@@ -1,0 +1,209 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Route and native request-field conformance for the llama-server b10621
+//! compatibility manifest (`compat/llama-server/b10621/`, issue #1443).
+//!
+//! The manifest's route entries claim, via `mlxcel.route`, which b10621
+//! method/path pairs the mlxcel server actually mounts; its native
+//! request-field entries claim, via `mlxcel.field`, which b10621
+//! `/completion` fields `NativeCompletionRequest` actually accepts. These
+//! tests hold both claim sets against the code in BOTH directions:
+//!
+//! - a claimed route must resolve on the real router (anything but
+//!   404/405), and a claimed field must exist on the struct;
+//! - an UNCLAIMED route must NOT resolve and an unclaimed field must NOT
+//!   exist, so implementing part of the surface without flipping the
+//!   manifest entry fails CI and produces the reviewable diff the manifest
+//!   exists for.
+//!
+//! The clap option surface half of the gate lives in
+//! `tests/llama_compat_manifest.rs`; the structural half in
+//! `scripts/ci/check_llama_compat_manifest.py`.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use tower::ServiceExt;
+
+use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
+use crate::tokenizer::MlxcelTokenizer;
+
+fn manifest_entries() -> Vec<serde_json::Value> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("compat/llama-server/b10621");
+    let mut entries = Vec::new();
+    for path in std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {dir:?}: {e}"))
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter(|p| p.file_name().is_some_and(|n| n != "pin.json"))
+    {
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("shard readable"))
+                .unwrap_or_else(|e| panic!("{path:?} is not valid JSON: {e}"));
+        entries.extend(
+            doc["entries"]
+                .as_array()
+                .expect("entries array")
+                .iter()
+                .cloned(),
+        );
+    }
+    assert!(!entries.is_empty(), "no manifest entries under {dir:?}");
+    entries
+}
+
+/// Router with every conditional endpoint enabled, so the probe answers
+/// "is this route mounted at all" rather than "is it enabled by default".
+/// Default-enablement parity is a per-flag concern tracked on the option
+/// entries (`--slots`, `--props`, `--metrics`).
+fn probe_app() -> axum::Router {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig {
+            enable_slots_endpoint: true,
+            enable_props_endpoint: true,
+            enable_metrics_endpoint: true,
+            ..Default::default()
+        },
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("route-test-model"),
+        batch_metrics,
+    );
+    create_app(state)
+}
+
+async fn probe(method: &str, path: &str) -> StatusCode {
+    let method: Method = method.parse().expect("HTTP method");
+    let needs_body = method == Method::POST;
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(if needs_body {
+            Body::from("{}")
+        } else {
+            Body::empty()
+        })
+        .expect("probe request builds");
+    probe_app()
+        .oneshot(request)
+        .await
+        .expect("router responds")
+        .status()
+}
+
+/// A route entry with an `mlxcel.route` claim must resolve on the router
+/// (any status except 404/405 counts: a 400/401/422/501 from the mounted
+/// handler still proves the method/path pair is served). A route entry
+/// WITHOUT a claim must not resolve, so adding the route later forces the
+/// manifest entry to flip in the same change.
+#[tokio::test]
+async fn manifest_route_claims_match_the_mounted_router() {
+    for entry in manifest_entries() {
+        if entry["kind"] != "route" {
+            continue;
+        }
+        let id = entry["id"].as_str().expect("id");
+        let path = entry["path"].as_str().expect("path");
+        if path.contains("${") {
+            // Synthetic entries for env-configured GCP routes and the Web
+            // UI static mount have no fixed probeable path.
+            assert!(
+                entry["mlxcel"].is_null(),
+                "{id}: synthetic route entries cannot carry a probeable claim"
+            );
+            continue;
+        }
+        let method = entry["method"].as_str().expect("method");
+        let status = probe(method, path).await;
+        let resolved = status != StatusCode::NOT_FOUND && status != StatusCode::METHOD_NOT_ALLOWED;
+        if entry["mlxcel"].is_null() {
+            assert!(
+                !resolved,
+                "{id}: the manifest records this b10621 route as not served \
+                 by mlxcel, but the router answered {status}. Flip the \
+                 manifest entry (state, mlxcel.route, notes) in the same \
+                 change that mounts the route."
+            );
+        } else {
+            assert_eq!(
+                entry["mlxcel"]["route"].as_str(),
+                Some(id),
+                "{id}: mlxcel.route claim must match the entry id"
+            );
+            assert!(
+                resolved,
+                "{id}: the manifest claims this route is mounted, but the \
+                 router answered {status}"
+            );
+        }
+    }
+}
+
+/// A native request-field entry with an `mlxcel.field` claim must exist on
+/// `NativeCompletionRequest` (as a field or serde alias); an unclaimed one
+/// must not, so accepting a new b10621 field forces the manifest flip.
+#[test]
+fn manifest_native_field_claims_match_native_completion_request() {
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/types/request.rs"),
+    )
+    .expect("request.rs readable");
+    let start = source
+        .find("pub struct NativeCompletionRequest {")
+        .expect("NativeCompletionRequest struct present");
+    let end = source[start..]
+        .find("\n}")
+        .map(|i| start + i)
+        .expect("struct block terminated");
+    let block = &source[start..end];
+
+    let declares = |field: &str| {
+        block.contains(&format!("pub {field}:")) || block.contains(&format!("alias = \"{field}\""))
+    };
+
+    for entry in manifest_entries() {
+        if entry["kind"] != "native_request_field" {
+            continue;
+        }
+        let id = entry["id"].as_str().expect("id");
+        let field = entry["field"].as_str().expect("field");
+        if entry["mlxcel"].is_null() {
+            assert!(
+                !declares(field),
+                "{id}: NativeCompletionRequest accepts {field:?} but the \
+                 manifest records it as not accepted. Flip the manifest \
+                 entry in the same change that adds the field."
+            );
+        } else {
+            assert_eq!(
+                entry["mlxcel"]["field"].as_str(),
+                Some(field),
+                "{id}: mlxcel.field claim must match the schema field name"
+            );
+            assert!(
+                declares(field),
+                "{id}: the manifest claims NativeCompletionRequest accepts \
+                 {field:?}, but the struct no longer declares it"
+            );
+        }
+    }
+}

@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "area": "lora-adapters",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--lora",
+      "section": "common params",
+      "spellings": [
+        "--lora"
+      ],
+      "long_spellings": [
+        "--lora"
+      ],
+      "value_hint": "FNAME",
+      "env": null,
+      "default": null,
+      "description": "path to LoRA adapter (use comma-separated values to load multiple adapters)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1439,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Single-adapter --lora works; comma-separated multi-adapter loading and scaling are owned by #1439.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--lora"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--lora-init-without-apply",
+      "section": "example-specific params",
+      "spellings": [
+        "--lora-init-without-apply"
+      ],
+      "long_spellings": [
+        "--lora-init-without-apply"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "disabled",
+      "description": "load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1439,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--lora-scaled",
+      "section": "common params",
+      "spellings": [
+        "--lora-scaled"
+      ],
+      "long_spellings": [
+        "--lora-scaled"
+      ],
+      "value_hint": "FNAME:SCALE,...",
+      "env": null,
+      "default": null,
+      "description": "path to LoRA adapter with user defined scaling (format: FNAME:SCALE,...) note: use comma-separated values",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1439,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET /lora-adapters",
+      "method": "GET",
+      "path": "/lora-adapters",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1439,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /lora-adapters",
+      "method": "POST",
+      "path": "/lora-adapters",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1439,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:lora",
+      "field": "lora",
+      "aliases": [],
+      "parent": null,
+      "field_type": "json",
+      "description": "A list of LoRA adapters to apply to this request. Each entry must have `id` and `scale` fields. Adapters not listed default to scale 0.0",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1439,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    }
+  ]
+}

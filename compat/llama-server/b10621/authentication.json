@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "area": "authentication",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--api-key",
+      "section": "example-specific params",
+      "spellings": [
+        "--api-key"
+      ],
+      "long_spellings": [
+        "--api-key"
+      ],
+      "value_hint": "KEY",
+      "env": "LLAMA_API_KEY",
+      "default": "none",
+      "description": "API key to use for authentication, multiple keys can be provided as a comma-separated list (default: none) (env: LLAMA_API_KEY)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1437,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Single-key authentication works with the same spelling and env. b10621 accepts a comma-separated key list; multi-key semantics are owned by #1437.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--api-key"
+        ],
+        "env": "LLAMA_API_KEY",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--api-key-file",
+      "section": "example-specific params",
+      "spellings": [
+        "--api-key-file"
+      ],
+      "long_spellings": [
+        "--api-key-file"
+      ],
+      "value_hint": "FNAME",
+      "env": "LLAMA_ARG_API_KEY_FILE",
+      "default": "none",
+      "description": "path to file containing API keys, one per line; lines starting with a hash are treated as comments (default: none) (env: LLAMA_ARG_API_KEY_FILE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1437,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Flag accepted; file-format parity (one key per line, hash comments) owned by #1437.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--api-key-file"
+        ]
+      }
+    }
+  ]
+}

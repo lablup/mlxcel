@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "area": "model-source",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--alias",
+      "section": "example-specific params",
+      "spellings": [
+        "-a",
+        "--alias"
+      ],
+      "long_spellings": [
+        "--alias"
+      ],
+      "value_hint": "STRING",
+      "env": "LLAMA_ARG_ALIAS",
+      "default": null,
+      "description": "set model name aliases, comma-separated (to be used by API) (env: LLAMA_ARG_ALIAS)",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1434,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Model alias reported by /v1/models and /props.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--alias"
+        ],
+        "env": "LLAMA_ARG_ALIAS",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--docker-repo",
+      "section": "common params",
+      "spellings": [
+        "-dr",
+        "--docker-repo"
+      ],
+      "long_spellings": [
+        "--docker-repo"
+      ],
+      "value_hint": "[<repo>/]<model>[:quant]",
+      "env": "LLAMA_ARG_DOCKER_REPO",
+      "default": "unused",
+      "description": "Docker Hub model repository. repo is optional, default to ai/. quant is optional, default to :latest. example: gemma3 (default: unused) (env: LLAMA_ARG_DOCKER_REPO)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--hf-file",
+      "section": "common params",
+      "spellings": [
+        "-hff",
+        "--hf-file"
+      ],
+      "long_spellings": [
+        "--hf-file"
+      ],
+      "value_hint": "FILE",
+      "env": "LLAMA_ARG_HF_FILE",
+      "default": "unused",
+      "description": "Hugging Face model file. If specified, it will override the quant in --hf-repo (default: unused) (env: LLAMA_ARG_HF_FILE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--hf-repo",
+      "section": "common params",
+      "spellings": [
+        "-hf",
+        "-hfr",
+        "--hf-repo"
+      ],
+      "long_spellings": [
+        "--hf-repo"
+      ],
+      "value_hint": "<user>/<model>[:quant]",
+      "env": "LLAMA_ARG_HF_REPO",
+      "default": "unused",
+      "description": "Hugging Face model repository; quant is optional, case-insensitive, default to Q4_K_M, or falls back to the first file in the repo if Q4_K_M doesn't exist. mmproj is also downloaded automatically if available. to disable, add --no-mmproj example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M (default: unused) (env: LLAMA_ARG_HF_REPO)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--hf-token",
+      "section": "common params",
+      "spellings": [
+        "-hft",
+        "--hf-token"
+      ],
+      "long_spellings": [
+        "--hf-token"
+      ],
+      "value_hint": "TOKEN",
+      "env": "HF_TOKEN",
+      "default": "value from HF_TOKEN environment variable",
+      "description": "Hugging Face access token (default: value from HF_TOKEN environment variable) (env: HF_TOKEN)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--model",
+      "section": "common params",
+      "spellings": [
+        "-m",
+        "--model"
+      ],
+      "long_spellings": [
+        "--model"
+      ],
+      "value_hint": "FNAME",
+      "env": "LLAMA_ARG_MODEL",
+      "default": null,
+      "description": "model path to load (env: LLAMA_ARG_MODEL)",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1434,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Value domain differs by runtime nature: llama-server loads a GGUF file, mlxcel loads an MLX safetensors checkpoint directory or HuggingFace repo id. The flag, env binding, and role are identical.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--model"
+        ],
+        "env": "LLAMA_ARG_MODEL",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--model-url",
+      "section": "common params",
+      "spellings": [
+        "-mu",
+        "--model-url"
+      ],
+      "long_spellings": [
+        "--model-url"
+      ],
+      "value_hint": "MODEL_URL",
+      "env": "LLAMA_ARG_MODEL_URL",
+      "default": "unused",
+      "description": "model download url (default: unused) (env: LLAMA_ARG_MODEL_URL)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--offline",
+      "section": "common params",
+      "spellings": [
+        "--offline"
+      ],
+      "long_spellings": [
+        "--offline"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_OFFLINE",
+      "default": null,
+      "description": "Offline mode: forces use of cache, prevents network access (env: LLAMA_ARG_OFFLINE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--warmup",
+      "section": "example-specific params",
+      "spellings": [
+        "--warmup",
+        "--no-warmup"
+      ],
+      "long_spellings": [
+        "--warmup",
+        "--no-warmup"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "enabled",
+      "description": "whether to perform warmup with an empty run (default: enabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1434,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "--warmup / --no-warmup accepted; whether --no-warmup actually skips the warmup pass to b10621 semantics is owned by #1434.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--warmup",
+          "--no-warmup"
+        ],
+        "defaults": [
+          "true"
+        ]
+      }
+    }
+  ]
+}

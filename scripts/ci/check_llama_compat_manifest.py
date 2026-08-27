@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+# Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Validate the checked-in llama-server b10621 compatibility manifest.
+
+Offline structural gate for ``compat/llama-server/b10621/`` (issue #1443,
+epic #1431). Runs without network or the b10621 archive; the binary-facing
+half of the gate lives in ``tests/llama_compat_manifest.rs`` (option
+spellings, env bindings, and defaults against the two server binaries) and
+``src/server/llama_compat_tests.rs`` (mounted routes and native request
+fields).
+
+Enforced here:
+
+- pin.json counts equal what the shards actually contain, and the shards
+  listed in pin.json equal the files on disk.
+- The b10621 inventory invariants hold: 249 help entries, 323 distinct
+  long-option spellings, 134 ``LLAMA_*`` environment variables. Duplicate
+  aliases live inside their entry (no spelling appears in two entries), so
+  aliases never inflate the feature count.
+- Every entry has exactly one policy state out of ``supported`` /
+  ``aliased`` / ``not_applicable`` / ``deferred``. The extractor's
+  ``unclassified`` marker is rejected, which is what turns a nightly bump
+  into a merge-blocking, reviewable diff.
+- ``deferred`` entries carry an issue number (``--check-issues-open``
+  additionally asserts each referenced issue is still open via ``gh``; the
+  CI job passes it, the offline ``make verify-llama-compat`` does not).
+- ``not_applicable`` entries carry a diagnostic/documentation test id and
+  an explanation.
+- ``aliased`` entries carry an mlxcel mapping and a test id.
+- ``supported`` entries carry a self-consistent mlxcel claim (canonical
+  spelling accepted, env binding recorded when b10621 defines one, route
+  and field claims matching the entry identity).
+- Every referenced test file exists in the repository.
+- Shard serialization is canonical (sorted entries, two-space indent,
+  trailing newline), so regeneration diffs stay minimal.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+MANIFEST_DIR = REPO / "compat" / "llama-server" / "b10621"
+
+VALID_STATES = {"supported", "aliased", "not_applicable", "deferred"}
+KIND_ORDER = {"option": 0, "route": 1, "native_request_field": 2}
+
+# Frozen-reference invariants for the b10621 pin. These are properties of
+# the pinned upstream release, so they can never drift while the pin holds;
+# a mismatch means the manifest was corrupted or regenerated against the
+# wrong binary.
+EXPECTED_HELP_ENTRIES = 249
+EXPECTED_LONG_SPELLINGS = 323
+EXPECTED_LLAMA_ENVS = 134
+EXPECTED_ARCHIVE_SHA256 = (
+    "429c8270608600188035e5e92f7d78dffb7900904fe7dd7e6a84f48068cd13cf"
+)
+
+errors: list[str] = []
+
+
+def err(msg: str) -> None:
+    errors.append(msg)
+
+
+def canonical_dump(doc: dict) -> str:
+    return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+
+
+def check_entry(shard: str, e: dict) -> None:
+    where = f"{shard}.json entry {e.get('id')!r}"
+    state = e.get("state")
+    if state not in VALID_STATES:
+        err(f"{where}: state {state!r} is not one of {sorted(VALID_STATES)}")
+        return
+    mlxcel = e.get("mlxcel")
+    test = e.get("test")
+
+    if state == "deferred":
+        if not isinstance(e.get("issue"), int):
+            err(f"{where}: deferred entry must link an implementation issue")
+    if state == "not_applicable":
+        if not test:
+            err(f"{where}: not_applicable entry must name a diagnostic/documentation test")
+        if not e.get("notes"):
+            err(f"{where}: not_applicable entry must explain why in notes")
+    if state == "aliased":
+        if not isinstance(mlxcel, dict) or not mlxcel:
+            err(f"{where}: aliased entry must record the mlxcel mapping")
+        if not test:
+            err(f"{where}: aliased entry must name its translation test")
+    if state == "supported":
+        if not isinstance(mlxcel, dict):
+            err(f"{where}: supported entry must carry an mlxcel claim")
+            return
+        if not test:
+            err(f"{where}: supported entry must name its conformance test")
+        kind = e.get("kind")
+        if kind == "option":
+            canonical = e["long_spellings"][0]
+            if canonical not in mlxcel.get("accepted_spellings", []):
+                err(
+                    f"{where}: supported option must accept its canonical "
+                    f"spelling {canonical}"
+                )
+            if e.get("env") and mlxcel.get("env") != e["env"]:
+                err(
+                    f"{where}: b10621 binds {e['env']} but the supported claim "
+                    f"records {mlxcel.get('env')!r}"
+                )
+        elif kind == "route":
+            if mlxcel.get("route") != e["id"]:
+                err(f"{where}: supported route claim must match the entry id")
+        elif kind == "native_request_field":
+            if mlxcel.get("field") != e["field"]:
+                err(f"{where}: supported field claim must match the field name")
+
+    if isinstance(mlxcel, dict):
+        if mlxcel.get("env_binding") == "runtime":
+            env_test = mlxcel.get("env_test")
+            if not env_test:
+                err(f"{where}: runtime env binding must name its covering test")
+            elif not (REPO / env_test).is_file():
+                err(f"{where}: env_test file {env_test} does not exist")
+    if test and not (REPO / str(test).split("::")[0]).is_file():
+        err(f"{where}: test file {test} does not exist")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--check-issues-open",
+        action="store_true",
+        help="additionally verify via `gh` that every issue referenced by a "
+        "deferred entry is still open (requires network and GH_TOKEN; the "
+        "CI job passes this, local `make verify-llama-compat` does not)",
+    )
+    args = ap.parse_args()
+
+    pin_path = MANIFEST_DIR / "pin.json"
+    if not pin_path.is_file():
+        print(f"error: {pin_path} missing", file=sys.stderr)
+        return 1
+    pin = json.loads(pin_path.read_text())
+    if pin["reference"]["archive_sha256"] != EXPECTED_ARCHIVE_SHA256:
+        err("pin.json archive_sha256 does not match the pinned official archive")
+
+    shard_files = sorted(
+        p for p in MANIFEST_DIR.glob("*.json") if p.name != "pin.json"
+    )
+    if sorted(pin.get("shards", [])) != [p.stem for p in shard_files]:
+        err(
+            "pin.json shards list does not match the shard files on disk: "
+            f"{sorted(pin.get('shards', []))} vs {[p.stem for p in shard_files]}"
+        )
+
+    entries_by_id: dict[str, dict] = {}
+    deferred_issues: set[int] = set()
+    options: list[dict] = []
+    routes = 0
+    fields = 0
+    for shard_path in shard_files:
+        doc = json.loads(shard_path.read_text())
+        if doc.get("schema_version") != 1:
+            err(f"{shard_path.name}: unsupported schema_version")
+        if doc.get("area") != shard_path.stem:
+            err(f"{shard_path.name}: area field must equal the file stem")
+        entries = doc.get("entries", [])
+        if not entries:
+            err(f"{shard_path.name}: shard has no entries")
+        keys = [(KIND_ORDER.get(e.get("kind"), 9), e.get("id", "")) for e in entries]
+        if keys != sorted(keys):
+            err(f"{shard_path.name}: entries are not in canonical (kind, id) order")
+        if canonical_dump(doc) != shard_path.read_text():
+            err(f"{shard_path.name}: not in canonical JSON serialization")
+        for e in entries:
+            eid = e.get("id")
+            if eid in entries_by_id:
+                err(f"entry {eid!r} appears in more than one shard")
+            entries_by_id[eid] = e
+            kind = e.get("kind")
+            if kind == "option":
+                options.append(e)
+            elif kind == "route":
+                routes += 1
+            elif kind == "native_request_field":
+                fields += 1
+            else:
+                err(f"{shard_path.name} entry {eid!r}: unknown kind {kind!r}")
+                continue
+            check_entry(shard_path.stem, e)
+            if e.get("state") == "deferred" and isinstance(e.get("issue"), int):
+                deferred_issues.add(e["issue"])
+
+    # Inventory invariants of the frozen reference.
+    all_spellings: list[str] = []
+    envs: set[str] = set()
+    for o in options:
+        all_spellings.extend(o.get("long_spellings", []))
+        if o.get("env"):
+            envs.add(o["env"])
+    if len(options) != EXPECTED_HELP_ENTRIES:
+        err(f"expected {EXPECTED_HELP_ENTRIES} help entries, found {len(options)}")
+    if len(set(all_spellings)) != EXPECTED_LONG_SPELLINGS:
+        err(
+            f"expected {EXPECTED_LONG_SPELLINGS} distinct long-option "
+            f"spellings, found {len(set(all_spellings))}"
+        )
+    if len(all_spellings) != len(set(all_spellings)):
+        dupes = sorted({s for s in all_spellings if all_spellings.count(s) > 1})
+        err(f"spellings appear in more than one entry (alias inflation): {dupes}")
+    llama_envs = {v for v in envs if v.startswith("LLAMA_")}
+    if len(llama_envs) != EXPECTED_LLAMA_ENVS:
+        err(f"expected {EXPECTED_LLAMA_ENVS} LLAMA_* env vars, found {len(llama_envs)}")
+
+    counts = pin.get("counts", {})
+    for key, actual in [
+        ("help_entries", len(options)),
+        ("long_option_spellings", len(set(all_spellings))),
+        ("environment_variables", len(envs)),
+        ("llama_environment_variables", len(llama_envs)),
+        ("routes", routes),
+        ("native_request_fields", fields),
+    ]:
+        if counts.get(key) != actual:
+            err(f"pin.json counts.{key}={counts.get(key)} but shards contain {actual}")
+
+    if args.check_issues_open:
+        for issue in sorted(deferred_issues):
+            proc = subprocess.run(
+                ["gh", "issue", "view", str(issue), "--json", "state", "-q", ".state"],
+                capture_output=True,
+                text=True,
+                cwd=REPO,
+                check=False,
+            )
+            state = proc.stdout.strip()
+            if proc.returncode != 0:
+                err(f"deferred issue #{issue}: gh lookup failed: {proc.stderr.strip()}")
+            elif state != "OPEN":
+                err(
+                    f"deferred issue #{issue} is {state}; flip its manifest "
+                    "entries or reopen the issue"
+                )
+
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        print(f"\n{len(errors)} manifest violations", file=sys.stderr)
+        return 1
+
+    states: dict[str, int] = {}
+    for e in entries_by_id.values():
+        states[e["state"]] = states.get(e["state"], 0) + 1
+    print(
+        f"llama-compat manifest OK: {len(options)} help entries, "
+        f"{len(set(all_spellings))} spellings, {len(envs)} env vars, "
+        f"{routes} routes, {fields} native fields; states {states}; "
+        f"{len(deferred_issues)} distinct deferred issues"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "area": "ui-tools-mcp-gcp",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--agent",
+      "section": "example-specific params",
+      "spellings": [
+        "-ag",
+        "--agent",
+        "-no-ag",
+        "--no-agent"
+      ],
+      "long_spellings": [
+        "--agent",
+        "--no-agent"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_AGENT",
+      "default": "disabled",
+      "description": "whether to enable CORS proxy and all built-in tools - do not enable in untrusted environments (default: disabled) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_AGENT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mcp-servers-config",
+      "section": "example-specific params",
+      "spellings": [
+        "--mcp-servers-config"
+      ],
+      "long_spellings": [
+        "--mcp-servers-config"
+      ],
+      "value_hint": "PATH",
+      "env": "LLAMA_ARG_MCP_SERVERS_CONFIG",
+      "default": "none",
+      "description": "experimental: path to JSON file with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_MCP_SERVERS_CONFIG)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mcp-servers-json",
+      "section": "example-specific params",
+      "spellings": [
+        "--mcp-servers-json"
+      ],
+      "long_spellings": [
+        "--mcp-servers-json"
+      ],
+      "value_hint": "JSON",
+      "env": "LLAMA_ARG_MCP_SERVERS_JSON",
+      "default": "none",
+      "description": "experimental: inline JSON with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_MCP_SERVERS_JSON)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--path",
+      "section": "example-specific params",
+      "spellings": [
+        "--path"
+      ],
+      "long_spellings": [
+        "--path"
+      ],
+      "value_hint": "PATH",
+      "env": "LLAMA_ARG_STATIC_PATH",
+      "default": "",
+      "description": "path to serve static files from (default: ) (env: LLAMA_ARG_STATIC_PATH)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--tools",
+      "section": "example-specific params",
+      "spellings": [
+        "--tools"
+      ],
+      "long_spellings": [
+        "--tools"
+      ],
+      "value_hint": "TOOL1,TOOL2,...",
+      "env": "LLAMA_ARG_TOOLS",
+      "default": "no tools",
+      "description": "experimental: whether to enable built-in tools for AI agents - do not enable in untrusted environments (default: no tools) specify \"all\" to enable all tools available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, get_info note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_TOOLS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--tools-runtime",
+      "section": "example-specific params",
+      "spellings": [
+        "--tools-runtime"
+      ],
+      "long_spellings": [
+        "--tools-runtime"
+      ],
+      "value_hint": "OPTION",
+      "env": "LLAMA_ARG_TOOLS_RUNTIME",
+      "default": "none, use host environment",
+      "description": "experimental: run tools in a separate runtime environment (default: none, use host environment) available options: 'docker:<image>', 'podman:<image>': spin up a new container and reuse it for all invocations, clean up on server exit 'docker-container:<id>', 'podman-container:<id>': use an existing container by ID, won't stop on server exit 'ssh:<target>': run tools on a remote POSIX host over SSH, key-based auth and a trusted host key are required (env: LLAMA_ARG_TOOLS_RUNTIME)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ui",
+      "section": "example-specific params",
+      "spellings": [
+        "--ui",
+        "--webui",
+        "--no-ui",
+        "--no-webui"
+      ],
+      "long_spellings": [
+        "--ui",
+        "--webui",
+        "--no-ui",
+        "--no-webui"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_UI",
+      "default": "enabled",
+      "description": "whether to enable the Web UI (default: enabled) (env: LLAMA_ARG_UI)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "--no-webui accepted and ignored (hidden); mlxcel has no Web UI. #1435 owns the classification.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--no-webui"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--ui-config",
+      "section": "example-specific params",
+      "spellings": [
+        "--ui-config",
+        "--webui-config"
+      ],
+      "long_spellings": [
+        "--ui-config",
+        "--webui-config"
+      ],
+      "value_hint": "JSON",
+      "env": "LLAMA_ARG_UI_CONFIG",
+      "default": null,
+      "description": "JSON that provides default UI settings (overrides UI defaults) (env: LLAMA_ARG_UI_CONFIG)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ui-config-file",
+      "section": "example-specific params",
+      "spellings": [
+        "--ui-config-file",
+        "--webui-config-file"
+      ],
+      "long_spellings": [
+        "--ui-config-file",
+        "--webui-config-file"
+      ],
+      "value_hint": "PATH",
+      "env": "LLAMA_ARG_UI_CONFIG_FILE",
+      "default": null,
+      "description": "JSON file that provides default UI settings (overrides UI defaults) (env: LLAMA_ARG_UI_CONFIG_FILE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ui-mcp-proxy",
+      "section": "example-specific params",
+      "spellings": [
+        "--ui-mcp-proxy",
+        "--webui-mcp-proxy",
+        "--no-ui-mcp-proxy",
+        "--no-webui-mcp-proxy"
+      ],
+      "long_spellings": [
+        "--ui-mcp-proxy",
+        "--webui-mcp-proxy",
+        "--no-ui-mcp-proxy",
+        "--no-webui-mcp-proxy"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_UI_MCP_PROXY",
+      "default": "disabled",
+      "description": "experimental: whether to enable MCP CORS proxy - do not enable in untrusted environments (default: disabled) (env: LLAMA_ARG_UI_MCP_PROXY)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET ${AIP_HEALTH_ROUTE}",
+      "method": "GET",
+      "path": "${AIP_HEALTH_ROUTE}",
+      "source": "tools/server/server-http.cpp",
+      "condition": "gcp-compat (AIP_MODE=PREDICTION; registered only when AIP_HEALTH_ROUTE is set)",
+      "discovery": "source-gcp-compat",
+      "state": "deferred",
+      "issue": 1456,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET ${api-prefix}/ (Web UI static assets)",
+      "method": "GET",
+      "path": "${api-prefix}/ (Web UI static assets)",
+      "source": "tools/server/server-http.cpp",
+      "condition": "webui enabled (--ui / --path static mount)",
+      "discovery": "source-static-mount",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET /cors-proxy",
+      "method": "GET",
+      "path": "/cors-proxy",
+      "source": "tools/server/server.cpp",
+      "condition": "webui-mcp-proxy (403 handler when disabled)",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET /tools",
+      "method": "GET",
+      "path": "/tools",
+      "source": "tools/server/server.cpp",
+      "condition": "server tools or MCP configured (403 handler when disabled)",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST ${AIP_PREDICT_ROUTE:-/predict}",
+      "method": "POST",
+      "path": "${AIP_PREDICT_ROUTE:-/predict}",
+      "source": "tools/server/server-http.cpp",
+      "condition": "gcp-compat (AIP_MODE=PREDICTION; path from AIP_PREDICT_ROUTE)",
+      "discovery": "source-gcp-compat",
+      "state": "deferred",
+      "issue": 1456,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /cors-proxy",
+      "method": "POST",
+      "path": "/cors-proxy",
+      "source": "tools/server/server.cpp",
+      "condition": "webui-mcp-proxy (403 handler when disabled)",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /tools",
+      "method": "POST",
+      "path": "/tools",
+      "source": "tools/server/server.cpp",
+      "condition": "server tools or MCP configured (403 handler when disabled)",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1435,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    }
+  ]
+}

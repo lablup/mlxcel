@@ -1,0 +1,971 @@
+{
+  "schema_version": 1,
+  "area": "ggml-runtime",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--backend-sampling",
+      "section": "sampling params",
+      "spellings": [
+        "-bs",
+        "--backend-sampling"
+      ],
+      "long_spellings": [
+        "--backend-sampling"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_BACKEND_SAMPLING",
+      "default": "disabled",
+      "description": "enable backend sampling (experimental) (default: disabled) (env: LLAMA_ARG_BACKEND_SAMPLING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cache-type-k",
+      "section": "common params",
+      "spellings": [
+        "-ctk",
+        "--cache-type-k"
+      ],
+      "long_spellings": [
+        "--cache-type-k"
+      ],
+      "value_hint": "TYPE",
+      "env": "LLAMA_ARG_CACHE_TYPE_K",
+      "default": "f16",
+      "description": "KV cache data type for K allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_CACHE_TYPE_K)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "VALUE-DOMAIN MISMATCH: same spelling, incompatible accepted values. b10621 accepts GGML quantizer names (f32, f16, bf16, q8_0, q4_0, ...); mlxcel accepts f16 and the TurboQuant modes and rejects GGML quantizer names rather than mapping them to different arithmetic (#1430). #1445 owns the explicit-rejection diagnostics.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cache-type-k"
+        ],
+        "env": "LLAMA_ARG_CACHE_TYPE_K",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--cache-type-v",
+      "section": "common params",
+      "spellings": [
+        "-ctv",
+        "--cache-type-v"
+      ],
+      "long_spellings": [
+        "--cache-type-v"
+      ],
+      "value_hint": "TYPE",
+      "env": "LLAMA_ARG_CACHE_TYPE_V",
+      "default": "f16",
+      "description": "KV cache data type for V allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_CACHE_TYPE_V)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "VALUE-DOMAIN MISMATCH: see --cache-type-k.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cache-type-v"
+        ],
+        "env": "LLAMA_ARG_CACHE_TYPE_V",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--check-tensors",
+      "section": "common params",
+      "spellings": [
+        "--check-tensors"
+      ],
+      "long_spellings": [
+        "--check-tensors"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "false",
+      "description": "check model tensor data for invalid values (default: false)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-mask",
+      "section": "common params",
+      "spellings": [
+        "-C",
+        "--cpu-mask"
+      ],
+      "long_spellings": [
+        "--cpu-mask"
+      ],
+      "value_hint": "M",
+      "env": null,
+      "default": "\"\"",
+      "description": "CPU affinity mask: arbitrarily long hex. Complements cpu-range (default: \"\")",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-mask-batch",
+      "section": "common params",
+      "spellings": [
+        "-Cb",
+        "--cpu-mask-batch"
+      ],
+      "long_spellings": [
+        "--cpu-mask-batch"
+      ],
+      "value_hint": "M",
+      "env": null,
+      "default": "same as --cpu-mask",
+      "description": "CPU affinity mask: arbitrarily long hex. Complements cpu-range-batch (default: same as --cpu-mask)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-moe",
+      "section": "common params",
+      "spellings": [
+        "-cmoe",
+        "--cpu-moe"
+      ],
+      "long_spellings": [
+        "--cpu-moe"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_CPU_MOE",
+      "default": null,
+      "description": "keep all Mixture of Experts (MoE) weights in the CPU (env: LLAMA_ARG_CPU_MOE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-range",
+      "section": "common params",
+      "spellings": [
+        "-Cr",
+        "--cpu-range"
+      ],
+      "long_spellings": [
+        "--cpu-range"
+      ],
+      "value_hint": "lo-hi",
+      "env": null,
+      "default": null,
+      "description": "range of CPUs for affinity. Complements --cpu-mask",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-range-batch",
+      "section": "common params",
+      "spellings": [
+        "-Crb",
+        "--cpu-range-batch"
+      ],
+      "long_spellings": [
+        "--cpu-range-batch"
+      ],
+      "value_hint": "lo-hi",
+      "env": null,
+      "default": null,
+      "description": "ranges of CPUs for affinity. Complements --cpu-mask-batch",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-strict",
+      "section": "common params",
+      "spellings": [
+        "--cpu-strict"
+      ],
+      "long_spellings": [
+        "--cpu-strict"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "0",
+      "description": "use strict CPU placement (default: 0)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cpu-strict-batch",
+      "section": "common params",
+      "spellings": [
+        "--cpu-strict-batch"
+      ],
+      "long_spellings": [
+        "--cpu-strict-batch"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "same as --cpu-strict",
+      "description": "use strict CPU placement (default: same as --cpu-strict)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--defrag-thold",
+      "section": "common params",
+      "spellings": [
+        "-dt",
+        "--defrag-thold"
+      ],
+      "long_spellings": [
+        "--defrag-thold"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_DEFRAG_THOLD",
+      "default": null,
+      "description": "KV cache defragmentation threshold (DEPRECATED) (env: LLAMA_ARG_DEFRAG_THOLD)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--device",
+      "section": "common params",
+      "spellings": [
+        "-dev",
+        "--device"
+      ],
+      "long_spellings": [
+        "--device"
+      ],
+      "value_hint": "<dev1,dev2,..>",
+      "env": "LLAMA_ARG_DEVICE",
+      "default": null,
+      "description": "comma-separated list of devices to use for offloading (none = don't offload) use --list-devices to see a list of available devices (env: LLAMA_ARG_DEVICE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--direct-io",
+      "section": "common params",
+      "spellings": [
+        "-dio",
+        "--direct-io",
+        "-ndio",
+        "--no-direct-io"
+      ],
+      "long_spellings": [
+        "--direct-io",
+        "--no-direct-io"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_DIO",
+      "default": null,
+      "description": "DEPRECATED in favor of `--load-mode`: use DirectIO if available (env: LLAMA_ARG_DIO)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fit",
+      "section": "common params",
+      "spellings": [
+        "-fit",
+        "--fit"
+      ],
+      "long_spellings": [
+        "--fit"
+      ],
+      "value_hint": "[on|off]",
+      "env": "LLAMA_ARG_FIT",
+      "default": null,
+      "description": "whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on') (env: LLAMA_ARG_FIT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fit-ctx",
+      "section": "common params",
+      "spellings": [
+        "-fitc",
+        "--fit-ctx"
+      ],
+      "long_spellings": [
+        "--fit-ctx"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_FIT_CTX",
+      "default": null,
+      "description": "minimum ctx size that can be set by --fit option, default: 4096 (env: LLAMA_ARG_FIT_CTX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fit-target",
+      "section": "common params",
+      "spellings": [
+        "-fitt",
+        "--fit-target"
+      ],
+      "long_spellings": [
+        "--fit-target"
+      ],
+      "value_hint": "MiB0,MiB1,MiB2,...",
+      "env": "LLAMA_ARG_FIT_TARGET",
+      "default": null,
+      "description": "target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024 (env: LLAMA_ARG_FIT_TARGET)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--flash-attn",
+      "section": "common params",
+      "spellings": [
+        "-fa",
+        "--flash-attn"
+      ],
+      "long_spellings": [
+        "--flash-attn"
+      ],
+      "value_hint": "[on|off|auto]",
+      "env": "LLAMA_ARG_FLASH_ATTN",
+      "default": null,
+      "description": "set Flash Attention use ('on', 'off', or 'auto', default: 'auto') (env: LLAMA_ARG_FLASH_ATTN)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Accepted and ignored (hidden). b10621 exposes on/off/auto with observable behavior; #1445 owns explicit rejection or honest mapping.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--flash-attn"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--gpu-layers",
+      "section": "common params",
+      "spellings": [
+        "-ngl",
+        "--gpu-layers",
+        "--n-gpu-layers"
+      ],
+      "long_spellings": [
+        "--gpu-layers",
+        "--n-gpu-layers"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_N_GPU_LAYERS",
+      "default": "auto",
+      "description": "max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto) (env: LLAMA_ARG_N_GPU_LAYERS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "--n-gpu-layers accepted and ignored (hidden); --gpu-layers spelling not accepted. mlxcel always runs fully on the accelerator; #1445 owns the diagnostic.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--n-gpu-layers"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--kv-offload",
+      "section": "common params",
+      "spellings": [
+        "-kvo",
+        "--kv-offload",
+        "-nkvo",
+        "--no-kv-offload"
+      ],
+      "long_spellings": [
+        "--kv-offload",
+        "--no-kv-offload"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_KV_OFFLOAD",
+      "default": "enabled",
+      "description": "whether to enable KV cache offloading (default: enabled) (env: LLAMA_ARG_KV_OFFLOAD)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--list-devices",
+      "section": "common params",
+      "spellings": [
+        "--list-devices"
+      ],
+      "long_spellings": [
+        "--list-devices"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "print list of available devices and exit",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--load-mode",
+      "section": "common params",
+      "spellings": [
+        "-lm",
+        "--load-mode"
+      ],
+      "long_spellings": [
+        "--load-mode"
+      ],
+      "value_hint": "MODE",
+      "env": "LLAMA_ARG_LOAD_MODE",
+      "default": "auto",
+      "description": "model loading mode (default: auto) - auto: mmap, unless a device does not support it - none: no special loading mode - mmap: memory-map model (if mmap disabled, slower load but may reduce pageouts if not using mlock) - mlock: force system to keep model in RAM rather than swapping or compressing - mmap+mlock: mmap + force system to keep model in RAM rather than swapping or compressing - dio: use DirectIO if available (env: LLAMA_ARG_LOAD_MODE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--main-gpu",
+      "section": "common params",
+      "spellings": [
+        "-mg",
+        "--main-gpu"
+      ],
+      "long_spellings": [
+        "--main-gpu"
+      ],
+      "value_hint": "INDEX",
+      "env": "LLAMA_ARG_MAIN_GPU",
+      "default": "0",
+      "description": "the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: 0) (env: LLAMA_ARG_MAIN_GPU)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mlock",
+      "section": "common params",
+      "spellings": [
+        "--mlock"
+      ],
+      "long_spellings": [
+        "--mlock"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_MLOCK",
+      "default": null,
+      "description": "DEPRECATED in favor of `--load-mode`: force system to keep model in RAM rather than swapping or compressing (env: LLAMA_ARG_MLOCK)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Accepted and ignored (hidden). No MLX equivalent; #1445 owns the diagnostic.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mlock"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--mmap",
+      "section": "common params",
+      "spellings": [
+        "--mmap",
+        "--no-mmap"
+      ],
+      "long_spellings": [
+        "--mmap",
+        "--no-mmap"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_MMAP",
+      "default": null,
+      "description": "DEPRECATED in favor of `--load-mode`: whether to memory-map model. (if mmap disabled, slower load but may reduce pageouts if not using mlock) (env: LLAMA_ARG_MMAP)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "--no-mmap accepted and ignored (hidden); --mmap spelling not accepted. #1445 owns the diagnostic.",
+      "mlxcel": {
+        "accepted_spellings": [
+          "--no-mmap"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--n-cpu-moe",
+      "section": "common params",
+      "spellings": [
+        "-ncmoe",
+        "--n-cpu-moe"
+      ],
+      "long_spellings": [
+        "--n-cpu-moe"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_N_CPU_MOE",
+      "default": null,
+      "description": "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU (env: LLAMA_ARG_N_CPU_MOE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--no-host",
+      "section": "common params",
+      "spellings": [
+        "--no-host"
+      ],
+      "long_spellings": [
+        "--no-host"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_NO_HOST",
+      "default": null,
+      "description": "bypass host buffer allowing extra buffers to be used (env: LLAMA_ARG_NO_HOST)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--numa",
+      "section": "common params",
+      "spellings": [
+        "--numa"
+      ],
+      "long_spellings": [
+        "--numa"
+      ],
+      "value_hint": "TYPE",
+      "env": "LLAMA_ARG_NUMA",
+      "default": null,
+      "description": "attempt optimizations that help on some NUMA systems - distribute: spread execution evenly over all nodes - isolate: only spawn threads on CPUs on the node that execution started on - numactl: use the CPU map provided by numactl if run without this previously, it is recommended to drop the system page cache before using this see https://github.com/ggml-org/llama.cpp/issues/1437 (env: LLAMA_ARG_NUMA)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--op-offload",
+      "section": "common params",
+      "spellings": [
+        "--op-offload",
+        "--no-op-offload"
+      ],
+      "long_spellings": [
+        "--op-offload",
+        "--no-op-offload"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "true",
+      "description": "whether to offload host tensor operations to device (default: true)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--override-kv",
+      "section": "common params",
+      "spellings": [
+        "--override-kv"
+      ],
+      "long_spellings": [
+        "--override-kv"
+      ],
+      "value_hint": "KEY=TYPE:VALUE,...",
+      "env": null,
+      "default": null,
+      "description": "advanced option to override model metadata by key. to specify multiple overrides, either use comma-separated values. types: int, float, bool, str. example: --override-kv tokenizer.ggml.add_bos_token=bool:false,tokenizer.ggml.add_eos_token=bool:false",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--override-tensor",
+      "section": "common params",
+      "spellings": [
+        "-ot",
+        "--override-tensor"
+      ],
+      "long_spellings": [
+        "--override-tensor"
+      ],
+      "value_hint": "<tensor name pattern>=<buffer type>,...",
+      "env": "LLAMA_ARG_OVERRIDE_TENSOR",
+      "default": null,
+      "description": "override tensor buffer type (env: LLAMA_ARG_OVERRIDE_TENSOR)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--perf",
+      "section": "common params",
+      "spellings": [
+        "--perf",
+        "--no-perf"
+      ],
+      "long_spellings": [
+        "--perf",
+        "--no-perf"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_PERF",
+      "default": "false",
+      "description": "whether to enable internal libllama performance timings (default: false) (env: LLAMA_ARG_PERF)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--poll",
+      "section": "common params",
+      "spellings": [
+        "--poll"
+      ],
+      "long_spellings": [
+        "--poll"
+      ],
+      "value_hint": "<0...100>",
+      "env": null,
+      "default": null,
+      "description": "use polling level to wait for work (0 - no polling, default: 50)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--poll-batch",
+      "section": "common params",
+      "spellings": [
+        "--poll-batch"
+      ],
+      "long_spellings": [
+        "--poll-batch"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "same as --poll",
+      "description": "use polling to wait for work (default: same as --poll)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--prio",
+      "section": "common params",
+      "spellings": [
+        "--prio"
+      ],
+      "long_spellings": [
+        "--prio"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "0",
+      "description": "set process/thread priority : low(-1), normal(0), medium(1), high(2), realtime(3) (default: 0)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--prio-batch",
+      "section": "common params",
+      "spellings": [
+        "--prio-batch"
+      ],
+      "long_spellings": [
+        "--prio-batch"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "0",
+      "description": "set process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--repack",
+      "section": "common params",
+      "spellings": [
+        "--repack",
+        "-nr",
+        "--no-repack"
+      ],
+      "long_spellings": [
+        "--repack",
+        "--no-repack"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_REPACK",
+      "default": "enabled",
+      "description": "whether to enable weight repacking (default: enabled) (env: LLAMA_ARG_REPACK)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--rpc",
+      "section": "common params",
+      "spellings": [
+        "--rpc"
+      ],
+      "long_spellings": [
+        "--rpc"
+      ],
+      "value_hint": "SERVERS",
+      "env": "LLAMA_ARG_RPC",
+      "default": null,
+      "description": "comma-separated list of RPC servers (host:port) (env: LLAMA_ARG_RPC)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--split-mode",
+      "section": "common params",
+      "spellings": [
+        "-sm",
+        "--split-mode"
+      ],
+      "long_spellings": [
+        "--split-mode"
+      ],
+      "value_hint": "{none,layer,row,tensor}",
+      "env": "LLAMA_ARG_SPLIT_MODE",
+      "default": null,
+      "description": "how to split the model across multiple GPUs, one of: - none: use one GPU only - layer (default): split layers and KV across GPUs (pipelined) - row: split weight across GPUs by rows (parallelized) - tensor: split weights and KV across GPUs (parallelized, EXPERIMENTAL) (env: LLAMA_ARG_SPLIT_MODE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--tensor-split",
+      "section": "common params",
+      "spellings": [
+        "-ts",
+        "--tensor-split"
+      ],
+      "long_spellings": [
+        "--tensor-split"
+      ],
+      "value_hint": "N0,N1,N2,...",
+      "env": "LLAMA_ARG_TENSOR_SPLIT",
+      "default": null,
+      "description": "fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1 (env: LLAMA_ARG_TENSOR_SPLIT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--threads",
+      "section": "common params",
+      "spellings": [
+        "-t",
+        "--threads"
+      ],
+      "long_spellings": [
+        "--threads"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_THREADS",
+      "default": "-1",
+      "description": "number of CPU threads to use during generation (default: -1) (env: LLAMA_ARG_THREADS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--threads-batch",
+      "section": "common params",
+      "spellings": [
+        "-tb",
+        "--threads-batch"
+      ],
+      "long_spellings": [
+        "--threads-batch"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "same as --threads",
+      "description": "number of threads to use during batch and prompt processing (default: same as --threads)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1445,
+      "test": null,
+      "notes": null,
+      "mlxcel": null
+    }
+  ]
+}

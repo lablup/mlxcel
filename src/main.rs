@@ -2061,6 +2061,31 @@ fn init_cli_tracing(command: &Commands) {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Hidden machine interface for the llama-server b10621 compatibility
+    // manifest (issue #1443): `mlxcel serve --dump-flag-surface` prints the
+    // complete clap surface of the `serve` subcommand, hidden compatibility
+    // arguments included, as deterministic JSON and exits. Intercepted before
+    // `Cli::parse` and matched positionally, so the operator-facing `--help`
+    // surface and ordinary argument values are unaffected. See
+    // `src/cli/flag_surface.rs` for the contract and consumers.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(String::as_str) == Some("serve")
+        && mlxcel::cli::flag_surface::dump_requested(&raw_args, 2)
+    {
+        use clap::CommandFactory;
+        let mut cli_cmd = Cli::command();
+        cli_cmd.build();
+        let mut serve_cmd = cli_cmd
+            .find_subcommand("serve")
+            .expect("the `serve` subcommand is statically defined")
+            .clone();
+        println!(
+            "{}",
+            mlxcel::cli::flag_surface::flag_surface_json("mlxcel serve", &mut serve_cmd)
+        );
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     init_cli_tracing(&cli.command);
