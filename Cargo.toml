@@ -238,7 +238,11 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 # pulling a second provider in would both add a C toolchain dependency to the
 # build and make rustls's process-default provider ambiguous at runtime.
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
-rustls-pemfile = "2"
+# PEM parsing for the `--ssl-cert-file` / `--ssl-key-file` material (#1432).
+# `rustls-pemfile` is the older spelling of the same code and is unmaintained
+# (RUSTSEC-2025-0134); its own advisory points here. Already in the graph
+# through rustls.
+rustls-pki-types = { version = "1", features = ["std"] }
 # `http_body::Body` is implemented directly for the read-budget body wrapper
 # that gates the `--timeout` socket read deadline (#1432). Already in the graph
 # through hyper and axum; promoted so the trait can be named.

@@ -27,6 +27,8 @@ use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use rustls_pki_types::pem::PemObject;
+
 use super::{ServeOptions, bind_tcp, serve};
 use crate::server::tls::{TlsPaths, build_server_config};
 use crate::server::transport::{HttpTimeouts, ListenTarget};
@@ -273,9 +275,9 @@ async fn a_tls_listener_completes_a_handshake_and_answers() {
     );
 
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut std::io::BufReader::new(
-        std::fs::File::open(&paths.cert).expect("cert"),
-    )) {
+    for cert in tokio_rustls::rustls::pki_types::CertificateDer::pem_file_iter(&paths.cert)
+        .expect("cert file opens")
+    {
         roots.add(cert.expect("cert der")).expect("trust anchor");
     }
     let client_config = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(

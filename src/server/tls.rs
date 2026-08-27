@@ -28,12 +28,11 @@
 //! than erroring when the default is ambiguous. A server must not be able to
 //! abort at bind time because of a link-order detail.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use rustls_pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::{ServerConfig as RustlsServerConfig, crypto::ring};
 
@@ -71,10 +70,8 @@ pub fn resolve_tls_paths(cert: Option<PathBuf>, key: Option<PathBuf>) -> Result<
 
 /// Read a PEM certificate chain.
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path)
-        .with_context(|| format!("--ssl-cert-file {}: cannot open", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<_> = CertificateDer::pem_file_iter(path)
+        .with_context(|| format!("--ssl-cert-file {}: cannot open", path.display()))?
         .collect::<std::result::Result<_, _>>()
         .with_context(|| {
             format!(
@@ -97,23 +94,16 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 /// cpp-httplib hands the file to OpenSSL, which accepts the same three, so
 /// restricting to PKCS#8 here would reject keys b10621 serves with.
 fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)
-        .with_context(|| format!("--ssl-key-file {}: cannot open", path.display()))?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .with_context(|| {
-            format!(
-                "--ssl-key-file {}: not a readable PEM private key",
-                path.display()
-            )
-        })?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "--ssl-key-file {}: contains no PRIVATE KEY block. Point it at a PEM-encoded \
-                 PKCS#8, PKCS#1 or SEC1 private key",
-                path.display()
-            )
-        })
+    if !path.is_file() {
+        bail!("--ssl-key-file {}: cannot open", path.display());
+    }
+    PrivateKeyDer::from_pem_file(path).map_err(|e| {
+        anyhow::anyhow!(
+            "--ssl-key-file {}: contains no PRIVATE KEY block ({e}). Point it at a PEM-encoded \
+             PKCS#8, PKCS#1 or SEC1 private key",
+            path.display()
+        )
+    })
 }
 
 /// Build the rustls server configuration from the configured PEM files.
