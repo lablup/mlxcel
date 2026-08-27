@@ -308,7 +308,10 @@ pub const DEFAULT_RERANK_BATCH_SIZE: usize = crate::rerank::DEFAULT_RERANK_BATCH
 /// so route handlers can apply one consistent set of defaults.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub api_key: Option<String>,
+    /// Configured API keys (#1437). Empty disables authentication, matching
+    /// b10621's empty `api_keys` vector. `Debug` prints a count, never key
+    /// material.
+    pub api_keys: crate::server::ApiKeys,
     /// Per-request decode watchdog, in seconds. Sourced from
     /// `--decode-timeout` / `MLXCEL_DECODE_TIMEOUT`. Before #1432 this was
     /// `--timeout`, which now carries the b10621 HTTP socket read/write
@@ -638,7 +641,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            api_key: None,
+            api_keys: crate::server::ApiKeys::default(),
             decode_timeout_seconds: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
             api_prefix: String::new(),
             sse_ping_interval: Some(std::time::Duration::from_secs(

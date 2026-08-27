@@ -38,7 +38,11 @@ fn app(api_prefix: &str, api_key: Option<&str>) -> Router {
         provider,
         ServerConfig {
             api_prefix: api_prefix.to_string(),
-            api_key: api_key.map(str::to_string),
+            api_keys: crate::server::resolve_api_keys(
+                &api_key.map(str::to_string).into_iter().collect::<Vec<_>>(),
+                &[],
+            )
+            .expect("valid key set"),
             ..Default::default()
         },
         ChatTemplateProcessor::with_template("ok".to_string()),

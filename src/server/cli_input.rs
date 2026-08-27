@@ -44,8 +44,14 @@ pub struct ServerStartupInput {
     pub model_alias: Option<String>,
     pub host: String,
     pub port: u16,
-    pub api_key: Option<String>,
-    pub api_key_file: Option<PathBuf>,
+    /// `--api-key` occurrences, raw. Each is split with b10621's CSV rules in
+    /// [`crate::server::resolve_api_keys`]; the `LLAMA_API_KEY` value is
+    /// prepended by [`env_fallback_api_keys`] because upstream applies the
+    /// environment before the command line and both append (#1437).
+    pub api_keys: Vec<String>,
+    /// `--api-key-file` occurrences, raw, with `LLAMA_ARG_API_KEY_FILE`
+    /// prepended by [`env_fallback_api_key_files`] for the same reason.
+    pub api_key_files: Vec<PathBuf>,
     pub n_parallel: usize,
     pub ctx_size: usize,
     pub n_predict: i32,
@@ -677,7 +683,7 @@ impl ServerStartupInput {
         ) {
             tracing::warn!("{warning}");
         }
-        if !api_prefix.is_empty() && (self.api_key.is_some() || self.api_key_file.is_some()) {
+        if !api_prefix.is_empty() && !(self.api_keys.is_empty() && self.api_key_files.is_empty()) {
             tracing::warn!(
                 "--api-prefix {api_prefix} is set together with an API key. llama-server b10621 \
                  compares its public-endpoint list against the unprefixed paths, so \
@@ -692,8 +698,8 @@ impl ServerStartupInput {
             model_alias: self.model_alias,
             host: self.host,
             port: self.port,
-            api_key: self.api_key,
-            api_key_file: self.api_key_file,
+            api_keys: self.api_keys,
+            api_key_files: self.api_key_files,
             n_parallel: self.n_parallel,
             ctx_size: self.ctx_size,
             n_predict: self.n_predict,
@@ -1190,6 +1196,32 @@ pub fn env_fallback_endpoint_slots(value: &mut bool, slots_was_set: bool, no_slo
                 raw
             ),
         }
+    }
+}
+
+/// Prepend `LLAMA_API_KEY` to the `--api-key` occurrences (#1437).
+///
+/// b10621 applies every environment variable before the command line and both
+/// call the same appending handler, so the environment value ADDS a key rather
+/// than being shadowed by a CLI one. clap's `env` attribute cannot express
+/// that (it uses the environment only when the flag is absent), so the
+/// variable is read here and the values are placed ahead of the CLI ones to
+/// match upstream's ordering.
+pub fn env_fallback_api_keys(values: &mut Vec<String>) {
+    const KEY: &str = "LLAMA_API_KEY";
+    if let Ok(raw) = std::env::var(KEY) {
+        values.insert(0, raw);
+    }
+}
+
+/// Prepend `LLAMA_ARG_API_KEY_FILE` to the `--api-key-file` occurrences.
+///
+/// Same additive rule as [`env_fallback_api_keys`]; see there for why clap's
+/// `env` attribute cannot express it.
+pub fn env_fallback_api_key_files(values: &mut Vec<PathBuf>) {
+    const KEY: &str = "LLAMA_ARG_API_KEY_FILE";
+    if let Ok(raw) = std::env::var(KEY) {
+        values.insert(0, PathBuf::from(raw));
     }
 }
 

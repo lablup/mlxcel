@@ -52,8 +52,12 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 | `LLAMA_ARG_CORS_METHODS` | `--cors-methods` | — |
 | `LLAMA_ARG_CORS_HEADERS` | `--cors-headers` | — |
 | `LLAMA_ARG_CORS_CREDENTIALS` | `--cors-credentials` / `--no-cors-credentials` | — |
+| `LLAMA_API_KEY` | `--api-key` | — |
+| `LLAMA_ARG_API_KEY_FILE` | `--api-key-file` | — |
 
 `LLAMA_ARG_TIMEOUT` changed meaning in v0.6.0 (#1432). It is now the HTTP socket read/write timeout with llama-server's 3600-second default, matching b10621. The per-request decode watchdog it used to configure moved to `--decode-timeout` / `MLXCEL_DECODE_TIMEOUT`, with its 600-second default unchanged. Setting `--timeout` (or `LLAMA_ARG_TIMEOUT`) without also setting the decode watchdog logs a migration warning at startup.
+
+`LLAMA_API_KEY` and `LLAMA_ARG_API_KEY_FILE` are the two exceptions to "an explicit CLI flag wins" (#1437). llama-server applies every environment variable before the command line and both call the same appending handler, so the environment value ADDS a key to the set rather than being replaced by a `--api-key` on the command line. `LLAMA_API_KEY=env-key --api-key cli-key` therefore accepts both keys, on either server. Multiple keys go in one `LLAMA_API_KEY` as a comma-separated list, with llama-server's own splitting rules: a field may be quoted to contain a comma, and whitespace is not trimmed.
 
 `LLAMA_ARG_CACHE_REUSE` is an integer minimum reuse chunk size in llama-server, not a prompt-cache enable switch. mlxcel accepts `0` without changing prompt-cache enablement and rejects positive values with an unsupported-setting error. Use `MLXCEL_PROMPT_CACHE_ENABLED` to enable or disable the cache.
 
