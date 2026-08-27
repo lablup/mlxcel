@@ -67,6 +67,7 @@ use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
 use crate::distributed::transport::Transport;
 use crate::server::batch::BatchObservability;
 use crate::server::batch::sequence::{RequestPriority, SequenceInfo, SequenceState};
+use crate::server::batch::stop_matcher::StopMatcher;
 use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
@@ -166,6 +167,7 @@ fn make_request(
         generated_tokens: Vec::new(),
         generated_text: String::new(),
         decode_state,
+        stop_matcher: StopMatcher::default(),
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,

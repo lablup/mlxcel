@@ -153,6 +153,39 @@ async fn the_native_completion_echoes_the_prompt_and_stop_metadata() {
     );
 }
 
+/// A matched string stop sequence must reach the wire as b10621 reports it:
+/// `stop_type: "word"` with the matched string in `stopping_word` (issue #1466).
+/// Before the fix the field could only ever be `""`, because nothing on the MLX
+/// serving path detected a stop-string match at all.
+#[tokio::test]
+async fn a_matched_stop_string_is_reported_as_stop_type_word() {
+    let (_, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 30, "stop": ["5"]}),
+    )
+    .await;
+    assert_eq!(body["stop_type"], "word", "{body}");
+    assert_eq!(body["stopping_word"], "5", "{body}");
+    // The request's stop list is echoed back in the resolved settings, so a
+    // client can see the server acted on the value it sent.
+    assert_eq!(
+        body["generation_settings"]["stop"],
+        serde_json::json!(["5"])
+    );
+}
+
+/// `/completions` shares the handler, so the same mapping must hold there.
+#[tokio::test]
+async fn the_completions_alias_reports_the_matched_stop_string_too() {
+    let (_, body) = post(
+        "/completions",
+        serde_json::json!({"prompt": "hello", "n_predict": 30, "stop": "5"}),
+    )
+    .await;
+    assert_eq!(body["stop_type"], "word", "{body}");
+    assert_eq!(body["stopping_word"], "5", "{body}");
+}
+
 #[tokio::test]
 async fn n_predict_accepts_the_openai_aliases() {
     // b10621 declares `max_tokens` and `max_completion_tokens` as aliases, so

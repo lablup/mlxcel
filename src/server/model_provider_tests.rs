@@ -22,8 +22,8 @@ use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
     ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
-    ModelRequest, QueueReservationMode, SingleStreamQueueReservation, drain_generation_events,
-    send_shutdown_signal, tokenize_prompt_for_generation,
+    ModelRequest, QueueReservationMode, SingleStreamQueueReservation, StopKind,
+    drain_generation_events, send_shutdown_signal, tokenize_prompt_for_generation,
     tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
 use crate::server::batch::BatchObservability;
@@ -39,6 +39,7 @@ fn sample_result() -> GenerationResult {
         prompt_eval_ms: 4,
         generation_only_ms: 6,
         finish_reason: "stop".to_string(),
+        stop_kind: StopKind::Eos,
         logprobs: None,
         cached_tokens: 0,
         structured_output: None,
@@ -427,6 +428,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             prompt_eval_ms: 79,
             generation_only_ms: 1,
             finish_reason: "stop".to_string(),
+            stop_kind: StopKind::Eos,
             logprobs: None,
             cached_tokens: 0,
             structured_output: None,

@@ -151,6 +151,41 @@ pub enum GenerateEvent {
     Error(String),
 }
 
+/// Why a generation ended, at the granularity the native `llama-server`
+/// response needs (issue #1466).
+///
+/// [`GenerationResult::finish_reason`] is the OpenAI wire string and collapses
+/// an end-of-sequence token and a string stop-sequence match into one `"stop"`.
+/// That is correct for the OpenAI routes and insufficient for b10621's
+/// `stop_type` / `stopping_word` pair, so the distinction (and the matched
+/// string) lives here instead of being re-derived from the text, which is
+/// impossible once the stop string has been excluded from it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum StopKind {
+    /// Generation ended without reaching the budget: an EOS token, a structured
+    /// -output completion, the repetition-loop guard, or an early bail. Maps to
+    /// b10621's `stop_type: "eos"`.
+    #[default]
+    Eos,
+    /// The `max_tokens` / `n_predict` budget was reached. Maps to
+    /// b10621's `stop_type: "limit"`.
+    Limit,
+    /// A request-supplied string stop sequence matched. The payload is that
+    /// string, which b10621 reports as `stopping_word` and which is excluded
+    /// from the returned text. Maps to `stop_type: "word"`.
+    Word(String),
+}
+
+impl StopKind {
+    /// The matched stop string, when a string stop sequence ended the request.
+    pub fn word(&self) -> Option<&str> {
+        match self {
+            StopKind::Word(w) => Some(w.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// Result of a generation
 #[derive(Debug, Clone)]
 pub struct GenerationResult {
@@ -161,6 +196,10 @@ pub struct GenerationResult {
     pub prompt_eval_ms: u64,
     pub generation_only_ms: u64,
     pub finish_reason: String,
+    /// Why generation ended, distinguishing a string stop-sequence match from
+    /// an EOS token and from the length limit (issue #1466). `finish_reason`
+    /// stays the OpenAI string and cannot express that three-way split.
+    pub stop_kind: StopKind,
     /// Per-token log probability data; `None` when logprobs were not requested
     pub logprobs: Option<Vec<TokenLogprobData>>,
     /// Number of prompt tokens that were satisfied by the KV prefix cache.

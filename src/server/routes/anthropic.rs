@@ -263,13 +263,19 @@ async fn non_stream_messages(
     let (visible_text, reasoning_text) =
         split_visible_reasoning(&result.text, parsed_tools.as_ref());
 
-    // Anthropic stop sequences: truncate visible text defensively (the
-    // scheduler already halts on native stop sequences, but a match may
-    // land inside a buffered chunk). Skip when tool calls were produced.
+    // Anthropic stop sequences: the scheduler now truncates on a native stop
+    // sequence and reports which one matched (issue #1466), so prefer its
+    // answer. `apply_stop_sequences` stays as the fallback for a match that
+    // only becomes visible after reasoning/tool splitting, and it can no longer
+    // find a scheduler-truncated match because the string is gone from the text.
+    // Skip both when tool calls were produced.
     let (final_text, stop_sequence) = if parsed_tool_calls.is_some() {
         (visible_text, None)
     } else {
-        apply_stop_sequences(&visible_text, request.stop_sequences.as_deref())
+        let (text, matched) =
+            apply_stop_sequences(&visible_text, request.stop_sequences.as_deref());
+        let matched = matched.or_else(|| result.stop_kind.word().map(str::to_string));
+        (text, matched)
     };
 
     let content_blocks = build_content_blocks(
@@ -542,12 +548,16 @@ async fn stream_messages(
         }
 
         // Stop-sequence detection on the visible text (skip when tool calls
-        // were produced, mirroring upstream).
+        // were produced, mirroring upstream). The scheduler's own match wins
+        // when it fired, because it truncated the streamed text and the string
+        // is no longer present to be found here (issue #1466).
         let stop_sequence = if parsed_calls.is_some() {
             None
         } else {
             let visible = visible_acc.lock().map(|g| g.clone()).unwrap_or_default();
-            apply_stop_sequences(&visible, stop_sequences.as_deref()).1
+            apply_stop_sequences(&visible, stop_sequences.as_deref())
+                .1
+                .or_else(|| result.stop_kind.word().map(str::to_string))
         };
 
         let stop_reason = anthropic_stop_reason(

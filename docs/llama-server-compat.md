@@ -75,6 +75,14 @@ The native completion object carries `index`, `content`, `tokens`, `id_slot`, `s
 
 Native request fields mlxcel has no equivalent for are now refused with a 400 naming the field and the alternative, instead of being accepted and ignored: `n_cmpl` (and its `n` alias) above 1, `n_indent`, `t_max_predict_ms`, `return_progress`, `verbose` and `return_tokens`. Each is still accepted at its inert value, so a client that sends the whole schema at its defaults is not turned away.
 
+### `stop` truncates the output instead of being ignored (#1466)
+
+`stop` is honored on the shipping MLX serving path, on every completion route and in both the streaming and non-streaming forms. Generation ends at the first match, the matched string is excluded from the emitted text, and the native response reports `stop_type: "word"` with the match in `stopping_word`. It was previously parsed and carried into the scheduler and then never read, so a request that asked to stop on a string ran to `n_predict` with the string in its output.
+
+The match runs on decoded text as it is produced, so a stop string that straddles token boundaries is caught, and a decoded piece whose tail could still become one is withheld from the stream until the next piece resolves it. The concatenation of the streamed chunks is therefore always exactly the non-streaming `content`: a client cannot observe text that a later token turns into a match. On a tie, the earliest match in the text wins, and among equal positions the first entry in the request's `stop` list.
+
+The match is against the raw generated stream, as upstream does, not against a reasoning-stripped view of it. On a reasoning model a stop string that appears inside a `<think>` block therefore ends the request there. `/v1/messages` reports that as Anthropic's `stop_reason: "stop_sequence"` with the matched string in `stop_sequence`.
+
 ## Sharding
 
 The manifest is sharded by area so that the concurrent implementation chains of epic #1431 edit disjoint files. Ownership is machine-readable, not prose: `pin.json`'s `shards` map records, per shard, the set of implementation issue numbers allowed to own entries in it (`shards["authentication"].owners == [1437]`, for example), and `scripts/ci/check_llama_compat_manifest.py` fails an entry whose `issue` is not a member of its own shard's owner set. That is what stops two concurrent chains from editing the same file: the file, not just the reviewer, rejects the second chain's entry.
@@ -95,7 +103,7 @@ The manifest is sharded by area so that the concurrent implementation chains of 
 | `ui-tools-mcp-gcp.json` | B | #1435, #1456 |
 | `streams-and-realtime.json` | B | #1444 |
 | `runtime-and-context.json` | C | #1449, #1450, #1453, #1472, #1473 |
-| `sampling-and-grammar.json` | C | #1436, #1377 |
+| `sampling-and-grammar.json` | C | #1436, #1377, #1466 |
 | `speculative.json` | C | #1433 |
 | `logging-and-presets.json` | C | #1448 |
 

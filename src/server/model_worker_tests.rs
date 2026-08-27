@@ -339,10 +339,73 @@ fn build_generation_result_computes_finish_reason_and_generation_split() {
     let stop = build_generation_result("ok".to_string(), 10, 3, 120, 40, 8);
     assert_eq!(stop.finish_reason, "stop");
     assert_eq!(stop.generation_only_ms, 80);
+    // The EOS-or-length split this function makes carries into `stop_kind`
+    // (issue #1466); only the scheduler can know about a stop-word match, and it
+    // overrides the value through `finish_stopped_by_word`.
+    assert_eq!(stop.stop_kind, crate::server::model_provider::StopKind::Eos);
 
     let length = build_generation_result("ok".to_string(), 10, 8, 50, 60, 8);
     assert_eq!(length.finish_reason, "length");
     assert_eq!(length.generation_only_ms, 0);
+    assert_eq!(
+        length.stop_kind,
+        crate::server::model_provider::StopKind::Limit
+    );
+}
+
+/// `finish_stopped_by_word` truncates the accumulated text to the bytes that
+/// actually reached the client and stamps the finish as a stop-word match, even
+/// when the budget was exhausted on the same token (issue #1466). Reporting
+/// `"length"` there would tell an OpenAI client to ask for a continuation of a
+/// request its own stop string ended.
+#[test]
+fn finish_stopped_by_word_truncates_and_overrides_the_finish_reason() {
+    use std::time::Instant;
+
+    let tokenizer = stub_all_byte_fallback();
+    let mut state = StreamingDecodeState::new(&tokenizer, &[]);
+    let ids = byte_fallback_ids("abcXYZ");
+    for id in &ids {
+        let _ = state.on_token(*id, &tokenizer);
+    }
+    let _ = state.flush(&tokenizer);
+
+    // Budget equals the token count, so the underlying builder would say
+    // "length" on its own.
+    let result = state.finish_stopped_by_word(
+        "XYZ".to_string(),
+        "abc".len(),
+        Instant::now(),
+        0,
+        ids.len(),
+        0,
+    );
+    assert_eq!(result.text, "abc");
+    assert_eq!(result.finish_reason, "stop");
+    assert_eq!(
+        result.stop_kind,
+        crate::server::model_provider::StopKind::Word("XYZ".to_string())
+    );
+    assert_eq!(result.completion_tokens, ids.len());
+}
+
+/// A `keep_bytes` that lands inside a multi-byte character is floored to the
+/// nearest boundary rather than panicking. The matcher only ever reports whole
+/// emitted pieces, so this is defence in depth.
+#[test]
+fn finish_truncated_floors_a_keep_length_inside_a_character() {
+    use std::time::Instant;
+
+    let tokenizer = stub_all_byte_fallback();
+    let mut state = StreamingDecodeState::new(&tokenizer, &[]);
+    for id in byte_fallback_ids("가나다") {
+        let _ = state.on_token(id, &tokenizer);
+    }
+    let _ = state.flush(&tokenizer);
+
+    // 4 bytes lands one byte into the second character (each is 3 bytes).
+    let result = state.finish_truncated_with_cache(4, Instant::now(), 0, 99, 0);
+    assert_eq!(result.text, "가");
 }
 
 // ── Byte-fallback streaming regression tests ───────────────────
@@ -377,46 +440,12 @@ fn simulate_byte_fallback_stream(
     (chunks, result.text)
 }
 
-/// Build a HuggingFace tokenizer whose vocab contains every byte-fallback token
-/// `<0x00>`..`<0xFF>` (token id == byte value) plus a couple of regular ASCII
-/// word tokens, with a `ByteFallback` decoder. This lets a test drive the
-/// incremental detokenizer with the exact byte sequence of any UTF-8 string, so
-/// byte-exactness can be checked against a one-shot decode of the same ids.
+/// The all-byte-fallback stub tokenizer, which lets these tests drive the
+/// incremental detokenizer with the exact byte sequence of any UTF-8 string.
+/// Lives on `MlxcelTokenizer` beside the other test stubs so the stop-sequence
+/// tests (#1466) can drive the same byte-level stream.
 fn stub_all_byte_fallback() -> MlxcelTokenizer {
-    let mut vocab_entries: Vec<String> = (0u16..=255)
-        .map(|b| format!("\"<0x{b:02X}>\": {b}"))
-        .collect();
-    // Regular word tokens after the 256 byte ids, exercising the mixed
-    // regular-piece + byte-fallback path.
-    vocab_entries.push("\"Hello\": 256".to_string());
-    vocab_entries.push("\"world\": 257".to_string());
-    let vocab = vocab_entries.join(", ");
-    let json = format!(
-        r#"{{
-            "version": "1.0",
-            "truncation": null,
-            "padding": null,
-            "added_tokens": [],
-            "normalizer": null,
-            "pre_tokenizer": null,
-            "post_processor": null,
-            "decoder": {{"type": "ByteFallback"}},
-            "model": {{
-                "type": "BPE",
-                "dropout": null,
-                "unk_token": null,
-                "continuing_subword_prefix": null,
-                "end_of_word_suffix": null,
-                "fuse_unk": false,
-                "byte_fallback": true,
-                "vocab": {{{vocab}}},
-                "merges": []
-            }}
-        }}"#
-    );
-    let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
-        .expect("failed to build all-byte-fallback stub tokenizer");
-    MlxcelTokenizer::HuggingFace(tokenizer)
+    MlxcelTokenizer::stub_all_byte_fallback()
 }
 
 /// The `<0xXX>` token ids for the UTF-8 bytes of `s` in [`stub_all_byte_fallback`]

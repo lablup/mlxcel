@@ -160,11 +160,10 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1466,
+      "issue": 1441,
       "test": "src/server/routes/native_route_tests.rs",
-      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. The remaining differences are listed in divergence and keep this entry deferred; the stop-sequence half is tracked separately as #1466 because the fix belongs to the MLX scheduler and to the field:stop entry in sampling-and-grammar.json.",
+      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. The remaining differences are listed in divergence and are #1441's, which is why this entry stays deferred and is filed under it.",
       "divergence": [
-        "String stop sequences reach ServerGenerateOptions and are never enforced on the MLX serving path, so `stop` has no effect on the emitted text and `stop_type` can never report `word` (#1466).",
         "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
         "`id_slot` is always -1: the continuous-batching scheduler exposes no stable per-request slot number (#1441).",
         "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
@@ -182,11 +181,10 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1466,
+      "issue": 1441,
       "test": "src/server/routes/native_route_tests.rs",
-      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. The remaining differences are listed in divergence and keep this entry deferred; the stop-sequence half is tracked separately as #1466 because the fix belongs to the MLX scheduler and to the field:stop entry in sampling-and-grammar.json.",
+      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. The remaining differences are listed in divergence and are #1441's, which is why this entry stays deferred and is filed under it.",
       "divergence": [
-        "String stop sequences reach ServerGenerateOptions and are never enforced on the MLX serving path, so `stop` has no effect on the emitted text and `stop_type` can never report `word` (#1466).",
         "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
         "`id_slot` is always -1: the continuous-batching scheduler exposes no stable per-request slot number (#1441).",
         "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."

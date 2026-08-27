@@ -59,6 +59,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, from_slice_f32};
 
 use crate::server::batch::sequence::{RequestPriority, SequenceInfo, SequenceState};
+use crate::server::batch::stop_matcher::StopMatcher;
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::thinking_budget::ThinkingState;
@@ -275,6 +276,7 @@ fn make_slice_sequence_with_id(
         generated_tokens: Vec::new(),
         generated_text: String::new(),
         decode_state,
+        stop_matcher: StopMatcher::default(),
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,

@@ -68,6 +68,7 @@ use mlxcel_core::generate::SamplingConfig;
 use super::BatchScheduler;
 use crate::server::batch::BatchObservability;
 use crate::server::batch::sequence::{RequestPriority, SequenceInfo, SequenceState};
+use crate::server::batch::stop_matcher::StopMatcher;
 use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
@@ -166,6 +167,7 @@ fn make_seq(
         generated_tokens: Vec::new(),
         generated_text: String::new(),
         decode_state,
+        stop_matcher: StopMatcher::default(),
         prefill_offset: 0,
         prefill_start_offset,
         already_cached_tokens: prefill_start_offset,

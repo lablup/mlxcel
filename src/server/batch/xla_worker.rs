@@ -426,7 +426,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                             if !chunk.emit.is_empty() {
                                 let _ = state.response_tx.send(GenerateEvent::Token(chunk.emit));
                             }
-                            chunk.stopped.then(|| state.stop.emitted_len())
+                            chunk.matched.is_some().then(|| state.stop.emitted_len())
                         } else {
                             let _ = state.response_tx.send(GenerateEvent::Token(piece));
                             None

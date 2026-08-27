@@ -42,7 +42,7 @@ use crate::models::llada2_moe::{Llada2FinishReason, Llada2GenerateOptions};
 use crate::models::{DiffusionGemmaModel, Llada2MoeModel};
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::{StreamingDecodeState, decode_request_images};
-use crate::server::model_provider::{GenerateEvent, GenerationResult, ModelRequest};
+use crate::server::model_provider::{GenerateEvent, GenerationResult, ModelRequest, StopKind};
 use crate::tokenizer::MlxcelTokenizer;
 
 /// Serve-level diffusion knobs resolved once on the worker thread from the
@@ -388,6 +388,16 @@ fn serve_streaming_request<G>(
                 0,
             );
             gen_result.finish_reason = finish_reason.to_string();
+            // Keep `stop_kind` consistent with the reason the diffusion engine
+            // actually reported (issue #1466). `finish_with_cache` derived it
+            // from the token counts, which disagrees when the engine stops on
+            // its own at exactly `max_new_tokens`. A diffusion request carries
+            // no string stop sequences, so `Word` is not reachable here.
+            gen_result.stop_kind = if gen_result.finish_reason == "length" {
+                StopKind::Limit
+            } else {
+                StopKind::Eos
+            };
             let _ = response_tx.send(GenerateEvent::Done(gen_result));
         }
         Err(err) => {

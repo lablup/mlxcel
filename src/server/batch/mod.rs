@@ -55,10 +55,12 @@ pub(crate) mod speculative_slice;
 mod speculative_slice_tests;
 /// Streaming-safe stop-string matcher (issue #449 M3 Stage 2d). Pure logic with
 /// no device state, so it is always compiled and unit-tested in ordinary
-/// `cargo test`; only the `xla-iree` serve worker consumes it today, so its
-/// items read as dead code when that feature is off.
-#[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
-mod stop_matcher;
+/// `cargo test`. Both backends drive it: the MLX scheduler through
+/// [`SequenceInfo::stream_decoded_text`] (issue #1466) and the `xla-iree` serve
+/// worker directly.
+pub(crate) mod stop_matcher;
+#[cfg(test)]
+mod stop_sequence_tests;
 /// Pure tick-arbitration policy (issue #908): the decision `decide_action`
 /// used to inline, extracted so the unit tests exercise the real policy
 /// instead of a local copy, and home of the `MLXCEL_MIXED_STEP` prototype.
