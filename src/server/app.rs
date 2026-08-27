@@ -15,78 +15,63 @@
 //! Axum application configuration
 
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
     extract::{DefaultBodyLimit, State},
-    http::{Request, StatusCode, header},
+    http::Request,
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, post},
 };
 use tower_http::trace::TraceLayer;
 
 use super::AppState;
+use super::auth;
 use super::cors::cors_middleware;
 use super::routes;
-use super::types::ErrorResponse;
 
-/// API key authentication middleware
+/// API-key authentication middleware, following b10621's
+/// `middleware_validate_api_key` (#1437).
+///
+/// An empty key set disables authentication. Otherwise the request must
+/// present one of the configured keys, unless its path is public. A missing
+/// credential and an unknown one produce the same 401 and the same body, so a
+/// probe cannot tell them apart, and no configured key is echoed.
+///
+/// This runs INSIDE the CORS middleware, so an `OPTIONS` preflight is answered
+/// before it: browsers do not send `Authorization` on a preflight.
 async fn api_key_auth(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // If no API key is configured, skip authentication
-    let Some(expected_key) = state.config.api_key.as_ref() else {
-        return next.run(request).await;
-    };
-
-    // Skip auth for health check endpoints
-    let path = request.uri().path();
-    if is_unauthenticated_health_path(path) {
+    if state.config.api_keys.is_empty() {
         return next.run(request).await;
     }
 
-    // Check for Authorization header
-    let auth_header = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
+    if is_public_endpoint(request.uri().path()) {
+        return next.run(request).await;
+    }
 
-    match auth_header {
-        Some(auth) => {
-            // Support "Bearer <token>" format
-            let token = if let Some(stripped) = auth.strip_prefix("Bearer ") {
-                stripped
-            } else {
-                auth
-            };
-
-            if token == expected_key {
-                next.run(request).await
-            } else {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse::new(
-                        "Invalid API key".to_string(),
-                        "invalid_api_key",
-                    )),
-                )
-                    .into_response()
-            }
-        }
-        None => (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse::new(
-                "Missing API key. Use 'Authorization: Bearer <api-key>' header.".to_string(),
-                "missing_api_key",
-            )),
-        )
-            .into_response(),
+    match auth::presented_credential(request.headers()) {
+        Some(presented) if state.config.api_keys.accepts(presented) => next.run(request).await,
+        _ => auth::unauthorized_response(),
     }
 }
 
-fn is_unauthenticated_health_path(path: &str) -> bool {
+/// Paths served without authentication when API keys are configured.
+///
+/// This is b10621's `get_public_endpoints` set: `/health`, `/v1/health`, and
+/// the Web UI front-end paths, of which mlxcel has only `/` (it ships no
+/// embedded UI assets, so upstream's per-asset entries have no counterpart).
+/// Everything else, `/props`, `/slots`, `/metrics`, `/models`, `/v1/models`
+/// and every inference route included, requires a key on both servers.
+///
+/// The comparison is against the request path as the client sent it, prefix
+/// included, which is what upstream's `req.path` carries. With `--api-prefix`
+/// set, `<prefix>/health` is therefore NOT public on either server; startup
+/// warns when both are configured (#1432).
+fn is_public_endpoint(path: &str) -> bool {
     matches!(path, "/" | "/health" | "/v1/health")
 }
 
@@ -233,8 +218,12 @@ fn build_routes(state: &AppState) -> Router<AppState> {
 mod api_prefix_tests;
 
 #[cfg(test)]
+#[path = "auth_route_tests.rs"]
+mod auth_route_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{AUDIO_MAX_UPLOAD_BYTES, is_unauthenticated_health_path};
+    use super::{AUDIO_MAX_UPLOAD_BYTES, is_public_endpoint};
     use axum::{
         Router,
         body::Body,
@@ -283,11 +272,11 @@ mod tests {
     }
 
     #[test]
-    fn all_health_aliases_are_unauthenticated() {
+    fn all_public_endpoints_are_unauthenticated() {
         for path in ["/", "/health", "/v1/health"] {
-            assert!(is_unauthenticated_health_path(path), "{path}");
+            assert!(is_public_endpoint(path), "{path}");
         }
-        assert!(!is_unauthenticated_health_path("/v1/models"));
+        assert!(!is_public_endpoint("/v1/models"));
     }
 
     #[tokio::test]

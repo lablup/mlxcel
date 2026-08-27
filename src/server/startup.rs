@@ -68,9 +68,12 @@ pub struct ServerStartupConfig {
     pub host: String,
     pub port: u16,
 
-    // Auth
-    pub api_key: Option<String>,
-    pub api_key_file: Option<PathBuf>,
+    // Auth (#1437). b10621 accepts a set of keys: every `--api-key`
+    // occurrence contributes a comma-separated list and every
+    // `--api-key-file` occurrence contributes one key per line, with the
+    // environment bindings appending to the same set rather than replacing it.
+    pub api_keys: Vec<String>,
+    pub api_key_files: Vec<PathBuf>,
 
     // Limits
     pub n_parallel: usize,
@@ -452,8 +455,8 @@ impl Default for ServerStartupConfig {
             model_alias: None,
             host: "127.0.0.1".to_string(),
             port: 8080,
-            api_key: None,
-            api_key_file: None,
+            api_keys: Vec::new(),
+            api_key_files: Vec::new(),
             // Serving-throughput default: 4 concurrent decode slots (#628).
             n_parallel: 4,
             ctx_size: 0,
@@ -716,26 +719,6 @@ pub(super) fn resolve_dry_penalty_last_n(value: i32) -> usize {
     if value < 0 { 0 } else { value as usize }
 }
 
-/// Resolve API key from flag or file.
-pub(super) fn resolve_api_key(
-    api_key: Option<String>,
-    api_key_file: Option<&Path>,
-) -> Result<Option<String>> {
-    if api_key.is_some() {
-        return Ok(api_key);
-    }
-    if let Some(path) = api_key_file {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read API key file: {:?}", path))?;
-        let key = content.trim().to_string();
-        if key.is_empty() {
-            anyhow::bail!("API key file {:?} is empty", path);
-        }
-        return Ok(Some(key));
-    }
-    Ok(None)
-}
-
 /// Walk the directories named in `MLXCEL_VIDEO_DIR_ALLOWLIST` once at
 /// startup and emit a `tracing::warn!` for any entry whose group or world
 /// write bits are set (hardening / follow-up).
@@ -958,7 +941,7 @@ fn resolve_decode_storage_backend() -> crate::server::DecodeStorageBackend {
 
 pub(super) fn build_server_config(
     startup: &ServerStartupConfig,
-    api_key: Option<String>,
+    api_keys: crate::server::ApiKeys,
 ) -> ServerConfig {
     let tensor_parallel = shard_config_from_cli(
         startup.tp_size,
@@ -1000,7 +983,7 @@ pub(super) fn build_server_config(
     };
 
     ServerConfig {
-        api_key,
+        api_keys,
         decode_timeout_seconds: startup.decode_timeout,
         api_prefix: startup.api_prefix.clone(),
         sse_ping_interval: startup.sse_ping_interval,
@@ -1957,8 +1940,24 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // -- Distributed mode initialization --
     let distributed = resolve_distributed_startup(&startup).await?;
 
-    let api_key = resolve_api_key(startup.api_key.clone(), startup.api_key_file.as_deref())?;
-    let mut config = build_server_config(&startup, api_key);
+    let api_keys = crate::server::resolve_api_keys(&startup.api_keys, &startup.api_key_files)?;
+    if !api_keys.is_empty() {
+        // Never the key material itself: a count is all an operator needs to
+        // confirm the file was read, and it is all a log should ever carry.
+        tracing::info!("API-key authentication enabled ({} keys)", api_keys.len());
+    } else if matches!(
+        startup.cors_policy.origins,
+        crate::server::OriginPolicy::Wildcard
+    ) {
+        // Upstream emits the same warning at startup: an origin policy of `*`
+        // with no API key is reachable by any page in the browser.
+        tracing::warn!(
+            "CORS is set to allow all origins ('*') and no API key is set; this can be a \
+             security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / \
+             --allowed-origins"
+        );
+    }
+    let mut config = build_server_config(&startup, api_keys);
 
     if config.pipeline_parallel_runtime.is_some() && distributed.pipeline_runtime.is_some() {
         anyhow::bail!(

@@ -111,6 +111,11 @@ mlxcel-server -m Qwen3.5-0.8B-4bit --api-prefix /llama
 mlxcel-server -m Qwen3.5-0.8B-4bit --host /run/mlxcel.sock
 mlxcel-server -m Qwen3.5-0.8B-4bit --cors-origins localhost --no-cors-credentials
 
+# API keys: a comma-separated list, a file with one key per line, or both.
+# Every source adds to the same set, matching llama-server.
+mlxcel-server -m Qwen3.5-0.8B-4bit --api-key alice-key,bob-key
+mlxcel-server -m Qwen3.5-0.8B-4bit --api-key-file /etc/mlxcel/api-keys
+
 # Read-only memory budget: weights + KV cache vs. available unified memory.
 mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
 

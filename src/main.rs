@@ -954,13 +954,28 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "LLAMA_ARG_PORT", default_value_t = 8080)]
     port: u16,
 
-    /// API key for authentication
-    #[arg(long, env = "LLAMA_API_KEY", value_name = "KEY")]
-    api_key: Option<String>,
+    /// API key for authentication; multiple keys can be given as a
+    /// comma-separated list
+    ///
+    /// Repeatable, and every occurrence adds to the same key set, matching
+    /// llama-server b10621. The value is split the way b10621 splits it: a
+    /// field may be quoted to contain a comma, and whitespace is NOT trimmed,
+    /// so `--api-key "a, b"` configures `a` and `" b"`.
+    ///
+    /// `LLAMA_API_KEY` adds to the set rather than replacing it, which is
+    /// also what b10621 does (it applies environment variables first and the
+    /// command line second, appending both times).
+    #[arg(long = "api-key", value_name = "KEY")]
+    api_key: Vec<String>,
 
-    /// Path to file containing API key
-    #[arg(long, value_name = "PATH")]
-    api_key_file: Option<PathBuf>,
+    /// Path to a file containing API keys, one per line
+    ///
+    /// Lines starting with `#` are comments and blank lines are skipped;
+    /// nothing else is trimmed, so trailing whitespace is part of the key.
+    /// Repeatable, and `LLAMA_ARG_API_KEY_FILE` adds to the same set, matching
+    /// llama-server b10621.
+    #[arg(long = "api-key-file", value_name = "FNAME")]
+    api_key_file: Vec<PathBuf>,
 
     /// Number of parallel request slots that share --ctx-size (default: 4)
     ///

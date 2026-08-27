@@ -28,11 +28,12 @@ use mlxcel::downloader::{
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
-    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_batch_size,
-    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
-    env_fallback_cors_credentials, env_fallback_draft_model, env_fallback_embedding_model,
-    env_fallback_endpoint_slots, env_fallback_kv_bits, env_fallback_kv_group_size,
-    env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_api_key_files,
+    env_fallback_api_keys, env_fallback_batch_size, env_fallback_cache_type_k,
+    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_cors_credentials,
+    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
+    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
+    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
     env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
@@ -292,13 +293,28 @@ struct ServerArgs {
     )]
     parallel: usize,
 
-    /// API key for authentication
-    #[arg(long = "api-key", env = "LLAMA_API_KEY", value_name = "KEY")]
-    api_key: Option<String>,
+    /// API key for authentication; multiple keys can be given as a
+    /// comma-separated list
+    ///
+    /// Repeatable, and every occurrence adds to the same key set, matching
+    /// llama-server b10621. The value is split the way b10621 splits it: a
+    /// field may be quoted to contain a comma, and whitespace is NOT trimmed,
+    /// so `--api-key "a, b"` configures `a` and `" b"`.
+    ///
+    /// `LLAMA_API_KEY` adds to the set rather than replacing it, which is
+    /// also what b10621 does (it applies environment variables first and the
+    /// command line second, appending both times).
+    #[arg(long = "api-key", value_name = "KEY")]
+    api_key: Vec<String>,
 
-    /// Path to file containing API key
-    #[arg(long = "api-key-file", value_name = "PATH")]
-    api_key_file: Option<PathBuf>,
+    /// Path to a file containing API keys, one per line
+    ///
+    /// Lines starting with `#` are comments and blank lines are skipped;
+    /// nothing else is trimmed, so trailing whitespace is part of the key.
+    /// Repeatable, and `LLAMA_ARG_API_KEY_FILE` adds to the same set, matching
+    /// llama-server b10621.
+    #[arg(long = "api-key-file", value_name = "FNAME")]
+    api_key_file: Vec<PathBuf>,
 
     /// HTTP socket read/write timeout in seconds (llama-server `--timeout`)
     ///
@@ -1720,6 +1736,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         long_cli_flag_was_set("slots"),
         long_cli_flag_was_set("no-slots"),
     );
+    env_fallback_api_keys(&mut args.api_key);
+    env_fallback_api_key_files(&mut args.api_key_file);
     env_fallback_cors_credentials(
         &mut args.cors_credentials,
         long_cli_flag_was_set("cors-credentials"),
@@ -1780,8 +1798,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         model_alias: args.alias,
         host: args.host,
         port: args.port,
-        api_key: args.api_key,
-        api_key_file: args.api_key_file,
+        api_keys: args.api_key,
+        api_key_files: args.api_key_file,
         n_parallel: args.parallel,
         ctx_size: args.ctx_size,
         n_predict: args.predict,

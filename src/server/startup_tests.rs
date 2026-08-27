@@ -16,9 +16,9 @@ use std::path::PathBuf;
 
 use super::{
     MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_server_config,
-    detect_model_media_support, effective_parallel_context_slots, resolve_api_key,
-    resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
-    resolve_dry_penalty_last_n, resolve_generation_sampling_defaults, resolve_loop_detection_env,
+    detect_model_media_support, effective_parallel_context_slots, resolve_chat_template,
+    resolve_decode_storage_backend, resolve_default_max_tokens, resolve_dry_penalty_last_n,
+    resolve_generation_sampling_defaults, resolve_loop_detection_env,
     resolve_parallel_context_size, resolve_remote_pipeline_topology,
     resolve_tensor_parallel_runtime_support, validate_parallel_context_startup,
     validate_pipeline_parallel_startup, validate_tensor_parallel_startup,
@@ -57,19 +57,21 @@ fn resolve_dry_penalty_last_n_maps_negative_to_full_history_sentinel() {
 }
 
 #[test]
-fn resolve_api_key_prefers_explicit_value_and_reads_trimmed_file() {
+fn api_keys_from_the_flag_and_the_file_join_one_set() {
+    // #1437: b10621 accepts a SET of keys, and both sources append to it, so
+    // a flag value no longer shadows the file. The file is read one key per
+    // line and is not trimmed.
     let dir = temp_path("api-key");
     let key_file = dir.join("key.txt");
-    std::fs::write(&key_file, "  secret-key \n").unwrap();
+    std::fs::write(&key_file, "secret-key\n# comment\n").unwrap();
 
-    assert_eq!(
-        resolve_api_key(Some("flag-key".to_string()), Some(&key_file)).unwrap(),
-        Some("flag-key".to_string())
-    );
-    assert_eq!(
-        resolve_api_key(None, Some(&key_file)).unwrap(),
-        Some("secret-key".to_string())
-    );
+    let resolved =
+        crate::server::resolve_api_keys(&["flag-key".to_string()], std::slice::from_ref(&key_file))
+            .unwrap();
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved.accepts("flag-key"));
+    assert!(resolved.accepts("secret-key"));
+    assert!(!resolved.accepts("# comment"));
 
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -137,8 +139,12 @@ fn build_server_config_applies_normalized_startup_values() {
         ..ServerStartupConfig::default()
     };
 
-    let config = build_server_config(&startup, Some("token".to_string()));
-    assert_eq!(config.api_key, Some("token".to_string()));
+    let config = build_server_config(
+        &startup,
+        crate::server::resolve_api_keys(&["token".to_string()], &[]).expect("valid key set"),
+    );
+    assert!(config.api_keys.accepts("token"));
+    assert_eq!(config.api_keys.len(), 1);
     assert_eq!(
         config.decode_timeout_seconds, 42,
         "the decode watchdog reads --decode-timeout, not --timeout"
@@ -240,7 +246,7 @@ fn build_server_config_max_batch_size_is_at_least_one() {
         n_parallel: 0,
         ..ServerStartupConfig::default()
     };
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert_eq!(config.max_batch_size, 1);
 }
 
@@ -271,7 +277,7 @@ fn build_server_config_uses_max_batch_size_as_context_divisor() {
         ..ServerStartupConfig::default()
     };
 
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert_eq!(config.context_size, 2048);
     assert_eq!(config.max_batch_size, 4);
     assert_eq!(config.max_kv_size, Some(2048));
@@ -286,7 +292,7 @@ fn build_server_config_honors_no_batch_as_single_slot_context() {
         ..ServerStartupConfig::default()
     };
 
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert_eq!(config.context_size, 8192);
     assert_eq!(config.max_kv_size, Some(8192));
 }
@@ -300,7 +306,7 @@ fn build_server_config_keeps_lower_explicit_max_kv_size() {
         ..ServerStartupConfig::default()
     };
 
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert_eq!(config.context_size, 4096);
     assert_eq!(config.max_kv_size, Some(1024));
 }
@@ -327,7 +333,7 @@ fn build_server_config_propagates_no_batch_flag() {
         no_batch: true,
         ..ServerStartupConfig::default()
     };
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert!(config.no_batch);
 }
 
@@ -337,7 +343,7 @@ fn build_server_config_preserves_batch_scheduler_for_tensor_parallel() {
         tp_size: 2,
         ..ServerStartupConfig::default()
     };
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert!(!config.no_batch);
     assert_eq!(config.tensor_parallel.tp_size, 2);
 }
@@ -349,7 +355,7 @@ fn build_server_config_propagates_pipeline_parallel_settings() {
         pp_micro_batch_size: 4,
         ..ServerStartupConfig::default()
     };
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     match config.pipeline_parallel_runtime.as_ref() {
         Some(PipelineParallelRuntimeConfig::InProcess {
             layers,
@@ -640,7 +646,7 @@ fn build_server_config_uses_cli_decode_storage_backend() {
         ..ServerStartupConfig::default()
     };
 
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert_eq!(config.decode_storage_backend, DecodeStorageBackend::Paged);
 }
 
@@ -1069,7 +1075,7 @@ fn build_server_config_prompt_cache_disabled_produces_false_is_enabled() {
         prompt_cache: PromptCacheConfig::disabled(),
         ..ServerStartupConfig::default()
     };
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert!(
         !config.prompt_cache.is_enabled(),
         "disabled PromptCacheConfig must not satisfy is_enabled() in ServerConfig"
@@ -1084,7 +1090,7 @@ fn build_server_config_prompt_cache_default_is_enabled() {
     assert_eq!(startup.top_p, 0.95);
     assert_eq!(startup.min_p, 0.05);
     assert_eq!(startup.dry_penalty_last_n, 64);
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert!(
         config.prompt_cache.is_enabled(),
         "default PromptCacheConfig must satisfy is_enabled() in ServerConfig"
@@ -1111,7 +1117,7 @@ fn build_server_config_propagates_prompt_cache_capacity() {
         ),
         ..ServerStartupConfig::default()
     };
-    let config = build_server_config(&startup, None);
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
     assert_eq!(config.prompt_cache.capacity_bytes, CUSTOM_CAP);
 }
 

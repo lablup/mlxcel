@@ -461,7 +461,8 @@ async fn v1_health_alias_is_public_when_api_key_auth_is_enabled() {
     let app = app_with_config(
         None,
         ServerConfig {
-            api_key: Some("secret".to_string()),
+            api_keys: crate::server::resolve_api_keys(&["secret".to_string()], &[])
+                .expect("valid key set"),
             ..Default::default()
         },
     );

@@ -18,6 +18,7 @@ pub mod anthropic_translator;
 pub mod app;
 pub mod audio_model;
 pub(crate) mod audio_worker;
+pub mod auth;
 pub mod batch;
 mod chat_request;
 pub mod chat_template;
@@ -65,6 +66,7 @@ pub use audio_model::{
     AudioModelError, AudioModelKind, AudioModelProvider, AudioSynthesizeInput,
     AudioSynthesizeOutput, AudioTranscribeInput, AudioTranscribeOutput,
 };
+pub use auth::{ApiKeys, resolve_api_keys};
 pub use chat_template::ChatTemplateProcessor;
 pub use chat_template_kwargs::{
     ChatTemplateKwargs, ChatTemplateKwargsError, LLAMA_ARG_CHAT_TEMPLATE_KWARGS,
@@ -72,12 +74,12 @@ pub use chat_template_kwargs::{
 };
 pub use cli_input::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
-    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_batch_size,
-    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_cors_credentials,
-    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
-    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
-    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_api_key_files,
+    env_fallback_api_keys, env_fallback_batch_size, env_fallback_cache_type_k,
+    env_fallback_cache_type_v, env_fallback_cors_credentials, env_fallback_draft_model,
+    env_fallback_embedding_model, env_fallback_endpoint_slots, env_fallback_kv_bits,
+    env_fallback_kv_group_size, env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer,
+    env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
     env_fallback_prompt_cache_snapshot_capacity_bytes,

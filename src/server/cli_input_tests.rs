@@ -35,8 +35,8 @@ fn sample_input() -> ServerStartupInput {
         model_alias: Some("alias".to_string()),
         host: "127.0.0.1".to_string(),
         port: 8080,
-        api_key: Some("secret".to_string()),
-        api_key_file: Some(PathBuf::from("api.key")),
+        api_keys: vec!["secret".to_string()],
+        api_key_files: vec![PathBuf::from("api.key")],
         n_parallel: 2,
         ctx_size: 4096,
         n_predict: 256,
@@ -1637,4 +1637,64 @@ fn into_startup_config_prefers_the_mlxcel_allow_list_when_it_is_set() {
         cfg.cors_policy.origins,
         crate::server::OriginPolicy::AllowList(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// b10621 API-key environment bindings (#1437)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn llama_api_key_env_adds_to_the_cli_keys_rather_than_shadowing_them() {
+    // b10621 applies every environment variable before the command line and
+    // both call the same appending handler, so a server started with
+    // `LLAMA_API_KEY=env --api-key cli` accepts BOTH. clap's own `env`
+    // attribute cannot express that, which is why the fallback exists.
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_API_KEY", "env-key");
+
+    let mut values = vec!["cli-key".to_string()];
+    super::env_fallback_api_keys(&mut values);
+    assert_eq!(values, vec!["env-key".to_string(), "cli-key".to_string()]);
+
+    let resolved = crate::server::resolve_api_keys(&values, &[]).expect("valid");
+    assert!(resolved.accepts("env-key"));
+    assert!(resolved.accepts("cli-key"));
+}
+
+#[test]
+fn llama_api_key_env_alone_configures_a_key() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_API_KEY", "solo-key,second");
+
+    let mut values = Vec::new();
+    super::env_fallback_api_keys(&mut values);
+    let resolved = crate::server::resolve_api_keys(&values, &[]).expect("valid");
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved.accepts("solo-key") && resolved.accepts("second"));
+}
+
+#[test]
+fn llama_arg_api_key_file_env_adds_to_the_cli_files() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_API_KEY_FILE", "/etc/mlxcel/env-keys");
+
+    let mut values = vec![PathBuf::from("/etc/mlxcel/cli-keys")];
+    super::env_fallback_api_key_files(&mut values);
+    assert_eq!(
+        values,
+        vec![
+            PathBuf::from("/etc/mlxcel/env-keys"),
+            PathBuf::from("/etc/mlxcel/cli-keys"),
+        ]
+    );
+}
+
+#[test]
+fn into_startup_config_carries_every_api_key_source() {
+    let mut input = sample_input();
+    input.api_keys = vec!["a,b".to_string()];
+    input.api_key_files = Vec::new();
+    let cfg = input.into_startup_config().expect("valid");
+    assert_eq!(cfg.api_keys, vec!["a,b".to_string()]);
+    assert!(cfg.api_key_files.is_empty());
 }

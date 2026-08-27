@@ -323,7 +323,8 @@ async fn a_preflight_is_answered_by_the_middleware_without_authentication() {
     let state = AppState::new(
         provider,
         ServerConfig {
-            api_key: Some("secret".to_string()),
+            api_keys: crate::server::resolve_api_keys(&["secret".to_string()], &[])
+                .expect("valid key set"),
             ..Default::default()
         },
         ChatTemplateProcessor::with_template("ok".to_string()),
