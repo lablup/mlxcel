@@ -69,6 +69,10 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 
 `HF_TOKEN` is a credential, so `--help` never renders its resolved value. `LLAMA_API_KEY` is not bound through clap at all, so it cannot be rendered either. Everything else in this table is printed by `--help` the way clap normally does.
 
+The b10621 GGML runtime options (`--n-gpu-layers`, `--split-mode`, `--mlock`, `--numa`, `--rpc`, the CPU thread-pool knobs, and the rest) bind their own `LLAMA_ARG_*` variables too (#1445). They are hidden compatibility surfaces: an inert value is accepted and anything else stops startup with a diagnostic. Value-less flags and `--x` / `--no-x` pairs among them are read at runtime rather than through clap, so their vocabulary is b10621's: a value-less option fires only on `on`/`enabled`/`true`/`1`, and a pair reads `parse_bool_value` plus a `LLAMA_ARG_NO_*` alias meaning false. See [llama-server-compat.md](llama-server-compat.md#ggml-runtime-placement-and-memory-options).
+
+`LLAMA_ARG_CACHE_TYPE_K` and `LLAMA_ARG_CACHE_TYPE_V` accept `f16` from b10621's vocabulary plus mlxcel's own `int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4` and `turbo4-delegated`. The other GGML quantizer names (`q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`) are rejected rather than mapped onto a different quantizer, and the unquantized `f32` and `bf16` are rejected because mlxcel's KV cache has no f32 or bf16 storage to select.
+
 `LLAMA_ARG_CACHE_REUSE` is an integer minimum reuse chunk size in llama-server, not a prompt-cache enable switch. mlxcel accepts `0` without changing prompt-cache enablement and rejects positive values with an unsupported-setting error. Use `MLXCEL_PROMPT_CACHE_ENABLED` to enable or disable the cache.
 
 ## Common runtime variables

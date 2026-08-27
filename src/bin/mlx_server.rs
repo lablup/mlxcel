@@ -18,11 +18,12 @@ use std::path::PathBuf;
 
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
+use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
 };
-use mlxcel::cli::turbo_args::TurboKvCacheArgs;
+use mlxcel::cli::turbo_args::{TurboKvCacheArgs, resolve_kv_cache_mode};
 use mlxcel::downloader::{
     DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo,
     resolve_model_source_with_options, set_offline_mode,
@@ -1216,25 +1217,9 @@ struct ServerArgs {
     #[arg(long, hide = true)]
     _jinja: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored: mlxcel always uses Metal)
-    #[arg(long = "n-gpu-layers", hide = true)]
-    _n_gpu_layers: Option<i32>,
-
     /// Accepted for llama-server CLI compatibility (ignored: vision projector loaded automatically)
     #[arg(long, hide = true)]
     _mmproj: Option<String>,
-
-    /// Accepted for llama-server CLI compatibility (ignored)
-    #[arg(long, hide = true)]
-    _flash_attn: bool,
-
-    /// Accepted for llama-server CLI compatibility (ignored: not applicable to MLX)
-    #[arg(long, hide = true)]
-    _mlock: bool,
-
-    /// Accepted for llama-server CLI compatibility (ignored: not applicable to MLX)
-    #[arg(long = "no-mmap", hide = true)]
-    _no_mmap: bool,
 
     /// Maximum number of cached post-projection image features per loaded VLM.
     ///
@@ -1359,6 +1344,16 @@ struct ServerArgs {
     // moment the next group is parsed.
     #[command(flatten)]
     turbo: TurboKvCacheArgs,
+
+    /// llama-server b10621 GGML runtime, placement, and memory options
+    /// (`--n-gpu-layers`, `--split-mode`, `--mlock`, `--numa`, `--rpc`, the
+    /// CPU thread-pool knobs, ...). Every one is hidden and its value is
+    /// classified at startup: inert values are accepted, values whose b10621
+    /// meaning mlxcel cannot reproduce are rejected with a diagnostic. Defined
+    /// once in `mlxcel::cli::ggml_compat_args` so both server binaries accept
+    /// exactly the same set (issue #1445).
+    #[command(flatten)]
+    ggml_compat: GgmlCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
@@ -1840,6 +1835,32 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // `--hf-file` here rather than accepting them and resolving something
     // else. `--offline` and `--hf-token` then shape how the reference is
     // resolved.
+    // b10621 GGML runtime / placement / memory options (issue #1445): every
+    // value is classified before the model reference is even resolved, so
+    // `--numa distribute` or `--rpc host:1` is reported immediately rather
+    // than after a multi-gigabyte download. Inert values are accepted
+    // silently; a value whose upstream meaning mlxcel cannot reproduce stops
+    // startup with a diagnostic naming the option, the value, the limitation,
+    // and the mlxcel alternative.
+    args.ggml_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.ggml_compat
+        .ensure_inert_before_model()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // The KV cache type is model-independent too, so validate it here rather
+    // than leaving `--cache-type-k q8_0` to be reported after a multi-gigabyte
+    // download (issue #1445). The resolved mode is recomputed later against the
+    // loaded model's family, which can only substitute a supported mode for
+    // another supported one; this pass exists to reject the value outright.
+    resolve_kv_cache_mode(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     env_fallback_offline(&mut args.offline);
     // One process-wide flag, as in b10621, so the fetch sites reached from
     // inside a loader (the moondream starmie tokenizer, request-path media
@@ -1867,6 +1888,14 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // Name the flag the operator actually typed. Without this a failure to
     // resolve an `--hf-repo` value reports it as a `-m` problem.
     .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?;
+
+    // The `--gpu-layers` half of the b10621 GGML classification, deferred
+    // until the checkpoint is known: only its layer count distinguishes a full
+    // offload (inert, since mlxcel always runs every layer on the accelerator)
+    // from a partial one (issue #1445).
+    args.ggml_compat
+        .ensure_inert(read_model_layer_count(&model_path))
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.

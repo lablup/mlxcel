@@ -19,6 +19,7 @@ use std::path::PathBuf;
 mod commands;
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
+use mlxcel::cli::ggml_compat_args::GgmlCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
@@ -1832,25 +1833,9 @@ pub(crate) struct ServeArgs {
     #[arg(long, hide = true)]
     _jinja: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored, mlxcel always uses Metal)
-    #[arg(long = "n-gpu-layers", hide = true)]
-    _n_gpu_layers: Option<i32>,
-
     /// Accepted for llama-server CLI compatibility (ignored, vision projector loaded automatically)
     #[arg(long, hide = true)]
     _mmproj: Option<String>,
-
-    /// Accepted for llama-server CLI compatibility (ignored)
-    #[arg(long, hide = true)]
-    _flash_attn: bool,
-
-    /// Accepted for llama-server CLI compatibility (ignored, not applicable to MLX)
-    #[arg(long, hide = true)]
-    _mlock: bool,
-
-    /// Accepted for llama-server CLI compatibility (ignored, not applicable to MLX)
-    #[arg(long = "no-mmap", hide = true)]
-    _no_mmap: bool,
 
     /// Decode storage backend for continuous batching.
     ///
@@ -1986,6 +1971,16 @@ pub(crate) struct ServeArgs {
     // moment the next group is parsed.
     #[command(flatten)]
     turbo: TurboKvCacheArgs,
+
+    /// llama-server b10621 GGML runtime, placement, and memory options
+    /// (`--n-gpu-layers`, `--split-mode`, `--mlock`, `--numa`, `--rpc`, the
+    /// CPU thread-pool knobs, ...). Every one is hidden and its value is
+    /// classified at startup: inert values are accepted, values whose b10621
+    /// meaning mlxcel cannot reproduce are rejected with a diagnostic. Defined
+    /// once in `mlxcel::cli::ggml_compat_args` so both server binaries accept
+    /// exactly the same set (issue #1445).
+    #[command(flatten)]
+    ggml_compat: GgmlCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,

@@ -268,3 +268,80 @@ fn an_unreadable_config_passes_the_requested_mode_through() {
     assert_eq!(mode, KVCacheMode::Turbo4Asym);
     assert!(warning.is_none());
 }
+
+// ── GGML KV cache type diagnostics (issue #1445) ────────────────────────────
+
+#[test]
+fn f16_is_the_one_ggml_kv_spelling_mlxcel_answers() {
+    // The only value the two vocabularies share: b10621's `f16` and mlxcel's
+    // FP16 KV storage are the same unquantized half-precision cache, so it is
+    // aliased rather than rejected.
+    for value in ["f16", "F16", "fp16"] {
+        assert_eq!(
+            resolve_kv_cache_mode(Some(value), Some(value), None),
+            Ok(KVCacheMode::Fp16),
+            "--cache-type-k {value} must resolve to FP16 storage"
+        );
+    }
+}
+
+#[test]
+fn every_other_ggml_quantizer_is_rejected_with_its_own_explanation() {
+    // Explicitly NOT mapped onto a TurboQuant mode: `q8_0` is block-wise with
+    // a per-block scale, mlxcel's `int8` is per-token absmax, and the Turbo
+    // modes are PolarQuant with a Walsh-Hadamard rotation. None of them is
+    // numerically equivalent, and naming similarity is not evidence.
+    for value in [
+        "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1", "f32", "bf16",
+    ] {
+        // `f32` and `bf16` are unquantized GGML float types, not quantizers,
+        // so they get their own sentence. Conflating the two would tell an
+        // operator something untrue about b10621.
+        let expected_reason = if matches!(value, "f32" | "bf16") {
+            "unquantized GGML float type"
+        } else {
+            "GGML KV cache quantizer"
+        };
+        for (k, v) in [(Some(value), None), (None, Some(value))] {
+            let err =
+                resolve_kv_cache_mode(k, v, None).expect_err(&format!("{value} must be rejected"));
+            assert!(
+                err.contains(value),
+                "the diagnostic must quote the requested value: {err}"
+            );
+            assert!(
+                err.contains(expected_reason),
+                "the diagnostic must name the platform limitation: {err}"
+            );
+            assert!(
+                err.contains("Use instead: f16"),
+                "the diagnostic must offer the mlxcel alternatives: {err}"
+            );
+            assert!(
+                err.contains("docs/turbo-kv-cache.md"),
+                "the diagnostic must point at the reference: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_value_outside_both_vocabularies_lists_what_mlxcel_accepts() {
+    let err = resolve_kv_cache_mode(Some("q3_k_m"), None, None).expect_err("unknown");
+    assert!(err.contains("q3_k_m"), "{err}");
+    assert!(err.contains("not a recognised KV cache type"), "{err}");
+    assert!(err.contains("turbo4-delegated"), "{err}");
+}
+
+#[test]
+fn no_kv_cache_diagnostic_carries_collapsed_indentation() {
+    for value in ["q8_0", "q3_k_m"] {
+        let err = resolve_kv_cache_mode(Some(value), None, None).expect_err("rejected");
+        for line in err.lines() {
+            assert!(
+                !line.trim().contains("   "),
+                "diagnostic line carries collapsed indentation: {line:?}"
+            );
+        }
+    }
+}

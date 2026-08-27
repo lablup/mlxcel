@@ -380,8 +380,44 @@ def check_entry(shard: str, e: dict) -> None:
                     f"{where}: env_test {env_test!r} is not an existing "
                     "repository-relative file"
                 )
-    if test and not repo_relative_file(str(test).split("::")[0]):
-        err(f"{where}: test {test!r} is not an existing repository-relative file")
+    if test:
+        test_file = str(test).split("::")[0]
+        if not repo_relative_file(test_file):
+            err(f"{where}: test {test!r} is not an existing repository-relative file")
+        else:
+            check_test_function_exists(where, str(test), test_file)
+
+
+def check_test_function_exists(where: str, test: str, test_file: str) -> None:
+    """A ``file::name`` test pointer must name a function that is really there.
+
+    The file half was already checked. The function half was not, so an entry
+    could point at a test that was renamed, or at one that covers a different
+    option entirely, and nothing noticed. That is not hypothetical: several
+    #1445 entries initially pointed at a fourteen-case integration test that
+    did not cover them, because a pointer nobody validates drifts the moment
+    the tests are reorganized.
+
+    Only the last ``::`` segment is treated as a function name, so a nested
+    path (``file.rs::mod::name``) still works: the name is searched for
+    anywhere in the file as ``fn <name>``.
+    """
+    if "::" not in test:
+        return
+    name = test.split("::")[-1]
+    if not name:
+        err(f"{where}: test {test!r} ends in an empty function name")
+        return
+    try:
+        source = (REPO / test_file).read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - the file existed a line ago
+        err(f"{where}: test file {test_file!r} became unreadable: {exc}")
+        return
+    if f"fn {name}(" not in source:
+        err(
+            f"{where}: test {test!r} names no `fn {name}` in {test_file}; the "
+            "pointer has drifted from the test that covers this entry"
+        )
 
 
 def check_shard_ownership(shard: str, e: dict, owners: set[int]) -> None:
