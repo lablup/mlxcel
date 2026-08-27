@@ -64,7 +64,12 @@ def load(path):
 
 
 def perplexity(rows):
-    return math.exp(-sum(r[3] for r in rows) / len(rows))
+    # Column 4 of the trace is the true NLL, positive: `examples/logit_trace.rs`
+    # writes `-log_softmax(target)`. Perplexity is therefore exp(+mean(nll)).
+    # This used to negate, which reported exp(mean(log p)), the geometric mean
+    # probability and the reciprocal of perplexity, so a worse candidate showed
+    # a NEGATIVE percentage under a header that read like an improvement.
+    return math.exp(sum(r[3] for r in rows) / len(rows))
 
 
 def main() -> int:
@@ -173,7 +178,10 @@ def main() -> int:
         )
 
     pr, pc = perplexity(ref), perplexity(cand)
-    print(f"\nperplexity  reference {pr:.4f}   candidate {pc:.4f}   {100*(pc/pr-1):+.3f}%")
+    print(
+        f"\nperplexity  reference {pr:.4f}   candidate {pc:.4f}   "
+        f"{100*(pc/pr-1):+.3f}%  (higher is worse)"
+    )
 
     print()
     if dis_all == 0:

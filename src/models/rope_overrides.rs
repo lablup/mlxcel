@@ -139,7 +139,7 @@ impl RopeRuntimeOverride {
                  YaRN request as any of those would change the rotation without saying so. \
                  Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, \
                  Mellum, TeleChat3) still load and rotate with it; only the runtime override \
-                 is refused. Tracked by #1450."
+                 is refused. Tracked by #1472."
                     .to_string(),
             );
         }

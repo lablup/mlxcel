@@ -33,7 +33,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1440,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "BEHAVIOR DRIFT: mlxcel's /health answers 503 {\"status\":\"no slot available\"} when the request queue is full, which b10621 reports on /slots?fail_on_no_slot instead, and its loading-state body differs from b10621's error envelope. A load balancer ejects mlxcel under load where llama-server stays healthy. #1440 owns it.",
       "divergence": [
@@ -53,7 +53,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1438,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Response-field subset: mlxcel emits {id, object, created, owned_by}; b10621 adds aliases, tags, architecture, source, can_remove and the modality lists, and reports owned_by \"llamacpp\". #1438 owns response-field parity.",
       "divergence": [
@@ -73,7 +73,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1440,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Kept public under API-key auth (#1430). BEHAVIOR DRIFT: see GET /health. #1440 owns it.",
       "divergence": [
@@ -93,7 +93,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1438,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Response-field subset: see GET /models. #1438 owns response-field parity.",
       "divergence": [
@@ -160,7 +160,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1466,
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. The remaining differences are listed in divergence and keep this entry deferred; the stop-sequence half is tracked separately as #1466 because the fix belongs to the MLX scheduler and to the field:stop entry in sampling-and-grammar.json.",
       "divergence": [
@@ -182,7 +182,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1466,
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. The remaining differences are listed in divergence and keep this entry deferred; the stop-sequence half is tracked separately as #1466 because the fix belongs to the MLX scheduler and to the field:stop entry in sampling-and-grammar.json.",
       "divergence": [
@@ -221,7 +221,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1452,
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Route separation done: /embedding and /embeddings answer b10621's native shape, a bare JSON array of {index, embedding} whose embedding is an array OF arrays, and /v1/embeddings keeps the OpenAI object. /embedding was not mounted at all before this change, and all three paths used to answer the OpenAI shape. The native handler also accepts upstream's legacy `content` spelling for the input. Shape verified against a capture of the pinned binary serving a real embedding checkpoint.",
       "divergence": [
@@ -240,7 +240,7 @@
       "condition": null,
       "discovery": "source-route-registration",
       "state": "deferred",
-      "issue": 1441,
+      "issue": 1452,
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Route separation done: /embedding and /embeddings answer b10621's native shape, a bare JSON array of {index, embedding} whose embedding is an array OF arrays, and /v1/embeddings keeps the OpenAI object. /embedding was not mounted at all before this change, and all three paths used to answer the OpenAI shape. The native handler also accepts upstream's legacy `content` spelling for the input. Shape verified against a capture of the pinned binary serving a real embedding checkpoint.",
       "divergence": [

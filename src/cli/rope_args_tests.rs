@@ -53,7 +53,7 @@ fn a_real_yarn_value_is_refused_with_the_flag_named() {
         .resolve()
         .expect_err("mlxcel's shared RoPE path has no YaRN arm");
     assert!(err.contains("--yarn-beta-fast 32"), "{err}");
-    assert!(err.contains("#1450"), "{err}");
+    assert!(err.contains("#1472"), "{err}");
 }
 
 #[test]
