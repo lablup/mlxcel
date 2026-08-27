@@ -68,6 +68,21 @@ use mlxcel::server::{
     about = "llama-server compatible HTTP server for MLX inference on Apple Silicon and CUDA GPUs",
     args_conflicts_with_subcommands = true,
     flatten_help = true,
+    // b10621 accepts a space-separated negative value on every option whose
+    // domain admits one (`llama-server --seed -1`), and mlxcel rejected all
+    // 122 of its value-taking long options with "unexpected argument '-1'"
+    // until this setting was added (#1459). `ServerArgs` is flattened into
+    // this command, so the setting reaches every server flag from here.
+    //
+    // `allow_negative_numbers`, not `allow_hyphen_values`: the latter takes
+    // ANY `-`-leading token as the pending option's value, so a mistyped
+    // `--seed --moldel foo` would silently bind `--moldel` as the seed and
+    // never report the typo. This one admits only tokens that lex as a
+    // number, which is exactly the domain b10621 documents. Options whose
+    // own domain excludes negatives (`--port: u16`, `--ctx-size: usize`,
+    // `parse_unit_interval` on `--diffusion-threshold`) still reject `-1` in
+    // their own value parser, which is asserted in this file's test module.
+    allow_negative_numbers = true,
     verbatim_doc_comment,
     after_help = "\
 Model and Runtime Support:
@@ -2193,5 +2208,257 @@ mod tests {
             primary.dry_sequence_breakers,
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+    // ── Space-separated negative values (issue #1459) ───────────────────
+    //
+    // b10621 accepts `llama-server --seed -1`, and mlxcel rejected the space
+    // form on all 122 of its value-taking long options with "unexpected
+    // argument '-1' found" until `allow_negative_numbers` landed on the root
+    // command. These tests pin the fix on the command the shipped binary
+    // actually parses with, and pin the two properties that separate
+    // `allow_negative_numbers` from `allow_hyphen_values`: a mistyped flag
+    // after an option is still reported rather than swallowed as its value,
+    // and an option whose domain excludes negatives still fails in its value
+    // parser instead of silently accepting `-1`.
+
+    /// Long options that decline a space-separated value of ANY sign because
+    /// they declare `require_equals`, so `--opt -1` failing on them is not a
+    /// negative-number defect. Both are mlxcel-only cache knobs with no
+    /// b10621 counterpart, so no llama-server command line reaches them.
+    const REQUIRE_EQUALS_LONGS: [&str; 2] = ["--apc-enabled", "--prompt-cache-enabled"];
+
+    /// True when clap rejects `argv` with the `unexpected argument` error that
+    /// every value-taking option produced for a space-separated `-1` before
+    /// #1459.
+    fn rejected_as_unexpected_argument(argv: &[&str]) -> bool {
+        match Cli::try_parse_from(argv) {
+            Ok(_) => false,
+            Err(err) => err.kind() == clap::error::ErrorKind::UnknownArgument,
+        }
+    }
+
+    #[test]
+    fn every_value_taking_long_option_accepts_a_space_separated_negative_number() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        command.build();
+        let options: Vec<(String, bool)> = command
+            .get_arguments()
+            .filter(|arg| arg.get_num_args().is_some_and(|r| r.takes_values()))
+            .filter_map(|arg| {
+                arg.get_long()
+                    .map(|long| (format!("--{long}"), arg.is_require_equals_set()))
+            })
+            .collect();
+
+        let mut swept = 0usize;
+        let mut exempt: Vec<String> = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
+        for (long, require_equals) in &options {
+            if *require_equals {
+                // Prove the exemption rather than assume it: an option that
+                // requires `=` must decline a space-separated positive value
+                // too, otherwise it is a real negative-number rejection
+                // hiding behind this branch.
+                assert!(
+                    Cli::try_parse_from(["mlxcel-server", long, "1"]).is_err(),
+                    "{long} declares require_equals but bound a space-separated positive \
+                     value; the #1459 sweep exemption no longer describes it"
+                );
+                exempt.push(long.clone());
+                continue;
+            }
+            swept += 1;
+            if rejected_as_unexpected_argument(&["mlxcel-server", long, "-1"]) {
+                rejected.push(long.clone());
+            }
+        }
+
+        assert!(
+            rejected.is_empty(),
+            "these mlxcel-server options still reject a space-separated negative value that \
+             b10621 accepts: {rejected:?}"
+        );
+        exempt.sort();
+        assert_eq!(
+            exempt, REQUIRE_EQUALS_LONGS,
+            "the set of options that take no space-separated value has changed. If a b10621 \
+             option gained require_equals, that is a compatibility regression; if a new \
+             mlxcel-only knob gained it, extend REQUIRE_EQUALS_LONGS deliberately"
+        );
+        // 122 value-taking long options at the time of the fix, minus the two
+        // require_equals knobs. The floor guards against a sweep that silently
+        // stops enumerating.
+        assert!(
+            swept >= 100,
+            "only {swept} value-taking long options were swept; the enumeration has collapsed"
+        );
+    }
+
+    #[test]
+    fn negative_seed_predict_and_reasoning_budget_parse_in_space_form() {
+        for argv in [
+            &["mlxcel-server", "--seed", "-1"][..],
+            &["mlxcel-server", "-s", "-1"][..],
+        ] {
+            assert_eq!(
+                parse_server_args(argv).seed,
+                -1,
+                "{argv:?} must bind -1 to the seed"
+            );
+        }
+        for argv in [
+            &["mlxcel-server", "--predict", "-1"][..],
+            &["mlxcel-server", "-n", "-1"][..],
+            &["mlxcel-server", "--n-predict", "-1"][..],
+        ] {
+            assert_eq!(
+                parse_server_args(argv).predict,
+                -1,
+                "{argv:?} must bind -1 to the predict budget"
+            );
+        }
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--reasoning-budget", "-1"]).reasoning_budget,
+            -1
+        );
+
+        // -1 is also the default for all three, so a distinct negative is what
+        // proves the token was consumed as the value rather than dropped.
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--seed", "-7"]).seed,
+            -7
+        );
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--predict", "-7"]).predict,
+            -7
+        );
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--reasoning-budget", "-7"]).reasoning_budget,
+            -7
+        );
+    }
+
+    #[test]
+    fn a_negative_float_parses_in_space_form() {
+        let args = parse_server_args(&["mlxcel-server", "--presence-penalty", "-1.5"]);
+        assert!(
+            (args.presence_penalty - (-1.5)).abs() < f32::EPSILON,
+            "--presence-penalty -1.5 must bind -1.5, got {}",
+            args.presence_penalty
+        );
+    }
+
+    #[test]
+    fn equals_form_negative_values_still_parse() {
+        assert_eq!(parse_server_args(&["mlxcel-server", "--seed=-7"]).seed, -7);
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--predict=-7"]).predict,
+            -7
+        );
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--n-predict=-7"]).predict,
+            -7
+        );
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "--reasoning-budget=-7"]).reasoning_budget,
+            -7
+        );
+    }
+
+    #[test]
+    fn a_negative_value_for_a_non_negative_option_fails_in_the_value_parser() {
+        for (long, argv) in [
+            ("--port", &["mlxcel-server", "--port", "-1"][..]),
+            ("--ctx-size", &["mlxcel-server", "--ctx-size", "-1"][..]),
+            // Custom `parse_unit_interval` parser rather than a clap numeric
+            // range, so it exercises the other rejection path.
+            (
+                "--diffusion-threshold",
+                &["mlxcel-server", "--diffusion-threshold", "-1"][..],
+            ),
+        ] {
+            let err = Cli::try_parse_from(argv)
+                .expect_err("a negative value outside the option's domain must be rejected");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{long} must fail in its value parser, not as an unknown argument"
+            );
+            let text = err.to_string();
+            assert!(
+                text.contains(long) && text.contains("-1"),
+                "the {long} rejection must name the option and the offending value, got: {text}"
+            );
+            assert!(
+                !text.contains("unexpected argument"),
+                "{long} must no longer report the value as an unexpected argument, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_parallel_reaches_the_value_parser_not_the_argv_parser() {
+        // b10621 documents a negative in `--parallel`'s help text while
+        // mlxcel's field is `usize`. Command-wide `allow_negative_numbers`
+        // makes `-1` a candidate value here, so the type parser is what must
+        // reject it, with a message that names the option and the value.
+        let err = Cli::try_parse_from(["mlxcel-server", "--parallel", "-1"])
+            .expect_err("--parallel is usize and must reject a negative slot count");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        let text = err.to_string();
+        assert!(
+            text.contains("--parallel") && text.contains("-1"),
+            "the --parallel rejection must name the option and the value, got: {text}"
+        );
+        assert!(
+            !text.contains("unexpected argument"),
+            "--parallel -1 must no longer be an argv-parser error, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_negative_number_with_no_option_awaiting_a_value_is_still_an_error() {
+        for argv in [
+            &["mlxcel-server", "-1"][..],
+            // The seed consumes the first negative; the second has nothing
+            // pending and must not be silently absorbed.
+            &["mlxcel-server", "--seed", "-1", "-2"][..],
+        ] {
+            let err = Cli::try_parse_from(argv)
+                .expect_err("a stray negative number must not be silently consumed");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{argv:?} must report the stray negative number"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mistyped_flag_after_an_option_is_reported_not_swallowed() {
+        // This is the whole reason the fix is `allow_negative_numbers` and not
+        // `allow_hyphen_values`: the latter takes any `-`-leading token as the
+        // pending option's value, so this typo would bind `--moldel` to the
+        // seed and never be reported.
+        let err = Cli::try_parse_from(["mlxcel-server", "--seed", "--moldel", "foo"])
+            .expect_err("a mistyped flag must not be swallowed as the seed value");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(
+            err.to_string().contains("--moldel"),
+            "the diagnostic must name the mistyped flag, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_download_subcommand_does_not_take_negative_numbers() {
+        // `allow_negative_numbers` is a per-command setting that does not
+        // propagate into subcommands, and `download` deliberately keeps the
+        // default: it has one positional repo-id and no numeric option, so a
+        // leading `-1` there is a typo rather than a value (#1459).
+        let err = Cli::try_parse_from(["mlxcel-server", "download", "-1"])
+            .expect_err("`download -1` has no numeric option to bind to");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }
