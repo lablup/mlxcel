@@ -18,6 +18,7 @@ pub mod anthropic_request;
 pub mod anthropic_response;
 pub mod anthropic_stream;
 pub mod embeddings;
+pub mod native_completion;
 pub mod request;
 pub mod rerank;
 pub mod response;
@@ -29,6 +30,7 @@ pub mod stream;
 // Anthropic types are accessed through their module paths (e.g.
 // `types::anthropic_request::AnthropicRequest`) to avoid colliding with the
 // OpenAI type glob below (both define `Tool`, `Role`, `MessageContent`, etc.).
+pub use native_completion::*;
 pub use request::*;
 pub use response::*;
 pub use responses_request::*;

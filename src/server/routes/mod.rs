@@ -50,7 +50,7 @@ pub use cache::{cache_reset, cache_stats};
 pub use chat::chat_completions;
 pub use completions::completions;
 pub use detokenize::detokenize;
-pub use embeddings::create_embeddings;
+pub use embeddings::{create_embeddings, native_embeddings};
 pub use health::health_check;
 pub use metrics::metrics;
 pub use models::list_models;
@@ -138,3 +138,7 @@ pub(crate) fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse 
     };
     response
 }
+
+#[cfg(test)]
+#[path = "native_route_tests.rs"]
+mod native_route_tests;

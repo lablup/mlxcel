@@ -36,7 +36,8 @@ use crate::server::request_options::{
 use crate::server::streaming::{sse_channel, sse_response};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::{
-    ErrorResponse, NativeCompletionRequest, NativeCompletionResponse, TimingInfo,
+    ErrorResponse, NativeCompletionChunk, NativeCompletionRequest, NativeCompletionResponse,
+    NativeTimings, StopType,
 };
 use crate::server::{AppState, ServerConfig, ServerGenerateOptions};
 
@@ -102,6 +103,15 @@ pub async fn native_completion(
         }
     };
 
+    // Native fields mlxcel cannot honor are rejected with a diagnostic naming
+    // the field, rather than accepted and ignored (#1441). A value that cannot
+    // change behavior (the upstream default, or an explicit `false`) is inert
+    // and passes, so a client that sends the whole schema with defaults is not
+    // turned away.
+    if let Some(response) = reject_unsupported_native_fields(&request) {
+        return response;
+    }
+
     // b10621 declares `sse_ping_interval` with hard limits (-1, INT32_MAX) at
     // schema-parse time, so an out-of-domain value is rejected whether or not
     // the request streams (#1432).
@@ -149,6 +159,9 @@ async fn non_stream_native_completion(
     let mut options = build_native_options(&request, &state);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    // The response echoes the settings that were actually used, so keep a copy
+    // before the options are moved into the generator.
+    let options_snapshot = options.clone();
 
     let result = state
         .model_provider
@@ -164,40 +177,119 @@ async fn non_stream_native_completion(
         result.generation_time_ms,
     );
 
-    Ok(Json(NativeCompletionResponse {
-        content: result.text,
-        stop: result.finish_reason == "stop",
-        generation_settings: serde_json::json!({}),
-        model: state.display_model_id().to_string(),
-        tokens_predicted: result.completion_tokens,
-        tokens_evaluated: result.prompt_tokens,
-        timings: TimingInfo {
-            prompt_n: result.prompt_tokens,
+    Ok(Json(build_native_response(
+        &state,
+        &request,
+        &options_snapshot,
+        NativeOutcome {
+            content: result.text,
+            tokens: Vec::new(),
+            tokens_predicted: result.completion_tokens,
+            tokens_evaluated: result.prompt_tokens,
+            cached_tokens: result.cached_tokens,
+            finish_reason: result.finish_reason.as_str(),
             prompt_ms,
-            prompt_per_token_ms: if result.prompt_tokens > 0 {
-                prompt_ms / result.prompt_tokens as f64
-            } else {
-                0.0
-            },
-            prompt_per_second: if prompt_ms > 0.0 {
-                result.prompt_tokens as f64 / (prompt_ms / 1000.0)
-            } else {
-                0.0
-            },
-            predicted_n: result.completion_tokens,
             predicted_ms: gen_ms,
-            predicted_per_token_ms: if result.completion_tokens > 0 {
-                gen_ms / result.completion_tokens as f64
-            } else {
-                0.0
-            },
-            predicted_per_second: if gen_ms > 0.0 {
-                result.completion_tokens as f64 / (gen_ms / 1000.0)
-            } else {
-                0.0
-            },
         },
-    }))
+    )))
+}
+
+/// The parts of a finished generation the native response is built from.
+///
+/// Grouped into one struct so the streaming and non-streaming paths build the
+/// final object through exactly one function and cannot drift apart.
+struct NativeOutcome<'a> {
+    content: String,
+    tokens: Vec<i32>,
+    tokens_predicted: usize,
+    tokens_evaluated: usize,
+    cached_tokens: usize,
+    finish_reason: &'a str,
+    prompt_ms: f64,
+    predicted_ms: f64,
+}
+
+/// Assemble the b10621 native completion object.
+///
+/// `stop_type` is derived from the finish reason. mlxcel cannot yet report
+/// `word`, because string stop sequences are not enforced on the MLX serving
+/// path at all (they reach `ServerGenerateOptions::stop_sequences` and are
+/// never read); that gap has its own issue and is recorded on the route's
+/// manifest entry, which is why `POST /completion` is not claimed as
+/// `supported` here.
+fn build_native_response(
+    state: &AppState,
+    request: &NativeCompletionRequest,
+    options: &ServerGenerateOptions,
+    outcome: NativeOutcome<'_>,
+) -> NativeCompletionResponse {
+    let stop_type = match outcome.finish_reason {
+        "length" => StopType::Limit,
+        _ => StopType::Eos,
+    };
+    NativeCompletionResponse {
+        index: 0,
+        has_new_line: outcome.content.contains('\n'),
+        content: outcome.content,
+        tokens: outcome.tokens,
+        // mlxcel's continuous-batching scheduler does not expose a stable
+        // per-request slot number, so the "no numbered slot" sentinel upstream
+        // uses on its own streaming frames is reported here as well.
+        id_slot: -1,
+        stop: true,
+        model: state.display_model_id().to_string(),
+        tokens_predicted: outcome.tokens_predicted,
+        tokens_evaluated: outcome.tokens_evaluated,
+        generation_settings: native_generation_settings(request, options),
+        prompt: request.prompt.clone(),
+        // The server clamps an over-long request rather than truncating the
+        // prompt, so no request reaches here with a dropped prefix.
+        truncated: false,
+        stop_type,
+        stopping_word: String::new(),
+        tokens_cached: outcome.cached_tokens,
+        timings: NativeTimings::new(
+            outcome.cached_tokens,
+            outcome.tokens_evaluated,
+            outcome.prompt_ms,
+            outcome.tokens_predicted,
+            outcome.predicted_ms,
+        ),
+    }
+}
+
+/// The resolved generation settings echoed back on the response.
+///
+/// b10621 echoes its whole `task_params` here (49 keys). mlxcel reports the
+/// settings it actually resolved and acts on; a key mlxcel has no analogue for
+/// is omitted rather than reported with an invented value, which would be a
+/// worse answer than its absence.
+fn native_generation_settings(
+    request: &NativeCompletionRequest,
+    options: &ServerGenerateOptions,
+) -> serde_json::Value {
+    let sampling = &options.sampling;
+    serde_json::json!({
+        "seed": sampling.seed.unwrap_or(u64::MAX),
+        "temperature": sampling.temperature,
+        "top_k": sampling.top_k,
+        "top_p": sampling.top_p,
+        "min_p": sampling.min_p,
+        "xtc_probability": sampling.xtc_probability,
+        "xtc_threshold": sampling.xtc_threshold,
+        "repeat_penalty": sampling.repetition_penalty,
+        "presence_penalty": sampling.presence_penalty,
+        "frequency_penalty": sampling.frequency_penalty,
+        "dry_multiplier": sampling.dry_multiplier,
+        "dry_base": sampling.dry_base,
+        "dry_allowed_length": sampling.dry_allowed_length,
+        "dry_penalty_last_n": sampling.dry_penalty_last_n,
+        "dry_sequence_breakers": sampling.dry_sequence_breakers,
+        "stop": options.stop_sequences.clone().unwrap_or_default(),
+        "max_tokens": options.max_tokens,
+        "n_predict": options.max_tokens,
+        "stream": request.stream.unwrap_or(false),
+    })
 }
 
 async fn stream_native_completion(
@@ -216,6 +308,7 @@ async fn stream_native_completion(
     let mut options = build_native_options(&request, &state);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    let options_snapshot = options.clone();
     let prompt = request.prompt.clone();
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
@@ -229,9 +322,13 @@ async fn stream_native_completion(
     // `--sse-ping-interval` (#1432); the caller resolved and validated it.
     let (events, stream, cancelled, keepalive) = sse_channel(100, ping_interval);
     let finish_events = events.clone();
+    let timings_per_token = request.timings_per_token.unwrap_or(false);
+    let started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || {
         let token_events = finish_events.clone();
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let emitted_for_tokens = emitted.clone();
 
         let result = state
             .model_provider
@@ -245,28 +342,125 @@ async fn stream_native_completion(
                 queue_reservation,
                 cancelled,
                 |token, _lp| {
-                    let chunk = serde_json::json!({
-                        "content": token,
-                        "stop": false,
-                    });
+                    let n =
+                        emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    // Upstream's per-token frame is small: the full metadata
+                    // block belongs to the final frame alone. `timings` is
+                    // attached here only under `timings_per_token`.
+                    let chunk = NativeCompletionChunk {
+                        index: 0,
+                        content: token.to_string(),
+                        tokens: Vec::new(),
+                        stop: false,
+                        id_slot: -1,
+                        tokens_predicted: n,
+                        tokens_evaluated: 0,
+                        timings: timings_per_token.then(|| {
+                            NativeTimings::new(0, 0, 0.0, n, started.elapsed().as_millis() as f64)
+                        }),
+                        prompt_progress: None,
+                    };
                     let _ = token_events.json(&chunk);
                 },
             );
 
-        // Send final chunk
-        let stop = match &result {
-            Ok(r) => r.finish_reason == "stop",
-            Err(_) => true,
-        };
-        let final_chunk = serde_json::json!({
-            "content": "",
-            "stop": true,
-            "stop_type": if stop { "stop" } else { "limit" },
-        });
-        let _ = finish_events.json(&final_chunk);
+        // The final frame is the whole non-streaming object with `stop: true`,
+        // built through the same function so the two shapes cannot drift.
+        // There is no `[DONE]` sentinel: b10621's native stream ends with this
+        // frame, and emitting one would be an extra event no llama-server
+        // client expects.
+        match result {
+            Ok(result) => {
+                let final_frame = build_native_response(
+                    &state,
+                    &request,
+                    &options_snapshot,
+                    NativeOutcome {
+                        content: String::new(),
+                        tokens: Vec::new(),
+                        tokens_predicted: result.completion_tokens,
+                        tokens_evaluated: result.prompt_tokens,
+                        cached_tokens: result.cached_tokens,
+                        finish_reason: result.finish_reason.as_str(),
+                        prompt_ms: result.prompt_eval_ms as f64,
+                        predicted_ms: result.generation_only_ms as f64,
+                    },
+                );
+                let _ = finish_events.json(&final_frame);
+            }
+            Err(err) => {
+                // A failed generation still terminates the stream with a frame
+                // the client can act on rather than a silent close.
+                let _ = finish_events.json(&serde_json::json!({
+                    "error": {
+                        "code": 500,
+                        "message": err.to_string(),
+                        "type": "server_error",
+                    }
+                }));
+            }
+        }
     });
 
     sse_response(stream, keepalive)
+}
+
+/// Reject the native fields mlxcel has no equivalent for.
+///
+/// The epic's policy is that a flag or field whose value has observable
+/// semantics must not be silently ignored. Each field below is accepted at its
+/// inert value and refused otherwise, with a message naming the field and what
+/// to use instead, so a `llama-server` request that depends on one fails
+/// loudly here instead of returning a plausible-looking wrong answer.
+fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option<Response> {
+    let refuse = |message: String| -> Option<Response> {
+        Some(ErrorResponse::new(message, "invalid_request_error").into_response())
+    };
+
+    if request.n_cmpl.is_some_and(|n| n != 1) {
+        return refuse(
+            "n_cmpl (alias n) above 1 is not supported on /completion; mlxcel serves one \
+             completion per request. Send one request per completion"
+                .to_string(),
+        );
+    }
+    if request.n_indent.is_some_and(|n| n != 0) {
+        return refuse(
+            "n_indent is not supported on /completion; mlxcel has no minimum-indentation \
+             stop rule for fill-in-the-middle completions"
+                .to_string(),
+        );
+    }
+    if request.t_max_predict_ms.is_some_and(|t| t > 0) {
+        return refuse(
+            "t_max_predict_ms is not supported per request; bound a stalled decode with the \
+             server-wide --decode-timeout / MLXCEL_DECODE_TIMEOUT instead"
+                .to_string(),
+        );
+    }
+    if request.return_progress.unwrap_or(false) {
+        return refuse(
+            "return_progress is not supported on /completion; the mlxcel scheduler emits no \
+             prompt-processing progress events on this path"
+                .to_string(),
+        );
+    }
+    if request.verbose.unwrap_or(false) {
+        return refuse(
+            "verbose is not supported on /completion; mlxcel has no __verbose debug block. \
+             Use GET /slots and GET /metrics for per-request observability"
+                .to_string(),
+        );
+    }
+    if request.return_tokens.unwrap_or(false) {
+        return refuse(
+            "return_tokens is not supported on /completion; mlxcel's streaming decoder emits \
+             detokenized text and does not surface the raw token ids on this path. Use POST \
+             /tokenize on the returned content"
+                .to_string(),
+        );
+    }
+    None
 }
 
 fn build_native_options(

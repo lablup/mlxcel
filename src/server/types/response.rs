@@ -535,31 +535,6 @@ impl axum::response::IntoResponse for ErrorResponse {
     }
 }
 
-/// Native llama-server completion response (POST /completion)
-#[derive(Debug, Clone, Serialize)]
-pub struct NativeCompletionResponse {
-    pub content: String,
-    pub stop: bool,
-    pub generation_settings: serde_json::Value,
-    pub model: String,
-    pub tokens_predicted: usize,
-    pub tokens_evaluated: usize,
-    pub timings: TimingInfo,
-}
-
-/// Timing information for generation (llama-server compatible)
-#[derive(Debug, Clone, Serialize)]
-pub struct TimingInfo {
-    pub prompt_n: usize,
-    pub prompt_ms: f64,
-    pub prompt_per_token_ms: f64,
-    pub prompt_per_second: f64,
-    pub predicted_n: usize,
-    pub predicted_ms: f64,
-    pub predicted_per_token_ms: f64,
-    pub predicted_per_second: f64,
-}
-
 /// Tokenize response (POST /tokenize)
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenizeResponse {
