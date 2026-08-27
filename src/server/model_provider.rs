@@ -147,8 +147,35 @@ pub enum GenerateEvent {
     Token(String),
     /// Token with associated log probability data (emitted when logprobs are enabled)
     TokenWithLogprobs(String, TokenLogprobData),
+    /// One-shot prefill snapshot, emitted when the first decoded token is
+    /// stamped and therefore before the first [`GenerateEvent::Token`] of the
+    /// same request (issue #1441).
+    ///
+    /// b10621 attaches the real prefill figures to every streaming frame under
+    /// `timings_per_token`, and the streaming route cannot wait for
+    /// [`GenerateEvent::Done`] to learn them. A consumer that does not care
+    /// ignores the variant; nothing else in the stream changes.
+    Prefill(PrefillStats),
     Done(GenerationResult),
     Error(String),
+}
+
+/// What prefill produced, measured once per request when the first token is
+/// stamped (issue #1441).
+///
+/// The three figures are the ones b10621's `timings` block reports before
+/// decode has finished: `prompt_tokens` is the whole prompt, `cached_tokens`
+/// the leading part of it the KV prefix cache supplied, and `prompt_ms` the
+/// time to the first token, which is the same quantity
+/// `GenerationResult::prompt_eval_ms` carries at the end of the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrefillStats {
+    /// Whole prompt length in tokens; b10621's `tokens_evaluated`.
+    pub prompt_tokens: usize,
+    /// Prompt tokens supplied by the KV prefix cache; b10621's `cache_n`.
+    pub cached_tokens: usize,
+    /// Milliseconds from request receipt to the first decoded token.
+    pub prompt_ms: u64,
 }
 
 /// Why a generation ended, at the granularity the native `llama-server`
@@ -1365,6 +1392,48 @@ impl ModelProvider {
         drain_generation_events_with_logprobs(response_rx, self.decode_hang_timeout, callback)
     }
 
+    /// Streaming entry for the native `llama-server` `/completion` route
+    /// (issue #1441).
+    ///
+    /// Identical to
+    /// [`Self::generate_streaming_with_logprobs_cancellable_videos_declared_reserved`]
+    /// except that it also forwards the one-shot [`PrefillStats`] snapshot, so
+    /// the route can put the real `prompt_n` / `prompt_ms` / `cache_n` on every
+    /// streaming frame the way b10621 does under `timings_per_token` instead of
+    /// zeroing them until the final frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_native_reserved<F, P>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        callback: F,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+        P: FnMut(PrefillStats),
+    {
+        let response_rx = self.send_generate_request_with_cancellation_and_metadata(
+            prompt,
+            options,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            media,
+            cancelled,
+            QueueReservationMode::PreReserved(queue_reservation),
+        )?;
+        drain_generation_events_with_prefill(
+            response_rx,
+            self.decode_hang_timeout,
+            callback,
+            on_prefill,
+        )
+    }
+
     fn send_generate_request(
         &self,
         prompt: String,
@@ -1668,6 +1737,9 @@ where
                 on_token(token);
                 Ok(None)
             }
+            // The prefill snapshot is only consumed by the native completion
+            // route's streaming arm; every other consumer skips it.
+            GenerateEvent::Prefill(_) => Ok(None),
             GenerateEvent::Done(result) => Ok(Some(result)),
             GenerateEvent::Error(err) => Err(anyhow::anyhow!(err)),
         })?;
@@ -1696,6 +1768,43 @@ where
         }
         GenerateEvent::TokenWithLogprobs(token, lp) => {
             on_token(token, Some(lp));
+            Ok(None)
+        }
+        GenerateEvent::Prefill(_) => Ok(None),
+        GenerateEvent::Done(result) => Ok(Some(result)),
+        GenerateEvent::Error(err) => Err(anyhow::anyhow!(err)),
+    })
+}
+
+/// Like [`drain_generation_events_with_logprobs`] but also forwards the
+/// one-shot [`GenerateEvent::Prefill`] snapshot (issue #1441).
+///
+/// The native `/completion` streaming arm needs the prefill figures while the
+/// stream is still open, because b10621 attaches them to every frame under
+/// `timings_per_token`. `on_prefill` fires at most once, before the first
+/// token; a request whose backend never emits the snapshot simply never calls
+/// it.
+pub(super) fn drain_generation_events_with_prefill<F, P>(
+    response_rx: mpsc::Receiver<GenerateEvent>,
+    decode_hang_timeout: Duration,
+    mut on_token: F,
+    mut on_prefill: P,
+) -> Result<GenerationResult>
+where
+    F: FnMut(String, Option<TokenLogprobData>),
+    P: FnMut(PrefillStats),
+{
+    drain_generation_events_impl(&response_rx, decode_hang_timeout, |event| match event {
+        GenerateEvent::Token(token) => {
+            on_token(token, None);
+            Ok(None)
+        }
+        GenerateEvent::TokenWithLogprobs(token, lp) => {
+            on_token(token, Some(lp));
+            Ok(None)
+        }
+        GenerateEvent::Prefill(stats) => {
+            on_prefill(stats);
             Ok(None)
         }
         GenerateEvent::Done(result) => Ok(Some(result)),
@@ -1771,6 +1880,10 @@ where
             | GenerateEvent::Done(_) => {
                 decode_phase_started = true;
             }
+            // The prefill snapshot arrives just before the first token, so it
+            // must NOT open the bounded decode window: doing so would start
+            // the hang timer while the first token is still being sampled.
+            GenerateEvent::Prefill(_) => {}
             GenerateEvent::Error(_) => {}
         }
 

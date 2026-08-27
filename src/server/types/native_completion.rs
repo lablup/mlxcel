@@ -51,6 +51,8 @@ pub enum StopType {
 pub struct NativeTimings {
     /// Prompt tokens served from the KV prefix cache rather than re-prefilled.
     pub cache_n: usize,
+    /// Prompt tokens the model actually processed, which upstream reports as
+    /// the whole prompt minus [`Self::cache_n`], not the whole prompt.
     pub prompt_n: usize,
     pub prompt_ms: f64,
     pub prompt_per_token_ms: f64,
@@ -62,25 +64,44 @@ pub struct NativeTimings {
 }
 
 impl NativeTimings {
-    /// Build the block from raw counts and millisecond durations, computing
-    /// the four derived rates the way upstream does (zero when the divisor is
-    /// zero rather than producing an infinity or a NaN, which would not be
-    /// serializable as JSON).
+    /// Build the block the way b10621 builds it.
+    ///
+    /// Two conventions here were read off the pinned binary rather than
+    /// guessed, because both are observable and neither is what a naive
+    /// reading suggests:
+    ///
+    /// - `prompt_n` is the part of the prompt the model actually processed,
+    ///   so it is `tokens_evaluated - cache_n`, not `tokens_evaluated`. A
+    ///   request whose prefix came entirely from the KV cache reports
+    ///   `prompt_n: 1` against `tokens_evaluated: 8` with `cache_n: 7`.
+    /// - the prompt rates divide by `prompt_n`, but the generation rates
+    ///   divide by `predicted_n - 1`, because `predicted_ms` is measured from
+    ///   the first token rather than from the request. Measured on the pinned
+    ///   binary: `predicted_n: 4`, `predicted_ms: 15.132` reports
+    ///   `predicted_per_token_ms: 5.044` (15.132 / 3) and
+    ///   `predicted_per_second: 198.255` (1e3 / 15.132 * 3).
+    ///
+    /// A zero divisor yields a zero rate rather than an infinity or a NaN,
+    /// neither of which is representable in JSON.
     pub fn new(
         cache_n: usize,
-        prompt_n: usize,
+        tokens_evaluated: usize,
         prompt_ms: f64,
         predicted_n: usize,
         predicted_ms: f64,
     ) -> Self {
         let per_token = |ms: f64, n: usize| if n > 0 { ms / n as f64 } else { 0.0 };
         let per_second = |ms: f64, n: usize| {
-            if ms > 0.0 {
+            if ms > 0.0 && n > 0 {
                 n as f64 / (ms / 1000.0)
             } else {
                 0.0
             }
         };
+        let prompt_n = tokens_evaluated.saturating_sub(cache_n);
+        // The generation rates are measured over the intervals BETWEEN emitted
+        // tokens, so a single-token generation has no interval to report.
+        let predicted_intervals = predicted_n.saturating_sub(1);
         Self {
             cache_n,
             prompt_n,
@@ -89,10 +110,44 @@ impl NativeTimings {
             prompt_per_second: per_second(prompt_ms, prompt_n),
             predicted_n,
             predicted_ms,
-            predicted_per_token_ms: per_token(predicted_ms, predicted_n),
-            predicted_per_second: per_second(predicted_ms, predicted_n),
+            predicted_per_token_ms: per_token(predicted_ms, predicted_intervals),
+            predicted_per_second: per_second(predicted_ms, predicted_intervals),
         }
     }
+}
+
+/// Apply b10621's `response_fields` projection to a finished native response
+/// (issue #1441).
+///
+/// Upstream walks each requested path through the response object splitting on
+/// `/`, and stores the value it lands on under the **full path string**, so
+/// `generation_settings/n_predict` becomes a root key literally named
+/// `"generation_settings/n_predict"` rather than `n_predict`. The schema's own
+/// description says the field is "unnested", which the binary does not do; the
+/// behavior here is the binary's, captured against it directly.
+///
+/// A path that does not resolve is omitted without an error, a path that walks
+/// into a non-object is omitted, an empty `paths` list returns the whole
+/// object, and the result preserves the order the request listed the paths in
+/// (upstream builds it in an insertion-ordered JSON object, and mlxcel's
+/// `serde_json` is built with `preserve_order`).
+pub fn select_response_fields(value: serde_json::Value, paths: &[String]) -> serde_json::Value {
+    if paths.is_empty() {
+        return value;
+    }
+    let mut selected = serde_json::Map::new();
+    for path in paths {
+        let mut current = Some(&value);
+        for key in path.split('/') {
+            current = current
+                .and_then(|node| node.as_object())
+                .and_then(|m| m.get(key));
+        }
+        if let Some(found) = current {
+            selected.insert(path.clone(), found.clone());
+        }
+    }
+    serde_json::Value::Object(selected)
 }
 
 /// Prompt-processing progress, emitted on streaming frames when the request

@@ -152,7 +152,7 @@ fn drive(text: &str, stops: &[&str], max_tokens: usize, chunk_bytes: usize) -> R
             GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => {
                 streamed.push_str(&t);
             }
-            GenerateEvent::Done(_) | GenerateEvent::Error(_) => {}
+            GenerateEvent::Done(_) | GenerateEvent::Error(_) | GenerateEvent::Prefill(_) => {}
         }
     }
 

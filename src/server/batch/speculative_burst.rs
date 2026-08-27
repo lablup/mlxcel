@@ -1973,9 +1973,7 @@ pub(crate) fn stream_burst_tokens(
     // stamped (right before its token loop); on the slice path it is the
     // end of slice 0, which is when the client actually receives the
     // first token.
-    if seq.first_token_time.is_none() {
-        seq.first_token_time = Some(Instant::now());
-    }
+    seq.mark_first_token();
     // When `seq.logprobs_config.enabled` the burst's generator returned
     // one logprob entry per emitted token, index-aligned with `tokens`.
     // We emit `GenerateEvent::TokenWithLogprobs` in that case so a

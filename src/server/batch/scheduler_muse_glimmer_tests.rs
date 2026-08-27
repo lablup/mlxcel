@@ -326,7 +326,9 @@ fn tiny_image_bytes() -> Vec<u8> {
 fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::GenerationResult {
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(GenerateEvent::Token(_)) | Ok(GenerateEvent::TokenWithLogprobs(_, _)) => {}
+            Ok(GenerateEvent::Token(_))
+            | Ok(GenerateEvent::TokenWithLogprobs(_, _))
+            | Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(result)) => return result,
             Ok(GenerateEvent::Error(error)) => panic!("unexpected generation error: {error}"),
             Err(err) => panic!("generation did not finish: {err}"),
@@ -342,6 +344,7 @@ fn receive_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
             panic!("unexpected token+logprobs event: {text:?}")
         }
         Ok(GenerateEvent::Done(_)) => panic!("unexpected done event"),
+        Ok(GenerateEvent::Prefill(_)) => panic!("unexpected prefill event"),
         Err(err) => panic!("generation did not reject: {err}"),
     }
 }

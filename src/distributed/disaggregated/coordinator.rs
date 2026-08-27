@@ -874,6 +874,10 @@ fn drain_generation_events(rx: &mpsc::Receiver<GenerateEvent>) -> DrainedGenerat
                 done = true;
                 completion_tokens = Some(result.completion_tokens as u64);
             }
+            // The prefill snapshot is a streaming-only detail of the native
+            // completion route; a disaggregated drain has no frame to put it
+            // on (#1441).
+            GenerateEvent::Prefill(_) => {}
             GenerateEvent::Error(e) => error = Some(e),
         }
     }

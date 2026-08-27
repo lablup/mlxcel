@@ -1097,11 +1097,34 @@ pub struct NativeCompletionRequest {
     /// b10621 declares `max_tokens` and `max_completion_tokens` as aliases of
     /// this field, so a request written for either OpenAI spelling reaches the
     /// native route unchanged (#1441).
+    ///
+    /// Signed because upstream's hard limits are `-1 <= value <= INT32_MAX`,
+    /// where `-1` means "as many as the context allows" and `0` means "evaluate
+    /// the prompt into the cache". The route resolves the sign through
+    /// [`NativeCompletionRequest::resolve_n_predict`] rather than letting serde
+    /// reject a value b10621 serves.
     #[serde(alias = "max_tokens", alias = "max_completion_tokens")]
-    pub n_predict: Option<usize>,
+    pub n_predict: Option<i64>,
     /// Attach the timing block to every streaming frame instead of only the
     /// final one (#1441).
     pub timings_per_token: Option<bool>,
+    /// Project the finished response down to the listed paths (#1441).
+    ///
+    /// Held as a raw value because b10621 reads it through `json_value(...,
+    /// std::vector<std::string>())`, which falls back to the default for a
+    /// value of any other shape instead of failing the request. A strongly
+    /// typed field would turn `"response_fields": "content"` into a 422 that
+    /// upstream answers with a normal completion.
+    #[serde(default)]
+    pub response_fields: Option<serde_json::Value>,
+    /// Additional options for streaming responses (#1441).
+    ///
+    /// Raw for the same reason as `response_fields`: upstream tolerates a
+    /// non-object here and ignores it, while rejecting a non-boolean
+    /// `include_usage` inside it with a 400. Both halves are reproduced by
+    /// `validate_native_stream_options`.
+    #[serde(default)]
+    pub stream_options: Option<serde_json::Value>,
     /// Number of completions to generate. mlxcel serves one completion per
     /// request; a value above 1 is rejected with a diagnostic rather than
     /// silently producing one result where b10621 would produce an array.
@@ -1177,6 +1200,111 @@ pub struct NativeCompletionRequest {
     /// decoding.
     #[serde(default)]
     pub response_format: Option<serde_json::Value>,
+}
+
+/// Upstream's inclusive hard limits for `n_predict`
+/// (<https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-schema.cpp>).
+const N_PREDICT_MIN: i64 = -1;
+const N_PREDICT_MAX: i64 = i32::MAX as i64;
+
+impl NativeCompletionRequest {
+    /// Resolve `n_predict` into the token budget the generation options take
+    /// (#1441).
+    ///
+    /// Reproduces b10621's value domain rather than serde's: `-1` is the
+    /// upstream spelling of "as many as the context allows", so it becomes an
+    /// effectively unbounded request that
+    /// `resolve_server_max_tokens` clamps to the effective context window; `0`
+    /// stays `0`, upstream's prompt-only evaluation; and anything outside
+    /// `[-1, INT32_MAX]` is refused with upstream's own diagnostic wording
+    /// instead of a serde type error.
+    pub fn resolve_n_predict(&self) -> Result<Option<usize>, String> {
+        match self.n_predict {
+            None => Ok(None),
+            Some(value) if !(N_PREDICT_MIN..=N_PREDICT_MAX).contains(&value) => Err(format!(
+                "Field 'n_predict': Value must be between {N_PREDICT_MIN} <= value <= \
+                 {N_PREDICT_MAX}, but got {value}"
+            )),
+            // Clamped down to the effective context window by
+            // `resolve_server_max_tokens`, which is what upstream's -1 means.
+            Some(-1) => Ok(Some(usize::MAX)),
+            Some(value) => Ok(Some(value as usize)),
+        }
+    }
+
+    /// The `response_fields` projection paths, or an empty list.
+    ///
+    /// Upstream reads the field with a `std::vector<std::string>` default, so a
+    /// value that is not an array of strings is silently ignored and the whole
+    /// response is returned. Measured on the pinned binary:
+    /// `"response_fields": "content"` and `["content", 5]` both answer the full
+    /// object.
+    pub fn response_field_paths(&self) -> Vec<String> {
+        let Some(serde_json::Value::Array(items)) = self.response_fields.as_ref() else {
+            return Vec::new();
+        };
+        let mut paths = Vec::with_capacity(items.len());
+        for item in items {
+            match item.as_str() {
+                Some(path) => paths.push(path.to_string()),
+                // A single non-string entry makes upstream's whole conversion
+                // throw, and the field falls back to its default.
+                None => return Vec::new(),
+            }
+        }
+        paths
+    }
+
+    /// Validate `stream_options` the way b10621 validates it.
+    ///
+    /// A non-object value is ignored (measured: `"stream_options": "garbage"`
+    /// answers a normal completion), while a present `include_usage` that is
+    /// not a boolean is refused with upstream's field-named diagnostic.
+    pub fn validate_stream_options(&self) -> Result<NativeStreamOptions, String> {
+        let Some(value) = self.stream_options.as_ref() else {
+            return Ok(NativeStreamOptions::default());
+        };
+        if !value.is_object() {
+            return Ok(NativeStreamOptions::default());
+        }
+        serde_json::from_value::<NativeStreamOptions>(value.clone()).map_err(|_| {
+            let offending = value
+                .get("include_usage")
+                .unwrap_or(&serde_json::Value::Null);
+            format!(
+                "Field 'include_usage': type must be boolean, but is {}",
+                json_type_name(offending)
+            )
+        })
+    }
+}
+
+/// b10621's nested `stream_options` block on the native completion schema
+/// (#1441).
+///
+/// Upstream declares it as one nested field with a single boolean subfield.
+/// The subfield is inert on `/completion` in both implementations: the native
+/// final frame always carries the counts and the timing block, so there is no
+/// usage to include or omit. It is modeled anyway so its type is validated
+/// rather than the value being dropped unread.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NativeStreamOptions {
+    /// Whether to include usage information in the stream.
+    #[serde(default)]
+    pub include_usage: Option<bool>,
+}
+
+/// nlohmann-style type name, so the `include_usage` diagnostic reads the way
+/// the b10621 message a client may already be matching on reads.
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 /// Tokenize request (POST /tokenize)

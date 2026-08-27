@@ -396,7 +396,7 @@ fn collect_text(rx: &mpsc::Receiver<GenerateEvent>) -> String {
     while let Ok(event) = rx.try_recv() {
         match event {
             GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => text.push_str(&t),
-            GenerateEvent::Done(_) => {}
+            GenerateEvent::Done(_) | GenerateEvent::Prefill(_) => {}
             GenerateEvent::Error(e) => panic!("unexpected generation error event: {e}"),
         }
     }

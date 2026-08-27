@@ -19,6 +19,7 @@
 
 use super::{
     NativeCompletionChunk, NativeCompletionResponse, NativeTimings, PromptProgress, StopType,
+    select_response_fields,
 };
 
 fn sample() -> NativeCompletionResponse {
@@ -92,12 +93,44 @@ fn the_timings_block_leads_with_cache_n() {
 }
 
 #[test]
+fn prompt_n_is_the_prompt_minus_what_the_cache_supplied() {
+    // Captured from the pinned binary on a repeated prompt: `tokens_evaluated`
+    // 8 with `cache_n` 7 reports `prompt_n` 1, not 8. The constructor takes
+    // `tokens_evaluated` and does the subtraction so no call site can report
+    // the whole prompt as the part that was processed.
+    let t = NativeTimings::new(7, 8, 4.711, 5, 19.309);
+    assert_eq!(t.cache_n, 7);
+    assert_eq!(t.prompt_n, 1);
+    // A cache figure larger than the prompt (which the wire shape allows but
+    // no healthy request produces) floors at zero rather than underflowing.
+    assert_eq!(NativeTimings::new(9, 8, 1.0, 1, 1.0).prompt_n, 0);
+}
+
+#[test]
 fn timings_rates_are_derived_the_way_upstream_derives_them() {
-    let t = NativeTimings::new(4, 10, 100.0, 20, 50.0);
-    assert_eq!(t.prompt_per_token_ms, 10.0);
-    assert_eq!(t.prompt_per_second, 100.0);
-    assert_eq!(t.predicted_per_token_ms, 2.5);
-    assert_eq!(t.predicted_per_second, 400.0);
+    // Both formulas were read off the pinned binary rather than assumed. The
+    // prompt rates divide by `prompt_n`; the generation rates divide by
+    // `predicted_n - 1`, because `predicted_ms` starts at the first token.
+    // Reference sample: prompt_n 17 / prompt_ms 40.387 reports
+    // prompt_per_token_ms 2.3757 and prompt_per_second 420.93, while
+    // predicted_n 4 / predicted_ms 15.132 reports predicted_per_token_ms
+    // 5.044 (15.132 / 3) and predicted_per_second 198.255 (1e3 / 15.132 * 3).
+    let t = NativeTimings::new(0, 17, 40.387, 4, 15.132);
+    assert!((t.prompt_per_token_ms - 40.387 / 17.0).abs() < 1e-9);
+    assert!((t.prompt_per_second - 1000.0 / 40.387 * 17.0).abs() < 1e-9);
+    assert!((t.predicted_per_token_ms - 15.132 / 3.0).abs() < 1e-9);
+    assert!((t.predicted_per_second - 1000.0 / 15.132 * 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_single_predicted_token_reports_zero_generation_rates() {
+    // Upstream's first streaming frame carries `predicted_n: 1` with
+    // `predicted_ms: 0.001` and reports both generation rates as 0.0: with one
+    // token there is no interval between tokens to measure.
+    let t = NativeTimings::new(0, 15, 44.1, 1, 0.001);
+    assert_eq!(t.predicted_n, 1);
+    assert_eq!(t.predicted_per_token_ms, 0.0);
+    assert_eq!(t.predicted_per_second, 0.0);
 }
 
 #[test]
@@ -197,4 +230,98 @@ fn a_streaming_chunk_carries_timings_and_progress_when_requested() {
         keys(&json["prompt_progress"]),
         ["total", "cache", "processed", "time_ms"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// `response_fields` projection (#1441)
+//
+// Every expectation below is a capture of the pinned b10621 binary answering
+// the same request, not a reading of the schema's description, which claims
+// the slash form "unnests" the value and is wrong about what the binary does.
+// ---------------------------------------------------------------------------
+
+fn projected(paths: &[&str]) -> serde_json::Value {
+    let owned: Vec<String> = paths.iter().map(|p| (*p).to_string()).collect();
+    select_response_fields(serde_json::to_value(sample()).expect("serializes"), &owned)
+}
+
+#[test]
+fn an_empty_response_fields_list_returns_the_whole_object() {
+    // Upstream treats an absent, null, empty, or wrongly typed value the same
+    // way: the full object.
+    assert_eq!(keys(&projected(&[])), B10621_KEYS);
+}
+
+#[test]
+fn response_fields_keeps_only_the_named_root_keys() {
+    let json = projected(&["content", "tokens_predicted"]);
+    assert_eq!(keys(&json), ["content", "tokens_predicted"]);
+    assert_eq!(json["content"], " Paris.");
+    assert_eq!(json["tokens_predicted"], 8);
+}
+
+#[test]
+fn a_slashed_path_keys_the_value_under_the_whole_path() {
+    // The binary emits `{"generation_settings/n_predict": 8}`, keeping the
+    // slash in the key rather than lifting `n_predict` to the root.
+    let json = projected(&[
+        "content",
+        "generation_settings/n_predict",
+        "timings/predicted_n",
+    ]);
+    assert_eq!(
+        keys(&json),
+        [
+            "content",
+            "generation_settings/n_predict",
+            "timings/predicted_n"
+        ]
+    );
+    assert_eq!(json["generation_settings/n_predict"], 8);
+    assert_eq!(json["timings/predicted_n"], 8);
+}
+
+#[test]
+fn a_missing_path_is_omitted_without_an_error() {
+    let json = projected(&[
+        "content",
+        "no_such_field",
+        "generation_settings/no_such_sub",
+    ]);
+    assert_eq!(keys(&json), ["content"]);
+}
+
+#[test]
+fn a_path_that_walks_into_a_non_object_is_omitted() {
+    // `content` is a string and `tokens` an array, so neither can be indexed
+    // further; upstream answers `{}` for both.
+    let json = projected(&["content/x", "tokens/0"]);
+    assert_eq!(json, serde_json::json!({}));
+}
+
+#[test]
+fn an_empty_path_selects_nothing() {
+    // Measured: `"response_fields": [""]` answers `{}`, not the whole object.
+    assert_eq!(projected(&[""]), serde_json::json!({}));
+}
+
+#[test]
+fn the_projection_preserves_the_order_the_request_listed() {
+    // Upstream builds the result in an insertion-ordered JSON object, so a
+    // reversed request order comes back reversed rather than sorted.
+    let json = projected(&["timings/predicted_n", "content", "index"]);
+    assert_eq!(keys(&json), ["timings/predicted_n", "content", "index"]);
+}
+
+#[test]
+fn a_repeated_path_yields_one_key() {
+    let json = projected(&["content", "content"]);
+    assert_eq!(keys(&json), ["content"]);
+}
+
+#[test]
+fn a_nested_object_can_be_selected_whole() {
+    let json = projected(&["timings"]);
+    assert_eq!(keys(&json), ["timings"]);
+    assert!(json["timings"]["cache_n"].is_number());
 }

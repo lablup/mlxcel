@@ -30,6 +30,7 @@ use axum::{
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
+use crate::server::model_provider::PrefillStats;
 use crate::server::model_provider::StopKind;
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
@@ -38,7 +39,7 @@ use crate::server::streaming::{sse_channel, sse_response};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::{
     ErrorResponse, NativeCompletionChunk, NativeCompletionRequest, NativeCompletionResponse,
-    NativeTimings, StopType,
+    NativeTimings, StopType, select_response_fields,
 };
 use crate::server::{AppState, ServerConfig, ServerGenerateOptions};
 
@@ -79,9 +80,27 @@ pub async fn native_completion(
         }
     }
 
+    // b10621's `n_predict` domain is [-1, INT32_MAX] with -1 meaning "as many
+    // as the context allows", so the sign is resolved here rather than by
+    // serde, which would answer 422 to a value upstream serves (#1441).
+    let requested_n_predict = match request.resolve_n_predict() {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            return ErrorResponse::new(err, "invalid_request_error").into_response();
+        }
+    };
+
+    // `stream_options` is tolerated at any shape but a present non-boolean
+    // `include_usage` is refused, matching the pinned binary. The resolved
+    // value is inert on this route for the same reason it is inert upstream:
+    // the native final frame always carries the counts and the timing block.
+    if let Err(err) = request.validate_stream_options() {
+        return ErrorResponse::new(err, "invalid_request_error").into_response();
+    }
+
     // validate thinking_budget_tokens early (semantics match
     // /v1/chat/completions but the cap is checked against n_predict).
-    let effective_n_predict = resolve_server_max_tokens(&state.config, request.n_predict);
+    let effective_n_predict = resolve_server_max_tokens(&state.config, requested_n_predict);
     let raw_budget = pick_budget_alias(
         request.thinking_budget_tokens,
         request.thinking_token_budget,
@@ -129,11 +148,25 @@ pub async fn native_completion(
 
     let priority = parse_priority_header(&headers);
     if request.stream.unwrap_or(false) {
-        stream_native_completion(state, request, priority, budget_override, ping_interval).await
+        stream_native_completion(
+            state,
+            request,
+            requested_n_predict,
+            priority,
+            budget_override,
+            ping_interval,
+        )
+        .await
     } else {
-        non_stream_native_completion(state, request, priority, budget_override)
-            .await
-            .into_response()
+        non_stream_native_completion(
+            state,
+            request,
+            requested_n_predict,
+            priority,
+            budget_override,
+        )
+        .await
+        .into_response()
     }
 }
 
@@ -147,9 +180,10 @@ fn parse_priority_header(headers: &HeaderMap) -> RequestPriority {
 async fn non_stream_native_completion(
     state: AppState,
     request: NativeCompletionRequest,
+    requested_n_predict: Option<usize>,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
-) -> Result<Json<NativeCompletionResponse>, ErrorResponse> {
+) -> Result<Json<serde_json::Value>, ErrorResponse> {
     // Queue-depth admission control: reject when prefill queue is full
     if !state.can_accept_request() {
         return Err(ErrorResponse::service_unavailable(
@@ -157,7 +191,7 @@ async fn non_stream_native_completion(
         ));
     }
 
-    let mut options = build_native_options(&request, &state);
+    let mut options = build_native_options(&request, requested_n_predict, &state);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // The response echoes the settings that were actually used, so keep a copy
@@ -178,7 +212,7 @@ async fn non_stream_native_completion(
         result.generation_time_ms,
     );
 
-    Ok(Json(build_native_response(
+    let response = build_native_response(
         &state,
         &request,
         &options_snapshot,
@@ -192,7 +226,23 @@ async fn non_stream_native_completion(
             prompt_ms,
             predicted_ms: gen_ms,
         },
-    )))
+    );
+    Ok(Json(project_native_response(&request, &response)))
+}
+
+/// Serialize the native object and apply the request's `response_fields`
+/// projection (#1441).
+///
+/// The projection is the last step on both the non-streaming body and the
+/// final streaming frame, exactly as upstream applies it to its final result
+/// only: the per-token frames upstream emits are unprojected, and so are
+/// mlxcel's.
+fn project_native_response(
+    request: &NativeCompletionRequest,
+    response: &NativeCompletionResponse,
+) -> serde_json::Value {
+    let body = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
+    select_response_fields(body, &request.response_field_paths())
 }
 
 /// The parts of a finished generation the native response is built from.
@@ -297,9 +347,39 @@ fn native_generation_settings(
     })
 }
 
+/// The prefill snapshot as the streaming arm carries it (#1441).
+///
+/// `Default` is "not observed yet", which reports zeros exactly as the frames
+/// did before the snapshot existed, so a backend that never emits one degrades
+/// to the old shape rather than to a wrong one. Once observed, `predicted_ms`
+/// is measured from the first token, which is what upstream's `predicted_ms`
+/// counts: its first streaming frame reports `predicted_n: 1` against
+/// `predicted_ms: 0.001`, not against the prefill duration.
+#[derive(Debug, Clone, Copy, Default)]
+struct StreamPrefill {
+    stats: PrefillStats,
+    first_token_at: Option<std::time::Instant>,
+}
+
+impl StreamPrefill {
+    fn observed(stats: PrefillStats) -> Self {
+        Self {
+            stats,
+            first_token_at: Some(std::time::Instant::now()),
+        }
+    }
+
+    fn predicted_ms(&self) -> f64 {
+        self.first_token_at
+            .map(|t| t.elapsed().as_millis() as f64)
+            .unwrap_or(0.0)
+    }
+}
+
 async fn stream_native_completion(
     state: AppState,
     request: NativeCompletionRequest,
+    requested_n_predict: Option<usize>,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
     ping_interval: Option<std::time::Duration>,
@@ -310,7 +390,7 @@ async fn stream_native_completion(
             .into_response();
     }
 
-    let mut options = build_native_options(&request, &state);
+    let mut options = build_native_options(&request, requested_n_predict, &state);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     let options_snapshot = options.clone();
@@ -328,46 +408,61 @@ async fn stream_native_completion(
     let (events, stream, cancelled, keepalive) = sse_channel(100, ping_interval);
     let finish_events = events.clone();
     let timings_per_token = request.timings_per_token.unwrap_or(false);
-    let started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || {
         let token_events = finish_events.clone();
         let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let emitted_for_tokens = emitted.clone();
+        // The prefill snapshot lands once, before the first token, and every
+        // frame after it reports the real `prompt_n` / `prompt_ms` / `cache_n`
+        // and `tokens_evaluated` the way b10621 does. Before #1441 those were
+        // zeroed until the final frame (#1441).
+        let prefill = std::sync::Arc::new(std::sync::Mutex::new(StreamPrefill::default()));
+        let prefill_for_tokens = prefill.clone();
+        let prefill_sink = prefill.clone();
 
-        let result = state
-            .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
-                prompt,
-                options,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                MediaRequestMetadata::default(),
-                queue_reservation,
-                cancelled,
-                |token, _lp| {
-                    let n =
-                        emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    // Upstream's per-token frame is small: the full metadata
-                    // block belongs to the final frame alone. `timings` is
-                    // attached here only under `timings_per_token`.
-                    let chunk = NativeCompletionChunk {
-                        index: 0,
-                        content: token.to_string(),
-                        tokens: Vec::new(),
-                        stop: false,
-                        id_slot: -1,
-                        tokens_predicted: n,
-                        tokens_evaluated: 0,
-                        timings: timings_per_token.then(|| {
-                            NativeTimings::new(0, 0, 0.0, n, started.elapsed().as_millis() as f64)
-                        }),
-                        prompt_progress: None,
-                    };
-                    let _ = token_events.json(&chunk);
-                },
-            );
+        let result = state.model_provider.generate_streaming_native_reserved(
+            prompt,
+            options,
+            MediaRequestMetadata::default(),
+            queue_reservation,
+            cancelled,
+            |token, _lp| {
+                let n = emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let snapshot = prefill_for_tokens
+                    .lock()
+                    .map(|guard| *guard)
+                    .unwrap_or_default();
+                // Upstream's per-token frame is small: the full metadata
+                // block belongs to the final frame alone. `timings` is
+                // attached here only under `timings_per_token`.
+                let chunk = NativeCompletionChunk {
+                    index: 0,
+                    content: token.to_string(),
+                    tokens: Vec::new(),
+                    stop: false,
+                    id_slot: -1,
+                    tokens_predicted: n,
+                    tokens_evaluated: snapshot.stats.prompt_tokens,
+                    timings: timings_per_token.then(|| {
+                        NativeTimings::new(
+                            snapshot.stats.cached_tokens,
+                            snapshot.stats.prompt_tokens,
+                            snapshot.stats.prompt_ms as f64,
+                            n,
+                            snapshot.predicted_ms(),
+                        )
+                    }),
+                    prompt_progress: None,
+                };
+                let _ = token_events.json(&chunk);
+            },
+            |stats| {
+                if let Ok(mut guard) = prefill_sink.lock() {
+                    *guard = StreamPrefill::observed(stats);
+                }
+            },
+        );
 
         // The final frame is the whole non-streaming object with `stop: true`,
         // built through the same function so the two shapes cannot drift.
@@ -391,7 +486,7 @@ async fn stream_native_completion(
                         predicted_ms: result.generation_only_ms as f64,
                     },
                 );
-                let _ = finish_events.json(&final_frame);
+                let _ = finish_events.json(&project_native_response(&request, &final_frame));
             }
             Err(err) => {
                 // A failed generation still terminates the stream with a frame
@@ -470,19 +565,23 @@ fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option
 
 fn build_native_options(
     request: &NativeCompletionRequest,
+    requested_n_predict: Option<usize>,
     state: &AppState,
 ) -> ServerGenerateOptions {
-    build_native_generate_options(&state.config, request)
+    build_native_generate_options(&state.config, request, requested_n_predict)
 }
 
 fn build_native_generate_options(
     config: &ServerConfig,
     request: &NativeCompletionRequest,
+    requested_n_predict: Option<usize>,
 ) -> ServerGenerateOptions {
     build_server_generate_options(
         config,
         RequestOptionOverrides {
-            max_tokens: request.n_predict,
+            // Already through `resolve_n_predict`, so an upstream `-1` arrives
+            // here as an unbounded budget the context clamp reduces.
+            max_tokens: requested_n_predict,
             temperature: request.temperature,
             top_k: request.top_k,
             top_p: request.top_p,
