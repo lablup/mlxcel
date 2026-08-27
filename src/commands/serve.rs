@@ -20,6 +20,7 @@
 //! on schema and routing.
 
 use anyhow::Context;
+use mlxcel::cli::ggml_compat_args::read_model_layer_count;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options, set_offline_mode};
@@ -71,6 +72,20 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // and `--docker-repo`, `--model-url` and `--hf-file` are refused here
     // rather than accepted and silently resolved to something else.
     // `--offline` / `--hf-token` then shape how the reference resolves.
+    // b10621 GGML runtime / placement / memory options (issue #1445): every
+    // value is classified before the model reference is even resolved, so
+    // `--numa distribute` or `--rpc host:1` is reported immediately rather
+    // than after a multi-gigabyte download. Inert values are accepted
+    // silently; a value whose upstream meaning mlxcel cannot reproduce stops
+    // startup with a diagnostic naming the option, the value, the limitation,
+    // and the mlxcel alternative.
+    args.ggml_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.ggml_compat
+        .ensure_inert_before_model()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
     env_fallback_offline(&mut args.offline);
     // One process-wide flag, as in b10621, so the fetch sites reached from
     // inside a loader (the moondream starmie tokenizer, request-path media
@@ -98,6 +113,14 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // Name the flag the operator actually typed. Without this a failure to
     // resolve an `--hf-repo` value reports it as a `-m` problem.
     .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?;
+
+    // The `--gpu-layers` half of the b10621 GGML classification, deferred
+    // until the checkpoint is known: only its layer count distinguishes a full
+    // offload (inert, since mlxcel always runs every layer on the accelerator)
+    // from a partial one (issue #1445).
+    args.ggml_compat
+        .ensure_inert(read_model_layer_count(&model_path))
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     args.model = Some(model_path.clone());
 
     // Issue #56: preflight memory check before the server begins

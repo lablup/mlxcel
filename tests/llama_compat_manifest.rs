@@ -56,6 +56,15 @@ const MANIFEST_REL: &str = "compat/llama-server/b10621";
 /// every entry gained the structured `divergence` list.
 const MANIFEST_SCHEMA_VERSION: i64 = 3;
 
+/// b10621's help-entry count, frozen by the pin and re-asserted by
+/// `scripts/ci/check_llama_compat_manifest.py`. Every option entry is either
+/// claimed (mlxcel accepts something for it) or unclaimed, so the two census
+/// tests below must always partition exactly this many entries. That is the
+/// invariant a floor on either half only approximated: epic #1431 converts
+/// unclaimed entries into claims by design, so any fixed floor on the
+/// unclaimed half goes stale, while the sum cannot.
+const EXPECTED_OPTION_ENTRIES: usize = 249;
+
 fn manifest_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL)
 }
@@ -228,13 +237,18 @@ fn manifest_option_claims_hold_on_both_server_binaries() {
         checked += 1;
     }
 
-    // The claim census must not silently collapse; as of seeding, 54 option
-    // entries carry mlxcel claims (supported plus partially-claimed
-    // deferred), and epic #1431 only ever adds claims.
-    assert!(
-        checked >= 50,
-        "only {checked} option entries carried mlxcel claims; the manifest \
-         claim data has been gutted"
+    // Census: every option entry is claimed or unclaimed, and the two halves
+    // must add up to the frozen inventory. Counted here rather than trusted so
+    // a shard that loses entries fails even when every surviving claim holds.
+    let unclaimed = entries
+        .values()
+        .filter(|e| e["kind"] == "option" && e["mlxcel"].is_null())
+        .count();
+    assert_eq!(
+        checked + unclaimed,
+        EXPECTED_OPTION_ENTRIES,
+        "{checked} claimed + {unclaimed} unclaimed option entries do not add up to b10621's \
+         {EXPECTED_OPTION_ENTRIES} help entries; the manifest has lost or gained entries"
     );
 }
 
@@ -270,11 +284,16 @@ fn unclaimed_option_entries_are_accepted_by_neither_server_binary() {
         checked += 1;
     }
 
-    // Seeded at 195 unclaimed option entries; the epic only ever converts
-    // them into claims, so a collapse here means the manifest lost entries.
-    assert!(
-        checked >= 150,
-        "only {checked} option entries were unclaimed; the manifest has lost entries"
+    // Same census as above, from the other side.
+    let claimed = entries
+        .values()
+        .filter(|e| e["kind"] == "option" && !e["mlxcel"].is_null())
+        .count();
+    assert_eq!(
+        checked + claimed,
+        EXPECTED_OPTION_ENTRIES,
+        "{checked} unclaimed + {claimed} claimed option entries do not add up to b10621's \
+         {EXPECTED_OPTION_ENTRIES} help entries; the manifest has lost or gained entries"
     );
 }
 

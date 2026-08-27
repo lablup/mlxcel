@@ -18,12 +18,22 @@
       "default": "disabled",
       "description": "enable backend sampling (experimental) (default: disabled) (env: LLAMA_ARG_BACKEND_SAMPLING)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::inert_values_fail_only_for_the_missing_model",
+      "notes": "b10621 asks for the sampler to run on the compute backend instead of the CPU. mlxcel's sampler is always MLX ops on the accelerator, so the flag's only position describes what mlxcel already does and it is accepted as inert. There is no `--no-backend-sampling` to reject. Its environment variable is bound at runtime rather than through clap: b10621 fires a value-less option from the environment only for `on`/`enabled`/`true`/`1` (`common_arg_utils::is_truthy`), while clap's boolish parser accepts a wider vocabulary and errors outside it.",
+      "divergence": [
+        "Always on, where b10621 defaults it off and treats it as experimental; the flag cannot select the CPU sampler because mlxcel has none."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--backend-sampling"
+        ],
+        "env": "LLAMA_ARG_BACKEND_SAMPLING",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -41,11 +51,14 @@
       "default": "f16",
       "description": "KV cache data type for K allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_CACHE_TYPE_K)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1445,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "VALUE-DOMAIN MISMATCH: same spelling, incompatible accepted values. b10621 accepts GGML quantizer names (f32, f16, bf16, q8_0, q4_0, ...); mlxcel accepts f16 and the TurboQuant modes and rejects GGML quantizer names rather than mapping them to different arithmetic (#1430). #1445 owns the explicit-rejection diagnostics.",
-      "divergence": [],
+      "test": "src/cli/turbo_args_tests.rs::every_other_ggml_quantizer_is_rejected_with_its_own_explanation",
+      "notes": "The two vocabularies overlap on exactly one spelling. `f16` names the same thing on both sides, unquantized half-precision KV storage, so it is aliased onto mlxcel's `KVCacheMode::Fp16` and is the only b10621 value accepted. Every other GGML name is a different quantizer, not a different name for the same one: `q8_0` is block-wise with a per-block scale, mlxcel's `int8` is per-token absmax, and the Turbo modes are PolarQuant with a Walsh-Hadamard rotation. #1445 deliberately does not map `q8_0`/`q4_0`/`q4_1`/`iq4_nl`/`q5_0`/`q5_1` (nor `f32`/`bf16`) onto any of them, because no numerical or storage equivalence has been demonstrated and naming similarity is not evidence; a mapping would leave a deployment believing its cache arithmetic is something it is not. Each of those values is rejected at startup with a diagnostic naming the value, why the vocabularies do not carry over, and the mlxcel modes that do exist. mlxcel's own `int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4` and `turbo4-delegated` remain available on the same flag and stay visible in `--help`; see docs/turbo-kv-cache.md.",
+      "divergence": [
+        "Value domain differs: of b10621's `f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1` only `f16` is accepted; the rest are rejected rather than mapped onto a different quantizer.",
+        "mlxcel accepts additional values b10621 does not (`int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4`, `turbo4-delegated`)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--cache-type-k"
@@ -70,11 +83,14 @@
       "default": "f16",
       "description": "KV cache data type for V allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_CACHE_TYPE_V)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1445,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "VALUE-DOMAIN MISMATCH: see --cache-type-k.",
-      "divergence": [],
+      "test": "src/cli/turbo_args_tests.rs::every_other_ggml_quantizer_is_rejected_with_its_own_explanation",
+      "notes": "The two vocabularies overlap on exactly one spelling. `f16` names the same thing on both sides, unquantized half-precision KV storage, so it is aliased onto mlxcel's `KVCacheMode::Fp16` and is the only b10621 value accepted. Every other GGML name is a different quantizer, not a different name for the same one: `q8_0` is block-wise with a per-block scale, mlxcel's `int8` is per-token absmax, and the Turbo modes are PolarQuant with a Walsh-Hadamard rotation. #1445 deliberately does not map `q8_0`/`q4_0`/`q4_1`/`iq4_nl`/`q5_0`/`q5_1` (nor `f32`/`bf16`) onto any of them, because no numerical or storage equivalence has been demonstrated and naming similarity is not evidence; a mapping would leave a deployment believing its cache arithmetic is something it is not. Each of those values is rejected at startup with a diagnostic naming the value, why the vocabularies do not carry over, and the mlxcel modes that do exist. mlxcel's own `int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4` and `turbo4-delegated` remain available on the same flag and stay visible in `--help`; see docs/turbo-kv-cache.md. See --cache-type-k.",
+      "divergence": [
+        "Value domain differs: of b10621's `f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1` only `f16` is accepted; the rest are rejected rather than mapped onto a different quantizer.",
+        "mlxcel accepts additional values b10621 does not (`int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4`, `turbo4-delegated`)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--cache-type-v"
@@ -98,12 +114,19 @@
       "default": "false",
       "description": "check model tensor data for invalid values (default: false)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 scans GGUF tensor data for invalid values while loading. mlxcel validates a SafeTensors header's shapes and dtypes but runs no data scan, so the flag's only position asks for work it cannot do and is rejected, pointing at `mlxcel inspect`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no tensor-data validation pass to enable."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--check-tensors"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -121,12 +144,19 @@
       "default": "\"\"",
       "description": "CPU affinity mask: arbitrarily long hex. Complements cpu-range (default: \"\")",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. b10621 has no default here, so every value is a placement request and every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no CPU thread pool to pin."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-mask"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -144,12 +174,19 @@
       "default": "same as --cpu-mask",
       "description": "CPU affinity mask: arbitrarily long hex. Complements cpu-range-batch (default: same as --cpu-mask)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. b10621 has no default here, so every value is a placement request and every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no CPU thread pool to pin."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-mask-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -167,12 +204,22 @@
       "default": null,
       "description": "keep all Mixture of Experts (MoE) weights in the CPU (env: LLAMA_ARG_CPU_MOE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 keeps every Mixture-of-Experts weight on the CPU to fit a larger model in less VRAM. mlxcel keeps every expert on the accelerator and has no CPU expert path, so the flag is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap: b10621 fires a value-less option from the environment only for `on`/`enabled`/`true`/`1` (`common_arg_utils::is_truthy`), while clap's boolish parser accepts a wider vocabulary and errors outside it.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no CPU expert path to move weights to."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-moe"
+        ],
+        "env": "LLAMA_ARG_CPU_MOE",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -190,12 +237,19 @@
       "default": null,
       "description": "range of CPUs for affinity. Complements --cpu-mask",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. b10621 has no default here, so every value is a placement request and every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no CPU thread pool to pin."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-range"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -213,12 +267,19 @@
       "default": null,
       "description": "ranges of CPUs for affinity. Complements --cpu-mask-batch",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. b10621 has no default here, so every value is a placement request and every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no CPU thread pool to pin."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-range-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -235,12 +296,19 @@
       "default": "0",
       "description": "use strict CPU placement (default: 0)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `0` (b10621's own default) is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `0` (b10621's own default) is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-strict"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -257,12 +325,19 @@
       "default": "same as --cpu-strict",
       "description": "use strict CPU placement (default: same as --cpu-strict)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `0` is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `0` is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cpu-strict-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -280,12 +355,21 @@
       "default": null,
       "description": "KV cache defragmentation threshold (DEPRECATED) (env: LLAMA_ARG_DEFRAG_THOLD)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 defragments its KV cache once the wasted fraction crosses this threshold, and deprecates the option. mlxcel's paged KV cache reclaims blocks on release and has no defragmentation pass to threshold, so every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel's paged KV cache has no defragmentation pass."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--defrag-thold"
+        ],
+        "env": "LLAMA_ARG_DEFRAG_THOLD",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -303,12 +387,21 @@
       "default": null,
       "description": "comma-separated list of devices to use for offloading (none = don't offload) use --list-devices to see a list of available devices (env: LLAMA_ARG_DEVICE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 picks which GGML devices to offload to, with `none` meaning no offload at all. mlxcel selects its accelerator from the build and the runtime environment, and cannot disable offloading, so every non-empty value is rejected, pointing at `MLXCEL_DEVICE`. mlxcel runs every tensor operation through MLX on one Metal or CUDA device and has no GGML backend, so this option describes a subsystem that does not exist here. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no GGML device list and cannot run without an accelerator."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--device"
+        ],
+        "env": "LLAMA_ARG_DEVICE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -329,12 +422,23 @@
       "default": null,
       "description": "DEPRECATED in favor of `--load-mode`: use DirectIO if available (env: LLAMA_ARG_DIO)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 reads weights with DirectIO where the platform supports it. mlxcel reads through the page cache, so `--no-direct-io` is inert and `--direct-io` is rejected. b10621 deprecates both in favour of `--load-mode`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap, so it reproduces b10621's `parse_bool_value` vocabulary and its `LLAMA_ARG_NO_*` alias exactly instead of clap's wider boolish one.",
+      "divergence": [
+        "`--direct-io` is rejected; mlxcel has no DirectIO read path."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--direct-io",
+          "--no-direct-io"
+        ],
+        "env": "LLAMA_ARG_DIO",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -352,12 +456,22 @@
       "default": null,
       "description": "whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on') (env: LLAMA_ARG_FIT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 shrinks unset arguments until the model fits in device memory, on by default. mlxcel estimates the footprint and refuses to start when it will not fit, rather than resizing anything, so `off` is inert and `on` is rejected, pointing at `--estimate-memory` with an explicit `--ctx-size`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `off` is accepted; mlxcel never resizes unset arguments.",
+        "b10621 defaults this ON, so a command line that passes neither `--fit` nor `--ctx-size` gets an auto-sized context upstream and mlxcel's own default here."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--fit"
+        ],
+        "env": "LLAMA_ARG_FIT",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -375,12 +489,21 @@
       "default": null,
       "description": "minimum ctx size that can be set by --fit option, default: 4096 (env: LLAMA_ARG_FIT_CTX)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "Bounds b10621's `--fit` search. mlxcel has no automatic context fitting for this to bound, so every value is rejected, pointing at `--estimate-memory` with an explicit `--ctx-size`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no automatic context fitting."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--fit-ctx"
+        ],
+        "env": "LLAMA_ARG_FIT_CTX",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -398,12 +521,21 @@
       "default": null,
       "description": "target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024 (env: LLAMA_ARG_FIT_TARGET)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "Bounds b10621's `--fit` search. mlxcel has no automatic context fitting for this to bound, so every value is rejected, pointing at `--estimate-memory` with an explicit `--ctx-size`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no automatic context fitting."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--fit-target"
+        ],
+        "env": "LLAMA_ARG_FIT_TARGET",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -421,18 +553,19 @@
       "default": null,
       "description": "set Flash Attention use ('on', 'off', or 'auto', default: 'auto') (env: LLAMA_ARG_FLASH_ATTN)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Accepted and ignored (hidden). b10621 exposes on/off/auto with observable behavior; #1445 owns explicit rejection or honest mapping.",
-      "divergence": [],
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 takes `on`, `off` or `auto` and selects between its flash-attention and reference attention kernels. mlxcel always attends through MLX's fused scaled-dot-product kernel and has no unfused path, so `on` and `auto` describe what it already does and are accepted, while `off` is rejected. A value outside the three is reported with b10621's own vocabulary. Before #1445 the flag was a value-less boolean here, so `--flash-attn on` (b10621's required form) did not even parse. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "`off` is rejected: mlxcel has no unfused attention path to fall back to, so flash attention cannot be turned off."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--flash-attn"
         ],
-        "defaults": [
-          "false"
-        ],
+        "env": "LLAMA_ARG_FLASH_ATTN",
+        "env_binding": "clap",
         "hidden": true
       }
     },
@@ -454,15 +587,20 @@
       "default": "auto",
       "description": "max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto) (env: LLAMA_ARG_N_GPU_LAYERS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "--n-gpu-layers accepted and ignored (hidden); --gpu-layers spelling not accepted. mlxcel always runs fully on the accelerator; #1445 owns the diagnostic.",
-      "divergence": [],
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 takes an exact layer count, `auto`, or `all`, and leaves the remainder on the CPU. mlxcel runs every layer on the accelerator and has no partial CPU offload, so `auto`, `all`, a negative count (llama.cpp's historical spelling of `all`), and any count covering the whole model are inert; a smaller count is rejected. That last case is the only classification in this shard that needs the checkpoint, so it runs after the model reference resolves and reads `num_hidden_layers` from `config.json`; when the count cannot be read the value is unsupported rather than guessed at. Before #1445 only `--n-gpu-layers` parsed, as an integer that was ignored, so `-ngl auto` failed and `-ngl 20` silently ran every layer on the GPU anyway. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "A layer budget smaller than the model is rejected; mlxcel has no partial CPU offload, so it cannot honour one."
+      ],
       "mlxcel": {
         "accepted_spellings": [
+          "--gpu-layers",
           "--n-gpu-layers"
         ],
+        "env": "LLAMA_ARG_N_GPU_LAYERS",
+        "env_binding": "clap",
         "hidden": true
       }
     },
@@ -485,12 +623,23 @@
       "default": "enabled",
       "description": "whether to enable KV cache offloading (default: enabled) (env: LLAMA_ARG_KV_OFFLOAD)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 chooses whether the KV cache lives in device memory. mlxcel always keeps it there, so `--kv-offload` is inert and `--no-kv-offload` is rejected, pointing at `--cache-type-k` / `--cache-type-v` as the way to shrink the cache instead. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap, so it reproduces b10621's `parse_bool_value` vocabulary and its `LLAMA_ARG_NO_*` alias exactly instead of clap's wider boolish one.",
+      "divergence": [
+        "`--no-kv-offload` is rejected; mlxcel cannot hold the KV cache on the host."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--kv-offload",
+          "--no-kv-offload"
+        ],
+        "env": "LLAMA_ARG_KV_OFFLOAD",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -507,12 +656,19 @@
       "default": null,
       "description": "print list of available devices and exit",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 prints its GGML device registry and exits. mlxcel drives one MLX device and has no registry to enumerate, so the flag is rejected, pointing at `mlxcel inspect`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup rather than printing a device list and exiting."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--list-devices"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -530,12 +686,21 @@
       "default": "auto",
       "description": "model loading mode (default: auto) - auto: mmap, unless a device does not support it - none: no special loading mode - mmap: memory-map model (if mmap disabled, slower load but may reduce pageouts if not using mlock) - mlock: force system to keep model in RAM rather than swapping or compressing - mmap+mlock: mmap + force system to keep model in RAM rather than swapping or compressing - dio: use DirectIO if available (env: LLAMA_ARG_LOAD_MODE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 chooses between `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` and `dio`. mlxcel memory-maps its SafeTensors shards and cannot lock, pin, or DirectIO-read them, so `auto` and `mmap` describe what it already does and are accepted; the rest are rejected, pointing at `MLXCEL_WIRED_LIMIT` as the nearest residency control. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `auto` and `mmap` are accepted; `none`, `mlock`, `mmap+mlock` and `dio` are rejected because mlxcel has no corresponding loading path."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--load-mode"
+        ],
+        "env": "LLAMA_ARG_LOAD_MODE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -553,12 +718,21 @@
       "default": "0",
       "description": "the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: 0) (env: LLAMA_ARG_MAIN_GPU)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 names the GPU holding intermediate results and the KV cache under `--split-mode none`/`row`. mlxcel drives one accelerator per process, so `0` is inert and any other index is rejected, pointing at docs/distributed.md. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only index `0` is accepted; mlxcel does not address a second device from this flag."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--main-gpu"
+        ],
+        "env": "LLAMA_ARG_MAIN_GPU",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -575,18 +749,20 @@
       "default": null,
       "description": "DEPRECATED in favor of `--load-mode`: force system to keep model in RAM rather than swapping or compressing (env: LLAMA_ARG_MLOCK)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Accepted and ignored (hidden). No MLX equivalent; #1445 owns the diagnostic.",
-      "divergence": [],
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 wires the model's pages so the operating system cannot swap or compress them. MLX owns mlxcel's allocation and the operating system owns its residency, so there is nothing to pin and the flag is rejected, pointing at `MLXCEL_WIRED_LIMIT`, which bounds Apple Silicon wired memory rather than guaranteeing residency. Before #1445 this parsed and did nothing, which left a deployment believing its weights were locked. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap: b10621 fires a value-less option from the environment only for `on`/`enabled`/`true`/`1` (`common_arg_utils::is_truthy`), while clap's boolish parser accepts a wider vocabulary and errors outside it.",
+      "divergence": [
+        "Rejected at startup; mlxcel cannot pin weights into resident memory."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--mlock"
         ],
-        "defaults": [
-          "false"
-        ],
+        "env": "LLAMA_ARG_MLOCK",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
         "hidden": true
       }
     },
@@ -607,18 +783,21 @@
       "default": null,
       "description": "DEPRECATED in favor of `--load-mode`: whether to memory-map model. (if mmap disabled, slower load but may reduce pageouts if not using mlock) (env: LLAMA_ARG_MMAP)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "--no-mmap accepted and ignored (hidden); --mmap spelling not accepted. #1445 owns the diagnostic.",
-      "divergence": [],
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621's positive half asks for memory-mapped loading, which is what mlxcel always does, so `--mmap` is inert. `--no-mmap` asks for a read-into-anonymous path mlxcel does not have and is rejected. Before #1445 `--no-mmap` parsed and did nothing. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap, so it reproduces b10621's `parse_bool_value` vocabulary and its `LLAMA_ARG_NO_*` alias exactly instead of clap's wider boolish one.",
+      "divergence": [
+        "`--no-mmap` is rejected; mlxcel has no non-mmap loading path."
+      ],
       "mlxcel": {
         "accepted_spellings": [
+          "--mmap",
           "--no-mmap"
         ],
-        "defaults": [
-          "false"
-        ],
+        "env": "LLAMA_ARG_MMAP",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
         "hidden": true
       }
     },
@@ -638,12 +817,21 @@
       "default": null,
       "description": "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU (env: LLAMA_ARG_N_CPU_MOE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 keeps the first N layers' experts on the CPU. mlxcel keeps every expert on the accelerator, so `0` is inert and any positive count is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `0` is accepted; mlxcel has no CPU expert path."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--n-cpu-moe"
+        ],
+        "env": "LLAMA_ARG_N_CPU_MOE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -660,12 +848,22 @@
       "default": null,
       "description": "bypass host buffer allowing extra buffers to be used (env: LLAMA_ARG_NO_HOST)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 bypasses the host buffer so extra GGML buffer types become usable. mlxcel has no GGML buffer-type registry, so the flag is rejected. mlxcel runs every tensor operation through MLX on one Metal or CUDA device and has no GGML backend, so this option describes a subsystem that does not exist here. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap: b10621 fires a value-less option from the environment only for `on`/`enabled`/`true`/`1` (`common_arg_utils::is_truthy`), while clap's boolish parser accepts a wider vocabulary and errors outside it.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no host buffer to bypass."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--no-host"
+        ],
+        "env": "LLAMA_ARG_NO_HOST",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -682,12 +880,21 @@
       "default": null,
       "description": "attempt optimizations that help on some NUMA systems - distribute: spread execution evenly over all nodes - isolate: only spawn threads on CPUs on the node that execution started on - numactl: use the CPU map provided by numactl if run without this previously, it is recommended to drop the system page cache before using this see https://github.com/ggml-org/llama.cpp/issues/1437 (env: LLAMA_ARG_NUMA)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 spreads, isolates, or numactl-maps its CPU threads across NUMA nodes. mlxcel has no NUMA-aware thread placement to configure and the accelerator owns the memory its tensors live in, so every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no NUMA-aware placement."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--numa"
+        ],
+        "env": "LLAMA_ARG_NUMA",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -706,12 +913,20 @@
       "default": "true",
       "description": "whether to offload host tensor operations to device (default: true)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 chooses whether host tensor operations are offloaded to the device. mlxcel runs every tensor operation on the accelerator, so `--op-offload` is inert and `--no-op-offload` is rejected: there is no host-execution path to fall back to. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "`--no-op-offload` is rejected; mlxcel has no host tensor-operation path."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--op-offload",
+          "--no-op-offload"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -728,12 +943,19 @@
       "default": null,
       "description": "advanced option to override model metadata by key. to specify multiple overrides, either use comma-separated values. types: int, float, bool, str. example: --override-kv tokenizer.ggml.add_bos_token=bool:false,tokenizer.ggml.add_eos_token=bool:false",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 overrides entries in a GGUF file's key/value metadata block. mlxcel loads MLX SafeTensors, which carry no such block, so every value is rejected, pointing at the checkpoint's `config.json` and `mlxcel surgery`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; a SafeTensors checkpoint has no GGUF metadata block to override."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--override-kv"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -751,12 +973,21 @@
       "default": null,
       "description": "override tensor buffer type (env: LLAMA_ARG_OVERRIDE_TENSOR)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 pins matching tensors to a chosen GGML buffer type. mlxcel runs every tensor operation through MLX on one Metal or CUDA device and has no GGML backend, so this option describes a subsystem that does not exist here. Every value is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no GGML buffer types to assign."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--override-tensor"
+        ],
+        "env": "LLAMA_ARG_OVERRIDE_TENSOR",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -775,12 +1006,23 @@
       "default": "false",
       "description": "whether to enable internal libllama performance timings (default: false) (env: LLAMA_ARG_PERF)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 enables libllama's internal performance timers. mlxcel has none; its counters are exposed over HTTP instead, so `--no-perf` is inert and `--perf` is rejected, pointing at `--metrics` and `--slots`. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap, so it reproduces b10621's `parse_bool_value` vocabulary and its `LLAMA_ARG_NO_*` alias exactly instead of clap's wider boolish one.",
+      "divergence": [
+        "`--perf` is rejected; mlxcel has no libllama timers to enable."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--perf",
+          "--no-perf"
+        ],
+        "env": "LLAMA_ARG_PERF",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -797,12 +1039,19 @@
       "default": null,
       "description": "use polling level to wait for work (0 - no polling, default: 50)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `50` (b10621's own default) is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `50` (b10621's own default) is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--poll"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -819,12 +1068,19 @@
       "default": "same as --poll",
       "description": "use polling to wait for work (default: same as --poll)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `50` is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `50` is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--poll-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -841,12 +1097,19 @@
       "default": "0",
       "description": "set process/thread priority : low(-1), normal(0), medium(1), high(2), realtime(3) (default: 0)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `0` (b10621's own default, normal priority) is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `0` (b10621's own default, normal priority) is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--prio"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -863,12 +1126,19 @@
       "default": "0",
       "description": "set process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `0` is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `0` is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--prio-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -888,12 +1158,23 @@
       "default": "enabled",
       "description": "whether to enable weight repacking (default: enabled) (env: LLAMA_ARG_REPACK)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::inert_values_fail_only_for_the_missing_model",
+      "notes": "b10621 repacks quantized weights into the layout its CPU kernels prefer. mlxcel has no CPU weight path and never repacks, and repacking has no externally observable effect beyond CPU kernel speed, so BOTH positions are inert and both are accepted. This is the one option in this shard where the negative half is inert too. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have. Its environment variable is bound at runtime rather than through clap, so it reproduces b10621's `parse_bool_value` vocabulary and its `LLAMA_ARG_NO_*` alias exactly instead of clap's wider boolish one.",
+      "divergence": [
+        "Neither position changes anything: mlxcel never repacks, so `--repack` does not enable a repacking pass the way b10621's default does."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--repack",
+          "--no-repack"
+        ],
+        "env": "LLAMA_ARG_REPACK",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ggml_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -910,12 +1191,21 @@
       "default": null,
       "description": "comma-separated list of RPC servers (host:port) (env: LLAMA_ARG_RPC)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 farms tensor work out to `rpc-server` processes over the GGML RPC backend. mlxcel's distributed execution uses its own transport, node roles, and peer list, so every value is rejected, pointing at `--node-role` / `--peers` and docs/distributed.md. mlxcel runs every tensor operation through MLX on one Metal or CUDA device and has no GGML backend, so this option describes a subsystem that does not exist here. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel has no GGML RPC backend."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--rpc"
+        ],
+        "env": "LLAMA_ARG_RPC",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -933,12 +1223,21 @@
       "default": null,
       "description": "how to split the model across multiple GPUs, one of: - none: use one GPU only - layer (default): split layers and KV across GPUs (pipelined) - row: split weight across GPUs by rows (parallelized) - tensor: split weights and KV across GPUs (parallelized, EXPERIMENTAL) (env: LLAMA_ARG_SPLIT_MODE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 splits a model across several GPUs by layer, by row, or by tensor. mlxcel's own tensor- and pipeline-parallel runtime is configured through `--tensor-parallel` / `--pipeline-parallel` and the distributed node flags, not through this one, so `none` (the single-device case) is inert and every other mode is rejected, pointing at docs/distributed.md. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `none` is accepted; multi-device execution is configured through mlxcel's own flags."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--split-mode"
+        ],
+        "env": "LLAMA_ARG_SPLIT_MODE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -956,12 +1255,21 @@
       "default": null,
       "description": "fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1 (env: LLAMA_ARG_TENSOR_SPLIT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "b10621 distributes a model across GPUs in the given proportions. mlxcel shards through its own tensor- and pipeline-parallel runtime, so every value is rejected, pointing at docs/distributed.md. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Rejected at startup; mlxcel does not split a model across devices from this flag."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--tensor-split"
+        ],
+        "env": "LLAMA_ARG_TENSOR_SPLIT",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -979,12 +1287,21 @@
       "default": "-1",
       "description": "number of CPU threads to use during generation (default: -1) (env: LLAMA_ARG_THREADS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `-1` (b10621's own default, meaning auto) is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `-1` (b10621's own default, meaning auto) is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--threads"
+        ],
+        "env": "LLAMA_ARG_THREADS",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -1002,12 +1319,19 @@
       "default": "same as --threads",
       "description": "number of threads to use during batch and prompt processing (default: same as --threads)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1445,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_ggml_runtime_cli.rs::unsupported_values_are_rejected_with_option_value_limitation_and_alternative",
+      "notes": "mlxcel has no GGML CPU thread pool to place or size: its CPU work is tokenization and HTTP handling, and every tensor operation runs on the accelerator. Only `-1` is inert; any other value asks for thread-pool behavior mlxcel cannot produce and is rejected. Accepted as a hidden compatibility argument and classified at startup, before any weight is read: an inert value is accepted silently, and any other value stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative. Hidden rather than documented because rendering it in `--help` would imply a GGML backend mlxcel does not have.",
+      "divergence": [
+        "Only `-1` is accepted; mlxcel has no CPU thread pool for another value to configure."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--threads-batch"
+        ],
+        "hidden": true
+      }
     }
   ]
 }

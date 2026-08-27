@@ -218,10 +218,10 @@ pub fn resolve_kv_cache_mode(
         let k_str = cache_type_k.unwrap_or("fp16");
         let v_str = cache_type_v.unwrap_or("fp16");
 
-        let k_mode = parse_split_cache_type(k_str)
-            .map_err(|_| format!("unrecognised --cache-type-k value \"{k_str}\""))?;
-        let v_mode = parse_split_cache_type(v_str)
-            .map_err(|_| format!("unrecognised --cache-type-v value \"{v_str}\""))?;
+        let k_mode =
+            parse_split_cache_type(k_str).map_err(|_| cache_type_error("--cache-type-k", k_str))?;
+        let v_mode =
+            parse_split_cache_type(v_str).map_err(|_| cache_type_error("--cache-type-v", v_str))?;
 
         return map_kv_modes_to_cache_mode(k_mode, v_mode);
     }
@@ -246,6 +246,52 @@ fn parse_split_cache_type(value: &str) -> Result<KVCacheMode, ()> {
         return Ok(KVCacheMode::Fp16);
     }
     value.parse::<KVCacheMode>().map_err(|_| ())
+}
+
+/// The GGML KV cache types b10621 accepts, minus `f16`, which mlxcel answers.
+///
+/// From b10621's `kv_cache_types` table
+/// (<https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp>).
+/// `--cache-type-k`'s help advertises exactly `f32, f16, bf16, q8_0, q4_0,
+/// q4_1, iq4_nl, q5_0, q5_1`.
+const GGML_KV_CACHE_TYPES: [&str; 8] = [
+    "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1",
+];
+
+/// Build the rejection for an unrecognized `--cache-type-k` / `--cache-type-v`
+/// value (issue #1445).
+///
+/// The two vocabularies overlap on exactly one spelling. `f16` names the same
+/// thing on both sides, unquantized half-precision KV storage, so it is
+/// aliased onto [`KVCacheMode::Fp16`]. Every other GGML name is a *different
+/// quantizer*: `q8_0` is a block-wise 8-bit format with a per-block scale,
+/// while mlxcel's `int8` is per-token absmax, and the Turbo modes are
+/// PolarQuant with a Walsh-Hadamard rotation. Mapping one onto the other would
+/// leave a deployment believing its cache arithmetic is something it is not,
+/// which is why they are named here rather than translated.
+///
+/// A GGML name gets its own message so the operator learns *why* the spelling
+/// they copied from a llama-server command line does not carry over; anything
+/// else gets the plain list of what mlxcel accepts.
+fn cache_type_error(option: &str, value: &str) -> String {
+    let lowered = value.to_ascii_lowercase();
+    if GGML_KV_CACHE_TYPES.contains(&lowered.as_str()) {
+        return format!(
+            "{option} {value} is not supported: `{lowered}` is a GGML KV cache quantizer, and \
+             mlxcel stores its KV cache in MLX arrays with no numerically equivalent \
+             representation. `f16` is the one spelling the two vocabularies share, and it is \
+             accepted.\n\
+             Use instead: f16 (identical storage), int8 (per-token absmax), fp16+turbo4, \
+             fp16+turbo3, turbo4, or turbo4-delegated. See docs/turbo-kv-cache.md for what each \
+             one costs and measures."
+        );
+    }
+    format!(
+        "{option} {value} is not a recognised KV cache type.\n\
+         Use instead: f16 (alias fp16), int8, fp16+turbo4 (alias turbo4-asym), fp16+turbo3 \
+         (alias turbo3-asym), turbo4 (alias turbo4-sym), or turbo4-delegated. See \
+         docs/turbo-kv-cache.md."
+    )
 }
 
 /// Map a (K-mode, V-mode) pair to the combined `KVCacheMode`.

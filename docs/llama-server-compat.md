@@ -131,6 +131,31 @@ llama.cpp writes these options with a single dash and several letters (`-hf`, `-
 
 The format gate lives in the shared `-m` resolver, not in the server, so `mlxcel generate`, `mlxcel chat`, `mlxcel serve` and `mlxcel-server` all refuse a GGUF reference identically. Issue #1434 owns this shard.
 
+## GGML runtime, placement, and memory options
+
+Everything in `ggml-runtime.json` describes the **GGML** backend: which CPU cores its thread pool runs on, how many layers to copy into VRAM, how to split a model across GPUs, whether to `mmap` or `mlock` the GGUF file, which RPC servers to farm work out to, and which GGML quantizer stores the KV cache. mlxcel runs every tensor operation through MLX on one Metal or CUDA device and has no GGML backend, so almost none of it has a counterpart.
+
+Each option is accepted as a hidden compatibility argument and its **value** is classified at startup, before any weight is read:
+
+- A value whose b10621 meaning mlxcel already satisfies, or that asks for nothing, is inert and is accepted silently: `--split-mode none`, `--threads -1`, `--cpu-strict 0`, `--poll 50`, `--prio 0`, `--flash-attn on|auto`, `--gpu-layers all`, `--main-gpu 0`, `--load-mode auto|mmap`, `--mmap`, `--no-direct-io`, `--repack` and `--no-repack`, `--kv-offload`, `--op-offload`, `--no-perf`, `--n-cpu-moe 0`, `--fit off`, `--backend-sampling`.
+- Anything else stops startup with a diagnostic naming the option, the value, the platform limitation, and the mlxcel alternative where one exists: `--split-mode row` and `--tensor-split` point at [`distributed.md`](distributed.md), `--rpc` at `--node-role` / `--peers`, `--mlock` and `--load-mode mlock` at `MLXCEL_WIRED_LIMIT`, `--device` at `MLXCEL_DEVICE`, `--perf` at `--metrics`, `--fit on` at `--estimate-memory`, `--no-kv-offload` at `--cache-type-k` / `--cache-type-v`, and `--check-tensors` / `--list-devices` at `mlxcel inspect`.
+
+`--gpu-layers` is the one option whose classification needs the checkpoint: only its `num_hidden_layers` separates a full offload (inert, because mlxcel always runs every layer on the accelerator) from a partial one. It is therefore checked after the model reference resolves; every other option is checked before, so `--numa distribute` is reported immediately rather than after a multi-gigabyte download.
+
+All of these are hidden from `--help`. They are compatibility surfaces, not mlxcel features, and rendering them would imply a GGML backend that does not exist. mlxcel's own Metal, Accelerate, CUDA, neural-accelerator, and TurboQuant options are unaffected and stay visible.
+
+### KV cache types
+
+`--cache-type-k` and `--cache-type-v` are the only entries in this shard that alias rather than reject, and they alias exactly one value. b10621 accepts `f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1`; `f16` names the same thing on both sides, unquantized half-precision KV storage, so it maps onto mlxcel's `KVCacheMode::Fp16`.
+
+Every other GGML name is a **different quantizer, not a different name for the same one**. `q8_0` is block-wise with a per-block scale; mlxcel's `int8` is per-token absmax; the Turbo modes are PolarQuant with a Walsh-Hadamard rotation. Issue #1445 deliberately does not map any of them onto a TurboQuant mode, because no numerical or storage equivalence has been demonstrated and naming similarity is not evidence. Each is rejected with a diagnostic naming the value, why the vocabularies do not carry over, and the mlxcel modes that do exist. Demonstrating an equivalence, if anyone wants to, means the teacher-forced logit-trace procedure in [`benchmarks.md`](benchmarks.md) and a report of disagreement at decided positions.
+
+mlxcel's own `int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4` and `turbo4-delegated` remain available on the same flag; see [`turbo-kv-cache.md`](turbo-kv-cache.md).
+
+### Environment bindings
+
+Value-taking options bind their `LLAMA_ARG_*` variable through clap, which passes the string through unchanged. Value-less flags and `--x` / `--no-x` pairs do not: b10621 fires a value-less option from the environment only for `on`, `enabled`, `true` or `1` (`common_arg_utils::is_truthy`, compared case-sensitively), and reads a bool pair through `parse_bool_value` plus a `LLAMA_ARG_NO_*` alias that means false. clap's own boolish parser accepts a wider vocabulary and *errors* outside it, so those nine are resolved at runtime against b10621's rules instead. `LLAMA_ARG_CPU_MOE=0` therefore does not enable `--cpu-moe`, and `LLAMA_ARG_PERF=sometimes` stops startup exactly as upstream throws.
+
 ## Regeneration
 
 ```bash
