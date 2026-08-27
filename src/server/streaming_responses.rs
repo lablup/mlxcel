@@ -47,7 +47,9 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::server::streaming::{IntoKeepAlive, SSE_KEEPALIVE_INTERVAL_SECS};
+use crate::server::streaming::IntoKeepAlive;
+#[cfg(test)]
+use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
 use crate::server::types::responses_stream::{ResponseStreamEvent, SequenceCounter};
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
@@ -87,16 +89,17 @@ impl ResponseStreamSender {
 
 /// Newtype wrapping the keepalive configuration so it ships out of the channel
 /// constructor and into `sse_response`, which attaches it.
-pub struct ResponseSseKeepAlive(KeepAlive);
+pub struct ResponseSseKeepAlive(Option<KeepAlive>);
 
 impl ResponseSseKeepAlive {
-    fn default_for_long_prefill() -> Self {
-        Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
+    /// `None` disables the pings (`--sse-ping-interval -1`, #1432).
+    fn from_interval(interval: Option<Duration>) -> Self {
+        Self(interval.map(|d| KeepAlive::new().interval(d)))
     }
 }
 
 impl IntoKeepAlive for ResponseSseKeepAlive {
-    fn into_keep_alive(self) -> KeepAlive {
+    fn into_keep_alive(self) -> Option<KeepAlive> {
         self.0
     }
 }
@@ -110,6 +113,7 @@ impl IntoKeepAlive for ResponseSseKeepAlive {
 /// dropped so the scheduler can abort orphaned sequences.
 pub fn responses_sse_channel(
     buffer: usize,
+    ping_interval: Option<Duration>,
 ) -> (
     ResponseStreamSender,
     impl Stream<Item = Result<Event, Infallible>>,
@@ -136,7 +140,7 @@ pub fn responses_sse_channel(
         sender,
         stream,
         cancelled,
-        ResponseSseKeepAlive::default_for_long_prefill(),
+        ResponseSseKeepAlive::from_interval(ping_interval),
     )
 }
 
@@ -259,7 +263,8 @@ mod tests {
         // generation runs on a `spawn_blocking` worker in production. We
         // mirror that here by sending from a `spawn_blocking` task while
         // the async receiver collects on the runtime worker.
-        let (sender, stream, _cancelled, _keepalive) = responses_sse_channel(4);
+        let (sender, stream, _cancelled, _keepalive) =
+            responses_sse_channel(4, Some(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)));
         let send_task = tokio::task::spawn_blocking(move || {
             sender
                 .send_event(&ResponseStreamEvent::OutputTextDelta {

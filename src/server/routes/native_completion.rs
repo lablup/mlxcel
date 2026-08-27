@@ -102,9 +102,23 @@ pub async fn native_completion(
         }
     };
 
+    // b10621 declares `sse_ping_interval` with hard limits (-1, INT32_MAX) at
+    // schema-parse time, so an out-of-domain value is rejected whether or not
+    // the request streams (#1432).
+    let ping_interval = match request.sse_ping_interval {
+        Some(secs) => match crate::server::transport::resolve_sse_ping_interval(secs) {
+            Ok(interval) => interval,
+            Err(err) => {
+                return ErrorResponse::new(err.to_string(), "invalid_request_error")
+                    .into_response();
+            }
+        },
+        None => state.config.sse_ping_interval,
+    };
+
     let priority = parse_priority_header(&headers);
     if request.stream.unwrap_or(false) {
-        stream_native_completion(state, request, priority, budget_override).await
+        stream_native_completion(state, request, priority, budget_override, ping_interval).await
     } else {
         non_stream_native_completion(state, request, priority, budget_override)
             .await
@@ -191,6 +205,7 @@ async fn stream_native_completion(
     request: NativeCompletionRequest,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
+    ping_interval: Option<std::time::Duration>,
 ) -> Response {
     // Queue-depth admission control: return 503 before opening SSE stream
     if !state.can_accept_request() {
@@ -208,9 +223,11 @@ async fn stream_native_completion(
         Err(err) => return generation_error_to_response(err).into_response(),
     };
 
-    // sse_channel also returns an SseKeepAlive for proxy
-    // idle-timeout prevention during long prefill phases.
-    let (events, stream, cancelled, keepalive) = sse_channel(100);
+    // sse_channel also returns an SseKeepAlive for proxy idle-timeout
+    // prevention during long prefill phases. The interval is the per-request
+    // `sse_ping_interval` when the client sent one, otherwise the server's
+    // `--sse-ping-interval` (#1432); the caller resolved and validated it.
+    let (events, stream, cancelled, keepalive) = sse_channel(100, ping_interval);
     let finish_events = events.clone();
 
     tokio::task::spawn_blocking(move || {

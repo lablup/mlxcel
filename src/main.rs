@@ -1315,9 +1315,168 @@ pub(crate) struct ServeArgs {
     )]
     conversation_store_ttl_secs: u64,
 
-    /// Request timeout in seconds
-    #[arg(long, env = "LLAMA_ARG_TIMEOUT", default_value_t = 600)]
+    /// HTTP socket read/write timeout in seconds (llama-server `--timeout`)
+    ///
+    /// Bounds how long one socket read or write may block, matching
+    /// llama-server b10621 and its 3600-second default. It does NOT cancel a
+    /// slow generation: that is `--decode-timeout`.
+    ///
+    /// BREAKING (#1432): before this, `--timeout` / `LLAMA_ARG_TIMEOUT` was
+    /// the decode watchdog with a 600-second default. A command line that
+    /// relied on the old meaning should now pass `--decode-timeout`.
+    #[arg(
+        long,
+        env = "LLAMA_ARG_TIMEOUT",
+        default_value_t = 3600,
+        value_name = "N"
+    )]
     timeout: u64,
+
+    /// Per-request decode watchdog in seconds (mlxcel-native)
+    ///
+    /// Cancels a request whose generation stops producing tokens. This is the
+    /// control `--timeout` carried before #1432; the default is unchanged.
+    /// Also reads `MLXCEL_DECODE_TIMEOUT`.
+    #[arg(
+        long = "decode-timeout",
+        env = "MLXCEL_DECODE_TIMEOUT",
+        default_value_t = 600,
+        value_name = "N"
+    )]
+    decode_timeout: u64,
+
+    /// Prefix path the server serves from, without the trailing slash
+    ///
+    /// `--api-prefix /llama` moves every route under `/llama`, so
+    /// `/v1/chat/completions` becomes `/llama/v1/chat/completions`. Matching
+    /// llama-server b10621, the public health endpoints are recognised by
+    /// their unprefixed paths, so `/llama/health` requires authentication when
+    /// an API key is configured. Also reads `LLAMA_ARG_API_PREFIX`.
+    #[arg(
+        long = "api-prefix",
+        env = "LLAMA_ARG_API_PREFIX",
+        default_value = "",
+        value_name = "PREFIX"
+    )]
+    api_prefix: String,
+
+    /// Server SSE ping interval in seconds (-1 = disabled)
+    ///
+    /// Interval between SSE comment pings emitted while a stream stays silent,
+    /// which is what keeps a reverse proxy from dropping a long prefill. Also
+    /// reads `LLAMA_ARG_SSE_PING_INTERVAL`.
+    #[arg(
+        long = "sse-ping-interval",
+        env = "LLAMA_ARG_SSE_PING_INTERVAL",
+        default_value_t = 30,
+        value_name = "N",
+        allow_negative_numbers = true
+    )]
+    sse_ping_interval: i64,
+
+    /// Number of threads used to process HTTP requests (-1 = automatic)
+    ///
+    /// mlxcel serves HTTP on a Tokio runtime, so this sizes the runtime's
+    /// worker threads. `-1` uses llama-server b10621's own formula,
+    /// `max(--parallel + 4, cores - 1)`. Also reads `LLAMA_ARG_THREADS_HTTP`.
+    #[arg(
+        long = "threads-http",
+        env = "LLAMA_ARG_THREADS_HTTP",
+        default_value_t = -1,
+        value_name = "N",
+        allow_negative_numbers = true
+    )]
+    threads_http: i64,
+
+    /// Allow multiple sockets to bind to the same port (SO_REUSEPORT)
+    ///
+    /// Also reads `LLAMA_ARG_REUSE_PORT`.
+    #[arg(long = "reuse-port", env = "LLAMA_ARG_REUSE_PORT")]
+    reuse_port: bool,
+
+    /// Path to a file with a PEM-encoded SSL certificate
+    ///
+    /// Serves HTTPS instead of HTTP. Must be given together with
+    /// `--ssl-key-file`. Also reads `LLAMA_ARG_SSL_CERT_FILE`.
+    #[arg(
+        long = "ssl-cert-file",
+        env = "LLAMA_ARG_SSL_CERT_FILE",
+        value_name = "FNAME"
+    )]
+    ssl_cert_file: Option<PathBuf>,
+
+    /// Path to a file with a PEM-encoded SSL private key
+    ///
+    /// Must be given together with `--ssl-cert-file`. Also reads
+    /// `LLAMA_ARG_SSL_KEY_FILE`.
+    #[arg(
+        long = "ssl-key-file",
+        env = "LLAMA_ARG_SSL_KEY_FILE",
+        value_name = "FNAME"
+    )]
+    ssl_key_file: Option<PathBuf>,
+
+    /// Allowed origins for CORS (default: `*`)
+    ///
+    /// Follows llama-server b10621: the value is emitted verbatim as
+    /// `Access-Control-Allow-Origin`, except for `*` (which echoes the request
+    /// `Origin` while `--cors-credentials` is on) and the special value
+    /// `localhost` (which echoes the `Origin` only when its host is
+    /// `localhost`, `127.0.0.1` or `::1`). For per-origin matching against a
+    /// list, use the mlxcel-native `--allowed-origins` instead; the two are
+    /// mutually exclusive. Also reads `LLAMA_ARG_CORS_ORIGINS`.
+    #[arg(
+        long = "cors-origins",
+        env = "LLAMA_ARG_CORS_ORIGINS",
+        default_value = "*",
+        value_name = "ORIGINS",
+        conflicts_with = "allowed_origins"
+    )]
+    cors_origins: String,
+
+    /// Comma-separated list of allowed methods for CORS
+    ///
+    /// Sent as `Access-Control-Allow-Methods` on a preflight. Also reads
+    /// `LLAMA_ARG_CORS_METHODS`.
+    #[arg(
+        long = "cors-methods",
+        env = "LLAMA_ARG_CORS_METHODS",
+        default_value = "GET, POST, DELETE, OPTIONS",
+        value_name = "METHODS"
+    )]
+    cors_methods: String,
+
+    /// Comma-separated list of allowed headers for CORS
+    ///
+    /// Sent as `Access-Control-Allow-Headers` on a preflight. Also reads
+    /// `LLAMA_ARG_CORS_HEADERS`.
+    #[arg(
+        long = "cors-headers",
+        env = "LLAMA_ARG_CORS_HEADERS",
+        default_value = "*",
+        value_name = "HEADERS"
+    )]
+    cors_headers: String,
+
+    /// Whether to allow credentials for CORS (default: enabled)
+    ///
+    /// With this enabled and `--cors-origins *` (the default), the `Origin`
+    /// header is echoed back and credentials are always allowed, matching
+    /// llama-server b10621. Also reads `LLAMA_ARG_CORS_CREDENTIALS`.
+    #[arg(
+        long = "cors-credentials",
+        default_value_t = true,
+        overrides_with = "_no_cors_credentials"
+    )]
+    cors_credentials: bool,
+
+    /// Disable CORS credentials (llama-server `--no-cors-credentials`)
+    #[arg(
+        long = "no-cors-credentials",
+        overrides_with = "cors_credentials",
+        hide = true
+    )]
+    _no_cors_credentials: bool,
 
     /// Override chat template (Jinja2 template string)
     #[arg(long, env = "LLAMA_ARG_CHAT_TEMPLATE", value_name = "TEMPLATE")]

@@ -309,7 +309,19 @@ pub const DEFAULT_RERANK_BATCH_SIZE: usize = crate::rerank::DEFAULT_RERANK_BATCH
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub api_key: Option<String>,
-    pub timeout_seconds: u64,
+    /// Per-request decode watchdog, in seconds. Sourced from
+    /// `--decode-timeout` / `MLXCEL_DECODE_TIMEOUT`. Before #1432 this was
+    /// `--timeout`, which now carries the b10621 HTTP socket read/write
+    /// timeout instead; see [`crate::server::transport`].
+    pub decode_timeout_seconds: u64,
+    /// b10621 `--api-prefix` (`LLAMA_ARG_API_PREFIX`). Empty (the default)
+    /// mounts every route at the root. A non-empty value is a validated path
+    /// with a leading and no trailing slash; `create_app` nests the whole
+    /// route set under it.
+    pub api_prefix: String,
+    /// b10621 `--sse-ping-interval` (`LLAMA_ARG_SSE_PING_INTERVAL`). `None`
+    /// disables the SSE comment pings (`-1` upstream).
+    pub sse_ping_interval: Option<std::time::Duration>,
     pub model_alias: Option<String>,
     /// Effective per-slot context window in tokens (`0` = model default).
     ///
@@ -570,12 +582,12 @@ pub struct ServerConfig {
     /// KV prefixes for multi-turn same-image conversations; text-only and
     /// non-VLM behavior is unchanged.
     pub enable_vlm_prefix_cache: bool,
-    /// Validated CORS allow-list origins (#244). `None` keeps the historical
-    /// permissive policy (reflects any `Origin`); `Some(non_empty)` restricts
-    /// cross-origin requests to exactly these origins. Built once at startup
-    /// from `--allowed-origins` / `MLXCEL_ALLOWED_ORIGINS` and consumed by
+    /// Resolved CORS policy (#244, realigned onto b10621 in #1432). Built
+    /// once at startup from `--cors-origins` / `--cors-methods` /
+    /// `--cors-headers` / `--cors-credentials`, or from the mlxcel-native
+    /// `--allowed-origins` allow-list, and consumed by
     /// [`crate::server::create_app`].
-    pub cors_allowed_origins: Option<Vec<axum::http::HeaderValue>>,
+    pub cors_policy: crate::server::CorsPolicy,
     /// Serving role for disaggregated paged KV serving (#126 B2), derived from
     /// `--node-role`. [`ServingMode::Hybrid`] (the default) is the single-node
     /// path and is byte-identical to a server with no distributed flags.
@@ -627,7 +639,11 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             api_key: None,
-            timeout_seconds: 600,
+            decode_timeout_seconds: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
+            api_prefix: String::new(),
+            sse_ping_interval: Some(std::time::Duration::from_secs(
+                crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
+            )),
             model_alias: None,
             context_size: 0,
             // Serving-throughput default: admit up to 4 concurrent decode
@@ -700,7 +716,7 @@ impl Default for ServerConfig {
             // instead of OOMing. Disable with `--kv-cache-budget none`.
             kv_cache_budget: Some(crate::memory_estimate::PagedBudgetDirective::Auto),
             enable_vlm_prefix_cache: false,
-            cors_allowed_origins: None,
+            cors_policy: crate::server::CorsPolicy::default(),
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,
             prefill_peers: Vec::new(),
             decode_peers: Vec::new(),

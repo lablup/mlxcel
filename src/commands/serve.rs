@@ -19,6 +19,7 @@
 //! rules live in `mlxcel::server::ServerStartupInput` so `main.rs` stays focused
 //! on schema and routing.
 
+use anyhow::Context;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::downloader::resolve_model_source_with_override;
@@ -27,9 +28,9 @@ use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
     env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_batch_size,
     env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
-    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
-    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
-    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    env_fallback_cors_credentials, env_fallback_draft_model, env_fallback_embedding_model,
+    env_fallback_endpoint_slots, env_fallback_kv_bits, env_fallback_kv_group_size,
+    env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
     env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
@@ -41,8 +42,20 @@ use mlxcel::server::{
 use mlxcel_core::cache::KVCacheMode;
 
 /// Run the `mlxcel serve` subcommand.
-#[tokio::main]
-pub(crate) async fn run_serve(mut args: crate::ServeArgs) -> anyhow::Result<()> {
+///
+/// The Tokio runtime is built here rather than by `#[tokio::main]` so
+/// `--threads-http` can size its worker pool (#1432); llama-server b10621
+/// sizes its own HTTP thread pool from the same flag. Everything below runs
+/// inside that runtime, so the process has exactly one.
+pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
+    let workers =
+        mlxcel::server::transport::resolve_http_threads(args.threads_http, args.n_parallel);
+    let runtime = mlxcel::server::transport::build_http_runtime(workers)
+        .context("failed to build the HTTP runtime; check --threads-http")?;
+    runtime.block_on(run_serve_async(args))
+}
+
+async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // Resolve `-m` into a concrete model directory (epic #92, issue #94)
     // before the memory preflight or the server reads it. An existing path is
     // used verbatim (byte-identical to the pre-#94 local-path behavior); an
@@ -235,6 +248,11 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         long_cli_flag_was_set("slots"),
         long_cli_flag_was_set("no-slots"),
     );
+    env_fallback_cors_credentials(
+        &mut args.cors_credentials,
+        long_cli_flag_was_set("cors-credentials"),
+        long_cli_flag_was_set("no-cors-credentials"),
+    );
 
     // Axis B (B8): resolve --lang-bias / --lang-bias-config early so
     // errors surface before the server starts. Empty resolution = None =
@@ -284,7 +302,28 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         n_parallel: args.n_parallel,
         ctx_size: args.ctx_size,
         n_predict: args.n_predict,
+        // HTTP transport (#1432). `timeout` is now the socket read/write
+        // budget; the decode watchdog moved to `--decode-timeout`. Both
+        // "was set" flags include the environment binding, because a
+        // deployment that only ever set `LLAMA_ARG_TIMEOUT` is exactly the one
+        // whose meaning changed.
         timeout: args.timeout,
+        timeout_was_set: long_cli_flag_was_set("timeout")
+            || std::env::var_os("LLAMA_ARG_TIMEOUT").is_some(),
+        decode_timeout: args.decode_timeout,
+        decode_timeout_was_set: long_cli_flag_was_set("decode-timeout")
+            || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
+        api_prefix: args.api_prefix,
+        sse_ping_interval: args.sse_ping_interval,
+        threads_http: args.threads_http,
+        reuse_port: args.reuse_port,
+        ssl_cert_file: args.ssl_cert_file,
+        ssl_key_file: args.ssl_key_file,
+        cors_origins: args.cors_origins,
+        cors_methods: args.cors_methods,
+        cors_headers: args.cors_headers,
+        cors_credentials: args.cors_credentials,
+        no_cors_credentials: args._no_cors_credentials,
         draft_model_path: args.draft_model,
         draft_max: args.draft_max,
         // forward the speculative-decoding selector flags

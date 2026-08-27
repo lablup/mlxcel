@@ -280,11 +280,11 @@ impl ModelProvider {
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
-        // Validate `--timeout` once at construction time and stash it on the
+        // Validate `--decode-timeout` once at construction time and stash it on the
         // provider so the same `Duration` is used by every drain loop. Issue
         // a value of 0 falls back to `DECODE_HANG_TIMEOUT` with a logged
         // warning so an operator typo never silently expires every request.
-        let decode_hang_timeout = validated_decode_hang_timeout(config.timeout_seconds);
+        let decode_hang_timeout = validated_decode_hang_timeout(config.decode_timeout_seconds);
 
         // resolve the speculative-decoding dispatch once
         // from the `ServerConfig::{draft_model_path, draft_kind,
@@ -1565,8 +1565,8 @@ fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {
 #[doc(hidden)] // pub(crate) for tests
 pub(crate) const DECODE_HANG_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Validate `timeout_seconds` from the server config and convert it to a
-/// `Duration`.
+/// Validate `decode_timeout_seconds` from the server config and convert it to
+/// a `Duration`.
 ///
 /// Returns the configured duration on success. Logs a warning and returns the
 /// fallback ([`DECODE_HANG_TIMEOUT`]) when the value is `0`, which would cause
@@ -1575,17 +1575,17 @@ pub(crate) const DECODE_HANG_TIMEOUT: Duration = Duration::from_secs(300);
 /// Used by: `ModelProvider::new_with_server_config_and_prompt_cache` (the only
 /// constructor that receives a `ServerConfig`); other constructors default to
 /// [`DECODE_HANG_TIMEOUT`].
-pub(crate) fn validated_decode_hang_timeout(timeout_seconds: u64) -> Duration {
-    if timeout_seconds == 0 {
+pub(crate) fn validated_decode_hang_timeout(decode_timeout_seconds: u64) -> Duration {
+    if decode_timeout_seconds == 0 {
         tracing::warn!(
-            "server timeout_seconds is 0, which would expire immediately; \
+            "server decode_timeout_seconds is 0, which would expire immediately; \
              using built-in fallback of {}s. \
-             Set --timeout to a positive value to suppress this warning.",
+             Set --decode-timeout to a positive value to suppress this warning.",
             DECODE_HANG_TIMEOUT.as_secs()
         );
         return DECODE_HANG_TIMEOUT;
     }
-    Duration::from_secs(timeout_seconds)
+    Duration::from_secs(decode_timeout_seconds)
 }
 
 /// Map the server's `--max-batch-size` to one of the OpenXLA engine's bundled

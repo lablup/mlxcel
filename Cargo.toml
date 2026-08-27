@@ -224,10 +224,32 @@ uuid = { version = "1.23", features = ["v4"] }
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+# The `cors` feature is deliberately absent: #1432 replaced the tower-http
+# CORS layer with the b10621-shaped middleware in `src/server/cors.rs`, which
+# has to set `Access-Control-Allow-Origin` on every response and answer
+# `OPTIONS` before authentication and before routing.
+tower-http = { version = "0.5", features = ["trace"] }
 tower = { version = "0.4", features = ["util"] }
 hyper = { version = "1.10", features = ["server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+# HTTPS listener for `--ssl-cert-file` / `--ssl-key-file` (#1432). `ring` is
+# selected explicitly and `aws-lc-rs` (the tokio-rustls default) is left off:
+# reqwest already resolves rustls onto the ring provider in this workspace, and
+# pulling a second provider in would both add a C toolchain dependency to the
+# build and make rustls's process-default provider ambiguous at runtime.
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+# PEM parsing for the `--ssl-cert-file` / `--ssl-key-file` material (#1432).
+# `rustls-pemfile` is the older spelling of the same code and is unmaintained
+# (RUSTSEC-2025-0134); its own advisory points here. Already in the graph
+# through rustls.
+rustls-pki-types = { version = "1", features = ["std"] }
+# `http_body::Body` is implemented directly for the read-budget body wrapper
+# that gates the `--timeout` socket read deadline (#1432). Already in the graph
+# through hyper and axum; promoted so the trait can be named.
+http-body = "1"
+# SO_REUSEPORT for `--reuse-port` (#1432); the `all` feature is what exposes
+# `Socket::set_reuse_port`. Already in the dependency graph through tokio.
+socket2 = { version = "0.6", features = ["all"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 indicatif = "0.18"
 async-stream = "0.3"
@@ -313,6 +335,16 @@ should_implement_trait = "allow"
 [dev-dependencies]
 ctor = "1.0.13"
 tempfile = "3"
+# `#[tokio::test(start_paused = true)]` for the socket-timeout unit tests
+# (#1432); `full` does not include the test clock.
+tokio = { version = "1.52", features = ["full", "test-util"] }
+# Self-signed certificates for the `--ssl-cert-file` / `--ssl-key-file` tests
+# (#1432). Generating the keypair in-test keeps a private key out of the
+# repository; `ring` matches the provider the server itself pins.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+# `BodyExt::collect` for the read-budget body tests (#1432). Already in the
+# graph through axum and hyper-util.
+http-body-util = "0.1"
 
 [[test]]
 name = "distributed_integration"

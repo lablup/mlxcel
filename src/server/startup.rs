@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tower::Service;
 
 use crate::SamplingConfig;
 use crate::distributed::pipeline::{
@@ -77,7 +76,25 @@ pub struct ServerStartupConfig {
     pub n_parallel: usize,
     pub ctx_size: usize,
     pub n_predict: i32, // -1 = unlimited
-    pub timeout: u64,
+
+    // HTTP transport (#1432). `http_timeout` is b10621's `--timeout`
+    // (socket read/write budget); `decode_timeout` is the mlxcel-native
+    // decode watchdog that spelling used to carry.
+    pub http_timeout: u64,
+    pub decode_timeout: u64,
+    /// `--api-prefix`, already validated by
+    /// [`crate::server::transport::resolve_api_prefix`]. Empty = no prefix.
+    pub api_prefix: String,
+    /// `--sse-ping-interval`; `None` = pings disabled (`-1` upstream).
+    pub sse_ping_interval: Option<std::time::Duration>,
+    /// `--threads-http`, already resolved to a concrete worker count by
+    /// [`crate::server::transport::resolve_http_threads`].
+    pub threads_http: usize,
+    /// `--reuse-port`: also set `SO_REUSEPORT` on the listener.
+    pub reuse_port: bool,
+    /// `--ssl-cert-file` / `--ssl-key-file`, paired and validated by
+    /// [`crate::server::tls::resolve_tls_paths`].
+    pub tls: Option<crate::server::tls::TlsPaths>,
 
     // Speculative decoding
     pub draft_model_path: Option<PathBuf>,
@@ -146,12 +163,10 @@ pub struct ServerStartupConfig {
     /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,
     /// `--enable-vlm-prefix-cache`). Default off; forwarded to the scheduler.
     pub enable_vlm_prefix_cache: bool,
-    /// Validated CORS allow-list origins (#244). `None` keeps the permissive
-    /// default; `Some(non_empty)` restricts cross-origin requests to exactly
-    /// these origins. Built from `--allowed-origins` in
-    /// [`super::ServerStartupInput::into_startup_config`] and forwarded to
+    /// Resolved CORS policy (#244 allow-list, b10621 flags in #1432). Built
+    /// in [`super::ServerStartupInput::into_startup_config`] and forwarded to
     /// [`super::config::ServerConfig`].
-    pub cors_allowed_origins: Option<Vec<axum::http::HeaderValue>>,
+    pub cors_policy: crate::server::CorsPolicy,
     /// #1011: `--prefill-grant-interval`. `None` keeps the env override /
     /// shipped default; `Some(0)` disables the fairness grant.
     pub prefill_grant_interval: Option<usize>,
@@ -432,7 +447,18 @@ impl Default for ServerStartupConfig {
             n_parallel: 4,
             ctx_size: 0,
             n_predict: -1,
-            timeout: 600,
+            http_timeout: crate::server::transport::DEFAULT_HTTP_TIMEOUT_SECS,
+            decode_timeout: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
+            api_prefix: String::new(),
+            sse_ping_interval: Some(std::time::Duration::from_secs(
+                crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
+            )),
+            threads_http: crate::server::transport::resolve_http_threads(
+                crate::server::transport::DEFAULT_THREADS_HTTP,
+                4,
+            ),
+            reuse_port: false,
+            tls: None,
             draft_model_path: None,
             draft_max: 16,
             // speculative-decoding selector defaults.
@@ -459,7 +485,7 @@ impl Default for ServerStartupConfig {
             ubatch_size_provided: false,
             enable_preemption: false,
             enable_vlm_prefix_cache: false,
-            cors_allowed_origins: None,
+            cors_policy: crate::server::CorsPolicy::default(),
             // #1011: unset -> scheduler resolves the env override / default.
             prefill_grant_interval: None,
             preemption_policy: "longest-first".to_string(),
@@ -963,7 +989,9 @@ pub(super) fn build_server_config(
 
     ServerConfig {
         api_key,
-        timeout_seconds: startup.timeout,
+        decode_timeout_seconds: startup.decode_timeout,
+        api_prefix: startup.api_prefix.clone(),
+        sse_ping_interval: startup.sse_ping_interval,
         model_alias: startup.model_alias.clone(),
         context_size,
         n_parallel: startup.n_parallel,
@@ -1062,7 +1090,7 @@ pub(super) fn build_server_config(
         // forward the experimental VLM prefix-cache toggle (#124 step c).
         enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
         // forward the validated CORS allow-list (#244); `None` keeps permissive.
-        cors_allowed_origins: startup.cors_allowed_origins.clone(),
+        cors_policy: startup.cors_policy.clone(),
         // disaggregated serving role derived from `--node-role` (#126 B2).
         serving_mode,
         // disaggregated serving-role network addresses (#126 B3b2a): the
@@ -1300,62 +1328,53 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
     // On Metal this is always 1; on a CUDA multi-GPU host it reports the real
     // adapter count that `--tp-size` can target.
     tracing::info!("Detected {} GPU(s)", mlxcel_core::gpu_device_count());
+    let prefix = startup.api_prefix.as_str();
     tracing::info!("Endpoints:");
-    tracing::info!("  POST /v1/chat/completions  - OpenAI chat completions");
-    tracing::info!("  POST /v1/completions       - OpenAI text completions");
-    tracing::info!("  GET  /v1/models            - List models");
-    tracing::info!("  POST /completion           - llama-server native completion");
-    tracing::info!("  POST /tokenize             - Tokenize text");
-    tracing::info!("  POST /detokenize           - Detokenize tokens");
+    tracing::info!("  POST {prefix}/v1/chat/completions  - OpenAI chat completions");
+    tracing::info!("  POST {prefix}/v1/completions       - OpenAI text completions");
+    tracing::info!("  GET  {prefix}/v1/models            - List models");
+    tracing::info!("  POST {prefix}/completion           - llama-server native completion");
+    tracing::info!("  POST {prefix}/tokenize             - Tokenize text");
+    tracing::info!("  POST {prefix}/detokenize           - Detokenize tokens");
     if startup.enable_props {
-        tracing::info!("  GET  /props                - Server properties");
+        tracing::info!("  GET  {prefix}/props                - Server properties");
     }
     if startup.enable_slots {
-        tracing::info!("  GET  /slots                - Slot status");
+        tracing::info!("  GET  {prefix}/slots                - Slot status");
     }
-    tracing::info!("  GET  /health               - Health check");
+    tracing::info!("  GET  {prefix}/health               - Health check");
 }
 
-async fn serve_unix_socket(startup: &ServerStartupConfig, app: axum::Router) -> Result<()> {
-    let socket_path = Path::new(&startup.host);
-
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)
-            .with_context(|| format!("Failed to remove stale socket: {:?}", socket_path))?;
+/// Bind and serve, applying the b10621 transport options (#1432).
+///
+/// The listen target comes from `--host` / `--port`
+/// ([`crate::server::transport::resolve_listen_target`]), the socket
+/// read/write budget from `--timeout`, and TLS from
+/// `--ssl-cert-file` / `--ssl-key-file`. The accept loop itself lives in
+/// [`crate::server::listen`] so all three transports enforce the timeout the
+/// same way.
+async fn serve_http(startup: &ServerStartupConfig, app: axum::Router) -> Result<()> {
+    let resolved = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
+    if let Some(warning) = &resolved.legacy_socket_warning {
+        tracing::warn!("{warning}");
     }
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create socket directory: {:?}", parent))?;
-    }
 
-    log_endpoints(startup, &startup.host);
-    let listener = tokio::net::UnixListener::bind(socket_path)
-        .with_context(|| format!("Failed to bind Unix socket: {:?}", socket_path))?;
+    let tls = match startup.tls.as_ref() {
+        Some(paths) => Some(crate::server::tls::build_server_config(paths)?),
+        None => None,
+    };
 
-    loop {
-        let (socket, _addr) = listener.accept().await?;
-        let app = app.clone();
-        tokio::spawn(async move {
-            let socket = hyper_util::rt::TokioIo::new(socket);
-            let hyper_service =
-                hyper::service::service_fn(move |request| app.clone().call(request));
-            if let Err(err) =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection(socket, hyper_service)
-                    .await
-            {
-                tracing::debug!("Unix socket connection error: {}", err);
-            }
-        });
-    }
-}
-
-async fn serve_tcp(startup: &ServerStartupConfig, app: axum::Router) -> Result<()> {
-    let addr = format!("{}:{}", startup.host, startup.port);
-    log_endpoints(startup, &addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    crate::server::listen::serve(
+        &resolved.target,
+        app,
+        crate::server::listen::ServeOptions {
+            timeouts: crate::server::transport::HttpTimeouts::from_secs(startup.http_timeout),
+            reuse_port: startup.reuse_port,
+            tls,
+        },
+        |addr| log_endpoints(startup, addr),
+    )
+    .await
 }
 
 fn parse_startup_listen_addr(startup: &ServerStartupConfig) -> Result<SocketAddr> {
@@ -2032,7 +2051,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             port = startup.port,
             "Starting disaggregated router front-end"
         );
-        return serve_tcp(&startup, app).await;
+        return serve_http(&startup, app).await;
     }
 
     // Create shared batch metrics and observability that both ModelProvider
@@ -2286,11 +2305,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     .with_rerank_model(rerank_model);
     let app = create_app(state);
 
-    if startup.port == 0 {
-        serve_unix_socket(&startup, app).await
-    } else {
-        serve_tcp(&startup, app).await
-    }
+    serve_http(&startup, app).await
 }
 
 /// Where the embedding checkpoint comes from.

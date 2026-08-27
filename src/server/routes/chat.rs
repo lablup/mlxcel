@@ -797,7 +797,7 @@ async fn stream_chat_completion(
     // SSE comment events. This prevents proxy/client idle-timeout disconnects
     // during long prefill phases (32k+ token prompts) where no token event is
     // emitted until the first generated token arrives.
-    let (events, stream, cancelled, keepalive) = sse_channel(100);
+    let (events, stream, cancelled, keepalive) = sse_channel(100, state.config.sse_ping_interval);
 
     // Clone for the spawned task
     let request_id_clone = request_id.clone();

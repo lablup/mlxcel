@@ -360,7 +360,7 @@ async fn stream_completion(
     // sse_channel also returns an SseKeepAlive that sends periodic
     // SSE comment events to prevent proxy/client idle-timeout disconnects
     // during long prefill phases.
-    let (events, stream, cancelled, keepalive) = sse_channel(100);
+    let (events, stream, cancelled, keepalive) = sse_channel(100, state.config.sse_ping_interval);
 
     // Clone for the spawned task
     let request_id_clone = request_id.clone();

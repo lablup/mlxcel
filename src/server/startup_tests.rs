@@ -107,7 +107,12 @@ fn resolve_chat_template_respects_override_then_file_then_model_metadata() {
 fn build_server_config_applies_normalized_startup_values() {
     let startup = ServerStartupConfig {
         model_alias: Some("alias".to_string()),
-        timeout: 42,
+        // #1432: two independent controls that used to share the --timeout
+        // spelling. The asserts below check each reaches its own consumer.
+        http_timeout: 7,
+        decode_timeout: 42,
+        api_prefix: "/llama".to_string(),
+        sse_ping_interval: Some(std::time::Duration::from_secs(45)),
         ctx_size: 2048,
         n_parallel: 3,
         enable_slots: false,
@@ -134,7 +139,19 @@ fn build_server_config_applies_normalized_startup_values() {
 
     let config = build_server_config(&startup, Some("token".to_string()));
     assert_eq!(config.api_key, Some("token".to_string()));
-    assert_eq!(config.timeout_seconds, 42);
+    assert_eq!(
+        config.decode_timeout_seconds, 42,
+        "the decode watchdog reads --decode-timeout, not --timeout"
+    );
+    assert_eq!(
+        startup.http_timeout, 7,
+        "the socket budget stays on --timeout and never reaches the decode watchdog"
+    );
+    assert_eq!(config.api_prefix, "/llama");
+    assert_eq!(
+        config.sse_ping_interval,
+        Some(std::time::Duration::from_secs(45))
+    );
     assert_eq!(config.model_alias.as_deref(), Some("alias"));
     assert_eq!(config.context_size, 682);
     assert_eq!(config.n_parallel, 3);

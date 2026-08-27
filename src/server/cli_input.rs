@@ -49,7 +49,35 @@ pub struct ServerStartupInput {
     pub n_parallel: usize,
     pub ctx_size: usize,
     pub n_predict: i32,
+
+    // HTTP transport (#1432). `timeout` is b10621's `--timeout` (the socket
+    // read/write budget); `decode_timeout` is the mlxcel-native watchdog that
+    // spelling used to carry.
     pub timeout: u64,
+    pub timeout_was_set: bool,
+    pub decode_timeout: u64,
+    pub decode_timeout_was_set: bool,
+    /// Raw `--api-prefix`; validated in [`Self::into_startup_config`].
+    pub api_prefix: String,
+    /// Raw `--sse-ping-interval`; `-1` disables the pings.
+    pub sse_ping_interval: i64,
+    /// Raw `--threads-http`; any value below 1 selects the automatic sizing.
+    pub threads_http: i64,
+    /// `--reuse-port`.
+    pub reuse_port: bool,
+    /// `--ssl-cert-file` / `--ssl-key-file`; paired in
+    /// [`Self::into_startup_config`].
+    pub ssl_cert_file: Option<PathBuf>,
+    pub ssl_key_file: Option<PathBuf>,
+    /// b10621 CORS flags, raw. `--cors-origins` accepts `*`, the special
+    /// value `localhost`, or a literal origin string.
+    pub cors_origins: String,
+    pub cors_methods: String,
+    pub cors_headers: String,
+    pub cors_credentials: bool,
+    /// `--no-cors-credentials`, resolved against `cors_credentials` in
+    /// [`Self::into_startup_config`] the same way `--slots` / `--no-slots` is.
+    pub no_cors_credentials: bool,
     pub draft_model_path: Option<PathBuf>,
     pub draft_max: usize,
     /// explicit drafter-kind override from `--draft-kind`.
@@ -615,9 +643,11 @@ impl ServerStartupInput {
 
         // (#244) Validate the CORS allow-list at the fallible startup boundary
         // so a malformed origin fails fast with a clear message. An empty list
-        // (the flag/env unset) maps to `None`, preserving the permissive
-        // default; a non-empty validated list narrows the origin policy.
-        let cors_allowed_origins = {
+        // (the flag/env unset) leaves the b10621 `--cors-origins` rule in
+        // force; a non-empty validated list selects the mlxcel-native
+        // allow-list policy instead. The CLI makes the two mutually exclusive,
+        // so exactly one origin rule is ever active.
+        let cors_allow_list = {
             let parsed = super::cors::parse_allowed_origins(&self.allowed_origins)?;
             if parsed.is_empty() {
                 None
@@ -625,6 +655,36 @@ impl ServerStartupInput {
                 Some(parsed)
             }
         };
+        let cors_policy = super::CorsPolicy::resolve(
+            &self.cors_origins,
+            &self.cors_methods,
+            &self.cors_headers,
+            resolve_compat_toggle(self.cors_credentials, self.no_cors_credentials),
+            cors_allow_list,
+        )?;
+
+        // (#1432) HTTP transport resolution. Every one of these is a startup
+        // failure rather than a silently ignored value.
+        let api_prefix = super::transport::resolve_api_prefix(&self.api_prefix)?;
+        let sse_ping_interval =
+            super::transport::resolve_sse_ping_interval(self.sse_ping_interval)?;
+        let threads_http =
+            super::transport::resolve_http_threads(self.threads_http, self.n_parallel);
+        let tls = super::tls::resolve_tls_paths(self.ssl_cert_file, self.ssl_key_file)?;
+        if let Some(warning) = super::transport::timeout_migration_warning(
+            self.timeout_was_set,
+            self.decode_timeout_was_set,
+        ) {
+            tracing::warn!("{warning}");
+        }
+        if !api_prefix.is_empty() && (self.api_key.is_some() || self.api_key_file.is_some()) {
+            tracing::warn!(
+                "--api-prefix {api_prefix} is set together with an API key. llama-server b10621 \
+                 compares its public-endpoint list against the unprefixed paths, so \
+                 {api_prefix}/health and {api_prefix}/v1/health require authentication while \
+                 /health does not. mlxcel matches that behavior"
+            );
+        }
 
         Ok(ServerStartupConfig {
             model_path: self.model_path,
@@ -637,7 +697,13 @@ impl ServerStartupInput {
             n_parallel: self.n_parallel,
             ctx_size: self.ctx_size,
             n_predict: self.n_predict,
-            timeout: self.timeout,
+            http_timeout: self.timeout,
+            decode_timeout: self.decode_timeout,
+            api_prefix,
+            sse_ping_interval,
+            threads_http,
+            reuse_port: self.reuse_port,
+            tls,
             draft_model_path: self.draft_model_path,
             draft_max: self.draft_max,
             // forward the new speculative-decoding selector
@@ -745,8 +811,9 @@ impl ServerStartupInput {
             kv_cache_budget: self.kv_cache_budget,
             // forward the experimental VLM prefix-cache toggle (#124 step c).
             enable_vlm_prefix_cache: self.enable_vlm_prefix_cache,
-            // forward the validated CORS allow-list (#244).
-            cors_allowed_origins,
+            // forward the resolved CORS policy: the b10621 flags, or the
+            // mlxcel-native allow-list when --allowed-origins is set (#244, #1432).
+            cors_policy,
             // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_ttl_secs: self.responses_store_ttl_secs,
@@ -1113,6 +1180,36 @@ pub fn env_fallback_log_file(value: &mut Option<PathBuf>) {
 pub fn env_fallback_endpoint_slots(value: &mut bool, slots_was_set: bool, no_slots_was_set: bool) {
     const KEY: &str = "LLAMA_ARG_ENDPOINT_SLOTS";
     if slots_was_set || no_slots_was_set {
+        return;
+    }
+    if let Ok(raw) = std::env::var(KEY) {
+        match parse_env_bool(&raw) {
+            Some(parsed) => *value = parsed,
+            None => tracing::warn!(
+                "{KEY} has unparseable value {:?}; ignoring (expected on/off/true/false/1/0)",
+                raw
+            ),
+        }
+    }
+}
+
+/// Apply `LLAMA_ARG_CORS_CREDENTIALS` without making clap treat its env value
+/// as an explicit `--cors-credentials` occurrence.
+///
+/// The flag defaults to enabled (b10621's default), and clap resolves a
+/// `SetTrue` argument's env binding by treating a truthy value as an
+/// occurrence and a falsey one as no occurrence at all. With a `true` default
+/// that makes `LLAMA_ARG_CORS_CREDENTIALS=0` a silent no-op, so the variable
+/// is read here instead, exactly as `--slots` does
+/// ([`env_fallback_endpoint_slots`]). An explicit `--cors-credentials` or
+/// `--no-cors-credentials` on the command line still wins.
+pub fn env_fallback_cors_credentials(
+    value: &mut bool,
+    enable_was_set: bool,
+    disable_was_set: bool,
+) {
+    const KEY: &str = "LLAMA_ARG_CORS_CREDENTIALS";
+    if enable_was_set || disable_was_set {
         return;
     }
     if let Ok(raw) = std::env::var(KEY) {

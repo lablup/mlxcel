@@ -37,7 +37,9 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::server::streaming::{IntoKeepAlive, SSE_KEEPALIVE_INTERVAL_SECS};
+use crate::server::streaming::IntoKeepAlive;
+#[cfg(test)]
+use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
 use crate::server::types::anthropic_response::AnthropicResponseBlock;
 use crate::server::types::anthropic_stream::{AnthropicBlockDelta, AnthropicStreamEvent};
 
@@ -76,19 +78,20 @@ impl AnthropicStreamSender {
 }
 
 /// Newtype wrapping the keepalive configuration.
-pub struct AnthropicSseKeepAlive(KeepAlive);
+pub struct AnthropicSseKeepAlive(Option<KeepAlive>);
 
 impl AnthropicSseKeepAlive {
-    fn default_for_long_prefill() -> Self {
-        // Anthropic clients accept `ping` events; the axum keepalive comment
-        // frame is also tolerated. We use the standard keepalive comment to
-        // match the Responses-API encoder.
-        Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
+    /// Anthropic clients accept `ping` events; the axum keepalive comment
+    /// frame is also tolerated. We use the standard keepalive comment to
+    /// match the Responses-API encoder. `None` disables the pings
+    /// (`--sse-ping-interval -1`, #1432).
+    fn from_interval(interval: Option<Duration>) -> Self {
+        Self(interval.map(|d| KeepAlive::new().interval(d)))
     }
 }
 
 impl IntoKeepAlive for AnthropicSseKeepAlive {
-    fn into_keep_alive(self) -> KeepAlive {
+    fn into_keep_alive(self) -> Option<KeepAlive> {
         self.0
     }
 }
@@ -101,6 +104,7 @@ impl IntoKeepAlive for AnthropicSseKeepAlive {
 /// can abort orphaned sequences.
 pub fn anthropic_sse_channel(
     buffer: usize,
+    ping_interval: Option<Duration>,
 ) -> (
     AnthropicStreamSender,
     impl Stream<Item = Result<Event, Infallible>>,
@@ -119,7 +123,7 @@ pub fn anthropic_sse_channel(
         sender,
         stream,
         cancelled,
-        AnthropicSseKeepAlive::default_for_long_prefill(),
+        AnthropicSseKeepAlive::from_interval(ping_interval),
     )
 }
 
@@ -265,7 +269,8 @@ mod tests {
 
     #[tokio::test]
     async fn channel_round_trips_event_with_header() {
-        let (sender, stream, _cancelled, _keepalive) = anthropic_sse_channel(8);
+        let (sender, stream, _cancelled, _keepalive) =
+            anthropic_sse_channel(8, Some(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)));
         let send_task = tokio::task::spawn_blocking(move || {
             sender
                 .send_event(&AnthropicStreamEvent::MessageStop)
@@ -282,7 +287,8 @@ mod tests {
     async fn emitter_block_index_machine() {
         // Drive the emitter and collect the produced frames to confirm the
         // open/close/advance index machine matches the Anthropic protocol.
-        let (sender, stream, _cancelled, _keepalive) = anthropic_sse_channel(64);
+        let (sender, stream, _cancelled, _keepalive) =
+            anthropic_sse_channel(64, Some(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)));
         let task = tokio::task::spawn_blocking(move || {
             let mut em = AnthropicBlockEmitter::new();
             // Open text, emit a delta.
@@ -315,7 +321,8 @@ mod tests {
 
     #[tokio::test]
     async fn emitter_idempotent_open_same_kind() {
-        let (sender, stream, _cancelled, _keepalive) = anthropic_sse_channel(16);
+        let (sender, stream, _cancelled, _keepalive) =
+            anthropic_sse_channel(16, Some(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)));
         let task = tokio::task::spawn_blocking(move || {
             let mut em = AnthropicBlockEmitter::new();
             em.open_text(&sender);

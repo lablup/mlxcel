@@ -57,14 +57,17 @@ pub(crate) const DONE_MARKER: &str = "[DONE]";
 /// long prefills so that proxies and HTTP clients do not time out the
 /// connection before the first token arrives.
 ///
-/// 15 seconds is shorter than virtually all proxy idle timeouts (nginx
+/// 30 seconds is the `llama-server` b10621 `--sse-ping-interval` default
+/// (#1432), and is shorter than virtually all proxy idle timeouts (nginx
 /// default 60 s, HAProxy 60 s, AWS ALB 60 s) while being long enough to
-/// avoid noticeable overhead for ordinary short responses.
+/// avoid noticeable overhead for ordinary short responses. An operator can
+/// override it per server with `--sse-ping-interval`, or per request with the
+/// native `sse_ping_interval` field; `-1` / `None` disables the pings.
 ///
 /// This is the single definition for every SSE surface. `streaming_responses`
 /// and `streaming_anthropic` keep their own newtypes, so a route cannot attach
 /// another surface's keepalive, but they read the interval from here (#1105).
-pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 
 /// The SSE keepalive interval must stay under typical reverse-proxy idle
 /// timeouts (nginx 60 s, HAProxy 60 s, AWS ALB 60 s) or a long prefill will
@@ -92,27 +95,36 @@ const _: () = assert!(
 /// `KeepAlive` is private to prevent callers from constructing a mismatched
 /// keepalive independently.
 ///
-/// `router_front.rs` builds its own with `default_for_long_prefill` because its
-/// streams do not come from `sse_channel`, but it goes through this type rather
-/// than `KeepAlive::default()` so it tracks the shared interval (#1105).
+/// `router_front.rs` builds its own with `from_interval` because its streams
+/// do not come from `sse_channel`, but it goes through this type rather than
+/// `KeepAlive::default()` so it tracks the configured interval (#1105, #1432).
+///
+/// `None` means the pings are switched off (`--sse-ping-interval -1`), which
+/// is why the inner value is an `Option`: axum's `Sse` has no "no keepalive"
+/// `KeepAlive`, so disabling has to be expressed by not attaching one.
 ///
 /// Used by: chat.rs, completions.rs, native_completion.rs, router_front.rs
-pub(crate) struct SseKeepAlive(KeepAlive);
+pub(crate) struct SseKeepAlive(Option<KeepAlive>);
 
 impl SseKeepAlive {
-    /// Build a keepalive that sends an empty comment every
-    /// [`SSE_KEEPALIVE_INTERVAL_SECS`] seconds to prevent proxy timeouts
-    /// during long prefill phases.
+    /// Build a keepalive that sends an empty comment every `interval`, or no
+    /// keepalive at all when `interval` is `None`.
     ///
     /// `KeepAlive::new()` already emits an empty SSE comment by default, so
     /// only the interval needs to be customised.
+    pub(crate) fn from_interval(interval: Option<Duration>) -> Self {
+        Self(interval.map(|d| KeepAlive::new().interval(d)))
+    }
+
+    /// The compiled-in default interval, for streams with no configured
+    /// server (tests and the disaggregated router front-end).
     pub(crate) fn default_for_long_prefill() -> Self {
-        Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
+        Self::from_interval(Some(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
 }
 
 impl IntoKeepAlive for SseKeepAlive {
-    fn into_keep_alive(self) -> KeepAlive {
+    fn into_keep_alive(self) -> Option<KeepAlive> {
         self.0
     }
 }
@@ -153,6 +165,7 @@ pub(crate) struct BlockingSseSender {
 /// Used by: chat.rs, completions.rs, native_completion.rs
 pub(crate) fn sse_channel(
     buffer: usize,
+    ping_interval: Option<Duration>,
 ) -> (
     BlockingSseSender,
     impl Stream<Item = Result<Event, Infallible>>,
@@ -162,7 +175,7 @@ pub(crate) fn sse_channel(
     let cancelled: CancellationToken = Arc::new(AtomicBool::new(false));
     let (sender, rx) = payload_channel(buffer, Some(cancelled.clone()));
     let stream = ReceiverStream::new(rx).map(|payload| payload.map(sse_event));
-    let keepalive = SseKeepAlive::default_for_long_prefill();
+    let keepalive = SseKeepAlive::from_interval(ping_interval);
     (sender, stream, cancelled, keepalive)
 }
 
@@ -178,7 +191,7 @@ pub(crate) fn sse_channel(
 /// only way to get at the inner `KeepAlive`, so there is no route from one of
 /// these newtypes to a hand-assembled `Sse`.
 pub(crate) trait IntoKeepAlive {
-    fn into_keep_alive(self) -> KeepAlive;
+    fn into_keep_alive(self) -> Option<KeepAlive>;
 }
 
 /// Build the streaming HTTP response, attaching the keepalive that the matching
@@ -200,9 +213,12 @@ pub(crate) fn sse_response<S>(stream: S, keepalive: impl IntoKeepAlive) -> Respo
 where
     S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
 {
-    Sse::new(stream)
-        .keep_alive(keepalive.into_keep_alive())
-        .into_response()
+    let sse = Sse::new(stream);
+    match keepalive.into_keep_alive() {
+        Some(keep_alive) => sse.keep_alive(keep_alive).into_response(),
+        // `--sse-ping-interval -1`: the operator asked for no comment pings.
+        None => sse.into_response(),
+    }
 }
 
 impl BlockingSseSender {
