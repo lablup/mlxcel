@@ -108,6 +108,17 @@ pub(crate) fn build_prompt_cache_request_context(
     history_prompt: Option<&str>,
 ) -> Option<PromptCacheRequestContext> {
     state.prompt_cache.as_ref()?;
+    // b10621 `cache_prompt: false` opts this one request out. Returning `None`
+    // here is the whole implementation, and deliberately so: the scheduler
+    // reaches the store only through this context, for the lookup
+    // (`try_adopt_cached_prefix`) and for the donate-back
+    // (`donate_finished_sequence_cache`) alike. Withholding it therefore
+    // forces a cold prefill AND leaves every entry another request might reuse
+    // exactly as it was, which is the half of the contract a lookup-only
+    // opt-out would miss.
+    if request.resolve_cache_prompt() == Some(false) {
+        return None;
+    }
     // Share the kwargs resolution with `prepare_chat_request_with_cache` so the
     // digest sees the same canonicalized map as the rendering pipeline. Calling
     // the helper rather than re-deriving the merge here keeps a mapped
@@ -1715,6 +1726,7 @@ mod tests {
             chat_template_kwargs: None,
             extra_body: None,
             prompt_cache_key: None,
+            cache_prompt: None,
             user: None,
             reasoning_effort: None,
             extra_body_fields: serde_json::Map::new(),

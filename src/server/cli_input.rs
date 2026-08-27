@@ -498,6 +498,12 @@ pub struct ServerStartupInput {
     pub diffusion_sampler: String,
     /// `--diffusion-threshold` (issue #217 phase 3). Diffusion models only.
     pub diffusion_threshold: f32,
+    /// llama-server b10621 prompt-cache and continuous-batching flags,
+    /// straight off the shared clap group. Folded into `prompt_cache_enabled`,
+    /// `prompt_cache_capacity_bytes` and `max_batch_size` by
+    /// [`ServerStartupInput::into_startup_config`], which is also where an
+    /// unserveable `--cache-reuse` is refused.
+    pub cache_compat: crate::cli::cache_args::CacheCompatArgs,
     /// llama-server b10621 RoPE / YaRN runtime overrides, straight off the
     /// shared clap group. Resolved (and refused, when unserveable) by
     /// [`ServerStartupInput::into_startup_config`] so both server binaries
@@ -524,6 +530,46 @@ impl ServerStartupInput {
             .rope
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
+        // b10621's prompt-cache and batching spellings, folded onto mlxcel's
+        // own settings below. Resolved here for the same reason: a
+        // `--cache-reuse` mlxcel cannot serve must fail the command line, not
+        // the first request that would have reused a chunk.
+        let cache_compat = self
+            .cache_compat
+            .resolve()
+            .map_err(|message| anyhow::anyhow!("{message}"))?;
+        // `--no-cache-prompt` and mlxcel's `--no-prompt-cache` are two
+        // spellings of one intent, so either disables. `--cache-prompt` cannot
+        // re-enable over an explicit mlxcel disable: both directions of "off"
+        // are explicit operator statements and the safe reading of a
+        // contradiction is the one that caches nothing.
+        let prompt_cache_enabled = match cache_compat.prompt_cache_enabled {
+            Some(false) => false,
+            _ => self.prompt_cache_enabled,
+        };
+        // `--cache-ram` states the same budget as
+        // `--prompt-cache-capacity-bytes`, in MiB. mlxcel's own flag wins when
+        // both are given, matching how `--prefill-chunk-size` wins over
+        // `--batch-size`: the native spelling is the more specific request.
+        let prompt_cache_capacity_bytes = self
+            .prompt_cache_capacity_bytes
+            .or(cache_compat.capacity_bytes);
+        if self.prompt_cache_capacity_bytes.is_some() && cache_compat.capacity_bytes.is_some() {
+            tracing::warn!(
+                "--cache-ram and --prompt-cache-capacity-bytes both provided; \
+                 --prompt-cache-capacity-bytes takes precedence"
+            );
+        }
+        // `--no-cont-batching` pins the decode width to one sequence. It is
+        // deliberately NOT mlxcel's `--no-batch`, which swaps the scheduler for
+        // a sequential worker and takes the prompt cache and speculative
+        // decoding out with it; upstream's `-nocb` keeps the slots and stops
+        // them interleaving, which is what `--max-batch-size 1` means here.
+        let max_batch_size = if cache_compat.single_sequence_decode {
+            Some(1)
+        } else {
+            self.max_batch_size
+        };
         let resolution =
             resolve_prefill_chunk_size(self.prefill_chunk_size, self.batch_size, self.ubatch_size);
         // resolve the server-wide thinking budget once, up-front.
@@ -552,8 +598,8 @@ impl ServerStartupInput {
         // Any field left at `None` picks up the compiled-in default.
         // layer APC config on top.
         let prompt_cache = build_prompt_cache_config(
-            self.prompt_cache_enabled,
-            self.prompt_cache_capacity_bytes,
+            prompt_cache_enabled,
+            prompt_cache_capacity_bytes,
             self.prompt_cache_max_entries,
             self.prompt_cache_ttl_seconds,
             self.prompt_cache_min_prefix,
@@ -728,7 +774,7 @@ impl ServerStartupInput {
             // owns both the drafter path AND the resolved kind.
             draft_kind: self.draft_kind,
             draft_block_size: self.draft_block_size,
-            max_batch_size: self.max_batch_size,
+            max_batch_size,
             max_queue_depth: self.max_queue_depth,
             audio_queue_depth: self.audio_queue_depth,
             audio_request_timeout_secs: self.audio_request_timeout_secs,
@@ -1451,29 +1497,28 @@ pub fn long_cli_flag_was_set(name: &str) -> bool {
     })
 }
 
-/// Apply `MLXCEL_PROMPT_CACHE_ENABLED` to the raw CLI bool and validate
-/// llama.cpp's independent `LLAMA_ARG_CACHE_REUSE` setting.
+/// Apply `MLXCEL_PROMPT_CACHE_ENABLED` to the raw CLI bool.
 ///
 /// Precedence:
 /// 1. CLI flag — always wins.
 /// 2. `MLXCEL_PROMPT_CACHE_ENABLED` env var.
 /// 3. Compiled-in default (`true`).
 ///
-/// `LLAMA_ARG_CACHE_REUSE` is not a prompt-cache enable switch. llama.cpp
-/// interprets it as an integer minimum reusable chunk size. mlxcel does not
-/// implement that tuning knob: `0` is accepted as the upstream no-extra-reuse
-/// default and leaves prompt caching unchanged, while positive or non-integer
-/// values fail startup instead of mutating a different setting.
+/// `LLAMA_ARG_CACHE_REUSE` used to be validated here, because #1430 needed
+/// somewhere to say that it is an integer chunk size rather than a boolean
+/// cache switch. Since #1453 it is a real clap option
+/// ([`crate::cli::cache_args::CacheCompatArgs::cache_reuse`]) with that
+/// environment binding, so the value is read and refused in one place instead
+/// of two, and a command-line `--cache-reuse` now beats the environment the
+/// way every other option does. The b10621 spelling of *this* setting,
+/// `--cache-prompt` / `--no-cache-prompt`, lives in the same group and is
+/// folded in by `ServerStartupInput::into_startup_config`.
 ///
 /// The `cli_was_set` parameter must be `true` when the binary's clap arg was
 /// explicitly provided (not the default), so that a default `true` from clap
 /// doesn't shadow an env var that says `false`.
-pub fn env_fallback_prompt_cache_enabled(
-    enabled: &mut bool,
-    cli_was_set: bool,
-) -> Result<(), String> {
+pub fn env_fallback_prompt_cache_enabled(enabled: &mut bool, cli_was_set: bool) {
     const MLXCEL_KEY: &str = "MLXCEL_PROMPT_CACHE_ENABLED";
-    const LLAMA_KEY: &str = "LLAMA_ARG_CACHE_REUSE";
 
     if cli_was_set {
         if std::env::var_os(MLXCEL_KEY).is_some() {
@@ -1492,25 +1537,6 @@ pub fn env_fallback_prompt_cache_enabled(
             }
         }
     }
-
-    if let Ok(raw) = std::env::var(LLAMA_KEY) {
-        let trimmed = raw.trim();
-        match trimmed.parse::<usize>() {
-            Ok(0) => {}
-            Ok(value) => {
-                return Err(format!(
-                    "{LLAMA_KEY}={value} requests a minimum prompt-cache reuse chunk size, which mlxcel does not support; unset it or use {LLAMA_KEY}=0"
-                ));
-            }
-            Err(_) => {
-                return Err(format!(
-                    "{LLAMA_KEY}={raw:?} is invalid: expected a non-negative integer minimum reuse chunk size (0 is supported); use MLXCEL_PROMPT_CACHE_ENABLED to enable or disable prompt caching"
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Apply `MLXCEL_PROMPT_CACHE_CAPACITY_BYTES` env var fallback.

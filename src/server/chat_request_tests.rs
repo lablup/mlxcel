@@ -36,6 +36,7 @@ fn request_with_messages(messages: Vec<Message>) -> ChatCompletionRequest {
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
@@ -611,6 +612,7 @@ fn build_raw_json_messages_includes_tool_fields() {
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
@@ -662,6 +664,7 @@ fn req_with_tool_call_arguments(arguments: &str) -> ChatCompletionRequest {
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
@@ -1211,6 +1214,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         chat_template_kwargs: kwargs.clone(),
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
@@ -1230,6 +1234,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         chat_template_kwargs: kwargs,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
@@ -1474,6 +1479,70 @@ async fn rolling_checkpoint_ignores_pseudo_user_tool_response_anchor() {
 // ---------------------------------------------------------------------------
 // prompt_cache_key and user field deserialization round-trips
 // ---------------------------------------------------------------------------
+
+// b10621 `cache_prompt` (#1453)
+// ---------------------------------------------------------------------------
+
+/// The three ways an SDK gets a field to the server, for the switch that turns
+/// prompt caching off for one request.
+#[test]
+fn cache_prompt_resolves_from_all_three_carriers() {
+    for json in [
+        r#"{"model":"t","messages":[{"role":"user","content":"hi"}],"cache_prompt":false}"#,
+        r#"{"model":"t","messages":[{"role":"user","content":"hi"}],"extra_body":{"cache_prompt":false}}"#,
+    ] {
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.resolve_cache_prompt(), Some(false), "{json}");
+    }
+    // The flattened form: an OpenAI SDK that passes extra_body kwargs at the
+    // request root rather than nested.
+    let req: ChatCompletionRequest = serde_json::from_str(
+        r#"{"model":"t","messages":[{"role":"user","content":"hi"}],"cache_prompt":false,"unrelated":1}"#,
+    )
+    .unwrap();
+    assert_eq!(req.resolve_cache_prompt(), Some(false));
+}
+
+/// Saying nothing must stay distinguishable from saying `true`, because only
+/// the first leaves the server-wide setting in charge.
+#[test]
+fn an_absent_cache_prompt_is_not_the_same_as_true() {
+    let absent: ChatCompletionRequest =
+        serde_json::from_str(r#"{"model":"t","messages":[{"role":"user","content":"hi"}]}"#)
+            .unwrap();
+    assert_eq!(absent.resolve_cache_prompt(), None);
+
+    let explicit: ChatCompletionRequest = serde_json::from_str(
+        r#"{"model":"t","messages":[{"role":"user","content":"hi"}],"cache_prompt":true}"#,
+    )
+    .unwrap();
+    assert_eq!(explicit.resolve_cache_prompt(), Some(true));
+}
+
+/// The top-level typed field wins over both `extra_body` carriers, matching
+/// `resolve_prompt_cache_key`.
+#[test]
+fn a_top_level_cache_prompt_wins_over_extra_body() {
+    let req: ChatCompletionRequest = serde_json::from_str(
+        r#"{"model":"t","messages":[{"role":"user","content":"hi"}],
+            "cache_prompt":true,"extra_body":{"cache_prompt":false}}"#,
+    )
+    .unwrap();
+    assert_eq!(req.resolve_cache_prompt(), Some(true));
+}
+
+/// A non-boolean under an `extra_body` key is ignored rather than rejected:
+/// that path is an untyped passthrough, and an unrelated key of the same name
+/// is likelier than a deliberate lie.
+#[test]
+fn a_non_boolean_cache_prompt_in_extra_body_is_ignored() {
+    let req: ChatCompletionRequest = serde_json::from_str(
+        r#"{"model":"t","messages":[{"role":"user","content":"hi"}],
+            "extra_body":{"cache_prompt":"no"}}"#,
+    )
+    .unwrap();
+    assert_eq!(req.resolve_cache_prompt(), None);
+}
 
 #[test]
 fn deserialize_request_with_top_level_prompt_cache_key() {
@@ -1911,6 +1980,7 @@ async fn chat_request_drops_temp_files_on_completion() {
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),

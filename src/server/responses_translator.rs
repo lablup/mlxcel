@@ -239,6 +239,7 @@ pub fn responses_request_to_chat(
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: request.prompt_cache_key.clone(),
+        cache_prompt: None,
         user,
         reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),

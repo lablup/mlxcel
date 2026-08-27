@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 mod commands;
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
+use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
@@ -1766,10 +1767,6 @@ pub(crate) struct ServeArgs {
     #[arg(long = "no-mmap", hide = true)]
     _no_mmap: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored, mlxcel handles batching internally)
-    #[arg(long, hide = true)]
-    _cont_batching: bool,
-
     /// Decode storage backend for continuous batching.
     ///
     /// Accepted values: `auto`, `dense`, `paged`. When omitted, the server
@@ -1935,6 +1932,13 @@ pub(crate) struct ServeArgs {
     /// see `ServerStartupConfig::rope_override`.
     #[command(flatten)]
     pub(crate) rope: RopeOverrideArgs,
+
+    /// Prompt-cache and continuous-batching flag group (`--cache-prompt`,
+    /// `--no-cache-prompt`, `--cache-reuse`, `--cache-ram`, `--cont-batching`,
+    /// `--no-cont-batching`). Defined once in `mlxcel::cli::cache_args` so both
+    /// server binaries accept the same llama-server b10621 command line.
+    #[command(flatten)]
+    pub(crate) cache_compat: CacheCompatArgs,
 
     /// Language-bias options for server-wide output
     /// steering. Mirrors the same flags exposed on the `generate` subcommand.

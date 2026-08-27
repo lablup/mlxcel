@@ -760,6 +760,25 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub prompt_cache_key: Option<String>,
 
+    /// llama-server b10621 `cache_prompt`: re-use the KV cache from a previous
+    /// request when the prompts share a prefix.
+    ///
+    /// `None` (the default) leaves the server-wide setting in force, which is
+    /// on unless `--no-cache-prompt` / `--no-prompt-cache` turned it off.
+    /// `false` opts this one request out: it is prefilled from cold and it
+    /// donates nothing back, so a client can force a clean evaluation without
+    /// disturbing what other requests may reuse.
+    ///
+    /// `true` is accepted and asserts the default; it cannot switch the cache
+    /// back on for one request against a server-wide disable, because there is
+    /// no store to look in.
+    ///
+    /// Reaches the same three ways as [`Self::prompt_cache_key`]: at the
+    /// request root, through the flattened OpenAI-SDK `extra_body`, or nested
+    /// inside `extra_body`. See [`Self::resolve_cache_prompt`].
+    #[serde(default)]
+    pub cache_prompt: Option<bool>,
+
     /// OpenAI-standard stable end-user identifier.
     ///
     /// Used as a session-bucket fallback for the prompt-prefix cache when
@@ -903,6 +922,37 @@ impl ChatCompletionRequest {
             && !s.is_empty()
         {
             return Some(s);
+        }
+        None
+    }
+
+    /// Resolve the request-level b10621 `cache_prompt` switch.
+    ///
+    /// Same precedence as [`Self::resolve_prompt_cache_key`]: top-level field,
+    /// then flattened `extra_body`, then nested `extra_body`. `None` means the
+    /// request said nothing and the server-wide setting decides.
+    ///
+    /// A non-boolean value under the key is ignored rather than rejected: the
+    /// top-level field is typed, so a wrong type there is already a 400 from
+    /// serde, and the `extra_body` paths are an untyped passthrough where an
+    /// unrelated key of the same name is likelier than a deliberate lie.
+    pub fn resolve_cache_prompt(&self) -> Option<bool> {
+        if let Some(v) = self.cache_prompt {
+            return Some(v);
+        }
+        if let Some(v) = self
+            .extra_body_fields
+            .get("cache_prompt")
+            .and_then(serde_json::Value::as_bool)
+        {
+            return Some(v);
+        }
+        if let Some(body) = self.extra_body.as_ref()
+            && let Some(v) = body
+                .get("cache_prompt")
+                .and_then(serde_json::Value::as_bool)
+        {
+            return Some(v);
         }
         None
     }

@@ -17,6 +17,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::path::PathBuf;
 
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
+use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
@@ -1149,10 +1150,6 @@ struct ServerArgs {
     #[arg(long = "no-mmap", hide = true)]
     _no_mmap: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored: mlxcel handles batching internally)
-    #[arg(long, hide = true)]
-    _cont_batching: bool,
-
     /// Maximum number of cached post-projection image features per loaded VLM.
     ///
     /// Multi-turn conversations that revisit the same image reuse cached
@@ -1308,6 +1305,13 @@ struct ServerArgs {
     /// see `ServerStartupConfig::rope_override`.
     #[command(flatten)]
     rope: RopeOverrideArgs,
+
+    /// Prompt-cache and continuous-batching flag group (`--cache-prompt`,
+    /// `--no-cache-prompt`, `--cache-reuse`, `--cache-ram`, `--cont-batching`,
+    /// `--no-cont-batching`). Defined once in `mlxcel::cli::cache_args` so both
+    /// server binaries accept the same llama-server b10621 command line.
+    #[command(flatten)]
+    cache_compat: CacheCompatArgs,
 
     /// Language-bias options for server-wide output
     /// steering. See `--lang-bias`, `--lang-bias-config`, `--lang-bias-policy`,
@@ -1663,8 +1667,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
         long_cli_flag_was_set("prompt-cache-enabled"),
-    )
-    .map_err(anyhow::Error::msg)?;
+    );
     env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
@@ -1957,6 +1960,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         diffusion_sampler: args.diffusion_sampler.clone(),
         diffusion_threshold: args.diffusion_threshold,
         rope: args.rope.clone(),
+        cache_compat: args.cache_compat.clone(),
     })
 }
 

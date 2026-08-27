@@ -133,6 +133,7 @@ fn request(messages: Vec<Message>) -> ChatCompletionRequest {
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         user: None,
         reasoning_effort: None,
         extra_body_fields: Map::new(),

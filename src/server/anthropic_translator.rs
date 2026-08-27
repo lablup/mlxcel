@@ -140,6 +140,7 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
         chat_template_kwargs: None,
         extra_body: None,
         prompt_cache_key: None,
+        cache_prompt: None,
         // Map the Anthropic `metadata.user_id` (stored untyped in `extra`) to
         // the chat request's `user` so per-user prompt-cache isolation works on
         // the Messages endpoint. Absent it, the session key falls back to the

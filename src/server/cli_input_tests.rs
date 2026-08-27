@@ -192,6 +192,7 @@ fn sample_input() -> ServerStartupInput {
         diffusion_sampler: "entropy-bound".to_string(),
         diffusion_threshold: 0.9,
         rope: crate::cli::rope_args::RopeOverrideArgs::default(),
+        cache_compat: crate::cli::cache_args::CacheCompatArgs::default(),
     }
 }
 
@@ -770,7 +771,7 @@ fn prompt_cache_enabled_env_var_sets_false() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "false");
 
     let mut enabled = true; // default
-    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("valid setting");
+    env_fallback_prompt_cache_enabled(&mut enabled, false);
     assert!(
         !enabled,
         "MLXCEL_PROMPT_CACHE_ENABLED=false must set enabled=false"
@@ -786,7 +787,7 @@ fn prompt_cache_enabled_env_var_accepts_numeric_one() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "1");
 
     let mut enabled = false;
-    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("valid setting");
+    env_fallback_prompt_cache_enabled(&mut enabled, false);
     assert!(
         enabled,
         "MLXCEL_PROMPT_CACHE_ENABLED=1 must set enabled=true"
@@ -794,47 +795,78 @@ fn prompt_cache_enabled_env_var_accepts_numeric_one() {
 }
 
 /// `LLAMA_ARG_CACHE_REUSE` is an integer, not a boolean cache-enable alias.
+///
+/// Since #1453 the variable is bound to the real `--cache-reuse` option rather
+/// than validated inside the prompt-cache enable fallback, so the coverage
+/// moved with it; what is asserted has not changed.
 #[test]
 fn prompt_cache_llama_arg_cache_reuse_boolean_is_rejected() {
-    use super::env_fallback_prompt_cache_enabled;
-
     let _env_guard = env_lock();
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "on");
 
-    let mut enabled = false;
-    let error = env_fallback_prompt_cache_enabled(&mut enabled, false)
-        .expect_err("boolean cache-reuse value must fail");
-    assert!(error.contains("non-negative integer"));
-    assert!(error.contains("MLXCEL_PROMPT_CACHE_ENABLED"));
+    let error = crate::cli::cache_args::from_env().expect_err("boolean cache-reuse must fail");
+    assert!(error.contains("cache-reuse"), "{error}");
 }
 
 /// Positive minimum reuse chunk sizes are not implemented and fail clearly.
 #[test]
 fn prompt_cache_llama_arg_cache_reuse_positive_is_rejected() {
-    use super::env_fallback_prompt_cache_enabled;
-
     let _env_guard = env_lock();
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "256");
 
-    let mut enabled = true;
-    let error = env_fallback_prompt_cache_enabled(&mut enabled, false)
-        .expect_err("unsupported positive cache-reuse value must fail");
-    assert!(error.contains("minimum prompt-cache reuse chunk size"));
-    assert!(error.contains("LLAMA_ARG_CACHE_REUSE=0"));
+    let error =
+        crate::cli::cache_args::from_env().expect_err("positive cache-reuse must fail until #1453");
+    assert!(error.contains("--cache-reuse 256"), "{error}");
+    assert!(error.contains("--cache-reuse 0"), "{error}");
 }
 
-/// Cache enablement and cache-reuse tuning are validated independently.
+/// Cache enablement and cache-reuse tuning stay independent settings: an
+/// invalid reuse value must not be masked by a valid enable value, and it must
+/// not disable the cache either.
 #[test]
 fn prompt_cache_mlxcel_env_does_not_hide_invalid_cache_reuse() {
-    use super::env_fallback_prompt_cache_enabled;
-
     let _env_guard = env_lock();
     let _mlxcel = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "true");
     let _llama = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "on");
 
     let mut enabled = false;
-    assert!(env_fallback_prompt_cache_enabled(&mut enabled, false).is_err());
+    super::env_fallback_prompt_cache_enabled(&mut enabled, false);
     assert!(enabled, "the actual enable setting must still be applied");
+    assert!(
+        crate::cli::cache_args::from_env().is_err(),
+        "and the invalid reuse value must still be reported"
+    );
+}
+
+/// `LLAMA_ARG_CACHE_PROMPT` is the b10621 spelling of the same setting, and a
+/// falsy value has to reach the config as a disable rather than as an absence.
+#[test]
+fn llama_arg_cache_prompt_disables_the_prompt_cache() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_CACHE_PROMPT", "0");
+
+    let resolved = crate::cli::cache_args::from_env().expect("0 is a valid boolean");
+    assert_eq!(resolved.prompt_cache_enabled, Some(false));
+}
+
+/// `LLAMA_ARG_CONT_BATCHING=0` pins the decode width to one sequence.
+#[test]
+fn llama_arg_cont_batching_zero_pins_the_decode_width() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_CONT_BATCHING", "0");
+
+    let resolved = crate::cli::cache_args::from_env().expect("0 is a valid boolean");
+    assert!(resolved.single_sequence_decode);
+}
+
+/// `LLAMA_ARG_CACHE_RAM` is stated in MiB, not bytes.
+#[test]
+fn llama_arg_cache_ram_is_read_in_mebibytes() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_CACHE_RAM", "64");
+
+    let resolved = crate::cli::cache_args::from_env().expect("64 MiB is valid");
+    assert_eq!(resolved.capacity_bytes, Some(64 * 1024 * 1024));
 }
 
 /// CLI-set `enabled=false` wins over any env var.
@@ -846,7 +878,7 @@ fn prompt_cache_cli_wins_over_env_for_enabled() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "true");
 
     let mut enabled = false; // CLI said false
-    env_fallback_prompt_cache_enabled(&mut enabled, true /* cli_was_set */).expect("valid setting");
+    env_fallback_prompt_cache_enabled(&mut enabled, true /* cli_was_set */);
     assert!(!enabled, "CLI value must win when cli_was_set=true");
 }
 
@@ -977,7 +1009,7 @@ fn prompt_cache_enabled_unparseable_env_var_ignored() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "maybe-yes");
 
     let mut enabled = true;
-    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("invalid mlxcel bool is ignored");
+    env_fallback_prompt_cache_enabled(&mut enabled, false);
     assert!(
         enabled,
         "unparseable MLXCEL_PROMPT_CACHE_ENABLED must leave original value in place"
@@ -987,17 +1019,109 @@ fn prompt_cache_enabled_unparseable_env_var_ignored() {
 /// `LLAMA_ARG_CACHE_REUSE=0` is a no-op and leaves prompt caching enabled.
 #[test]
 fn prompt_cache_llama_arg_cache_reuse_zero_leaves_cache_enabled() {
-    use super::env_fallback_prompt_cache_enabled;
-
     let _env_guard = env_lock();
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "0");
 
-    let mut enabled = true;
-    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("zero is supported");
-    assert!(
-        enabled,
-        "LLAMA_ARG_CACHE_REUSE=0 must not disable the cache"
+    let resolved = crate::cli::cache_args::from_env().expect("zero is supported");
+    assert_eq!(
+        resolved.prompt_cache_enabled, None,
+        "LLAMA_ARG_CACHE_REUSE=0 must not say anything about whether the cache is enabled"
     );
+}
+
+/// Integration: `into_startup_config` with `enabled=false` produces a
+/// `ServerStartupConfig` whose `prompt_cache.is_enabled()` returns `false`.
+#[test]
+fn b10621_no_cache_prompt_disables_the_store() {
+    let mut input = sample_input();
+    input.cache_compat.no_cache_prompt = true;
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert!(
+        !startup.prompt_cache.is_enabled(),
+        "--no-cache-prompt must reach PromptCacheConfig, not just parse"
+    );
+}
+
+/// `--cache-prompt` asserts the default and cannot outvote mlxcel's own
+/// disable. Between two explicit operator statements the safe reading is the
+/// one that caches nothing.
+#[test]
+fn b10621_cache_prompt_cannot_reenable_over_the_native_disable() {
+    let mut input = sample_input();
+    input.prompt_cache_enabled = false;
+    input.cache_compat.cache_prompt = Some(true);
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert!(!startup.prompt_cache.is_enabled());
+}
+
+/// `--cache-ram` is the same budget as `--prompt-cache-capacity-bytes`, stated
+/// in MiB, and it has to reach the config in bytes.
+#[test]
+fn b10621_cache_ram_sets_the_prompt_cache_budget_in_bytes() {
+    let mut input = sample_input();
+    input.prompt_cache_capacity_bytes = None;
+    input.cache_compat.cache_ram = Some(64);
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert_eq!(startup.prompt_cache.capacity_bytes, 64 * 1024 * 1024);
+}
+
+/// The native spelling is the more specific request and wins, the way
+/// `--prefill-chunk-size` wins over `--batch-size`.
+#[test]
+fn the_native_capacity_flag_wins_over_cache_ram() {
+    let mut input = sample_input();
+    input.prompt_cache_capacity_bytes = Some(7 * 1024 * 1024);
+    input.cache_compat.cache_ram = Some(64);
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert_eq!(startup.prompt_cache.capacity_bytes, 7 * 1024 * 1024);
+}
+
+/// `--cache-ram 0` is upstream's disable sentinel, and it has to disable
+/// rather than fall through to the compiled-in default: `is_enabled()` reads
+/// `capacity_bytes > 0`, so a zero that arrived as "unset" would silently
+/// leave a 2 GiB cache running.
+#[test]
+fn b10621_cache_ram_zero_disables_the_store() {
+    let mut input = sample_input();
+    input.prompt_cache_capacity_bytes = None;
+    input.cache_compat.cache_ram = Some(0);
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert_eq!(startup.prompt_cache.capacity_bytes, 0);
+    assert!(!startup.prompt_cache.is_enabled());
+}
+
+/// `--no-cont-batching` pins the decode width to one sequence. It is not
+/// mlxcel's `--no-batch`, which would also take the scheduler out.
+#[test]
+fn b10621_no_cont_batching_pins_the_decode_width_without_removing_the_scheduler() {
+    let mut input = sample_input();
+    input.max_batch_size = None;
+    input.cache_compat.no_cont_batching = true;
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert_eq!(startup.max_batch_size, Some(1));
+    assert!(
+        !startup.no_batch,
+        "--no-cont-batching must not fall through to the legacy sequential worker"
+    );
+}
+
+/// A positive `--cache-reuse` fails the command line rather than the first
+/// request that would have reused a chunk.
+#[test]
+fn b10621_positive_cache_reuse_fails_startup_configuration() {
+    let mut input = sample_input();
+    input.cache_compat.cache_reuse = Some(256);
+
+    let error = input
+        .into_startup_config()
+        .expect_err("KV-shift chunk reuse is not implemented");
+    assert!(error.to_string().contains("--cache-reuse 256"), "{error}");
 }
 
 /// Integration: `into_startup_config` with `enabled=false` produces a
