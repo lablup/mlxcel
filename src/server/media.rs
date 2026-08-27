@@ -1368,6 +1368,13 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
 /// programmer invariant, so it's surfaced as a normal error to the caller
 /// (same as the downloader's client) rather than panicking the request path.
 async fn http_image_client() -> Result<&'static reqwest::Client> {
+    // `--offline` / `LLAMA_ARG_OFFLINE` promises to prevent network access, so
+    // a remote image, audio, or video URL in a request is refused rather than
+    // fetched (issue #1434). b10621 has no request-path media fetch of its
+    // own, so this adds no divergence; it keeps the flag's promise true for
+    // the whole process instead of only for model resolution.
+    crate::downloader::ensure_online("remote media URLs referenced by a request")?;
+
     // `tokio::sync::OnceCell::get_or_try_init` gives true single-flight
     // semantics: concurrent callers that arrive before the first
     // initialization finishes await that *same* attempt and observe its

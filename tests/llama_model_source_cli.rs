@@ -329,6 +329,127 @@ fn help_never_presents_gguf_as_something_mlxcel_loads() {
     }
 }
 
+// ── llama.cpp short spellings reach the real option ─────────────────────────
+
+#[test]
+fn the_hf_short_spelling_does_not_silently_render_help() {
+    // clap reads `-hf` as the cluster `-h -f`, and `-h` is `--help`, so
+    // without the argv pre-pass `mlxcel-server -hf repo` prints the help text
+    // and exits 0: a llama-server command line that neither runs nor reports
+    // an error. This is the regression test for that.
+    for (bin, lead) in ENTRY_POINTS {
+        let mut args: Vec<&str> = lead.to_vec();
+        args.extend_from_slice(&["-hf", "ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M"]);
+        let out = run(bin, &args, &[]);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success(),
+            "{bin}: -hf must reach the option, not the help screen: {text}"
+        );
+        assert!(
+            text.contains("Q4_K_M"),
+            "{bin}: -hf must reach the --hf-repo diagnostic: {text}"
+        );
+    }
+}
+
+#[test]
+fn every_llama_short_model_source_spelling_reaches_its_option() {
+    for (short, marker) in [
+        ("-hf", "Q4_K_M"),
+        ("-hfr", "Q4_K_M"),
+        ("-mu", "--hf-repo mlx-community/Qwen3-4B-4bit"),
+        ("-dr", "--hf-repo mlx-community/"),
+        ("-hff", "model.safetensors.index.json"),
+    ] {
+        let value = match short {
+            "-hf" | "-hfr" => "ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M",
+            "-mu" => "https://huggingface.co/mlx-community/Qwen3-4B-4bit",
+            "-dr" => "ai/gemma3",
+            _ => "model-Q4_K_M.gguf",
+        };
+        for (bin, lead) in ENTRY_POINTS {
+            let mut args: Vec<&str> = lead.to_vec();
+            if short == "-hff" {
+                args.extend_from_slice(&["--hf-repo", "mlx-community/Qwen3-4B-4bit"]);
+            }
+            args.extend_from_slice(&[short, value]);
+            let out = run(bin, &args, &[]);
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                !out.status.success(),
+                "{bin} {short}: expected failure: {text}"
+            );
+            assert!(
+                text.contains(marker),
+                "{bin} {short} must reach its own diagnostic (looking for {marker:?}): {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_hf_token_short_spelling_is_accepted_as_a_value_taking_option() {
+    // `-hft <token>` must consume its value rather than leaving it as an
+    // unexpected argument. The command still fails (no model source), but on
+    // the model-source diagnostic, not a clap parse error.
+    for (bin, lead) in ENTRY_POINTS {
+        let mut args: Vec<&str> = lead.to_vec();
+        args.extend_from_slice(&["-hft", "hf_example_value"]);
+        let out = run(bin, &args, &[]);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("--hf-repo"),
+            "{bin}: -hft must parse and leave the missing-source diagnostic: {text}"
+        );
+        assert!(
+            !text.contains("unexpected argument"),
+            "{bin}: -hft must not reach clap as an unknown token: {text}"
+        );
+        assert!(
+            !text.contains("hf_example_value") || !text.contains("unexpected"),
+            "{bin}: the token value must not be echoed as an unexpected argument: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_value_that_spells_a_short_option_survives_the_pre_pass() {
+    // `--alias=-hf` names a model `-hf`. The pre-pass must leave that value
+    // alone, so the run fails for want of a model source rather than reporting
+    // an --hf-repo problem. (The space-separated form is rejected by clap
+    // itself, which refuses a hyphen-leading value for this option; the
+    // pre-pass's own value-skipping is unit-tested in
+    // `src/cli/llama_short_flags_tests.rs`.)
+    for (bin, lead) in ENTRY_POINTS {
+        let mut args: Vec<&str> = lead.to_vec();
+        args.push("--alias=-hf");
+        let out = run(bin, &args, &[]);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "{bin}: expected failure: {text}");
+        assert!(
+            text.contains("--model/-m is required"),
+            "{bin}: the alias value must not have been rewritten into --hf-repo: {text}"
+        );
+    }
+}
+
 /// The binaries must exist where the harness looked; a silent skip here would
 /// make every assertion above vacuous.
 #[test]

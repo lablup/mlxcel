@@ -314,6 +314,10 @@ fn resolve_repo_id(repo_id: &str, opts: ModelSourceOptions<'_>) -> Result<PathBu
         token,
         offline,
     } = opts;
+    // The process-wide flag can only ADD offline-ness, never remove it, so a
+    // caller that did not thread `--offline` through its own options cannot
+    // re-enable a fetch the operator forbade (issue #1434).
+    let offline = offline || super::offline_mode();
     let cwd_models = PathBuf::from(LEGACY_MODELS_DIR);
 
     // 2a–2c: reuse an existing COMPLETE snapshot without re-downloading.
@@ -592,15 +596,6 @@ fn revision_with_local_path_error(value: &Path, revision: &str) -> anyhow::Error
     )
 }
 
-/// Build the error for a revision-qualified request whose mlxcel store
-/// destination is already occupied by a snapshot of the same repo
-/// (issue #1113).
-///
-/// The store is keyed on `<owner>/<name>` with no revision component, so the
-/// existing snapshot's revision is unknown and the two cannot coexist. Letting
-/// the download proceed would be worse than failing: `download_repo` treats
-/// same-named, non-zero files as "already present" and skips the fetch, so the
-/// caller would silently receive whichever revision was already there.
 /// Error for an offline (`--offline` / `LLAMA_ARG_OFFLINE`) request whose
 /// repo-id is not present in any reuse location (issue #1434).
 ///
@@ -622,10 +617,23 @@ fn offline_cache_miss_error(
         None => String::new(),
     };
     anyhow!(
-        "offline mode is on and no cached snapshot of '{repo_id}'{at_revision}          was found{store_hint}. mlxcel looked in ./models/, the HuggingFace          cache, and the mlxcel model store, and --offline forbids the          download. Fetch it once with `mlxcel download {repo_id}` (or point -m          at an existing checkpoint directory), then re-run with --offline."
+        "offline mode is on and no cached snapshot of '{repo_id}'{at_revision} \
+         was found{store_hint}. mlxcel looked in ./models/, the HuggingFace \
+         cache, and the mlxcel model store, and --offline forbids the \
+         download. Fetch it once with `mlxcel download {repo_id}` (or point -m \
+         at an existing checkpoint directory), then re-run with --offline."
     )
 }
 
+/// Build the error for a revision-qualified request whose mlxcel store
+/// destination is already occupied by a snapshot of the same repo
+/// (issue #1113).
+///
+/// The store is keyed on `<owner>/<name>` with no revision component, so the
+/// existing snapshot's revision is unknown and the two cannot coexist. Letting
+/// the download proceed would be worse than failing: `download_repo` treats
+/// same-named, non-zero files as "already present" and skips the fetch, so the
+/// caller would silently receive whichever revision was already there.
 fn revision_store_occupied_error(repo_id: &str, revision: &str, dest: &Path) -> anyhow::Error {
     anyhow!(
         "cannot resolve '{repo_id}' at revision '{revision}': the mlxcel store \

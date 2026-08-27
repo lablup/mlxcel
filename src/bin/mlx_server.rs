@@ -24,7 +24,7 @@ use mlxcel::cli::speculative_args::{
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
 use mlxcel::downloader::{
     DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo,
-    resolve_model_source_with_options,
+    resolve_model_source_with_options, set_offline_mode,
 };
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
@@ -1656,7 +1656,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse();
+    // llama.cpp writes its multi-letter options with one dash (`-hf`, `-hft`,
+    // `-mu`); clap reads that as a cluster of one-letter shorts, so `-hf`
+    // parses as `-h -f` and renders `--help` with exit status 0. Rewrite those
+    // exact tokens to their long spellings before clap sees them, so a
+    // llama-server command line reaches the real option (issue #1434).
+    let cli = {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let args =
+            mlxcel::cli::llama_short_flags::expand_llama_short_options(&mut cmd, raw_args, 1);
+        Cli::parse_from(args)
+    };
 
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.
@@ -1827,6 +1838,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // else. `--offline` and `--hf-token` then shape how the reference is
     // resolved.
     env_fallback_offline(&mut args.offline);
+    // One process-wide flag, as in b10621, so the fetch sites reached from
+    // inside a loader (the moondream starmie tokenizer, request-path media
+    // URLs) honour --offline too, not just the `-m` resolver.
+    set_offline_mode(args.offline);
     let source = resolve_llama_model_source(&LlamaModelSourceArgs {
         model: args.model.clone(),
         hf_repo: args.hf_repo.clone(),
@@ -1845,7 +1860,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
             token: args.hf_token.as_deref(),
             offline: args.offline,
         },
-    )?;
+    )
+    // Name the flag the operator actually typed. Without this a failure to
+    // resolve an `--hf-repo` value reports it as a `-m` problem.
+    .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?;
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.

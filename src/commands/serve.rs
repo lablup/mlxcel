@@ -22,7 +22,7 @@
 use anyhow::Context;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options};
+use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options, set_offline_mode};
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
 use mlxcel::server::{LlamaModelSourceArgs, resolve_llama_model_source, superseded_model_notice};
 use mlxcel::server::{
@@ -72,6 +72,10 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // rather than accepted and silently resolved to something else.
     // `--offline` / `--hf-token` then shape how the reference resolves.
     env_fallback_offline(&mut args.offline);
+    // One process-wide flag, as in b10621, so the fetch sites reached from
+    // inside a loader (the moondream starmie tokenizer, request-path media
+    // URLs) honour --offline too, not just the `-m` resolver.
+    set_offline_mode(args.offline);
     let source = resolve_llama_model_source(&LlamaModelSourceArgs {
         model: args.model.clone(),
         hf_repo: args.hf_repo.clone(),
@@ -90,7 +94,10 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
             token: args.hf_token.as_deref(),
             offline: args.offline,
         },
-    )?;
+    )
+    // Name the flag the operator actually typed. Without this a failure to
+    // resolve an `--hf-repo` value reports it as a `-m` problem.
+    .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?;
     args.model = Some(model_path.clone());
 
     // Issue #56: preflight memory check before the server begins

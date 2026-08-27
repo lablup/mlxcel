@@ -15,6 +15,7 @@
 //! Unit tests for the b10621 model-source flag translation (issue #1434).
 
 use super::*;
+use std::path::Path;
 
 fn args() -> LlamaModelSourceArgs {
     LlamaModelSourceArgs::default()
@@ -199,6 +200,19 @@ fn alias_list_is_split_stripped_and_deduplicated() {
 }
 
 #[test]
+fn the_alias_list_is_sorted_like_b10621s_set() {
+    // b10621 inserts each alias into a `std::set<std::string>` and serves the
+    // set's first element, which is the lexicographically smallest entry, not
+    // the one typed first. `--alias zebra,apple` serves `apple` upstream, so
+    // it must serve `apple` here too.
+    assert_eq!(
+        parse_model_aliases("zebra,apple,Mango"),
+        vec!["Mango".to_owned(), "apple".to_owned(), "zebra".to_owned()],
+        "aliases must come back in the same order b10621's std::set holds them"
+    );
+}
+
+#[test]
 fn a_single_alias_is_unchanged() {
     assert_eq!(parse_model_aliases("llama-remote"), vec!["llama-remote"]);
 }
@@ -217,6 +231,114 @@ fn an_alias_value_with_no_content_yields_no_aliases() {
 fn the_first_entry_is_the_served_id() {
     let aliases = parse_model_aliases("primary,secondary");
     assert_eq!(aliases.first().map(String::as_str), Some("primary"));
+    // And that first entry is the smallest, not the one typed first.
+    let reversed = parse_model_aliases("secondary,primary");
+    assert_eq!(reversed.first().map(String::as_str), Some("primary"));
+}
+
+// ── diagnostics are readable ────────────────────────────────────────────────
+
+#[test]
+fn no_diagnostic_carries_a_run_of_collapsed_indentation() {
+    // A multi-line string literal whose `\` continuations are lost keeps its
+    // source indentation as literal spaces, and `cargo fmt` will not reflow a
+    // string literal, so nothing else in the gate notices. Every assertion in
+    // this file matches short fragments, which straddle none of the gaps.
+    let mut messages: Vec<String> = Vec::new();
+    for args in [
+        LlamaModelSourceArgs {
+            docker_repo: Some("ai/gemma3".to_owned()),
+            ..args()
+        },
+        LlamaModelSourceArgs {
+            model_url: Some("https://huggingface.co/owner/name".to_owned()),
+            ..args()
+        },
+        LlamaModelSourceArgs {
+            model_url: Some("https://example.com/model.gguf".to_owned()),
+            ..args()
+        },
+        LlamaModelSourceArgs {
+            hf_file: Some("model.gguf".to_owned()),
+            ..args()
+        },
+        LlamaModelSourceArgs::default(),
+    ] {
+        messages.push(format!(
+            "{}",
+            resolve_llama_model_source(&args).expect_err("each case is an error")
+        ));
+    }
+    messages.push(format!(
+        "{}",
+        parse_hf_repo("owner/name:Q4_K_M").expect_err("quant suffix")
+    ));
+    messages.push(format!(
+        "{}",
+        parse_hf_repo("not-a-repo").expect_err("bad shape")
+    ));
+    messages.push(superseded_model_notice(
+        Path::new("owner/name"),
+        Path::new("models/local"),
+    ));
+
+    for message in messages {
+        for line in message.lines() {
+            assert!(
+                !line.trim().contains("   "),
+                "diagnostic line carries collapsed indentation: {line:?}"
+            );
+        }
+    }
+}
+
+// ── credentials are never echoed ────────────────────────────────────────────
+
+#[test]
+fn a_model_url_credential_is_redacted_from_the_diagnostic() {
+    let err = resolve_llama_model_source(&LlamaModelSourceArgs {
+        model_url: Some("https://alice:hunter2@example.com/model.gguf".to_owned()),
+        ..args()
+    })
+    .expect_err("--model-url must be rejected");
+    let text = format!("{err}");
+    assert!(
+        !text.contains("hunter2") && !text.contains("alice"),
+        "the userinfo component must not reach the diagnostic: {text}"
+    );
+    assert!(
+        text.contains("example.com/model.gguf"),
+        "the rest of the URL must still be shown: {text}"
+    );
+}
+
+#[test]
+fn an_hf_repo_credential_is_redacted_from_the_diagnostic() {
+    let err = parse_hf_repo("https://alice:hunter2@huggingface.co/owner/name")
+        .expect_err("a URL is not a repository identifier");
+    let text = format!("{err}");
+    assert!(
+        !text.contains("hunter2"),
+        "the userinfo component must not reach the diagnostic: {text}"
+    );
+    assert!(
+        text.contains("<owner>/<name>"),
+        "a URL must get the shape diagnostic, not the quant one: {text}"
+    );
+    assert!(
+        !text.contains("quantization"),
+        "a colon outside the final segment is not a quant request: {text}"
+    );
+}
+
+#[test]
+fn a_windows_path_is_reported_as_a_bad_identifier_not_a_quant_request() {
+    let err = parse_hf_repo("C:\\models\\foo").expect_err("not a repository identifier");
+    let text = format!("{err}");
+    assert!(
+        text.contains("<owner>/<name>") && !text.contains("quantization"),
+        "got: {text}"
+    );
 }
 
 // ── LLAMA_ARG_OFFLINE (issue #1434) ─────────────────────────────────────────

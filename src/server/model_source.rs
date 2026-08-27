@@ -47,11 +47,12 @@
 //! The compatibility boundary these rules implement is recorded in
 //! `compat/llama-server/b10621/model-source.json`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
-use crate::downloader::huggingface_repo_from_url;
+use crate::downloader::{huggingface_repo_from_url, redact_url_userinfo};
 
 /// The b10621 model-source flags, as parsed from either server binary.
 #[derive(Debug, Default, Clone)]
@@ -73,7 +74,9 @@ pub struct LlamaModelSourceArgs {
 pub struct ResolvedModelSource {
     /// The value to hand to [`crate::downloader::resolve_model_source_with_options`].
     pub reference: PathBuf,
-    /// Name of the flag `reference` came from, for logging.
+    /// The flag `reference` came from (`"--model"` or `"--hf-repo"`), so a
+    /// caller reporting a resolution failure can name the flag the operator
+    /// actually typed rather than always saying `-m`.
     pub origin: &'static str,
     /// A `-m` value that `--hf-repo` took precedence over, if any.
     pub superseded_model: Option<PathBuf>,
@@ -142,22 +145,31 @@ pub fn resolve_llama_model_source(args: &LlamaModelSourceArgs) -> Result<Resolve
 /// not a plain `owner/name` pair.
 pub fn parse_hf_repo(value: &str) -> Result<String> {
     let trimmed = value.trim();
-    if let Some((repo, quant)) = trimmed.split_once(':') {
+    let mut parts = trimmed.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let shape_ok = !owner.is_empty() && !name.is_empty() && parts.next().is_none();
+
+    // The `:quant` message is only correct when the value really is
+    // `<owner>/<name>:<quant>`. b10621 splits the tag off the LAST segment for
+    // the same reason: a colon anywhere else (a pasted URL's `https:`, a
+    // Windows drive letter) is a malformed identifier, not a quantization
+    // request, and blaming the quant would describe something the user never
+    // asked for.
+    if shape_ok && let Some((repo_name, quant)) = name.split_once(':') {
         return Err(anyhow!(
             "--hf-repo '{trimmed}' selects the GGUF quantization '{quant}'. \
              mlxcel loads MLX SafeTensors snapshots, whose quantization is part \
-             of the repository name, so there is no file inside '{repo}' for \
-             ':{quant}' to select.\n\
+             of the repository name, so there is no file inside \
+             '{owner}/{repo_name}' for ':{quant}' to select.\n\
              Name the MLX repository directly, for example:\n  \
              --hf-repo mlx-community/Qwen3-4B-4bit"
         ));
     }
-    let mut parts = trimmed.split('/');
-    let owner = parts.next().unwrap_or_default();
-    let name = parts.next().unwrap_or_default();
-    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+    if !shape_ok || owner.contains(':') {
+        let shown = crate::downloader::redact_url_userinfo(trimmed);
         return Err(anyhow!(
-            "--hf-repo '{trimmed}' is not a HuggingFace repository identifier. \
+            "--hf-repo '{shown}' is not a HuggingFace repository identifier. \
              Expected exactly '<owner>/<name>', for example:\n  \
              --hf-repo mlx-community/Qwen3-4B-4bit"
         ));
@@ -165,28 +177,31 @@ pub fn parse_hf_repo(value: &str) -> Result<String> {
     Ok(format!("{owner}/{name}"))
 }
 
-/// Split a b10621 `--alias` value into its aliases.
+/// Split a b10621 `--alias` value into its aliases, in b10621's own order.
 ///
-/// b10621 takes a comma-separated list and keeps every entry as an API-visible
-/// name for the model. mlxcel serves one model under one id, so the first
-/// non-empty entry becomes the served id and the rest are carried for the
-/// `/v1/models` `aliases` array (issue #1438). Entries are stripped of
-/// surrounding whitespace and empty entries are dropped, matching
-/// `string_strip` in b10621's `--alias` handler.
+/// b10621 splits on commas, strips each entry, drops empty ones, and inserts
+/// the rest into a `std::set<std::string>`
+/// (<https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp>).
+/// The served model name is then the set's first element, which for a
+/// `std::set<std::string>` is the **lexicographically smallest** entry, not
+/// the one typed first. `--alias zebra,apple` therefore serves `apple`.
+///
+/// This returns the same sorted, de-duplicated sequence, so the caller can
+/// take `.first()` for the served id and hand the whole list to the
+/// `/v1/models` `aliases` array (issue #1438) without re-deriving either.
 ///
 /// Returns an empty vector when the value contains no non-empty entry, which
 /// the caller treats exactly like an absent `--alias`.
 #[must_use]
 pub fn parse_model_aliases(value: &str) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
+    let mut aliases: BTreeSet<String> = BTreeSet::new();
     for part in value.split(',') {
         let trimmed = part.trim();
-        if trimmed.is_empty() || seen.iter().any(|existing| existing == trimmed) {
-            continue;
+        if !trimmed.is_empty() {
+            aliases.insert(trimmed.to_owned());
         }
-        seen.push(trimmed.to_owned());
     }
-    seen
+    aliases.into_iter().collect()
 }
 
 /// Environment variable bound to `--offline` by b10621.
@@ -241,7 +256,11 @@ fn docker_repo_error(value: &str) -> anyhow::Error {
 }
 
 fn model_url_error(value: &str) -> anyhow::Error {
-    match huggingface_repo_from_url(value) {
+    let repo = huggingface_repo_from_url(value);
+    // Never echo an embedded credential: `LLAMA_ARG_MODEL_URL` is routinely
+    // inherited, and llama.cpp accepts `https://user:token@host/model.gguf`.
+    let value = redact_url_userinfo(value);
+    match repo {
         Some(repo) => anyhow!(
             "--model-url '{value}' is not supported. mlxcel resolves models by \
              HuggingFace repository identifier through the mlxcel model store \

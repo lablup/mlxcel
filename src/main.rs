@@ -2345,7 +2345,27 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse();
+    // llama.cpp writes its multi-letter options with one dash (`-hf`, `-hft`,
+    // `-mu`); clap reads that as a cluster of one-letter shorts, so `-hf`
+    // parses as `-h -f` and renders `--help` with exit status 0. Rewrite those
+    // exact tokens to their long spellings before clap sees them, so a
+    // llama-server command line reaches the real option (issue #1434). Scoped
+    // to `mlxcel serve`, which is the drop-in surface; the other subcommands
+    // have their own vocabulary and are not llama-server compatible.
+    let cli = if raw_args.get(1).is_some_and(|a| a == "serve") {
+        use clap::CommandFactory;
+        let mut cli_cmd = Cli::command();
+        cli_cmd.build();
+        let mut serve_cmd = cli_cmd
+            .find_subcommand("serve")
+            .expect("the `serve` subcommand is statically defined")
+            .clone();
+        let args =
+            mlxcel::cli::llama_short_flags::expand_llama_short_options(&mut serve_cmd, raw_args, 2);
+        Cli::parse_from(args)
+    } else {
+        Cli::parse()
+    };
 
     init_cli_tracing(&cli.command);
 

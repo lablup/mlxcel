@@ -38,6 +38,7 @@
 //! The b10621 side of the boundary is recorded in
 //! `compat/llama-server/b10621/model-source.json`.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -75,6 +76,13 @@ pub fn ensure_mlx_model_reference(value: &Path) -> Result<()> {
     let Some(text) = value.to_str() else {
         return Ok(());
     };
+    // A GGUF artifact is a file, never a directory. Nothing else in this gate
+    // touches the filesystem, but skipping this one probe would reject
+    // `-m models/mymodel.gguf` when that is a real MLX checkpoint *directory*
+    // someone happened to name that way, which used to load.
+    if value.is_dir() {
+        return Ok(());
+    }
     match classify_model_reference(text) {
         None => Ok(()),
         Some(kind) => Err(unsupported_reference_error(text, kind)),
@@ -84,21 +92,21 @@ pub fn ensure_mlx_model_reference(value: &Path) -> Result<()> {
 /// Classify `value` as an unsupported reference shape, or `None` when mlxcel
 /// may attempt to resolve it.
 ///
-/// Exposed for the server-side flag translation in
-/// [`crate::server::model_source`], which reports `--model-url` and
-/// `--docker-repo` against their own flag name rather than through `-m`.
+/// [`ensure_mlx_model_reference`] is the gate; this is the classification
+/// behind it, exposed so a caller that wants to branch on the shape (rather
+/// than take the gate's diagnostic) does not re-derive it. Purely syntactic:
+/// unlike the gate it never touches the filesystem, so a directory named
+/// `foo.gguf` classifies as [`UnsupportedModelReference::Gguf`] here.
 #[must_use]
 pub fn classify_model_reference(value: &str) -> Option<UnsupportedModelReference> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if let Some(scheme_end) = url_scheme_end(trimmed) {
-        let scheme = trimmed[..scheme_end].to_ascii_lowercase();
-        // A Windows drive letter (`C:\models\…`) is not a URL. `url_scheme_end`
-        // already requires `://`, which a drive path never has, so reaching
-        // here means a real scheme.
-        debug_assert!(!scheme.is_empty());
+    // A Windows drive letter (`C:\models\…`) is not a URL: `url_scheme_end`
+    // requires `://`, which a drive path never has, so a match here is a real
+    // scheme.
+    if url_scheme_end(trimmed).is_some() {
         if huggingface_repo_from_url(trimmed).is_some() {
             return Some(UnsupportedModelReference::HuggingFaceUrl);
         }
@@ -224,9 +232,39 @@ fn file_name(value: &str) -> Option<&str> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// Replace a URL's `userinfo` component with `***` so a diagnostic never
+/// echoes an embedded credential.
+///
+/// `LLAMA_ARG_MODEL_URL=https://user:token@host/model.gguf` inherited from a
+/// llama.cpp deployment would otherwise print the token to stderr, and into
+/// whatever captures it, at startup. Non-URL values are returned unchanged.
+#[must_use]
+pub fn redact_url_userinfo(value: &str) -> Cow<'_, str> {
+    let Some(scheme_end) = url_scheme_end(value) else {
+        return Cow::Borrowed(value);
+    };
+    let authority_start = scheme_end + "://".len();
+    let rest = &value[authority_start..];
+    // The authority ends at the first `/`, `?` or `#`; userinfo is what sits
+    // before the last `@` inside it.
+    let authority_end = rest
+        .find(['/', '?', '#'])
+        .map_or(rest.len(), |i| i + authority_start);
+    let authority = &value[authority_start..authority_end];
+    match authority.rfind('@') {
+        None => Cow::Borrowed(value),
+        Some(at) => Cow::Owned(format!(
+            "{}***@{}",
+            &value[..authority_start],
+            &value[authority_start + at + 1..]
+        )),
+    }
+}
+
 /// Build the actionable diagnostic for an unsupported reference.
 fn unsupported_reference_error(value: &str, kind: UnsupportedModelReference) -> anyhow::Error {
     let example = mlx_replacement_example(value, kind);
+    let value = redact_url_userinfo(value);
     match kind {
         UnsupportedModelReference::Gguf => anyhow!(
             "'{value}' is a GGUF file. mlxcel is an MLX runtime with no GGML \

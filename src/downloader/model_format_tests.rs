@@ -235,3 +235,88 @@ fn quant_tags_and_split_suffixes_are_stripped_from_the_suggested_name() {
         );
     }
 }
+
+// ── credential redaction (issue #1434) ──────────────────────────────────────
+
+#[test]
+fn a_urls_userinfo_is_redacted_before_it_reaches_a_diagnostic() {
+    for (value, secret) in [
+        ("https://alice:hunter2@example.com/model.gguf", "hunter2"),
+        ("https://token@hf.co/owner/name", "token@"),
+        ("ftp://user:pw@host/model", "pw"),
+    ] {
+        let redacted = redact_url_userinfo(value);
+        assert!(
+            !redacted.contains(secret),
+            "{value} still leaks {secret}: {redacted}"
+        );
+        assert!(redacted.contains("***@"), "{value} -> {redacted}");
+    }
+}
+
+#[test]
+fn redaction_leaves_a_credential_free_value_untouched() {
+    for value in [
+        "https://huggingface.co/owner/name",
+        "models/Qwen3-4B-4bit",
+        "owner/name",
+        "",
+        // A `@` in the path is not userinfo.
+        "https://example.com/a@b/model.gguf",
+    ] {
+        assert_eq!(
+            redact_url_userinfo(value),
+            value,
+            "{value} must be unchanged"
+        );
+    }
+}
+
+#[test]
+fn the_url_diagnostic_does_not_echo_a_credential() {
+    let err = ensure_mlx_model_reference(Path::new("https://alice:hunter2@example.com/model.gguf"))
+        .expect_err("a URL must be rejected");
+    let text = format!("{err}");
+    assert!(!text.contains("hunter2"), "credential leaked: {text}");
+}
+
+// ── the gate never touches a real directory ─────────────────────────────────
+
+#[test]
+fn a_directory_named_like_a_gguf_file_still_resolves() {
+    // The gate is otherwise purely syntactic and runs before the resolver's
+    // existing-path branch, so without the is_dir() guard an MLX checkpoint
+    // directory someone named `mymodel.gguf` would stop loading.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("mymodel.gguf");
+    std::fs::create_dir_all(&dir).unwrap();
+    ensure_mlx_model_reference(&dir).expect("a real directory is never a GGUF artifact");
+}
+
+#[test]
+fn a_real_gguf_file_is_still_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("mymodel.gguf");
+    std::fs::write(&file, b"GGUF").unwrap();
+    ensure_mlx_model_reference(&file).expect_err("a real GGUF file must be rejected");
+}
+
+// ── diagnostics are readable ────────────────────────────────────────────────
+
+#[test]
+fn no_format_diagnostic_carries_a_run_of_collapsed_indentation() {
+    for value in [
+        "model.gguf",
+        "model-00001-of-00003.gguf",
+        "https://huggingface.co/owner/name",
+        "docker://ai/gemma3",
+    ] {
+        let err = ensure_mlx_model_reference(Path::new(value)).expect_err("rejected");
+        for line in format!("{err}").lines() {
+            assert!(
+                !line.trim().contains("   "),
+                "diagnostic line carries collapsed indentation: {line:?}"
+            );
+        }
+    }
+}
