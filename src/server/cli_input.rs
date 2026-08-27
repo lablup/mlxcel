@@ -1493,23 +1493,41 @@ pub fn resolve_compat_toggle(enabled: bool, disabled: bool) -> bool {
 /// [`resolve_server_default_kwargs`]'s "no server-default kwargs" case.
 fn apply_reasoning_template_kwargs(
     base: Option<crate::server::chat_template_kwargs::ChatTemplateKwargs>,
-    from_flags: &[(String, serde_json::Value)],
+    from_flags: &[(String, Option<serde_json::Value>)],
 ) -> Option<crate::server::chat_template_kwargs::ChatTemplateKwargs> {
     if from_flags.is_empty() {
         return base;
     }
     let mut merged = base.unwrap_or_default();
     for (key, value) in from_flags {
-        if let Some(existing) = merged.get(key)
-            && existing != value
-        {
-            tracing::warn!(
-                "--chat-template-kwargs sets {key}={existing} but a dedicated reasoning flag \
-                 sets {key}={value}; the flag wins (llama-server deprecates setting {key} \
-                 through --chat-template-kwargs)"
-            );
+        let existing = merged.get(key).cloned();
+        match value {
+            Some(value) => {
+                if let Some(existing) = existing.as_ref()
+                    && existing != value
+                {
+                    tracing::warn!(
+                        "--chat-template-kwargs sets {key}={existing} but a dedicated reasoning \
+                         flag sets {key}={value}; the flag wins (llama-server deprecates setting \
+                         {key} through --chat-template-kwargs)"
+                    );
+                }
+                merged.set(key, value.clone());
+            }
+            None => {
+                // `--reasoning-effort default` ERASES the key, as upstream's
+                // own handler does, so an earlier `--chat-template-kwargs`
+                // entry for it does not survive. A template testing
+                // `reasoning_effort is defined` must see it undefined.
+                if let Some(existing) = existing.as_ref() {
+                    tracing::warn!(
+                        "--chat-template-kwargs sets {key}={existing} but --reasoning-effort \
+                         default asks for the template's own default; the key is removed"
+                    );
+                }
+                merged.remove(key);
+            }
         }
-        merged.set(key, value.clone());
     }
     Some(merged)
 }

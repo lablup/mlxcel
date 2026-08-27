@@ -24,7 +24,7 @@ fn resolve(args: ChatCompatArgs) -> ChatCompatResolution {
     args.resolve().expect("must resolve")
 }
 
-fn kwargs(args: ChatCompatArgs) -> Vec<(String, Value)> {
+fn kwargs(args: ChatCompatArgs) -> Vec<(String, Option<Value>)> {
     resolve(args).template_kwargs
 }
 
@@ -88,7 +88,7 @@ fn reasoning_on_and_off_write_the_enable_thinking_kwarg() {
                 reasoning: Some(value.to_owned()),
                 ..args()
             }),
-            vec![("enable_thinking".to_owned(), Value::Bool(true))],
+            vec![("enable_thinking".to_owned(), Some(Value::Bool(true)))],
             "--reasoning {value}"
         );
     }
@@ -98,7 +98,7 @@ fn reasoning_on_and_off_write_the_enable_thinking_kwarg() {
                 reasoning: Some(value.to_owned()),
                 ..args()
             }),
-            vec![("enable_thinking".to_owned(), Value::Bool(false))],
+            vec![("enable_thinking".to_owned(), Some(Value::Bool(false)))],
             "--reasoning {value}"
         );
     }
@@ -140,20 +140,23 @@ fn a_reasoning_effort_level_becomes_the_template_kwarg() {
         }),
         vec![(
             "reasoning_effort".to_owned(),
-            Value::String("xhigh".to_owned())
+            Some(Value::String("xhigh".to_owned()))
         )]
     );
 }
 
 #[test]
 fn the_literal_default_level_erases_the_kwarg_as_upstream_does() {
-    assert!(
+    // `None` is an erase, not "no opinion": upstream's handler calls
+    // `default_template_kwargs.erase("reasoning_effort")`, so an earlier
+    // `--chat-template-kwargs '{"reasoning_effort":"high"}'` must not survive.
+    assert_eq!(
         kwargs(ChatCompatArgs {
             reasoning_effort: Some("default".to_owned()),
             ..args()
-        })
-        .is_empty(),
-        "`default` keeps the template's own default rather than setting a level"
+        }),
+        vec![("reasoning_effort".to_owned(), None)],
+        "`default` must erase the key, not merely contribute nothing"
     );
 }
 
@@ -171,7 +174,7 @@ fn the_level_is_passed_through_without_translation() {
             }),
             vec![(
                 "reasoning_effort".to_owned(),
-                Value::String(level.to_owned())
+                Some(Value::String(level.to_owned()))
             )],
             "{level} must reach the template verbatim"
         );
@@ -187,14 +190,14 @@ fn both_reasoning_preserve_halves_write_the_kwarg() {
             reasoning_preserve: true,
             ..args()
         }),
-        vec![("preserve_reasoning".to_owned(), Value::Bool(true))]
+        vec![("preserve_reasoning".to_owned(), Some(Value::Bool(true)))]
     );
     assert_eq!(
         kwargs(ChatCompatArgs {
             no_reasoning_preserve: true,
             ..args()
         }),
-        vec![("preserve_reasoning".to_owned(), Value::Bool(false))]
+        vec![("preserve_reasoning".to_owned(), Some(Value::Bool(false)))]
     );
 }
 
@@ -209,12 +212,12 @@ fn every_reasoning_flag_contributes_to_one_kwarg_map() {
     assert_eq!(
         resolved.template_kwargs,
         vec![
-            ("enable_thinking".to_owned(), Value::Bool(false)),
+            ("enable_thinking".to_owned(), Some(Value::Bool(false))),
             (
                 "reasoning_effort".to_owned(),
-                Value::String("low".to_owned())
+                Some(Value::String("low".to_owned()))
             ),
-            ("preserve_reasoning".to_owned(), Value::Bool(false)),
+            ("preserve_reasoning".to_owned(), Some(Value::Bool(false))),
         ]
     );
 }

@@ -168,6 +168,18 @@ impl ChatTemplateKwargs {
         self.values.insert(key.to_string(), value);
     }
 
+    /// Remove `key`, returning its previous value.
+    ///
+    /// The counterpart to [`Self::set`] for the one b10621 handler that
+    /// *erases* a kwarg rather than writing one: `--reasoning-effort default`
+    /// calls `default_template_kwargs.erase("reasoning_effort")` so the
+    /// template keeps its own default (issue #1447). Removing rather than
+    /// setting a sentinel matters, because a template that tests
+    /// `reasoning_effort is defined` must see it undefined.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        self.values.remove(key)
+    }
+
     /// Merge `other` into `self` with "other wins per-key".
     ///
     /// Unrelated keys in `self` are preserved; keys present in both are

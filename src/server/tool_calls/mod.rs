@@ -28,8 +28,8 @@ pub mod types;
 
 pub use atem::render_muse_channels_for_display;
 pub use parser::{
-    clean_structural_tokens, clean_structural_tokens_keeping_thinking, generate_tool_call_id,
-    parse_tool_calls,
+    clean_structural_tokens, content_with_thinking_block, generate_tool_call_id, parse_tool_calls,
+    thinking_marker_pair,
 };
 pub use types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 

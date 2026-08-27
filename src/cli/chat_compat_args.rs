@@ -199,9 +199,14 @@ pub struct ChatCompatResolution {
     /// `--reasoning-budget-message`, injected when the budget is exhausted.
     pub reasoning_budget_message: Option<String>,
     /// Chat-template kwargs the reasoning flags contribute, in b10621's own
-    /// key vocabulary. Applied *under* an explicit `--chat-template-kwargs`
-    /// entry of the same name and under a per-request kwarg.
-    pub template_kwargs: Vec<(String, Value)>,
+    /// key vocabulary, applied over `--chat-template-kwargs` and under a
+    /// per-request kwarg.
+    ///
+    /// `None` is an **erase**, not "no opinion": `--reasoning-effort default`
+    /// removes the key rather than setting a level, exactly as upstream's
+    /// handler calls `default_template_kwargs.erase("reasoning_effort")`. A
+    /// template testing `reasoning_effort is defined` must see it undefined.
+    pub template_kwargs: Vec<(String, Option<Value>)>,
 }
 
 /// A value outside the option's accepted set.
@@ -295,14 +300,14 @@ impl ChatCompatArgs {
         }
 
         // ── reasoning ───────────────────────────────────────────────────
-        let mut template_kwargs: Vec<(String, Value)> = Vec::new();
+        let mut template_kwargs: Vec<(String, Option<Value>)> = Vec::new();
         if let Some(raw) = non_empty(self.reasoning.as_deref()) {
             // Upstream: truthy sets `enable_thinking=true`, falsey sets
             // `false`, `auto` writes nothing, anything else throws.
             if TRUTHY.contains(&raw) {
-                template_kwargs.push(("enable_thinking".to_owned(), Value::Bool(true)));
+                template_kwargs.push(("enable_thinking".to_owned(), Some(Value::Bool(true))));
             } else if FALSEY.contains(&raw) {
-                template_kwargs.push(("enable_thinking".to_owned(), Value::Bool(false)));
+                template_kwargs.push(("enable_thinking".to_owned(), Some(Value::Bool(false))));
             } else if !matches!(raw, "auto" | "-1") {
                 return Err(ChatCompatError {
                     option: "--reasoning",
@@ -310,18 +315,21 @@ impl ChatCompatArgs {
                 });
             }
         }
-        if let Some(raw) = non_empty(self.reasoning_effort.as_deref())
-            && raw != "default"
-        {
+        if let Some(raw) = non_empty(self.reasoning_effort.as_deref()) {
             // Upstream stores the JSON-dumped value, so a template reading
-            // `reasoning_effort` sees a string. `default` erases the key,
-            // which here means contributing nothing.
-            template_kwargs.push(("reasoning_effort".to_owned(), Value::String(raw.to_owned())));
+            // `reasoning_effort` sees a string, and the literal `default`
+            // ERASES the key rather than setting a level. Erasing matters:
+            // `--chat-template-kwargs '{"reasoning_effort":"high"}'
+            // --reasoning-effort default` must end with no key at all.
+            template_kwargs.push((
+                "reasoning_effort".to_owned(),
+                (raw != "default").then(|| Value::String(raw.to_owned())),
+            ));
         }
         if self.reasoning_preserve || self.no_reasoning_preserve {
             template_kwargs.push((
                 "preserve_reasoning".to_owned(),
-                Value::Bool(self.reasoning_preserve),
+                Some(Value::Bool(self.reasoning_preserve)),
             ));
         }
 

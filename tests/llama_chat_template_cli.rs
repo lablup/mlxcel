@@ -237,6 +237,35 @@ fn actual_template_text_is_still_accepted() {
     }
 }
 
+// ── llama.cpp short spellings reach the real option ─────────────────────────
+
+#[test]
+fn every_b10621_chat_short_spelling_reaches_its_own_option() {
+    // clap reads a single dash as a cluster of one-letter shorts, so `-sp`
+    // would parse as `-s p` and produce a complaint about `--seed` rather than
+    // the `--special` diagnostic. The argv pre-pass rewrites these tokens
+    // before clap sees them.
+    for (invocation, marker) in [
+        (&["-rea", "maybe"][..], "on, off, auto"),
+        (&["-sp"][..], "special tokens"),
+        (&["-e"][..], "--model/-m is required"),
+    ] {
+        for entry in ENTRY_POINTS {
+            let text = expect_failure(entry, invocation);
+            assert!(
+                !text.contains("unexpected argument"),
+                "{} {invocation:?}: must not reach clap as an unknown token: {text}",
+                entry.0
+            );
+            assert!(
+                text.contains(marker),
+                "{} {invocation:?}: must reach its own option (looking for {marker:?}): {text}",
+                entry.0
+            );
+        }
+    }
+}
+
 // ── environment bindings ────────────────────────────────────────────────────
 
 #[test]

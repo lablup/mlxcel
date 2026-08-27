@@ -918,7 +918,7 @@ fn validate_muse_glimmer_unsupported_startup(startup: &ServerStartupConfig) -> R
     Ok(())
 }
 
-/// The names b10621 accepts on `--chat-template` in place of a Jinja template.
+/// The 54 names b10621 accepts on `--chat-template` in place of a Jinja template.
 ///
 /// Its `--chat-template` takes either template *text* or one of these built-in
 /// identifiers, and the help lists them. mlxcel has no built-in template

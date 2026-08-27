@@ -15,7 +15,10 @@
 //! Where a model's thoughts end up in a chat response (issue #1447).
 //!
 //! b10621's `--reasoning-format` (`LLAMA_ARG_THINK`) chooses between three
-//! placements, and the per-request `reasoning_format` field overrides it:
+//! placements. Upstream also exposes a per-request `reasoning_format` field on
+//! its native `/completion` schema; mlxcel's `/completion` is a raw-prompt
+//! endpoint with nothing for it to configure, so this is a server-wide setting
+//! here and the field is `not_applicable` in the manifest.
 //!
 //! | Value | `message.content` | `message.reasoning_content` |
 //! |---|---|---|
@@ -35,6 +38,14 @@
 //! mlxcel's reasoning split is the same `<think>` / `<|channel>` marker set for
 //! every family it supports, so there is nothing else for it to detect. The
 //! entry in `compat/llama-server/b10621/chat-templates.json` records that.
+//!
+//! The table above is b10621's `--reasoning-format` help text. Upstream also
+//! sets `chat_parser_params.reasoning_in_content = stream && legacy` in
+//! `tools/server/server-schema.cpp`, whose consumer (`common/chat-parser.cpp`)
+//! is outside the pinned source set, so whether a *streamed* `deepseek-legacy`
+//! response carries the thoughts in one field or both could not be verified
+//! from the reference. mlxcel implements the documented shape (both) rather
+//! than an inference, and the manifest entry records the open question.
 
 use std::fmt;
 
