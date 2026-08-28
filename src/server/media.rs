@@ -29,6 +29,8 @@ use std::{
 
 use crate::multimodal::video::{TempFile, VideoSource, is_video_file};
 
+use super::media_net;
+use super::media_root;
 use super::types::ChatCompletionRequest;
 use super::types::request::{InputAudio, VideoUrl};
 
@@ -305,6 +307,82 @@ impl ImageInputLimits {
         limits.max_alloc = Some(self.max_decode_alloc_bytes);
         limits
     }
+}
+
+/// Set by b10621's `--no-mmproj` / `--no-mmproj-auto` (issue #1451).
+///
+/// Upstream's flag leaves the multimodal projector unloaded and every media
+/// part in a request is then refused. mlxcel cannot leave the projector
+/// unloaded, because it is inside the checkpoint, so it declines the same
+/// requests instead. Process-wide, like the image limits below, because it is
+/// an operator setting that predates any request.
+static MEDIA_ADMISSION_DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record whether the operator disabled multimodal admission.
+pub fn configure_media_admission(disabled: bool) {
+    MEDIA_ADMISSION_DISABLED.store(disabled, Ordering::Relaxed);
+}
+
+/// True when `--no-mmproj` / `--no-mmproj-auto` was passed.
+#[must_use]
+pub fn media_admission_disabled() -> bool {
+    MEDIA_ADMISSION_DISABLED.load(Ordering::Relaxed)
+}
+
+/// The b10621 refusal for a media part the loaded server will not consume.
+///
+/// Upstream's wording is `"<kind> input is not supported - hint: if this is
+/// unexpected, you may need to provide the mmproj"`. The leading clause is kept
+/// verbatim, because that is what a llama-server client matches on; the hint is
+/// replaced, because mlxcel has no separate projector file to provide and
+/// telling an operator to attach a GGUF `mmproj` to an MLX checkpoint would be
+/// false (issue #1451).
+#[must_use]
+pub(crate) fn media_kind_refusal(kind: &str, model_id: &str) -> String {
+    // Assembled by concatenation rather than as one long literal with escaped
+    // line continuations: rustfmt rewrites those continuations into literal
+    // runs of spaces, which then appear in the message a client reads.
+    let mut message = format!("{kind} input is not supported - hint: ");
+    if media_admission_disabled() {
+        message.push_str("--no-mmproj disabled multimodal input on this server");
+        return message;
+    }
+    message.push_str(&format!(
+        "the loaded checkpoint '{model_id}' has no {kind} tower; "
+    ));
+    message.push_str("mlxcel loads an integrated MLX VLM checkpoint, so serve one to send ");
+    message.push_str(kind);
+    message.push_str(" input");
+    message
+}
+
+/// Refuse a request whose media parts the loaded checkpoint cannot consume.
+///
+/// Runs at the HTTP boundary, before any byte of a referenced image or audio
+/// file is fetched, so a text-only checkpoint never becomes a fetch proxy
+/// either. Returns the first offending modality in a fixed order.
+#[must_use]
+pub(crate) fn media_capability_rejection(
+    request: &ChatCompletionRequest,
+    support: crate::server::state::ModelMediaSupport,
+    model_id: &str,
+) -> Option<crate::server::types::ErrorResponse> {
+    let refuse = |kind: &str| {
+        Some(crate::server::types::ErrorResponse::not_supported(
+            media_kind_refusal(kind, model_id),
+        ))
+    };
+    if !support.image && !request.image_urls().is_empty() {
+        return refuse("image");
+    }
+    if !support.audio && !request.audio_inputs().is_empty() {
+        return refuse("audio");
+    }
+    if !support.video && !request.video_urls().is_empty() {
+        return refuse("video");
+    }
+    None
 }
 
 static MAX_IMAGE_PAYLOAD_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_IMAGE_PAYLOAD_SIZE);
@@ -768,13 +846,28 @@ async fn fetch_remote_video(url: &str) -> Option<(PathBuf, TempFile)> {
             return None;
         }
     };
-    let response = match client.get(url).send().await {
+    // Same address policy as the image/audio fetch path (issue #1451).
+    let parsed = match media_net::ensure_media_url_allowed(url).await {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!("Video URL rejected {}: {}", url, err);
+            return None;
+        }
+    };
+    let host = parsed.host_str().unwrap_or_default().to_owned();
+    let response = match client.get(parsed).send().await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("Failed to fetch video URL {}: {}", url, err);
             return None;
         }
     };
+    if let Some(peer) = response.remote_addr()
+        && let Err(err) = media_net::ensure_socket_addr_allowed(&host, peer)
+    {
+        tracing::warn!("Video URL rejected {}: {}", url, err);
+        return None;
+    }
     let response = match response.error_for_status() {
         Ok(r) => r,
         Err(err) => {
@@ -1022,10 +1115,10 @@ async fn read_audio_input(
         return validate_audio_size(bytes, clip_index, max_payload_bytes);
     }
 
-    // file:// prefix
-    if let Some(path) = data.strip_prefix("file://") {
-        let bytes = read_local_bytes_with_limit_cancel(
-            Path::new(path),
+    // file:// prefix, confined to the `--media-path` root (issue #1451).
+    if data.starts_with("file://") {
+        let bytes = read_confined_bytes_with_limit_cancel(
+            data,
             "audio",
             max_payload_bytes,
             Some(cancelled),
@@ -1044,10 +1137,12 @@ async fn read_audio_input(
         return validate_audio_size(bytes, clip_index, max_payload_bytes);
     }
 
-    // Bare local path
-    if Path::new(data).is_file() {
-        let bytes = read_local_bytes_with_limit_cancel(
-            Path::new(data),
+    // Bare relative path under the configured `--media-path` root. Without a
+    // root, the value falls through to the raw-base64 branch below, which is
+    // what b10621 does with a string that is neither a URL nor a data URI.
+    if !data.contains("://") && media_root::media_root().is_some() {
+        let bytes = read_confined_bytes_with_limit_cancel(
+            data,
             "audio",
             max_payload_bytes,
             Some(cancelled),
@@ -1189,8 +1284,10 @@ pub(crate) async fn try_read_image_url_with_limits(
         return decode_data_uri_with_limit(url, "image", limits.max_payload_bytes).map(Some);
     }
 
-    if let Some(path) = url.strip_prefix("file://") {
-        return read_local_bytes_with_limit(Path::new(path), "image", limits.max_payload_bytes)
+    if url.starts_with("file://") {
+        // Confined to the `--media-path` root (issue #1451). Before that, this
+        // branch opened any absolute path the request named.
+        return read_confined_bytes_with_limit(url, "image", limits.max_payload_bytes)
             .await
             .map(Some);
     }
@@ -1201,8 +1298,11 @@ pub(crate) async fn try_read_image_url_with_limits(
             .map(Some);
     }
 
-    if Path::new(url).is_file() {
-        return read_local_bytes_with_limit(Path::new(url), "image", limits.max_payload_bytes)
+    if !url.contains("://") && media_root::media_root().is_some() {
+        // A bare relative path is what an operator who configured
+        // `--media-path` writes; it resolves against the same confined root as
+        // a `file://` URL and may not leave it.
+        return read_confined_bytes_with_limit(url, "image", limits.max_payload_bytes)
             .await
             .map(Some);
     }
@@ -1254,10 +1354,23 @@ async fn fetch_remote_bytes_with_limit_cancel(
     cancelled: Option<&dyn AudioAcquisitionCancellation>,
 ) -> Result<Vec<u8>> {
     check_media_cancel(cancelled, 0)?;
-    let response = match http_image_client().await?.get(url).send().await {
+    // Address policy before the socket opens: scheme, credentials, IP literal,
+    // and every address the host name resolves to (issue #1451).
+    let parsed = media_net::ensure_media_url_allowed(url)
+        .await
+        .map_err(|err| anyhow!("{kind} URL rejected: {err}"))?;
+    let host = parsed.host_str().unwrap_or_default().to_owned();
+    let response = match http_image_client().await?.get(parsed).send().await {
         Ok(response) => response,
         Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
     };
+    // Post-connect re-check: the peer the request actually reached. This is
+    // what closes the DNS-rebinding window the pre-flight resolution leaves,
+    // and it runs before any body byte is read.
+    if let Some(peer) = response.remote_addr() {
+        media_net::ensure_socket_addr_allowed(&host, peer)
+            .map_err(|err| anyhow!("{kind} URL rejected: {err}"))?;
+    }
 
     let response = match response.error_for_status() {
         Ok(response) => response,
@@ -1291,35 +1404,65 @@ async fn fetch_remote_bytes_with_limit_cancel(
     Ok(bytes)
 }
 
-async fn read_local_bytes_with_limit(path: &Path, kind: &str, max_size: usize) -> Result<Vec<u8>> {
-    read_local_bytes_with_limit_cancel(path, kind, max_size, None).await
+/// Read a local media reference confined to the `--media-path` root.
+///
+/// Every local read on the request path goes through here (issue #1451):
+/// [`media_root::resolve_media_file`] applies b10621's own name validation plus
+/// the canonicalize-and-contain rules, and [`media_root::open_confined`] takes
+/// the resulting file with `O_NOFOLLOW` so the resolve-to-open window cannot be
+/// won by a symlink swap.
+async fn read_confined_bytes_with_limit(
+    reference: &str,
+    kind: &str,
+    max_size: usize,
+) -> Result<Vec<u8>> {
+    read_confined_bytes_with_limit_cancel(reference, kind, max_size, None).await
 }
 
-async fn read_local_bytes_with_limit_cancel(
-    path: &Path,
+async fn read_confined_bytes_with_limit_cancel(
+    reference: &str,
+    kind: &str,
+    max_size: usize,
+    cancelled: Option<&dyn AudioAcquisitionCancellation>,
+) -> Result<Vec<u8>> {
+    check_media_cancel(cancelled, 0)?;
+    let canonical = media_root::resolve_media_file(reference)
+        .await
+        .map_err(|err| anyhow!("{kind} file rejected: {err}"))?;
+    // The size preflight runs against the resolved path, so an oversized file
+    // is refused before a single byte is copied into the process.
+    match tokio::fs::metadata(&canonical).await {
+        Ok(meta) if meta.len() > max_size as u64 => {
+            bail!(
+                "{kind} payload too large: file {} is {} bytes, maximum is {} bytes",
+                canonical.display(),
+                meta.len(),
+                max_size
+            );
+        }
+        Ok(_) => {}
+        Err(err) => bail!("Failed to stat {kind} file {}: {err}", canonical.display()),
+    }
+    let file = media_root::open_confined(&canonical)
+        .await
+        .map_err(|err| anyhow!("{kind} file rejected: {err}"))?;
+    read_open_file_with_limit(file, &canonical, kind, max_size, cancelled).await
+}
+
+/// Stream an already-opened file into memory under a byte cap.
+///
+/// Split out of the former `read_local_bytes_with_limit_cancel` so the confined
+/// resolver can hand over the file descriptor it opened with `O_NOFOLLOW`
+/// rather than re-opening the path.
+async fn read_open_file_with_limit(
+    mut file: tokio::fs::File,
+    label: &Path,
     kind: &str,
     max_size: usize,
     cancelled: Option<&dyn AudioAcquisitionCancellation>,
 ) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
 
-    check_media_cancel(cancelled, 0)?;
-    match tokio::fs::metadata(path).await {
-        Ok(meta) if meta.len() > max_size as u64 => {
-            bail!(
-                "{kind} payload too large: file {} is {} bytes, maximum is {} bytes",
-                path.display(),
-                meta.len(),
-                max_size
-            );
-        }
-        Ok(_) => {}
-        Err(err) => bail!("Failed to stat {kind} file {}: {err}", path.display()),
-    }
-
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("Failed to open {kind} file {}", path.display()))?;
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     loop {
@@ -1327,7 +1470,7 @@ async fn read_local_bytes_with_limit_cancel(
         let read = file
             .read(&mut chunk)
             .await
-            .with_context(|| format!("Failed to read {kind} file {}", path.display()))?;
+            .with_context(|| format!("Failed to read {kind} file {}", label.display()))?;
         if read == 0 {
             break;
         }
@@ -1396,8 +1539,10 @@ async fn http_image_client() -> Result<&'static reqwest::Client> {
                 // than necessary.
                 .connect_timeout(Duration::from_secs(5))
                 // Bound redirect chains so a malicious origin cannot
-                // bounce the client through unbounded hops.
-                .redirect(reqwest::redirect::Policy::limited(5));
+                // bounce the client through unbounded hops, and refuse a hop
+                // whose target leaves the public address space or the
+                // http(s) schemes (issue #1451).
+                .redirect(media_net::media_redirect_policy());
             // See `downloader::load_extra_ca_certificates` — this client
             // fetches remote media URLs over the same rustls-tls backend,
             // so it needs the same MLXCEL_EXTRA_CA_CERTS trust anchors to

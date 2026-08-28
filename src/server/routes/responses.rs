@@ -90,6 +90,17 @@ pub async fn create_response(
         Err(err) => return translate_error_to_response(err).into_response(),
     };
 
+    // Refuse media parts the loaded checkpoint cannot consume, with b10621's
+    // own `<kind> input is not supported` wording, before any referenced URL or
+    // file is read (issue #1451).
+    if let Some(rejection) = crate::server::media_capability_rejection(
+        &translated.chat_request,
+        state.media_support,
+        state.display_model_id(),
+    ) {
+        return rejection.into_response();
+    }
+
     // Reject requests with no effective input before any model dispatch
     // (issue #773), mirroring the chat-completions check. Runs on the
     // translated `ChatCompletionRequest` so history pulled in from

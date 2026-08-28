@@ -20,6 +20,7 @@ use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
+use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
@@ -1214,10 +1215,6 @@ struct ServerArgs {
     #[arg(long, hide = true)]
     _no_webui: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored: vision projector loaded automatically)
-    #[arg(long, hide = true)]
-    _mmproj: Option<String>,
-
     /// Maximum number of cached post-projection image features per loaded VLM.
     ///
     /// Multi-turn conversations that revisit the same image reuse cached
@@ -1360,6 +1357,17 @@ struct ServerArgs {
     /// the same set (issue #1447).
     #[command(flatten)]
     chat_compat: ChatCompatArgs,
+
+    /// llama-server b10621 multimodal projector and media options
+    /// (`--mmproj`, `--mmproj-url`, `--mmproj-auto`, `--mmproj-offload`,
+    /// `--mmproj-device`, `--image-min-tokens`, `--image-max-tokens`,
+    /// `--mtmd-batch-max-tokens`, `--media-path`). Every projector flag is a
+    /// hidden compatibility surface classified at startup like the GGML group;
+    /// `--media-path` is a real mlxcel feature and is visible. Defined once in
+    /// `mlxcel::cli::multimodal_compat_args` so both server binaries accept
+    /// exactly the same set (issue #1451).
+    #[command(flatten)]
+    multimodal_compat: MultimodalCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
@@ -1860,6 +1868,43 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     args.ggml_compat
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // b10621 multimodal projector / media options (issue #1451): classified
+    // before the model reference resolves, like the GGML and chat-template
+    // groups, so `--mmproj projector.gguf` is reported immediately rather than
+    // after a multi-gigabyte download. The requested image-token budget and the
+    // `--media-path` root are installed process-wide here, before the first
+    // load and before the server accepts a request that could name a local
+    // file.
+    args.multimodal_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.multimodal_compat
+        .ensure_inert()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    let image_token_bounds = args
+        .multimodal_compat
+        .image_token_bounds()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    mlxcel::vision::image_token_overrides::install(
+        mlxcel::vision::image_token_overrides::ImageTokenOverride::from_bounds(
+            image_token_bounds.min_tokens,
+            image_token_bounds.max_tokens,
+        ),
+    )
+    .map_err(|message| anyhow::anyhow!("{message}"))?;
+    mlxcel::server::media_root::install_media_root(
+        args.multimodal_compat
+            .resolve_media_root()
+            .map_err(|message| anyhow::anyhow!("{message}"))?,
+    )
+    .map_err(|message| anyhow::anyhow!("{message}"))?;
+    mlxcel::server::configure_media_admission(
+        args.multimodal_compat.media_admission().is_disabled(),
+    );
+    mlxcel::server::configure_private_media_urls(
+        mlxcel::server::private_media_urls_allowed_from_env(),
+    );
 
     // b10621 chat-template / reasoning / parsing options (issue #1447):
     // classified before the model reference resolves, like the GGML group, so

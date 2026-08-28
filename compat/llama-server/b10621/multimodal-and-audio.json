@@ -17,12 +17,21 @@
       "default": "read from model",
       "description": "maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model) (env: LLAMA_ARG_IMAGE_MAX_TOKENS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::a_maximum_below_the_minimum_is_refused_as_upstream_throws",
+      "notes": "Honored, because the translation is the identity rather than an approximation. b10621 stores the value on `clip_hparams::custom_image_min_tokens` / `custom_image_max_tokens` and converts it in `set_limit_image_tokens` as `pixels = tokens * patch_size^2 * n_merge^2`; mlxcel's dynamic-resolution processors express the same two bounds as `min_pixels` / `max_pixels`, and `src/vision/image_token_overrides.rs` applies the same multiplication against the same patch area. Upstream's value domain is reproduced too: only a positive value is a custom bound, `0` and a negative number mean `read it from the model`, and a maximum below the minimum is refused as upstream throws on `image_max_pixels < image_min_pixels`. An architecture with no such bound does not silently ignore the flag: every bound-consuming processor increments an applications counter, and the model worker refuses to serve when a budget was requested and the counter is still zero after the checkpoint loads, naming the checkpoint and the flag. That is the same no-stale-list mechanism `src/models/rope_overrides.rs` uses. Accepted as a hidden compatibility argument; the operator-facing image controls stay `--max-image-payload-size` and `--max-images`.",
+      "divergence": [
+        "Applies to the dynamic-resolution preprocessing path only (every family that resizes through `vision::processors::qwen2_vl`); a checkpoint whose preprocessor has no per-image pixel bound refuses to serve with a diagnostic instead of encoding at its own geometry, where b10621 accepts the flag against a wider set of architectures."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--image-max-tokens"
+        ],
+        "env": "LLAMA_ARG_IMAGE_MAX_TOKENS",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -39,12 +48,21 @@
       "default": "read from model",
       "description": "minimum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model) (env: LLAMA_ARG_IMAGE_MIN_TOKENS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::image_token_bounds_parse_upstreams_value_domain",
+      "notes": "Honored, because the translation is the identity rather than an approximation. b10621 stores the value on `clip_hparams::custom_image_min_tokens` / `custom_image_max_tokens` and converts it in `set_limit_image_tokens` as `pixels = tokens * patch_size^2 * n_merge^2`; mlxcel's dynamic-resolution processors express the same two bounds as `min_pixels` / `max_pixels`, and `src/vision/image_token_overrides.rs` applies the same multiplication against the same patch area. Upstream's value domain is reproduced too: only a positive value is a custom bound, `0` and a negative number mean `read it from the model`, and a maximum below the minimum is refused as upstream throws on `image_max_pixels < image_min_pixels`. An architecture with no such bound does not silently ignore the flag: every bound-consuming processor increments an applications counter, and the model worker refuses to serve when a budget was requested and the counter is still zero after the checkpoint loads, naming the checkpoint and the flag. That is the same no-stale-list mechanism `src/models/rope_overrides.rs` uses. Accepted as a hidden compatibility argument; the operator-facing image controls stay `--max-image-payload-size` and `--max-images`.",
+      "divergence": [
+        "Applies to the dynamic-resolution preprocessing path only (every family that resizes through `vision::processors::qwen2_vl`); a checkpoint whose preprocessor has no per-image pixel bound refuses to serve with a diagnostic instead of encoding at its own geometry, where b10621 accepts the flag against a wider set of architectures."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--image-min-tokens"
+        ],
+        "env": "LLAMA_ARG_IMAGE_MIN_TOKENS",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -61,12 +79,20 @@
       "default": "disabled",
       "description": "directory for loading local media files; files can be accessed via file:// URLs using relative paths (default: disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/media_root_tests.rs::a_symlink_pointing_outside_the_root_is_refused",
+      "notes": "Implemented, with a confined root. b10621 keeps the value on `common_params::media_path`, appends the platform separator at parse time, and resolves a request's `file://` URL by string concatenation in `handle_media`: no root means `file:// URLs are not allowed unless --media-path is specified`, and otherwise `fs_validate_filename(path, allow_subdirs=true)` runs before `media_path + file_path` is opened. mlxcel reproduces the wording, the concatenation (a leading separator is stripped so `file:///etc/passwd` lands under the root rather than replacing it, which a Rust `Path::join` would have done) and the whole `fs_validate_filename` rule set, then adds what a pure string check cannot do: the joined path is canonicalized and must stay inside the canonical root, and the file is opened with `O_NOFOLLOW` so the resolve-to-open window cannot be won by a symlink swap. Non-regular files are refused too, so a FIFO in the media root cannot block a request task. The same root governs a bare relative path, which is what an operator who configured `--media-path` naturally writes; before #1451 mlxcel had no root at all and opened any `file://` path, or any bare string naming an existing file, straight off the request.",
+      "divergence": [
+        "A path that resolves outside the root through a symlink is refused; upstream's check is a pure string test and reads the symlink target.",
+        "A path carrying a percent escape for `.`, `/`, `\\` or NUL is refused outright rather than being treated as a literal filename, so an encoding-based traversal cannot depend on a future decoder being added.",
+        "A resolved path that is not a regular file is refused; upstream opens whatever the path names."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--media-path"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -84,15 +110,19 @@
       "default": null,
       "description": "path to a multimodal projector file. see tools/mtmd/README.md note: if -hf is used, this argument can be omitted (env: LLAMA_ARG_MMPROJ)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1451,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Accepted and ignored (hidden): mlxcel loads the vision projector automatically from the checkpoint. #1451 owns projector flag classification.",
-      "divergence": [],
+      "test": "src/cli/multimodal_compat_args_tests.rs::mmproj_file_is_refused_with_an_mlx_replacement",
+      "notes": "b10621's multimodal support is a separate GGUF artifact: `libmtmd` loads a projector file alongside the language model. mlxcel loads an integrated MLX VLM checkpoint whose vision tower, audio tower and multimodal projector are tensors inside the same SafeTensors snapshot as the language model, resolved by the same `-m` reference, so there is nothing for a separate projector artifact to be attached to. Before #1451 this parsed into an ignored field, so a command line that asked mlxcel to attach a GGUF projector started a server that silently was not using it; it now stops startup, before the model reference resolves, with a diagnostic naming the value, the reason, and the MLX checkpoint to point `-m` at instead. Hidden from `--help` on purpose: rendering it would imply that a GGUF `mmproj` file can be attached to an MLX checkpoint, which is exactly what the epic asks the help surface not to say. llama.cpp writes the short spelling with a single dash and several letters, which clap reads as a cluster of one-letter shorts; the argv pre-pass in `src/cli/llama_short_flags.rs` rewrites the exact upstream tokens to the long spelling before clap sees them, so the flag-surface dump the manifest gate reads records only the long form.",
+      "divergence": [
+        "Rejected at startup instead of loading a separate multimodal projector; an MLX VLM checkpoint carries its projector inside its own snapshot, so there is no GGUF artifact to attach."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj"
         ],
+        "env": "LLAMA_ARG_MMPROJ",
+        "env_binding": "clap",
         "hidden": true
       }
     },
@@ -115,12 +145,28 @@
       "default": "enabled",
       "description": "whether to use multimodal projector file (if available), useful when using -hf (default: enabled) (env: LLAMA_ARG_MMPROJ_AUTO)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::no_mmproj_disables_media_admission_on_both_spellings",
+      "notes": "The one projector flag whose observable effect has a translation. Upstream's `--no-mmproj` leaves `mctx` null, and every image, audio or video part in a request is then refused with `<kind> input is not supported`. mlxcel cannot leave the projector unloaded, because it is inside the checkpoint, but it declines exactly those requests at the HTTP boundary with the same leading clause, so a deployment script that disables multimodal input keeps its meaning. The hint half of upstream's sentence is replaced, because telling an operator to provide an `mmproj` would be false here. Upstream's default (`--mmproj-auto`, enabled) is what mlxcel already does and is inert. All three spellings parse; the pair is resolved from `LLAMA_ARG_MMPROJ_AUTO` at runtime rather than by clap, because b10621 reads it through `parse_bool_value` plus a `LLAMA_ARG_NO_*` alias meaning false, and clap's boolish parser accepts a wider vocabulary and errors outside it.",
+      "divergence": [
+        "The checkpoint's vision and audio weights are still loaded and resident under `--no-mmproj`; upstream never loads the projector, so the two processes differ in memory footprint even though both refuse the same requests.",
+        "The refusal keeps b10621's `<kind> input is not supported` clause but replaces its `you may need to provide the mmproj` hint, which has no meaning for an integrated MLX checkpoint."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mmproj-auto",
+          "--no-mmproj",
+          "--no-mmproj-auto"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "env": "LLAMA_ARG_MMPROJ_AUTO",
+        "env_binding": "runtime",
+        "env_test": "src/cli/multimodal_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -138,12 +184,21 @@
       "default": null,
       "description": "device to use for multimodal projector (none = don't offload, default: auto) use --list-devices to see a list of available devices (env: MTMD_BACKEND_DEVICE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::mmproj_device_none_and_a_named_device_are_both_refused",
+      "notes": "The flag describes where the projector runs. mlxcel evaluates the whole checkpoint, vision and audio towers included, on the one MLX device selected by `MLXCEL_DEVICE`, and has no host projector path to move it to, so the value that asks for nothing is inert and every other value stops startup with a diagnostic naming the option, the value, the limitation, and the mlxcel alternative where one exists. Accepted as a hidden compatibility argument and classified before the model reference resolves, like the GGML group. Upstream's `none` means `do not offload the projector`, the same request as `--no-mmproj-offload`, and any other value names a GGML device from `--list-devices`. mlxcel has neither, so both are rejected; a named device points at `MLXCEL_DEVICE`, which selects the MLX device for the whole checkpoint. The environment binding is `MTMD_BACKEND_DEVICE`, not a `LLAMA_ARG_*` variable, exactly as b10621 binds it, and it takes a value so clap carries it through unchanged.",
+      "divergence": [
+        "Every value is rejected at startup; mlxcel has no GGML device list and places the whole checkpoint on one MLX device."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mmproj-device"
+        ],
+        "env": "MTMD_BACKEND_DEVICE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -162,12 +217,26 @@
       "default": "enabled",
       "description": "whether to enable GPU offloading for multimodal projector (default: enabled) (env: LLAMA_ARG_MMPROJ_OFFLOAD)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::projector_placement_accepts_only_the_inert_half",
+      "notes": "The flag describes where the projector runs. mlxcel evaluates the whole checkpoint, vision and audio towers included, on the one MLX device selected by `MLXCEL_DEVICE`, and has no host projector path to move it to, so the value that asks for nothing is inert and every other value stops startup with a diagnostic naming the option, the value, the limitation, and the mlxcel alternative where one exists. Accepted as a hidden compatibility argument and classified before the model reference resolves, like the GGML group. The positive half is b10621's own default and describes what mlxcel already does, so it is accepted silently; `--no-mmproj-offload` asks for a host-resident projector and is rejected. The pair is resolved from `LLAMA_ARG_MMPROJ_OFFLOAD` at runtime rather than by clap, for the same `parse_bool_value` reason as the rest of the b10621 boolean pairs.",
+      "divergence": [
+        "`--no-mmproj-offload` is rejected; mlxcel cannot run the vision or audio tower on the host."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mmproj-offload",
+          "--no-mmproj-offload"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "env": "LLAMA_ARG_MMPROJ_OFFLOAD",
+        "env_binding": "runtime",
+        "env_test": "src/cli/multimodal_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -185,12 +254,21 @@
       "default": null,
       "description": "URL to a multimodal projector file. see tools/mtmd/README.md (env: LLAMA_ARG_MMPROJ_URL)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::mmproj_url_is_refused_for_the_same_reason",
+      "notes": "b10621's multimodal support is a separate GGUF artifact: `libmtmd` loads a projector file alongside the language model. mlxcel loads an integrated MLX VLM checkpoint whose vision tower, audio tower and multimodal projector are tensors inside the same SafeTensors snapshot as the language model, resolved by the same `-m` reference, so there is nothing for a separate projector artifact to be attached to. Before #1451 this parsed into an ignored field, so a command line that asked mlxcel to attach a GGUF projector started a server that silently was not using it; it now stops startup, before the model reference resolves, with a diagnostic naming the value, the reason, and the MLX checkpoint to point `-m` at instead. Hidden from `--help` on purpose: rendering it would imply that a GGUF `mmproj` file can be attached to an MLX checkpoint, which is exactly what the epic asks the help surface not to say. llama.cpp writes the short spelling with a single dash and several letters, which clap reads as a cluster of one-letter shorts; the argv pre-pass in `src/cli/llama_short_flags.rs` rewrites the exact upstream tokens to the long spelling before clap sees them, so the flag-surface dump the manifest gate reads records only the long form.",
+      "divergence": [
+        "Rejected at startup instead of downloading a separate multimodal projector; mlxcel resolves one MLX snapshot by repository identifier and has no second artifact to fetch."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mmproj-url"
+        ],
+        "env": "LLAMA_ARG_MMPROJ_URL",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -207,12 +285,21 @@
       "default": "1024",
       "description": "maximum number of image tokens per batch when encoding images (default: 1024) (env: LLAMA_ARG_MTMD_BATCH_MAX_TOKENS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1451,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/multimodal_compat_args_tests.rs::mtmd_batch_max_tokens_is_inert_at_the_upstream_default_only",
+      "notes": "Names an encode batch width, not a per-image budget: upstream splits an image's tokens across several `mtmd` encode batches of at most this many tokens. mlxcel encodes each image in a single vision-tower forward and has no image-token batch to bound, so b10621's own default of 1024 is inert and accepted, and any other value stops startup with a diagnostic pointing at `--max-image-payload-size` and `--max-images`, which are the image-work bounds mlxcel does have. Accepted as a hidden compatibility argument and classified before the model reference resolves.",
+      "divergence": [
+        "Only b10621's own default of 1024 is accepted; mlxcel has no image-token encode batch for another value to size."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mtmd-batch-max-tokens"
+        ],
+        "env": "LLAMA_ARG_MTMD_BATCH_MAX_TOKENS",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "route",

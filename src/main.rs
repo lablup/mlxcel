@@ -21,6 +21,7 @@ use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::GgmlCompatArgs;
+use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
@@ -1855,10 +1856,6 @@ pub(crate) struct ServeArgs {
     #[arg(long, hide = true)]
     _no_webui: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored, vision projector loaded automatically)
-    #[arg(long, hide = true)]
-    _mmproj: Option<String>,
-
     /// Decode storage backend for continuous batching.
     ///
     /// Accepted values: `auto`, `dense`, `paged`. When omitted, the server
@@ -2012,6 +2009,17 @@ pub(crate) struct ServeArgs {
     /// the same set (issue #1447).
     #[command(flatten)]
     chat_compat: ChatCompatArgs,
+
+    /// llama-server b10621 multimodal projector and media options
+    /// (`--mmproj`, `--mmproj-url`, `--mmproj-auto`, `--mmproj-offload`,
+    /// `--mmproj-device`, `--image-min-tokens`, `--image-max-tokens`,
+    /// `--mtmd-batch-max-tokens`, `--media-path`). Every projector flag is a
+    /// hidden compatibility surface classified at startup like the GGML group;
+    /// `--media-path` is a real mlxcel feature and is visible. Defined once in
+    /// `mlxcel::cli::multimodal_compat_args` so both server binaries accept
+    /// exactly the same set (issue #1451).
+    #[command(flatten)]
+    multimodal_compat: MultimodalCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,

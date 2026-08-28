@@ -290,6 +290,18 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         tracing::error!("{message}");
                         return;
                     }
+                    // Same rule for a b10621 `--image-min-tokens` /
+                    // `--image-max-tokens` budget that reached no image
+                    // preprocessing path: the server would encode at the
+                    // checkpoint's own resolution while the operator believed
+                    // the budget applied (#1451).
+                    if let Err(message) =
+                        crate::vision::image_token_overrides::verify_applied(&worker_model_id)
+                    {
+                        chat_unavailable.store(true, Ordering::Release);
+                        tracing::error!("{message}");
+                        return;
+                    }
                     loaded.store(true, Ordering::Release);
                     (model, tokenizer)
                 }
@@ -989,6 +1001,18 @@ pub(crate) fn spawn_legacy_model_worker(
                         tracing::error!("{message}");
                         return;
                     }
+                    // Same rule for a b10621 `--image-min-tokens` /
+                    // `--image-max-tokens` budget that reached no image
+                    // preprocessing path: the server would encode at the
+                    // checkpoint's own resolution while the operator believed
+                    // the budget applied (#1451).
+                    if let Err(message) =
+                        crate::vision::image_token_overrides::verify_applied(&worker_model_id)
+                    {
+                        chat_unavailable.store(true, Ordering::Release);
+                        tracing::error!("{message}");
+                        return;
+                    }
                     loaded.store(true, Ordering::Release);
                     (model, tokenizer)
                 }
@@ -1316,6 +1340,17 @@ pub(crate) fn prepare_request_vlm_embeddings(
         observability.record_audio_feature_rejection();
         return Err(anyhow!(
             "Audio input is not supported by the loaded non-VLM model"
+        ));
+    }
+    // Images and videos used to fall through to the text-only branch below, so
+    // a request that sent a picture to a text-only checkpoint was answered
+    // fluently from the prompt alone and nothing said the picture was dropped
+    // (issue #1451). The HTTP boundary refuses this first; this is the
+    // defence-in-depth copy that covers any path that reaches the worker
+    // without passing the route gate.
+    if (!images.is_empty() || !videos.is_empty()) && !model.is_vlm() {
+        return Err(anyhow!(
+            "Image and video input are not supported by the loaded non-VLM model"
         ));
     }
     if !has_media || !model.is_vlm() {

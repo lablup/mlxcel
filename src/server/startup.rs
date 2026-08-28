@@ -820,6 +820,13 @@ fn warn_on_insecure_video_allowlist() {
 fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
     use crate::models::ModelType;
 
+    // b10621's `--no-mmproj` / `--no-mmproj-auto` refuses every media part,
+    // whatever the checkpoint could do (issue #1451).
+    if crate::server::media_admission_disabled() {
+        tracing::info!("--no-mmproj: refusing image, audio and video content blocks");
+        return ModelMediaSupport::none();
+    }
+
     let model_type = match crate::models::get_model_type(model_path) {
         Ok(t) => t,
         Err(err) => {
@@ -849,7 +856,20 @@ fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
         );
     }
 
-    ModelMediaSupport { video }
+    // Image and audio parts need a checkpoint with a vision/audio tower at all.
+    // `is_vlm_model_type` is the same config.json-only predicate the model
+    // registry uses, so a family that lands as `ModelKind::Vlm` is admitted
+    // with no list here to update (issue #1451). A multimodal checkpoint whose
+    // towers cannot take audio still refuses on the worker, where the loaded
+    // family is known; this boundary only separates "could in principle" from
+    // "text-only".
+    let multimodal = crate::model_metadata::is_vlm_model_type(model_type);
+
+    ModelMediaSupport {
+        image: multimodal,
+        audio: multimodal,
+        video,
+    }
 }
 
 fn is_muse_glimmer_model_path(model_path: &Path) -> bool {

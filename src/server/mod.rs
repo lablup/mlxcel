@@ -38,6 +38,8 @@ pub mod infill;
 pub mod kokoro_tts;
 mod listen;
 mod media;
+mod media_net;
+pub mod media_root;
 pub mod model_provider;
 pub mod model_source;
 pub mod prompt_cache;
@@ -96,11 +98,13 @@ pub use config::{
     RemotePipelineStageConfig, ServerConfig, ServerGenerateOptions,
 };
 pub use cors::{CorsPolicy, OriginPolicy};
-pub(crate) use media::current_image_input_limits;
 pub use media::{
     DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES, DEFAULT_MAX_IMAGE_HEIGHT, DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
     DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,
+    configure_media_admission, media_admission_disabled,
 };
+pub(crate) use media::{current_image_input_limits, media_capability_rejection};
+pub use media_net::{configure_private_media_urls, private_media_urls_allowed_from_env};
 pub use model_provider::{GenerationResult, ModelProvider};
 pub use model_source::{
     LLAMA_ARG_OFFLINE, LlamaModelSourceArgs, ResolvedModelSource, env_fallback_offline,

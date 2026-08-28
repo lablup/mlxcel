@@ -32,6 +32,7 @@ pub mod connectors;
 pub mod detection;
 pub mod encoders;
 pub mod feature_cache;
+pub mod image_token_overrides;
 pub mod merge;
 pub mod processors;
 

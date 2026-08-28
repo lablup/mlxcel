@@ -359,10 +359,42 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
 /// process, not what any individual request asks for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModelMediaSupport {
+    /// `true` when the loaded checkpoint is a vision-language model, so
+    /// `image_url` content blocks can reach a vision tower.
+    ///
+    /// Before issue #1451 a text-only checkpoint accepted an image part at the
+    /// HTTP boundary, dropped it in `prepare_request_vlm_embeddings`, and
+    /// answered from the text alone: a caller could not tell an ignored image
+    /// from a described one. It is now refused with b10621's own
+    /// `image input is not supported` wording.
+    pub image: bool,
+    /// `true` when the loaded checkpoint can consume `input_audio` content
+    /// blocks. A checkpoint that is not multimodal at all refuses them here;
+    /// a multimodal checkpoint without an audio tower still refuses later, on
+    /// the worker, where the loaded family is known.
+    pub audio: bool,
     /// `true` when the loaded model supports `video_url` content blocks.
     /// Currently this is exactly the Gemma 4 VLM family; expand the
     /// detection logic alongside any new video-capable model.
     pub video: bool,
+}
+
+impl ModelMediaSupport {
+    /// The all-refusing set, used when the operator passed b10621's
+    /// `--no-mmproj` / `--no-mmproj-auto`.
+    ///
+    /// Upstream's `--no-mmproj` leaves the projector unloaded, and every media
+    /// part in a request is then refused. mlxcel cannot leave the projector
+    /// unloaded (it is inside the checkpoint) but declines the same requests,
+    /// which is the observable half of the flag.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            image: false,
+            audio: false,
+            video: false,
+        }
+    }
 }
 
 /// Shared application state passed into route handlers.
