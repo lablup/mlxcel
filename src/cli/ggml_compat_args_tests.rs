@@ -888,3 +888,58 @@ fn the_layer_count_survives_every_config_spelling_in_tree() {
         );
     }
 }
+
+// ── control vectors (#1449) ─────────────────────────────────────────────
+
+#[test]
+fn control_vectors_are_rejected_before_the_model_load() {
+    // Activation steering changes model behavior; accepting a vector as a
+    // no-op would be the silent-ignore failure the epic forbids, so both
+    // vector flags fail startup with the logit-level alternative named.
+    let args = GgmlCompatArgs {
+        control_vector: vec!["steer.gguf".to_string()],
+        ..Default::default()
+    };
+    let rejection = args
+        .ensure_inert_before_model()
+        .expect_err("a control vector must fail startup");
+    assert_eq!(rejection.option, "--control-vector");
+    assert!(rejection.to_string().contains("logit"), "{rejection}");
+
+    let args = GgmlCompatArgs {
+        control_vector_scaled: vec!["steer.gguf:0.5".to_string()],
+        ..Default::default()
+    };
+    let rejection = args
+        .ensure_inert_before_model()
+        .expect_err("a scaled control vector must fail startup");
+    assert_eq!(rejection.option, "--control-vector-scaled");
+
+    // A scale of zero is still a configured vector set: the flag is
+    // rejected as a whole rather than partially applied, satisfying the
+    // no-partial-application criterion; the scale-zero baseline
+    // reproduction criterion applies only to an implemented path.
+    let args = GgmlCompatArgs {
+        control_vector_scaled: vec!["steer.gguf:0.0".to_string()],
+        ..Default::default()
+    };
+    assert_eq!(
+        args.ensure_inert_before_model()
+            .expect_err("scale zero is still a vector configuration")
+            .option,
+        "--control-vector-scaled"
+    );
+}
+
+#[test]
+fn control_vector_layer_range_alone_is_inert() {
+    // Without vectors the range configures nothing, exactly as upstream;
+    // and every vector flag is rejected, so no configuration where the
+    // range matters can ever be reached.
+    let args = GgmlCompatArgs {
+        control_vector_layer_range: Some(vec![0, 12]),
+        ..Default::default()
+    };
+    args.ensure_inert_before_model()
+        .expect("the range alone applies to nothing");
+}

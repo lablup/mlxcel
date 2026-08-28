@@ -262,12 +262,19 @@
       "default": null,
       "description": "add a control vector note: use comma-separated values to add multiple control vectors",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1449,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ggml_compat_args_tests.rs::control_vectors_are_rejected_before_the_model_load",
+      "notes": "Activation steering has no mlxcel application path: MLX model forwards do not add per-layer steering directions, and accepting a vector without applying it would silently change what the deployment believes it is serving. The flag parses (hidden) and any configured vector fails startup before the model load with a diagnostic naming logit-level steering (--lang-bias / per-request logit_bias) as the nearest mlxcel feature. Because no vector configuration can ever serve, partial application and cross-configuration prompt/KV cache reuse are impossible by construction.",
+      "divergence": [
+        "b10621 loads the vector and applies it to the model's activations; mlxcel rejects the flag at startup before any weight is read."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--control-vector"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -284,12 +291,17 @@
       "default": null,
       "description": "layer range to apply the control vector(s) to, start and end inclusive",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1449,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/ggml_compat_args_tests.rs::control_vector_layer_range_alone_is_inert",
+      "notes": "Inert: without vectors the range configures nothing, exactly as upstream, and mlxcel rejects every vector flag, so no configuration where the range matters can be reached. Accepted (hidden) with b10621's two-value START END form.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--control-vector-layer-range"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -306,12 +318,19 @@
       "default": null,
       "description": "add a control vector with user defined scaling SCALE note: use comma-separated values (format: FNAME:SCALE,...)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1449,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ggml_compat_args_tests.rs::control_vectors_are_rejected_before_the_model_load",
+      "notes": "Activation steering has no mlxcel application path: MLX model forwards do not add per-layer steering directions, and accepting a vector without applying it would silently change what the deployment believes it is serving. The flag parses (hidden) and any configured vector fails startup before the model load with a diagnostic naming logit-level steering (--lang-bias / per-request logit_bias) as the nearest mlxcel feature. Because no vector configuration can ever serve, partial application and cross-configuration prompt/KV cache reuse are impossible by construction.",
+      "divergence": [
+        "b10621 loads the vector and applies it to the model's activations; mlxcel rejects the flag at startup before any weight is read."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--control-vector-scaled"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
