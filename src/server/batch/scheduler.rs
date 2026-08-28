@@ -3291,6 +3291,7 @@ impl BatchScheduler {
         &self,
         override_: ReasoningBudgetOverride,
         enter_block_on_start: bool,
+        reasoning_control: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> ThinkingState {
         // No thinking tokens -> always disabled regardless of config.
         let Some(token_ids) = self.thinking_token_ids else {
@@ -3300,7 +3301,11 @@ impl BatchScheduler {
             ReasoningBudgetOverride::InheritServerDefault => self.reasoning_budget,
             ReasoningBudgetOverride::Explicit(v) => v,
         };
+        // b10621 `reasoning_control` (#1444): an armed control flag keeps the
+        // tracker active even without a budget, so a live `reasoning_end`
+        // request can close the block at the next sampled token.
         ThinkingState::new(Some(token_ids), effective, enter_block_on_start)
+            .with_force_end(reasoning_control)
     }
 
     /// Run the scheduler loop until shutdown or channel close.
@@ -4094,6 +4099,7 @@ impl BatchScheduler {
         let thinking = self.build_thinking_state(
             options.reasoning_budget,
             options.thinking_enter_block_on_start,
+            options.reasoning_control.clone(),
         );
 
         // Record the per-request prompt-cache context so the donate-back

@@ -166,6 +166,18 @@ pub struct ServerGenerateOptions {
     /// reasoning tokens.
     pub thinking_enter_block_on_start: bool,
 
+    /// b10621 `reasoning_control` (#1444): when the request armed realtime
+    /// reasoning control, this is the shared "end reasoning now" flag the
+    /// sequence's [`crate::server::thinking_budget::ThinkingState`] polls at
+    /// every sampling step. `POST /v1/chat/completions/control` with
+    /// `action: "reasoning_end"` sets it through the
+    /// [`crate::server::completion_control::CompletionControlRegistry`].
+    /// `None` means the request did not arm control; the sampler pays
+    /// nothing. `Some` keeps the thinking tracker active even when no
+    /// budget is configured, which is upstream's "create the budget sampler
+    /// on demand" behavior.
+    pub reasoning_control: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
     /// cache-key metadata the scheduler uses to look
     /// up a stored prompt prefix and adopt its detached KV cache. `None` when
     /// the route did not install a

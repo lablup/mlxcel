@@ -58,6 +58,12 @@ struct AnthropicFrame {
 pub struct AnthropicStreamSender {
     tx: mpsc::Sender<Result<AnthropicFrame, Infallible>>,
     cancelled: CancellationToken,
+    /// Resumable-stream tee (#1444): frames are also appended, in their
+    /// on-wire `event:`/`data:` framing, to the conversation's session
+    /// buffer for replay via `GET /v1/stream`. While attached, a client
+    /// disconnect does not flip the cancellation token; only
+    /// `DELETE /v1/stream` or session replacement does.
+    tee: Option<Arc<crate::server::stream_session::ResumeTee>>,
 }
 
 impl AnthropicStreamSender {
@@ -70,7 +76,10 @@ impl AnthropicStreamSender {
             name: event.event_name(),
             data: payload,
         };
-        if self.tx.blocking_send(Ok(frame)).is_err() {
+        if let Some(ref tee) = self.tee {
+            tee.write_event(frame.name, &frame.data);
+        }
+        if self.tx.blocking_send(Ok(frame)).is_err() && self.tee.is_none() {
             self.cancelled.store(true, Ordering::Relaxed);
         }
         Ok(())
@@ -111,13 +120,39 @@ pub fn anthropic_sse_channel(
     CancellationToken,
     AnthropicSseKeepAlive,
 ) {
-    let cancelled: CancellationToken = Arc::new(AtomicBool::new(false));
+    anthropic_sse_channel_resumable(buffer, ping_interval, None)
+}
+
+/// [`anthropic_sse_channel`] with an optional resumable-stream session
+/// attached (#1444). With `Some`, the cancellation token is the session's
+/// own (client disconnect no longer aborts the sequence; `DELETE
+/// /v1/stream` does) and every frame is teed into the session buffer.
+pub(crate) fn anthropic_sse_channel_resumable(
+    buffer: usize,
+    ping_interval: Option<Duration>,
+    session: Option<Arc<crate::server::stream_session::StreamSession>>,
+) -> (
+    AnthropicStreamSender,
+    impl Stream<Item = Result<Event, Infallible>>,
+    CancellationToken,
+    AnthropicSseKeepAlive,
+) {
+    let (cancelled, tee) = match session {
+        Some(session) => (
+            session.cancellation_token(),
+            Some(Arc::new(crate::server::stream_session::ResumeTee::new(
+                session,
+            ))),
+        ),
+        None => (Arc::new(AtomicBool::new(false)) as CancellationToken, None),
+    };
     let (tx, rx) = mpsc::channel::<Result<AnthropicFrame, Infallible>>(buffer);
     let stream = ReceiverStream::new(rx)
         .map(|frame| frame.map(|f| Event::default().event(f.name).data(f.data)));
     let sender = AnthropicStreamSender {
         tx,
         cancelled: cancelled.clone(),
+        tee,
     };
     (
         sender,

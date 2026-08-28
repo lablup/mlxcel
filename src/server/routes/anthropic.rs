@@ -46,7 +46,7 @@ use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_e
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::model_provider::{ChatWorkerGoneError, QueueFullError};
 use crate::server::streaming::sse_response;
-use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel};
+use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel_resumable};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
 use crate::server::tool_calls::stream_filter::StreamFilter;
@@ -168,6 +168,12 @@ pub async fn anthropic_messages(
     let priority = parse_priority_header(&headers);
 
     if request.stream {
+        // b10621 resumable streams (#1444): `X-Conversation-Id` attaches a
+        // replayable session, scoped to the presenting API key.
+        let resumable = super::chat::ResumableStreamContext {
+            conversation_id: super::stream::conversation_id_from_headers(&headers),
+            owner: super::stream::request_stream_owner(&state, &headers),
+        };
         stream_messages(
             state,
             request,
@@ -175,6 +181,7 @@ pub async fn anthropic_messages(
             priority,
             budget_override,
             include_thinking,
+            resumable,
         )
         .await
     } else {
@@ -330,6 +337,7 @@ async fn stream_messages(
     priority: crate::server::batch::RequestPriority,
     budget_override: ReasoningBudgetOverride,
     include_thinking: bool,
+    resumable: super::chat::ResumableStreamContext,
 ) -> Response {
     if !state.can_accept_request() {
         return AnthropicErrorResponse::overloaded("All slots are busy. Please try again later.")
@@ -378,8 +386,15 @@ async fn stream_messages(
         Err(err) => return generation_error_to_response(err),
     };
 
+    // b10621 resumable stream (#1444): tee the SSE frames into the
+    // conversation's session when `X-Conversation-Id` was sent.
+    let session = resumable.conversation_id.as_deref().map(|cid| {
+        state
+            .stream_sessions
+            .create_or_replace(cid, resumable.owner.clone())
+    });
     let (sender, stream, cancelled, keepalive) =
-        anthropic_sse_channel(128, state.config.sse_ping_interval);
+        anthropic_sse_channel_resumable(128, state.config.sse_ping_interval, session);
 
     let model_id_for_task = model_id.clone();
     let stop_sequences = request.stop_sequences.clone();

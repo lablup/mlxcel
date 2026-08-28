@@ -27,6 +27,7 @@ pub mod audio;
 pub mod cache;
 pub mod chat;
 pub mod completions;
+pub mod control;
 pub mod detokenize;
 pub mod embeddings;
 pub mod health;
@@ -40,6 +41,7 @@ pub mod props;
 pub mod rerank;
 pub mod responses;
 pub mod slots;
+pub mod stream;
 pub mod tokenize;
 pub mod transcription_compat;
 
@@ -47,11 +49,16 @@ pub mod transcription_compat;
 #[path = "availability_tests.rs"]
 mod availability_tests;
 
+#[cfg(test)]
+#[path = "stream_route_tests.rs"]
+mod stream_route_tests;
+
 pub use anthropic::{anthropic_count_tokens, anthropic_messages};
 pub use audio::{audio_speech, audio_transcriptions, audio_translations};
 pub use cache::{cache_reset, cache_stats};
 pub use chat::chat_completions;
 pub use completions::completions;
+pub use control::chat_completions_control;
 pub use detokenize::detokenize;
 pub use embeddings::{create_embeddings, native_embeddings};
 pub use health::health_check;
@@ -65,6 +72,7 @@ pub use props::props;
 pub use rerank::create_rerank;
 pub use responses::{cancel_response, create_response, delete_response, retrieve_response};
 pub use slots::slots;
+pub use stream::{stream_delete, stream_get, streams_lookup};
 pub use tokenize::tokenize;
 
 /// Explain a terminal generation-unavailable state without exposing worker or

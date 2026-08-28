@@ -35,7 +35,7 @@ use crate::server::model_provider::StopKind;
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
 };
-use crate::server::streaming::{sse_channel, sse_response};
+use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::{
     ErrorResponse, NativeCompletionChunk, NativeCompletionRequest, NativeCompletionResponse,
@@ -163,6 +163,13 @@ pub(crate) async fn serve_native_completion(
 
     let priority = parse_priority_header(headers);
     if request.stream.unwrap_or(false) {
+        // b10621 resumable streams (#1444): `X-Conversation-Id` attaches a
+        // replayable session on the native route too, scoped to the
+        // presenting API key.
+        let resumable = super::chat::ResumableStreamContext {
+            conversation_id: super::stream::conversation_id_from_headers(headers),
+            owner: super::stream::request_stream_owner(&state, headers),
+        };
         stream_native_completion(
             state,
             request,
@@ -170,6 +177,7 @@ pub(crate) async fn serve_native_completion(
             priority,
             budget_override,
             ping_interval,
+            resumable,
         )
         .await
     } else {
@@ -402,6 +410,7 @@ async fn stream_native_completion(
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
     ping_interval: Option<std::time::Duration>,
+    resumable: super::chat::ResumableStreamContext,
 ) -> Response {
     // Queue-depth admission control: return 503 before opening SSE stream
     if !state.can_accept_request() {
@@ -412,6 +421,13 @@ async fn stream_native_completion(
     let mut options = build_native_options(&request, requested_n_predict, &state);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    // b10621 `reasoning_control` (#1444): arming creates the runtime
+    // force-end flag, as upstream's on-demand budget sampler does. The
+    // native response never exposes the internal completion id, so no
+    // control request can address it; that matches b10621, whose native
+    // route also never reveals `oaicompat_cmpl_id`.
+    options.reasoning_control = (request.reasoning_control == Some(true))
+        .then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let options_snapshot = options.clone();
     let prompt = request.prompt.clone();
 
@@ -424,7 +440,14 @@ async fn stream_native_completion(
     // prevention during long prefill phases. The interval is the per-request
     // `sse_ping_interval` when the client sent one, otherwise the server's
     // `--sse-ping-interval` (#1432); the caller resolved and validated it.
-    let (events, stream, cancelled, keepalive) = sse_channel(100, ping_interval);
+    // b10621 resumable stream (#1444): tee the SSE payloads into the
+    // conversation's session when `X-Conversation-Id` was sent.
+    let session = resumable.conversation_id.as_deref().map(|cid| {
+        state
+            .stream_sessions
+            .create_or_replace(cid, resumable.owner.clone())
+    });
+    let (events, stream, cancelled, keepalive) = sse_channel_resumable(100, ping_interval, session);
     let finish_events = events.clone();
     let timings_per_token = request.timings_per_token.unwrap_or(false);
 

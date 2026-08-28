@@ -39,7 +39,7 @@ use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, chat_carries_loop_amplifier,
     resolve_server_max_tokens,
 };
-use crate::server::streaming::{sse_channel, sse_response};
+use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
@@ -352,7 +352,22 @@ pub async fn chat_completions(
 
     let priority = parse_priority_header(&headers);
     if request.stream {
-        stream_chat_completion(state, request, priority, budget_override, structured).await
+        // b10621 resumable streams (#1444): a streaming request carrying
+        // `X-Conversation-Id` buffers its SSE bytes in a session replayable
+        // via `GET /v1/stream`, scoped to the API key that created it.
+        let resumable = ResumableStreamContext {
+            conversation_id: super::stream::conversation_id_from_headers(&headers),
+            owner: super::stream::request_stream_owner(&state, &headers),
+        };
+        stream_chat_completion(
+            state,
+            request,
+            priority,
+            budget_override,
+            structured,
+            resumable,
+        )
+        .await
     } else {
         non_stream_chat_completion(state, request, priority, budget_override, structured)
             .await
@@ -759,6 +774,14 @@ struct StreamCallbackState {
     lp_buffer: std::collections::VecDeque<Option<TokenLogprobData>>,
 }
 
+/// Resumable-stream request context (#1444): the `X-Conversation-Id` value,
+/// if any, and the API-key identity that owns the session and the
+/// completion-control entry.
+pub(crate) struct ResumableStreamContext {
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) owner: crate::server::stream_session::StreamOwner,
+}
+
 async fn stream_chat_completion(
     state: AppState,
     request: ChatCompletionRequest,
@@ -767,6 +790,7 @@ async fn stream_chat_completion(
     structured: Option<
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
+    resumable: ResumableStreamContext,
 ) -> Response {
     // Queue-depth admission control: return 503 before opening SSE stream
     if !state.can_accept_request() {
@@ -876,11 +900,38 @@ async fn stream_chat_completion(
     };
     let tool_choice = request.tool_choice.clone();
 
+    // b10621 `reasoning_control` (#1444): arm realtime reasoning control for
+    // this completion. The shared flag travels into the scheduler's thinking
+    // tracker, and the registration makes the completion addressable by
+    // `POST /v1/chat/completions/control` under its `chatcmpl-...` id for
+    // exactly the lifetime of the generation task (the guard moves into the
+    // blocking task below and drops when it exits, on every path).
+    let control_force = (request.params.reasoning_control == Some(true))
+        .then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    options.reasoning_control = control_force.clone();
+    let control_registration = state.completion_controls.register(
+        request_id.clone(),
+        control_force,
+        resumable.owner.clone(),
+    );
+
+    // b10621 resumable stream (#1444): with `X-Conversation-Id` present,
+    // create (or replace) the conversation's session and tee every SSE
+    // payload into it. The session's cancellation token replaces the
+    // per-connection one, so a client disconnect no longer aborts the
+    // generation; `DELETE /v1/stream` and session replacement do.
+    let session = resumable.conversation_id.as_deref().map(|cid| {
+        state
+            .stream_sessions
+            .create_or_replace(cid, resumable.owner.clone())
+    });
+
     // sse_channel also returns an SseKeepAlive that sends periodic
     // SSE comment events. This prevents proxy/client idle-timeout disconnects
     // during long prefill phases (32k+ token prompts) where no token event is
     // emitted until the first generated token arrives.
-    let (events, stream, cancelled, keepalive) = sse_channel(100, state.config.sse_ping_interval);
+    let (events, stream, cancelled, keepalive) =
+        sse_channel_resumable(100, state.config.sse_ping_interval, session);
 
     // Clone for the spawned task
     let request_id_clone = request_id.clone();
@@ -896,6 +947,10 @@ async fn stream_chat_completion(
 
     // Spawn a blocking task to handle generation
     tokio::task::spawn_blocking(move || {
+        // Keep the completion controllable for exactly the lifetime of this
+        // task; the guard unregisters the id on drop, whatever exit path
+        // the task takes (#1444).
+        let _control_registration = control_registration;
         // Send initial chunk with role
         let initial =
             ChatCompletionChunk::initial(request_id_clone.clone(), model_id_clone.clone());

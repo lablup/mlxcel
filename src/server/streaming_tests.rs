@@ -36,7 +36,7 @@ impl Serialize for FailingPayload {
 
 #[test]
 fn blocking_sse_sender_sends_json_text_and_done_in_order() {
-    let (sender, mut rx) = payload_channel(4, None);
+    let (sender, mut rx) = payload_channel(4, None, None);
 
     sender.json(&TestPayload { token: "hello" }).unwrap();
     sender.text("plain-text");
@@ -257,7 +257,7 @@ fn cancellation_token_set_when_receiver_dropped() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let token: CancellationToken = Arc::new(AtomicBool::new(false));
-    let (sender, rx) = payload_channel(4, Some(token.clone()));
+    let (sender, rx) = payload_channel(4, Some(token.clone()), None);
 
     // Drop the receiver to simulate client disconnect
     drop(rx);
@@ -276,7 +276,7 @@ fn cancellation_token_not_set_when_send_succeeds() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let token: CancellationToken = Arc::new(AtomicBool::new(false));
-    let (sender, _rx) = payload_channel(4, Some(token.clone()));
+    let (sender, _rx) = payload_channel(4, Some(token.clone()), None);
 
     sender.text("hello");
     assert!(
@@ -287,7 +287,7 @@ fn cancellation_token_not_set_when_send_succeeds() {
 
 #[test]
 fn sender_without_cancellation_token_does_not_panic_on_dropped_receiver() {
-    let (sender, rx) = payload_channel(4, None);
+    let (sender, rx) = payload_channel(4, None, None);
     drop(rx);
     // Should not panic even without a cancellation token
     sender.text("hello");
@@ -312,7 +312,7 @@ fn long_prefill_channel_stays_open_before_first_token() {
     use std::time::Duration;
 
     // Buffer of 4 is enough for our synthetic token sequence.
-    let (sender, mut rx) = payload_channel(4, None);
+    let (sender, mut rx) = payload_channel(4, None, None);
 
     // Simulate the model worker: pause for 50 ms (representing a long prefill),
     // then emit a token event and a DONE marker. The channel must survive the

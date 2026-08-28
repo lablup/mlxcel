@@ -307,6 +307,15 @@ pub struct ThinkingState {
     /// matches the Qwen3 default where the chat template primes
     /// `<think>\n` so the model's first emitted token is reasoning content.
     pub enter_block_on_start: bool,
+    /// Runtime "end reasoning now" flag, armed by the b10621
+    /// `reasoning_control` request field and set by
+    /// `POST /v1/chat/completions/control` with `action: "reasoning_end"`
+    /// (#1444). When the flag is set, the next sampled token inside the
+    /// thinking block is replaced by `</think>`, exactly as an exhausted
+    /// budget would; committed tokens are unaffected. `Some` keeps the state
+    /// active even when no budget is configured, which is upstream's
+    /// "create the budget sampler on demand" semantics.
+    pub force_end: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ThinkingState {
@@ -326,7 +335,20 @@ impl ThinkingState {
             token_ids,
             budget,
             enter_block_on_start,
+            force_end: None,
         }
+    }
+
+    /// Attach the runtime force-end flag armed by the request's
+    /// `reasoning_control` field (#1444). A `Some` flag keeps the state
+    /// active even without a configured budget.
+    #[must_use]
+    pub fn with_force_end(
+        mut self,
+        force_end: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
+        self.force_end = force_end;
+        self
     }
 
     /// A no-op state used when thinking-budget enforcement is disabled for
@@ -339,14 +361,25 @@ impl ThinkingState {
             token_ids: None,
             budget: None,
             enter_block_on_start: false,
+            force_end: None,
         }
     }
 
     /// `true` when this state will not affect sampling (zero overhead on the
-    /// hot path beyond a single branch).
+    /// hot path beyond a single branch). An armed `force_end` flag keeps the
+    /// state active even without a budget (#1444).
     #[inline]
     pub fn is_disabled(&self) -> bool {
-        self.budget.is_none() || self.token_ids.is_none()
+        self.token_ids.is_none() || (self.budget.is_none() && self.force_end.is_none())
+    }
+
+    /// `true` when `reasoning_control` armed this sequence and a control
+    /// request has since asked for the reasoning phase to end.
+    #[inline]
+    fn force_end_requested(&self) -> bool {
+        self.force_end
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Inspect the upcoming sampled token and decide whether to override it
@@ -363,36 +396,36 @@ impl ThinkingState {
         let Some(ids) = self.token_ids else {
             return ThinkingDecision::NoOverride;
         };
-        let Some(budget) = self.budget else {
+        if self.budget.is_none() && self.force_end.is_none() {
             return ThinkingDecision::NoOverride;
-        };
+        }
+        // A live `reasoning_end` control request acts exactly like an
+        // exhausted budget from this step onward (#1444).
+        let forced = self.force_end_requested();
 
         match self.phase {
             ThinkingPhase::Closed => ThinkingDecision::NoOverride,
             ThinkingPhase::Pending => {
-                // If the chat template primes `<think>\n`, budget=0 takes
-                // effect at the very first generated token.
-                if self.enter_block_on_start && budget.cap() == 0 {
+                // If the chat template primes `<think>\n`, budget=0 (or a
+                // pending force-end) takes effect at the very first
+                // generated token.
+                if self.enter_block_on_start
+                    && (forced || self.budget.is_some_and(|b| b.cap() == 0))
+                {
                     return ThinkingDecision::ForceClose(ids.close);
                 }
-                // Otherwise wait until we detect `<think>` open; no override yet.
-                // (Budget=0 without a primed template still waits for the
-                // open token so we don't mistakenly close before the model
-                // enters the block.)
-                if sampled == ids.open && budget.cap() == 0 {
-                    // We're about to enter the block, and budget is 0 ->
-                    // close immediately AFTER the open token, on the next step.
-                    ThinkingDecision::NoOverride
-                } else {
-                    ThinkingDecision::NoOverride
-                }
+                // Otherwise wait until we detect `<think>` open; no override
+                // yet. (Budget=0 without a primed template still waits for
+                // the open token so we don't mistakenly close before the
+                // model enters the block.)
+                ThinkingDecision::NoOverride
             }
             ThinkingPhase::InBlock => {
                 // Natural close — let it through.
                 if sampled == ids.close {
                     return ThinkingDecision::NoOverride;
                 }
-                if self.in_block_count >= budget.cap() {
+                if forced || self.budget.is_some_and(|b| self.in_block_count >= b.cap()) {
                     ThinkingDecision::ForceClose(ids.close)
                 } else {
                     ThinkingDecision::NoOverride
@@ -407,7 +440,7 @@ impl ThinkingState {
     /// (i.e., after any override applied by [`Self::decide_override`]).
     pub fn observe(&mut self, final_token: i32) {
         let Some(ids) = self.token_ids else { return };
-        if self.budget.is_none() {
+        if self.budget.is_none() && self.force_end.is_none() {
             return;
         }
         match self.phase {
@@ -585,6 +618,74 @@ mod tests {
     fn budget_zero_with_template_primed_forces_immediate() {
         let s = ThinkingState::new(Some(ids()), Some(ThinkingBudget::ImmediateClose), true);
         assert_eq!(s.decide_override(42), ThinkingDecision::ForceClose(200));
+    }
+
+    // -- reasoning_control force-end (#1444) --
+
+    fn force_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    #[test]
+    fn armed_without_budget_is_active_and_tracks_the_block() {
+        let flag = force_flag();
+        let mut s = ThinkingState::new(Some(ids()), None, true).with_force_end(Some(flag.clone()));
+        assert!(!s.is_disabled());
+
+        // Flag not yet set: behaves like an unbounded budget.
+        assert_eq!(s.decide_override(50), ThinkingDecision::NoOverride);
+        s.observe(50);
+        assert!(matches!(s.phase, ThinkingPhase::InBlock));
+
+        // Control request lands mid-block: next sampled reasoning token is
+        // replaced by `</think>`; already-observed tokens are untouched.
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(s.decide_override(51), ThinkingDecision::ForceClose(200));
+        s.observe(200);
+        assert!(matches!(s.phase, ThinkingPhase::Closed));
+
+        // After the close the request continues as ordinary content.
+        assert_eq!(s.decide_override(52), ThinkingDecision::NoOverride);
+    }
+
+    #[test]
+    fn force_end_before_first_primed_token_closes_immediately() {
+        let flag = force_flag();
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        let s = ThinkingState::new(Some(ids()), None, true).with_force_end(Some(flag));
+        assert_eq!(s.decide_override(42), ThinkingDecision::ForceClose(200));
+    }
+
+    #[test]
+    fn force_end_outside_a_block_waits_for_the_open_token() {
+        let flag = force_flag();
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        let mut s = ThinkingState::new(Some(ids()), None, false).with_force_end(Some(flag));
+        // No block open yet: ordinary content flows untouched.
+        assert_eq!(s.decide_override(55), ThinkingDecision::NoOverride);
+        s.observe(55);
+        assert!(matches!(s.phase, ThinkingPhase::Pending));
+        // The model opens a block anyway: the sticky flag closes it on the
+        // next step, like a zero budget would.
+        s.observe(100);
+        assert!(matches!(s.phase, ThinkingPhase::InBlock));
+        assert_eq!(s.decide_override(56), ThinkingDecision::ForceClose(200));
+    }
+
+    #[test]
+    fn force_end_lets_a_natural_close_through() {
+        let flag = force_flag();
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        let mut s = ThinkingState::new(Some(ids()), None, true).with_force_end(Some(flag));
+        s.observe(50);
+        // The sampled token IS the close: no override needed.
+        assert_eq!(s.decide_override(200), ThinkingDecision::NoOverride);
+    }
+
+    #[test]
+    fn unarmed_state_without_budget_stays_disabled() {
+        let s = ThinkingState::new(Some(ids()), None, true).with_force_end(None);
+        assert!(s.is_disabled());
     }
 
     #[test]

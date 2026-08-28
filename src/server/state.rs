@@ -451,6 +451,13 @@ pub struct AppState {
     /// `--reranker-model`); while it is `None` the route returns a structured
     /// `501 Not Implemented`.
     pub rerank_model: Option<Arc<dyn RerankModelProvider>>,
+    /// Resumable-stream sessions for the b10621 `/v1/stream` lifecycle
+    /// (#1444): streaming requests carrying `X-Conversation-Id` buffer their
+    /// SSE bytes here for replay, lookup, and deletion.
+    pub(crate) stream_sessions: Arc<super::stream_session::StreamSessionManager>,
+    /// Live completions addressable by `POST /v1/chat/completions/control`
+    /// (#1444), keyed by their public completion id.
+    pub(crate) completion_controls: Arc<super::completion_control::CompletionControlRegistry>,
 }
 
 impl AppState {
@@ -481,6 +488,10 @@ impl AppState {
             audio_model: None,
             embedding_model: None,
             rerank_model: None,
+            stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
+            completion_controls: Arc::new(
+                super::completion_control::CompletionControlRegistry::new(),
+            ),
         }
     }
 
@@ -515,6 +526,10 @@ impl AppState {
             audio_model: None,
             embedding_model: None,
             rerank_model: None,
+            stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
+            completion_controls: Arc::new(
+                super::completion_control::CompletionControlRegistry::new(),
+            ),
         }
     }
 
