@@ -1689,6 +1689,22 @@ fn sampling_config_eq_distinguishes_top_n_sigma() {
 }
 
 #[test]
+fn sampling_config_eq_ignores_inert_greedy_top_n_sigma() {
+    // Greedy rows sample identically regardless of top_n_sigma (the filter
+    // is skipped), so the window gate compares the EFFECTIVE value and keeps
+    // them together.
+    let a = SamplingConfig::greedy();
+    let b = SamplingConfig {
+        top_n_sigma: 1.0,
+        ..SamplingConfig::greedy()
+    };
+    assert!(
+        super::speculative_burst::sampling_config_eq(&a, &b),
+        "greedy rows differing only in an inert top_n_sigma must share a batched window"
+    );
+}
+
+#[test]
 fn sampling_config_eq_distinguishes_stop_token_ids() {
     let a = SamplingConfig::default();
     let b = SamplingConfig {

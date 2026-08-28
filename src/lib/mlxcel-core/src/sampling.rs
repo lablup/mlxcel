@@ -668,13 +668,19 @@ pub struct FusedSampleParams {
 
 impl FusedSampleParams {
     /// Extract the fused scalar params from a full [`SamplingConfig`].
+    ///
+    /// `top_n_sigma` is normalized through
+    /// [`SamplingConfig::effective_top_n_sigma`]: a value the sampler would
+    /// skip anyway (greedy config, non-positive, or non-finite) becomes
+    /// `0.0` here, so [`FusedSampleParams::matches`] does not split a batch
+    /// of rows whose sampled outputs are necessarily identical.
     pub fn from_config(config: &SamplingConfig) -> Self {
         Self {
             temperature: config.temperature,
             top_k: config.top_k,
             top_p: config.top_p,
             min_p: config.min_p,
-            top_n_sigma: config.top_n_sigma,
+            top_n_sigma: config.effective_top_n_sigma(),
         }
     }
 
@@ -867,13 +873,23 @@ pub(crate) fn top_n_sigma_filter(logits: &MlxArray, n_sigma: f32) -> UniquePtr<M
     let d = ffi::where_cond(&finite, &ffi::subtract(&f, &mean), &zero);
     let var = ffi::divide(&ffi::sum_axis(&ffi::multiply(&d, &d), -1, true), &n);
     let std = ffi::sqrt(&var);
-    // `-inf` never wins the max while a finite entry exists.
-    let top = ffi::max_axis(&f, -1, true);
+    // Row maximum over the FINITE entries only: MLX's Max reducer propagates
+    // NaN, so taking the max over the raw row would let a single NaN drive
+    // `thresh` to NaN and silently mask the whole row to `-inf`. Replacing
+    // every non-finite entry with `-inf` first keeps NaN (and `-inf`) out of
+    // the reduction; a `+inf` entry is likewise excluded from the statistics
+    // but still survives the `keep` comparison below.
+    let neg_inf_f32 = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let top = ffi::max_axis(&ffi::where_cond(&finite, &f, &neg_inf_f32), -1, true);
     let thresh = ffi::subtract(&top, &crate::ops::multiply_scalar(&std, n_sigma));
     let keep = ffi::greater_equal(&f, &thresh);
-    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
-    // Same masking convention as `min_p_filter` / `top_k_filter`: the kept
-    // entries pass through from the original logits.
+    // The mask fill carries the ORIGINAL logits dtype: MLX's `where`
+    // promotes to `promote_types(x, y)`, so an f32 fill would silently
+    // promote f16/bf16 logits to f32, changing the precision the C++ chain
+    // runs in and doubling the `[B, V]` tensor. Same masking convention as
+    // `min_p_filter` / `top_k_filter` otherwise: kept entries pass through
+    // from the original logits.
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, ffi::array_dtype(logits));
     ffi::where_cond(&keep, logits, &neg_inf)
 }
 
@@ -3279,6 +3295,18 @@ mod tests {
     }
 
     #[test]
+    fn top_n_sigma_filter_nan_entry_does_not_mask_the_row() {
+        // MLX's Max reducer propagates NaN; the filter must exclude the NaN
+        // from the row maximum so one NaN entry cannot drive the threshold
+        // to NaN and collapse the whole row to -inf. The NaN entry itself
+        // stays masked (NaN >= thresh is false).
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0, f32::NAN], &[1, 6]);
+        let v = to_vec_f32(&top_n_sigma_filter(&logits, 1.0));
+        assert_eq!(kept_indices(&v), vec![3, 4]);
+        assert_eq!(v[5], f32::NEG_INFINITY);
+    }
+
+    #[test]
     fn top_n_sigma_filter_f16_large_vocab_does_not_overflow() {
         // 152k float16 logits in [0, 3]: an f16 row sum overflows to inf
         // (152000 * ~1.5 >> 65504), which would drive the mean/std to
@@ -3289,6 +3317,9 @@ mod tests {
         let logits_f32 = ffi::from_slice_f32(&vals, &[1, V as i32]);
         let logits_f16 = ffi::astype(&logits_f32, dtype::FLOAT16);
         let filtered = top_n_sigma_filter(&logits_f16, 1.0);
+        // The filter must hand back the ORIGINAL dtype, not the f32 the
+        // statistics were computed in.
+        assert_eq!(ffi::array_dtype(&filtered), dtype::FLOAT16);
         let as_f32 = ffi::astype(&filtered, dtype::FLOAT32);
         let kept = kept_indices(&to_vec_f32(&as_f32)).len();
         assert!(kept > 0, "filter masked the whole row (overflow symptom)");
@@ -3358,6 +3389,34 @@ mod tests {
             ..Default::default()
         };
         assert!(config_supports_fused_batch(&cfg));
+    }
+
+    #[test]
+    fn fused_sample_params_normalizes_inert_top_n_sigma() {
+        // Greedy rows differing only in an inert top_n_sigma sample
+        // identically, so from_config must normalize the field to 0.0 and
+        // keep them on the shared fused batch / lookahead paths.
+        let mut greedy_a = SamplingConfig::greedy();
+        greedy_a.top_n_sigma = 0.0;
+        let mut greedy_b = SamplingConfig::greedy();
+        greedy_b.top_n_sigma = 1.5;
+        let pa = FusedSampleParams::from_config(&greedy_a);
+        let pb = FusedSampleParams::from_config(&greedy_b);
+        assert_eq!(pa.top_n_sigma, 0.0);
+        assert_eq!(pb.top_n_sigma, 0.0);
+        assert!(pa.matches(&pb));
+
+        // The non-positive / non-finite "disabled" forms normalize too.
+        let sentinel = SamplingConfig {
+            top_n_sigma: -1.0,
+            ..Default::default()
+        };
+        assert_eq!(FusedSampleParams::from_config(&sentinel).top_n_sigma, 0.0);
+        let nan = SamplingConfig {
+            top_n_sigma: f32::NAN,
+            ..Default::default()
+        };
+        assert_eq!(FusedSampleParams::from_config(&nan).top_n_sigma, 0.0);
     }
 
     #[test]

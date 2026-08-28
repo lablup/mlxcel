@@ -951,6 +951,27 @@ impl SamplingConfig {
         }
     }
 
+    /// The top-n-sigma value the sampler will actually apply: `0.0`
+    /// (disabled) when the config is greedy (`temperature == 0.0 ||
+    /// top_k == 1`), or when the raw field is non-positive or non-finite
+    /// (which covers the b10621 `-1.0` "disabled" sentinel). Batch-uniformity
+    /// gates ([`crate::sampling::FusedSampleParams::from_config`], the
+    /// speculative-window `sampling_config_eq`) compare THIS value rather
+    /// than the raw field, so two rows whose sampled outputs are necessarily
+    /// identical (e.g. greedy rows differing only in an inert `top_n_sigma`)
+    /// are not needlessly split off the fused batch, pipelined-lookahead, or
+    /// batched-speculative paths.
+    pub fn effective_top_n_sigma(&self) -> f32 {
+        if self.temperature == 0.0 || self.top_k == 1 {
+            return 0.0;
+        }
+        if self.top_n_sigma > 0.0 && self.top_n_sigma.is_finite() {
+            self.top_n_sigma
+        } else {
+            0.0
+        }
+    }
+
     /// Check if any penalty-based sampling is enabled
     pub fn needs_token_history(&self) -> bool {
         self.repetition_penalty != 1.0

@@ -2845,7 +2845,9 @@ pub(crate) fn sampling_config_eq(a: &SamplingConfig, b: &SamplingConfig) -> bool
         && a.top_k == b.top_k
         && a.top_p.to_bits() == b.top_p.to_bits()
         && a.min_p.to_bits() == b.min_p.to_bits()
-        && a.top_n_sigma.to_bits() == b.top_n_sigma.to_bits()
+        // Compare the value the sampler will actually apply, so greedy rows
+        // differing only in an inert top_n_sigma still share a window.
+        && a.effective_top_n_sigma().to_bits() == b.effective_top_n_sigma().to_bits()
         && a.seed == b.seed
         && a.stop_token_ids == b.stop_token_ids
         && a.token_bias.is_empty()
