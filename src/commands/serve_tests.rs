@@ -139,6 +139,7 @@ fn sample_args() -> crate::ServeArgs {
         spec_compat: mlxcel::cli::spec_compat_args::SpecCompatArgs::default(),
         chat_compat: Default::default(),
         multimodal_compat: Default::default(),
+        ui_compat: Default::default(),
         cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),
         infill: mlxcel::cli::infill_args::InfillArgs::default(),
         embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs::default(),

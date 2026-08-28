@@ -21,12 +21,26 @@
       "default": "disabled",
       "description": "whether to enable CORS proxy and all built-in tools - do not enable in untrusted environments (default: disabled) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_AGENT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "Agent mode enables the CORS proxy plus every built-in tool for the browser-UI agent; mlxcel implements neither, so --agent fails startup while --no-agent is inert (upstream's default). The single-dash -ag and -no-ag spellings rewrite to the long forms through the argv pre-pass in src/cli/llama_short_flags.rs before clap parses, like every other llama-server short token; the claim records the long spellings the parser itself accepts. LLAMA_ARG_AGENT resolves at runtime with parse_bool_value rules.",
+      "divergence": [
+        "b10621 with the flag turns on server tools and the CORS proxy; mlxcel rejects it at startup."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--agent",
+          "--no-agent"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "env": "LLAMA_ARG_AGENT",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ui_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -43,12 +57,21 @@
       "default": "none",
       "description": "experimental: path to JSON file with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_MCP_SERVERS_CONFIG)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "b10621 spawns stdio MCP child processes and exposes their tools through /tools for its web UI. mlxcel spawns none, so any value fails startup; the diagnostic notes that a server-side MCP tool loop is tracked separately in issue #1457 as a product feature, outside b10621 compatibility.",
+      "divergence": [
+        "b10621 spawns the configured MCP servers; mlxcel rejects the flag at startup."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mcp-servers-config"
+        ],
+        "env": "LLAMA_ARG_MCP_SERVERS_CONFIG",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -65,12 +88,21 @@
       "default": "none",
       "description": "experimental: inline JSON with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none) note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_MCP_SERVERS_JSON)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "The inline-JSON spelling of --mcp-servers-config; identical classification and diagnostic.",
+      "divergence": [
+        "b10621 spawns the configured MCP servers; mlxcel rejects the flag at startup."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mcp-servers-json"
+        ],
+        "env": "LLAMA_ARG_MCP_SERVERS_JSON",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -87,12 +119,21 @@
       "default": "",
       "description": "path to serve static files from (default: ) (env: LLAMA_ARG_STATIC_PATH)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "Upstream serves the directory at / in place of the embedded UI bundle, and only while the UI is enabled. mlxcel has no web UI and no static file server, so there is no independent behavior to alias to; any value fails startup with the UI diagnostic.",
+      "divergence": [
+        "b10621 serves the named directory at /; mlxcel rejects the flag at startup."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--path"
+        ],
+        "env": "LLAMA_ARG_STATIC_PATH",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -109,12 +150,21 @@
       "default": "no tools",
       "description": "experimental: whether to enable built-in tools for AI agents - do not enable in untrusted environments (default: no tools) specify \"all\" to enable all tools available tools: read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, get_info note: for security reasons, this will limit --cors-origins to localhost by default (env: LLAMA_ARG_TOOLS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "Server-executed tools exist for b10621's browser-UI agent; the agent loop runs in the browser and upstream's own README-dev marks /tools UI-internal. mlxcel executes no server-side tools (client-declared `tools` in chat requests are still parsed for tool-call extraction), so any value fails startup. GET/POST /tools answer upstream's disabled 403 feature_disabled envelope.",
+      "divergence": [
+        "b10621 executes the named tools server-side for its UI; mlxcel rejects the flag at startup and /tools always answers the disabled 403."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--tools"
+        ],
+        "env": "LLAMA_ARG_TOOLS",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -131,12 +181,21 @@
       "default": "none, use host environment",
       "description": "experimental: run tools in a separate runtime environment (default: none, use host environment) available options: 'docker:<image>', 'podman:<image>': spin up a new container and reuse it for all invocations, clean up on server exit 'docker-container:<id>', 'podman-container:<id>': use an existing container by ID, won't stop on server exit 'ssh:<target>': run tools on a remote POSIX host over SSH, key-based auth and a trusted host key are required (env: LLAMA_ARG_TOOLS_RUNTIME)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "Selects where b10621 executes its built-in tools (docker:, podman:, ssh:); mlxcel executes none, so any value fails startup with the tools diagnostic.",
+      "divergence": [
+        "b10621 runs its tools in the named runtime; mlxcel rejects the flag at startup."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--tools-runtime"
+        ],
+        "env": "LLAMA_ARG_TOOLS_RUNTIME",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -159,18 +218,26 @@
       "default": "enabled",
       "description": "whether to enable the Web UI (default: enabled) (env: LLAMA_ARG_UI)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "--no-webui accepted and ignored (hidden); mlxcel has no Web UI. #1435 owns the classification.",
-      "divergence": [],
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "mlxcel ships no web UI, so there is nothing to serve and nothing to alias. --no-ui and --no-webui ask for the state the server is permanently in and are accepted as inert; --ui and --webui fail startup with a diagnostic pointing at the HTTP API. LLAMA_ARG_UI resolves at runtime with b10621's parse_bool_value rules (LLAMA_ARG_NO_UI wins and means false), so a falsy value is the inert form and a truthy one reaches the same refusal the flag does.",
+      "divergence": [
+        "b10621 serves its embedded web UI at / by default; mlxcel has none, --ui/--webui fail startup, and / answers the health check."
+      ],
       "mlxcel": {
         "accepted_spellings": [
+          "--ui",
+          "--webui",
+          "--no-ui",
           "--no-webui"
         ],
         "defaults": [
           "false"
         ],
+        "env": "LLAMA_ARG_UI",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ui_compat_args_tests.rs",
         "hidden": true
       }
     },
@@ -191,12 +258,22 @@
       "default": null,
       "description": "JSON that provides default UI settings (overrides UI defaults) (env: LLAMA_ARG_UI_CONFIG)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "Configures the web UI mlxcel does not ship; any value fails startup with the UI diagnostic.",
+      "divergence": [
+        "b10621 applies the JSON to its web UI; mlxcel rejects the flag at startup because no UI exists."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ui-config",
+          "--webui-config"
+        ],
+        "env": "LLAMA_ARG_UI_CONFIG",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -215,12 +292,22 @@
       "default": null,
       "description": "JSON file that provides default UI settings (overrides UI defaults) (env: LLAMA_ARG_UI_CONFIG_FILE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "Configures the web UI mlxcel does not ship; any value fails startup with the UI diagnostic.",
+      "divergence": [
+        "b10621 applies the file to its web UI; mlxcel rejects the flag at startup because no UI exists."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ui-config-file",
+          "--webui-config-file"
+        ],
+        "env": "LLAMA_ARG_UI_CONFIG_FILE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -243,12 +330,28 @@
       "default": "disabled",
       "description": "experimental: whether to enable MCP CORS proxy - do not enable in untrusted environments (default: disabled) (env: LLAMA_ARG_UI_MCP_PROXY)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "The generic /cors-proxy URL proxy exists so b10621's browser UI can reach remote MCP servers; it is an SSRF surface by construction and mlxcel does not implement it, so no loopback, link-local, metadata-service, or DNS-rebinding allowlist is needed here. The negative forms are upstream's default and are accepted as inert; the positive forms fail startup, and GET/POST /cors-proxy answer upstream's disabled 403. LLAMA_ARG_UI_MCP_PROXY resolves at runtime with parse_bool_value rules.",
+      "divergence": [
+        "b10621 with the flag proxies arbitrary URLs through /cors-proxy; mlxcel rejects the flag at startup and the route always answers the disabled 403."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ui-mcp-proxy",
+          "--webui-mcp-proxy",
+          "--no-ui-mcp-proxy",
+          "--no-webui-mcp-proxy"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "env": "LLAMA_ARG_UI_MCP_PROXY",
+        "env_binding": "runtime",
+        "env_test": "src/cli/ui_compat_args_tests.rs",
+        "hidden": true
+      }
     },
     {
       "kind": "route",
@@ -275,11 +378,13 @@
       "source": "tools/server/server-http.cpp",
       "condition": "webui enabled (--ui / --path static mount)",
       "discovery": "source-static-mount",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
+      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
+      "notes": "b10621 serves its embedded SvelteKit bundle (or the --path directory) at the root; mlxcel ships no UI assets and answers the health check at /. The flags that would select a bundle (--ui, --webui, --path, --ui-config, --ui-config-file) fail startup with a diagnostic pointing at the HTTP API, so the root can never become a UI mount.",
+      "divergence": [
+        "b10621 answers the web UI at /; mlxcel answers the health check there."
+      ],
       "mlxcel": null
     },
     {
@@ -290,12 +395,16 @@
       "source": "tools/server/server.cpp",
       "condition": "webui-mcp-proxy (403 handler when disabled)",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/feature_disabled_tests.rs::tools_and_cors_proxy_answer_the_b10621_feature_disabled_envelope",
+      "notes": "Mounted as b10621's own disabled-feature stub: 403 with {\"error\":{\"message\":\"this feature is disabled\",\"type\":\"feature_disabled\"}}, byte-shaped like upstream's res_403 (no code field). The feature can never be enabled here because the enabling flags fail startup (#1435), so the stub is the permanent answer.",
+      "divergence": [
+        "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
+      ],
+      "mlxcel": {
+        "route": "GET /cors-proxy"
+      }
     },
     {
       "kind": "route",
@@ -305,12 +414,16 @@
       "source": "tools/server/server.cpp",
       "condition": "server tools or MCP configured (403 handler when disabled)",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/feature_disabled_tests.rs::tools_and_cors_proxy_answer_the_b10621_feature_disabled_envelope",
+      "notes": "Mounted as b10621's own disabled-feature stub: 403 with {\"error\":{\"message\":\"this feature is disabled\",\"type\":\"feature_disabled\"}}, byte-shaped like upstream's res_403 (no code field). The feature can never be enabled here because the enabling flags fail startup (#1435), so the stub is the permanent answer.",
+      "divergence": [
+        "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
+      ],
+      "mlxcel": {
+        "route": "GET /tools"
+      }
     },
     {
       "kind": "route",
@@ -337,12 +450,16 @@
       "source": "tools/server/server.cpp",
       "condition": "webui-mcp-proxy (403 handler when disabled)",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/feature_disabled_tests.rs::tools_and_cors_proxy_answer_the_b10621_feature_disabled_envelope",
+      "notes": "Mounted as b10621's own disabled-feature stub: 403 with {\"error\":{\"message\":\"this feature is disabled\",\"type\":\"feature_disabled\"}}, byte-shaped like upstream's res_403 (no code field). The feature can never be enabled here because the enabling flags fail startup (#1435), so the stub is the permanent answer.",
+      "divergence": [
+        "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
+      ],
+      "mlxcel": {
+        "route": "POST /cors-proxy"
+      }
     },
     {
       "kind": "route",
@@ -352,12 +469,16 @@
       "source": "tools/server/server.cpp",
       "condition": "server tools or MCP configured (403 handler when disabled)",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1435,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/feature_disabled_tests.rs::tools_and_cors_proxy_answer_the_b10621_feature_disabled_envelope",
+      "notes": "Mounted as b10621's own disabled-feature stub: 403 with {\"error\":{\"message\":\"this feature is disabled\",\"type\":\"feature_disabled\"}}, byte-shaped like upstream's res_403 (no code field). The feature can never be enabled here because the enabling flags fail startup (#1435), so the stub is the permanent answer.",
+      "divergence": [
+        "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
+      ],
+      "mlxcel": {
+        "route": "POST /tools"
+      }
     }
   ]
 }

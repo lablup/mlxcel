@@ -157,6 +157,16 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     args.multimodal_compat
         .ensure_inert()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // b10621 Web UI / tools / MCP / CORS-proxy / agent surface (issue
+    // #1435): the inert forms are accepted, every enabling form fails here,
+    // before the model reference resolves.
+    args.ui_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.ui_compat
+        .ensure_inert()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     let image_token_bounds = args
         .multimodal_compat
         .image_token_bounds()

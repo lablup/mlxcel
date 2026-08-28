@@ -340,6 +340,21 @@ pub(crate) fn route_inventory(_config: &crate::server::ServerConfig) -> Vec<Rout
             Method::POST,
             post(routes::responses_input_tokens),
         ),
+        // b10621 disabled-feature stubs (#1435): server tools, MCP, and the
+        // UI's CORS proxy are never implemented here (the enabling flags
+        // fail startup in `cli::ui_compat_args`), so these four routes
+        // always answer upstream's 403 `feature_disabled` envelope, exactly
+        // as a llama-server with the features off does.
+        reg(
+            "/tools",
+            Method::POST,
+            get(routes::feature_disabled).post(routes::feature_disabled),
+        ),
+        reg(
+            "/cors-proxy",
+            Method::POST,
+            get(routes::feature_disabled).post(routes::feature_disabled),
+        ),
     ];
 
     // b10621 mounts /props, /slots, /metrics and the slot actions
