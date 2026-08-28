@@ -122,6 +122,8 @@ fn build_server_generate_options_uses_server_defaults() {
     // resolves to the disabled baseline regardless of server configuration.
     assert_eq!(options.sampling.xtc_probability, 0.0);
     assert_eq!(options.sampling.xtc_threshold, 0.1);
+    // Like XTC, top-n-sigma is request-only: absent resolves to disabled.
+    assert_eq!(options.sampling.top_n_sigma, 0.0);
     assert_eq!(options.stop_sequences, None);
 }
 
@@ -147,6 +149,7 @@ fn build_server_generate_options_applies_request_overrides() {
             dry_sequence_breakers: Some(vec![1, 2]),
             xtc_probability: Some(0.7),
             xtc_threshold: Some(0.2),
+            top_n_sigma: Some(2.5),
             stop_sequences: Some(vec!["stop".to_string()]),
             priority: crate::server::batch::RequestPriority::High,
             reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
@@ -175,6 +178,7 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.dry_sequence_breakers, vec![1, 2]);
     assert_eq!(options.sampling.xtc_probability, 0.7);
     assert_eq!(options.sampling.xtc_threshold, 0.2);
+    assert_eq!(options.sampling.top_n_sigma, 2.5);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
 }
 

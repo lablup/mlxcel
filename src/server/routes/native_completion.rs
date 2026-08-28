@@ -600,6 +600,12 @@ fn build_native_generate_options(
             // them), so XTC always resolves to the disabled baseline here.
             xtc_probability: None,
             xtc_threshold: None,
+            // The native `/completion` `top_n_sigma` field is wired together
+            // with its manifest entry (`field:top_n_sigma`, owned by #1436):
+            // the llama-compat gate requires the request field and the
+            // manifest flip to land in one change, so until then the filter
+            // stays at the disabled baseline on this endpoint.
+            top_n_sigma: None,
             stop_sequences: request.stop.clone(),
             priority: RequestPriority::default(),
             // the caller fills this from the validated request

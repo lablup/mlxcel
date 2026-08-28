@@ -42,7 +42,7 @@ use crate::tokenizer::MlxcelTokenizer;
 
 use super::chat::{
     build_generate_options, decode_token, parse_priority_header, structured_error_to_response,
-    validate_xtc_params,
+    validate_top_n_sigma, validate_xtc_params,
 };
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
@@ -167,6 +167,9 @@ pub async fn completions(
     if let Err(message) =
         validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability)
     {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
+    if let Err(message) = validate_top_n_sigma(request.params.top_n_sigma) {
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
@@ -470,6 +473,24 @@ mod tests {
             validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability),
             Err("xtc_threshold must be between 0.0 and 0.5")
         );
+    }
+
+    #[test]
+    fn completions_rejects_negative_top_n_sigma() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","top_n_sigma":-1.0}"#).unwrap();
+        assert_eq!(
+            validate_top_n_sigma(request.params.top_n_sigma),
+            Err("top_n_sigma must be >= 0.0")
+        );
+    }
+
+    #[test]
+    fn completions_accepts_positive_top_n_sigma() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","top_n_sigma":1.5}"#).unwrap();
+        assert_eq!(request.params.top_n_sigma, Some(1.5));
+        assert!(validate_top_n_sigma(request.params.top_n_sigma).is_ok());
     }
 
     #[test]

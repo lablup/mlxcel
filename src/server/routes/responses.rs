@@ -66,7 +66,7 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 
 use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
-    validate_xtc_params,
+    validate_top_n_sigma, validate_xtc_params,
 };
 use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
 
@@ -110,6 +110,9 @@ pub async fn create_response(
         translated.chat_request.params.xtc_threshold,
         translated.chat_request.params.xtc_probability,
     ) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
+    if let Err(message) = validate_top_n_sigma(translated.chat_request.params.top_n_sigma) {
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
@@ -1197,6 +1200,20 @@ mod tests {
                 translated.chat_request.params.xtc_probability,
             ),
             Err("xtc_probability must be between 0.0 and 1.0")
+        );
+    }
+
+    #[test]
+    fn responses_rejects_negative_top_n_sigma() {
+        let request: CreateResponseRequest =
+            serde_json::from_str(r#"{"model":"m","input":"hi","top_n_sigma":-2.0}"#).unwrap();
+        let translated = responses_request_to_chat(&request, None, None).unwrap();
+        // The flattened `SamplingParams` clone forwards the field, so the
+        // handler's gate sees it.
+        assert_eq!(translated.chat_request.params.top_n_sigma, Some(-2.0));
+        assert_eq!(
+            validate_top_n_sigma(translated.chat_request.params.top_n_sigma),
+            Err("top_n_sigma must be >= 0.0")
         );
     }
 

@@ -1675,6 +1675,20 @@ fn sampling_config_eq_distinguishes_top_k_top_p_min_p() {
 }
 
 #[test]
+fn sampling_config_eq_distinguishes_top_n_sigma() {
+    let a = SamplingConfig::default();
+    let b = SamplingConfig {
+        top_n_sigma: 1.0,
+        ..SamplingConfig::default()
+    };
+    assert!(
+        !super::speculative_burst::sampling_config_eq(&a, &b),
+        "a top_n_sigma difference must keep the rows out of one batched \
+         window: the window samples every row with one shared config"
+    );
+}
+
+#[test]
 fn sampling_config_eq_distinguishes_stop_token_ids() {
     let a = SamplingConfig::default();
     let b = SamplingConfig {

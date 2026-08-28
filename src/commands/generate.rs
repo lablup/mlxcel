@@ -955,6 +955,7 @@ fn resolved_cli_sampling_params(
         // keeps it disabled.
         xtc_probability: 0.0,
         xtc_threshold: 0.1,
+        top_n_sigma: args.sampling.top_n_sigma,
         stop_token_ids,
     }
 }

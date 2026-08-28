@@ -201,6 +201,7 @@ fn full_state_serialize_deserialize_round_trip() {
             dry_sequence_breakers: vec![],
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            top_n_sigma: 0.0,
             stop_token_ids: vec![2],
         }),
         token_history: vec![100, 200, 300],

@@ -22,6 +22,7 @@ fn default_sampling() -> SerializableSamplingState {
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        top_n_sigma: 0.0,
         stop_token_ids: Vec::new(),
     }
 }

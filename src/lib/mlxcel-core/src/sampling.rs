@@ -481,7 +481,7 @@ fn preprocess_logits_for_sampling(
         last_logits
     };
 
-    if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
+    let last_logits = if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
         && !token_history.is_empty()
     {
         match &mut state {
@@ -499,7 +499,14 @@ fn preprocess_logits_for_sampling(
         }
     } else {
         last_logits
-    }
+    };
+
+    // Row filters (top-n-sigma; #1377 / #1373 add typical_p and p_less here)
+    // run on the penalized, untempered logits: after every history-based
+    // penalty and before the fused C++ chain (temperature / top_k / top_p /
+    // min_p / XTC). Disabled filters return `last_logits` unchanged with no
+    // new graph nodes, preserving the bit-exact baseline.
+    apply_row_filters(last_logits, &FusedSampleParams::from_config(config))
 }
 
 /// The exact categorical distribution [`sample_token_optimized`] would draw
@@ -653,6 +660,10 @@ pub struct FusedSampleParams {
     pub top_p: f32,
     /// Min-p cutoff (`0.0` disables).
     pub min_p: f32,
+    /// Top-n-sigma logit filter (`0.0` disables). Row-wise, history-free and
+    /// RNG-free, so it stays fused-eligible: [`apply_row_filters`] applies it
+    /// to the whole `[B, V]` batch before the single fused dispatch.
+    pub top_n_sigma: f32,
 }
 
 impl FusedSampleParams {
@@ -663,6 +674,7 @@ impl FusedSampleParams {
             top_k: config.top_k,
             top_p: config.top_p,
             min_p: config.min_p,
+            top_n_sigma: config.top_n_sigma,
         }
     }
 
@@ -676,6 +688,7 @@ impl FusedSampleParams {
             && self.top_k == other.top_k
             && self.top_p.to_bits() == other.top_p.to_bits()
             && self.min_p.to_bits() == other.min_p.to_bits()
+            && self.top_n_sigma.to_bits() == other.top_n_sigma.to_bits()
     }
 }
 
@@ -689,6 +702,14 @@ impl FusedSampleParams {
 /// token bias, is a per-row logit edit that must run through the per-row
 /// sampler, so it disqualifies the fused fast path. When this returns `false`,
 /// the caller must fall back to the per-row sampler.
+///
+/// `top_n_sigma` deliberately does NOT disqualify the fused path: it is
+/// row-wise, history-free and RNG-free, and its scalar rides in
+/// [`FusedSampleParams`], so a batch whose rows share one value applies the
+/// filter to the whole `[B, V]` tensor ([`apply_row_filters`]) and still
+/// dispatches once. Rows with different values diverge in
+/// [`FusedSampleParams::matches`] and fall back per row, exactly like mixed
+/// `top_p` values do.
 ///
 /// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
 pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
@@ -744,6 +765,9 @@ pub fn row_supports_fused_batch(
 pub fn batched_fused_sample(logits: &MlxArray, params: &FusedSampleParams) -> Vec<i32> {
     // [B, 1, vocab] -> [B, vocab]; a 2-D input is returned unchanged.
     let last_logits = ffi::slice_last_logits(logits);
+    // Row filters (top-n-sigma) apply to the whole [B, vocab] batch before the
+    // single fused dispatch; a no-op when every filter is disabled.
+    let last_logits = apply_row_filters(last_logits, params);
     let tokens = ffi::fused_sample(
         &last_logits,
         params.temperature,
@@ -771,6 +795,86 @@ fn token_ids_to_host(tokens: &MlxArray) -> Vec<i32> {
         .chunks_exact(4)
         .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+/// Batch-safe row-filter hook: apply the enabled RNG-free, history-free
+/// logit filters to a `[B, V]` (or `[V]`-broadcastable) logit tensor in the
+/// fixed order pinned by #1375:
+///
+/// ```text
+/// top_n_sigma -> p_less (#1373) -> typical_p (#1377)
+/// ```
+///
+/// (the latter two land in their own issues; their slots in this function fix
+/// the order here so neither can accidentally reorder the chain).
+///
+/// Returns the input pointer unchanged, adding NO graph nodes, when every
+/// filter is disabled or when the config is greedy (`temperature == 0.0 ||
+/// top_k == 1`), so the disabled baseline and the greedy path both stay
+/// byte-identical. A non-finite or non-positive `top_n_sigma` counts as
+/// disabled, which also makes the b10621 `-1.0` "disabled" sentinel inert
+/// rather than a mask-everything threshold.
+///
+/// Used by: [`preprocess_logits_for_sampling`] (per-row sampler, and through
+/// it [`effective_token_distribution`] / [`sample_token_with_distribution`]),
+/// [`batched_fused_sample`], `BatchScheduler::prime_lookahead_with_input`
+pub fn apply_row_filters(
+    logits: UniquePtr<MlxArray>,
+    params: &FusedSampleParams,
+) -> UniquePtr<MlxArray> {
+    // Greedy skips every row filter: the argmax of the unfiltered row is by
+    // definition inside every "keep the top" mask, so filtering could only
+    // add graph nodes without changing the sampled token.
+    if params.temperature == 0.0 || params.top_k == 1 {
+        return logits;
+    }
+    let mut logits = logits;
+    if params.top_n_sigma > 0.0 && params.top_n_sigma.is_finite() {
+        logits = top_n_sigma_filter(&logits, params.top_n_sigma);
+    }
+    // p_less (#1373) slot: runs here, after top_n_sigma, when it lands.
+    // typical_p (#1377) slot: runs here, after p_less, when it lands.
+    logits
+}
+
+/// Top-n-sigma logit filter: keep only the tokens whose logit lies within
+/// `n_sigma` standard deviations of the row maximum
+/// (`logit >= max - n_sigma * std`), masking the rest to `-inf`.
+/// Statistics (mean, population std with
+/// `ddof = 0`) are taken over the FINITE entries of each vocabulary row, so
+/// tokens already masked by token bias or penalties neither perturb the
+/// threshold nor come back: `-inf >= thresh` is false and NaN compares false,
+/// so masked entries stay masked.
+///
+/// All reductions are computed in float32 regardless of the logit dtype: a
+/// float16 sum over a 150k-entry vocabulary overflows to `inf`, which would
+/// drive the threshold to `-inf`/NaN and silently disable the filter.
+///
+/// Rows are independent (`axis = -1` reductions with `keepdims`), so a
+/// `[B, V]` batch filters each row against its own statistics.
+///
+/// Used by: [`apply_row_filters`], unit tests
+pub(crate) fn top_n_sigma_filter(logits: &MlxArray, n_sigma: f32) -> UniquePtr<MlxArray> {
+    let f = ffi::astype(logits, dtype::FLOAT32);
+    let finite = ffi::isfinite(&f);
+    let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
+    // Finite count per row. An all-masked row divides by zero into NaN,
+    // which keeps every comparison false and leaves the row fully masked,
+    // identical to its input.
+    let n = ffi::sum_axis(&ffi::astype(&finite, dtype::FLOAT32), -1, true);
+    let masked = ffi::where_cond(&finite, &f, &zero);
+    let mean = ffi::divide(&ffi::sum_axis(&masked, -1, true), &n);
+    let d = ffi::where_cond(&finite, &ffi::subtract(&f, &mean), &zero);
+    let var = ffi::divide(&ffi::sum_axis(&ffi::multiply(&d, &d), -1, true), &n);
+    let std = ffi::sqrt(&var);
+    // `-inf` never wins the max while a finite entry exists.
+    let top = ffi::max_axis(&f, -1, true);
+    let thresh = ffi::subtract(&top, &crate::ops::multiply_scalar(&std, n_sigma));
+    let keep = ffi::greater_equal(&f, &thresh);
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    // Same masking convention as `min_p_filter` / `top_k_filter`: the kept
+    // entries pass through from the original logits.
+    ffi::where_cond(&keep, logits, &neg_inf)
 }
 
 /// Apply repetition penalty to logits.
@@ -3117,6 +3221,205 @@ mod tests {
             i32::from_ne_bytes([ba[0], ba[1], ba[2], ba[3]]),
             0,
             "allowlisted token was removed by the C++ XTC draw path"
+        );
+    }
+
+    // -- top-n-sigma row filter (#1375) --
+
+    /// Indices of the finite (kept) entries of a filtered row.
+    fn kept_indices(v: &[f32]) -> Vec<usize> {
+        v.iter()
+            .enumerate()
+            .filter(|(_, x)| x.is_finite())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn top_n_sigma_filter_keeps_within_n_std() {
+        // Row [0,1,2,3,4]: mean 2, population std sqrt(2) = 1.414.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[1, 5]);
+        // n = 1: threshold 4 - 1.414 = 2.586 -> keeps {3, 4}.
+        let v = to_vec_f32(&top_n_sigma_filter(&logits, 1.0));
+        assert_eq!(kept_indices(&v), vec![3, 4]);
+        // n = 2: threshold 4 - 2.828 = 1.172 -> keeps {2, 3, 4}.
+        let v = to_vec_f32(&top_n_sigma_filter(&logits, 2.0));
+        assert_eq!(kept_indices(&v), vec![2, 3, 4]);
+        // n = 0: threshold is the max itself -> keeps only the argmax.
+        let v = to_vec_f32(&top_n_sigma_filter(&logits, 0.0));
+        assert_eq!(kept_indices(&v), vec![4]);
+        // n = 100: threshold far below the min -> keeps everything.
+        let v = to_vec_f32(&top_n_sigma_filter(&logits, 100.0));
+        assert_eq!(kept_indices(&v), vec![0, 1, 2, 3, 4]);
+        // Kept entries pass through unchanged.
+        assert_eq!(v, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn top_n_sigma_filter_rows_independent() {
+        #[rustfmt::skip]
+        let flat = [
+            0.0f32, 1.0, 2.0, 3.0, 4.0,
+            4.0,    3.0, 2.0, 1.0, 0.0,
+        ];
+        let logits = ffi::from_slice_f32(&flat, &[2, 5]);
+        let filtered = top_n_sigma_filter(&logits, 1.0);
+        assert_eq!(kept_indices(&row_vec(&filtered, 0, 5)), vec![3, 4]);
+        assert_eq!(kept_indices(&row_vec(&filtered, 1, 5)), vec![0, 1]);
+    }
+
+    #[test]
+    fn top_n_sigma_filter_ignores_neg_inf_entries() {
+        // The -inf entry must neither perturb the row statistics nor come
+        // back: kept set matches the 5-entry row above and index 5 stays -inf.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0, f32::NEG_INFINITY], &[1, 6]);
+        let v = to_vec_f32(&top_n_sigma_filter(&logits, 1.0));
+        assert_eq!(kept_indices(&v), vec![3, 4]);
+        assert_eq!(v[5], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn top_n_sigma_filter_f16_large_vocab_does_not_overflow() {
+        // 152k float16 logits in [0, 3]: an f16 row sum overflows to inf
+        // (152000 * ~1.5 >> 65504), which would drive the mean/std to
+        // inf/NaN and silently disable the filter. The float32 reduction
+        // path must keep a strict subset: 0 < kept < V.
+        const V: usize = 152_000;
+        let vals: Vec<f32> = (0..V).map(|i| (i % 1000) as f32 * 0.003).collect();
+        let logits_f32 = ffi::from_slice_f32(&vals, &[1, V as i32]);
+        let logits_f16 = ffi::astype(&logits_f32, dtype::FLOAT16);
+        let filtered = top_n_sigma_filter(&logits_f16, 1.0);
+        let as_f32 = ffi::astype(&filtered, dtype::FLOAT32);
+        let kept = kept_indices(&to_vec_f32(&as_f32)).len();
+        assert!(kept > 0, "filter masked the whole row (overflow symptom)");
+        assert!(kept < V, "filter kept the whole row (overflow symptom)");
+    }
+
+    #[test]
+    fn apply_row_filters_disabled_returns_input_pointer_unchanged() {
+        // Disabled filters must add zero graph nodes: the exact input
+        // pointer comes back.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0], &[1, 3]);
+        let ptr_before = &*logits as *const MlxArray;
+        let params = FusedSampleParams::from_config(&SamplingConfig::default());
+        let out = apply_row_filters(logits, &params);
+        assert_eq!(ptr_before, &*out as *const MlxArray);
+    }
+
+    #[test]
+    fn apply_row_filters_greedy_skips_active_filter() {
+        // Greedy (temperature 0 / top_k 1) skips the filter even when
+        // enabled: same pointer, no new nodes.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0], &[1, 3]);
+        let ptr_before = &*logits as *const MlxArray;
+        let mut config = SamplingConfig::greedy();
+        config.top_n_sigma = 1.0;
+        let out = apply_row_filters(logits, &FusedSampleParams::from_config(&config));
+        assert_eq!(ptr_before, &*out as *const MlxArray);
+    }
+
+    #[test]
+    fn apply_row_filters_treats_negative_sentinel_as_disabled() {
+        // The b10621 `-1.0` "disabled" sentinel must be inert, not a
+        // mask-everything threshold.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0], &[1, 3]);
+        let ptr_before = &*logits as *const MlxArray;
+        let config = SamplingConfig {
+            top_n_sigma: -1.0,
+            ..Default::default()
+        };
+        let out = apply_row_filters(logits, &FusedSampleParams::from_config(&config));
+        assert_eq!(ptr_before, &*out as *const MlxArray);
+    }
+
+    #[test]
+    fn top_n_sigma_skipped_on_greedy() {
+        // temperature = 0 with the filter enabled returns the argmax of the
+        // unfiltered row, byte-identical to the baseline greedy config.
+        let logits = ffi::from_slice_f32(&[0.1, 0.9, 1.2], &[1, 1, 3]);
+        let baseline = SamplingConfig::greedy();
+        let mut with_filter = SamplingConfig::greedy();
+        with_filter.top_n_sigma = 1.0;
+
+        let (token_a, logits_a) = sample_token_optimized(&logits, &baseline, &[]);
+        let (token_b, logits_b) = sample_token_optimized(&logits, &with_filter, &[]);
+        ffi::eval(&token_a);
+        ffi::eval(&token_b);
+        assert_eq!(ffi::item_i32(&token_a), ffi::item_i32(&token_b));
+        assert_eq!(to_vec_f32(&logits_a), to_vec_f32(&logits_b));
+    }
+
+    #[test]
+    fn config_supports_fused_batch_true_for_top_n_sigma() {
+        // The filter is row-wise, history-free and RNG-free, so it stays on
+        // the single-dispatch fused batch path.
+        let cfg = SamplingConfig {
+            top_n_sigma: 1.0,
+            ..Default::default()
+        };
+        assert!(config_supports_fused_batch(&cfg));
+    }
+
+    #[test]
+    fn fused_sample_params_matches_compares_top_n_sigma() {
+        let base = FusedSampleParams::from_config(&SamplingConfig::with_temperature(0.7));
+        assert!(base.matches(&base));
+        let diff = FusedSampleParams {
+            top_n_sigma: 1.0,
+            ..base
+        };
+        assert!(!base.matches(&diff));
+        assert!(diff.matches(&diff));
+    }
+
+    #[test]
+    fn batched_fused_sample_honors_top_n_sigma() {
+        // 64 identical rows [0,1,2,3,4], temperature 1.0, n = 1.0: the
+        // filter keeps {3, 4}, so every sampled id must land there.
+        const B: usize = 64;
+        let mut flat = Vec::with_capacity(B * 5);
+        for _ in 0..B {
+            flat.extend_from_slice(&[0.0f32, 1.0, 2.0, 3.0, 4.0]);
+        }
+        let logits = ffi::from_slice_f32(&flat, &[B as i32, 1, 5]);
+        let cfg = SamplingConfig {
+            top_n_sigma: 1.0,
+            ..Default::default()
+        };
+        let params = FusedSampleParams::from_config(&cfg);
+        let tokens = batched_fused_sample(&logits, &params);
+        assert_eq!(tokens.len(), B);
+        for (i, t) in tokens.iter().enumerate() {
+            assert!(
+                *t == 3 || *t == 4,
+                "row {i} sampled masked token {t}; filter not applied on the fused batch path"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_token_distribution_zeroes_top_n_sigma_masked_tokens() {
+        // The #902 proposal/target distribution must carry zero mass outside
+        // the kept set {3, 4}, keeping speculative acceptance consistent
+        // with the sampler.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[1, 1, 5]);
+        let cfg = SamplingConfig {
+            top_n_sigma: 1.0,
+            ..Default::default()
+        };
+        let probs = effective_token_distribution(&logits, &cfg, &[]);
+        let v = to_vec_f32(&probs);
+        assert_eq!(v.len(), 5);
+        for i in [0usize, 1, 2] {
+            assert_eq!(v[i], 0.0, "masked token {i} kept probability {}", v[i]);
+        }
+        for i in [3usize, 4] {
+            assert!(v[i] > 0.0, "kept token {i} lost its probability");
+        }
+        let total: f32 = v.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "distribution not normalized: {total}"
         );
     }
 }

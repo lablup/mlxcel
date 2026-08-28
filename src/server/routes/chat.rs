@@ -270,6 +270,9 @@ pub async fn chat_completions(
     {
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
+    if let Err(message) = validate_top_n_sigma(request.params.top_n_sigma) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
 
     // reject `video_url` content blocks early for models that do
     // not support video. Detected once at startup from `config.json` and
@@ -1258,6 +1261,22 @@ pub(crate) fn validate_xtc_params(
     Ok(())
 }
 
+/// Validate the top-n-sigma sampling parameter.
+///
+/// `top_n_sigma` must be finite and `>= 0.0` when set (`0.0` disables the
+/// filter); an absent field (`None`) is always valid and resolves to the
+/// disabled baseline. Returns `Err` with a client-facing message so the
+/// caller can surface a 400 `invalid_request_error` before any generation
+/// work begins.
+pub(crate) fn validate_top_n_sigma(top_n_sigma: Option<f32>) -> Result<(), &'static str> {
+    if let Some(value) = top_n_sigma
+        && !(value.is_finite() && value >= 0.0)
+    {
+        return Err("top_n_sigma must be >= 0.0");
+    }
+    Ok(())
+}
+
 /// Maximum number of tools allowed in a single request.
 pub(crate) const MAX_TOOLS: usize = 128;
 
@@ -1450,6 +1469,7 @@ pub(crate) fn build_generate_options(
             dry_sequence_breakers: params.dry_sequence_breakers.clone(),
             xtc_probability: params.xtc_probability,
             xtc_threshold: params.xtc_threshold,
+            top_n_sigma: params.top_n_sigma,
             stop_sequences: params.stop.clone(),
             priority: RequestPriority::default(),
             // the caller (non_stream_chat_completion /
@@ -1533,6 +1553,38 @@ mod tests {
         assert_eq!(
             validate_xtc_params(None, Some(-0.5)),
             Err("xtc_probability must be between 0.0 and 1.0")
+        );
+    }
+
+    #[test]
+    fn validate_top_n_sigma_accepts_unset_zero_and_positive() {
+        assert!(validate_top_n_sigma(None).is_ok());
+        assert!(validate_top_n_sigma(Some(0.0)).is_ok());
+        assert!(validate_top_n_sigma(Some(1.0)).is_ok());
+        assert!(validate_top_n_sigma(Some(100.0)).is_ok());
+    }
+
+    #[test]
+    fn chat_rejects_negative_top_n_sigma() {
+        assert_eq!(
+            validate_top_n_sigma(Some(-1.0)),
+            Err("top_n_sigma must be >= 0.0")
+        );
+        assert_eq!(
+            validate_top_n_sigma(Some(-0.001)),
+            Err("top_n_sigma must be >= 0.0")
+        );
+    }
+
+    #[test]
+    fn validate_top_n_sigma_rejects_non_finite() {
+        assert_eq!(
+            validate_top_n_sigma(Some(f32::NAN)),
+            Err("top_n_sigma must be >= 0.0")
+        );
+        assert_eq!(
+            validate_top_n_sigma(Some(f32::INFINITY)),
+            Err("top_n_sigma must be >= 0.0")
         );
     }
 

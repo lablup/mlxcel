@@ -80,6 +80,9 @@ pub(crate) struct RequestOptionOverrides {
     /// XTC probability threshold override. Validated at the request layer
     /// (`0.0..=0.5`) before it reaches here.
     pub xtc_threshold: Option<f32>,
+    /// Top-n-sigma logit-filter override. Validated at the request layer
+    /// (finite, `>= 0.0`) before it reaches here.
+    pub top_n_sigma: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
     pub priority: RequestPriority,
     /// per-request thinking-token budget override.
@@ -253,6 +256,9 @@ pub(crate) fn build_server_generate_options(
         // `xtc_probability > 0.0`.
         xtc_probability: overrides.xtc_probability.unwrap_or(0.0),
         xtc_threshold: overrides.xtc_threshold.unwrap_or(0.1),
+        // Like XTC, top-n-sigma is request-only with no server-level default:
+        // an absent field always resolves to the disabled baseline (`0.0`).
+        top_n_sigma: overrides.top_n_sigma.unwrap_or(0.0),
         stop_token_ids: Vec::new(),
     });
 

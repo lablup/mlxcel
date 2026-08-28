@@ -46,6 +46,9 @@ pub struct ResolvedSamplingParams {
     /// XTC probability threshold (valid range `0.0..=0.5`, enforced at the
     /// request layer). Unused while `xtc_probability == 0.0`.
     pub xtc_threshold: f32,
+    /// Top-n-sigma logit filter (`0.0` = disabled). Non-negative and finite,
+    /// enforced at the request layer.
+    pub top_n_sigma: f32,
     pub stop_token_ids: Vec<i32>,
 }
 
@@ -73,6 +76,10 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             // penalties above), so the greedy branch threads it through too.
             xtc_probability: params.xtc_probability,
             xtc_threshold: params.xtc_threshold,
+            // Threaded through even though the greedy sampler skips it (the
+            // row-filter hook gates on `temperature == 0.0 || top_k == 1`),
+            // so the config faithfully mirrors what the request resolved.
+            top_n_sigma: params.top_n_sigma,
             stop_token_ids: params.stop_token_ids,
             ..SamplingConfig::greedy()
         }
@@ -93,6 +100,7 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             presence_penalty: params.presence_penalty,
             xtc_probability: params.xtc_probability,
             xtc_threshold: params.xtc_threshold,
+            top_n_sigma: params.top_n_sigma,
             stop_token_ids: params.stop_token_ids,
             token_bias: TokenBiasMap::default(),
             // Loop detection defaults to disabled here. The server control
