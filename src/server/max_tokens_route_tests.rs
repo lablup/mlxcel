@@ -9,6 +9,7 @@ use tower::ServiceExt;
 use super::{
     AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, ServerGenerateOptions, create_app,
 };
+use crate::server::state::ModelMediaSupport;
 use crate::tokenizer::MlxcelTokenizer;
 
 fn route_test_app(config: ServerConfig) -> (axum::Router, mpsc::Receiver<ServerGenerateOptions>) {
@@ -30,16 +31,38 @@ fn route_test_app_with_provider(
     config: ServerConfig,
     provider: Arc<ModelProvider>,
 ) -> axum::Router {
+    create_app(route_test_state(config, provider))
+}
+
+/// Same app, but the loaded model declares it can consume images.
+///
+/// `AppState::new` defaults `media_support` to the all-refusing set, which is
+/// correct for a text-only checkpoint: since #1451 the modality gate refuses an
+/// `image_url` part with 501 `not_supported_error` *before* anything reads the
+/// referenced URL or file. A test that wants to reach the per-request image
+/// checks behind that gate has to say the model could process an image in the
+/// first place, otherwise it only ever exercises the gate.
+fn route_test_app_with_image_support(
+    config: ServerConfig,
+    provider: Arc<ModelProvider>,
+) -> axum::Router {
+    let state = route_test_state(config, provider).with_media_support(ModelMediaSupport {
+        image: true,
+        ..ModelMediaSupport::default()
+    });
+    create_app(state)
+}
+
+fn route_test_state(config: ServerConfig, provider: Arc<ModelProvider>) -> AppState {
     let batch_metrics = provider.batch_metrics().clone();
-    let state = AppState::new(
+    AppState::new(
         provider,
         config,
         ChatTemplateProcessor::with_template("ok".to_string()),
         MlxcelTokenizer::stub(),
         PathBuf::from("route-test-model"),
         batch_metrics,
-    );
-    create_app(state)
+    )
 }
 
 async fn post_json(app: axum::Router, path: &str, body: Value) -> StatusCode {
@@ -245,7 +268,7 @@ fn route_image_cardinality_rejection_does_not_poison_same_worker() {
                     let (options_tx, options_rx) = mpsc::channel();
                     let provider =
                         Arc::new(ModelProvider::recording_for_route_tests(options_tx));
-                    let app = route_test_app_with_provider(capped_config(), provider);
+                    let app = route_test_app_with_image_support(capped_config(), provider);
 
                     let bad = json!({
                         "model": "route-test-model",
