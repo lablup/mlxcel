@@ -229,6 +229,75 @@ b10621 accepts either Jinja template text or one of 54 built-in identifiers (`ch
 
 Four entries are `deferred` against #1470 rather than claimed. `--reasoning-format` is the one whose behavior is otherwise complete; its streamed delimiter loss and the unverified `reasoning_in_content` question keep it there. `--prefill-assistant` is b10621's default and mlxcel diverges from it *with no flag passed*: a trailing assistant message is answered with a fresh turn here and continued upstream. `--reasoning-budget-message` parses and warns at startup but is not yet injected before the end-of-thinking tag. The native `echo` field is a plain completion feature mlxcel lacks. Every other native field in this shard is `not_applicable`: mlxcel's `POST /completion` is a raw-prompt endpoint with no chat template and no chat parsing for them to configure.
 
+## Multimodal projectors and request media
+
+b10621's multimodal support is a separate artifact. `libmtmd` loads a projector file next to the language model (`--mmproj`, `--mmproj-url`), places it on a device (`--mmproj-device`, `--mmproj-offload`), and can be told not to load one at all (`--no-mmproj`). mlxcel loads an integrated MLX VLM checkpoint: the vision tower, the audio tower and the multimodal projector are tensors inside the same SafeTensors snapshot as the language model, resolved by the same `-m` reference. That difference decides the whole `multimodal-and-audio.json` shard (#1451).
+
+| Flag | Environment | State | Behavior |
+|---|---|---|---|
+| `--mmproj` / `-mm` | `LLAMA_ARG_MMPROJ` | `not_applicable` | Refused at startup. There is no separate GGUF projector to attach to an MLX checkpoint; the diagnostic names an MLX VLM checkpoint to point `-m` at instead. |
+| `--mmproj-url` / `-mmu` | `LLAMA_ARG_MMPROJ_URL` | `not_applicable` | Refused for the same reason. |
+| `--mmproj-auto` / `--no-mmproj` / `--no-mmproj-auto` | `LLAMA_ARG_MMPROJ_AUTO` | `aliased` | Honored. The default admits media; `--no-mmproj` refuses every image, audio and video part with b10621's own `<kind> input is not supported` clause. |
+| `--mmproj-offload` / `--no-mmproj-offload` | `LLAMA_ARG_MMPROJ_OFFLOAD` | `not_applicable` | The default is inert; `--no-mmproj-offload` is refused, because mlxcel has no host projector path. |
+| `--mmproj-device` / `-mmdev` | `MTMD_BACKEND_DEVICE` | `not_applicable` | Refused, pointing at `MLXCEL_DEVICE`, which selects the MLX device for the whole checkpoint. |
+| `--image-min-tokens` | `LLAMA_ARG_IMAGE_MIN_TOKENS` | `aliased` | Honored on the dynamic-resolution preprocessing path; see below. |
+| `--image-max-tokens` | `LLAMA_ARG_IMAGE_MAX_TOKENS` | `aliased` | Honored on the same path. |
+| `--mtmd-batch-max-tokens` | `LLAMA_ARG_MTMD_BATCH_MAX_TOKENS` | `not_applicable` | Inert at b10621's own default of 1024; any other value is refused, because mlxcel encodes each image in one vision-tower forward and has no image-token batch to bound. |
+| `--media-path` | - | `aliased` | Implemented, with a confined root; see below. |
+
+Everything except `--media-path` is hidden from `--help`. Rendering the projector family would imply that a GGUF `mmproj` file can be attached to an MLX checkpoint, which is precisely what the classification denies. `--media-path` is a real mlxcel feature and is visible, under a `Multimodal Options` heading.
+
+### Media parts a checkpoint cannot consume are refused
+
+A text-only checkpoint used to accept an `image_url` content block at the HTTP boundary, drop it inside `prepare_request_vlm_embeddings`, and answer from the prompt alone. The reply was fluent, and a caller could not tell an ignored picture from a described one. The chat-completions, responses and Anthropic-messages routes now refuse the request before any referenced URL or file is read, with b10621's own leading clause and its `not_supported_error` type at HTTP 501:
+
+```text
+image input is not supported - hint: the loaded checkpoint 'qwen3-0.6b-4bit' has no image tower; ...
+```
+
+Capability comes from the same `config.json`-only model-type probe that already decided video support, so a newly ported VLM family is admitted with no list to update. The worker keeps its own copy of the refusal, so a path that reaches it without passing a route gate fails rather than degrading to text. The hint half of upstream's sentence is replaced on purpose: telling an operator to provide an `mmproj` has no meaning for an integrated checkpoint.
+
+### `--image-min-tokens` / `--image-max-tokens` move real pixel bounds
+
+Upstream converts a token budget into pixel bounds in `clip_hparams::set_limit_image_tokens`:
+
+```text
+patch_area       = patch_size^2 * n_merge^2
+image_min_pixels = image_min_tokens * patch_area
+image_max_pixels = image_max_tokens * patch_area
+```
+
+mlxcel's dynamic-resolution processors express the same two bounds as `min_pixels` / `max_pixels`, so the translation is the identity: the same multiplication against the same patch area, applied in `src/vision/image_token_overrides.rs` and consumed by `vision::processors::qwen2_vl::smart_resize`. Upstream's value domain carries over too. Only a positive value is a custom bound, `0` and a negative number mean "read it from the model", and a maximum below the minimum is refused exactly as upstream throws on `image_max_pixels < image_min_pixels`.
+
+A checkpoint whose preprocessor resizes to a fixed geometry has no such bound to move. Rather than a hand-written list of honoring architectures, every bound-consuming processor increments an applications counter and the model worker refuses to serve when a budget was requested and the counter is still zero after the checkpoint loads, naming the checkpoint and the flag. That is the mechanism [`rope_overrides`](../src/models/rope_overrides.rs) already uses for `--rope-freq-base`, and for the same reason: a list goes stale the moment a family is ported.
+
+### `--media-path` confines local files to one root
+
+Without `--media-path`, a `file://` media URL in a request is refused with b10621's own sentence, `file:// URLs are not allowed unless --media-path is specified`. With it, the request's path is resolved against the configured directory and may not leave it.
+
+mlxcel reproduces upstream's rules and then adds what a pure string check cannot do:
+
+- **Concatenation, not join.** b10621 evaluates `media_path + file_path`, so `file:///etc/passwd` lands under the root instead of replacing it. mlxcel strips the leading separators before joining, because a Rust `Path::join` with an absolute component would discard the root and turn a compatibility feature into an arbitrary-file read.
+- **b10621's whole name validation.** `fs_validate_filename(path, allow_subdirs=true)`: no `..` anywhere, no control characters, none of `: * ? " < > |`, no leading or trailing space, no trailing `.`, at most 255 bytes, and the Unicode separator look-alikes (`U+FF0E`, `U+2215`, `U+2216`, `U+FFFD`, `U+FEFF`) refused.
+- **No percent decoding, and no percent-encoded traversal.** Upstream never decodes, so `%2e%2e` is a literal filename there. mlxcel does not decode either, and additionally refuses a path carrying a percent escape for `.`, `/`, `\` or NUL, so the property is checked rather than inherited from an absent call.
+- **Canonicalize and contain.** The joined path is canonicalized and must stay inside the canonical root. A symlink whose target leaves the root is refused; one that stays inside still resolves, so organising the media root with links keeps working.
+- **`O_NOFOLLOW` on the open.** The resolve-to-open window cannot be won by swapping the last component for a symlink; the open fails with `ELOOP` instead. This is the same primitive the video resolver already used.
+- **Regular files only.** A directory, FIFO, socket or device node under the root is refused, so a FIFO cannot block a request task waiting for a writer.
+
+The last three are stricter than b10621, whose check is a pure string test that reads whatever the path names, and are recorded as divergences on the entry. A bare relative path is governed by the same root, because that is what an operator who configured `--media-path` naturally writes.
+
+### Remote media URLs have a network-address policy
+
+A request may name an `http(s)` image, audio or video URL and the server fetches it, which makes the server a fetch proxy an unauthenticated caller steers. b10621 fetches with `common_remote_get_content` and applies no address policy at all. mlxcel refuses non-public addresses in three places, which is recorded as a divergence:
+
+1. **Before the request.** The scheme must be `http` or `https`, the URL may not carry credentials, an IP-literal host is checked directly, and a host written as a name is resolved with every resulting address checked.
+2. **On every redirect.** The redirect policy sees the next URL before it is followed, so a public origin cannot bounce the fetch onto `http://169.254.169.254/`. The chain stays bounded at five hops.
+3. **After the connection.** The peer address the request actually reached is re-checked before a single body byte is read, which closes the DNS-rebinding window the first two leave open.
+
+Refused: loopback, the unspecified address, multicast and broadcast, the IPv4 private and link-local ranges (which is what puts the cloud metadata service at `169.254.169.254` out of reach), carrier-grade NAT, the IETF protocol-assignment, benchmarking and documentation prefixes, `240.0.0.0/4`, IPv6 unique-local, link-local and documentation, and any IPv4-mapped or IPv4-compatible IPv6 spelling of a refused IPv4 address. A deployment that genuinely serves its media from an internal object store sets `MLXCEL_ALLOW_PRIVATE_MEDIA_URLS=1`, which turns every address check into a pass. It is off by default because a fetch proxy that reaches the private network has to be an explicit operator decision.
+
+The existing byte and decode limits are unchanged and still apply: `--max-image-payload-size`, `--max-images`, the decoder's width, height and allocation caps, the audio per-clip and per-request ceilings, and the 10-second fetch timeout.
+
 ## Regeneration
 
 ```bash

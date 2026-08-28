@@ -73,6 +73,7 @@ pub fn max_image_tokens(
 impl Qwen2VLProcessor {
     /// Used by: Qwen2-VL, Qwen2.5-VL (CLIP normalization)
     pub fn new(patch_size: usize, temporal_patch_size: usize, spatial_merge_size: usize) -> Self {
+        crate::vision::image_token_overrides::note_dynamic_resolution_processor();
         Self {
             patch_size,
             temporal_patch_size,
@@ -92,6 +93,7 @@ impl Qwen2VLProcessor {
         mean: [f32; 3],
         std: [f32; 3],
     ) -> Self {
+        crate::vision::image_token_overrides::note_dynamic_resolution_processor();
         Self {
             patch_size,
             temporal_patch_size,
@@ -103,10 +105,32 @@ impl Qwen2VLProcessor {
         }
     }
 
+    /// The pixel bounds this processor resizes against.
+    ///
+    /// Normally the checkpoint's own `min_pixels` / `max_pixels`. When an
+    /// operator passed b10621's `--image-min-tokens` / `--image-max-tokens`,
+    /// [`crate::vision::image_token_overrides`] converts the token budget into
+    /// the same two bounds with upstream's own `tokens * patch_size^2 *
+    /// merge^2` arithmetic and returns those instead, counting the application
+    /// so startup can tell an ignored budget from an applied one.
+    ///
+    /// Used by: Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5-VL, Qwen3-VL-MoE,
+    /// Qwen3-Omni, GLM-4V, GLM-4V-MoE, GLM-OCR, ColQwen2.5.
+    #[must_use]
+    pub(crate) fn effective_pixel_bounds(&self) -> (usize, usize) {
+        crate::vision::image_token_overrides::resolve_pixel_bounds(
+            self.patch_size,
+            self.spatial_merge_size,
+            self.min_pixels,
+            self.max_pixels,
+        )
+    }
+
     /// Compute target size that satisfies constraints
     /// Returns (height, width) padded to multiples of factor
     pub(crate) fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.spatial_merge_size) as u32; // 28
+        let (min_pixels, max_pixels) = self.effective_pixel_bounds();
 
         // Start with original size, round to factor
         let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
@@ -114,20 +138,20 @@ impl Qwen2VLProcessor {
 
         // Ensure within pixel limits
         let pixels = (h * w) as usize;
-        if pixels > self.max_pixels {
-            let scale = (self.max_pixels as f64 / pixels as f64).sqrt();
+        if pixels > max_pixels {
+            let scale = (max_pixels as f64 / pixels as f64).sqrt();
             h = ((h as f64 * scale / factor as f64).round() as u32).max(1) * factor;
             w = ((w as f64 * scale / factor as f64).round() as u32).max(1) * factor;
         }
-        if (h * w) as usize > self.max_pixels {
+        if (h * w) as usize > max_pixels {
             // Further reduce if needed
-            let scale = (self.max_pixels as f64 / (h * w) as f64).sqrt();
+            let scale = (max_pixels as f64 / (h * w) as f64).sqrt();
             h = ((h as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
             w = ((w as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
         }
         let pixels = (h * w) as usize;
-        if pixels < self.min_pixels {
-            let scale = (self.min_pixels as f64 / pixels as f64).sqrt();
+        if pixels < min_pixels {
+            let scale = (min_pixels as f64 / pixels as f64).sqrt();
             h = ((h as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
             w = ((w as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
         }

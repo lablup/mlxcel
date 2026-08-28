@@ -23,7 +23,8 @@ use super::{
     ImageInputLimits, MediaRequestMetadata, collect_image_data, extract_chat_image_data,
     extract_chat_video_paths_with_allowlist, read_image_url, scan_insecure_allowlist_dirs,
     try_collect_image_data_with_limits, try_extract_chat_audio_data,
-    try_extract_chat_audio_data_with_cancellation, try_read_image_url_with_limits,
+    try_extract_chat_audio_data_with_cancellation, try_extract_chat_image_data,
+    try_read_image_url_with_limits,
 };
 use crate::server::types::request::{InputAudio, VideoUrl};
 use crate::server::types::{
@@ -154,11 +155,15 @@ async fn local_audio_acquisition_cancels_between_bounded_read_chunks() {
         }
     }
 
-    let path = std::env::temp_dir().join(format!("mlxcel-audio-{}.wav", uuid::Uuid::new_v4()));
+    // Local media is confined to the `--media-path` root (issue #1451), so the
+    // fixture lives inside the shared test root and is named relative to it.
+    let root = crate::server::media_root::install_test_root_once();
+    let name = format!("mlxcel-audio-{}.wav", uuid::Uuid::new_v4());
+    let path = root.join(&name);
     fs::write(&path, vec![0u8; 128 * 1024]).unwrap();
     let request = build_chat_request(vec![ContentPart::InputAudio {
         input_audio: InputAudio {
-            data: format!("file://{}", path.display()),
+            data: format!("file://{name}"),
             format: "wav".to_string(),
         },
     }]);
@@ -192,6 +197,10 @@ async fn aborting_audio_acquisition_task_drops_slow_http_stream() {
     const CHUNK_BYTES: usize = 16 * 1024;
     const CHUNK_COUNT: usize = 512;
 
+    // The origin is a loopback socket, which the request-path address policy
+    // refuses by default (issue #1451); this test is about stream teardown, so
+    // it opts in for its own duration.
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (first_chunk_tx, first_chunk_rx) = tokio::sync::oneshot::channel();
@@ -292,19 +301,52 @@ async fn read_image_url_rejects_malformed_data_uri() {
 }
 
 #[tokio::test]
-async fn read_image_url_reads_bare_local_paths() {
-    let path = std::env::temp_dir().join(format!("mlxcel-media-{}.png", uuid::Uuid::new_v4()));
+async fn read_image_url_reads_bare_paths_inside_the_media_root() {
+    // A bare relative path is resolved against the `--media-path` root, the
+    // same as a `file://` URL (issue #1451). Before that it was any path on
+    // the filesystem that happened to exist.
+    let root = crate::server::media_root::install_test_root_once();
+    let name = format!("mlxcel-media-{}.png", uuid::Uuid::new_v4());
+    let path = root.join(&name);
     let payload = tiny_png_bytes();
     fs::write(&path, &payload).unwrap();
 
-    let bytes = read_image_url(path.to_str().unwrap()).await.unwrap();
+    let bytes = read_image_url(&name).await.unwrap();
     assert_eq!(bytes, payload);
 
+    let outside = std::env::temp_dir().join(format!("mlxcel-outside-{}.png", uuid::Uuid::new_v4()));
+    fs::write(&outside, &payload).unwrap();
+    assert!(
+        read_image_url(outside.to_str().unwrap()).await.is_none(),
+        "a bare absolute path outside the root is not readable"
+    );
+
     fs::remove_file(path).unwrap();
+    fs::remove_file(outside).unwrap();
+}
+
+#[tokio::test]
+async fn read_image_url_refuses_a_loopback_origin() {
+    // The address policy runs before the socket opens, so a request that names
+    // the server's own admin port gets a rejection rather than a fetch. The
+    // deny guard holds the same lock the opt-in tests take, so a concurrent
+    // loopback-origin test cannot make this pass or fail vacuously.
+    let _private = crate::server::media_net::deny_private_media_urls_in_tests();
+    for origin in [
+        "http://127.0.0.1:9090/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::1]:8080/x.png",
+    ] {
+        let err = try_read_image_url_with_limits(origin, ImageInputLimits::default())
+            .await
+            .expect_err("a non-public origin is refused");
+        assert!(err.to_string().contains("image URL rejected"), "{err}");
+    }
 }
 
 #[tokio::test]
 async fn read_image_url_fetches_http_urls() {
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let payload = tiny_png_bytes();
@@ -460,18 +502,53 @@ async fn read_image_url_rejects_oversized_data_uri() {
 }
 
 #[tokio::test]
-async fn extract_chat_image_data_reads_file_urls() {
-    let path = std::env::temp_dir().join(format!("mlxcel-media-{}.bin", uuid::Uuid::new_v4()));
+async fn extract_chat_image_data_reads_file_urls_inside_the_media_root() {
+    let root = crate::server::media_root::install_test_root_once();
+    let name = format!("mlxcel-media-{}.bin", uuid::Uuid::new_v4());
+    let path = root.join(&name);
     fs::write(&path, b"image-bytes").unwrap();
 
     let request = build_chat_request(vec![ContentPart::ImageUrl {
-        image_url: ImageUrl::new(format!("file://{}", path.display())),
+        image_url: ImageUrl::new(format!("file://{name}")),
     }]);
 
     let images = extract_chat_image_data(&request).await;
     assert_eq!(images, vec![b"image-bytes".to_vec()]);
 
     fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn extract_chat_image_data_refuses_a_file_url_outside_the_media_root() {
+    // The pre-#1451 behavior: any absolute path the request named was opened.
+    // The root confines it now, so an absolute path outside the root resolves
+    // to nothing and the image is dropped rather than read.
+    crate::server::media_root::install_test_root_once();
+    let outside = std::env::temp_dir().join(format!("mlxcel-outside-{}.bin", uuid::Uuid::new_v4()));
+    fs::write(&outside, b"secret-bytes").unwrap();
+
+    let request = build_chat_request(vec![ContentPart::ImageUrl {
+        image_url: ImageUrl::new(format!("file://{}", outside.display())),
+    }]);
+    // Image resolution is deliberately tolerant, so the refusal shows up as a
+    // resolved count of zero against one declared image; the shared cardinality
+    // validator is what turns that into a request rejection, rather than a
+    // silently text-only answer.
+    let resolved = try_extract_chat_image_data(&request)
+        .await
+        .expect("resolution itself is tolerant");
+    assert!(
+        resolved.is_empty(),
+        "a path outside the root must not be read"
+    );
+    assert!(
+        MediaRequestMetadata::new(1, 0, 0, resolved.len(), 0, 0)
+            .validate_resolved_image_count()
+            .is_err(),
+        "one declared image that resolved to nothing must reject the request"
+    );
+
+    fs::remove_file(outside).unwrap();
 }
 
 #[tokio::test]
@@ -900,6 +977,7 @@ async fn fetch_remote_video_streaming_rejects_oversized() {
         "test fixture assumes the documented 1 GiB cap"
     );
 
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // We declare a Content-Length larger than the cap, then start writing
@@ -1193,4 +1271,114 @@ fn scan_insecure_allowlist_dirs_passes_strict_directory() {
 
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
     fs::remove_dir_all(dir).unwrap();
+}
+
+// ── modality gate at the request boundary (issue #1451) ─────────────────────
+
+#[test]
+fn media_capability_rejection_refuses_each_modality_a_checkpoint_cannot_consume() {
+    use crate::server::state::ModelMediaSupport;
+
+    let text_only = ModelMediaSupport::none();
+    let image_request = build_chat_request(vec![ContentPart::ImageUrl {
+        image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+    }]);
+    let rejection = super::media_capability_rejection(&image_request, text_only, "qwen3-0.6b-4bit")
+        .expect("a text-only checkpoint refuses an image part");
+    // b10621 answers ERROR_TYPE_NOT_SUPPORTED, which is HTTP 501 with the
+    // `not_supported_error` type string.
+    assert_eq!(rejection.status, axum::http::StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(rejection.error.error_type, "not_supported_error");
+    assert!(
+        rejection
+            .error
+            .message
+            .starts_with("image input is not supported"),
+        "{}",
+        rejection.error.message
+    );
+    assert!(
+        rejection.error.message.contains("qwen3-0.6b-4bit"),
+        "the refusal has to name the checkpoint that cannot serve it: {}",
+        rejection.error.message
+    );
+    assert!(
+        !rejection.error.message.contains("provide the mmproj"),
+        "an integrated MLX checkpoint has no projector file to provide: {}",
+        rejection.error.message
+    );
+
+    let audio_request = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: "aGVsbG8=".to_string(),
+            format: "wav".to_string(),
+        },
+    }]);
+    assert!(
+        super::media_capability_rejection(&audio_request, text_only, "m")
+            .expect("audio is refused")
+            .error
+            .message
+            .starts_with("audio input is not supported")
+    );
+
+    let video_request = build_chat_request(vec![ContentPart::VideoUrl {
+        video_url: VideoUrl {
+            url: "file://clip.mp4".to_string(),
+            fps: None,
+        },
+    }]);
+    assert!(
+        super::media_capability_rejection(&video_request, text_only, "m")
+            .expect("video is refused")
+            .error
+            .message
+            .starts_with("video input is not supported")
+    );
+}
+
+#[test]
+fn media_capability_rejection_admits_what_the_checkpoint_supports() {
+    use crate::server::state::ModelMediaSupport;
+
+    let vlm = ModelMediaSupport {
+        image: true,
+        audio: true,
+        video: false,
+    };
+    let image_request = build_chat_request(vec![ContentPart::ImageUrl {
+        image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+    }]);
+    assert!(super::media_capability_rejection(&image_request, vlm, "qwen2.5-vl-7b-4bit").is_none());
+
+    // Video stays gated per family, as it was before the modality gate existed.
+    let video_request = build_chat_request(vec![ContentPart::VideoUrl {
+        video_url: VideoUrl {
+            url: "file://clip.mp4".to_string(),
+            fps: None,
+        },
+    }]);
+    assert!(super::media_capability_rejection(&video_request, vlm, "qwen2.5-vl-7b-4bit").is_some());
+
+    // A text-only request is never refused, whatever the checkpoint is.
+    let text = build_chat_request(vec![ContentPart::Text {
+        text: "hello".to_string(),
+    }]);
+    assert!(super::media_capability_rejection(&text, ModelMediaSupport::none(), "m").is_none());
+}
+
+#[test]
+fn no_mmproj_refusal_names_the_flag_rather_than_the_checkpoint() {
+    // `--no-mmproj` is an operator decision, so the hint has to say so instead
+    // of blaming the checkpoint for lacking a tower it may well have.
+    let _guard = crate::test_support::env_lock::env_lock();
+    let previous = super::media_admission_disabled();
+    super::configure_media_admission(true);
+    let message = super::media_kind_refusal("image", "qwen2.5-vl-7b-4bit");
+    super::configure_media_admission(previous);
+    assert!(
+        message.starts_with("image input is not supported"),
+        "{message}"
+    );
+    assert!(message.contains("--no-mmproj"), "{message}");
 }

@@ -125,7 +125,7 @@ fn sample_args() -> crate::ServeArgs {
         _no_webui: false,
         ggml_compat: Default::default(),
         chat_compat: Default::default(),
-        _mmproj: None,
+        multimodal_compat: Default::default(),
         cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),
         infill: mlxcel::cli::infill_args::InfillArgs::default(),
         estimate_memory: false,

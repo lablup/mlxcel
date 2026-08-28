@@ -274,20 +274,19 @@ pub async fn chat_completions(
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
-    // reject `video_url` content blocks early for models that do
-    // not support video. Detected once at startup from `config.json` and
-    // cached on `AppState.media_support`. Returning a 400 keeps the client
-    // contract honest — silently dropping video frames would still consume
-    // tokens and produce a confusing reply.
-    if !state.media_support.video && request_has_video_blocks(&request) {
-        return ErrorResponse::new(
-            format!(
-                "video_url content blocks are not supported by model '{}'",
-                state.display_model_id()
-            ),
-            "invalid_request_error",
-        )
-        .into_response();
+    // Reject image, audio and video content blocks the loaded checkpoint
+    // cannot consume, before any referenced URL or file is read. Capability is
+    // detected once at startup from `config.json` and cached on
+    // `AppState.media_support`; the refusal carries b10621's own
+    // `<kind> input is not supported` wording (issue #1451). Silently dropping
+    // an image would still consume tokens and produce a reply the caller could
+    // not tell apart from one that saw the picture.
+    if let Some(rejection) = crate::server::media_capability_rejection(
+        &request,
+        state.media_support,
+        state.display_model_id(),
+    ) {
+        return rejection.into_response();
     }
 
     // Keep tool validation shared with the disaggregated router front so both
@@ -1233,6 +1232,10 @@ async fn stream_chat_completion(
 /// content part anywhere in `messages`. The check matches before the heavier
 /// `extract_chat_video_paths` resolution step so non-video-capable models
 /// can refuse the request without paying canonicalisation / disk-I/O cost.
+/// Retained as the narrow `video_url`-only predicate the modality gate
+/// subsumes; the shared `media_capability_rejection` covers image, audio and
+/// video together (issue #1451).
+#[cfg_attr(not(test), allow(dead_code))]
 fn request_has_video_blocks(request: &ChatCompletionRequest) -> bool {
     !request.video_urls().is_empty()
 }

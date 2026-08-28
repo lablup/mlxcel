@@ -96,6 +96,24 @@ pub async fn anthropic_messages(
     }
     let translated = anthropic_request_to_chat(&request);
 
+    // Refuse media parts the loaded checkpoint cannot consume, with b10621's
+    // own `<kind> input is not supported` wording, before any referenced URL or
+    // file is read (issue #1451). Rendered in the Anthropic error envelope this
+    // route uses, so a client parsing it does not have to special-case one
+    // rejection.
+    if let Some(rejection) = crate::server::media_capability_rejection(
+        &translated.chat_request,
+        state.media_support,
+        state.display_model_id(),
+    ) {
+        return AnthropicErrorResponse::new(
+            StatusCode::NOT_IMPLEMENTED,
+            rejection.error.message,
+            "not_supported_error",
+        )
+        .into_response();
+    }
+
     // Reject requests with no effective input before any model dispatch
     // (issue #805, extending the #773 guard to the Anthropic Messages
     // route). Runs on the translated `ChatCompletionRequest` so a non-empty

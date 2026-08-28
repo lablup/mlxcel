@@ -86,6 +86,43 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
+    // b10621 multimodal projector / media options (issue #1451): classified
+    // before the model reference resolves, like the GGML and chat-template
+    // groups, so `--mmproj projector.gguf` is reported immediately rather than
+    // after a multi-gigabyte download. The requested image-token budget and the
+    // `--media-path` root are installed process-wide here, before the first
+    // load and before the server accepts a request that could name a local
+    // file.
+    args.multimodal_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.multimodal_compat
+        .ensure_inert()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    let image_token_bounds = args
+        .multimodal_compat
+        .image_token_bounds()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    mlxcel::vision::image_token_overrides::install(
+        mlxcel::vision::image_token_overrides::ImageTokenOverride::from_bounds(
+            image_token_bounds.min_tokens,
+            image_token_bounds.max_tokens,
+        ),
+    )
+    .map_err(|message| anyhow::anyhow!("{message}"))?;
+    mlxcel::server::media_root::install_media_root(
+        args.multimodal_compat
+            .resolve_media_root()
+            .map_err(|message| anyhow::anyhow!("{message}"))?,
+    )
+    .map_err(|message| anyhow::anyhow!("{message}"))?;
+    mlxcel::server::configure_media_admission(
+        args.multimodal_compat.media_admission().is_disabled(),
+    );
+    mlxcel::server::configure_private_media_urls(
+        mlxcel::server::private_media_urls_allowed_from_env(),
+    );
+
     // b10621 chat-template / reasoning / parsing options (issue #1447):
     // classified before the model reference resolves, like the GGML group, so
     // `--reasoning-format legacy` is reported immediately.
