@@ -514,6 +514,26 @@ impl ErrorResponse {
         }
     }
 
+    /// Build b10621's `ERROR_TYPE_NOT_SUPPORTED`: a `501` whose error type is
+    /// the `not_supported_error` string upstream emits.
+    ///
+    /// Distinct from [`Self::not_implemented`], whose `not_implemented` type is
+    /// mlxcel's own spelling for "this deployment has no model for that". This
+    /// one is for a capability the loaded model genuinely cannot have, which is
+    /// how `POST /infill` refuses a checkpoint with no fill-in-the-middle
+    /// tokens (#1442), and a client matching on upstream's type string keeps
+    /// working.
+    pub fn not_supported(message: impl Into<String>) -> Self {
+        Self {
+            error: ErrorDetail {
+                message: message.into(),
+                error_type: "not_supported_error".into(),
+                code: None,
+            },
+            status: axum::http::StatusCode::NOT_IMPLEMENTED,
+        }
+    }
+
     /// Build a `501 Not Implemented` error. Used by the audio endpoints to
     /// report that no model is loaded for the requested audio direction while
     /// the request itself parsed successfully.
@@ -535,10 +555,27 @@ impl axum::response::IntoResponse for ErrorResponse {
     }
 }
 
+/// One entry of a [`TokenizeResponse`].
+///
+/// b10621 answers `/tokenize` with a flat id array by default and with one
+/// `{id, piece}` object per token when the request set `with_pieces`. The two
+/// shapes share the `tokens` key, so the element type is what varies (#1442).
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum TokenizeEntry {
+    /// The default shape: the token id on its own.
+    Id(i32),
+    /// The `with_pieces` shape. `piece` is a JSON string when the token's bytes
+    /// are valid UTF-8 and an array of byte values when they are not, which is
+    /// how a client reassembles text across a token that carries part of a
+    /// multi-byte character.
+    Piece { id: i32, piece: serde_json::Value },
+}
+
 /// Tokenize response (POST /tokenize)
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenizeResponse {
-    pub tokens: Vec<i32>,
+    pub tokens: Vec<TokenizeEntry>,
 }
 
 /// Detokenize response (POST /detokenize)

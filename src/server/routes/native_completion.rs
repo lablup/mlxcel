@@ -53,6 +53,21 @@ pub async fn native_completion(
     headers: HeaderMap,
     Json(request): Json<NativeCompletionRequest>,
 ) -> Response {
+    serve_native_completion(state, &headers, request).await
+}
+
+/// The native completion path, entered with an already-parsed request.
+///
+/// `POST /infill` reaches generation through here after it has replaced the
+/// request's `prompt` with the FIM-formatted one, exactly as b10621's own
+/// infill handler falls through to its shared completion implementation. Every
+/// validation, option-resolution and response-shaping step below therefore
+/// applies to both routes rather than being duplicated per route (#1442).
+pub(crate) async fn serve_native_completion(
+    state: AppState,
+    headers: &HeaderMap,
+    request: NativeCompletionRequest,
+) -> Response {
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -146,7 +161,7 @@ pub async fn native_completion(
         None => state.config.sse_ping_interval,
     };
 
-    let priority = parse_priority_header(&headers);
+    let priority = parse_priority_header(headers);
     if request.stream.unwrap_or(false) {
         stream_native_completion(
             state,

@@ -139,6 +139,10 @@ pub struct ServerStartupConfig {
     pub enable_props: bool,
     pub enable_metrics: bool,
 
+    /// `--spm-infill`: the Suffix/Prefix/Middle ordering for `POST /infill`
+    /// (#1442). Forwarded to [`super::config::ServerConfig::spm_infill`].
+    pub spm_infill: bool,
+
     // Batch scheduling
     pub max_batch_size: Option<usize>,
     pub max_queue_depth: usize,
@@ -534,6 +538,7 @@ impl Default for ServerStartupConfig {
             chat_template_file: None,
             enable_slots: true,
             enable_props: false,
+            spm_infill: false,
             enable_metrics: false,
             warmup: true,
             temperature: 0.8,
@@ -1130,6 +1135,7 @@ pub(super) fn build_server_config(
         n_parallel: startup.n_parallel,
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
+        spm_infill: startup.spm_infill,
         enable_metrics_endpoint: startup.enable_metrics,
         default_temperature: sampling_defaults.temperature,
         default_top_p: sampling_defaults.top_p,

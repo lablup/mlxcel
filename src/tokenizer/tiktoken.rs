@@ -185,6 +185,42 @@ impl TiktokenTokenizer {
         Ok(result)
     }
 
+    /// Encode without recognizing special-token spellings written into the
+    /// input text (`parse_special: false`, #1442).
+    pub fn encode_without_special_parsing(&self, text: &str) -> Result<Vec<u32>> {
+        let mut result = Vec::new();
+        let matches = self.pat.find_iter(text);
+        for m in matches {
+            let m = m.map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+            let piece = m.as_str().as_bytes();
+            if let Some(&id) = self.encoder.get(piece) {
+                result.push(id);
+            } else {
+                result.extend(self.bpe_encode(piece));
+            }
+        }
+        Ok(result)
+    }
+
+    /// The id a vocabulary entry holds, by its exact spelling.
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.special_encoder
+            .get(token)
+            .copied()
+            .or_else(|| self.encoder.get(token.as_bytes()).copied())
+    }
+
+    /// Raw bytes for one token; see `MlxcelTokenizer::token_piece_bytes`.
+    ///
+    /// The tiktoken vocabulary is byte sequences by construction, so this is
+    /// the one backend where no reconstruction is needed.
+    pub fn piece_bytes(&self, id: u32) -> Option<Vec<u8>> {
+        if let Some(special) = self.special_decoder.get(&id) {
+            return Some(special.clone().into_bytes());
+        }
+        self.decoder.get(&id).cloned()
+    }
+
     /// Decode token IDs back to a string.
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         let mut bytes = Vec::new();

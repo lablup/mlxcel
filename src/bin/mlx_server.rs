@@ -1400,6 +1400,12 @@ struct ServerArgs {
     #[command(flatten)]
     cache_compat: CacheCompatArgs,
 
+    /// Fill-in-the-middle flag group (`--spm-infill`). Defined once in
+    /// `mlxcel::cli::infill_args` so both server binaries accept the same
+    /// llama-server b10621 command line.
+    #[command(flatten)]
+    infill: mlxcel::cli::infill_args::InfillArgs,
+
     /// Language-bias options for server-wide output
     /// steering. See `--lang-bias`, `--lang-bias-config`, `--lang-bias-policy`,
     /// and the `--lang-bias-include-*` family of flags.
@@ -2144,6 +2150,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         diffusion_threshold: args.diffusion_threshold,
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
+        infill: args.infill.clone(),
     })
 }
 

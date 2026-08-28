@@ -585,6 +585,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         diffusion_threshold: args.diffusion.diffusion_threshold,
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
+        infill: args.infill.clone(),
     })
 }
 

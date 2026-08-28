@@ -2026,6 +2026,12 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     pub(crate) cache_compat: CacheCompatArgs,
 
+    /// Fill-in-the-middle flag group (`--spm-infill`). Defined once in
+    /// `mlxcel::cli::infill_args` so both server binaries accept the same
+    /// llama-server b10621 command line.
+    #[command(flatten)]
+    pub(crate) infill: mlxcel::cli::infill_args::InfillArgs,
+
     /// Language-bias options for server-wide output
     /// steering. Mirrors the same flags exposed on the `generate` subcommand.
     ///

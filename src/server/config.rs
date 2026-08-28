@@ -358,6 +358,13 @@ pub struct ServerConfig {
     pub enable_slots_endpoint: bool,
     pub enable_props_endpoint: bool,
     pub enable_metrics_endpoint: bool,
+    /// `--spm-infill`: use the Suffix/Prefix/Middle ordering on `POST /infill`
+    /// instead of the default Prefix/Suffix/Middle (#1442).
+    ///
+    /// A model's FIM training fixes one of the two orderings, and prompting in
+    /// the wrong one produces a fluent but wrong completion rather than an
+    /// error, so this is a correctness switch and not a preference.
+    pub spm_infill: bool,
     pub default_temperature: f32,
     pub default_top_p: f32,
     pub default_top_k: i32,
@@ -681,6 +688,7 @@ impl Default for ServerConfig {
             n_parallel: 4,
             enable_slots_endpoint: true,
             enable_props_endpoint: false,
+            spm_infill: false,
             enable_metrics_endpoint: false,
             default_temperature: 0.8,
             default_top_p: 0.95,

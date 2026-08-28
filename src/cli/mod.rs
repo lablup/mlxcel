@@ -26,6 +26,7 @@ pub mod cache_args;
 pub mod chat_compat_args;
 pub mod flag_surface;
 pub mod ggml_compat_args;
+pub mod infill_args;
 pub mod llama_short_flags;
 pub mod max_tokens;
 pub mod rope_args;

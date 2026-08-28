@@ -17,12 +17,19 @@
       "default": "disabled",
       "description": "use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this. (default: disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": null,
-      "notes": null,
+      "test": "src/server/infill_tests.rs::spm_infill_swaps_the_two_blocks",
+      "notes": "Accepted on both server binaries through the shared `mlxcel::cli::infill_args::InfillArgs` group and honored by POST /infill: the flag moves the suffix block ahead of the prefix block while the middle marker stays last, which is upstream's swap exactly. b10621 declares it value-less with no environment binding, so this definition has none either. `infill_route_tests.rs::spm_infill_changes_the_prompt_the_server_actually_sends` asserts the flag reaches the served prompt rather than only the config.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spm-infill"
+        ],
+        "defaults": [
+          "false"
+        ]
+      }
     },
     {
       "kind": "route",
@@ -112,12 +119,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/prompt_inspection_tests.rs::apply_template_answers_the_rendered_prompt",
+      "notes": "Renders a chat-completions body through the loaded chat template and answers {\"prompt\": \"...\"} without generating. The render is the same `prepare_chat_request_with_cache` call /v1/chat/completions makes, so messages, tools, reasoning options and chat_template_kwargs are honored and what comes back is the prompt that request would have been served with. The MAX_TOOLS guard runs first, as it does on the generating routes, so an oversized tool array cannot reach Jinja2 through a route that does not generate.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /apply-template"
+      }
     },
     {
       "kind": "route",
@@ -144,12 +153,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/prompt_inspection_tests.rs::the_chat_input_token_count_matches_the_rendered_prompt",
+      "notes": "Answers {\"input_tokens\": N} for a chat-completions body. The count runs the same render and the same encode the generation path runs (encode(prompt, add_special=true)), so it is the number of tokens that request would really have been prefilled with rather than an estimate that can drift from it.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /chat/completions/input_tokens"
+      }
     },
     {
       "kind": "route",
@@ -203,10 +214,10 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "Mounted; schema parity owned by #1442.",
+      "test": "src/server/routes/tokenize_tests.rs::detokenize_round_trips_ascii_unicode_and_special_tokens",
+      "notes": "Special tokens are rendered rather than skipped, as upstream's `tokens_to_str` does, and an absent or empty `tokens` answers {\"content\": \"\"} rather than failing. Bytes that cannot form a character come back as U+FFFD, which is what upstream emits too because its JSON writer runs with the replacing error handler.",
       "divergence": [],
       "mlxcel": {
         "route": "POST /detokenize"
@@ -260,10 +271,15 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1442,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/infill_route_tests.rs::the_served_prompt_carries_the_default_prefix_suffix_middle_ordering",
+      "notes": "Mounted and serving. The capability gate runs first and refuses a model whose vocabulary has no prefix, suffix and middle token with upstream's own wording, over the same spelling list llama-vocab.cpp scans; `input_prefix` and `input_suffix` are required, `input_extra` is validated as an array of {filename, text}, and the assembled prompt follows format_infill's ordering in both the default and --spm-infill forms. Two observable differences remain, recorded below, and they are why this entry is still deferred rather than supported.",
+      "divergence": [
+        "Text in input_prefix, input_suffix, input_extra[].text, input_extra[].filename or prompt that contains one of the model's own FIM marker spellings is refused with a diagnostic; b10621 tokenizes those fields with parse_special off and serves the marker as literal text. mlxcel's generation entry takes a prompt string that is re-tokenized with parsing on, so the marker would otherwise silently restructure the prompt.",
+        "The FIM context is not truncated to the prefill batch: b10621 keeps only the last 3*(n_batch/4) prefix tokens and the first (n_batch/4) - (2 + prompt) suffix tokens, while mlxcel serves the whole prefix and suffix, consistent with its policy of clamping an over-long request rather than dropping prompt text."
+      ],
+      "mlxcel": {
+        "route": "POST /infill"
+      }
     },
     {
       "kind": "route",
@@ -330,12 +346,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/prompt_inspection_tests.rs::both_responses_input_token_paths_answer_the_same_count",
+      "notes": "Answers {\"input_tokens\": N} for a Responses body. The body is flattened to the chat shape by the same translator /v1/responses uses, including previous_response_id and conversation rehydration, so the count covers the whole conversation the generation call would have prefilled rather than only the new turn.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /responses/input_tokens"
+      }
     },
     {
       "kind": "route",
@@ -345,10 +363,10 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "Mounted; request/response schema parity (add_special, pieces, ...) is owned by #1442.",
+      "test": "src/server/routes/tokenize_tests.rs::the_pieces_of_a_tokenization_concatenate_back_to_the_input",
+      "notes": "All four b10621 switches are honored: `content` accepts the mixed shape (a string, or an array whose elements are strings or already-tokenized ids) and may be absent, in which case the answer is an empty token list rather than an error; `add_special` defaults to false; `parse_special` defaults to true and, when false, stops a special-token spelling written into the text from being recognized as that token; `with_pieces` switches the response to {id, piece} objects whose `piece` is a JSON string for valid UTF-8 and an array of byte values otherwise, so a token carrying part of a multi-byte character reassembles exactly.",
       "divergence": [],
       "mlxcel": {
         "route": "POST /tokenize"
@@ -379,12 +397,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/prompt_inspection_tests.rs::both_chat_input_token_paths_answer_the_same_count",
+      "notes": "The /v1 spelling of POST /chat/completions/input_tokens; both paths reach one handler.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /v1/chat/completions/input_tokens"
+      }
     },
     {
       "kind": "route",
@@ -519,12 +539,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1442,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/prompt_inspection_tests.rs::both_responses_input_token_paths_answer_the_same_count",
+      "notes": "The /v1 spelling of POST /responses/input_tokens; both paths reach one handler.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /v1/responses/input_tokens"
+      }
     },
     {
       "kind": "native_request_field",
