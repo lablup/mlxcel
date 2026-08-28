@@ -119,6 +119,7 @@ fn sample_input() -> ServerStartupInput {
         verbose: true,
         log_disable: false,
         log_file: Some(PathBuf::from("server.log")),
+        log_format: crate::server::logging::LogFormatOptions::default(),
         distributed_config: None,
         node_role: None,
         node_id: None,

@@ -249,6 +249,10 @@ pub struct ServerStartupConfig {
     pub verbose: bool,
     pub log_disable: bool,
     pub log_file: Option<PathBuf>,
+    /// b10621 log format and verbosity state (#1448). See
+    /// [`crate::server::logging`] for the destination and verbosity
+    /// precedence this participates in.
+    pub log_format: crate::server::logging::LogFormatOptions,
 
     // Distributed inference
     /// Path to a TOML cluster configuration file.
@@ -587,6 +591,7 @@ impl Default for ServerStartupConfig {
             verbose: false,
             log_disable: false,
             log_file: None,
+            log_format: crate::server::logging::LogFormatOptions::default(),
             distributed_config: None,
             node_role: None,
             node_id: None,
@@ -1484,29 +1489,24 @@ fn resolve_loop_detection_env() -> Option<mlxcel_core::LoopDetectionConfig> {
     None
 }
 
+/// Install the tracing subscriber for a server run.
+///
+/// `--log-disable` wins over every other logging option and installs nothing,
+/// exactly as b10621's `common_log_pause` does. Otherwise the destination,
+/// format, verbosity precedence, log-file permissions, and secret redaction
+/// all live in [`crate::server::logging`]; this function only decides whether
+/// to call it and reports the resolved configuration once a subscriber
+/// exists to report it into (#1448).
 fn initialize_server_logging(startup: &ServerStartupConfig) -> Result<()> {
     if startup.log_disable {
         return Ok(());
     }
-
-    let filter = if startup.verbose { "debug" } else { "info" };
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
-
-    if let Some(ref log_path) = startup.log_file {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .with_context(|| format!("Failed to open log file: {:?}", log_path))?;
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(file)
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
-    }
-
+    let summary = crate::server::logging::install(
+        &startup.log_format,
+        startup.log_file.as_deref(),
+        startup.verbose,
+    )?;
+    tracing::debug!("{summary}");
     Ok(())
 }
 

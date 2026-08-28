@@ -20,6 +20,7 @@ use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
+use mlxcel::cli::logging_compat_args::LoggingCompatArgs;
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::spec_compat_args::SpecCompatArgs;
@@ -78,6 +79,10 @@ use mlxcel::server::{
     about = "llama-server compatible HTTP server for MLX inference on Apple Silicon and CUDA GPUs",
     args_conflicts_with_subcommands = true,
     flatten_help = true,
+    // b10621 spells the help option `-h`, `--help` and `--usage`;
+    // clap's generated help argument cannot carry an alias, so it is
+    // declared by hand on this struct instead (#1448).
+    disable_help_flag = true,
     // b10621 accepts a space-separated negative value on every option whose
     // domain admits one (`llama-server --seed -1`), and mlxcel rejected all
     // 122 of its value-taking long options with "unexpected argument '-1'"
@@ -158,6 +163,21 @@ Subcommands:
 See also: docs/distributed.md"
 )]
 struct Cli {
+    /// Print usage and exit.
+    ///
+    /// Declared by hand, with `disable_help_flag`, rather than left to clap's
+    /// generated help argument: b10621 spells this option `-h`, `--help` and
+    /// `--usage`, and clap's built-in help argument cannot carry an alias
+    /// through the derive. Declared first so it lands before any
+    /// `next_help_heading` group (#1448).
+    #[arg(
+        short = 'h',
+        long = "help",
+        visible_alias = "usage",
+        action = clap::ArgAction::Help
+    )]
+    help: Option<bool>,
+
     /// Subcommand to run. When omitted, the binary boots the HTTP server
     /// using the flattened [`ServerArgs`] flags (legacy invocation).
     #[command(subcommand)]
@@ -1082,8 +1102,12 @@ struct ServerArgs {
     dry_sequence_breakers: Vec<String>,
 
     // Logging.
-    /// Enable verbose (debug) logging
-    #[arg(short = 'v', long = "verbose")]
+    /// Enable verbose logging: every mlxcel message.
+    ///
+    /// Equivalent to the top `--verbosity` tier, and unconditional: a
+    /// command-line `--verbose` beats `RUST_LOG`, matching b10621's `-v`
+    /// (#1448). `--log-verbose` is the b10621 twin spelling.
+    #[arg(short = 'v', long = "verbose", visible_alias = "log-verbose")]
     verbose: bool,
 
     /// Disable all logging
@@ -1479,6 +1503,15 @@ struct ServerArgs {
     #[command(flatten)]
     embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs,
 
+    /// llama-server b10621 logging, introspection, and built-in preset
+    /// options (`--log-colors`, `--log-prefix`, `--log-timestamps`,
+    /// `--verbosity`, `--cache-list`, `--completion-bash`, `--log-prompts-dir`
+    /// and the twelve GGUF model presets). Defined once in
+    /// `mlxcel::cli::logging_compat_args` so both server binaries accept
+    /// exactly the same set (issue #1448).
+    #[command(flatten)]
+    logging_compat: LoggingCompatArgs,
+
     /// Language-bias options for server-wide output
     /// steering. See `--lang-bias`, `--lang-bias-config`, `--lang-bias-policy`,
     /// and the `--lang-bias-include-*` family of flags.
@@ -1753,6 +1786,27 @@ fn main() -> anyhow::Result<()> {
         Cli::parse_from(args)
     };
 
+    // b10621 introspection options (issue #1448): `--cache-list` reports the
+    // model store and `--completion-bash` prints a completion script, both
+    // before any model is resolved and both exiting 0, exactly as upstream's
+    // parser-level handlers do. Placed here so neither needs `-m` and neither
+    // pays for the runtime, the MLX environment defaults, or a model load.
+    if let Some(action) = cli.server.logging_compat.early_action() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        print!(
+            "{}",
+            mlxcel::cli::logging_compat_args::render_early_action(
+                action,
+                "mlxcel-server",
+                "mlxcel-server",
+                &mut cmd,
+                cli.server.models_dir.as_deref(),
+            )
+        );
+        return Ok(());
+    }
+
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.
     mlxcel_core::ensure_persistent_ptx_cache();
@@ -1940,6 +1994,30 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     args.ggml_compat
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // b10621 logging and preset options (issue #1448): `--log-prompts-dir` and
+    // the twelve GGUF presets are refused here, before the model reference is
+    // resolved, so a copied llama-server command line fails in under a second
+    // with the mlxcel equivalent rather than after a multi-gigabyte download.
+    args.logging_compat
+        .ensure_supported()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    let log_format = args
+        .logging_compat
+        .resolve_format(mlxcel::cli::logging_compat_args::verbosity_was_set_on_cli())
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Register credentials before the subscriber exists so no log sink can
+    // ever hold an API key or a repository token (#1448).
+    mlxcel::cli::logging_compat_args::register_credentials_for_redaction(
+        &args.api_key,
+        &args.api_key_file,
+        args.hf_token.as_deref(),
+    );
+    // The subscriber itself is installed inside `start_server`, which is
+    // reached only after the model reference resolves. Validate and create the
+    // destination here instead, so an unwritable `--log-file` is reported
+    // before a multi-gigabyte download rather than after it (#1448).
+    mlxcel::server::logging::precheck_log_destination(args.log_disable, args.log_file.as_deref())?;
 
     // b10621 speculative compatibility options (#1433): classified before the
     // model load like the GGML group above. n-gram / lookup speculation, GGML
@@ -2219,6 +2297,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         verbose: args.verbose,
         log_disable: args.log_disable,
         log_file: args.log_file,
+        log_format,
         distributed_config: args.distributed_config,
         node_role: args.node_role,
         node_id: args.node_id,

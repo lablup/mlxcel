@@ -462,3 +462,73 @@ Upstream reuses a cached chunk that is not a prefix of the incoming prompt by de
 `tests/prompt_cache_compat_e2e.rs` is the differential gate. It runs a real server and compares per-position tokens and logprobs between a cold evaluation, a prefix-cache hit, a per-request `cache_prompt: false`, and three concurrent requests of different prompt lengths against their own solo runs. What a prompt cache has to be is not "good" but "the same as not having one", which is a statement about two runs that no single-run perplexity can express.
 
 Two properties of that comparison decide whether it means anything. The same-width arms (cache hit, per-request disable) are gated on exact agreement, because they run at the batch width the reference did. The concurrent arm is gated on the **first** divergence and the reference's own top-two gap there, not on the total disagreement: a decode at batch width three does not run the same kernels as one at width one (issue #203), near-ties can land the other way, and once a single token flips every position after it is conditioned on different text, so counting the cascade measures the flip's echo rather than the change. On `qwen3-0.6b-4bit` the concurrent arms part at reference gaps of 0.25 and 0.125 against a decided-position threshold of 2.0, which is that jitter class and not a cache defect; the same-width arms agree on every one of 32 positions.
+
+## Logging, introspection, and built-in presets
+
+`logging-and-presets.json` holds four unrelated surfaces that share one owner: where and how the server logs, the two introspection options that print and exit, `--log-prompts-dir`, and b10621's twelve built-in model presets.
+
+### Log destination
+
+Precedence, highest first: `--log-disable`, then `--log-file PATH` on the command line, then `LLAMA_ARG_LOG_FILE`, then the mlxcel-native `LLAMA_LOG_FILE`, then standard output. `--log-disable` installs no subscriber at all, matching b10621's `common_log_pause`.
+
+An unusable destination is a **startup failure**, never a silent fallback to the terminal. A deployment that asked for a log file and got stdout believes it has an audit trail it does not have, so `--log-file` refuses a path that is a symbolic link (a pre-planted symlink is how an unprivileged local account turns a server log into an append primitive against a file it cannot write itself), a path that is a directory, a path whose parent directory does not exist, and a path that cannot be opened for append. Each refusal names the option and the path.
+
+That check runs where the rest of the b10621 compatibility surface is classified, before the model reference resolves, because `-m mlx-community/...` can mean a multi-gigabyte download and the subscriber itself is not installed until `start_server`. The destination is created there too, which is what b10621 does: its `--log-file` handler opens the file from inside the argument parser.
+
+The file is created `0600`, and an existing file is tightened to `0600` on open, so re-running the server fixes permissions rather than inheriting them. Before #1448 the default umask left it `0644`: a log carrying model paths, request metadata and slot timings was readable by every account on the host.
+
+Every line written to any sink passes through a redaction pass. `--api-key`, the contents of every `--api-key-file`, `--hf-token`, `HF_TOKEN`, `LLAMA_API_KEY`, `MLXCEL_API_KEY` and the file named by `LLAMA_ARG_API_KEY_FILE` are registered before the subscriber is installed, and any occurrence of one of those values in a log line is replaced with `[redacted]`. Redaction is line-buffered rather than per-write because the `tracing` formatter emits one event in several writes, so a value straddling two of them would slip past a per-write scan. `tests/llama_logging_presets.rs` proves the property against real processes with canary values rather than by inspection.
+
+mlxcel logs to standard output where b10621 logs to standard error. That is a pre-existing mlxcel default that #1448 deliberately left alone; the two options this section adds that write machine-readable output to stdout, `--cache-list` and `--completion-bash`, both run and exit before any subscriber exists, so nothing interleaves.
+
+### Log format and verbosity
+
+| Flag | Environment | Effect |
+|---|---|---|
+| `--log-colors on\|off\|auto` | `LLAMA_ARG_LOG_COLORS` | ANSI escapes. `auto`, the default, colors only when the sink is a terminal, so a log file never receives escapes. Values are parsed with b10621's own case-sensitive vocabulary, not clap's wider boolish set, and anything outside it stops startup. |
+| `--log-prefix` / `--no-log-prefix` | `LLAMA_ARG_LOG_PREFIX` | The per-line level tag. On by default, as upstream. |
+| `--log-timestamps` / `--no-log-timestamps` | `LLAMA_ARG_LOG_TIMESTAMPS` | The per-line timestamp. On by default, as upstream. |
+| `-lv N`, `--verbosity N`, `--log-verbosity N` | `LLAMA_ARG_LOG_VERBOSITY` | Threshold, default `3`. Messages above it are dropped, so a larger number is always at least as verbose. |
+| `-v`, `--verbose`, `--log-verbose` | none | Every mlxcel message, unconditionally. |
+
+Both defaults in the middle two rows were read off the pinned macOS arm64 binary rather than assumed: `llama-server` with no logging flags prints `0.00.039.303 I cmn common_param: ...`, and `--no-log-prefix --no-log-timestamps` reduces that to `cmn common_param: ...`.
+
+Verbosity precedence, highest first: `--verbose` on the command line, then `--verbosity N` on the command line, then `RUST_LOG`, then `LLAMA_ARG_LOG_VERBOSITY`, then the compiled-in default. A command-line flag always beats the environment, which is what b10621 does and what mlxcel did not do before #1448: `EnvFilter::try_from_default_env` ran first, so `RUST_LOG=warn mlxcel-server -v` silently ignored `-v` while upstream's `-v` sets the threshold to `INT_MAX` unconditionally. Among environment variables `RUST_LOG` wins, because it is the more expressive per-target form and it is what mlxcel operators already have in their scripts.
+
+The threshold maps onto mlxcel's own levels: `0` and `1` to `error`, `2` to `warn`, `3` to `info`, `4` to `debug`, `5` and above to `trace` for mlxcel's targets over `debug` for dependencies. `--verbose` resolves to the same filter as the top tier, so it is never less verbose than `--verbosity 5`. The top tier does not raise dependencies to `trace` on purpose: a bare `trace` directive turns on hyper and tokio internals and buries the mlxcel messages the operator asked to see.
+
+### `--cache-list` and `--completion-bash`
+
+Both run before any model is resolved, need no `-m`, and exit 0, as upstream's parser-level handlers do.
+
+`--cache-list` (and the llama.cpp short spelling `-cl`) lists mlxcel's model store in b10621's exact output shape, a `number of models in cache: N` header followed by `%4zu. %s` per entry. The store is the directory `--models-dir` / `MLXCEL_MODELS_DIR` / `MLXCEL_CACHE_DIR` resolve, holding `<owner>/<name>` snapshots of MLX SafeTensors checkpoints rather than llama.cpp's GGUF cache, and each entry is printed as the repository id `-m` accepts, so the output pastes straight into the next command. A directory counts only when it actually holds a checkpoint (`config.json` or a `*.safetensors` file), so a half-finished download is not offered as a model that cannot load.
+
+`--completion-bash` prints a source-able bash completion script generated from the live clap surface: one completion function, an `opts` list, a `case "$prev"` block giving file and directory completion to the path-valued options, then a `complete -F` line. `mlxcel-server` registers it against `mlxcel-server`; `mlxcel serve` registers it against `mlxcel` and says so in a header comment. Only **visible** arguments and **visible** aliases reach the script. mlxcel's hidden b10621 compatibility surface (`--n-gpu-layers`, `--mlock`, `--control-vector`, `--log-prompts-dir`, the presets) and the `--dump-flag-surface` machine interface are deliberately omitted; llama.cpp hides no arguments, so upstream has no equivalent choice to make. `tests/llama_logging_presets.rs` runs `bash -n` over both binaries' output and asserts both halves of that rule.
+
+### `--log-prompts-dir` is refused
+
+mlxcel does not write request prompts to disk, and #1448 declined to add it. Accepting the flag as a no-op would leave the named directory empty while the operator believed prompts were being captured; implementing it would put a plaintext copy of user request bodies on the log volume, which is a disclosure surface the project will not create for a debugging aid. The option is accepted by the parser, hidden, and refused before the model reference resolves, with a diagnostic naming `--log-file` plus `--verbosity 4` as the request-level debugging path that records route, slot, token counts and timings and no prompt bodies. b10621 creates the directory from inside its parser; the refusal here leaves no trace on the filesystem.
+
+### The built-in presets are refused, with the MLX equivalent named
+
+Each of b10621's twelve presets rewrites `params.model.hf_repo` to a **GGUF** repository under `ggml-org` and then overwrites the port, context, batch, parallelism and (for the two gpt-oss presets) sampling block. mlxcel serves MLX SafeTensors and has no GGUF reader, so neither half can be honored on its own: mapping only the checkpoint would silently drop the parameter block, and mapping only the parameter block would serve a different quantization than the flag names.
+
+All twelve are hidden, accepted by the parser, and refused before the model reference resolves. Eleven of them print the nearest MLX checkpoint and the exact two command lines that reach it:
+
+| Preset | Upstream GGUF | mlxcel equivalent |
+|---|---|---|
+| `--embd-gemma-default` | `ggml-org/embeddinggemma-300M-qat-q4_0-GGUF` | `mlx-community/embeddinggemma-300m-4bit` |
+| `--fim-qwen-1.5b-default` | `ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF` | `mlx-community/Qwen2.5-Coder-1.5B-8bit` |
+| `--fim-qwen-3b-default` | `ggml-org/Qwen2.5-Coder-3B-Q8_0-GGUF` | `mlx-community/Qwen2.5-Coder-3B-8bit` |
+| `--fim-qwen-7b-default` | `ggml-org/Qwen2.5-Coder-7B-Q8_0-GGUF` | `mlx-community/Qwen2.5-Coder-7B-8bit` |
+| `--fim-qwen-7b-spec` | same, plus a `0.5B` draft | `mlx-community/Qwen2.5-Coder-7B-8bit` with `--model-draft mlx-community/Qwen2.5-Coder-0.5B-8bit --draft-kind dflash` |
+| `--fim-qwen-14b-spec` | `ggml-org/Qwen2.5-Coder-14B-Q8_0-GGUF`, plus a `0.5B` draft | `mlx-community/Qwen2.5-Coder-14B-8bit` with the same draft |
+| `--fim-qwen-30b-default` | `ggml-org/Qwen3-Coder-30B-A3B-Instruct-Q8_0-GGUF` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit` |
+| `--gpt-oss-20b-default` | `ggml-org/gpt-oss-20b-GGUF` | `mlx-community/gpt-oss-20b-MXFP4-Q8` |
+| `--gpt-oss-120b-default` | `ggml-org/gpt-oss-120b-GGUF` | `mlx-community/gpt-oss-120b-MXFP4-Q8` |
+| `--vision-gemma-4b-default` | `ggml-org/gemma-3-4b-it-qat-GGUF` | `mlx-community/gemma-3-4b-it-qat-4bit` |
+| `--vision-gemma-12b-default` | `ggml-org/gemma-3-12b-it-qat-GGUF` | `mlx-community/gemma-3-12b-it-qat-4bit` |
+
+Those repository names appear in diagnostics only and are never resolved implicitly, so a repository that later moves degrades to a stale suggestion rather than a failed startup or, worse, a silent download of something else.
+
+`--spec-default` is the twelfth and configures no model at all: it enables b10621's n-gram-modulo drafter, which predicts continuations from the context itself. mlxcel's drafters are checkpoint-backed, so the refusal points at `--draft-kind mtp` on an MTP-capable target and `--draft-kind dflash --model-draft <path-or-repo-id>` otherwise. The n-gram tuning knobs the preset would have set are classified under #1433 in the speculative shard.

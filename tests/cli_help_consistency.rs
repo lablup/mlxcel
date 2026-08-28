@@ -906,9 +906,13 @@ const SHARED_SERVER_FLAG_DESCRIPTIONS: &[&[&str]] = &[
 const SERVE_ONLY_FLAGS: &[&str] = &["--estimate-memory", "--force"];
 
 /// Long names that legitimately exist on `mlxcel-server` and not on `mlxcel
-/// serve`. `mlxcel` carries `--version` at the top level instead, where it
-/// belongs for a multi-subcommand binary.
-const SERVER_ONLY_FLAGS: &[&str] = &["--version"];
+/// serve`.
+///
+/// Empty since #1448: `--version` used to be the single entry, because
+/// `mlxcel` carried it only at the top level. b10621 lists `--version` among
+/// its common options, so `propagate_version` on the `mlxcel` root now carries
+/// it onto `serve` as well and the exception is gone.
+const SERVER_ONLY_FLAGS: &[&str] = &[];
 
 /// The long name a clap `--help` signature line declares, or `None` when the
 /// line is not a signature line.

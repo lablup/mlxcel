@@ -186,6 +186,11 @@ pub struct ServerStartupInput {
     pub verbose: bool,
     pub log_disable: bool,
     pub log_file: Option<PathBuf>,
+    /// b10621 log format and verbosity state (`--log-colors`, `--log-prefix`,
+    /// `--log-timestamps`, `--verbosity`), resolved by
+    /// `crate::cli::logging_compat_args::LoggingCompatArgs::resolve_format`
+    /// and applied in `crate::server::logging::install` (#1448).
+    pub log_format: crate::server::logging::LogFormatOptions,
 
     // Distributed inference.
     /// Path to a TOML cluster configuration file.
@@ -913,6 +918,7 @@ impl ServerStartupInput {
             verbose: self.verbose,
             log_disable: self.log_disable,
             log_file: self.log_file,
+            log_format: self.log_format,
             distributed_config: self.distributed_config,
             node_role: self.node_role,
             node_id: self.node_id,
