@@ -1365,3 +1365,62 @@ fn loop_detection_env_wrong_field_count_returns_none() {
     let result = with_loop_detection_env(Some("1,20,4,extra"), resolve_loop_detection_env);
     assert!(result.is_none());
 }
+
+// ── b10621 serving-mode gate (#1452) ────────────────────────────────────────
+
+fn mode_config(mode: crate::server::config::EmbeddingServingMode) -> crate::server::ServerConfig {
+    crate::server::ServerConfig {
+        embedding_serving_mode: mode,
+        ..crate::server::ServerConfig::default()
+    }
+}
+
+/// A mode flag that resolved no worker able to serve it fails at startup,
+/// naming the flag and the two ways to give it a checkpoint. Without this the
+/// flag would parse, generation would be off, and the only route left would
+/// answer 501 for the life of the process.
+#[test]
+fn a_mode_flag_with_no_matching_worker_fails_startup() {
+    use crate::server::config::EmbeddingServingMode;
+
+    let err = super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::EmbeddingOnly),
+        false,
+        true,
+    )
+    .expect_err("--embeddings with no embedder must fail");
+    let message = err.to_string();
+    assert!(message.contains("--embeddings"), "{message}");
+    assert!(message.contains("--embedding-model"), "{message}");
+
+    let err =
+        super::check_serving_mode(&mode_config(EmbeddingServingMode::RerankOnly), true, false)
+            .expect_err("--reranking with no reranker must fail");
+    let message = err.to_string();
+    assert!(message.contains("--reranking"), "{message}");
+    assert!(message.contains("--reranker-model"), "{message}");
+}
+
+#[test]
+fn a_mode_flag_with_its_worker_starts() {
+    use crate::server::config::EmbeddingServingMode;
+
+    super::check_serving_mode(
+        &mode_config(EmbeddingServingMode::EmbeddingOnly),
+        true,
+        false,
+    )
+    .expect("--embeddings with an embedder starts");
+    super::check_serving_mode(&mode_config(EmbeddingServingMode::RerankOnly), false, true)
+        .expect("--reranking with a reranker starts");
+}
+
+#[test]
+fn an_unrestricted_server_never_fails_the_mode_gate() {
+    use crate::server::config::EmbeddingServingMode;
+
+    for (embedding, rerank) in [(false, false), (true, false), (false, true), (true, true)] {
+        super::check_serving_mode(&mode_config(EmbeddingServingMode::Any), embedding, rerank)
+            .expect("no mode flag, nothing to check");
+    }
+}

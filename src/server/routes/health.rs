@@ -36,6 +36,37 @@ fn model_health_fields(state: &AppState) -> (usize, Option<String>) {
     (context_size, tool_call_parser)
 }
 
+/// Readiness of a server restricted to its side-model routes (#1452).
+///
+/// `ok` once the worker the mode selected exists. It cannot be absent in
+/// practice, because `check_serving_mode` refuses to start a server whose mode
+/// resolved no worker, but the check is made here too rather than assumed: this
+/// is the endpoint an operator reads when something did not come up.
+fn side_model_health(state: &AppState) -> (StatusCode, Json<HealthResponse>) {
+    use crate::server::config::EmbeddingServingMode;
+    let ready = match state.config.embedding_serving_mode {
+        EmbeddingServingMode::RerankOnly => state.rerank_model.is_some(),
+        EmbeddingServingMode::EmbeddingOnly => state.embedding_model.is_some(),
+        EmbeddingServingMode::Any => true,
+    };
+    let (status, label) = if ready {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "loading model")
+    };
+    (
+        status,
+        Json(HealthResponse {
+            status: label.to_string(),
+            model: Some(state.display_model_id().to_string()),
+            batch: None,
+            observability: None,
+            context_size: None,
+            tool_call_parser: None,
+        }),
+    )
+}
+
 /// GET /health
 ///
 /// Returns status with batch metrics and observability counters:
@@ -43,6 +74,19 @@ fn model_health_fields(state: &AppState) -> (usize, Option<String>) {
 /// - `{"status": "no slot available", ...}` when all slots are busy and queue is full
 /// - `{"status": "loading model"}` when model is still loading
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    // A server started with b10621's `--embeddings` or `--reranking` has no
+    // chat worker to be "loaded", and reporting it unhealthy forever would make
+    // the mode unusable behind any container probe (#1452). Readiness there is
+    // whether the worker the mode selected came up.
+    //
+    // Deliberately scoped to the mode flags: a server whose `-m` is an
+    // embedding checkpoint but that was started without them still reports on
+    // the chat provider, so nothing that exists today changes behavior. That
+    // wider case, and the queue-full and loading-body drift, are `GET
+    // /health`'s recorded divergences and belong to #1440.
+    if state.config.embedding_serving_mode.blocks_generation() {
+        return side_model_health(&state);
+    }
     if !state.model_provider.is_loaded() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

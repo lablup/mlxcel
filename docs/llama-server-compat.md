@@ -109,6 +109,37 @@ Two `/infill` differences remain, and its manifest entry stays `deferred` for th
 - Text in `input_prefix`, `input_suffix`, `input_extra[].text`, `input_extra[].filename` or `prompt` that contains one of the model's own FIM marker spellings is **refused** with a diagnostic naming the field and the marker. b10621 tokenizes those fields with special-token parsing off, so the marker stays literal text there. mlxcel's generation entry point takes a prompt string that is re-tokenized with parsing on, and a string cannot express "these characters are not that token", so carrying the text through would let a file the client did not write restructure the FIM prompt and return a fluent wrong completion. Failing loudly is the smaller divergence.
 - The FIM context is not truncated to the prefill batch. b10621 keeps only the last `3*(n_batch/4)` prefix tokens and the first `(n_batch/4) - (2 + prompt)` suffix tokens; mlxcel serves the whole prefix and suffix, consistent with its policy everywhere else of clamping an over-long request rather than dropping prompt text.
 
+### Embedding and reranking mode, pooling and normalization (#1452)
+
+b10621's `--embedding` / `--embeddings`, `--rerank` / `--reranking`, `--pooling` and `--embd-normalize` are accepted on both server binaries, with `LLAMA_ARG_EMBEDDINGS`, `LLAMA_ARG_RERANKING` and `LLAMA_ARG_POOLING` bound. The two mode flags do the same two things upstream's do, and one more that upstream never needs.
+
+They **restrict**: generation routes answer `501` naming the flag, so a client sees the same "this server does not generate" it would see from `llama-server --embeddings`. They **select**: a mlxcel server runs a dedicated embedding or reranking worker rather than reusing one set of weights, so `--embeddings` requires an embedding checkpoint to resolve from `-m` or `--embedding-model`, and `--reranking` requires a reranker from `-m` or `--reranker-model`. A command line that asks for a mode nothing can serve fails at startup naming the flag, instead of booting a server whose only route answers 501 forever. That startup refusal is the one behavior upstream does not have, because its `--embeddings` embeds with whatever `-m` happens to be and mlxcel has no path that produces embeddings from a causal chat checkpoint.
+
+`--pooling` maps `mean`, `cls` and `last` onto mlxcel's own kernels, and the flag outranks both the checkpoint's `1_Pooling/config.json` and the `MLXCEL_EMBEDDING_POOLING` variable. The other two values are not pooling kernels at all: `rank` is how b10621 puts a model on its reranking path, so it is accepted as a synonym for `--reranking`, and `none` asks for one vector per token, which mlxcel cannot produce because every embedding family pools inside its own forward pass before the engine sees the output. `none` is refused at startup with that reason. mlxcel's own `max` pooling has no b10621 spelling and stays reachable through `MLXCEL_EMBEDDING_POOLING` and the checkpoint config.
+
+`--embd-normalize` implements the whole b10621 domain with upstream's arithmetic: `-1` none, `0` the max-absolute rescale into the signed int16 range, `1` taxicab, `2` euclidean, and any value above 2 that p-norm. A zero vector normalizes to zeros rather than NaN, which is upstream's `norm = sum > 0 ? 1/sum : 0` rule and matters here because the embedding route refuses a non-finite response with a 500. `2` delegates to the L2 kernel every mlxcel embedding response already used, so the default path produces exactly the numbers it produced before. The value is also readable per request as `embd_normalize` on `/embedding`, `/embeddings` and `/v1/embeddings`, as upstream reads it, and `mlxcel embed` takes the same `--pooling` and `--embd-normalize` so the offline and server surfaces resolve identically.
+
+One default differs: with the flag unset mlxcel follows the checkpoint's own `normalize` flag from `config.json`, which is euclidean for every checkpoint that does not set it and none for one that sets it to `false`. b10621 always defaults to `2`, because GGUF carries no such metadata.
+
+#### Rerank envelope
+
+The four rerank routes now answer b10621's shapes rather than only Cohere's.
+
+| Request spells the document list | Response |
+|---|---|
+| `documents` (Jina / Cohere) | `{"model", "object": "list", "usage", "results": [{"index", "relevance_score"}]}`, with `document` echoed under `return_documents` |
+| `texts` (b10621 / TEI) | a bare array of `{"index", "score"}`, with `text` echoed under `return_text` |
+
+`object` was previously missing from the Jina envelope and the TEI shape was not served at all; both were recorded divergences on all four routes. A body carrying both list spellings stays on the Jina envelope, and the three shape errors (`"query" must be provided`, `"query" must be a string`, `"documents" must be a non-empty string array`) use upstream's wording. The `/embedding` family answers `"input" or "content" must be provided` for the same reason.
+
+#### Readiness in a restricted mode
+
+A server started with `--embeddings` or `--reranking` has no chat worker to be "loaded", and `/health` answered `503 {"status": "loading model"}` for the life of the process, which would make the mode unusable behind any container probe. In those two modes `/health` now reports on the worker the mode selected instead. The change is deliberately scoped to the flags: a server whose `-m` is an embedding checkpoint but that was started without them still reports on the chat provider, so nothing that exists today changes behavior. That wider case, along with the queue-full and loading-body drift, is recorded on `GET /health`'s manifest entry and belongs to #1440.
+
+#### Resolved capability on `/props` and `/v1/models`
+
+`/props` gains a `capabilities` block reporting what the server resolved rather than what was passed: whether generation is on, which mode flag restricted it, and, for each loaded side model, its id plus the pooling and `embd_normalize` really in force. A `--pooling` value the checkpoint overrode is therefore visible. `/v1/models` labels each entry with a `capabilities` array (`completion`, `embedding`, `rerank`), which is what a client needs to tell which id to send where; the field is omitted when empty, so a plain generation deployment keeps exactly the OpenAI object shape.
+
 ## Sharding
 
 The manifest is sharded by area so that the concurrent implementation chains of epic #1431 edit disjoint files. Ownership is machine-readable, not prose: `pin.json`'s `shards` map records, per shard, the set of implementation issue numbers allowed to own entries in it (`shards["authentication"].owners == [1437]`, for example), and `scripts/ci/check_llama_compat_manifest.py` fails an entry whose `issue` is not a member of its own shard's owner set. That is what stops two concurrent chains from editing the same file: the file, not just the reviewer, rejects the second chain's entry.

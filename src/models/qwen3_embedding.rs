@@ -131,6 +131,10 @@ impl EmbeddingModel for Qwen3EmbeddingModel {
         PoolingMode::LastToken
     }
 
+    fn pooling(&self) -> PoolingMode {
+        self.pooling
+    }
+
     fn normalize(&self) -> bool {
         self.normalize
     }

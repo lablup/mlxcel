@@ -511,3 +511,83 @@ async fn non_finite_embeddings_return_500() {
         "{body}"
     );
 }
+
+// ── `embd_normalize` (#1452) ────────────────────────────────────────────────
+
+/// The vectors a request with the given `embd_normalize` comes back with.
+async fn embedded_with(body: serde_json::Value) -> (StatusCode, Value) {
+    post(
+        app_with(Some(stub_provider(false, 4))),
+        "/v1/embeddings",
+        body,
+    )
+    .await
+}
+
+fn first_vector(body: &Value) -> Vec<f32> {
+    body["data"][0]["embedding"]
+        .as_array()
+        .expect("a float array")
+        .iter()
+        .map(|v| v.as_f64().expect("a number") as f32)
+        .collect()
+}
+
+#[tokio::test]
+async fn embd_normalize_minus_one_leaves_the_vector_unnormalized() {
+    let (status, normalized) =
+        embedded_with(serde_json::json!({"input": "hello", "embd_normalize": 2})).await;
+    assert_eq!(status, StatusCode::OK, "{normalized}");
+    let (_, raw) = embedded_with(serde_json::json!({"input": "hello", "embd_normalize": -1})).await;
+
+    let l2 = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(
+        (l2(&first_vector(&normalized)) - 1.0).abs() < 1e-4,
+        "embd_normalize 2 must produce a unit vector: {normalized}"
+    );
+    assert!(
+        (l2(&first_vector(&raw)) - 1.0).abs() > 1e-4,
+        "embd_normalize -1 must not normalize: {raw}"
+    );
+}
+
+#[tokio::test]
+async fn embd_normalize_one_produces_a_unit_l1_vector() {
+    let (_, body) = embedded_with(serde_json::json!({"input": "hello", "embd_normalize": 1})).await;
+    let l1: f32 = first_vector(&body).iter().map(|v| v.abs()).sum();
+    assert!((l1 - 1.0).abs() < 1e-4, "L1 norm is {l1}: {body}");
+}
+
+#[tokio::test]
+async fn an_out_of_domain_embd_normalize_is_a_400_naming_the_domain() {
+    let (status, body) =
+        embedded_with(serde_json::json!({"input": "hello", "embd_normalize": -2})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().expect("a message");
+    assert!(message.contains("embd_normalize -2"), "{message}");
+    assert!(
+        !message.contains("--embd-normalize"),
+        "a per-request error must name the request field, not the flag: {message}"
+    );
+}
+
+#[tokio::test]
+async fn the_native_route_honors_embd_normalize_too() {
+    // b10621 serves `/embedding` and `/v1/embeddings` from one handler, so the
+    // field cannot be honored on only one of them.
+    let (status, body) = post(
+        app_with(Some(stub_provider(false, 4))),
+        "/embedding",
+        serde_json::json!({"content": "hello", "embd_normalize": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let values: Vec<f32> = body[0]["embedding"][0]
+        .as_array()
+        .expect("the native array-of-arrays shape")
+        .iter()
+        .map(|v| v.as_f64().expect("a number") as f32)
+        .collect();
+    let l1: f32 = values.iter().map(|v| v.abs()).sum();
+    assert!((l1 - 1.0).abs() < 1e-4, "L1 norm is {l1}: {body}");
+}

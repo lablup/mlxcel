@@ -125,6 +125,7 @@ fn dimensions_truncates_and_renormalizes() {
     let opts = EmbedOptions {
         instruction: None,
         dimensions: Some(4),
+        normalize: None,
     };
     let reply = e.embed_tokens(&[vec![2, 3]], &opts).unwrap();
     let v = &reply.vectors[0];
@@ -143,6 +144,7 @@ fn dimensions_truncates_and_renormalizes() {
                 &EmbedOptions {
                     instruction: None,
                     dimensions: Some(bad),
+                    normalize: None,
                 },
             )
             .unwrap_err();
@@ -175,6 +177,7 @@ fn multi_vector_reply_has_one_row_per_real_token() {
             &EmbedOptions {
                 instruction: None,
                 dimensions: Some(3),
+                normalize: None,
             },
         )
         .unwrap();

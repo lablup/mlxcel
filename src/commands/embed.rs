@@ -53,6 +53,18 @@ pub(crate) struct EmbedArgs {
     #[arg(long, value_name = "N")]
     pub(crate) dimensions: Option<usize>,
 
+    /// Pooling override: `mean`, `cls` or `last`, the b10621 `--pooling`
+    /// spellings mlxcel implements. Unset uses the checkpoint's
+    /// `1_Pooling/config.json`, then the family default (#1452).
+    #[arg(long = "pooling", value_name = "{mean,cls,last}")]
+    pub(crate) pooling: Option<String>,
+
+    /// Embedding normalization, b10621's `--embd-normalize` domain: `-1` none,
+    /// `0` max absolute int16, `1` taxicab, `2` euclidean, above 2 that p-norm.
+    /// Unset uses the checkpoint's own `normalize` flag (#1452).
+    #[arg(long = "embd-normalize", value_name = "N")]
+    pub(crate) embd_normalize: Option<i32>,
+
     /// Print one JSON object instead of the text layout.
     #[arg(long)]
     pub(crate) json: bool,
@@ -129,6 +141,25 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
         }
     }
 
+    // `--pooling` and `--embd-normalize` are resolved before the checkpoint is
+    // loaded, because the pooling override has to be installed before the
+    // family constructor reads it and because a bad value should fail the
+    // command line rather than a forward pass (#1452).
+    let normalize_override = match args.embd_normalize {
+        Some(raw) => Some(mlxcel::embeddings::EmbdNormalize::new(raw).map_err(anyhow::Error::msg)?),
+        None => None,
+    };
+    let pooling_override = match args.pooling.as_deref() {
+        Some(raw) => Some(
+            raw.trim()
+                .to_ascii_lowercase()
+                .parse::<mlxcel::embeddings::PoolingMode>()
+                .map_err(|e| anyhow::anyhow!("--pooling {raw}: {e}"))?,
+        ),
+        None => None,
+    };
+    mlxcel::embeddings::set_pooling_override(pooling_override);
+
     let model_dir =
         resolve_model_source_with_override(&args.model, args.models_dir.as_deref(), None)?;
 
@@ -156,6 +187,7 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
     let options = EmbedOptions {
         instruction: args.instruction.clone(),
         dimensions: args.dimensions,
+        normalize: normalize_override,
     };
     let mut labels: Vec<String> = Vec::new();
     let mut vectors: Vec<EmbeddingVector> = Vec::new();

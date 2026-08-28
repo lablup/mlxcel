@@ -128,6 +128,7 @@ fn sample_args() -> crate::ServeArgs {
         _mmproj: None,
         cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),
         infill: mlxcel::cli::infill_args::InfillArgs::default(),
+        embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs::default(),
         estimate_memory: false,
         force_memory: false,
         turbo: mlxcel::cli::turbo_args::TurboKvCacheArgs::default(),

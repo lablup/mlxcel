@@ -302,6 +302,44 @@ pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = DEFAULT_AUDIO_REQUEST_TI
 /// because each of its rows carries a full image's worth of visual tokens.
 pub const DEFAULT_RERANK_BATCH_SIZE: usize = crate::rerank::DEFAULT_RERANK_BATCH_SIZE;
 
+/// What this server is allowed to serve, per b10621's `--embeddings` and
+/// `--reranking` (#1452).
+///
+/// b10621 has one model and one set of weights, so those flags are a
+/// server-wide restriction rather than a worker selection. mlxcel reproduces
+/// the restriction half here: generation routes answer the same 501 they answer
+/// with no chat model, and the body names the flag that turned them off, so an
+/// operator can tell "this deployment is embedding-only" from "the chat model
+/// failed to load".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbeddingServingMode {
+    /// No mode flag: every loaded worker serves its routes.
+    #[default]
+    Any,
+    /// `--embeddings`: embedding routes only.
+    EmbeddingOnly,
+    /// `--reranking`: reranking routes only.
+    RerankOnly,
+}
+
+impl EmbeddingServingMode {
+    /// The b10621 flag that selected this mode, or `None` for [`Self::Any`].
+    #[must_use]
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Any => None,
+            Self::EmbeddingOnly => Some("--embeddings"),
+            Self::RerankOnly => Some("--reranking"),
+        }
+    }
+
+    /// Whether generation is refused in this mode.
+    #[must_use]
+    pub fn blocks_generation(self) -> bool {
+        !matches!(self, Self::Any)
+    }
+}
+
 /// Server configuration derived from CLI-compatible startup arguments.
 ///
 /// Default values intentionally track `llama-server` behavior where practical
@@ -358,6 +396,14 @@ pub struct ServerConfig {
     pub enable_slots_endpoint: bool,
     pub enable_props_endpoint: bool,
     pub enable_metrics_endpoint: bool,
+    /// `--embd-normalize`: the server-wide embedding normalization, `None`
+    /// when the operator did not choose one and the checkpoint's own
+    /// `normalize` flag decides (#1452).
+    pub embd_normalize: Option<crate::embeddings::EmbdNormalize>,
+    /// `--embeddings` / `--reranking`: generation is off and this server serves
+    /// only its side-model routes (#1452). Carries the flag that turned it off
+    /// so the 501 body can name it.
+    pub embedding_serving_mode: EmbeddingServingMode,
     /// `--spm-infill`: use the Suffix/Prefix/Middle ordering on `POST /infill`
     /// instead of the default Prefix/Suffix/Middle (#1442).
     ///
@@ -689,6 +735,8 @@ impl Default for ServerConfig {
             enable_slots_endpoint: true,
             enable_props_endpoint: false,
             spm_infill: false,
+            embd_normalize: None,
+            embedding_serving_mode: EmbeddingServingMode::Any,
             enable_metrics_endpoint: false,
             default_temperature: 0.8,
             default_top_p: 0.95,

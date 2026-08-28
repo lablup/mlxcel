@@ -130,6 +130,22 @@ Micro-batches are right-padded to their longest member (or to a fixed width when
 
 Prompt prefixes are caller-side everywhere: nothing is injected server-side, so an input embeds exactly as it is sent. The `instruction` request field (and `mlxcel embed --instruction`) reaches `EmbeddingModel::format_text`, and only a family that documents a format below does anything with it.
 
+### Pooling and normalization overrides
+
+Two llama-server b10621 flags override what the checkpoint asks for, on the server and on `mlxcel embed` alike (issue #1452):
+
+| Flag | Values | Unset |
+|---|---|---|
+| `--pooling` | `mean`, `cls`, `last` (b10621 also has `none` and `rank`; see below) | `1_Pooling/config.json`, then the family default |
+| `--embd-normalize` | `-1` none, `0` max absolute int16, `1` taxicab, `2` euclidean, above 2 that p-norm | the checkpoint's `config.json` `normalize` flag, which is euclidean unless it says otherwise |
+
+`--pooling` outranks both `1_Pooling/config.json` and the `MLXCEL_EMBEDDING_POOLING` variable, and `GET /props` reports the mode that was really resolved, so a value the checkpoint overrode would be visible rather than assumed. mlxcel's own `max` pooling has no b10621 spelling and stays reachable through `MLXCEL_EMBEDDING_POOLING` and the checkpoint config.
+
+b10621's other two `--pooling` values are not pooling kernels. `rank` is how it puts a model on its reranking path, so mlxcel accepts it as a synonym for `--reranking`. `none` asks for one vector per token, which no mlxcel embedding family can return because each pools inside its own forward pass before the engine sees the output; it is refused at startup with that reason.
+
+`--embd-normalize` is also readable per request as `embd_normalize` on `/embedding`, `/embeddings` and `/v1/embeddings`. A zero vector normalizes to zeros rather than to NaN under every mode, matching upstream.
+
+
 ### BERT and XLM-RoBERTa
 
 One encoder covers both (`src/models/bert.rs`): a post-LayerNorm block stack over absolute position embeddings, selected by a `BertVariant` switch. `model_type: bert` builds position ids as `0..L` and carries a real `token_type_ids` axis; `model_type: xlm-roberta` builds them as `cumsum(input_ids != pad_token_id) * mask + pad_token_id`, so the first real token sits at `pad_token_id + 1` and padding stays at `pad_token_id`. `intfloat/multilingual-e5-small` is a `BertModel` despite shipping the XLM-RoBERTa tokenizer, and follows the BERT rule.

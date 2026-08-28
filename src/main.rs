@@ -147,7 +147,9 @@ enum Commands {
     /// `1_Pooling/config.json`, L2 normalization, right-padded batching) and
     /// prints one vector per input, plus the cosine-similarity matrix when
     /// two or more inputs are given. This is the offline validation tool for
-    /// every embedding family.
+    /// every embedding family. `--pooling` and `--embd-normalize` override the
+    /// two defaults with the same values the server's flags take, so a
+    /// configuration can be reproduced here before it is deployed.
     ///
     /// Examples:
     ///
@@ -2031,6 +2033,13 @@ pub(crate) struct ServeArgs {
     /// llama-server b10621 command line.
     #[command(flatten)]
     pub(crate) infill: mlxcel::cli::infill_args::InfillArgs,
+
+    /// llama-server b10621 embedding and reranking mode flag group
+    /// (`--embedding`, `--rerank`, `--pooling`, `--embd-normalize`). Defined
+    /// once in `mlxcel::cli::embedding_compat_args` so both server binaries
+    /// accept the same command line.
+    #[command(flatten)]
+    pub(crate) embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs,
 
     /// Language-bias options for server-wide output
     /// steering. Mirrors the same flags exposed on the `generate` subcommand.

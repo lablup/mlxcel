@@ -407,6 +407,15 @@ pub struct ModelInfo {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// What this entry can be asked for: `completion`, `embedding` or
+    /// `rerank` (#1452).
+    ///
+    /// `/v1/models` listed a chat model, an embedding model and a reranker with
+    /// no field distinguishing them, so a client could not tell which id to
+    /// send where. Omitted when empty so the object stays exactly the OpenAI
+    /// shape for a deployment that has only a chat model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<&'static str>,
 }
 
 /// Models list response
@@ -622,6 +631,57 @@ pub struct PropsResponse {
     /// because it is an independent second route to a quantized cache and is
     /// subject to the same startup substitution.
     pub kv_bits: i32,
+    /// What this server can actually be asked for, resolved at startup
+    /// (#1452).
+    ///
+    /// b10621's own `/props` carries comparable facts (its server binary
+    /// declares `modalities`, `capabilities` and `pooling_type` keys), and for
+    /// the same reason: "is generation on", "is there an embedder", "which
+    /// pooling did it resolve" and "which normalization will an unqualified
+    /// request get" are all decided before the first request and are otherwise
+    /// invisible to a client. The key set here is mlxcel's own, because the
+    /// facts it reports are about mlxcel's dedicated workers. The pooling
+    /// value is the mode the checkpoint really resolved, not the flag that was
+    /// passed, so `--pooling` having been ignored would be visible here.
+    pub capabilities: ServerCapabilities,
+}
+
+/// The resolved side-model capability block of [`PropsResponse`] (#1452).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServerCapabilities {
+    /// Whether generation routes serve requests.
+    pub generation: bool,
+    /// The b10621 mode flag that restricted this server, `null` when none did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serving_mode: Option<&'static str>,
+    /// The embedding worker, absent when none is loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingCapability>,
+    /// The rerank worker, absent when none is loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranking: Option<RerankCapability>,
+}
+
+/// What the loaded embedding checkpoint resolved.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EmbeddingCapability {
+    pub model: String,
+    /// Width of one vector.
+    pub dim: usize,
+    /// The pooling really in force: `cls`, `mean`, `max` or `lasttoken`.
+    pub pooling: String,
+    /// The `--embd-normalize` value an unqualified request gets.
+    pub embd_normalize: i32,
+    /// Whether the family returns one vector per token.
+    pub multi_vector: bool,
+}
+
+/// What the loaded reranker resolved.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RerankCapability {
+    pub model: String,
+    /// `sequence_classifier`, `generative_text` or `generative_vl`.
+    pub kind: String,
 }
 
 /// Slot information (GET /slots)

@@ -195,6 +195,7 @@ fn sample_input() -> ServerStartupInput {
         rope: crate::cli::rope_args::RopeOverrideArgs::default(),
         cache_compat: crate::cli::cache_args::CacheCompatArgs::default(),
         infill: crate::cli::infill_args::InfillArgs::default(),
+        embedding_compat: crate::cli::embedding_compat_args::EmbeddingCompatArgs::default(),
     }
 }
 

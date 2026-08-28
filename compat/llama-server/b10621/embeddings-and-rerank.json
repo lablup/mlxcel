@@ -19,10 +19,18 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1452,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/embeddings/normalize_tests.rs::the_domain_accepts_minus_one_and_above",
+      "notes": "Accepted on both server binaries and honored end to end: the whole b10621 domain is implemented in src/embeddings/normalize.rs with upstream's own arithmetic, including its `norm = sum > 0 ? 1/sum : 0` rule so a zero vector normalizes to zeros rather than NaN. `2` delegates to the L2 kernel every mlxcel embedding response already used, so the default path is unchanged. The value is also readable per request as `embd_normalize` on /embedding, /embeddings and /v1/embeddings, as upstream reads it. b10621 declares no environment variable for this option and neither does mlxcel.",
+      "divergence": [
+        "The default when the flag is unset is the checkpoint's own `normalize` flag (config.json), which is euclidean for every checkpoint that does not set it and none for one that sets it to false; b10621 always defaults to 2 because GGUF carries no such metadata."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--embd-normalize"
+        ],
+        "env": null,
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -43,10 +51,23 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1452,
-      "test": null,
-      "notes": "mlxcel serves embeddings through dedicated models/endpoints rather than a server-wide restriction flag. #1452 owns the mode semantics.",
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/embedding_compat_args_tests.rs::the_embedding_flag_restricts_the_server",
+      "notes": "Both spellings accepted on both server binaries, and the flag does the two things b10621's does: generation routes answer 501 naming the flag (the restriction half, asserted by embedding_rerank_mode_tests.rs), and the embedding routes serve. LLAMA_ARG_EMBEDDINGS is read at runtime rather than through clap because b10621 fires a value-less option from the environment only for its own truthy set (on, enabled, true, 1) and clap's boolish parser both accepts more and errors outside it.",
+      "divergence": [
+        "mlxcel additionally requires an embedding checkpoint to resolve: --embeddings on a server whose -m is a chat model fails at startup naming the flag, where b10621 restricts the loaded model and embeds with it. mlxcel has no path that produces embeddings from a causal chat checkpoint."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--embedding",
+          "--embeddings"
+        ],
+        "env": "LLAMA_ARG_EMBEDDINGS",
+        "env_binding": "runtime",
+        "env_test": "src/cli/embedding_compat_args_tests.rs",
+        "defaults": [
+          "false"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -65,10 +86,19 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1452,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/embedding_compat_args_tests.rs::the_three_poolable_values_map_onto_mlxcel_kernels",
+      "notes": "Accepted on both server binaries with LLAMA_ARG_POOLING bound through clap. `mean`, `cls` and `last` map onto mlxcel's Mean, Cls and LastToken kernels and outrank the checkpoint's 1_Pooling/config.json and the MLXCEL_EMBEDDING_POOLING variable; the resolved mode is reported on /props so a value that the checkpoint overrode would be visible. `mlxcel embed --pooling` takes the same three values, so the offline and server surfaces resolve identically.",
+      "divergence": [
+        "`--pooling none` is refused at startup with a diagnostic; b10621 serves it as one embedding vector per token. Every mlxcel embedding family pools inside its own forward pass, before the engine sees the output, so there is no unpooled hidden state left to return.",
+        "`--pooling rank` selects the reranking worker, as `--reranking` does, rather than becoming a pooling type: mlxcel scores a query/document pair through a dedicated reranker head, so there is no pooling kernel for it to name."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--pooling"
+        ],
+        "env": "LLAMA_ARG_POOLING",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -89,10 +119,24 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1452,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/cli/embedding_compat_args_tests.rs::the_rerank_flag_implies_the_embedding_restriction_as_upstream_does",
+      "notes": "Both spellings accepted on both server binaries, and, as upstream's handler does, the flag also turns generation off rather than only enabling the rerank routes. LLAMA_ARG_RERANKING is read at runtime for the same reason as LLAMA_ARG_EMBEDDINGS. `--pooling rank` is accepted as a synonym, which is how b10621 spells the same request.",
+      "divergence": [
+        "mlxcel additionally requires a reranker to resolve: --reranking on a server whose -m is not a reranker fails at startup naming the flag, where b10621 switches the loaded model to its rank pooling type and scores with it.",
+        "b10621's --reranking sets its embedding flag too, so /v1/embeddings keeps answering there; a mlxcel server in rerank mode has no embedding worker and answers 501 on the embedding routes."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--rerank",
+          "--reranking"
+        ],
+        "env": "LLAMA_ARG_RERANKING",
+        "env_binding": "runtime",
+        "env_test": "src/cli/embedding_compat_args_tests.rs",
+        "defaults": [
+          "false"
+        ]
+      }
     }
   ]
 }

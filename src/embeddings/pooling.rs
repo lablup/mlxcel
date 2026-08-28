@@ -157,14 +157,68 @@ impl PoolingConfig {
     }
 }
 
-/// Resolve the effective pooling mode for a checkpoint, in order:
-/// `1_Pooling/config.json`, then `family_default`, then the
-/// [`POOLING_ENV`] override (logged when it applies).
+/// Sentinel for "no `--pooling` override installed" in [`POOLING_OVERRIDE`].
+const NO_POOLING_OVERRIDE: u8 = u8::MAX;
+
+/// The operator's `--pooling` choice, installed once at startup (#1452).
+///
+/// A process-wide cell rather than a parameter because the resolution happens
+/// inside each family's constructor, which is reached through the weight
+/// loader and carries no server context. That is the same shape
+/// [`POOLING_ENV`] already had; the flag simply takes precedence over it.
+/// Stored as the discriminant of [`PoolingMode`] so the cell is lock-free and
+/// safe to read from the embedding worker thread.
+static POOLING_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(NO_POOLING_OVERRIDE);
+
+/// Install the `--pooling` override.
+///
+/// Called once from startup, before any embedding checkpoint is loaded. Passing
+/// `None` clears it, which is what the server tests need between cases.
+pub fn set_pooling_override(mode: Option<PoolingMode>) {
+    let encoded = match mode {
+        Some(PoolingMode::Cls) => 0,
+        Some(PoolingMode::Mean) => 1,
+        Some(PoolingMode::Max) => 2,
+        Some(PoolingMode::LastToken) => 3,
+        None => NO_POOLING_OVERRIDE,
+    };
+    POOLING_OVERRIDE.store(encoded, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The installed `--pooling` override, if any.
+#[must_use]
+pub fn pooling_override() -> Option<PoolingMode> {
+    match POOLING_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => Some(PoolingMode::Cls),
+        1 => Some(PoolingMode::Mean),
+        2 => Some(PoolingMode::Max),
+        3 => Some(PoolingMode::LastToken),
+        _ => None,
+    }
+}
+
+/// Resolve the effective pooling mode for a checkpoint, in order: the
+/// `--pooling` flag ([`set_pooling_override`]), then the [`POOLING_ENV`]
+/// override, then `1_Pooling/config.json`, then `family_default`. Whichever
+/// wins is logged.
+///
+/// The flag outranks the variable so an operator who exports
+/// `MLXCEL_EMBEDDING_POOLING` in a shell profile can still override it per
+/// invocation, which is the usual precedence for a flag against its own
+/// environment fallback.
 ///
 /// Used by: every embedding family constructor and the test stub.
 pub fn resolve_pooling_mode(model_dir: &Path, family_default: PoolingMode) -> Result<PoolingMode> {
     let from_config = PoolingConfig::read(model_dir)?;
     let resolved = from_config.unwrap_or(family_default);
+    if let Some(forced) = pooling_override() {
+        tracing::info!(
+            target: "mlxcel::embeddings",
+            "--pooling {forced} overrides the resolved pooling mode {resolved}"
+        );
+        return Ok(forced);
+    }
     match std::env::var(POOLING_ENV) {
         Ok(raw) if !raw.trim().is_empty() => {
             let forced: PoolingMode = raw

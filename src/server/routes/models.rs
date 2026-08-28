@@ -24,11 +24,37 @@ use crate::server::types::{ModelInfo, ModelsResponse};
 
 /// GET /v1/models
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
+    // `capabilities` says what each id may be sent to (#1452). The primary
+    // entry is the interesting one: when `-m` is itself an embedding or
+    // reranker checkpoint its id is the only id on the list, and before this
+    // field a client had no way to tell that sending it to
+    // `/v1/chat/completions` would 501.
+    let mut primary: Vec<&'static str> = Vec::new();
+    if !state.model_provider.is_chat_unavailable()
+        && !state.config.embedding_serving_mode.blocks_generation()
+    {
+        primary.push("completion");
+    }
+    if state
+        .embedding_model
+        .as_ref()
+        .is_some_and(|e| e.model_id() == state.display_model_id())
+    {
+        primary.push("embedding");
+    }
+    if state
+        .rerank_model
+        .as_ref()
+        .is_some_and(|r| r.model_id() == state.display_model_id())
+    {
+        primary.push("rerank");
+    }
     let mut models = vec![ModelInfo {
         id: state.display_model_id().to_string(),
         object: "model".to_string(),
         created: state.model_provider.created_at(),
         owned_by: "user".to_string(),
+        capabilities: primary,
     }];
 
     // A separately loaded embedding model (`--embedding-model`) is listed
@@ -42,6 +68,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> 
             object: "model".to_string(),
             created: embedding.created_at(),
             owned_by: "user".to_string(),
+            capabilities: vec!["embedding"],
         });
     }
 
@@ -55,6 +82,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> 
             object: "model".to_string(),
             created: reranker.created_at(),
             owned_by: "user".to_string(),
+            capabilities: vec!["rerank"],
         });
     }
 

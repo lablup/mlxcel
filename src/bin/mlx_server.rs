@@ -1406,6 +1406,13 @@ struct ServerArgs {
     #[command(flatten)]
     infill: mlxcel::cli::infill_args::InfillArgs,
 
+    /// llama-server b10621 embedding and reranking mode flag group
+    /// (`--embedding`, `--rerank`, `--pooling`, `--embd-normalize`). Defined
+    /// once in `mlxcel::cli::embedding_compat_args` so both server binaries
+    /// accept the same command line.
+    #[command(flatten)]
+    embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs,
+
     /// Language-bias options for server-wide output
     /// steering. See `--lang-bias`, `--lang-bias-config`, `--lang-bias-policy`,
     /// and the `--lang-bias-include-*` family of flags.
@@ -2151,6 +2158,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
         infill: args.infill.clone(),
+        embedding_compat: args.embedding_compat.clone(),
     })
 }
 

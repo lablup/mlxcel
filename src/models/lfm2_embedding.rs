@@ -208,6 +208,10 @@ impl EmbeddingModel for Lfm2EmbeddingModel {
         PoolingMode::Cls
     }
 
+    fn pooling(&self) -> PoolingMode {
+        self.pooling
+    }
+
     fn normalize(&self) -> bool {
         self.normalize
     }

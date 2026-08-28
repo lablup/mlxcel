@@ -106,6 +106,10 @@ impl EmbeddingModel for StubEmbeddingModel {
         self.pooling
     }
 
+    fn pooling(&self) -> PoolingMode {
+        self.pooling
+    }
+
     fn multi_vector(&self) -> bool {
         self.multi_vector
     }

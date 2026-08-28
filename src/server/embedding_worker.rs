@@ -61,6 +61,10 @@ pub(crate) struct EmbeddingWorkerInfo {
     pub supports_images: bool,
     pub batch_size: usize,
     pub model_type: ModelType,
+    /// The pooling this checkpoint resolved, reported by `/props` (#1452).
+    pub pooling: crate::embeddings::PoolingMode,
+    /// The normalization a request that names none gets (#1452).
+    pub embd_normalize: crate::embeddings::EmbdNormalize,
 }
 
 type Reply = mpsc::Sender<Result<EmbedReply, EmbeddingError>>;
@@ -268,6 +272,8 @@ fn worker_loop<L>(
         supports_images: engine.supports_images(),
         batch_size: engine.batch_size(),
         model_type: engine.model_type(),
+        pooling: engine.pooling(),
+        embd_normalize: engine.default_normalize(),
     };
     if ready.send(Ok(info)).is_err() {
         return;
@@ -461,6 +467,14 @@ impl EmbeddingModelProvider for EmbeddingWorkerProvider {
 
     fn multi_vector(&self) -> bool {
         self.worker.info().multi_vector
+    }
+
+    fn pooling(&self) -> crate::embeddings::PoolingMode {
+        self.worker.info().pooling
+    }
+
+    fn embd_normalize(&self) -> crate::embeddings::EmbdNormalize {
+        self.worker.info().embd_normalize
     }
 
     fn supports_images(&self) -> bool {

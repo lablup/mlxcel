@@ -21,7 +21,9 @@ use axum::{Json, extract::State};
 
 use crate::server::AppState;
 use crate::server::config::ServerConfig;
-use crate::server::types::PropsResponse;
+use crate::server::types::{
+    EmbeddingCapability, PropsResponse, RerankCapability, ServerCapabilities,
+};
 
 /// The `default_generation_settings` object of the `/props` payload.
 ///
@@ -90,7 +92,48 @@ pub async fn props(State(state): State<AppState>) -> Json<PropsResponse> {
         // the startup log.
         kv_cache_mode: state.config.kv_cache_mode.to_string(),
         kv_bits: state.config.batch_kv_quant.bits,
+        capabilities: server_capabilities(&state),
     })
+}
+
+/// Build the resolved capability block (#1452).
+///
+/// Everything here is read from the workers that were really loaded rather than
+/// from the flags that were passed, so a `--pooling` the checkpoint overrode,
+/// or a `--embedding-model` that failed to load, shows up as what happened.
+pub(crate) fn server_capabilities(state: &AppState) -> ServerCapabilities {
+    ServerCapabilities {
+        generation: !state.model_provider.is_chat_unavailable()
+            && !state.config.embedding_serving_mode.blocks_generation(),
+        serving_mode: state.config.embedding_serving_mode.flag(),
+        embedding: state
+            .embedding_model
+            .as_ref()
+            .map(|provider| EmbeddingCapability {
+                model: provider.model_id().to_string(),
+                dim: provider.dim(),
+                pooling: provider.pooling().to_string(),
+                // The value an unqualified request really gets: the
+                // `--embd-normalize` flag when the operator set one, and the
+                // checkpoint's own `normalize` flag otherwise. Reporting the
+                // checkpoint's answer unconditionally would have shown 2 on a
+                // server started with `--embd-normalize 1`, which is the
+                // opposite of what this block is for.
+                embd_normalize: state
+                    .config
+                    .embd_normalize
+                    .unwrap_or_else(|| provider.embd_normalize())
+                    .value(),
+                multi_vector: provider.multi_vector(),
+            }),
+        reranking: state
+            .rerank_model
+            .as_ref()
+            .map(|provider| RerankCapability {
+                model: provider.model_id().to_string(),
+                kind: provider.kind().as_str().to_string(),
+            }),
+    }
 }
 
 #[cfg(test)]
