@@ -2713,7 +2713,32 @@ mod tests {
     }
 
     #[test]
-    fn legacy_server_mode_resolves_repo_id_from_models_dir_override() {
+    fn legacy_server_mode_resolves_repo_id_from_model_store_root_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_root = tmp.path().join("custom-model-store");
+        let repo_id = "zz-mlxcel-test-owner/zz-mlxcel-test-model";
+        let expected = make_complete_snapshot(&models_root, repo_id);
+        let models_root_arg = models_root.to_string_lossy().to_string();
+
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            repo_id,
+            "--model-store-root",
+            &models_root_arg,
+        ]);
+        let input = build_startup_input(args).expect("repo-id should resolve from override store");
+
+        assert_eq!(input.model_path, expected);
+    }
+
+    /// The other half of #1438's `--models-dir` swap: the spelling that used to
+    /// mean "store root" now selects b10621 router-mode discovery, so it must
+    /// NOT resolve a repo id against itself as a store. Without this the swap
+    /// could silently regress back and only the renamed test above would notice,
+    /// which it would not, because it no longer uses the spelling.
+    #[test]
+    fn models_dir_no_longer_acts_as_the_model_store_root() {
         let tmp = tempfile::tempdir().unwrap();
         let models_root = tmp.path().join("custom-model-store");
         let repo_id = "zz-mlxcel-test-owner/zz-mlxcel-test-model";
@@ -2727,9 +2752,13 @@ mod tests {
             "--models-dir",
             &models_root_arg,
         ]);
-        let input = build_startup_input(args).expect("repo-id should resolve from override store");
 
-        assert_eq!(input.model_path, expected);
+        if let Ok(input) = build_startup_input(args) {
+            assert_ne!(
+                input.model_path, expected,
+                "--models-dir must not resolve the repo id against itself as a store root"
+            );
+        }
     }
 
     #[test]
