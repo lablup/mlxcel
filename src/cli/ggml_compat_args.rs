@@ -13,7 +13,9 @@
 // limitations under the License.
 
 //! llama-server b10621 GGML runtime, placement, and memory options
-//! (issue #1445).
+//! (issue #1445), plus the control-vector activation-steering flags
+//! (issue #1449), which share this module's accept-hidden-and-classify
+//! machinery rather than a three-flag module of their own.
 //!
 //! Every option here describes something about the **GGML** backend: which CPU
 //! cores its thread pool runs on, how many model layers to copy into VRAM, how
@@ -344,7 +346,7 @@ pub struct GgmlCompatArgs {
     /// only to an implemented path, which this deliberately is not.
     #[arg(
         long = "control-vector-scaled",
-        value_name = "FNAME:SCALE",
+        value_name = "FNAME:SCALE,...",
         hide = true
     )]
     pub control_vector_scaled: Vec<String>,
@@ -355,11 +357,13 @@ pub struct GgmlCompatArgs {
     /// range alone is accepted silently.
     #[arg(
         long = "control-vector-layer-range",
-        value_name = "START END",
+        value_names = ["START", "END"],
         num_args = 2,
+        value_parser = clap::value_parser!(i64),
+        allow_negative_numbers = true,
         hide = true
     )]
-    pub control_vector_layer_range: Option<Vec<String>>,
+    pub control_vector_layer_range: Option<Vec<i64>>,
 
     // ── model metadata and buffers ──────────────────────────────────────
     /// b10621 `--override-kv`: override GGUF metadata by key.

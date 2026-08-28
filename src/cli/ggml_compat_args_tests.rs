@@ -937,7 +937,7 @@ fn control_vector_layer_range_alone_is_inert() {
     // and every vector flag is rejected, so no configuration where the
     // range matters can ever be reached.
     let args = GgmlCompatArgs {
-        control_vector_layer_range: Some(vec!["0".to_string(), "12".to_string()]),
+        control_vector_layer_range: Some(vec![0, 12]),
         ..Default::default()
     };
     args.ensure_inert_before_model()
