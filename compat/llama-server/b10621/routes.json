@@ -56,14 +56,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "Response-field subset: mlxcel emits {id, object, created, owned_by}; b10621 adds aliases, tags, architecture, source, can_remove and the modality lists, and reports owned_by \"llamacpp\". #1438 owns response-field parity.",
-      "divergence": [
-        "Model objects omit b10621's aliases, tags, architecture, source, can_remove and modality lists (#1438).",
-        "Reports owned_by \"user\" where b10621 reports \"llamacpp\" (#1438)."
-      ],
+      "test": "src/server/routes/models_tests.rs",
+      "notes": "Since #1438 the single-model answer carries b10621's two blocks: the OpenAI data array whose entries have id, aliases, tags, object, created, owned_by \"llamacpp\" and the meta facts block (vocab_type, n_vocab, n_ctx, n_ctx_train, n_embd, n_params, size, ftype, derived from config.json and the safetensors headers), and the Ollama-compatible models array with the details block (format \"safetensors\"). In router mode both paths serve the router inventory (status, architecture, source, can_remove), as upstream's get_router_models does. mlxcel's additions are additive: per-entry capabilities routing hints and extra entries for a separately loaded embedder/reranker.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /models"
       }
@@ -93,14 +90,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "Response-field subset: see GET /models. #1438 owns response-field parity.",
-      "divergence": [
-        "Model objects omit b10621's aliases, tags, architecture, source, can_remove and modality lists (#1438).",
-        "Reports owned_by \"user\" where b10621 reports \"llamacpp\" (#1438)."
-      ],
+      "test": "src/server/routes/models_tests.rs",
+      "notes": "Since #1438 the single-model answer carries b10621's two blocks: the OpenAI data array whose entries have id, aliases, tags, object, created, owned_by \"llamacpp\" and the meta facts block (vocab_type, n_vocab, n_ctx, n_ctx_train, n_embd, n_params, size, ftype, derived from config.json and the safetensors headers), and the Ollama-compatible models array with the details block (format \"safetensors\"). In router mode both paths serve the router inventory (status, architecture, source, can_remove), as upstream's get_router_models does. mlxcel's additions are additive: per-entry capabilities routing hints and extra entries for a separately loaded embedder/reranker.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /v1/models"
       }

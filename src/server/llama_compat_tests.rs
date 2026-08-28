@@ -114,6 +114,76 @@ fn probe_app() -> axum::Router {
     create_app(state)
 }
 
+/// Router-mode probe app (issue #1438): the b10621 model-management routes
+/// (`POST/DELETE /models`, `/models/load`, `/models/unload`, `/models/sse`)
+/// are registered only by the router server, exactly as upstream registers
+/// them only when `is_router_server`; claims for them resolve here.
+fn router_probe_app() -> axum::Router {
+    let dir =
+        std::env::temp_dir().join(format!("mlxcel-compat-router-probe-{}", std::process::id()));
+    let model_dir = dir.join("probe-model");
+    std::fs::create_dir_all(&model_dir).expect("probe models dir");
+    std::fs::write(model_dir.join("config.json"), "{}").expect("probe config");
+    let pool = std::sync::Arc::new(
+        crate::server::router_models::RouterPool::new(dir, ServerConfig::default(), 4, true)
+            .expect("probe pool"),
+    );
+    crate::server::router_server::create_router_app(
+        crate::server::router_server::RouterServerState {
+            pool,
+            config: Arc::new(ServerConfig::default()),
+        },
+    )
+}
+
+async fn probe_on(app: axum::Router, method: &str, path: &str) -> StatusCode {
+    let method: Method = method.parse().expect("HTTP method");
+    let needs_body = method == Method::POST;
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(if needs_body {
+            // Name the probe pool's one model so a mounted handler answers
+            // from its own logic (400/500) instead of the name-validation
+            // 404 that would read as "route absent".
+            Body::from(r#"{"model":"probe-model"}"#)
+        } else {
+            Body::empty()
+        })
+        .expect("probe request builds");
+    app.oneshot(request)
+        .await
+        .expect("router responds")
+        .status()
+}
+
+/// Whether either serving mode resolves the method/path pair: the
+/// single-model app first, the router-mode app second, mirroring b10621's
+/// two registration sets.
+async fn probe_resolves(method: &str, path: &str) -> bool {
+    let single = probe(method, path).await;
+    if single != StatusCode::NOT_FOUND && single != StatusCode::METHOD_NOT_ALLOWED {
+        return true;
+    }
+    // The router fallback dispatches unmatched paths, answering 400 for a
+    // missing model rather than 404; only the routes the router itself
+    // registers are meaningful here, so restrict the second probe to the
+    // model-management set.
+    const ROUTER_ONLY: [&str; 5] = [
+        "/models",
+        "/models/load",
+        "/models/unload",
+        "/models/sse",
+        "/v1/models",
+    ];
+    if !ROUTER_ONLY.contains(&path) {
+        return false;
+    }
+    let router = probe_on(router_probe_app(), method, path).await;
+    router != StatusCode::NOT_FOUND && router != StatusCode::METHOD_NOT_ALLOWED
+}
+
 async fn probe(method: &str, path: &str) -> StatusCode {
     let method: Method = method.parse().expect("HTTP method");
     let needs_body = method == Method::POST;
@@ -167,7 +237,7 @@ async fn manifest_route_claims_match_the_mounted_router() {
         }
         let method = entry["method"].as_str().expect("method");
         let status = probe(method, path).await;
-        let resolved = status != StatusCode::NOT_FOUND && status != StatusCode::METHOD_NOT_ALLOWED;
+        let resolved = probe_resolves(method, path).await;
         if entry["mlxcel"].is_null() {
             assert!(
                 !resolved,

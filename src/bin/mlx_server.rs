@@ -314,9 +314,53 @@ struct ServerArgs {
     /// Sets the directory that directly holds snapshots, so a repo-id resolves
     /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
     /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
-    /// `-m/--model` is already an existing local path.
-    #[arg(long, value_name = "PATH")]
+    /// `-m/--model` is already an existing local path. This used to be
+    /// spelled `--models-dir`, which now carries b10621's router semantics
+    /// (#1438).
+    #[arg(long = "model-store-root", value_name = "PATH")]
+    model_store_root: Option<PathBuf>,
+
+    /// Directory containing models for the router server (default: disabled)
+    #[arg(long = "models-dir", env = "LLAMA_ARG_MODELS_DIR", value_name = "PATH")]
     models_dir: Option<PathBuf>,
+
+    /// For router server, maximum number of models to load simultaneously (0 = unlimited)
+    #[arg(
+        long = "models-max",
+        env = "LLAMA_ARG_MODELS_MAX",
+        default_value_t = 4,
+        value_name = "N"
+    )]
+    models_max: usize,
+
+    /// For router server, whether to automatically load models
+    #[arg(
+        long = "models-autoload",
+        env = "LLAMA_ARG_MODELS_AUTOLOAD",
+        default_value_t = true,
+        overrides_with = "_no_models_autoload"
+    )]
+    models_autoload: bool,
+
+    /// Disable automatic model loading in router mode
+    #[arg(
+        long = "no-models-autoload",
+        overrides_with = "models_autoload",
+        hide = true
+    )]
+    _no_models_autoload: bool,
+
+    /// Path to INI file containing model presets for the router server (default: disabled)
+    #[arg(
+        long = "models-preset",
+        env = "LLAMA_ARG_MODELS_PRESET",
+        value_name = "PATH"
+    )]
+    models_preset: Option<PathBuf>,
+
+    /// Set model tags, comma-separated (informational, not used for routing)
+    #[arg(long = "tags", env = "LLAMA_ARG_TAGS", value_name = "TAGS")]
+    tags: Option<String>,
 
     /// Repository revision (branch, tag, or commit hash). Defaults to `main`.
     ///
@@ -1813,7 +1857,7 @@ fn main() -> anyhow::Result<()> {
                 "mlxcel-server",
                 "mlxcel-server",
                 &mut cmd,
-                cli.server.models_dir.as_deref(),
+                cli.server.model_store_root.as_deref(),
             )
         );
         return Ok(());
@@ -2152,36 +2196,49 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // inside a loader (the moondream starmie tokenizer, request-path media
     // URLs) honour --offline too, not just the `-m` resolver.
     set_offline_mode(args.offline);
-    let source = resolve_llama_model_source(&LlamaModelSourceArgs {
-        model: args.model.clone(),
-        hf_repo: args.hf_repo.clone(),
-        hf_file: args.hf_file.clone(),
-        model_url: args.model_url.clone(),
-        docker_repo: args.docker_repo.clone(),
-    })?;
-    if let Some(superseded) = source.superseded_model.as_deref() {
-        tracing::info!("{}", superseded_model_notice(&source.reference, superseded));
-    }
-    let model_path = resolve_model_source_with_options(
-        &source.reference,
-        ModelSourceOptions {
-            models_dir: args.models_dir.as_deref(),
-            revision: args.revision.as_deref(),
-            token: args.hf_token.as_deref(),
-            offline: args.offline,
-        },
-    )
-    // Name the flag the operator actually typed. Without this a failure to
-    // resolve an `--hf-repo` value reports it as a `-m` problem.
-    .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?;
+    // b10621 router mode (#1438): `--models-dir` with no model argument
+    // serves the router surface and never resolves a checkpoint here.
+    let router_mode = args.models_dir.is_some()
+        && args.model.is_none()
+        && args.hf_repo.is_none()
+        && args.model_url.is_none()
+        && args.docker_repo.is_none();
+    let model_path = if router_mode {
+        PathBuf::new()
+    } else {
+        let source = resolve_llama_model_source(&LlamaModelSourceArgs {
+            model: args.model.clone(),
+            hf_repo: args.hf_repo.clone(),
+            hf_file: args.hf_file.clone(),
+            model_url: args.model_url.clone(),
+            docker_repo: args.docker_repo.clone(),
+        })?;
+        if let Some(superseded) = source.superseded_model.as_deref() {
+            tracing::info!("{}", superseded_model_notice(&source.reference, superseded));
+        }
+        resolve_model_source_with_options(
+            &source.reference,
+            ModelSourceOptions {
+                models_dir: args.model_store_root.as_deref(),
+                revision: args.revision.as_deref(),
+                token: args.hf_token.as_deref(),
+                offline: args.offline,
+            },
+        )
+        // Name the flag the operator actually typed. Without this a failure to
+        // resolve an `--hf-repo` value reports it as a `-m` problem.
+        .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?
+    };
 
     // The `--gpu-layers` half of the b10621 GGML classification, deferred
     // until the checkpoint is known: only its layer count distinguishes a full
     // offload (inert, since mlxcel always runs every layer on the accelerator)
     // from a partial one (issue #1445).
-    args.ggml_compat
-        .ensure_inert(read_model_layer_count(&model_path))
-        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if !router_mode {
+        args.ggml_compat
+            .ensure_inert(read_model_layer_count(&model_path))
+            .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    }
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.
@@ -2193,7 +2250,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
             resolve_model_source_with_options(
                 std::path::Path::new(value),
                 ModelSourceOptions {
-                    models_dir: args.models_dir.as_deref(),
+                    models_dir: args.model_store_root.as_deref(),
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
@@ -2211,7 +2268,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
             resolve_model_source_with_options(
                 std::path::Path::new(value),
                 ModelSourceOptions {
-                    models_dir: args.models_dir.as_deref(),
+                    models_dir: args.model_store_root.as_deref(),
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
@@ -2289,6 +2346,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         props: args.props,
         metrics: args.metrics,
         slot_save_path: args.slot_save_path,
+        router_models_dir: args.models_dir.clone(),
+        models_max: args.models_max,
+        models_autoload: args.models_autoload,
+        models_preset: args.models_preset.clone(),
+        tags: args.tags.clone(),
         warmup: args.warmup,
         no_warmup: args._no_warmup,
         temperature: args.temp,

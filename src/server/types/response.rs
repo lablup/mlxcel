@@ -400,31 +400,6 @@ impl CompletionResponse {
     }
 }
 
-/// Model information
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelInfo {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub owned_by: String,
-    /// What this entry can be asked for: `completion`, `embedding` or
-    /// `rerank` (#1452).
-    ///
-    /// `/v1/models` listed a chat model, an embedding model and a reranker with
-    /// no field distinguishing them, so a client could not tell which id to
-    /// send where. Omitted when empty so the object stays exactly the OpenAI
-    /// shape for a deployment that has only a chat model.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<&'static str>,
-}
-
-/// Models list response
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelsResponse {
-    pub object: String,
-    pub data: Vec<ModelInfo>,
-}
-
 /// Error response
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorResponse {

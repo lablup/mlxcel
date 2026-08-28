@@ -229,6 +229,16 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // inside a loader (the moondream starmie tokenizer, request-path media
     // URLs) honour --offline too, not just the `-m` resolver.
     set_offline_mode(args.offline);
+    // b10621 router mode (#1438): `--models-dir` with no model argument
+    // serves the router surface and never resolves a checkpoint here.
+    let router_mode = args.models_dir.is_some()
+        && args.model.is_none()
+        && args.hf_repo.is_none()
+        && args.model_url.is_none()
+        && args.docker_repo.is_none();
+    if router_mode {
+        return start_server(build_startup_input(args)?.into_startup_config()?).await;
+    }
     let source = resolve_llama_model_source(&LlamaModelSourceArgs {
         model: args.model.clone(),
         hf_repo: args.hf_repo.clone(),
@@ -242,7 +252,7 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     let model_path = resolve_model_source_with_options(
         &source.reference,
         ModelSourceOptions {
-            models_dir: args.models_dir.as_deref(),
+            models_dir: args.model_store_root.as_deref(),
             revision: args.revision.as_deref(),
             token: args.hf_token.as_deref(),
             offline: args.offline,
@@ -475,7 +485,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             resolve_model_source_with_options(
                 std::path::Path::new(value),
                 ModelSourceOptions {
-                    models_dir: args.models_dir.as_deref(),
+                    models_dir: args.model_store_root.as_deref(),
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
@@ -493,7 +503,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             resolve_model_source_with_options(
                 std::path::Path::new(value),
                 ModelSourceOptions {
-                    models_dir: args.models_dir.as_deref(),
+                    models_dir: args.model_store_root.as_deref(),
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
@@ -507,13 +517,16 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             .chat_compat
             .resolve()
             .map_err(|e| anyhow::anyhow!("{e}"))?,
-        model_path: args.model.clone().ok_or_else(|| {
-            anyhow::anyhow!(
+        model_path: match args.model.clone() {
+            Some(path) => path,
+            // Router mode (#1438): no model argument plus `--models-dir`.
+            None if args.models_dir.is_some() => std::path::PathBuf::new(),
+            None => anyhow::bail!(
                 "--model/-m is required to start the server (set the \
                  LLAMA_ARG_MODEL environment variable, pass -m \
                  <PATH_OR_REPO_ID>, or pass --hf-repo <owner>/<name>)"
-            )
-        })?,
+            ),
+        },
         adapter_path: args.adapter,
         model_alias: args.alias,
         host: args.host,
@@ -579,6 +592,11 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         no_slots: args._no_slots,
         props: args.props,
         slot_save_path: args.slot_save_path,
+        router_models_dir: args.models_dir.clone(),
+        models_max: args.models_max,
+        models_autoload: args.models_autoload,
+        models_preset: args.models_preset.clone(),
+        tags: args.tags.clone(),
         metrics: args.metrics,
         warmup: args.warmup,
         no_warmup: args._no_warmup,

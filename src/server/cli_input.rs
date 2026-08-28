@@ -160,6 +160,16 @@ pub struct ServerStartupInput {
     /// save/restore actions (#1440). `None` keeps them disabled, b10621's
     /// default.
     pub slot_save_path: Option<PathBuf>,
+    /// `--models-dir`: b10621 router-mode model discovery root (#1438).
+    pub router_models_dir: Option<PathBuf>,
+    /// `--models-max` (#1438).
+    pub models_max: usize,
+    /// Resolved `--models-autoload` / `--no-models-autoload` (#1438).
+    pub models_autoload: bool,
+    /// `--models-preset` (#1438).
+    pub models_preset: Option<PathBuf>,
+    /// `--tags` (#1438).
+    pub tags: Option<String>,
     pub warmup: bool,
     pub no_warmup: bool,
     pub temperature: f32,
@@ -572,6 +582,20 @@ impl ServerStartupInput {
     /// confusing state where the operator thinks they configured kwargs but
     /// didn't.
     pub fn into_startup_config(self) -> anyhow::Result<ServerStartupConfig> {
+        // Migration guard for the #1438 semantic change: `--models-dir` used
+        // to be the mlxcel model-store root and now selects b10621 router
+        // mode. Combining it with a model argument is exactly the old store
+        // root use, and honouring either meaning silently would change
+        // behavior under an operator's feet, so it fails with the map to the
+        // new spelling instead.
+        if self.router_models_dir.is_some() && !self.model_path.as_os_str().is_empty() {
+            anyhow::bail!(
+                "--models-dir now selects llama-server b10621 router-mode model discovery and cannot \
+                 be combined with a model argument. To set the mlxcel model-store root (its old \
+                 meaning), use --model-store-root <PATH> or the MLXCEL_MODELS_DIR environment \
+                 variable; to start the router, drop the model argument"
+            );
+        }
         // Resolved before anything else so an unserveable rotation request
         // fails the command line rather than the first token. The two failure
         // modes are a YaRN request (no arm on the shared RoPE path) and a
@@ -889,6 +913,11 @@ impl ServerStartupInput {
             enable_slots: resolve_compat_toggle(self.slots, self.no_slots),
             enable_props: self.props,
             slot_save_path: self.slot_save_path,
+            router_models_dir: self.router_models_dir,
+            models_max: self.models_max,
+            models_autoload: self.models_autoload,
+            models_preset: self.models_preset,
+            tags: self.tags,
             spm_infill: self.infill.spm_infill,
             embd_normalize: embedding_compat.embd_normalize,
             embedding_serving_mode: embedding_serving_mode(&embedding_compat),

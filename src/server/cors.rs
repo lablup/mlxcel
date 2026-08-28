@@ -226,7 +226,16 @@ pub(crate) async fn cors_middleware(
 ) -> Response {
     // The policy itself stays behind the shared `Arc<ServerConfig>`; only the
     // handful of header values a response actually carries is cloned.
-    let policy = &state.config.cors_policy;
+    apply_cors_policy(&state.config.cors_policy, request, next).await
+}
+
+/// The policy application shared by the single-model middleware above and the
+/// router-mode top level (issue #1438), which carries its own state type.
+pub(crate) async fn apply_cors_policy(
+    policy: &CorsPolicy,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
     let allow_origin = policy.allow_origin(request.headers().get(header::ORIGIN));
 
     if request.method() == Method::OPTIONS {
