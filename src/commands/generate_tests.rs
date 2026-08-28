@@ -568,7 +568,8 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             dry_multiplier: 0.0,
             dry_base: 1.75,
             dry_allowed_length: 2,
-            dry_penalty_last_n: 0,
+            dry_penalty_last_n: -1,
+            repeat_last_n: -1,
             seed: None,
         },
         pipeline_parallel: crate::PipelineParallelOptions {

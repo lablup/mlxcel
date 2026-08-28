@@ -225,6 +225,13 @@ pub struct ServerStartupConfig {
     pub top_p_was_set: bool,
     pub min_p: f32,
     pub typical_p: f32,
+    pub top_n_sigma: f32,
+    pub xtc_probability: f32,
+    pub xtc_threshold: f32,
+    pub ignore_eos: bool,
+    pub reverse_prompt: Vec<String>,
+    pub samplers: Option<String>,
+    pub sampler_seq: Option<String>,
     pub seed: Option<u64>,
     pub repeat_last_n: usize,
     pub repeat_penalty: f32,
@@ -560,6 +567,13 @@ impl Default for ServerStartupConfig {
             top_p_was_set: false,
             min_p: 0.05,
             typical_p: 1.0,
+            top_n_sigma: -1.0,
+            xtc_probability: 0.0,
+            xtc_threshold: 0.1,
+            ignore_eos: false,
+            reverse_prompt: Vec::new(),
+            samplers: None,
+            sampler_seq: None,
             seed: None,
             repeat_last_n: 64,
             repeat_penalty: 1.0,
@@ -728,16 +742,71 @@ pub(super) fn resolve_elastic_pp_config(startup: &ServerStartupConfig) -> Option
     Some(cfg)
 }
 
-/// Resolve the per-request default token budget applied when a request omits
-/// `max_tokens` / `n_predict`.
-///
-/// llama-server parity (issue #476): a negative `--n-predict` (`-1`, the
-/// default) means "generate until the context window is full". It resolves to
-/// the effective per-slot context window — an explicit `--ctx-size` (already
-/// divided across slots into `per_slot_context_size`) when set, otherwise the
-/// model's `max_position_embeddings` read from `config.json`, with the
-/// historical 4096 used only when neither is available. A non-negative
-/// `--n-predict N` is taken verbatim.
+/// Sanitize the server-wide `--dry-base` default: b10621's CLI silently
+/// keeps its 1.75 default for a value below 1.0 (its sampler additionally
+/// disables DRY outright below 1.0), so a sub-1.0 flag value folds back to
+/// the default with a warning instead of running DRY at a shrinking base no
+/// upstream deployment can produce.
+fn sanitize_dry_base_default(value: f32) -> f32 {
+    if value >= 1.0 {
+        value
+    } else {
+        tracing::warn!(
+            "--dry-base {value} is below 1.0; b10621 ignores such values, keeping the 1.75 default"
+        );
+        1.75
+    }
+}
+
+/// Sanitize the server-wide `--top-nsigma` default: b10621's flag default is
+/// `-1.0` and its sampler treats every non-positive value as disabled, so
+/// those (and non-finite input) fold to mlxcel's `0.0` disabled form without
+/// a warning; they are the documented off state, not an operator mistake.
+fn sanitize_top_n_sigma_default(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
+}
+
+/// b10621's default sampler chain, the only order mlxcel can honor: its
+/// filter chain position is fixed (#1375/#1377 pin it to exactly this
+/// order), so `--samplers` accepts precisely this list and rejects anything
+/// else at startup with the accepted form in the diagnostic.
+pub(super) const B10621_DEFAULT_SAMPLERS: &str =
+    "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature";
+
+/// b10621's single-character spelling of the same default chain
+/// (`--sampler-seq`).
+pub(super) const B10621_DEFAULT_SAMPLER_SEQ: &str = "edskypmxt";
+
+/// Validate `--samplers` / `--sampler-seq` (#1436): mlxcel's sampler chain
+/// order is fixed to b10621's default, so the flags are accepted only with
+/// exactly that order (an inert configuration) and any other order fails
+/// startup with an actionable diagnostic instead of silently sampling in a
+/// different order than requested.
+pub(super) fn check_sampler_order(
+    samplers: Option<&str>,
+    sampler_seq: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(order) = samplers
+        && order.trim() != B10621_DEFAULT_SAMPLERS
+    {
+        anyhow::bail!(
+            "--samplers {order:?} is not supported: mlxcel's sampler chain order is fixed to the b10621 default {B10621_DEFAULT_SAMPLERS:?}; pass that order (or omit the flag) to proceed"
+        );
+    }
+    if let Some(seq) = sampler_seq
+        && seq.trim() != B10621_DEFAULT_SAMPLER_SEQ
+    {
+        anyhow::bail!(
+            "--sampler-seq {seq:?} is not supported: mlxcel's sampler chain order is fixed to the b10621 default {B10621_DEFAULT_SAMPLER_SEQ:?}; pass that sequence (or omit the flag) to proceed"
+        );
+    }
+    Ok(())
+}
+
 /// Sanitize the server-wide `--typical` / `--typical-p` default: values
 /// outside the enabled range `(0.0, 1.0)` other than the explicit disabled
 /// form `1.0` (zero, negative, above one, non-finite) fold to `1.0` with a
@@ -757,6 +826,16 @@ fn sanitize_typical_p_default(value: f32) -> f32 {
     }
 }
 
+/// Resolve the per-request default token budget applied when a request omits
+/// `max_tokens` / `n_predict`.
+///
+/// llama-server parity (issue #476): a negative `--n-predict` (`-1`, the
+/// default) means "generate until the context window is full". It resolves to
+/// the effective per-slot context window — an explicit `--ctx-size` (already
+/// divided across slots into `per_slot_context_size`) when set, otherwise the
+/// model's `max_position_embeddings` read from `config.json`, with the
+/// historical 4096 used only when neither is available. A non-negative
+/// `--n-predict N` is taken verbatim.
 pub(super) fn resolve_default_max_tokens(
     n_predict: i32,
     per_slot_context_size: usize,
@@ -773,7 +852,14 @@ pub(super) fn resolve_default_max_tokens(
 }
 
 pub(super) fn resolve_dry_penalty_last_n(value: i32) -> usize {
-    if value < 0 { 0 } else { value as usize }
+    // b10621 sentinels (#1436): the flag's documented -1 means "full
+    // context", which is now the explicit DRY_FULL_HISTORY form; 0 disables
+    // DRY (upstream's own sentinel) instead of the pre-#1436 full scan.
+    if value < 0 {
+        mlxcel_core::generate::DRY_FULL_HISTORY
+    } else {
+        value as usize
+    }
 }
 
 /// Walk the directories named in `MLXCEL_VIDEO_DIR_ALLOWLIST` once at
@@ -1195,6 +1281,11 @@ pub(super) fn build_server_config(
         default_top_k: sampling_defaults.top_k,
         default_min_p: startup.min_p,
         default_typical_p: sanitize_typical_p_default(startup.typical_p),
+        default_top_n_sigma: sanitize_top_n_sigma_default(startup.top_n_sigma),
+        default_xtc_probability: startup.xtc_probability,
+        default_xtc_threshold: startup.xtc_threshold,
+        default_ignore_eos: startup.ignore_eos,
+        default_stop_sequences: startup.reverse_prompt.clone(),
         default_repetition_penalty: startup.repeat_penalty,
         default_repetition_context_size: startup.repeat_last_n,
         default_max_tokens: resolve_default_max_tokens(
@@ -1206,7 +1297,7 @@ pub(super) fn build_server_config(
         default_frequency_penalty: startup.frequency_penalty,
         default_presence_penalty: startup.presence_penalty,
         default_dry_multiplier: startup.dry_multiplier,
-        default_dry_base: startup.dry_base,
+        default_dry_base: sanitize_dry_base_default(startup.dry_base),
         default_dry_allowed_length: startup.dry_allowed_length,
         default_dry_penalty_last_n: resolve_dry_penalty_last_n(startup.dry_penalty_last_n),
         // Left empty here on purpose: `--dry-sequence-breaker` takes token
@@ -1426,6 +1517,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             max_tokens: 1,
             sampling: SamplingConfig::greedy(),
             stop_sequences: None,
+            ignore_eos: false,
             priority: crate::server::batch::RequestPriority::Normal,
             logprobs: Default::default(),
             reasoning_budget: Default::default(),
@@ -1947,6 +2039,12 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
+
+    // A sampler-order flag that asks for anything but the fixed b10621
+    // default chain would silently sample in a different order than the
+    // operator requested; fail here, before the multi-GB model load, since
+    // the check depends only on the two flag strings (#1436).
+    check_sampler_order(startup.samplers.as_deref(), startup.sampler_seq.as_deref())?;
 
     // issue #1350: the KV cache mode was resolved against the model family in
     // `into_startup_config`, which runs before the subscriber above exists.

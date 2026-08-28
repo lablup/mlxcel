@@ -818,6 +818,12 @@ impl DecodeBatchContext {
     }
 }
 
+/// The `dry_penalty_last_n` sentinel meaning "scan the entire token
+/// history". b10621 reconciliation (#1436): `0` now DISABLES the DRY stage
+/// (upstream's sentinel), so the old mlxcel "0 = full history" form moved to
+/// this explicit value. The CLI and OpenAI-shaped surfaces spell it `-1`.
+pub const DRY_FULL_HISTORY: usize = usize::MAX;
+
 /// Sampling configuration
 #[derive(Debug, Clone)]
 pub struct SamplingConfig {
@@ -840,7 +846,10 @@ pub struct SamplingConfig {
     pub dry_base: f32,
     /// DRY minimum match length before penalty applies (default: 2)
     pub dry_allowed_length: usize,
-    /// DRY lookback window (0 = all history)
+    /// DRY lookback window. b10621 semantics (#1436): `0` DISABLES the DRY
+    /// stage entirely, [`DRY_FULL_HISTORY`] scans the whole history (the
+    /// explicit successor of the pre-#1436 `0`), and any other value is the
+    /// number of recent tokens scanned.
     pub dry_penalty_last_n: usize,
     /// Token IDs that break DRY matching (e.g., newlines, punctuation)
     pub dry_sequence_breakers: Vec<i32>,
@@ -897,6 +906,14 @@ pub struct SamplingConfig {
     /// preserves the bit-exact baseline. See
     /// [`crate::sampling::apply_row_filters`].
     pub typical_p: f32,
+    /// Repetition / frequency / presence penalty lookback window, b10621's
+    /// `repeat_last_n` (#1436). `-1` (the default) scans the entire token
+    /// history, preserving mlxcel's pre-#1436 behavior; `0` DISABLES the
+    /// three history penalties entirely (they become inert whatever their
+    /// values, and the config stays fused-batch eligible); `N > 0` penalizes
+    /// over only the last `N` generated tokens, matching b10621's windowed
+    /// penalty ring buffer. DRY has its own window (`dry_penalty_last_n`).
+    pub penalty_last_n: i32,
 }
 
 impl Default for SamplingConfig {
@@ -911,7 +928,7 @@ impl Default for SamplingConfig {
             dry_multiplier: 0.0,
             dry_base: 1.75,
             dry_allowed_length: 2,
-            dry_penalty_last_n: 0,
+            dry_penalty_last_n: DRY_FULL_HISTORY,
             dry_sequence_breakers: Vec::new(),
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -923,6 +940,7 @@ impl Default for SamplingConfig {
             xtc_special_token_ids: Vec::new(),
             top_n_sigma: 0.0,
             typical_p: 1.0,
+            penalty_last_n: -1,
         }
     }
 }
@@ -940,7 +958,7 @@ impl SamplingConfig {
             dry_multiplier: 0.0,
             dry_base: 1.75,
             dry_allowed_length: 2,
-            dry_penalty_last_n: 0,
+            dry_penalty_last_n: DRY_FULL_HISTORY,
             dry_sequence_breakers: Vec::new(),
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -952,6 +970,7 @@ impl SamplingConfig {
             xtc_special_token_ids: Vec::new(),
             top_n_sigma: 0.0,
             typical_p: 1.0,
+            penalty_last_n: -1,
         }
     }
 
@@ -1001,12 +1020,21 @@ impl SamplingConfig {
         }
     }
 
-    /// Check if any penalty-based sampling is enabled
+    /// Check if any penalty-based sampling is enabled.
+    ///
+    /// A `penalty_last_n` of `0` makes the repetition / frequency / presence
+    /// stage inert regardless of the penalty values, and a
+    /// `dry_penalty_last_n` of `0` disables DRY the same way (b10621's
+    /// sentinels, #1436), so neither counts as needing history then. This is
+    /// what lets a request that zeroes its windows stay on the fused batch
+    /// path.
     pub fn needs_token_history(&self) -> bool {
-        self.repetition_penalty != 1.0
-            || self.dry_multiplier > 0.0
-            || self.frequency_penalty != 0.0
-            || self.presence_penalty != 0.0
+        let penalties_active = self.penalty_last_n != 0
+            && (self.repetition_penalty != 1.0
+                || self.frequency_penalty != 0.0
+                || self.presence_penalty != 0.0);
+        let dry_active = self.dry_multiplier > 0.0 && self.dry_penalty_last_n != 0;
+        penalties_active || dry_active
     }
 }
 

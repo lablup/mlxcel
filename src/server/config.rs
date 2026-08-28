@@ -133,6 +133,11 @@ pub struct ServerGenerateOptions {
     pub max_tokens: usize,
     pub sampling: SamplingConfig,
     pub stop_sequences: Option<Vec<String>>,
+    /// b10621 `--ignore-eos` / `ignore_eos` (#1436): suppress every
+    /// end-of-generation token with a `-inf` logit bias at enqueue time so
+    /// the model keeps generating until the token budget or a string stop,
+    /// exactly as upstream's EOG bias does. Default `false`.
+    pub ignore_eos: bool,
     /// Request priority for prefill queue ordering.
     pub priority: RequestPriority,
     /// Log probability configuration; disabled by default (zero overhead).
@@ -418,6 +423,23 @@ pub struct ServerConfig {
     /// Server-wide default for locally typical sampling (`1.0` = disabled),
     /// set by `--typical` / `--typical-p` (#1377).
     pub default_typical_p: f32,
+    /// Server-wide default for top-n-sigma (`0.0` = disabled), set by
+    /// `--top-nsigma` / `--top-n-sigma` (#1436). The b10621 flag default is
+    /// `-1.0` (its disabled sentinel); startup folds any non-positive or
+    /// non-finite value to mlxcel's `0.0` disabled form.
+    pub default_top_n_sigma: f32,
+    /// Server-wide default XTC probability (`0.0` = disabled), set by
+    /// `--xtc-probability` (#1436).
+    pub default_xtc_probability: f32,
+    /// Server-wide default XTC threshold, set by `--xtc-threshold` (#1436).
+    /// b10621 domain `0.0..=1.0`; values above `0.5` make XTC inert.
+    pub default_xtc_threshold: f32,
+    /// b10621 `--ignore-eos` (#1436): server-wide default for suppressing
+    /// end-of-generation tokens.
+    pub default_ignore_eos: bool,
+    /// b10621 `-r` / `--reverse-prompt` (#1436): server-wide stop strings
+    /// merged into every request's stop set.
+    pub default_stop_sequences: Vec<String>,
     pub default_repetition_penalty: f32,
     pub default_repetition_context_size: usize,
     pub default_max_tokens: usize,
@@ -746,6 +768,11 @@ impl Default for ServerConfig {
             default_top_k: 40,
             default_min_p: 0.05,
             default_typical_p: 1.0,
+            default_top_n_sigma: 0.0,
+            default_xtc_probability: 0.0,
+            default_xtc_threshold: 0.1,
+            default_ignore_eos: false,
+            default_stop_sequences: Vec::new(),
             default_repetition_penalty: 1.0,
             default_repetition_context_size: 64,
             default_max_tokens: 512,

@@ -1496,6 +1496,15 @@ pub(crate) fn build_generate_options(
             xtc_threshold: params.xtc_threshold,
             top_n_sigma: params.top_n_sigma,
             typical_p: params.typical_p,
+            // b10621 repeat_last_n / mlx-lm repetition_context_size: the
+            // usize deserialization already rejects negatives (upstream's
+            // schema floor is 0), so only the i32 clamp remains.
+            penalty_last_n: params
+                .repetition_context_size
+                .map(|v| i32::try_from(v).unwrap_or(i32::MAX)),
+            // The OpenAI schema has no ignore_eos; the server-wide
+            // --ignore-eos default still applies through the resolution.
+            ignore_eos: None,
             stop_sequences: params.stop.clone(),
             priority: RequestPriority::default(),
             // the caller (non_stream_chat_completion /

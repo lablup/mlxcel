@@ -3899,6 +3899,19 @@ impl BatchScheduler {
             sampling.xtc_special_token_ids = allowlist;
         }
 
+        // b10621 --ignore-eos / ignore_eos (#1436): upstream implements it
+        // as a -inf logit bias on every end-of-generation token, so the
+        // model keeps generating until the token budget or a string stop.
+        // Suppressing through the shared token-bias map reproduces that
+        // exactly; the EOS stop check then never fires because the id can
+        // never be sampled. Opt-in only, so the common path stays bit-exact
+        // (and fused-batch eligible: a non-empty bias map already routes to
+        // the per-row sampler).
+        if options.ignore_eos {
+            let eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
+            sampling.token_bias.suppress_tokens(&eos);
+        }
+
         let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
 
         // Experimental VLM prompt-prefix cache sharing (#124 step c). Off by

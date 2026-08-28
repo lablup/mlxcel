@@ -203,6 +203,7 @@ fn full_state_serialize_deserialize_round_trip() {
             presence_penalty: 0.0,
             top_n_sigma: 0.0,
             typical_p: 1.0,
+            penalty_last_n: -1,
             stop_token_ids: vec![2],
         }),
         token_history: vec![100, 200, 300],

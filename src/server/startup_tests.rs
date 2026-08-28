@@ -51,12 +51,6 @@ fn resolve_default_max_tokens_matches_server_policy() {
 }
 
 #[test]
-fn resolve_dry_penalty_last_n_maps_negative_to_full_history_sentinel() {
-    assert_eq!(resolve_dry_penalty_last_n(-1), 0);
-    assert_eq!(resolve_dry_penalty_last_n(24), 24);
-}
-
-#[test]
 fn api_keys_from_the_flag_and_the_file_join_one_set() {
     // #1437: b10621 accepts a SET of keys, and both sources append to it, so
     // a flag value no longer shadows the file. The file is read one key per
@@ -125,6 +119,13 @@ fn build_server_config_applies_normalized_startup_values() {
         top_k: 32,
         min_p: 0.05,
         typical_p: 1.0,
+        top_n_sigma: -1.0,
+        xtc_probability: 0.0,
+        xtc_threshold: 0.1,
+        ignore_eos: false,
+        reverse_prompt: Vec::new(),
+        samplers: None,
+        sampler_seq: None,
         repeat_penalty: 1.2,
         repeat_last_n: 96,
         n_predict: -1,
@@ -181,7 +182,12 @@ fn build_server_config_applies_normalized_startup_values() {
     assert_eq!(config.default_dry_multiplier, 0.6);
     assert_eq!(config.default_dry_base, 2.0);
     assert_eq!(config.default_dry_allowed_length, 4);
-    assert_eq!(config.default_dry_penalty_last_n, 0);
+    // -1 resolves to the explicit full-history sentinel since #1436 (the
+    // pre-#1436 code mapped it to 0, which now means "DRY disabled").
+    assert_eq!(
+        config.default_dry_penalty_last_n,
+        mlxcel_core::generate::DRY_FULL_HISTORY
+    );
     assert_eq!(config.draft_model_path, Some(PathBuf::from("draft")));
     assert_eq!(config.num_draft_tokens, 5);
     // max_batch_size derived from n_parallel (no explicit override);
@@ -1438,4 +1444,44 @@ fn sanitize_typical_p_default_folds_out_of_domain_to_disabled() {
             "--typical {bad} must fold to the disabled default"
         );
     }
+}
+
+#[test]
+fn sanitize_top_n_sigma_default_folds_the_b10621_disabled_sentinel() {
+    use super::sanitize_top_n_sigma_default;
+    assert_eq!(sanitize_top_n_sigma_default(1.5), 1.5);
+    for disabled in [-1.0f32, 0.0, f32::NAN, f32::NEG_INFINITY] {
+        assert_eq!(sanitize_top_n_sigma_default(disabled), 0.0);
+    }
+}
+
+#[test]
+fn resolve_dry_penalty_last_n_maps_the_sentinels() {
+    assert_eq!(
+        resolve_dry_penalty_last_n(-1),
+        mlxcel_core::generate::DRY_FULL_HISTORY,
+        "-1 is the documented full-context form"
+    );
+    assert_eq!(resolve_dry_penalty_last_n(0), 0, "0 disables DRY (b10621)");
+    assert_eq!(resolve_dry_penalty_last_n(64), 64);
+}
+
+#[test]
+fn sampler_order_accepts_only_the_fixed_b10621_default() {
+    use super::{B10621_DEFAULT_SAMPLER_SEQ, B10621_DEFAULT_SAMPLERS, check_sampler_order};
+    check_sampler_order(None, None).expect("absent flags are fine");
+    check_sampler_order(
+        Some(B10621_DEFAULT_SAMPLERS),
+        Some(B10621_DEFAULT_SAMPLER_SEQ),
+    )
+    .expect("the default order is the inert configuration");
+    let err = check_sampler_order(Some("top_k;temperature"), None)
+        .expect_err("a reordered chain must fail startup");
+    assert!(err.to_string().contains(B10621_DEFAULT_SAMPLERS), "{err}");
+    let err = check_sampler_order(None, Some("kt"))
+        .expect_err("a reordered char sequence must fail startup");
+    assert!(
+        err.to_string().contains(B10621_DEFAULT_SAMPLER_SEQ),
+        "{err}"
+    );
 }

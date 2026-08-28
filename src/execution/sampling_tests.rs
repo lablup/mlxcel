@@ -33,6 +33,7 @@ fn sample_params() -> ResolvedSamplingParams {
         xtc_threshold: 0.15,
         top_n_sigma: 1.5,
         typical_p: 0.4,
+        penalty_last_n: -1,
         stop_token_ids: vec![1, 2],
     }
 }

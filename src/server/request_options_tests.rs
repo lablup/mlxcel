@@ -128,6 +128,15 @@ fn build_server_generate_options_uses_server_defaults() {
     // applies (and defaults to the disabled 1.0).
     assert_eq!(options.sampling.typical_p, config.default_typical_p);
     assert_eq!(options.sampling.typical_p, 1.0);
+    // #1436: the b10621 defaults reach the sampler: the penalty window
+    // defaults to --repeat-last-n (64), top-n-sigma and XTC to disabled,
+    // ignore_eos to off, and no server-wide stop strings exist.
+    assert_eq!(
+        options.sampling.penalty_last_n,
+        config.default_repetition_context_size as i32
+    );
+    assert_eq!(options.sampling.top_n_sigma, config.default_top_n_sigma);
+    assert!(!options.ignore_eos);
     assert_eq!(options.stop_sequences, None);
 }
 
@@ -155,6 +164,8 @@ fn build_server_generate_options_applies_request_overrides() {
             xtc_threshold: Some(0.2),
             top_n_sigma: Some(2.5),
             typical_p: Some(0.35),
+            penalty_last_n: Some(32),
+            ignore_eos: Some(true),
             stop_sequences: Some(vec!["stop".to_string()]),
             priority: crate::server::batch::RequestPriority::High,
             reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
@@ -185,6 +196,8 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.xtc_threshold, 0.2);
     assert_eq!(options.sampling.top_n_sigma, 2.5);
     assert_eq!(options.sampling.typical_p, 0.35);
+    assert_eq!(options.sampling.penalty_last_n, 32);
+    assert!(options.ignore_eos);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
 }
 
@@ -863,5 +876,73 @@ fn disaggregated_chat_front_gates_on_rendered_tools() {
     assert_eq!(
         chat_route_loop_detection(&chat_request_with_tools(None)),
         LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn dry_base_below_one_falls_back_to_the_server_default() {
+    // b10621's schema handler replaces a dry_base below 1.0 with the server
+    // default instead of erroring (#1436).
+    let config = ServerConfig::default();
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            dry_base: Some(0.5),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(options.sampling.dry_base, config.default_dry_base);
+}
+
+#[test]
+fn reverse_prompt_stops_follow_the_b10621_replace_semantics() {
+    // Upstream seeds the stop set from the CLI antiprompt list and REPLACES
+    // it wholesale when the request carries any effective stop string.
+    let config = ServerConfig {
+        default_stop_sequences: vec!["<<STOP>>".to_string()],
+        ..ServerConfig::default()
+    };
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            stop_sequences: Some(vec!["###".to_string()]),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(
+        options.stop_sequences,
+        Some(vec!["###".to_string()]),
+        "a request with effective stops discards the server-wide reverse-prompt strings"
+    );
+
+    // No request stops (absent or empty): the CLI list applies.
+    let options = build_server_generate_options(&config, RequestOptionOverrides::default());
+    assert_eq!(options.stop_sequences, Some(vec!["<<STOP>>".to_string()]));
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            stop_sequences: Some(Vec::new()),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(options.stop_sequences, Some(vec!["<<STOP>>".to_string()]));
+}
+
+#[test]
+fn dry_penalty_last_n_wire_values_clamp_below_the_full_history_sentinel() {
+    // usize::MAX from the wire must not select the internal DRY_FULL_HISTORY
+    // sentinel; upstream's schema ceiling is INT32_MAX.
+    let config = ServerConfig::default();
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            dry_penalty_last_n: Some(usize::MAX),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(options.sampling.dry_penalty_last_n, i32::MAX as usize);
+    assert_ne!(
+        options.sampling.dry_penalty_last_n,
+        mlxcel_core::generate::DRY_FULL_HISTORY
     );
 }

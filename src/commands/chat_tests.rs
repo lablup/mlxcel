@@ -207,6 +207,7 @@ fn chat_options_new_sets_conventional_defaults() {
         xtc_threshold: 0.1,
         top_n_sigma: 0.0,
         typical_p: 1.0,
+        penalty_last_n: -1,
         stop_token_ids: Vec::new(),
     };
     let opts = ChatOptions::new(PathBuf::from("models/foo"), 128, sampling);

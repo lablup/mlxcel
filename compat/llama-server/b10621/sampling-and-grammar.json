@@ -18,7 +18,7 @@
       "description": "adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: 0.90)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -40,7 +40,7 @@
       "description": "adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: -1.00) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -61,10 +61,10 @@
       "default": "2",
       "description": "set allowed length for DRY sampling (default: 2)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "OFF-BY-ONE: mlxcel penalizes when match_len > dry_allowed_length, b10621 at >=, so the base^0 tier (a repeat exactly dry_allowed_length long) is never penalized. #1436 owns it.",
+      "notes": "The off-by-one is fixed (#1436): a repeat exactly dry_allowed_length long now receives the base^0 tier, matching upstream's >= comparison. Known corner: at dry_allowed_length 0 the minimum observable match length is 1, so mlxcel's lowest tier is base^1 where upstream's zero-length positions emit base^0.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -90,13 +90,11 @@
       "default": "1.75",
       "description": "set DRY sampling base value (default: 1.75)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "b10621 ignores a value below 1.0 (the CLI keeps 1.75, the HTTP schema falls back to the server default); mlxcel uses it verbatim.",
-      "divergence": [
-        "A value below 1.0 is used verbatim; b10621 ignores it and keeps the 1.75 default (#1436)."
-      ],
+      "notes": "A value below 1.0 keeps the default on the CLI and falls back to the server default on the HTTP field, both matching b10621 (#1436).",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--dry-base"
@@ -150,10 +148,10 @@
       "default": "64, 0 = disable",
       "description": "set DRY penalty for the last n tokens (default: 64, 0 = disable)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "INVERTED SENTINEL: b10621 disables DRY at 0 and rejects negatives; mlxcel reads 0 as 'scan the whole history' and maps a negative to 0, i.e. also full scan. #1436 owns the reconciliation.",
+      "notes": "Sentinels reconciled (#1436): 0 disables DRY (upstream's sentinel) and negatives are rejected at parse time exactly as b10621's CLI does; a full-history scan is reachable through a window at least the context length. The offline mlxcel generate CLI (not a compat surface) additionally accepts -1 as its explicit full-history spelling.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -180,7 +178,7 @@
       "description": "add sequence breaker for DRY sampling, clearing out default breakers ('\\n', ':', '\"', '*') in the process; use \"none\" to not use any sequence breakers",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling accepted, but b10621's default breaker set ('\\n', ':', '\"', '*') is not applied (mlxcel starts with none), the \"none\" sentinel is not recognized, and a breaker that is not exactly one token fails startup. #1436 owns the reconciliation.",
       "divergence": [],
@@ -206,7 +204,7 @@
       "description": "dynamic temperature exponent (default: 1.00)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -228,7 +226,7 @@
       "description": "dynamic temperature range (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -249,10 +247,10 @@
       "default": "0.00, 0.0 = disabled",
       "description": "repeat alpha frequency penalty (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
+      "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -279,7 +277,7 @@
       "description": "BNF-like grammar to constrain generations (see samples in grammars/ dir)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -301,7 +299,7 @@
       "description": "file to read grammar from",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -322,12 +320,16 @@
       "default": null,
       "description": "ignore end of stream token and continue generating (implies --logit-bias EOS-inf)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Implemented as upstream does on the MLX serving path: a -inf logit bias on every end-of-generation token at enqueue time, so generation runs to the token budget or a stop string. The OpenXLA worker has no token-bias path and rejects an ignore_eos request with a diagnostic; the disaggregated decode-role handoff does not carry token bias (same recorded gap as XTC there).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ignore-eos"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -346,7 +348,7 @@
       "description": "JSON schema to constrain generations (https://json-schema.org/), e.g. `{}` for any JSON object For schemas w/ external $refs, use --grammar + example/json_schema_to_grammar.py instead",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -369,7 +371,7 @@
       "description": "File containing a JSON schema to constrain generations (https://json-schema.org/), e.g. `{}` for any JSON object For schemas w/ external $refs, use --grammar + example/json_schema_to_grammar.py instead",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -392,7 +394,7 @@
       "description": "modifies the likelihood of token appearing in the completion, i.e. `--logit-bias 15043+1` to increase likelihood of token ' Hello', or `--logit-bias 15043-1` to decrease likelihood of token ' Hello'",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -443,7 +445,7 @@
       "description": "use Mirostat sampling. Top K, Nucleus and Locally Typical samplers are ignored if used. (default: 0, 0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -465,7 +467,7 @@
       "description": "Mirostat target entropy, parameter tau (default: 5.00)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -487,7 +489,7 @@
       "description": "Mirostat learning rate, parameter eta (default: 0.10)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -508,10 +510,10 @@
       "default": "0.00, 0.0 = disabled",
       "description": "repeat alpha presence penalty (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
+      "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -537,10 +539,10 @@
       "default": "64, 0 = disabled",
       "description": "last n tokens to consider for penalize (default: 64, 0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Accepted with the b10621 spelling and default (64) and echoed by GET /props, but no penalty window reaches the sampler: SamplingConfig has no repetition/frequency/presence window field, so every penalty scans the full history. #1436 owns the window.",
+      "notes": "The window now reaches the sampler (#1436): repetition, frequency, and presence penalties scan exactly the configured recent-token window, 0 disables the stage, and /props reports the resolved value.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -566,10 +568,10 @@
       "default": "1.00, 1.0 = disabled",
       "description": "penalize repeat sequence of tokens (default: 1.00, 1.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
+      "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -596,12 +598,16 @@
       "default": null,
       "description": "halt generation at PROMPT, return control in interactive mode",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Repeatable server-wide stop strings with b10621 replace semantics: the CLI list seeds every request's stop set, and a request carrying any effective stop string replaces it wholesale, falling back to the CLI list only when the request supplied none. The -r short form is also registered on both binaries; the conformance dump indexes long spellings only, so the claim lists the long form.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--reverse-prompt"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -620,12 +626,17 @@
       "default": "edskypmxt",
       "description": "simplified sequence for samplers that will be used (default: edskypmxt)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/startup_tests.rs::sampler_order_accepts_only_the_fixed_b10621_default",
+      "notes": "Single-character spelling of --samplers; only the default sequence edskypmxt is accepted (inert), any other sequence fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--sampler-seq",
+          "--sampling-seq"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -642,12 +653,16 @@
       "default": "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature",
       "description": "samplers that will be used for generation in the order, separated by ';' (default: penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/startup_tests.rs::sampler_order_accepts_only_the_fixed_b10621_default",
+      "notes": "mlxcel's sampler chain order is fixed to exactly b10621's default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature; #1375/#1377 pin the filter positions). The flag accepts precisely that order as an inert configuration and any other order fails startup with the accepted form in the diagnostic, so a reordered chain can never be silently sampled in the wrong order.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--samplers"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -666,7 +681,7 @@
       "description": "RNG seed (default: -1, use random seed for -1)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "seed -1 = nondeterministic accepted exactly. The below-minus-one rejection added by #1430 lives on the HTTP field (see field:seed), not on this flag: the flag maps every negative value to the random sentinel.",
       "divergence": [
@@ -699,7 +714,7 @@
       "description": "temperature (default: 0.80)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Both spellings (--temp, --temperature) accepted since #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
       "divergence": [
@@ -731,7 +746,7 @@
       "description": "top-k sampling (default: 40, 0 = disabled) (env: LLAMA_ARG_TOP_K)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
       "divergence": [
@@ -765,12 +780,20 @@
       "default": "-1.00, -1.0 = disabled",
       "description": "top-n-sigma sampling (default: -1.00, -1.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Server-wide default on both binaries; b10621's -1.0 disabled sentinel (and every non-positive or non-finite value) folds to mlxcel's 0.0 disabled form at startup. The filter semantics landed with #1375.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--top-nsigma",
+          "--top-n-sigma"
+        ],
+        "defaults": [
+          "-1"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -788,7 +811,7 @@
       "description": "top-p sampling (default: 0.95, 1.0 = disabled)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Default aligned to 0.95 by #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
       "divergence": [
@@ -850,12 +873,19 @@
       "default": "0.00, 0.0 = disabled",
       "description": "xtc probability (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Server-wide default on both binaries; the in-chain XTC semantics landed with #1379.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--xtc-probability"
+        ],
+        "defaults": [
+          "0"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -872,12 +902,19 @@
       "default": "0.10, 1.0 = disabled",
       "description": "xtc threshold (default: 0.10, 1.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Server-wide default on both binaries; values above 0.5 make XTC inert, matching upstream.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--xtc-threshold"
+        ],
+        "defaults": [
+          "0.1"
+        ]
+      }
     },
     {
       "kind": "native_request_field",
@@ -889,7 +926,7 @@
       "description": "EMA decay for adaptive sampling; history approximates 1/(1-decay) tokens",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -905,7 +942,7 @@
       "description": "Adaptive sampling target entropy (valid range 0.0 to 1.0; negative = disabled)",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -921,7 +958,7 @@
       "description": "Use backend sampling instead of llama.cpp sampling",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -936,10 +973,10 @@
       "field_type": "num",
       "description": "Tokens that extend repetition beyond this length receive exponentially increasing penalty: multiplier * base ^ (sequence_length - allowed_length)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "OFF-BY-ONE: mlxcel penalizes at match_len > dry_allowed_length, b10621 at >=. #1436 owns it.",
+      "notes": "Off-by-one fixed (#1436): the base^0 tier now applies at exactly the allowed length.",
       "divergence": [],
       "mlxcel": {
         "field": "dry_allowed_length"
@@ -954,13 +991,11 @@
       "field_type": "num",
       "description": "Set the DRY repetition penalty base value (must be >= 1.0, any values < 1.0 will be replaced with the default value)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "b10621 replaces a value below 1.0 with the server default; mlxcel uses it verbatim.",
-      "divergence": [
-        "A value below 1.0 is used verbatim; b10621 replaces it with the server default (#1436)."
-      ],
+      "notes": "A value below 1.0 falls back to the server default, matching the b10621 schema handler (#1436).",
+      "divergence": [],
       "mlxcel": {
         "field": "dry_base"
       }
@@ -992,10 +1027,10 @@
       "field_type": "num",
       "description": "How many tokens to scan for repetitions (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "INVERTED SENTINEL: b10621 disables DRY at 0 (schema domain [0, INT32_MAX]); mlxcel reads 0 as 'scan the whole history'. #1436 owns the reconciliation.",
+      "notes": "0 disables DRY (b10621 sentinel, #1436); the schema floor of 0 is enforced by the unsigned deserialization and the value is clamped to upstream's INT32_MAX ceiling so a wire value cannot collide with the internal full-history sentinel.",
       "divergence": [],
       "mlxcel": {
         "field": "dry_penalty_last_n"
@@ -1011,7 +1046,7 @@
       "description": "Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "VALUE-DOMAIN MISMATCH: mlxcel deserializes an array of token ids, b10621 an array of strings (or \"none\"). #1436 owns the reconciliation.",
       "divergence": [],
@@ -1029,7 +1064,7 @@
       "description": "Dynamic temperature exponent, controls how entropy maps to temperature",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1045,7 +1080,7 @@
       "description": "Dynamic temperature range. The final temperature will be in [temperature - range, temperature + range] (0 = disabled)",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1060,10 +1095,10 @@
       "field_type": "num",
       "description": "Repeat alpha frequency penalty (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
+      "notes": "Applied over the repeat_last_n window since #1436.",
       "divergence": [],
       "mlxcel": {
         "field": "frequency_penalty"
@@ -1079,7 +1114,7 @@
       "description": "Whether to apply grammar constraints lazily, only when triggered (instead of at every step)",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1095,7 +1130,7 @@
       "description": "List of strings or patterns that trigger grammar-constrained generation",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1110,12 +1145,14 @@
       "field_type": "bool",
       "description": "Ignore the end-of-sequence token and continue generating",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Implemented as a -inf end-of-generation bias, matching upstream's EOG logit-bias mechanism, on the MLX serving path; the OpenXLA worker rejects it with a diagnostic instead of silently stopping at EOS.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "ignore_eos"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1129,7 +1166,7 @@
       "description": "Set a JSON schema (json_schema) or GBNF grammar string (grammar) for constrained generation. json_schema takes precedence if both are provided",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1145,7 +1182,7 @@
       "description": "Modify the likelihood of specific tokens. Accepts an array of [token, bias] pairs or an object mapping token to bias. Use false as bias to ban a token",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1161,7 +1198,7 @@
       "description": "If greater than 0, force samplers to return at least N possible tokens",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1195,7 +1232,7 @@
       "description": "Enable Mirostat sampling, controlling perplexity during text generation (0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1211,7 +1248,7 @@
       "description": "Set the Mirostat learning rate, parameter eta",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1227,7 +1264,7 @@
       "description": "Set the Mirostat target entropy, parameter tau",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1245,7 +1282,7 @@
       "description": "If greater than 0, output the probabilities of top N tokens for each generated token",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1261,7 +1298,7 @@
       "description": "Return probabilities of top n_probs tokens after applying the sampling chain",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1276,10 +1313,10 @@
       "field_type": "num",
       "description": "Repeat alpha presence penalty (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
+      "notes": "Applied over the repeat_last_n window since #1436.",
       "divergence": [],
       "mlxcel": {
         "field": "presence_penalty"
@@ -1295,7 +1332,7 @@
       "description": "List of token strings that must not be split during tokenization",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
+      "issue": 1485,
       "test": null,
       "notes": null,
       "divergence": [],
@@ -1310,10 +1347,10 @@
       "field_type": "num",
       "description": "Last n tokens to consider for penalizing repetition (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "Declared on NativeCompletionRequest but never read; no penalty window reaches the sampler. #1436 owns it.",
+      "notes": "Wired into the shared penalty window (#1436): 0 disables the stage, positives bound the scan; negatives are rejected by the unsigned deserialization, matching the b10621 schema floor of 0.",
       "divergence": [],
       "mlxcel": {
         "field": "repeat_last_n"
@@ -1328,10 +1365,10 @@
       "field_type": "num",
       "description": "Control the repetition of token sequences in the generated text (1.0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
+      "notes": "Applied over the repeat_last_n window since #1436.",
       "divergence": [],
       "mlxcel": {
         "field": "repeat_penalty"
@@ -1346,12 +1383,14 @@
       "field_type": "json",
       "description": "The order in which samplers are applied. An array of sampler type names, or a single string of sampler chars",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_samplers_accepts_only_the_default_order",
+      "notes": "The field is declared and accepts b10621's default order in both upstream shapes (array of stage names, character string) as an inert configuration; any other order is refused with a 400 naming the accepted forms, so a reordered chain is never silently sampled in the wrong order.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "samplers"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1363,9 +1402,9 @@
       "description": "Set the random number generator (RNG) seed (-1 = random)",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1436,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "seed: -1 accepted as nondeterministic; below -1 rejected (#1430).",
+      "issue": 1485,
+      "test": null,
+      "notes": "seed: -1 accepted as nondeterministic; below -1 rejected (#1430) where b10621 folds it into its uint32 seed space, so the entry stays deferred with the divergence recorded.",
       "divergence": [
         "A seed below -1 is rejected with a 400; b10621 accepts it and folds it into its uint32 seed space (#1436)."
       ],
@@ -1436,12 +1475,14 @@
       "field_type": "num",
       "description": "Keep tokens within n standard deviations of the top token logit (< 0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "b10621 declares the field without limits and treats every value <= 0.0 (default -1.0) as disabled; the route maps those to the explicit 0.0 disabled form, which still overrides the server-wide default.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "top_n_sigma"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1488,12 +1529,14 @@
       "field_type": "num",
       "description": "Set the chance for token removal via XTC sampler (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "b10621 declares SOFT 0..=1 schema limits: an out-of-range value is clamped into the domain, not rejected; the route clamps identically and in-range values pass to the in-chain XTC filter.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "xtc_probability"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1504,12 +1547,14 @@
       "field_type": "num",
       "description": "Set a minimum probability threshold for tokens to be removed via XTC sampler (> 0.5 disables XTC)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1436,
-      "test": null,
-      "notes": null,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Same soft 0..=1 clamp as xtc_probability; a threshold above 0.5 is in range and inert, matching upstream.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "xtc_threshold"
+      }
     }
   ]
 }

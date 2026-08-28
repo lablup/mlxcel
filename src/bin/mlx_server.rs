@@ -975,6 +975,40 @@ struct ServerArgs {
     )]
     typical_p: f32,
 
+    /// Default top-n-sigma sampling (-1.0 or 0.0 = disabled, b10621 sentinel)
+    #[arg(
+        long = "top-nsigma",
+        alias = "top-n-sigma",
+        value_name = "N",
+        default_value_t = -1.0,
+        allow_negative_numbers = true
+    )]
+    top_n_sigma: f32,
+
+    /// Default XTC removal probability (0.0 = disabled)
+    #[arg(long = "xtc-probability", value_name = "N", default_value_t = 0.0)]
+    xtc_probability: f32,
+
+    /// Default XTC probability threshold (values above 0.5 make XTC inert)
+    #[arg(long = "xtc-threshold", value_name = "N", default_value_t = 0.1)]
+    xtc_threshold: f32,
+
+    /// Suppress end-of-generation tokens so generation runs to the token budget or a stop string (b10621 --ignore-eos)
+    #[arg(long = "ignore-eos")]
+    ignore_eos: bool,
+
+    /// Add a server-wide stop string, merged into every request's stop set (repeatable; b10621 -r / --reverse-prompt)
+    #[arg(short = 'r', long = "reverse-prompt", value_name = "PROMPT")]
+    reverse_prompt: Vec<String>,
+
+    /// Sampler chain order. mlxcel's chain order is fixed to b10621's default; any other order is rejected at startup
+    #[arg(long = "samplers", value_name = "SAMPLERS")]
+    samplers: Option<String>,
+
+    /// Sampler chain order in b10621's single-character form; same fixed order rule as --samplers
+    #[arg(long = "sampler-seq", alias = "sampling-seq", value_name = "SEQUENCE")]
+    sampler_seq: Option<String>,
+
     /// Random seed (-1 = random)
     #[arg(short = 's', long = "seed", default_value_t = -1)]
     seed: i64,
@@ -1008,8 +1042,9 @@ struct ServerArgs {
     #[arg(long = "dry-allowed-length", default_value_t = 2)]
     dry_allowed_length: usize,
 
-    /// DRY lookback window (-1 = full context)
-    #[arg(long = "dry-penalty-last-n", default_value_t = 64)]
+    /// DRY lookback window (0 = disable DRY, matching b10621; negatives
+    /// rejected at parse time exactly as b10621 does)
+    #[arg(long = "dry-penalty-last-n", default_value_t = 64, value_parser = clap::value_parser!(i32).range(0..))]
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
@@ -2105,6 +2140,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         top_p_was_set: long_cli_flag_was_set("top-p"),
         min_p: args.min_p,
         typical_p: args.typical_p,
+        top_n_sigma: args.top_n_sigma,
+        xtc_probability: args.xtc_probability,
+        xtc_threshold: args.xtc_threshold,
+        ignore_eos: args.ignore_eos,
+        reverse_prompt: args.reverse_prompt.clone(),
+        samplers: args.samplers.clone(),
+        sampler_seq: args.sampler_seq.clone(),
         seed: args.seed,
         repeat_last_n: args.repeat_last_n,
         repeat_penalty: args.repeat_penalty,

@@ -382,6 +382,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         max_tokens: 128,
         sampling: mlxcel::SamplingConfig::greedy(),
         stop_sequences: None,
+        ignore_eos: false,
         priority: mlxcel::server::batch::RequestPriority::Normal,
         logprobs: Default::default(),
         reasoning_budget: Default::default(),

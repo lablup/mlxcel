@@ -87,6 +87,14 @@ pub(crate) struct RequestOptionOverrides {
     /// (finite, in `(0.0, 1.0]`) on the OpenAI-shaped endpoints; the native
     /// `/completion` route sanitizes out-of-domain values itself.
     pub typical_p: Option<f32>,
+    /// Repetition / frequency / presence penalty window override (b10621
+    /// `repeat_last_n`, #1436): `-1` = full history, `0` = disables the
+    /// stage, `N > 0` = last N tokens. Absent falls back to the server-wide
+    /// `--repeat-last-n` default (64, matching b10621).
+    pub penalty_last_n: Option<i32>,
+    /// b10621 `ignore_eos` override (#1436). Absent falls back to the
+    /// server-wide `--ignore-eos` default.
+    pub ignore_eos: Option<bool>,
     pub stop_sequences: Option<Vec<String>>,
     pub priority: RequestPriority,
     /// per-request thinking-token budget override.
@@ -236,13 +244,21 @@ pub(crate) fn build_server_generate_options(
         dry_multiplier: overrides
             .dry_multiplier
             .unwrap_or(config.default_dry_multiplier),
-        dry_base: overrides.dry_base.unwrap_or(config.default_dry_base),
+        // b10621's schema handler replaces a dry_base below 1.0 with the
+        // server default rather than erroring (#1436).
+        dry_base: {
+            let v = overrides.dry_base.unwrap_or(config.default_dry_base);
+            if v < 1.0 { config.default_dry_base } else { v }
+        },
         dry_allowed_length: overrides
             .dry_allowed_length
             .unwrap_or(config.default_dry_allowed_length),
+        // Clamped to upstream's INT32_MAX schema ceiling so a wire value can
+        // never collide with the internal DRY_FULL_HISTORY sentinel (#1436).
         dry_penalty_last_n: overrides
             .dry_penalty_last_n
-            .unwrap_or(config.default_dry_penalty_last_n),
+            .unwrap_or(config.default_dry_penalty_last_n)
+            .min(i32::MAX as usize),
         dry_sequence_breakers: overrides
             .dry_sequence_breakers
             .unwrap_or_else(|| config.default_dry_sequence_breakers.clone()),
@@ -252,22 +268,32 @@ pub(crate) fn build_server_generate_options(
         presence_penalty: overrides
             .presence_penalty
             .unwrap_or(config.default_presence_penalty),
-        // XTC has no server-level CLI default (unlike the other knobs above):
-        // it is an experimental, purely opt-in per-request feature, so an
-        // absent request field always resolves to the disabled baseline
-        // (`0.0`) regardless of server configuration. `0.1` is the inert
-        // upstream-conventional threshold value used only while
-        // `xtc_probability > 0.0`.
-        xtc_probability: overrides.xtc_probability.unwrap_or(0.0),
-        xtc_threshold: overrides.xtc_threshold.unwrap_or(0.1),
-        // Like XTC, top-n-sigma is request-only with no server-level default:
-        // an absent field always resolves to the disabled baseline (`0.0`).
-        top_n_sigma: overrides.top_n_sigma.unwrap_or(0.0),
+        // #1436: XTC gained the b10621 server-wide defaults
+        // (--xtc-probability / --xtc-threshold, defaults 0.0 / 0.1, the
+        // disabled baseline); an absent request field resolves to them.
+        xtc_probability: overrides
+            .xtc_probability
+            .unwrap_or(config.default_xtc_probability),
+        xtc_threshold: overrides
+            .xtc_threshold
+            .unwrap_or(config.default_xtc_threshold),
+        // #1436: top-n-sigma gained a server-wide default (--top-nsigma),
+        // sanitized at startup so it is either a valid enabled value or the
+        // 0.0 disabled baseline; an absent request field resolves to it.
+        top_n_sigma: overrides.top_n_sigma.unwrap_or(config.default_top_n_sigma),
         // Unlike XTC and top-n-sigma, typical_p follows the classic sampler
         // knobs (--temp / --top-p / --min-p): the server-wide --typical /
         // --typical-p default applies when the request omits the field,
         // matching llama-server's sampling-params surface.
         typical_p: overrides.typical_p.unwrap_or(config.default_typical_p),
+        // b10621 window semantics (#1436): the server-wide --repeat-last-n
+        // default (64) bounds the repetition/frequency/presence penalties for
+        // every request that does not carry its own repeat_last_n. Before
+        // #1436 the flag was parsed and echoed by /props but never reached
+        // the sampler, which scanned the full history.
+        penalty_last_n: overrides.penalty_last_n.unwrap_or_else(|| {
+            i32::try_from(config.default_repetition_context_size).unwrap_or(i32::MAX)
+        }),
         stop_token_ids: Vec::new(),
     });
 
@@ -284,10 +310,26 @@ pub(crate) fn build_server_generate_options(
         overrides.request_carries_loop_amplifier,
     );
 
+    // b10621 -r / --reverse-prompt (#1436): upstream seeds the task's stop
+    // set from the CLI antiprompt list and then REPLACES it wholesale when
+    // the request carries any effective stop string, falling back to the CLI
+    // list only when the request supplied none. A request's non-empty `stop`
+    // therefore discards the server-wide strings, exactly as b10621 does.
+    let stop_sequences = match overrides.stop_sequences {
+        Some(request_stops) if !request_stops.is_empty() => Some(request_stops),
+        _ if !config.default_stop_sequences.is_empty() => {
+            Some(config.default_stop_sequences.clone())
+        }
+        other => other,
+    };
+
     ServerGenerateOptions {
         max_tokens: resolve_server_max_tokens(config, overrides.max_tokens),
         sampling,
-        stop_sequences: overrides.stop_sequences,
+        stop_sequences,
+        // b10621 --ignore-eos (#1436): a per-request ignore_eos overrides
+        // the server-wide default; absent falls back to it.
+        ignore_eos: overrides.ignore_eos.unwrap_or(config.default_ignore_eos),
         priority: overrides.priority,
         logprobs: LogprobsConfig::default(),
         reasoning_budget: overrides.reasoning_budget,

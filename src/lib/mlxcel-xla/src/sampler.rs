@@ -71,10 +71,16 @@ pub struct SampleParams {
     pub dry_base: f32,
     /// DRY minimum match length before a penalty applies.
     pub dry_allowed_length: usize,
-    /// DRY lookback window in tokens (`0` = the whole history).
+    /// DRY lookback window in tokens. b10621 sentinels (#1436), mirroring
+    /// `mlxcel-core`: `0` DISABLES the DRY stage, `usize::MAX` scans the
+    /// whole history, anything else is a recent-token window.
     pub dry_penalty_last_n: usize,
     /// Token ids that break DRY suffix matching (e.g. newlines, punctuation).
     pub dry_sequence_breakers: Vec<i32>,
+    /// Repetition / frequency / presence penalty lookback window, mirroring
+    /// `mlxcel-core`'s `penalty_last_n` (#1436): `-1` = full history, `0` =
+    /// stage disabled, `N > 0` = last N tokens.
+    pub penalty_last_n: i32,
 }
 
 impl SampleParams {
@@ -93,8 +99,12 @@ impl SampleParams {
             dry_multiplier: 0.0,
             dry_base: 1.75,
             dry_allowed_length: 2,
-            dry_penalty_last_n: 0,
+            // Full-history sentinel (#1436): `0` now disables DRY, so the
+            // pre-#1436 "0 = whole history" default moved to usize::MAX,
+            // mirroring mlxcel-core's DRY_FULL_HISTORY.
+            dry_penalty_last_n: usize::MAX,
             dry_sequence_breakers: Vec::new(),
+            penalty_last_n: -1,
         }
     }
 
@@ -112,10 +122,12 @@ impl SampleParams {
     /// penalty value; `dry_multiplier` only counts when strictly positive).
     #[must_use]
     pub fn needs_penalties(&self) -> bool {
-        self.repetition_penalty != 1.0
-            || self.frequency_penalty != 0.0
-            || self.presence_penalty != 0.0
-            || self.dry_multiplier > 0.0
+        let penalties_active = self.penalty_last_n != 0
+            && (self.repetition_penalty != 1.0
+                || self.frequency_penalty != 0.0
+                || self.presence_penalty != 0.0);
+        let dry_active = self.dry_multiplier > 0.0 && self.dry_penalty_last_n != 0;
+        penalties_active || dry_active
     }
 }
 
@@ -187,8 +199,17 @@ fn apply_dry(logits: &mut [f32], history: &[i32], params: &SampleParams) {
     if hlen < 2 {
         return;
     }
-    let window: &[i32] = if params.dry_penalty_last_n == 0 {
+    // b10621's sampler disables DRY outright when dry_base < 1.0; mirror
+    // of the mlxcel-core early-out.
+    if params.dry_base < 1.0 {
+        return;
+    }
+    // b10621 sentinels (#1436): usize::MAX = full history, 0 = disabled
+    // (the caller gates; the empty slice is the backstop).
+    let window: &[i32] = if params.dry_penalty_last_n == usize::MAX {
         history
+    } else if params.dry_penalty_last_n == 0 {
+        &history[hlen..]
     } else {
         &history[hlen.saturating_sub(params.dry_penalty_last_n)..]
     };
@@ -224,14 +245,19 @@ fn apply_dry(logits: &mut [f32], history: &[i32], params: &SampleParams) {
                     break;
                 }
             }
-            if match_len > params.dry_allowed_length {
+            // b10621 penalizes AT the allowed length (`>=`), the base^0 tier.
+            if match_len >= params.dry_allowed_length {
                 let next_pos = pos + 1;
                 if next_pos < wlen {
                     let next_token = window[next_pos];
-                    let penalty = params.dry_multiplier
-                        * params
-                            .dry_base
-                            .powi((match_len - params.dry_allowed_length) as i32);
+                    let mut exponent = (match_len - params.dry_allowed_length) as f32;
+                    if params.dry_base > 1.0 {
+                        let max_exponent = 88.722_84_f32 / params.dry_base.ln();
+                        if exponent > max_exponent {
+                            exponent = max_exponent;
+                        }
+                    }
+                    let penalty = params.dry_multiplier * params.dry_base.powf(exponent);
                     let entry = penalties.entry(next_token).or_insert(0.0);
                     if penalty > *entry {
                         *entry = penalty;
@@ -253,16 +279,28 @@ fn apply_penalties(logits: &mut [f32], params: &SampleParams, history: &[i32]) {
     if history.is_empty() {
         return;
     }
-    if params.repetition_penalty != 1.0 {
-        apply_repetition(logits, history, params.repetition_penalty);
+    // b10621 `repeat_last_n` window (#1436), mirroring `mlxcel-core`'s
+    // `penalty_window`: 0 = stage disabled, negative = full history,
+    // N > 0 = last N tokens. DRY keeps its own window.
+    let penalty_history: &[i32] = if params.penalty_last_n == 0 {
+        &[]
+    } else if params.penalty_last_n < 0 {
+        history
+    } else {
+        &history[history.len().saturating_sub(params.penalty_last_n as usize)..]
+    };
+    if params.repetition_penalty != 1.0 && !penalty_history.is_empty() {
+        apply_repetition(logits, penalty_history, params.repetition_penalty);
     }
-    if params.dry_multiplier > 0.0 {
+    if params.dry_multiplier > 0.0 && params.dry_penalty_last_n != 0 {
         apply_dry(logits, history, params);
     }
-    if params.frequency_penalty != 0.0 || params.presence_penalty != 0.0 {
+    if (params.frequency_penalty != 0.0 || params.presence_penalty != 0.0)
+        && !penalty_history.is_empty()
+    {
         apply_frequency_presence(
             logits,
-            history,
+            penalty_history,
             params.frequency_penalty,
             params.presence_penalty,
         );
@@ -494,14 +532,18 @@ mod tests {
 
     #[test]
     fn dry_sequence_breaker_stops_the_match() {
-        // Same history, but token a (0) is a sequence breaker, so the back-match
-        // breaks before reaching length 2 and nothing is penalized.
+        // Same history, but token a (0) is a sequence breaker, so the
+        // back-match breaks before reaching length 2 and stays below the
+        // allowed length of 2; nothing is penalized. (allowed_length is 2
+        // here because the b10621 `>=` comparison, adopted in #1436, would
+        // otherwise penalize even the length-1 match at its base^0 tier and
+        // the breaker would be unobservable.)
         let mut v = [0.0f32; 3];
         let history = [0, 1, 2, 0, 1];
         let p = SampleParams {
             dry_multiplier: 1.0,
             dry_base: 2.0,
-            dry_allowed_length: 1,
+            dry_allowed_length: 2,
             dry_sequence_breakers: vec![0],
             ..SampleParams::greedy()
         };

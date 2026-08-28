@@ -247,6 +247,7 @@ pub fn sampling_to_serializable(config: &SamplingConfig) -> SerializableSampling
         presence_penalty: config.presence_penalty,
         top_n_sigma: config.top_n_sigma,
         typical_p: config.typical_p,
+        penalty_last_n: config.penalty_last_n,
         stop_token_ids: config.stop_token_ids.clone(),
     }
 }
@@ -272,6 +273,7 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         presence_penalty: state.presence_penalty,
         top_n_sigma: state.top_n_sigma,
         typical_p: state.typical_p,
+        penalty_last_n: state.penalty_last_n,
         stop_token_ids: state.stop_token_ids.clone(),
         token_bias: Default::default(),
         // Loop detection is not yet serialized across the disaggregated
@@ -280,7 +282,10 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         loop_detection: Default::default(),
         // XTC is likewise not yet part of the wire frame; the decode node
         // keeps the disabled baseline (`xtc_probability == 0.0`) until this
-        // is wired into `SerializableSamplingState` as a follow-up.
+        // is wired into `SerializableSamplingState` as a follow-up. The same
+        // gap applies to `ignore_eos` (#1436): it is delivered through the
+        // node-local token-bias map, which this frame deliberately drops, so
+        // a decode node continues honoring EOS after a handoff.
         xtc_probability: Default::default(),
         xtc_threshold: Default::default(),
         xtc_special_token_ids: Default::default(),

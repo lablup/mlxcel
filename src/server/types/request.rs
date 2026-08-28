@@ -622,7 +622,11 @@ pub struct SamplingParams {
     /// Repetition penalty (1.0 = no penalty)
     #[serde(alias = "repeat_penalty")]
     pub repetition_penalty: Option<f32>,
-    /// Context size for repetition penalty
+    /// Repetition / frequency / presence penalty lookback window (b10621
+    /// `repeat_last_n`, mlx-lm `repetition_context_size`; #1436 wired it
+    /// into the sampler after #1430 left it parse-only). `0` disables the
+    /// three history penalties; `N > 0` penalizes over the last N tokens.
+    /// Absent falls back to the server-wide `--repeat-last-n` default.
     #[serde(alias = "repeat_last_n")]
     pub repetition_context_size: Option<usize>,
     /// Logit bias for specific tokens
@@ -1178,6 +1182,30 @@ pub struct NativeCompletionRequest {
     /// server-wide `--typical` default exactly like an upstream request
     /// value replaces the server default.
     pub typical_p: Option<f32>,
+    /// Top-n-sigma logit filter. b10621 declares the field without limits
+    /// and its sampler treats every value `<= 0.0` (default `-1.0`) as
+    /// disabled, so the route maps non-positive and non-finite values to the
+    /// explicit disabled form rather than rejecting them (#1436).
+    pub top_n_sigma: Option<f32>,
+    /// XTC removal probability. b10621 declares a SOFT `0.0..=1.0` schema
+    /// limit, clamping out-of-range values into the domain instead of
+    /// rejecting them; the route clamps identically (#1436).
+    pub xtc_probability: Option<f32>,
+    /// XTC probability threshold. Same soft `0.0..=1.0` clamp as
+    /// `xtc_probability`; values above `0.5` are in range and make XTC
+    /// inert, matching upstream (#1436).
+    pub xtc_threshold: Option<f32>,
+    /// Suppress end-of-generation tokens so generation runs to the token
+    /// budget or a stop string (#1436).
+    pub ignore_eos: Option<bool>,
+    /// Sampler chain order (b10621 accepts an array of stage names or a
+    /// single character string). mlxcel's chain order is fixed to b10621's
+    /// default, so only the default order (either spelling) is accepted as
+    /// an inert configuration; any other order is rejected with a 400
+    /// instead of silently sampling in a different order than requested
+    /// (#1436). Held as a raw value because both shapes must be inspected.
+    #[serde(default)]
+    pub samplers: Option<serde_json::Value>,
     /// Repetition penalty
     pub repeat_penalty: Option<f32>,
     /// Repetition penalty last N tokens
