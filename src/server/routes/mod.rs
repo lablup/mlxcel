@@ -30,6 +30,7 @@ pub mod completions;
 pub mod control;
 pub mod detokenize;
 pub mod embeddings;
+pub mod feature_disabled;
 pub mod health;
 pub mod infill;
 pub mod metrics;
@@ -53,6 +54,10 @@ mod availability_tests;
 #[path = "stream_route_tests.rs"]
 mod stream_route_tests;
 
+#[cfg(test)]
+#[path = "feature_disabled_tests.rs"]
+mod feature_disabled_tests;
+
 pub use anthropic::{anthropic_count_tokens, anthropic_messages};
 pub use audio::{audio_speech, audio_transcriptions, audio_translations};
 pub use cache::{cache_reset, cache_stats};
@@ -61,6 +66,7 @@ pub use completions::completions;
 pub use control::chat_completions_control;
 pub use detokenize::detokenize;
 pub use embeddings::{create_embeddings, native_embeddings};
+pub use feature_disabled::feature_disabled;
 pub use health::health_check;
 pub use infill::infill;
 pub use metrics::metrics;

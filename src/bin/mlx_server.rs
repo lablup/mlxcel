@@ -28,6 +28,7 @@ use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
 };
 use mlxcel::cli::turbo_args::{TurboKvCacheArgs, resolve_kv_cache_mode};
+use mlxcel::cli::ui_compat_args::UiCompatArgs;
 use mlxcel::downloader::{
     DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo,
     resolve_model_source_with_options, set_offline_mode,
@@ -1455,6 +1456,13 @@ struct ServerArgs {
     #[command(flatten)]
     multimodal_compat: MultimodalCompatArgs,
 
+    /// b10621 Web UI / tools / MCP / CORS-proxy / agent compatibility
+    /// surface, shared with `mlxcel serve` through
+    /// `mlxcel::cli::ui_compat_args`: inert forms accepted, enabling forms
+    /// refused at startup (issue #1435).
+    #[command(flatten)]
+    ui_compat: UiCompatArgs,
+
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
     /// `--kv-skip-last-layer`). Defined once in
@@ -2072,6 +2080,16 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .apply_env_bindings()
         .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
     args.multimodal_compat
+        .ensure_inert()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // b10621 Web UI / tools / MCP / CORS-proxy / agent surface (issue
+    // #1435): the inert forms are accepted, every enabling form fails here,
+    // before the model reference resolves.
+    args.ui_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.ui_compat
         .ensure_inert()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     let image_token_bounds = args

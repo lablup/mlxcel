@@ -38,3 +38,4 @@ pub mod rope_args;
 pub mod spec_compat_args;
 pub mod speculative_args;
 pub mod turbo_args;
+pub mod ui_compat_args;

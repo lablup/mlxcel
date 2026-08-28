@@ -26,6 +26,7 @@ use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::spec_compat_args::SpecCompatArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
+use mlxcel::cli::ui_compat_args::UiCompatArgs;
 use mlxcel::downloader::DownloadArgs;
 use mlxcel::lang_bias::LangBiasCliArgs;
 
@@ -2146,6 +2147,13 @@ pub(crate) struct ServeArgs {
     /// exactly the same set (issue #1451).
     #[command(flatten)]
     multimodal_compat: MultimodalCompatArgs,
+
+    /// b10621 Web UI / tools / MCP / CORS-proxy / agent compatibility
+    /// surface, shared with `mlxcel-server` through
+    /// `mlxcel::cli::ui_compat_args`: inert forms accepted, enabling forms
+    /// refused at startup (issue #1435).
+    #[command(flatten)]
+    ui_compat: UiCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
