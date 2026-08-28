@@ -142,6 +142,20 @@ pub struct ServerStartupConfig {
     /// `--slot-save-path`: storage root for slot save/restore files (#1440).
     pub slot_save_path: Option<PathBuf>,
 
+    /// `--models-dir`: b10621 router-mode model discovery root (#1438).
+    /// `Some` with an empty `model_path` starts the router server.
+    pub router_models_dir: Option<PathBuf>,
+    /// `--models-max`: concurrently loaded model cap in router mode
+    /// (0 = unlimited), b10621 default 4 (#1438).
+    pub models_max: usize,
+    /// `--models-autoload` / `--no-models-autoload` (#1438).
+    pub models_autoload: bool,
+    /// `--models-preset`: b10621 INI preset file; accepted but refused at
+    /// startup until preset translation exists (#1438).
+    pub models_preset: Option<PathBuf>,
+    /// `--tags`: comma-separated informational model tags (#1438).
+    pub tags: Option<String>,
+
     /// `--spm-infill`: the Suffix/Prefix/Middle ordering for `POST /infill`
     /// (#1442). Forwarded to [`super::config::ServerConfig::spm_infill`].
     pub spm_infill: bool,
@@ -561,6 +575,11 @@ impl Default for ServerStartupConfig {
             enable_slots: true,
             enable_props: false,
             slot_save_path: None,
+            router_models_dir: None,
+            models_max: 4,
+            models_autoload: true,
+            models_preset: None,
+            tags: None,
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: crate::server::config::EmbeddingServingMode::Any,
@@ -943,7 +962,7 @@ fn warn_on_insecure_video_allowlist() {
 /// the type cannot be determined, the loaded model would have failed earlier
 /// in startup; falling back to "no media support" here just means video
 /// requests get a 400, which is the safe default.
-fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
+pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
     use crate::models::ModelType;
 
     // b10621's `--no-mmproj` / `--no-mmproj-auto` refuses every media part,
@@ -1285,6 +1304,11 @@ pub(super) fn build_server_config(
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
         slot_save_path: startup.slot_save_path.clone(),
+        model_tags: startup
+            .tags
+            .as_deref()
+            .map(crate::server::model_source::parse_model_aliases)
+            .unwrap_or_default(),
         spm_infill: startup.spm_infill,
         embd_normalize: startup.embd_normalize,
         embedding_serving_mode: startup.embedding_serving_mode,
@@ -1652,7 +1676,7 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
 /// `--ssl-cert-file` / `--ssl-key-file`. The accept loop itself lives in
 /// [`crate::server::listen`] so all three transports enforce the timeout the
 /// same way.
-async fn serve_http(startup: &ServerStartupConfig, app: axum::Router) -> Result<()> {
+pub(crate) async fn serve_http(startup: &ServerStartupConfig, app: axum::Router) -> Result<()> {
     let resolved = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
     if let Some(warning) = &resolved.legacy_socket_warning {
         tracing::warn!("{warning}");
@@ -2074,6 +2098,25 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             port = resolution.port,
             "Google Cloud Platform (Vertex AI) compat enabled"
         );
+    }
+
+    // b10621 `--models-preset` names an INI file of per-model presets.
+    // mlxcel has no preset translation yet; accepting the file and ignoring
+    // it would silently serve un-preset models, so it fails loudly (#1438).
+    if let Some(preset) = startup.models_preset.as_ref() {
+        anyhow::bail!(
+            "--models-preset {} is accepted but not implemented yet: mlxcel cannot translate \
+             llama-server INI presets into per-model configuration. Start the router with \
+             --models-dir alone, or configure models through the router's own CLI defaults \
+             (#1438 tracks preset support)",
+            preset.display()
+        );
+    }
+
+    // b10621 router mode: no model argument plus `--models-dir` serves the
+    // model-management surface instead of loading one checkpoint (#1438).
+    if startup.router_models_dir.is_some() && startup.model_path.as_os_str().is_empty() {
+        return crate::server::router_server::run_router_server(startup).await;
     }
 
     // A sampler-order flag that asks for anything but the fixed b10621
@@ -2698,7 +2741,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     if config.model_aliases.len() > 1 {
         tracing::info!(
             "serving model id '{served_chat_id}'; the additional --alias entries [{}] are \
-             recorded but not yet reported on /v1/models",
+             reported in the /v1/models model object's aliases array (#1438)",
             config.model_aliases[1..].join(", ")
         );
     }

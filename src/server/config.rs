@@ -420,6 +420,9 @@ pub struct ServerConfig {
     /// `--slot-save-path`: directory for `POST /slots/:id_slot` save/restore
     /// files. `None` disables the slot actions, b10621's default (#1440).
     pub slot_save_path: Option<std::path::PathBuf>,
+    /// `--tags`: informational model tags reported in the `/v1/models` model
+    /// object; never used for routing, exactly b10621's contract (#1438).
+    pub model_tags: Vec<String>,
     /// `--embd-normalize`: the server-wide embedding normalization, `None`
     /// when the operator did not choose one and the checkpoint's own
     /// `normalize` flag decides (#1452).
@@ -780,6 +783,7 @@ impl Default for ServerConfig {
             enable_slots_endpoint: true,
             enable_props_endpoint: false,
             slot_save_path: None,
+            model_tags: Vec::new(),
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: EmbeddingServingMode::Any,

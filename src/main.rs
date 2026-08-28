@@ -1085,8 +1085,50 @@ pub(crate) struct ServeArgs {
     /// to / downloads at `<PATH>/<owner>/<name>` (no extra `models/` subdir).
     /// Overrides the `MLXCEL_MODELS_DIR` environment variable. No effect when
     /// the model argument is already an existing local path.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long = "model-store-root", value_name = "PATH")]
+    model_store_root: Option<PathBuf>,
+
+    /// Directory containing models for the router server (default: disabled)
+    #[arg(long = "models-dir", env = "LLAMA_ARG_MODELS_DIR", value_name = "PATH")]
     models_dir: Option<PathBuf>,
+
+    /// For router server, maximum number of models to load simultaneously (0 = unlimited)
+    #[arg(
+        long = "models-max",
+        env = "LLAMA_ARG_MODELS_MAX",
+        default_value_t = 4,
+        value_name = "N"
+    )]
+    models_max: usize,
+
+    /// For router server, whether to automatically load models
+    #[arg(
+        long = "models-autoload",
+        env = "LLAMA_ARG_MODELS_AUTOLOAD",
+        default_value_t = true,
+        overrides_with = "_no_models_autoload"
+    )]
+    models_autoload: bool,
+
+    /// Disable automatic model loading in router mode
+    #[arg(
+        long = "no-models-autoload",
+        overrides_with = "models_autoload",
+        hide = true
+    )]
+    _no_models_autoload: bool,
+
+    /// Path to INI file containing model presets for the router server (default: disabled)
+    #[arg(
+        long = "models-preset",
+        env = "LLAMA_ARG_MODELS_PRESET",
+        value_name = "PATH"
+    )]
+    models_preset: Option<PathBuf>,
+
+    /// Set model tags, comma-separated (informational, not used for routing)
+    #[arg(long = "tags", env = "LLAMA_ARG_TAGS", value_name = "TAGS")]
+    tags: Option<String>,
 
     /// Repository revision (branch, tag, or commit hash). Defaults to `main`.
     ///
@@ -2584,7 +2626,7 @@ fn main() -> anyhow::Result<()> {
                 "mlxcel",
                 "mlxcel serve",
                 &mut serve_cmd,
-                serve_args.models_dir.as_deref(),
+                serve_args.model_store_root.as_deref(),
             )
         );
         return Ok(());

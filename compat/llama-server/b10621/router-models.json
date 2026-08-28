@@ -19,12 +19,22 @@
       "default": "enabled",
       "description": "for router server, whether to automatically load models (default: enabled) (env: LLAMA_ARG_MODELS_AUTOLOAD)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": null,
-      "notes": null,
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Same spelling pair (--models-autoload / --no-models-autoload), env binding, and enabled default. With autoload off, a request naming an unloaded model answers b10621's 400 \"model is not loaded\"; the per-request ?autoload= query override is honored exactly as upstream's is_autoload reads it (true/1).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--models-autoload",
+          "--no-models-autoload"
+        ],
+        "env": "LLAMA_ARG_MODELS_AUTOLOAD",
+        "env_binding": "clap",
+        "defaults": [
+          "true"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -43,13 +53,18 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1438,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "SEMANTIC COLLISION: mlxcel's --models-dir names the local model-store root used by `mlxcel list`/download, while b10621 uses it to enable router mode over a directory of GGUF files. #1438 owns the reconciliation.",
-      "divergence": [],
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Since #1438 the flag carries b10621's router semantics: with no model argument it starts router mode over the directory (in-process model pool, discovery of checkpoint directories, load/unload/SSE routes, autoload, models-max LRU). The pre-#1438 mlxcel meaning (local model-store root) moved to the mlxcel-native --model-store-root / MLXCEL_MODELS_DIR.",
+      "divergence": [
+        "Combining --models-dir with a model argument fails startup with a migration diagnostic naming --model-store-root; b10621 accepts the flag as inert outside router mode. The refusal protects deployments that relied on the flag's pre-#1438 mlxcel store-root meaning (#1438).",
+        "Router mode serves models in-process rather than as child llama-server processes, so the model objects' status.args argv list is empty and no child loaded_info keys are merged into GET /models entries (#1438)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--models-dir"
-        ]
+        ],
+        "env": "LLAMA_ARG_MODELS_DIR",
+        "env_binding": "clap"
       }
     },
     {
@@ -67,12 +82,21 @@
       "default": "4, 0 = unlimited",
       "description": "for router server, maximum number of models to load simultaneously (default: 4, 0 = unlimited) (env: LLAMA_ARG_MODELS_MAX)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": null,
-      "notes": null,
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Same spelling, env binding, and default (4, 0 = unlimited). In router mode the cap is enforced with least-recently-used eviction of loaded models when a load would exceed it; a pool whose running entries are all still loading answers 503 instead of thrashing. Validated with two real checkpoints cycling through load, eviction, and reload in the #1438 PR.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--models-max"
+        ],
+        "env": "LLAMA_ARG_MODELS_MAX",
+        "env_binding": "clap",
+        "defaults": [
+          "4"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -91,10 +115,18 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1438,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/startup.rs",
+      "notes": "Accepted on both binaries with the b10621 spelling and env binding, and refused at startup with a diagnostic: mlxcel cannot yet translate llama-server INI presets into per-model configuration, and loading un-preset models while the operator believes presets apply would be the silent-ignore failure epic #1431 exists to remove.",
+      "divergence": [
+        "Any configured preset file fails startup with the migration diagnostic; b10621 loads INI presets and applies them per model (#1438)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--models-preset"
+        ],
+        "env": "LLAMA_ARG_MODELS_PRESET",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -111,12 +143,18 @@
       "default": null,
       "description": "set model tags, comma-separated (informational, not used for routing) (env: LLAMA_ARG_TAGS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/models_tests.rs",
+      "notes": "Comma-separated informational tags, split with the same trim/sort/de-dup rule as --alias and reported in the /v1/models model object's tags array; never used for routing, exactly upstream's contract.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--tags"
+        ],
+        "env": "LLAMA_ARG_TAGS",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "route",
@@ -128,10 +166,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1438,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Mounted with upstream's reachable refusal surface for a models-dir pool: a missing name answers 400 \"model must be a non-empty string\", an unknown one 500 \"model name=X is not found\", and a discovered one 500 \"model name=X is not removable (not from cache)\", which is exactly what b10621 answers for its models_dir-sourced entries.",
+      "divergence": [
+        "No cache source exists, so no model is ever removable; b10621 can delete cache-sourced models from disk (#1438)."
+      ],
+      "mlxcel": {
+        "route": "DELETE /models"
+      }
     },
     {
       "kind": "route",
@@ -143,10 +185,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1438,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/router_models_tests.rs",
+      "notes": "Router mode serves the SSE stream with b10621's event envelope ({\"model\", \"event\"[, \"data\"]}) for models_reload, model_status on load begin, and status_change on load/unload transitions.",
+      "divergence": [
+        "The event vocabulary is the in-process subset: download_progress / download_finished / download_failed and model_remove never occur (no cache downloads, no removable models), and status_change payloads carry status and failed only, without a child's info/progress blocks (#1438)."
+      ],
+      "mlxcel": {
+        "route": "GET /models/sse"
+      }
     },
     {
       "kind": "route",
@@ -158,10 +204,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1438,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Mounted with upstream's validation surface: a missing name answers 400 \"model must be a non-empty string\" and an existing one 400 \"model 'X' already exists\".",
+      "divergence": [
+        "A new model name answers a 500 diagnostic instead of starting a HuggingFace download into the cache; mlxcel's router has no cache source yet (#1438)."
+      ],
+      "mlxcel": {
+        "route": "POST /models"
+      }
     },
     {
       "kind": "route",
@@ -171,12 +221,14 @@
       "source": "tools/server/server.cpp",
       "condition": "router-mode",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": null,
-      "notes": null,
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Router mode: an unknown model answers upstream's 404 \"model is not found\", a running one its 400 \"model is already running\", and a successful begin answers {\"success\": true} while the load proceeds through loading to loaded, observable on GET /models and the SSE stream.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /models/load"
+      }
     },
     {
       "kind": "route",
@@ -186,12 +238,14 @@
       "source": "tools/server/server.cpp",
       "condition": "router-mode",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": null,
-      "notes": null,
+      "test": "src/server/router_server_tests.rs",
+      "notes": "Router mode: an unknown model answers 400 \"model is not found\", a not-running one 400 \"model is not running\", and success answers {\"success\": true}. Unload is graceful by refcount: in-flight requests hold the model's serving state until they finish, then the worker exits and the weights free.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST /models/unload"
+      }
     }
   ]
 }

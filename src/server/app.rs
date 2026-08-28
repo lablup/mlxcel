@@ -71,7 +71,7 @@ async fn api_key_auth(
 /// included, which is what upstream's `req.path` carries. With `--api-prefix`
 /// set, `<prefix>/health` is therefore NOT public on either server; startup
 /// warns when both are configured (#1432).
-fn is_public_endpoint(path: &str) -> bool {
+pub(crate) fn is_public_endpoint(path: &str) -> bool {
     matches!(path, "/" | "/health" | "/v1/health")
 }
 
@@ -89,6 +89,18 @@ const AUDIO_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 /// authentication middleware stays outside the nest so it sees the request
 /// path as the client sent it, which is what upstream's `req.path` carries.
 pub fn create_app(state: AppState) -> Router {
+    create_app_impl(state, true)
+}
+
+/// [`create_app`] without the CORS layer, for router-mode sub-apps
+/// (issue #1438): the router's top level answers preflights and stamps the
+/// CORS headers exactly once, so a dispatched sub-app must not add a second
+/// `Access-Control-Allow-Origin` to the same response.
+pub fn create_app_without_cors(state: AppState) -> Router {
+    create_app_impl(state, false)
+}
+
+fn create_app_impl(state: AppState, with_cors: bool) -> Router {
     // Start the resumable-stream GC once per session manager (#1444); a
     // completed session is retained for replay for a bounded TTL even when
     // no request ever touches the manager again.
@@ -103,15 +115,17 @@ pub fn create_app(state: AppState) -> Router {
 
     let gcp_enabled = state.config.gcp.is_some();
     let dispatch_cell = state.gcp_dispatch.clone();
-    let app = routes
-        // Middleware, innermost first.
-        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
-        .layer(middleware::from_fn_with_state(
+    // Middleware, innermost first.
+    let routes = routes.layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
+    let routes = if with_cors {
+        routes.layer(middleware::from_fn_with_state(
             state.clone(),
             cors_middleware,
         ))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    } else {
+        routes
+    };
+    let app = routes.layer(TraceLayer::new_for_http()).with_state(state);
     // Vertex AI predict adapter (#1456): hand the predict handler the same
     // composed router the socket serves, so per-instance dispatch runs the
     // full middleware stack (auth, CORS, tracing) in-process.
