@@ -175,6 +175,16 @@ The OpenAI Responses retrieve/cancel surface (`GET /v1/responses/:id`, `POST /v1
 
 `GET /metrics` opens with the b10621 `llamacpp:` counter and gauge families name-for-name, carries the `Process-Start-Time-Unix` header, and averages the throughput gauges over the window between two scrapes, so a Prometheus scrape config written for llama-server works unchanged; the `mlxcel_` families follow in the same body. `--sleep-idle-seconds` remains deferred: mlxcel has no idle-sleep lifecycle yet, and `/props` truthfully reports `is_sleeping: false`.
 
+### Vertex AI (GCP) custom-container compatibility (#1456)
+
+b10621 serves Google Cloud Vertex AI custom containers purely from the `AIP_*` environment variables, and mlxcel now does the same on both server binaries. With `AIP_MODE=PREDICTION`: `AIP_HTTP_PORT` (default 8080) overrides `--port` with a logged warning, `AIP_HEALTH_ROUTE` (leading slash ensured) becomes a GET alias of the health handler, and `AIP_PREDICT_ROUTE` (default `/predict`) mounts the prediction fan-out; a predict path colliding with a registered route fails startup before the model load. With `AIP_MODE` unset nothing is registered and the variables are inert.
+
+`POST /predict` accepts `{"instances": [...]}` with at most 128 entries. Each instance names its target in `@requestFormat`, either the camelCase alias of a registered route (`chatCompletions`, `embeddings`, `applyTemplate`, ...) or a registered path verbatim; the field is stripped, a `stream` field is forced off with a warning, and the remainder is dispatched through the composed router in-process with the predict request's own headers, so API-key authentication, request validation, and queue admission apply exactly as they do to a direct call. Results come back as `{"predictions": [...]}` in request order, with per-instance failures as error objects in their slots. The alias table is derived from the same route inventory the router itself mounts, so a newly added route is aliased automatically.
+
+Two internals differ without changing any response, and are recorded in the manifest notes rather than as divergences: instance execution is bounded to eight concurrent dispatches (upstream launches every instance at once; order is preserved either way), and alias collisions such as `completions` (`/completions` native vs `/v1/completions` OpenAI) resolve deterministically to the `/v1` route by registration order, where upstream iterates an unordered map and its winner is unspecified. Neither the predict route nor the health alias is a public endpoint, exactly as in b10621: with API keys configured, Vertex AI must present the key.
+
+The `AIP_*` variables are documented in [`environment-variables.md`](environment-variables.md).
+
 ## Sharding
 
 The manifest is sharded by area so that the concurrent implementation chains of epic #1431 edit disjoint files. Ownership is machine-readable, not prose: `pin.json`'s `shards` map records, per shard, the set of implementation issue numbers allowed to own entries in it (`shards["authentication"].owners == [1437]`, for example), and `scripts/ci/check_llama_compat_manifest.py` fails an entry whose `issue` is not a member of its own shard's owner set. That is what stops two concurrent chains from editing the same file: the file, not just the reviewer, rejects the second chain's entry.

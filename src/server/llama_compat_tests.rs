@@ -151,11 +151,18 @@ async fn manifest_route_claims_match_the_mounted_router() {
         let path = entry["path"].as_str().expect("path");
         if path.contains("${") {
             // Synthetic entries for env-configured GCP routes and the Web
-            // UI static mount have no fixed probeable path.
-            assert!(
-                entry["mlxcel"].is_null(),
-                "{id}: synthetic route entries cannot carry a probeable claim"
-            );
+            // UI static mount have no fixed probeable path, so their claims
+            // cannot be verified against the router here. A claim, when one
+            // is recorded (#1456 mounts the GCP pair from `AIP_*`), must
+            // name the synthetic id itself; behavior is covered by
+            // `gcp_compat_tests.rs` against a router with the adapter
+            // enabled.
+            if !entry["mlxcel"].is_null() {
+                assert_eq!(
+                    entry["mlxcel"]["route"], entry["id"],
+                    "{id}: a synthetic route claim must record the entry id"
+                );
+            }
             continue;
         }
         let method = entry["method"].as_str().expect("method");

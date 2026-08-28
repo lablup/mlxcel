@@ -18,10 +18,10 @@ use axum::{
     Router,
     body::Body,
     extract::{DefaultBodyLimit, State},
-    http::Request,
+    http::{Method, Request},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{MethodRouter, get, post},
 };
 use tower_http::trace::TraceLayer;
 
@@ -101,7 +101,9 @@ pub fn create_app(state: AppState) -> Router {
         Router::new().nest(&api_prefix, routes)
     };
 
-    routes
+    let gcp_enabled = state.config.gcp.is_some();
+    let dispatch_cell = state.gcp_dispatch.clone();
+    let app = routes
         // Middleware, innermost first.
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
         .layer(middleware::from_fn_with_state(
@@ -109,79 +111,164 @@ pub fn create_app(state: AppState) -> Router {
             cors_middleware,
         ))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+    // Vertex AI predict adapter (#1456): hand the predict handler the same
+    // composed router the socket serves, so per-instance dispatch runs the
+    // full middleware stack (auth, CORS, tracing) in-process.
+    if gcp_enabled {
+        let _ = dispatch_cell.set(app.clone());
+    }
+    app
 }
 
-/// Register every route, without middleware and without the API prefix.
-fn build_routes(_state: &AppState) -> Router<AppState> {
-    // Audio upload endpoints carry a larger body limit via a sub-router.
-    // Merging keeps the outer auth, CORS, and trace layers applying normally.
-    let audio_routes: Router<AppState> = Router::new()
-        .route("/v1/audio/speech", post(routes::audio_speech))
-        .route(
-            "/v1/audio/transcriptions",
-            post(routes::audio_transcriptions),
-        )
-        .route("/v1/audio/translations", post(routes::audio_translations))
-        .route("/audio/speech", post(routes::audio_speech))
-        .route("/audio/transcriptions", post(routes::audio_transcriptions))
-        .route("/audio/translations", post(routes::audio_translations))
-        .layer(DefaultBodyLimit::max(AUDIO_MAX_UPLOAD_BYTES));
+/// One entry of the route inventory: the path, the `MethodRouter` mounted
+/// there, and the method the Vertex AI predict adapter dispatches with
+/// (#1456). The inventory is the single source [`build_routes`] mounts from
+/// and [`crate::server::gcp_compat::dispatch_table`] derives the camelCase
+/// alias table from, so a route added here is automatically served, aliased,
+/// and considered by the `AIP_PREDICT_ROUTE` collision check. Registration
+/// order is alias priority: the first path producing a given alias wins,
+/// which is why the OpenAI `/v1` routes come first.
+pub(crate) struct RouteRegistration {
+    pub(crate) path: &'static str,
+    /// Method the predict adapter uses when dispatching to this path (the
+    /// registered method; POST preferred when a path serves several).
+    pub(crate) dispatch_method: Method,
+    pub(crate) handler: MethodRouter<AppState>,
+}
 
-    let mut app = Router::new()
+fn reg(
+    path: &'static str,
+    dispatch_method: Method,
+    handler: MethodRouter<AppState>,
+) -> RouteRegistration {
+    RouteRegistration {
+        path,
+        dispatch_method,
+        handler,
+    }
+}
+
+/// The full route table, in registration (= alias priority) order.
+///
+/// Keep every `.route()` of the server in here: [`build_routes`] mounts
+/// exactly this list, so a route bypassing the inventory would not exist.
+pub(crate) fn route_inventory(_config: &crate::server::ServerConfig) -> Vec<RouteRegistration> {
+    let audio_limit = DefaultBodyLimit::max(AUDIO_MAX_UPLOAD_BYTES);
+    let mut inventory = vec![
         // OpenAI API endpoints
-        .route("/v1/chat/completions", post(routes::chat_completions))
+        reg(
+            "/v1/chat/completions",
+            Method::POST,
+            post(routes::chat_completions),
+        ),
         // b10621 realtime control of a live completion (#1444).
-        .route(
+        reg(
             "/v1/chat/completions/control",
+            Method::POST,
             post(routes::chat_completions_control),
-        )
+        ),
         // b10621 resumable-stream lifecycle (#1444): replay, discovery, and
         // stop for streaming completions that carried `X-Conversation-Id`.
-        .route(
+        reg(
             "/v1/stream",
+            Method::GET,
             get(routes::stream_get).delete(routes::stream_delete),
-        )
-        .route("/v1/streams/lookup", post(routes::streams_lookup))
-        .route("/v1/completions", post(routes::completions))
-        .route("/v1/models", get(routes::list_models))
+        ),
+        reg(
+            "/v1/streams/lookup",
+            Method::POST,
+            post(routes::streams_lookup),
+        ),
+        reg("/v1/completions", Method::POST, post(routes::completions)),
+        reg("/v1/models", Method::GET, get(routes::list_models)),
         // Embeddings (OpenAI /v1/embeddings surface), served by the embedding
         // worker when one is loaded; a structured 501 otherwise.
-        .route("/v1/embeddings", post(routes::create_embeddings))
+        reg(
+            "/v1/embeddings",
+            Method::POST,
+            post(routes::create_embeddings),
+        ),
         // Reranking (Cohere / Jina compatible surface), served by the rerank
         // worker when one is loaded; a structured 501 otherwise.
-        .route("/v1/rerank", post(routes::create_rerank))
-        .route("/v1/reranking", post(routes::create_rerank))
+        reg("/v1/rerank", Method::POST, post(routes::create_rerank)),
+        reg("/v1/reranking", Method::POST, post(routes::create_rerank)),
         // Responses API (OpenAI /v1/responses surface).
-        .route("/v1/responses", post(routes::create_response))
-        .route(
+        reg("/v1/responses", Method::POST, post(routes::create_response)),
+        reg(
             "/v1/responses/:id",
+            Method::GET,
             get(routes::retrieve_response).delete(routes::delete_response),
-        )
-        .route("/v1/responses/:id/cancel", post(routes::cancel_response))
+        ),
+        reg(
+            "/v1/responses/:id/cancel",
+            Method::POST,
+            post(routes::cancel_response),
+        ),
         // Anthropic Messages API (/v1/messages surface).
-        .route("/v1/messages", post(routes::anthropic_messages))
-        .route(
+        reg(
+            "/v1/messages",
+            Method::POST,
+            post(routes::anthropic_messages),
+        ),
+        reg(
             "/v1/messages/count_tokens",
+            Method::POST,
             post(routes::anthropic_count_tokens),
-        )
-        // prompt-cache observability endpoints (always mounted
-        // the handlers return a stable "disabled" payload when the cache is
-        // off so monitoring clients can poll without conditional logic).
-        .route("/v1/cache/stats", get(routes::cache_stats))
-        .route("/v1/cache/reset", post(routes::cache_reset))
+        ),
+        // prompt-cache observability endpoints (always mounted; the handlers
+        // return a stable "disabled" payload when the cache is off so
+        // monitoring clients can poll without conditional logic).
+        reg("/v1/cache/stats", Method::GET, get(routes::cache_stats)),
+        reg("/v1/cache/reset", Method::POST, post(routes::cache_reset)),
         // Adaptive B=1 MTP policy state (issue #1257). Always mounted, and
         // returns a well-formed "unavailable" payload when no policy is
-        // running, for the same reason the cache endpoints do: a consumer must
-        // be able to tell "nothing to report" from "this server does not
-        // answer". It is the supported replacement for reading the private
-        // hint files under the mlxcel cache root.
-        .route("/v1/internal/mtp-policy", get(routes::mtp_policy))
-        // Audio routes (speech, transcriptions, translations) come from the
-        // sub-router that carries the larger body-limit layer.
-        .merge(audio_routes)
+        // running: a consumer must be able to tell "nothing to report" from
+        // "this server does not answer". It is the supported replacement for
+        // reading the private hint files under the mlxcel cache root.
+        reg(
+            "/v1/internal/mtp-policy",
+            Method::GET,
+            get(routes::mtp_policy),
+        ),
+        // Audio endpoints carry a larger per-route body limit because real
+        // audio uploads commonly exceed the Axum 2 MiB default.
+        reg(
+            "/v1/audio/speech",
+            Method::POST,
+            post(routes::audio_speech).layer(audio_limit),
+        ),
+        reg(
+            "/v1/audio/transcriptions",
+            Method::POST,
+            post(routes::audio_transcriptions).layer(audio_limit),
+        ),
+        reg(
+            "/v1/audio/translations",
+            Method::POST,
+            post(routes::audio_translations).layer(audio_limit),
+        ),
+        reg(
+            "/audio/speech",
+            Method::POST,
+            post(routes::audio_speech).layer(audio_limit),
+        ),
+        reg(
+            "/audio/transcriptions",
+            Method::POST,
+            post(routes::audio_transcriptions).layer(audio_limit),
+        ),
+        reg(
+            "/audio/translations",
+            Method::POST,
+            post(routes::audio_translations).layer(audio_limit),
+        ),
         // Aliases (some clients use these)
-        .route("/chat/completions", post(routes::chat_completions))
+        reg(
+            "/chat/completions",
+            Method::POST,
+            post(routes::chat_completions),
+        ),
         // BREAKING (#1441): `/completions` and `/embeddings` are llama-server
         // NATIVE routes, not OpenAI aliases. b10621 sends `/completion` and
         // `/completions` to one handler and `/v1/completions` to a different
@@ -189,52 +276,71 @@ fn build_routes(_state: &AppState) -> Router<AppState> {
         // `/v1/embeddings`. mlxcel used to answer the OpenAI shape on all of
         // them, so a llama-server client reading the native schema got an
         // object it could not parse.
-        .route("/completions", post(routes::native_completion))
-        .route("/models", get(routes::list_models))
-        .route("/embedding", post(routes::native_embeddings))
-        .route("/embeddings", post(routes::native_embeddings))
-        .route("/rerank", post(routes::create_rerank))
-        .route("/reranking", post(routes::create_rerank))
-        .route("/responses", post(routes::create_response))
-        .route(
+        reg(
+            "/completions",
+            Method::POST,
+            post(routes::native_completion),
+        ),
+        reg("/models", Method::GET, get(routes::list_models)),
+        reg("/embedding", Method::POST, post(routes::native_embeddings)),
+        reg("/embeddings", Method::POST, post(routes::native_embeddings)),
+        reg("/rerank", Method::POST, post(routes::create_rerank)),
+        reg("/reranking", Method::POST, post(routes::create_rerank)),
+        reg("/responses", Method::POST, post(routes::create_response)),
+        reg(
             "/responses/:id",
+            Method::GET,
             get(routes::retrieve_response).delete(routes::delete_response),
-        )
-        .route("/responses/:id/cancel", post(routes::cancel_response))
-        .route("/messages", post(routes::anthropic_messages))
-        .route(
+        ),
+        reg(
+            "/responses/:id/cancel",
+            Method::POST,
+            post(routes::cancel_response),
+        ),
+        reg("/messages", Method::POST, post(routes::anthropic_messages)),
+        reg(
             "/messages/count_tokens",
+            Method::POST,
             post(routes::anthropic_count_tokens),
-        )
+        ),
         // llama-server compatible endpoints
-        .route("/completion", post(routes::native_completion))
-        .route("/tokenize", post(routes::tokenize))
-        .route("/detokenize", post(routes::detokenize))
+        reg("/completion", Method::POST, post(routes::native_completion)),
+        reg("/tokenize", Method::POST, post(routes::tokenize)),
+        reg("/detokenize", Method::POST, post(routes::detokenize)),
         // Fill-in-the-middle. Mounted unconditionally, like every other route:
         // whether the loaded model can serve it is a property of its
         // vocabulary, and the handler answers 501 naming the missing FIM
         // tokens rather than 404, so a client can tell "this server does not
         // implement infill" from "this model cannot do it" (#1442).
-        .route("/infill", post(routes::infill))
+        reg("/infill", Method::POST, post(routes::infill)),
         // Prompt inspection: render or count a prompt without generating from
         // it (#1442).
-        .route("/apply-template", post(routes::apply_template))
-        .route(
+        reg(
+            "/apply-template",
+            Method::POST,
+            post(routes::apply_template),
+        ),
+        reg(
             "/chat/completions/input_tokens",
+            Method::POST,
             post(routes::chat_input_tokens),
-        )
-        .route(
+        ),
+        reg(
             "/v1/chat/completions/input_tokens",
+            Method::POST,
             post(routes::chat_input_tokens),
-        )
-        .route(
+        ),
+        reg(
             "/responses/input_tokens",
+            Method::POST,
             post(routes::responses_input_tokens),
-        )
-        .route(
+        ),
+        reg(
             "/v1/responses/input_tokens",
+            Method::POST,
             post(routes::responses_input_tokens),
-        );
+        ),
+    ];
 
     // b10621 mounts /props, /slots, /metrics and the slot actions
     // unconditionally and answers its own diagnostics when a gate is off
@@ -242,17 +348,59 @@ fn build_routes(_state: &AppState) -> Router<AppState> {
     // --slots gates GET /slots, --metrics gates GET /metrics, and
     // --slot-save-path gates POST /slots/:id_slot. The handlers own those
     // gates so a disabled surface answers upstream's 501 instead of a 404.
-    app = app
-        .route("/props", get(routes::props).post(routes::post_props))
-        .route("/slots", get(routes::slots))
-        .route("/slots/:id_slot", post(routes::slot_action))
-        .route("/metrics", get(routes::metrics));
+    inventory.push(reg(
+        "/props",
+        Method::POST,
+        get(routes::props).post(routes::post_props),
+    ));
+    inventory.push(reg("/slots", Method::GET, get(routes::slots)));
+    inventory.push(reg(
+        "/slots/:id_slot",
+        Method::POST,
+        post(routes::slot_action),
+    ));
+    inventory.push(reg("/metrics", Method::GET, get(routes::metrics)));
+
+    // Health check
+    inventory.push(reg("/health", Method::GET, get(routes::health_check)));
+    inventory.push(reg("/v1/health", Method::GET, get(routes::health_check)));
+    inventory.push(reg("/", Method::GET, get(routes::health_check)));
+    inventory
+}
+
+/// Register every route, without middleware and without the API prefix.
+fn build_routes(state: &AppState) -> Router<AppState> {
+    let mut app = Router::new();
+    let mut mounted: Vec<&'static str> = Vec::new();
+    for entry in route_inventory(&state.config) {
+        mounted.push(entry.path);
+        app = app.route(entry.path, entry.handler);
+    }
+
+    // Vertex AI (GCP) compat routes (#1456): resolved once at startup from
+    // the AIP_* variables into `config.gcp`; `None` (the default) mounts
+    // nothing. Registered inside the middleware stack, so the predict route
+    // and the health alias require an API key exactly as upstream's do
+    // (neither is in b10621's public endpoint set).
+    if let Some(gcp) = state.config.gcp.as_ref() {
+        if let Some(health_alias) = gcp
+            .path_health
+            .as_deref()
+            .filter(|alias| !mounted.contains(alias))
+        {
+            // A health alias naming an already-registered path is skipped:
+            // upstream registers a duplicate httplib handler that never
+            // matches, so the observable behavior (the existing route
+            // answers) is the same.
+            app = app.route(health_alias, get(routes::health_check));
+        }
+        // Startup refused a colliding AIP_PREDICT_ROUTE before the model
+        // load (`gcp_compat::check_predict_collision`); a collision here
+        // would panic in axum's route registration.
+        app = app.route(&gcp.path_predict, post(crate::server::gcp_compat::predict));
+    }
 
     app
-        // Health check
-        .route("/health", get(routes::health_check))
-        .route("/v1/health", get(routes::health_check))
-        .route("/", get(routes::health_check))
 }
 
 #[cfg(test)]

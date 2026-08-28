@@ -258,12 +258,14 @@
       "source": "tools/server/server-http.cpp",
       "condition": "gcp-compat (AIP_MODE=PREDICTION; registered only when AIP_HEALTH_ROUTE is set)",
       "discovery": "source-gcp-compat",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1456,
-      "test": null,
-      "notes": null,
+      "test": "src/server/gcp_compat_tests.rs::health_alias_mounts_at_a_custom_path_and_skips_collisions",
+      "notes": "Implemented (#1456): with AIP_MODE=PREDICTION and AIP_HEALTH_ROUTE set, the value (leading slash ensured) is mounted as a GET alias of the health handler. As in b10621 the alias is not in the public endpoint set, so with API keys configured it requires a key. An alias naming an already-registered path is skipped: upstream registers a duplicate httplib handler that never matches, so the observable behavior (the existing route answers) is identical.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "GET ${AIP_HEALTH_ROUTE}"
+      }
     },
     {
       "kind": "route",
@@ -318,12 +320,14 @@
       "source": "tools/server/server-http.cpp",
       "condition": "gcp-compat (AIP_MODE=PREDICTION; path from AIP_PREDICT_ROUTE)",
       "discovery": "source-gcp-compat",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1456,
-      "test": null,
-      "notes": null,
+      "test": "src/server/gcp_compat_tests.rs::predict_fans_out_and_returns_predictions_in_request_order",
+      "notes": "Implemented (#1456): with AIP_MODE=PREDICTION, the predict route (default /predict, leading slash ensured, startup refused on collision with a registered route) fans the instances array (cap 128, upstream's envelope 400s verbatim) out over the camelCase alias of every registered route, built from the same route inventory the router mounts, with direct registered paths accepted too. @requestFormat is stripped, a client stream field is forced false with a warning, per-instance failures become an error object in that slot, and predictions return in request order. Each instance dispatches through the composed router in-process, so authentication, validation, and queue admission apply exactly as on a direct call; AIP_HTTP_PORT (default 8080) overrides --port with upstream's warning. Two internals differ without changing any response: instance concurrency is bounded to 8 at a time (upstream launches all at once, order is preserved either way), and alias collisions such as completions (/completions vs /v1/completions) resolve deterministically to the /v1 route in registration order, where upstream's iteration over an unordered map leaves its winner unspecified.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "POST ${AIP_PREDICT_ROUTE:-/predict}"
+      }
     },
     {
       "kind": "route",

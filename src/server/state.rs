@@ -472,6 +472,10 @@ pub struct AppState {
     /// Unix timestamp of server start, reported as b10621's
     /// `Process-Start-Time-Unix` response header on `GET /metrics`.
     pub started_at_unix: i64,
+    /// The composed router the socket serves, set by `create_app` when the
+    /// Vertex AI predict adapter is enabled (#1456), so per-instance
+    /// dispatch runs through the same middleware stack in-process.
+    pub(crate) gcp_dispatch: Arc<std::sync::OnceLock<axum::Router>>,
 }
 
 /// Cumulative counter snapshot taken at the previous `/metrics` scrape.
@@ -549,6 +553,7 @@ impl AppState {
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
             started_at_unix: chrono::Utc::now().timestamp(),
+            gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -593,6 +598,7 @@ impl AppState {
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
             started_at_unix: chrono::Utc::now().timestamp(),
+            gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
