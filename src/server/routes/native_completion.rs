@@ -146,6 +146,9 @@ pub(crate) async fn serve_native_completion(
     if let Some(response) = reject_unsupported_native_fields(&request) {
         return response;
     }
+    if let Some(response) = reject_non_inert_lora_field(&state, &request) {
+        return response;
+    }
 
     // b10621 declares `sse_ping_interval` with hard limits (-1, INT32_MAX) at
     // schema-parse time, so an out-of-domain value is rejected whether or not
@@ -614,6 +617,49 @@ fn native_samplers_is_the_default_order(value: &serde_json::Value) -> bool {
 /// inert value and refused otherwise, with a message naming the field and what
 /// to use instead, so a `llama-server` request that depends on one fails
 /// loudly here instead of returning a plausible-looking wrong answer.
+/// Refuse a per-request `lora` value that asks for a different adapter
+/// configuration than the one fused at load (#1439).
+///
+/// b10621 swaps adapter scales per request; mlxcel's adapters are fused into
+/// the weights, so the only honest answers are accepting a value that
+/// resolves to the configuration in force (inert, upstream's own semantics
+/// for that value) and refusing anything else with a diagnostic, instead of
+/// serving the request on weights the client did not ask for. The resolution
+/// rule is upstream's: listed ids set their scale, unlisted adapters drop to
+/// 0.0, unknown ids are ignored.
+fn reject_non_inert_lora_field(
+    state: &AppState,
+    request: &NativeCompletionRequest,
+) -> Option<Response> {
+    let value = request.lora.as_ref()?;
+    let Some(entries) = value.as_array() else {
+        return Some(
+            ErrorResponse::new(
+                "lora must be an array of {id, scale} objects",
+                "invalid_request_error",
+            )
+            .into_response(),
+        );
+    };
+    let current: Vec<f32> = state
+        .config
+        .lora_adapters
+        .iter()
+        .map(|spec| spec.reported_scale())
+        .collect();
+    let requested = super::lora_adapters::requested_scales(entries, current.len());
+    if requested == current {
+        return None;
+    }
+    Some(
+        ErrorResponse::new(
+            "per-request LoRA adapter selection is not supported: mlxcel fuses adapters into the model weights at load time, so this request's `lora` value cannot be served. Send the server's current adapter configuration (GET /lora-adapters), or restart with --lora / --lora-scaled for a different one",
+            "invalid_request_error",
+        )
+        .into_response(),
+    )
+}
+
 fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option<Response> {
     let refuse = |message: String| -> Option<Response> {
         Some(ErrorResponse::new(message, "invalid_request_error").into_response())

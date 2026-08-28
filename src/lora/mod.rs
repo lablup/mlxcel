@@ -22,8 +22,11 @@
 
 mod config;
 mod loader;
+pub mod multi;
 
 pub use config::{AdapterConfig, LoRAParameters};
 pub use loader::{
-    apply_lora_adapters, apply_stage_lora_adapter, fuse_lora_weights, fuse_lora_weights_into,
+    apply_lora_adapters, apply_lora_adapters_scaled, apply_stage_lora_adapter, fuse_lora_weights,
+    fuse_lora_weights_into,
 };
+pub use multi::LoraAdapterSpec;

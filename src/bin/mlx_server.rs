@@ -382,9 +382,17 @@ struct ServerArgs {
     )]
     alias: Option<String>,
 
-    /// Path to LoRA adapter directory
-    #[arg(long = "lora", visible_alias = "adapter", value_name = "PATH")]
-    lora: Option<PathBuf>,
+    /// Path to LoRA adapter (use comma-separated values to load multiple adapters)
+    #[arg(long = "lora", visible_alias = "adapter", value_name = "FNAME")]
+    lora: Option<String>,
+
+    /// Path to LoRA adapter with user defined scaling (format: FNAME:SCALE,...) note: use comma-separated values
+    #[arg(long = "lora-scaled", value_name = "FNAME:SCALE,...")]
+    lora_scaled: Option<String>,
+
+    /// Load LoRA adapters without applying them (apply later via POST /lora-adapters)
+    #[arg(long = "lora-init-without-apply")]
+    lora_init_without_apply: bool,
 
     /// Host address to bind to (or Unix socket path when --port 0)
     #[arg(long, env = "LLAMA_ARG_HOST", default_value = "127.0.0.1")]
@@ -1335,11 +1343,6 @@ struct ServerArgs {
     #[arg(long = "decode-storage-backend", value_name = "BACKEND")]
     decode_storage_backend: Option<mlxcel::server::DecodeStorageBackend>,
 
-    // llama-server compatibility arguments (accepted but ignored).
-    /// Accepted for llama-server CLI compatibility (ignored: mlxcel has no web UI)
-    #[arg(long, hide = true)]
-    _no_webui: bool,
-
     /// Maximum number of cached post-projection image features per loaded VLM.
     ///
     /// Multi-turn conversations that revisit the same image reuse cached
@@ -2203,6 +2206,18 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         && args.hf_repo.is_none()
         && args.model_url.is_none()
         && args.docker_repo.is_none();
+    // The #1438 migration guard, raised BEFORE model resolution so the old
+    // store-root combination fails in milliseconds instead of after a
+    // multi-gigabyte download. `into_startup_config` re-checks it for
+    // programmatic callers.
+    if args.models_dir.is_some() && !router_mode {
+        anyhow::bail!(
+            "--models-dir now selects llama-server b10621 router-mode model discovery and cannot \
+             be combined with a model argument. To set the mlxcel model-store root (its old \
+             meaning), use --model-store-root <PATH> or the MLXCEL_MODELS_DIR environment \
+             variable; to start the router, drop the model argument"
+        );
+    }
     let model_path = if router_mode {
         PathBuf::new()
     } else {
@@ -2280,7 +2295,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     Ok(ServerStartupInput {
         chat_compat,
         model_path,
-        adapter_path: args.lora,
+        adapter_path: None,
+        lora: args.lora.clone(),
+        lora_scaled: args.lora_scaled.clone(),
+        lora_init_without_apply: args.lora_init_without_apply,
         model_alias: args.alias,
         host: args.host,
         port: args.port,
@@ -2725,16 +2743,36 @@ mod tests {
         let expected = make_complete_snapshot(&models_root, repo_id);
         let models_root_arg = models_root.to_string_lossy().to_string();
 
+        // #1438: the store-root override moved to --model-store-root;
+        // --models-dir now selects router mode.
         let args = parse_server_args(&[
             "mlxcel-server",
             "-m",
             repo_id,
-            "--models-dir",
+            "--model-store-root",
             &models_root_arg,
         ]);
         let input = build_startup_input(args).expect("repo-id should resolve from override store");
 
         assert_eq!(input.model_path, expected);
+    }
+
+    #[test]
+    fn models_dir_with_a_model_argument_fails_with_the_migration_diagnostic() {
+        // #1438: the old `--models-dir <store>` + `-m` combination must fail
+        // loudly with the replacement named, never silently pick a meaning.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_arg = tmp.path().to_string_lossy().to_string();
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--models-dir",
+            &dir_arg,
+        ]);
+        let err = build_startup_input(args)
+            .expect_err("the migration guard must refuse the combination before resolution");
+        assert!(err.to_string().contains("--model-store-root"), "{err}");
     }
 
     #[test]
@@ -2846,11 +2884,13 @@ mod tests {
         let local_model_arg = local_model.to_string_lossy().to_string();
         let decoy_arg = decoy_models_root.to_string_lossy().to_string();
 
+        // #1438: --models-dir is router mode now; the store-root decoy uses
+        // the replacement spelling and must still not affect a local path.
         let args = parse_server_args(&[
             "mlxcel-server",
             "-m",
             &local_model_arg,
-            "--models-dir",
+            "--model-store-root",
             &decoy_arg,
         ]);
         let input = build_startup_input(args).expect("existing path should be accepted");
@@ -2999,7 +3039,7 @@ mod tests {
             primary.lora, aliased.lora,
             "--lora and its --adapter alias must resolve to the same adapter path"
         );
-        assert_eq!(primary.lora, Some(PathBuf::from("adapters/foo")));
+        assert_eq!(primary.lora.as_deref(), Some("adapters/foo"));
     }
 
     #[test]

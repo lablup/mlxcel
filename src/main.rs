@@ -1141,9 +1141,17 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "REV")]
     revision: Option<String>,
 
-    /// Path to LoRA adapter directory
-    #[arg(long, visible_alias = "lora", value_name = "PATH")]
-    adapter: Option<PathBuf>,
+    /// Path to LoRA adapter (use comma-separated values to load multiple adapters)
+    #[arg(long, visible_alias = "lora", value_name = "FNAME")]
+    adapter: Option<String>,
+
+    /// Path to LoRA adapter with user defined scaling (format: FNAME:SCALE,...) note: use comma-separated values
+    #[arg(long = "lora-scaled", value_name = "FNAME:SCALE,...")]
+    lora_scaled: Option<String>,
+
+    /// Load LoRA adapters without applying them (apply later via POST /lora-adapters)
+    #[arg(long = "lora-init-without-apply")]
+    lora_init_without_apply: bool,
 
     /// Model alias (shown in API responses instead of directory name)
     #[arg(short = 'a', long, env = "LLAMA_ARG_ALIAS", value_name = "NAME")]
@@ -2013,11 +2021,6 @@ pub(crate) struct ServeArgs {
         value_name = "MODE"
     )]
     tp_lm_head_mode: String,
-
-    // llama-server compatibility arguments (accepted but ignored).
-    /// Accepted for llama-server CLI compatibility (ignored, mlxcel has no web UI)
-    #[arg(long, hide = true)]
-    _no_webui: bool,
 
     /// Decode storage backend for continuous batching.
     ///

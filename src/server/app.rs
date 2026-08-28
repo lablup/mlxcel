@@ -389,6 +389,12 @@ pub(crate) fn route_inventory(_config: &crate::server::ServerConfig) -> Vec<Rout
         post(routes::slot_action),
     ));
     inventory.push(reg("/metrics", Method::GET, get(routes::metrics)));
+    // b10621 LoRA adapter inventory and hot-swap surface (issue #1439).
+    inventory.push(reg(
+        "/lora-adapters",
+        Method::POST,
+        get(routes::get_lora_adapters).post(routes::post_lora_adapters),
+    ));
 
     // Health check
     inventory.push(reg("/health", Method::GET, get(routes::health_check)));

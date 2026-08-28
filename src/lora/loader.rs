@@ -440,13 +440,25 @@ fn compute_lora_delta(
 ///
 /// A new HashMap containing the fused weights
 pub fn apply_lora_adapters(base_weights: &WeightMap, adapter_path: &Path) -> Result<WeightMap> {
+    apply_lora_adapters_scaled(base_weights, adapter_path, 1.0)
+}
+
+/// [`apply_lora_adapters`] with a b10621 `--lora-scaled` user scale
+/// multiplied into the adapter's own `alpha / r`, exactly as upstream
+/// multiplies its per-adapter scale into the applied delta (issue #1439).
+pub fn apply_lora_adapters_scaled(
+    base_weights: &WeightMap,
+    adapter_path: &Path,
+    user_scale: f32,
+) -> Result<WeightMap> {
     // Load adapter configuration
     let config = AdapterConfig::load(adapter_path)?;
 
     tracing::info!(
-        "Loading LoRA adapter: rank={}, scale={:.2}, type={:?}",
+        "Loading LoRA adapter: rank={}, scale={:.2}, user_scale={:.2}, type={:?}",
         config.rank(),
         config.effective_scale(),
+        user_scale,
         config.fine_tune_type
     );
 
@@ -463,7 +475,11 @@ pub fn apply_lora_adapters(base_weights: &WeightMap, adapter_path: &Path) -> Res
     tracing::info!("Loaded {} adapter weight tensors", adapter_weights.len());
 
     // Fuse weights
-    let fused = fuse_lora_weights(base_weights, &adapter_weights, config.effective_scale())?;
+    let fused = fuse_lora_weights(
+        base_weights,
+        &adapter_weights,
+        config.effective_scale() * user_scale,
+    )?;
 
     // Count how many weights were modified
     let modified_count = adapter_weights

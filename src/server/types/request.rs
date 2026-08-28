@@ -1214,6 +1214,14 @@ pub struct NativeCompletionRequest {
     /// (#1436). Held as a raw value because both shapes must be inspected.
     #[serde(default)]
     pub samplers: Option<serde_json::Value>,
+    /// b10621 `lora`: a per-request adapter configuration, an array of
+    /// `{id, scale}` where unlisted adapters drop to scale 0.0 (#1439).
+    /// mlxcel fuses adapters into the weights at load time, so only a value
+    /// resolving to the configuration already in force is accepted as inert;
+    /// anything else is refused with a diagnostic rather than silently served
+    /// on the wrong weights. Held raw because the inert check inspects it.
+    #[serde(default)]
+    pub lora: Option<serde_json::Value>,
     // b10621 per-request speculative fields (#1433). Upstream registers
     // these seven FLAT dotted top-level keys behind a schema block that is
     // compiled out (`#if 0` in server-schema.cpp), so b10621 itself accepts

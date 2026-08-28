@@ -74,6 +74,9 @@ pub struct ServerStartupConfig {
     // Model
     pub model_path: PathBuf,
     pub adapter_path: Option<PathBuf>,
+    /// b10621 multi-adapter LoRA specification (#1439); empty when
+    /// `adapter_path` (the trivial single-adapter case) serves instead.
+    pub lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
     /// Served model id: the first `--alias` entry, or `None`.
     pub model_alias: Option<String>,
     /// Every `--alias` entry, primary first (issue #1434). Empty when the flag
@@ -512,6 +515,7 @@ impl Default for ServerStartupConfig {
             reasoning_budget_message: None,
             model_path: PathBuf::new(),
             adapter_path: None,
+            lora_adapters: Vec::new(),
             model_alias: None,
             model_aliases: Vec::new(),
             host: "127.0.0.1".to_string(),
@@ -1309,6 +1313,7 @@ pub(super) fn build_server_config(
             .as_deref()
             .map(crate::server::model_source::parse_model_aliases)
             .unwrap_or_default(),
+        lora_adapters: startup.lora_adapters.clone(),
         spm_infill: startup.spm_infill,
         embd_normalize: startup.embd_normalize,
         embedding_serving_mode: startup.embedding_serving_mode,

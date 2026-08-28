@@ -51,6 +51,10 @@ use super::{GenerationResult, ModelRequest, StopKind};
 /// Configuration for the scheduler, passed from `ModelProvider` to the
 /// worker thread.
 pub(crate) struct WorkerSchedulerConfig {
+    /// b10621 multi-adapter LoRA specification (#1439); when non-empty the
+    /// worker loads through `load_model_with_adapter_specs` instead of the
+    /// single `adapter_path`.
+    pub lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
     pub max_batch_size: usize,
     pub max_queue_depth: usize,
     pub prefill_chunk_size: usize,
@@ -250,6 +254,12 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     adapter_path.as_deref(),
                     &sched_config.tensor_parallel,
                 )
+            } else if !sched_config.lora_adapters.is_empty() {
+                tracing::info!(
+                    "Loading {} LoRA adapter(s) from --lora/--lora-scaled",
+                    sched_config.lora_adapters.len()
+                );
+                backend.load_model_with_adapter_specs(&model_path, &sched_config.lora_adapters)
             } else if let Some(adapter) = adapter_path {
                 tracing::info!("Loading LoRA adapter from {:?}", adapter);
                 backend.load_model_with_adapter(&model_path, &adapter)

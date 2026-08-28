@@ -200,6 +200,12 @@ Concretely, on both server binaries: `--no-ui`, `--no-webui`, `--no-agent`, `--n
 
 Single-model `GET /models` / `GET /v1/models` also moved to b10621's shape: the OpenAI `data` entry carries `aliases` (the full `--alias` list), `tags`, `owned_by: "llamacpp"` (it used to say `"user"`), and a `meta` block of checkpoint facts derived from `config.json` and the safetensors headers (`n_params` unpacks quantized `U32` payloads by their declared bit width), next to b10621's Ollama-compatible `models` block whose `details.format` honestly reads `"safetensors"`.
 
+### Multi-adapter LoRA and the fused-weights boundary (#1439)
+
+`--lora` takes comma-separated adapter paths (scale 1.0 each, the mlxcel-native `--adapter` spelling stays an alias) and `--lora-scaled` takes comma-separated `FNAME:SCALE` pairs; adapters fuse into the base weights at model load, in listed order, with the user scale multiplied into each adapter's own `alpha / r`. A non-numeric, NaN, or infinite scale, a missing adapter directory, and combining multi-adapter or scaled loading with tensor/pipeline parallelism all fail startup. `GET /lora-adapters` reports every adapter in b10621's entry shape (`id`, `path`, `scale`, `task_name`, `prompt_prefix`), with `--lora-init-without-apply` adapters validated and reported at scale 0.0.
+
+The fused-weights boundary is the recorded divergence: b10621 keeps adapters as runtime-swappable layers, mlxcel bakes them into the weights. `POST /lora-adapters` therefore acknowledges a request that resolves (by upstream's own rule: listed ids set scales, unlisted drop to 0.0, unknown ids are ignored) to the configuration already in force, and refuses any actual scale change with a diagnostic naming `--lora-scaled` and a restart. The per-request `lora` field follows the same rule: the inert value is served, anything else is refused with a 400 rather than silently answered on weights the client did not ask for.
+
 ## Sharding
 
 The manifest is sharded by area so that the concurrent implementation chains of epic #1431 edit disjoint files. Ownership is machine-readable, not prose: `pin.json`'s `shards` map records, per shard, the set of implementation issue numbers allowed to own entries in it (`shards["authentication"].owners == [1437]`, for example), and `scripts/ci/check_llama_compat_manifest.py` fails an entry whose `issue` is not a member of its own shard's owner set. That is what stops two concurrent chains from editing the same file: the file, not just the reviewer, rejects the second chain's entry.

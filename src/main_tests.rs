@@ -869,10 +869,7 @@ fn serve_adapter_and_lora_aliases_resolve_identically() {
         primary_args.adapter, aliased_args.adapter,
         "--adapter and its --lora alias must resolve to the same adapter path"
     );
-    assert_eq!(
-        primary_args.adapter,
-        Some(std::path::PathBuf::from("lora/foo"))
-    );
+    assert_eq!(primary_args.adapter, Some("lora/foo".to_string()));
 }
 
 #[test]
