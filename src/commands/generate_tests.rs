@@ -562,6 +562,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             top_p: 1.0,
             top_k: 0,
             min_p: 0.0,
+            top_n_sigma: 0.0,
             repetition_penalty: 1.0,
             dry_multiplier: 0.0,
             dry_base: 1.75,

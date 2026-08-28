@@ -655,6 +655,18 @@ pub(crate) struct SamplingOptions {
     #[arg(long, default_value_t = 0.0, value_name = "FLOAT")]
     pub(crate) min_p: f32,
 
+    /// Top-n-sigma logit filter: keep only tokens whose raw logit lies within
+    /// N standard deviations of the row maximum (0.0 = disabled). Stable at
+    /// high temperature; invariant to the temperature value itself.
+    #[arg(
+        long = "top-n-sigma",
+        alias = "top-nsigma",
+        default_value_t = 0.0,
+        value_name = "FLOAT",
+        value_parser = parse_non_negative_f32
+    )]
+    pub(crate) top_n_sigma: f32,
+
     /// Repetition penalty multiplier
     #[arg(long, default_value_t = 1.0, value_name = "FLOAT")]
     pub(crate) repetition_penalty: f32,
@@ -682,6 +694,19 @@ pub(crate) struct SamplingOptions {
     /// (e.g. DiffusionGemma). Unset = nondeterministic.
     #[arg(long, value_name = "N")]
     pub(crate) seed: Option<u64>,
+}
+
+/// Clap value parser: a finite f32 that is zero or positive.
+///
+/// Used by: `--top-n-sigma` (reject a negative or non-finite value at parse
+/// time instead of masking the whole vocabulary at the first decode step).
+fn parse_non_negative_f32(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if v.is_finite() && v >= 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("must be >= 0.0, got {v}"))
+    }
 }
 
 /// Clap value parser: an f32 in the closed interval [0, 1].

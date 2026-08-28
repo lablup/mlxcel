@@ -1675,6 +1675,36 @@ fn sampling_config_eq_distinguishes_top_k_top_p_min_p() {
 }
 
 #[test]
+fn sampling_config_eq_distinguishes_top_n_sigma() {
+    let a = SamplingConfig::default();
+    let b = SamplingConfig {
+        top_n_sigma: 1.0,
+        ..SamplingConfig::default()
+    };
+    assert!(
+        !super::speculative_burst::sampling_config_eq(&a, &b),
+        "a top_n_sigma difference must keep the rows out of one batched \
+         window: the window samples every row with one shared config"
+    );
+}
+
+#[test]
+fn sampling_config_eq_ignores_inert_greedy_top_n_sigma() {
+    // Greedy rows sample identically regardless of top_n_sigma (the filter
+    // is skipped), so the window gate compares the EFFECTIVE value and keeps
+    // them together.
+    let a = SamplingConfig::greedy();
+    let b = SamplingConfig {
+        top_n_sigma: 1.0,
+        ..SamplingConfig::greedy()
+    };
+    assert!(
+        super::speculative_burst::sampling_config_eq(&a, &b),
+        "greedy rows differing only in an inert top_n_sigma must share a batched window"
+    );
+}
+
+#[test]
 fn sampling_config_eq_distinguishes_stop_token_ids() {
     let a = SamplingConfig::default();
     let b = SamplingConfig {

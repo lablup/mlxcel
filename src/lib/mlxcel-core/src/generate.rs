@@ -877,6 +877,16 @@ pub struct SamplingConfig {
     /// merged end-of-sequence set. Resolved once per request at enqueue time
     /// (empty by default, and unused while `xtc_probability == 0.0`).
     pub xtc_special_token_ids: Vec<i32>,
+    /// Top-n-sigma logit filter (`0.0` = disabled, the default). Keeps only
+    /// the tokens whose raw logit lies within `top_n_sigma` standard
+    /// deviations of the row maximum (`logit >= max - n * std`, statistics
+    /// over the finite entries of the vocabulary row) and masks the rest to
+    /// `-inf`. Thresholds logits rather than probabilities, so it is
+    /// invariant to temperature and to any per-row additive shift. `0.0` is a
+    /// zero-overhead no-op that preserves the bit-exact baseline; the greedy
+    /// path (`temperature == 0.0 || top_k == 1`) skips the filter entirely.
+    /// See [`crate::sampling::apply_row_filters`].
+    pub top_n_sigma: f32,
 }
 
 impl Default for SamplingConfig {
@@ -901,6 +911,7 @@ impl Default for SamplingConfig {
             xtc_probability: 0.0,
             xtc_threshold: 0.1,
             xtc_special_token_ids: Vec::new(),
+            top_n_sigma: 0.0,
         }
     }
 }
@@ -928,6 +939,7 @@ impl SamplingConfig {
             xtc_probability: 0.0,
             xtc_threshold: 0.1,
             xtc_special_token_ids: Vec::new(),
+            top_n_sigma: 0.0,
         }
     }
 
@@ -936,6 +948,27 @@ impl SamplingConfig {
         Self {
             temperature: temp,
             ..Default::default()
+        }
+    }
+
+    /// The top-n-sigma value the sampler will actually apply: `0.0`
+    /// (disabled) when the config is greedy (`temperature == 0.0 ||
+    /// top_k == 1`), or when the raw field is non-positive or non-finite
+    /// (which covers the b10621 `-1.0` "disabled" sentinel). Batch-uniformity
+    /// gates ([`crate::sampling::FusedSampleParams::from_config`], the
+    /// speculative-window `sampling_config_eq`) compare THIS value rather
+    /// than the raw field, so two rows whose sampled outputs are necessarily
+    /// identical (e.g. greedy rows differing only in an inert `top_n_sigma`)
+    /// are not needlessly split off the fused batch, pipelined-lookahead, or
+    /// batched-speculative paths.
+    pub fn effective_top_n_sigma(&self) -> f32 {
+        if self.temperature == 0.0 || self.top_k == 1 {
+            return 0.0;
+        }
+        if self.top_n_sigma > 0.0 && self.top_n_sigma.is_finite() {
+            self.top_n_sigma
+        } else {
+            0.0
         }
     }
 

@@ -74,6 +74,7 @@ fn test_sampling_state() -> SerializableSamplingState {
         dry_sequence_breakers: vec![],
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        top_n_sigma: 0.0,
         stop_token_ids: vec![2],
     }
 }

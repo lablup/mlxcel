@@ -652,6 +652,11 @@ pub struct SamplingParams {
     /// XTC probability threshold
     pub xtc_threshold: Option<f32>,
 
+    /// Top-n-sigma logit filter (`0.0` = disabled). Keeps only tokens whose
+    /// raw logit lies within `top_n_sigma` standard deviations of the row
+    /// maximum. Must be finite and `>= 0.0`; validated at the request layer.
+    pub top_n_sigma: Option<f32>,
+
     // OpenAI-compatible frequency/presence penalties
     /// Frequency penalty (0.0 = disabled) - penalizes based on frequency
     pub frequency_penalty: Option<f32>,

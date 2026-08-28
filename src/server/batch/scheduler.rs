@@ -44,7 +44,7 @@ use mlxcel_core::generation_policy::{
 };
 use mlxcel_core::hardware;
 use mlxcel_core::sampling::{
-    FusedSampleParams, TokenBiasMap, batched_fused_sample, compute_logprobs,
+    FusedSampleParams, TokenBiasMap, apply_row_filters, batched_fused_sample, compute_logprobs,
     row_supports_fused_batch, sample_token_optimized, sample_token_optimized_with_state,
 };
 use mlxcel_core::streams::{
@@ -7324,6 +7324,11 @@ impl BatchScheduler {
     ) -> Option<DecodeLookahead> {
         let logits = self.lookahead_forward(seq_ids, input)?;
         let last_logits = mlxcel_core::slice_last_logits(&logits);
+        // Same pre-fused row filters (top-n-sigma) as `batched_fused_sample`,
+        // so the pipelined lookahead samples from the identical distribution
+        // as the synchronous fused path it accelerates. A no-op adding no
+        // graph nodes while every filter is disabled.
+        let last_logits = apply_row_filters(last_logits, params);
         let tokens = mlxcel_core::fused_sample(
             &last_logits,
             params.temperature,

@@ -245,6 +245,7 @@ pub fn sampling_to_serializable(config: &SamplingConfig) -> SerializableSampling
         dry_sequence_breakers: config.dry_sequence_breakers.clone(),
         frequency_penalty: config.frequency_penalty,
         presence_penalty: config.presence_penalty,
+        top_n_sigma: config.top_n_sigma,
         stop_token_ids: config.stop_token_ids.clone(),
     }
 }
@@ -268,6 +269,7 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         dry_sequence_breakers: state.dry_sequence_breakers.clone(),
         frequency_penalty: state.frequency_penalty,
         presence_penalty: state.presence_penalty,
+        top_n_sigma: state.top_n_sigma,
         stop_token_ids: state.stop_token_ids.clone(),
         token_bias: Default::default(),
         // Loop detection is not yet serialized across the disaggregated

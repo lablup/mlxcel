@@ -218,6 +218,7 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     config.presence_penalty = 0.3;
     config.stop_token_ids = vec![13, 14];
     config.dry_sequence_breakers = vec![198];
+    config.top_n_sigma = 1.5;
 
     let restored = sampling_from_serializable(&sampling_to_serializable(&config));
 
@@ -231,4 +232,22 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     assert_eq!(restored.presence_penalty, 0.3);
     assert_eq!(restored.stop_token_ids, vec![13, 14]);
     assert_eq!(restored.dry_sequence_breakers, vec![198]);
+    assert_eq!(restored.top_n_sigma, 1.5);
+}
+
+#[test]
+fn sampling_state_from_an_older_peer_without_top_n_sigma_defaults_to_disabled() {
+    // A frame serialized before #1375 carries no `top_n_sigma`; the
+    // `#[serde(default)]` on the wire struct must resolve it to the disabled
+    // baseline instead of failing the handoff.
+    let mut value = serde_json::to_value(sampling_to_serializable(&SamplingConfig::greedy()))
+        .expect("serialize sampling state");
+    value
+        .as_object_mut()
+        .expect("sampling state serializes as an object")
+        .remove("top_n_sigma");
+    let state: SerializableSamplingState =
+        serde_json::from_value(value).expect("deserialize legacy sampling state");
+    assert_eq!(state.top_n_sigma, 0.0);
+    assert_eq!(sampling_from_serializable(&state).top_n_sigma, 0.0);
 }

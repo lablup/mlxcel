@@ -275,6 +275,11 @@ pub struct SerializableSamplingState {
     pub dry_sequence_breakers: Vec<i32>,
     pub frequency_penalty: f32,
     pub presence_penalty: f32,
+    /// Top-n-sigma logit filter (#1375). `#[serde(default)]` so a frame
+    /// serialized by an older prefill node (without the field) deserializes
+    /// to the disabled baseline instead of failing the handoff.
+    #[serde(default)]
+    pub top_n_sigma: f32,
     pub stop_token_ids: Vec<i32>,
 }
 
