@@ -236,6 +236,18 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         && args.hf_repo.is_none()
         && args.model_url.is_none()
         && args.docker_repo.is_none();
+    // The #1438 migration guard, raised BEFORE model resolution so the old
+    // store-root combination fails in milliseconds instead of after a
+    // multi-gigabyte download. `into_startup_config` re-checks it for
+    // programmatic callers.
+    if args.models_dir.is_some() && !router_mode {
+        anyhow::bail!(
+            "--models-dir now selects llama-server b10621 router-mode model discovery and cannot \
+             be combined with a model argument. To set the mlxcel model-store root (its old \
+             meaning), use --model-store-root <PATH> or the MLXCEL_MODELS_DIR environment \
+             variable; to start the router, drop the model argument"
+        );
+    }
     if router_mode {
         return start_server(build_startup_input(args)?.into_startup_config()?).await;
     }
@@ -527,7 +539,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
                  <PATH_OR_REPO_ID>, or pass --hf-repo <owner>/<name>)"
             ),
         },
-        adapter_path: args.adapter,
+        adapter_path: None,
+        lora: args.adapter.clone(),
+        lora_scaled: args.lora_scaled.clone(),
+        lora_init_without_apply: args.lora_init_without_apply,
         model_alias: args.alias,
         host: args.host,
         port: args.port,

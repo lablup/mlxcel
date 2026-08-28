@@ -225,6 +225,29 @@ impl Backend {
         }
     }
 
+    /// Load a model with a b10621 multi-adapter LoRA specification
+    /// (issue #1439). Only the MLX backend fuses adapters at load; the
+    /// other backends report the limitation instead of silently serving
+    /// base weights.
+    #[inline]
+    pub fn load_model_with_adapter_specs(
+        &self,
+        model_path: &Path,
+        specs: &[crate::lora::LoraAdapterSpec],
+    ) -> Result<(LoadedModel, MlxcelTokenizer)> {
+        match self {
+            Backend::Mlx(_) => crate::loading::load_model_with_adapter_specs(model_path, specs),
+            #[cfg(feature = "experimental-backend")]
+            Backend::Experimental(_) => {
+                anyhow::bail!("multi-adapter LoRA is not supported on the experimental backend")
+            }
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(_) => {
+                anyhow::bail!("multi-adapter LoRA is not supported on the XLA backend")
+            }
+        }
+    }
+
     /// Load a model under a tensor-parallel shard configuration through the
     /// active backend.
     #[inline]

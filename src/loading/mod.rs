@@ -738,6 +738,44 @@ pub fn load_model_with_adapter(
     Ok((model, tokenizer))
 }
 
+/// Load a model with a b10621 multi-adapter LoRA specification fused in
+/// (issue #1439).
+///
+/// Adapters fuse one after another in specification order (`--lora` entries
+/// first, then `--lora-scaled` entries, each list in its written order); the
+/// deltas add, so the result is order-independent, but a failure names the
+/// adapter that caused it deterministically. A spec with `apply == false`
+/// (`--lora-init-without-apply`) is validated by loading its configuration
+/// and skipped at fusion, which is b10621's scale-0.0 initial state.
+pub fn load_model_with_adapter_specs(
+    model_path: &Path,
+    specs: &[lora::LoraAdapterSpec],
+) -> Result<(LoadedModel, MlxcelTokenizer)> {
+    let model_path = resolve_model_dir(model_path);
+    let model_path = model_path.as_path();
+    maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
+    let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    for spec in specs {
+        if !spec.apply {
+            // Validate without applying: the configuration must parse so a
+            // broken adapter still fails at startup, matching the "load"
+            // half of upstream's --lora-init-without-apply.
+            let _ = lora::AdapterConfig::load(&spec.path).map_err(|e| {
+                anyhow::anyhow!("LoRA adapter {} failed to load: {e}", spec.path.display())
+            })?;
+            continue;
+        }
+        weights =
+            lora::apply_lora_adapters_scaled(&weights, &spec.path, spec.scale).map_err(|e| {
+                anyhow::anyhow!("LoRA adapter {} failed to fuse: {e}", spec.path.display())
+            })?;
+    }
+    let model = load_model_from_weights(model_path, &mut weights)?;
+    let tokenizer = tokenizer::load_tokenizer(model_path)?;
+    Ok((model, tokenizer))
+}
+
 /// Build a model from pre-loaded weights (used by adapter loading)
 fn load_model_from_weights(model_path: &Path, weights: &mut WeightMap) -> Result<LoadedModel> {
     let model_type = get_model_type(model_path)?;

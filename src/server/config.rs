@@ -423,6 +423,13 @@ pub struct ServerConfig {
     /// `--tags`: informational model tags reported in the `/v1/models` model
     /// object; never used for routing, exactly b10621's contract (#1438).
     pub model_tags: Vec<String>,
+    /// The b10621 multi-adapter LoRA specification (#1439): what `--lora` /
+    /// `--lora-scaled` / `--lora-init-without-apply` resolved to, in listed
+    /// order. Fused at model load; `GET /lora-adapters` reports it and the
+    /// per-request `lora` field is validated against it. Empty when the
+    /// legacy single-adapter `adapter_path` plumbing (one adapter, scale 1,
+    /// applied) serves the request instead.
+    pub lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
     /// `--embd-normalize`: the server-wide embedding normalization, `None`
     /// when the operator did not choose one and the checkpoint's own
     /// `normalize` flag decides (#1452).
@@ -784,6 +791,7 @@ impl Default for ServerConfig {
             enable_props_endpoint: false,
             slot_save_path: None,
             model_tags: Vec::new(),
+            lora_adapters: Vec::new(),
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: EmbeddingServingMode::Any,

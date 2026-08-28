@@ -17,10 +17,10 @@
       "default": null,
       "description": "path to LoRA adapter (use comma-separated values to load multiple adapters)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1439,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Single-adapter --lora works; comma-separated multi-adapter loading and scaling are owned by #1439.",
+      "test": "src/lora/multi.rs",
+      "notes": "Comma-separated adapter paths load at scale 1.0 in listed order and fuse into the base weights at model load (#1439); fusion adds deltas, so multi-adapter results are order-independent while logs and failure attribution stay deterministic. The mlxcel-native --adapter spelling remains an alias. Runtime swappability is the POST /lora-adapters entry's business.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -45,10 +45,19 @@
       "discovery": "help-entry-head",
       "state": "deferred",
       "issue": 1439,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/lora_adapters_tests.rs",
+      "notes": "Accepted on both binaries: adapters are validated at load (a broken adapter still fails startup) and GET /lora-adapters reports them at scale 0.0, upstream's initial state. Deferred because the flag's purpose, applying the adapters later through POST /lora-adapters, needs runtime (unfused) LoRA application that mlxcel does not have (#1439).",
+      "divergence": [
+        "The loaded-but-unapplied adapters can never be applied afterwards: POST /lora-adapters refuses the scale change where b10621 activates them at runtime (#1439)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--lora-init-without-apply"
+        ],
+        "defaults": [
+          "false"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -65,12 +74,16 @@
       "default": null,
       "description": "path to LoRA adapter with user defined scaling (format: FNAME:SCALE,...) note: use comma-separated values",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1439,
-      "test": null,
-      "notes": null,
+      "test": "src/lora/multi.rs",
+      "notes": "Comma-separated FNAME:SCALE pairs (split on the last colon so absolute paths keep their separators) fuse with the user scale multiplied into the adapter's own alpha/r, exactly as upstream multiplies its per-adapter scale. A non-numeric, NaN, or infinite scale fails startup: fusing a non-finite delta would poison every weight the adapter touches (#1439).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--lora-scaled"
+        ]
+      }
     },
     {
       "kind": "route",
@@ -80,12 +93,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1439,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/lora_adapters_tests.rs",
+      "notes": "Reports every configured adapter in b10621's entry shape: id, path, scale (0.0 for a loaded-but-not-applied adapter, upstream's --lora-init-without-apply report), task_name and prompt_prefix (empty: b10621 reads them from GGUF adapter metadata, which MLX adapter directories do not carry; upstream reports empty strings for adapters without that metadata too). The alora invocation keys appear only for alora adapters upstream, and no MLX adapter is one.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "route": "GET /lora-adapters"
+      }
     },
     {
       "kind": "route",
@@ -97,10 +112,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1439,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/lora_adapters_tests.rs",
+      "notes": "Mounted with upstream's request contract: a non-array body answers the exact \"Request body must be an array\" 400, entries are resolved with upstream's construct_lora_list rule (listed ids set their scale, unlisted drop to 0.0, unknown ids are ignored), and a request resolving to the configuration already in force answers {\"success\": true}.",
+      "divergence": [
+        "A request that changes any adapter scale is refused with a diagnostic naming --lora-scaled and a restart; b10621 applies the new scales at runtime. mlxcel fuses adapters into the weights at load, so a runtime swap requires the unfused-LoRA forward path this entry stays deferred for (#1439)."
+      ],
+      "mlxcel": {
+        "route": "POST /lora-adapters"
+      }
     },
     {
       "kind": "native_request_field",
@@ -113,10 +132,14 @@
       "discovery": "source-schema-declaration",
       "state": "deferred",
       "issue": 1439,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/native_completion.rs",
+      "notes": "Declared on NativeCompletionRequest and resolved with upstream's rule (listed ids set scales, unlisted drop to 0.0). A value resolving to the fused configuration is accepted as inert, which is also what it means upstream; a different per-request adapter set is refused with a 400 naming GET /lora-adapters and --lora-scaled, following the #1441 policy of refusing rather than silently serving on weights the client did not ask for.",
+      "divergence": [
+        "Per-request adapter selection cannot change the served weights: any non-inert value is refused where b10621 swaps the slot's adapter set for that request (#1439)."
+      ],
+      "mlxcel": {
+        "field": "lora"
+      }
     }
   ]
 }

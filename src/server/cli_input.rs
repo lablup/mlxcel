@@ -41,6 +41,15 @@ use crate::lang_bias::LangBiasCliArgs;
 pub struct ServerStartupInput {
     pub model_path: PathBuf,
     pub adapter_path: Option<PathBuf>,
+    /// Raw b10621 `--lora` value: comma-separated adapter paths (#1439).
+    /// Parsed in [`Self::into_startup_config`]; `adapter_path` above stays
+    /// the programmatic single-adapter channel.
+    pub lora: Option<String>,
+    /// Raw b10621 `--lora-scaled` value: comma-separated `FNAME:SCALE`
+    /// pairs (#1439).
+    pub lora_scaled: Option<String>,
+    /// b10621 `--lora-init-without-apply` (#1439).
+    pub lora_init_without_apply: bool,
     /// Raw `-a/--alias` value, still in b10621's comma-separated list form.
     /// [`ServerStartupInput::into_startup_config`] splits it (issue #1434).
     pub model_alias: Option<String>,
@@ -582,6 +591,36 @@ impl ServerStartupInput {
     /// confusing state where the operator thinks they configured kwargs but
     /// didn't.
     pub fn into_startup_config(self) -> anyhow::Result<ServerStartupConfig> {
+        // b10621 multi-adapter LoRA surface (#1439): parse `--lora` /
+        // `--lora-scaled` / `--lora-init-without-apply` into an ordered
+        // specification, validate every adapter directory up front, and
+        // reduce the trivial single-adapter case onto the pre-#1439
+        // `adapter_path` channel so that path stays byte-identical.
+        let parsed_lora = crate::lora::multi::parse_lora_flags(
+            self.lora.as_deref(),
+            self.lora_scaled.as_deref(),
+            self.lora_init_without_apply,
+        )?;
+        crate::lora::multi::validate_adapter_paths(&parsed_lora)?;
+        let (adapter_path, lora_adapters) = if self.adapter_path.is_some() {
+            // Programmatic callers that set adapter_path directly keep it.
+            (self.adapter_path.clone(), Vec::new())
+        } else if let Some(single) = crate::lora::multi::is_legacy_single(&parsed_lora) {
+            (Some(single.to_path_buf()), Vec::new())
+        } else {
+            (None, parsed_lora)
+        };
+        // Multi-adapter fusion runs on the standard MLX load path only; the
+        // tensor-parallel and pipeline loaders take the single-adapter
+        // channel. Refusing here beats fusing nothing silently.
+        if !lora_adapters.is_empty()
+            && (self.tp_size > 1 || self.pp_layers.is_some() || self.pp_auto.is_some())
+        {
+            anyhow::bail!(
+                "--lora-scaled / multiple --lora adapters are not supported together with                  tensor or pipeline parallelism yet; use a single unscaled --lora adapter"
+            );
+        }
+
         // Migration guard for the #1438 semantic change: `--models-dir` used
         // to be the mlxcel model-store root and now selects b10621 router
         // mode. Combining it with a model argument is exactly the old store
@@ -860,7 +899,8 @@ impl ServerStartupInput {
             no_prefill_assistant: self.chat_compat.no_prefill_assistant,
             reasoning_budget_message: self.chat_compat.reasoning_budget_message.clone(),
             model_path: self.model_path,
-            adapter_path: self.adapter_path,
+            adapter_path,
+            lora_adapters,
             model_alias: model_aliases.first().cloned(),
             model_aliases,
             host: self.host,

@@ -446,9 +446,10 @@ impl ModelProvider {
             }
             Ok(provider)
         } else {
-            let mut provider = Self::new_with_full_config_and_speculative_dispatch(
+            let mut provider = Self::new_with_full_config_and_speculative_dispatch_and_lora(
                 model_path,
                 adapter_path,
+                config.lora_adapters.clone(),
                 config.max_batch_size,
                 config.max_queue_depth,
                 config.prefill_chunk_size,
@@ -794,9 +795,10 @@ impl ModelProvider {
         // speculative dispatch to `Disabled`. Callers wiring `--draft-model`
         // / `--draft-kind` use the `_with_speculative_dispatch` variant
         // below.
-        Self::new_with_full_config_and_speculative_dispatch(
+        Self::new_with_full_config_and_speculative_dispatch_and_lora(
             model_path,
             adapter_path,
+            Vec::new(),
             max_batch_size,
             max_queue_depth,
             prefill_chunk_size,
@@ -843,9 +845,13 @@ impl ModelProvider {
     /// preserves bit-exact baseline behaviour for the non-speculative
     /// path.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_full_config_and_speculative_dispatch(
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_full_config_and_speculative_dispatch_and_lora(
         model_path: PathBuf,
         adapter_path: Option<PathBuf>,
+        // b10621 multi-adapter LoRA specification (#1439); empty keeps the
+        // single `adapter_path` (or no-adapter) load byte-identical.
+        lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
         max_batch_size: usize,
         max_queue_depth: usize,
         prefill_chunk_size: usize,
@@ -894,6 +900,7 @@ impl ModelProvider {
         let obs_clone = batch_observability.clone();
 
         let sched_config = model_worker::WorkerSchedulerConfig {
+            lora_adapters,
             max_batch_size,
             max_queue_depth,
             prefill_chunk_size,
@@ -1010,6 +1017,7 @@ impl ModelProvider {
             prefill_chunk_size: 0,
             // #1011: chunking is off on this path, so no prefill can ever park
             // and the fairness grant is unreachable; keep the default.
+            lora_adapters: Vec::new(),
             prefill_grant_interval: None,
             enable_preemption: false,
             preemption_policy: crate::server::config::PreemptionPolicy::default(),

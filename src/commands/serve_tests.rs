@@ -29,7 +29,9 @@ fn sample_args() -> crate::ServeArgs {
         model_url: None,
         docker_repo: None,
         revision: None,
-        adapter: Some(PathBuf::from("adapters/bar")),
+        adapter: Some("adapters/bar".to_string()),
+        lora_scaled: None,
+        lora_init_without_apply: false,
         alias: Some("alias".to_string()),
         host: "127.0.0.1".to_string(),
         port: 9000,
@@ -140,7 +142,6 @@ fn sample_args() -> crate::ServeArgs {
         tp_moe_mode: "expert_parallel".to_string(),
         tp_embedding_mode: "replicated".to_string(),
         tp_lm_head_mode: "replicated".to_string(),
-        _no_webui: false,
         ggml_compat: Default::default(),
         spec_compat: mlxcel::cli::spec_compat_args::SpecCompatArgs::default(),
         chat_compat: Default::default(),
@@ -202,7 +203,11 @@ fn build_startup_input_preserves_edge_flags_for_normalization() {
     let input = build_startup_input(sample_args()).expect("resolve");
 
     assert_eq!(input.model_path, PathBuf::from("models/foo"));
-    assert_eq!(input.adapter_path, Some(PathBuf::from("adapters/bar")));
+    // #1439: `--adapter` now flows through the raw `lora` field; the parsed
+    // specification reduces the trivial single-adapter case back onto
+    // `adapter_path` inside `into_startup_config`.
+    assert_eq!(input.adapter_path, None);
+    assert_eq!(input.lora.as_deref(), Some("adapters/bar"));
     assert_eq!(input.draft_model_path, Some(PathBuf::from("models/draft")));
     assert!(input.slots);
     assert!(input.no_slots);
