@@ -37,6 +37,7 @@ mod http_timeout;
 pub mod infill;
 pub mod kokoro_tts;
 mod listen;
+pub mod logging;
 mod media;
 mod media_net;
 pub mod media_root;

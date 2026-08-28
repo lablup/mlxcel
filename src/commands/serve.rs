@@ -86,6 +86,26 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
+    // b10621 logging and preset options (issue #1448): `--log-prompts-dir` and
+    // the twelve GGUF presets are refused here, before the model reference is
+    // resolved, so a copied llama-server command line fails in under a second
+    // with the mlxcel equivalent rather than after a multi-gigabyte download.
+    args.logging_compat
+        .ensure_supported()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Register credentials before the subscriber exists so no log sink can
+    // ever hold an API key or a repository token (#1448).
+    mlxcel::cli::logging_compat_args::register_credentials_for_redaction(
+        &args.api_key,
+        &args.api_key_file,
+        args.hf_token.as_deref(),
+    );
+    // The subscriber itself is installed inside `start_server`, which is
+    // reached only after the model reference resolves. Validate and create the
+    // destination here instead, so an unwritable `--log-file` is reported
+    // before a multi-gigabyte download rather than after it (#1448).
+    mlxcel::server::logging::precheck_log_destination(args.log_disable, args.log_file.as_deref())?;
+
     // b10621 speculative compatibility options (#1433): classified before the
     // model load like the GGML group above. n-gram / lookup speculation, GGML
     // draft-side process placement, and draft-sampler thresholds mlxcel's
@@ -580,6 +600,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         verbose: args.verbose,
         log_disable: args.log_disable,
         log_file: args.log_file,
+        log_format: args
+            .logging_compat
+            .resolve_format(mlxcel::cli::logging_compat_args::verbosity_was_set_on_cli())
+            .map_err(|rejection| anyhow::anyhow!("{rejection}"))?,
         distributed_config: args.distributed_config,
         node_role: args.node_role,
         node_id: args.node_id,

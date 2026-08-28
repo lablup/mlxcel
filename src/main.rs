@@ -38,6 +38,9 @@ use mlxcel::lang_bias::LangBiasCliArgs;
     name = "mlxcel",
     author = "Lablup Inc.",
     version,
+    // b10621's `--version` is a common option, so `mlxcel serve` must
+    // answer it as `mlxcel-server` already does (#1448).
+    propagate_version = true,
     about = "High-performance model inference on Apple Silicon and CUDA GPUs",
     long_about = None,
     after_help = "\
@@ -938,6 +941,10 @@ fn parse_kv_cache_budget(s: &str) -> Result<mlxcel::memory_estimate::PagedBudget
 // comment on the `mlxcel-server` root command in `src/bin/mlx_server.rs` for
 // why this is not `allow_hyphen_values`.
 #[command(allow_negative_numbers = true)]
+// b10621 spells the help option `-h`, `--help` and `--usage`; clap's
+// generated help argument cannot carry an alias, so it is declared by hand
+// on this struct instead (#1448).
+#[command(disable_help_flag = true)]
 #[command(after_help = "\
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
@@ -973,6 +980,21 @@ Thunderbolt mode:
 
 See also: docs/distributed.md")]
 pub(crate) struct ServeArgs {
+    /// Print usage and exit.
+    ///
+    /// Declared by hand, with `disable_help_flag`, rather than left to clap's
+    /// generated help argument: b10621 spells this option `-h`, `--help` and
+    /// `--usage`, and clap's built-in help argument cannot carry an alias
+    /// through the derive. Declared first so it lands before any
+    /// `next_help_heading` group (#1448).
+    #[arg(
+        short = 'h',
+        long = "help",
+        visible_alias = "usage",
+        action = clap::ArgAction::Help
+    )]
+    help: Option<bool>,
+
     /// Path to a local model directory, or a HuggingFace `owner/name`
     /// repo-id to auto-download.
     ///
@@ -1796,8 +1818,12 @@ pub(crate) struct ServeArgs {
     dry_sequence_breakers: Vec<String>,
 
     // Logging.
-    /// Enable verbose (debug) logging
-    #[arg(short = 'v', long)]
+    /// Enable verbose logging: every mlxcel message.
+    ///
+    /// Equivalent to the top `--verbosity` tier, and unconditional: a
+    /// command-line `--verbose` beats `RUST_LOG`, matching b10621's `-v`
+    /// (#1448). `--log-verbose` is the b10621 twin spelling.
+    #[arg(short = 'v', long, visible_alias = "log-verbose")]
     verbose: bool,
 
     /// Disable all logging
@@ -2168,6 +2194,15 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     pub(crate) embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs,
 
+    /// llama-server b10621 logging, introspection, and built-in preset
+    /// options (`--log-colors`, `--log-prefix`, `--log-timestamps`,
+    /// `--verbosity`, `--cache-list`, `--completion-bash`, `--log-prompts-dir`
+    /// and the twelve GGUF model presets). Defined once in
+    /// `mlxcel::cli::logging_compat_args` so both server binaries accept
+    /// exactly the same set (issue #1448).
+    #[command(flatten)]
+    pub(crate) logging_compat: mlxcel::cli::logging_compat_args::LoggingCompatArgs,
+
     /// Language-bias options for server-wide output
     /// steering. Mirrors the same flags exposed on the `generate` subcommand.
     ///
@@ -2513,6 +2548,35 @@ fn main() -> anyhow::Result<()> {
     } else {
         Cli::parse()
     };
+
+    // b10621 introspection options (issue #1448): `mlxcel serve --cache-list`
+    // reports the model store and `--completion-bash` prints a completion
+    // script, both before any model is resolved and both exiting 0, exactly as
+    // upstream's parser-level handlers do. Placed before `init_cli_tracing` so
+    // the machine-readable output on stdout can never be interleaved with log
+    // lines, and before the MLX environment defaults so neither pays for them.
+    if let Commands::Serve(ref serve_args) = cli.command
+        && let Some(action) = serve_args.logging_compat.early_action()
+    {
+        use clap::CommandFactory;
+        let mut cli_cmd = Cli::command();
+        cli_cmd.build();
+        let mut serve_cmd = cli_cmd
+            .find_subcommand("serve")
+            .expect("the `serve` subcommand is statically defined")
+            .clone();
+        print!(
+            "{}",
+            mlxcel::cli::logging_compat_args::render_early_action(
+                action,
+                "mlxcel",
+                "mlxcel serve",
+                &mut serve_cmd,
+                serve_args.models_dir.as_deref(),
+            )
+        );
+        return Ok(());
+    }
 
     init_cli_tracing(&cli.command);
 

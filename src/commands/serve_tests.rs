@@ -18,6 +18,9 @@ use super::{build_startup_input, serve_preflight_batch, serve_preflight_ctx_len}
 
 fn sample_args() -> crate::ServeArgs {
     crate::ServeArgs {
+        // `--help` / `--usage` is a clap `ArgAction::Help` argument declared by
+        // hand on `ServeArgs` (#1448); it never carries a parsed value.
+        help: None,
         model: Some(PathBuf::from("models/foo")),
         hf_repo: None,
         hf_token: None,
@@ -138,6 +141,7 @@ fn sample_args() -> crate::ServeArgs {
         cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),
         infill: mlxcel::cli::infill_args::InfillArgs::default(),
         embedding_compat: mlxcel::cli::embedding_compat_args::EmbeddingCompatArgs::default(),
+        logging_compat: mlxcel::cli::logging_compat_args::LoggingCompatArgs::default(),
         estimate_memory: false,
         force_memory: false,
         turbo: mlxcel::cli::turbo_args::TurboKvCacheArgs::default(),
