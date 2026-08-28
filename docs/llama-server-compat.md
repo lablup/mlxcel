@@ -100,7 +100,7 @@ The manifest is sharded by area so that the concurrent implementation chains of 
 |---|---|---|
 | `transport-tls-cors.json` | A | #1432 |
 | `authentication.json` | A | #1437 |
-| `routes.json` | A | #1438, #1440, #1441, #1442, #1452, #1466 |
+| `routes.json` | A | #1438, #1440, #1441, #1442, #1452, #1466, #1477 |
 | `embeddings-and-rerank.json` | A | #1452 |
 | `observability-and-slots.json` | A | #1440 |
 | `router-models.json` | A | #1438 |
