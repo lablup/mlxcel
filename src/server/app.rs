@@ -113,11 +113,7 @@ pub fn create_app(state: AppState) -> Router {
 }
 
 /// Register every route, without middleware and without the API prefix.
-fn build_routes(state: &AppState) -> Router<AppState> {
-    let enable_slots = state.config.enable_slots_endpoint;
-    let enable_props = state.config.enable_props_endpoint;
-    let enable_metrics = state.config.enable_metrics_endpoint;
-
+fn build_routes(_state: &AppState) -> Router<AppState> {
     // Audio upload endpoints carry a larger body limit via a sub-router.
     // Merging keeps the outer auth, CORS, and trace layers applying normally.
     let audio_routes: Router<AppState> = Router::new()
@@ -240,20 +236,17 @@ fn build_routes(state: &AppState) -> Router<AppState> {
             post(routes::responses_input_tokens),
         );
 
-    // Conditionally enable /props endpoint
-    if enable_props {
-        app = app.route("/props", get(routes::props));
-    }
-
-    // Conditionally enable /slots endpoint
-    if enable_slots {
-        app = app.route("/slots", get(routes::slots));
-    }
-
-    // Conditionally enable /metrics endpoint
-    if enable_metrics {
-        app = app.route("/metrics", get(routes::metrics));
-    }
+    // b10621 mounts /props, /slots, /metrics and the slot actions
+    // unconditionally and answers its own diagnostics when a gate is off
+    // (issue #1440): GET /props is ungated, --props gates POST /props,
+    // --slots gates GET /slots, --metrics gates GET /metrics, and
+    // --slot-save-path gates POST /slots/:id_slot. The handlers own those
+    // gates so a disabled surface answers upstream's 501 instead of a 404.
+    app = app
+        .route("/props", get(routes::props).post(routes::post_props))
+        .route("/slots", get(routes::slots))
+        .route("/slots/:id_slot", post(routes::slot_action))
+        .route("/metrics", get(routes::metrics));
 
     app
         // Health check

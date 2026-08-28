@@ -68,10 +68,10 @@ pub use models::list_models;
 pub use mtp_policy::mtp_policy;
 pub use native_completion::native_completion;
 pub use prompt_inspection::{apply_template, chat_input_tokens, responses_input_tokens};
-pub use props::props;
+pub use props::{post_props, props};
 pub use rerank::create_rerank;
 pub use responses::{cancel_response, create_response, delete_response, retrieve_response};
-pub use slots::slots;
+pub use slots::{slot_action, slots};
 pub use stream::{stream_delete, stream_get, streams_lookup};
 pub use tokenize::tokenize;
 

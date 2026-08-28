@@ -89,6 +89,7 @@ fn sample_input() -> ServerStartupInput {
         no_slots: false,
         props: true,
         metrics: true,
+        slot_save_path: None,
         warmup: true,
         no_warmup: false,
         temperature: 0.8,

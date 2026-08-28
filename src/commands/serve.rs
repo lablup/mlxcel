@@ -568,6 +568,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         slots: args.slots,
         no_slots: args._no_slots,
         props: args.props,
+        slot_save_path: args.slot_save_path,
         metrics: args.metrics,
         warmup: args.warmup,
         no_warmup: args._no_warmup,

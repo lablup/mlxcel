@@ -552,6 +552,14 @@ pub(crate) fn step_slice_session<T: MtpTarget>(
         &out.new_tokens,
         &out.new_logprobs,
     );
+    // One speculative verification round: `block_size` draft tokens were
+    // proposed, and the round emitted its accepted prefix plus one bonus
+    // token (b10621 spec_decode_* counters, #1440).
+    super::observability::spec_counters::record(
+        job.block_size,
+        out.new_tokens.len().saturating_sub(1),
+        1,
+    );
 
     job.session = Some(session);
     settle_slice(job, generator, out.finished || stream_done);

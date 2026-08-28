@@ -221,10 +221,24 @@ async fn non_stream_native_completion(
     // before the options are moved into the generator.
     let options_snapshot = options.clone();
 
+    // Slot accounting (#1440): ties this request to a numbered slot for
+    // GET /slots and the response's `id_slot` field.
+    let slot = state.slots.begin(
+        &request.prompt,
+        super::slots::slot_params_json(&options, false),
+        Some(options.max_tokens as i64),
+    );
+
     let result = state
         .model_provider
         .generate(request.prompt.clone(), options)
         .map_err(generation_error_to_response)?;
+    slot.finish(
+        result.prompt_tokens,
+        result.cached_tokens,
+        result.completion_tokens,
+        &result.text,
+    );
 
     let prompt_ms = result.prompt_eval_ms as f64;
     let gen_ms = result.generation_only_ms as f64;
@@ -248,6 +262,7 @@ async fn non_stream_native_completion(
             stop_kind: &result.stop_kind,
             prompt_ms,
             predicted_ms: gen_ms,
+            id_slot: slot.id_slot(),
         },
     );
     Ok(Json(project_native_response(&request, &response)))
@@ -286,6 +301,10 @@ struct NativeOutcome<'a> {
     stop_kind: &'a StopKind,
     prompt_ms: f64,
     predicted_ms: f64,
+    /// The slot the request ran on, from the slot registry (#1440); `-1` when
+    /// every slot was busy for the whole request, the sentinel upstream uses
+    /// on frames that carry no slot.
+    id_slot: i64,
 }
 
 /// Assemble the b10621 native completion object.
@@ -310,10 +329,7 @@ fn build_native_response(
         has_new_line: outcome.content.contains('\n'),
         content: outcome.content,
         tokens: outcome.tokens,
-        // mlxcel's continuous-batching scheduler does not expose a stable
-        // per-request slot number, so the "no numbered slot" sentinel upstream
-        // uses on its own streaming frames is reported here as well.
-        id_slot: -1,
+        id_slot: outcome.id_slot,
         stop: true,
         model: state.display_model_id().to_string(),
         tokens_predicted: outcome.tokens_predicted,
@@ -452,6 +468,13 @@ async fn stream_native_completion(
     let timings_per_token = request.timings_per_token.unwrap_or(false);
 
     tokio::task::spawn_blocking(move || {
+        // Slot accounting (#1440): ties this request to a numbered slot for
+        // GET /slots and the frames' `id_slot` field.
+        let slot = state.slots.begin(
+            &prompt,
+            super::slots::slot_params_json(&options, true),
+            Some(options.max_tokens as i64),
+        );
         let token_events = finish_events.clone();
         let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let emitted_for_tokens = emitted.clone();
@@ -470,6 +493,7 @@ async fn stream_native_completion(
             queue_reservation,
             cancelled,
             |token, _lp| {
+                slot.on_token(&token);
                 let n = emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let snapshot = prefill_for_tokens
                     .lock()
@@ -483,7 +507,7 @@ async fn stream_native_completion(
                     content: token.to_string(),
                     tokens: Vec::new(),
                     stop: false,
-                    id_slot: -1,
+                    id_slot: slot.id_slot(),
                     tokens_predicted: n,
                     tokens_evaluated: snapshot.stats.prompt_tokens,
                     timings: timings_per_token.then(|| {
@@ -500,6 +524,7 @@ async fn stream_native_completion(
                 let _ = token_events.json(&chunk);
             },
             |stats| {
+                slot.on_prefill(stats.prompt_tokens, stats.cached_tokens);
                 if let Ok(mut guard) = prefill_sink.lock() {
                     *guard = StreamPrefill::observed(stats);
                 }
@@ -513,6 +538,12 @@ async fn stream_native_completion(
         // client expects.
         match result {
             Ok(result) => {
+                slot.finish(
+                    result.prompt_tokens,
+                    result.cached_tokens,
+                    result.completion_tokens,
+                    &result.text,
+                );
                 let final_frame = build_native_response(
                     &state,
                     &request,
@@ -526,6 +557,7 @@ async fn stream_native_completion(
                         stop_kind: &result.stop_kind,
                         prompt_ms: result.prompt_eval_ms as f64,
                         predicted_ms: result.generation_only_ms as f64,
+                        id_slot: slot.id_slot(),
                     },
                 );
                 let _ = finish_events.json(&project_native_response(&request, &final_frame));

@@ -292,11 +292,24 @@ async fn non_stream_completion(
         };
     }
 
+    // Slot accounting (#1440): ties this request to a numbered slot for
+    // GET /slots. Taken before `options` moves into the provider call.
+    let slot = state.slots.begin(
+        &prompt,
+        super::slots::slot_params_json(&options, false),
+        Some(options.max_tokens as i64),
+    );
     // Generate (blocking call handled by model provider's worker thread)
     let result = state
         .model_provider
         .generate(prompt, options)
         .map_err(generation_error_to_response)?;
+    slot.finish(
+        result.prompt_tokens,
+        result.cached_tokens,
+        result.completion_tokens,
+        &result.text,
+    );
 
     state.metrics.record_request(
         result.prompt_tokens,
@@ -415,6 +428,12 @@ async fn stream_completion(
         // Unregister the completion-control entry when this task exits, on
         // every path (#1444).
         let _control_registration = control_registration;
+        // Slot accounting (#1440); see the non-streaming arm above.
+        let slot = state.slots.begin(
+            &prompt,
+            super::slots::slot_params_json(&options, true),
+            Some(options.max_tokens as i64),
+        );
         // Use logprobs-aware streaming
         let token_events = finish_events.clone();
         let request_id_inner = request_id_clone.clone();
@@ -433,6 +452,7 @@ async fn stream_completion(
                 queue_reservation,
                 cancelled,
                 |token, lp_data| {
+                    slot.on_token(&token);
                     let logprobs = if logprobs_enabled {
                         lp_data.as_ref().map(|lp| {
                             let chunk_lp = build_single_token_completion_logprobs(
@@ -456,6 +476,15 @@ async fn stream_completion(
                     let _ = token_events.json(&chunk);
                 },
             );
+
+        if let Ok(r) = &result {
+            slot.finish(
+                r.prompt_tokens,
+                r.cached_tokens,
+                r.completion_tokens,
+                &r.text,
+            );
+        }
 
         // Send finish chunk
         let finish_reason = match &result {

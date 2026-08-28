@@ -250,6 +250,13 @@ async fn non_stream_messages(
         prepared.history_prompt.as_deref(),
     );
 
+    // Slot accounting (#1440): ties this request to a numbered slot for
+    // GET /slots. Taken before `options` moves into the provider call.
+    let slot = state.slots.begin(
+        &prepared.prompt,
+        super::slots::slot_params_json(&options, false),
+        Some(options.max_tokens as i64),
+    );
     let result = match state
         .model_provider
         .generate_with_media_and_videos_declared(
@@ -263,6 +270,12 @@ async fn non_stream_messages(
         Ok(r) => r,
         Err(e) => return generation_error_to_response(e),
     };
+    slot.finish(
+        result.prompt_tokens,
+        result.cached_tokens,
+        result.completion_tokens,
+        &result.text,
+    );
 
     state.metrics.record_request(
         result.prompt_tokens,
@@ -437,6 +450,12 @@ async fn stream_messages(
         });
 
         // Shared streaming state.
+        // Slot accounting (#1440); see the non-streaming arm above.
+        let slot = state.slots.begin(
+            &prepared.prompt,
+            super::slots::slot_params_json(&options, true),
+            Some(options.max_tokens as i64),
+        );
         let accumulated_raw = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let acc_clone = accumulated_raw.clone();
         let stream_filter = std::sync::Arc::new(std::sync::Mutex::new(StreamFilter::new()));
@@ -460,6 +479,7 @@ async fn stream_messages(
                 queue_reservation,
                 cancelled,
                 |token, _lp| {
+                    slot.on_token(&token);
                     if let Ok(mut acc) = acc_clone.lock() {
                         acc.push_str(&token);
                     }
@@ -514,6 +534,14 @@ async fn stream_messages(
             em.emit_text_delta(&sender, text);
         }
 
+        if let Ok(r) = &result {
+            slot.finish(
+                r.prompt_tokens,
+                r.cached_tokens,
+                r.completion_tokens,
+                &r.text,
+            );
+        }
         let result = match result {
             Ok(r) => r,
             Err(err) => {

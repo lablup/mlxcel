@@ -54,6 +54,8 @@ pub mod responses_store;
 pub mod responses_translator;
 pub mod router_front;
 pub mod routes;
+pub mod slot_persist;
+pub mod slots_state;
 pub mod speculative_dispatch;
 mod startup;
 mod state;

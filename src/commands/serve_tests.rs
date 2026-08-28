@@ -84,6 +84,7 @@ fn sample_args() -> crate::ServeArgs {
         _no_slots: true,
         props: true,
         metrics: false,
+        slot_save_path: None,
         warmup: true,
         _no_warmup: true,
         temp: 0.7,

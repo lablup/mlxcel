@@ -413,6 +413,9 @@ pub struct ServerConfig {
     pub enable_slots_endpoint: bool,
     pub enable_props_endpoint: bool,
     pub enable_metrics_endpoint: bool,
+    /// `--slot-save-path`: directory for `POST /slots/:id_slot` save/restore
+    /// files. `None` disables the slot actions, b10621's default (#1440).
+    pub slot_save_path: Option<std::path::PathBuf>,
     /// `--embd-normalize`: the server-wide embedding normalization, `None`
     /// when the operator did not choose one and the checkpoint's own
     /// `normalize` flag decides (#1452).
@@ -771,6 +774,7 @@ impl Default for ServerConfig {
             n_parallel: 4,
             enable_slots_endpoint: true,
             enable_props_endpoint: false,
+            slot_save_path: None,
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: EmbeddingServingMode::Any,

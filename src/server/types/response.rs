@@ -425,49 +425,6 @@ pub struct ModelsResponse {
     pub data: Vec<ModelInfo>,
 }
 
-/// Health check response
-#[derive(Debug, Clone, Serialize)]
-pub struct HealthResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<BatchStatusInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observability: Option<crate::server::batch::ObservabilitySnapshot>,
-    /// Effective context window size in tokens.
-    ///
-    /// Reports the effective per-slot `--ctx-size` value. When the server was
-    /// started without an explicit `--ctx-size` override this is 0, which means
-    /// the model's own `max_position_embeddings` applies. Monitoring tools may
-    /// use this as a hint; `0` should be treated as "model default / unknown".
-    ///
-    /// Present only when the model is loaded.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_size: Option<usize>,
-    /// Name of the active tool-call parser or family-specific format, or
-    /// `null` when the loaded chat template does not support tool calls.
-    ///
-    /// mlxcel's parser is output-format auto-detection (tries Hermes, Gemma 4,
-    /// Mistral Nemo, Functionary, Llama 3, Command-R, and others in sequence).
-    /// The field is always present once a model is loaded so that monitoring
-    /// tools can distinguish "template does not support tools" (`null`) from
-    /// "field missing because model has not finished loading" (field absent).
-    /// Family-specific defaults such as Muse Glimmer's `atem` are reported
-    /// when the model/template identity is precise enough to select one.
-    ///
-    /// Present only when the model is loaded.
-    pub tool_call_parser: Option<String>,
-}
-
-/// Batch status included in the health check response.
-#[derive(Debug, Clone, Serialize)]
-pub struct BatchStatusInfo {
-    pub active_sequences: usize,
-    pub queue_depth: usize,
-    pub max_batch_size: usize,
-}
-
 /// Error response
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorResponse {
@@ -611,48 +568,7 @@ pub struct AudioTranscriptionResponse {
     pub duration: Option<f32>,
 }
 
-/// Server properties response (GET /props)
-#[derive(Debug, Clone, Serialize)]
-pub struct PropsResponse {
-    pub default_generation_settings: serde_json::Value,
-    pub total_slots: usize,
-    /// The KV cache mode the caches were really built with, as the
-    /// `--kv-cache-mode` spelling (`fp16`, `int8`, `fp16+turbo4`, `turbo4`,
-    /// `turbo4-delegated`, `fp16+turbo3`).
-    ///
-    /// The *effective* mode, not the requested one (issue #1350). A model
-    /// family that cannot hold a quantized cache has its request substituted
-    /// during startup, and until this field existed the only record of that was
-    /// one `tracing::warn!` line, invisible to a client and gone after log
-    /// rotation. An operator reads this to answer "what am I actually running".
-    pub kv_cache_mode: String,
-    /// Resolved speculative-decoding configuration (#1433): whether a draft
-    /// model is configured, its resolved kind override (or `null` for
-    /// auto-detect), and the draft-token cap. The draft model is reported as
-    /// its directory basename, not the full path, so `/props` leaks neither
-    /// the operator's filesystem layout nor any token embedded in a URL.
-    pub speculative: serde_json::Value,
-    /// Effective batched KV quantization width (`--kv-bits`), `0` when batched
-    /// KV quantization is off. Reported alongside [`Self::kv_cache_mode`]
-    /// because it is an independent second route to a quantized cache and is
-    /// subject to the same startup substitution.
-    pub kv_bits: i32,
-    /// What this server can actually be asked for, resolved at startup
-    /// (#1452).
-    ///
-    /// b10621's own `/props` carries comparable facts (its server binary
-    /// declares `modalities`, `capabilities` and `pooling_type` keys), and for
-    /// the same reason: "is generation on", "is there an embedder", "which
-    /// pooling did it resolve" and "which normalization will an unqualified
-    /// request get" are all decided before the first request and are otherwise
-    /// invisible to a client. The key set here is mlxcel's own, because the
-    /// facts it reports are about mlxcel's dedicated workers. The pooling
-    /// value is the mode the checkpoint really resolved, not the flag that was
-    /// passed, so `--pooling` having been ignored would be visible here.
-    pub capabilities: ServerCapabilities,
-}
-
-/// The resolved side-model capability block of [`PropsResponse`] (#1452).
+/// The resolved side-model capability block of `GET /props` (#1452).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServerCapabilities {
     /// Whether generation routes serve requests.
@@ -688,23 +604,6 @@ pub struct RerankCapability {
     pub model: String,
     /// `sequence_classifier`, `generative_text` or `generative_vl`.
     pub kind: String,
-}
-
-/// Slot information (GET /slots)
-#[derive(Debug, Clone, Serialize)]
-pub struct SlotInfo {
-    pub id: usize,
-    pub state: String,
-    pub model: String,
-    /// Effective per-slot context window in tokens (`0` = model default).
-    pub context_size: usize,
-    pub is_processing: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generated_tokens: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -917,23 +816,6 @@ mod tests {
         assert_eq!(message["florence2_result"]["kind"], "bboxes");
         assert_eq!(message["florence2_result"]["bboxes"][0][0], 9.6);
         assert_eq!(message["florence2_result"]["labels"][0], "cat");
-    }
-
-    #[test]
-    fn slot_info_serializes_effective_context_size() {
-        let slot = SlotInfo {
-            id: 0,
-            state: "idle".to_string(),
-            model: "model".to_string(),
-            context_size: 2048,
-            is_processing: false,
-            prompt_tokens: None,
-            generated_tokens: None,
-            elapsed_ms: None,
-        };
-
-        let json = serde_json::to_value(&slot).unwrap();
-        assert_eq!(json["context_size"], 2048);
     }
 
     // -- OpenAI/llama.cpp/vLLM tool-call content=null shape --

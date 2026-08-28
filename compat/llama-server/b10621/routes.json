@@ -39,14 +39,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1440,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "BEHAVIOR DRIFT: mlxcel's /health answers 503 {\"status\":\"no slot available\"} when the request queue is full, which b10621 reports on /slots?fail_on_no_slot instead, and its loading-state body differs from b10621's error envelope. A load balancer ejects mlxcel under load where llama-server stays healthy. #1440 owns it.",
-      "divergence": [
-        "Answers 503 {\"status\":\"no slot available\"} when the request queue is full; b10621 keeps /health healthy under load and reports slot exhaustion on GET /slots?fail_on_no_slot (#1440).",
-        "The model-loading response body differs from b10621's error envelope (#1440)."
-      ],
+      "test": "src/server/routes/health.rs",
+      "notes": "Since #1440 the ready answer is exactly b10621's 200 {\"status\": \"ok\"} and stays 200 under load (slot saturation is GET /slots?fail_on_no_slot business, so liveness probes never restart a busy server), and the not-ready answer is upstream's 503 {\"error\": {\"code\": 503, \"message\": \"Loading model\", \"type\": \"unavailable_error\"}} envelope. The former mlxcel-native rich health payload moved to GET /slots and GET /metrics.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /health"
       }
@@ -79,14 +76,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1440,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "Kept public under API-key auth (#1430). BEHAVIOR DRIFT: see GET /health. #1440 owns it.",
-      "divergence": [
-        "Answers 503 {\"status\":\"no slot available\"} when the request queue is full; b10621 keeps /health healthy under load and reports slot exhaustion on GET /slots?fail_on_no_slot (#1440).",
-        "The model-loading response body differs from b10621's error envelope (#1440)."
-      ],
+      "test": "src/server/routes/health.rs",
+      "notes": "Since #1440 the ready answer is exactly b10621's 200 {\"status\": \"ok\"} and stays 200 under load (slot saturation is GET /slots?fail_on_no_slot business, so liveness probes never restart a busy server), and the not-ready answer is upstream's 503 {\"error\": {\"code\": 503, \"message\": \"Loading model\", \"type\": \"unavailable_error\"}} envelope. The former mlxcel-native rich health payload moved to GET /slots and GET /metrics.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /v1/health"
       }
@@ -176,7 +170,6 @@
       "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence; two of them are #1441's and one belongs to #1440, which is why this entry stays deferred and stays filed under #1441.",
       "divergence": [
         "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
-        "`id_slot` is always -1: the continuous-batching scheduler exposes no stable per-request slot number, so exposing one is #1440's scope, not this entry's (#1440).",
         "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1441).",
         "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
       ],
@@ -198,7 +191,6 @@
       "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence; two of them are #1441's and one belongs to #1440, which is why this entry stays deferred and stays filed under #1441.",
       "divergence": [
         "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
-        "`id_slot` is always -1: the continuous-batching scheduler exposes no stable per-request slot number, so exposing one is #1440's scope, not this entry's (#1440).",
         "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1441).",
         "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
       ],

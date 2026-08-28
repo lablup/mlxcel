@@ -32,6 +32,7 @@ use super::embedding_model::EmbeddingModelProvider;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
 use super::rerank_model::RerankModelProvider;
 use super::responses_store::ResponsesStore;
+use super::slots_state::SlotRegistry;
 use super::{ChatTemplateProcessor, ModelProvider, ServerConfig};
 
 /// Server-wide metrics counters (atomic, lock-free).
@@ -458,6 +459,56 @@ pub struct AppState {
     /// Live completions addressable by `POST /v1/chat/completions/control`
     /// (#1444), keyed by their public completion id.
     pub(crate) completion_controls: Arc<super::completion_control::CompletionControlRegistry>,
+    /// b10621-compatible slot registry backing `GET /slots`, the native
+    /// `id_slot` field, and the `POST /slots/:id_slot` actions (issue #1440).
+    pub slots: Arc<SlotRegistry>,
+    /// Whether `LLAMA_SERVER_SLOTS_DEBUG` was set at startup: gates the
+    /// `prompt` / `generated` fields of `GET /slots`, exactly b10621's
+    /// `slots_debug` switch.
+    pub slots_debug: bool,
+    /// Baseline of the previous `GET /metrics` scrape, backing the
+    /// between-scrapes throughput gauges b10621 averages per bucket.
+    pub llama_scrape: Arc<std::sync::Mutex<LlamaScrapeBaseline>>,
+    /// Unix timestamp of server start, reported as b10621's
+    /// `Process-Start-Time-Unix` response header on `GET /metrics`.
+    pub started_at_unix: i64,
+}
+
+/// Cumulative counter snapshot taken at the previous `/metrics` scrape.
+///
+/// b10621 accumulates prompt/predict token counts and processing time into a
+/// bucket that each scrape drains, then reports the bucket's tokens/second as
+/// the `prompt_tokens_seconds` / `predicted_tokens_seconds` gauges. Keeping
+/// the previous scrape's cumulative values and differencing produces the same
+/// averages without a second set of hot-path counters.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LlamaScrapeBaseline {
+    pub prompt_tokens: u64,
+    pub prompt_us: u64,
+    pub predicted_tokens: u64,
+    pub predicted_us: u64,
+}
+
+/// Whether `LLAMA_SERVER_SLOTS_DEBUG` enables the unredacted `/slots` fields.
+fn slots_debug_from_env() -> bool {
+    std::env::var("LLAMA_SERVER_SLOTS_DEBUG")
+        .ok()
+        .map(|v| {
+            v.trim()
+                .parse::<i64>()
+                .map(|n| n != 0)
+                .unwrap_or(!v.is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// Build the slot registry for a config: `--parallel` slots, retaining text
+/// only when the debug switch or `--slot-save-path` needs it.
+fn build_slot_registry(config: &ServerConfig, slots_debug: bool) -> Arc<SlotRegistry> {
+    Arc::new(SlotRegistry::new(
+        config.n_parallel,
+        slots_debug || config.slot_save_path.is_some(),
+    ))
 }
 
 impl AppState {
@@ -470,6 +521,8 @@ impl AppState {
         model_path: PathBuf,
         batch_metrics: Arc<BatchMetrics>,
     ) -> Self {
+        let slots_debug = slots_debug_from_env();
+        let slots = build_slot_registry(&config, slots_debug);
         Self {
             model_provider,
             config: Arc::new(config),
@@ -492,6 +545,10 @@ impl AppState {
             completion_controls: Arc::new(
                 super::completion_control::CompletionControlRegistry::new(),
             ),
+            slots,
+            slots_debug,
+            llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
+            started_at_unix: chrono::Utc::now().timestamp(),
         }
     }
 
@@ -508,6 +565,8 @@ impl AppState {
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Self {
+        let slots_debug = slots_debug_from_env();
+        let slots = build_slot_registry(&config, slots_debug);
         Self {
             model_provider,
             config: Arc::new(config),
@@ -530,6 +589,10 @@ impl AppState {
             completion_controls: Arc::new(
                 super::completion_control::CompletionControlRegistry::new(),
             ),
+            slots,
+            slots_debug,
+            llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
+            started_at_unix: chrono::Utc::now().timestamp(),
         }
     }
 
