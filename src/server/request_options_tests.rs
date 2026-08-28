@@ -128,6 +128,15 @@ fn build_server_generate_options_uses_server_defaults() {
     // applies (and defaults to the disabled 1.0).
     assert_eq!(options.sampling.typical_p, config.default_typical_p);
     assert_eq!(options.sampling.typical_p, 1.0);
+    // #1436: the b10621 defaults reach the sampler: the penalty window
+    // defaults to --repeat-last-n (64), top-n-sigma and XTC to disabled,
+    // ignore_eos to off, and no server-wide stop strings exist.
+    assert_eq!(
+        options.sampling.penalty_last_n,
+        config.default_repetition_context_size as i32
+    );
+    assert_eq!(options.sampling.top_n_sigma, config.default_top_n_sigma);
+    assert!(!options.ignore_eos);
     assert_eq!(options.stop_sequences, None);
 }
 
@@ -155,6 +164,8 @@ fn build_server_generate_options_applies_request_overrides() {
             xtc_threshold: Some(0.2),
             top_n_sigma: Some(2.5),
             typical_p: Some(0.35),
+            penalty_last_n: Some(32),
+            ignore_eos: Some(true),
             stop_sequences: Some(vec!["stop".to_string()]),
             priority: crate::server::batch::RequestPriority::High,
             reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
@@ -185,6 +196,8 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.xtc_threshold, 0.2);
     assert_eq!(options.sampling.top_n_sigma, 2.5);
     assert_eq!(options.sampling.typical_p, 0.35);
+    assert_eq!(options.sampling.penalty_last_n, 32);
+    assert!(options.ignore_eos);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
 }
 
@@ -864,4 +877,42 @@ fn disaggregated_chat_front_gates_on_rendered_tools() {
         chat_route_loop_detection(&chat_request_with_tools(None)),
         LOOP_DETECTION_RECOMMENDED
     );
+}
+
+#[test]
+fn dry_base_below_one_falls_back_to_the_server_default() {
+    // b10621's schema handler replaces a dry_base below 1.0 with the server
+    // default instead of erroring (#1436).
+    let config = ServerConfig::default();
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            dry_base: Some(0.5),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(options.sampling.dry_base, config.default_dry_base);
+}
+
+#[test]
+fn reverse_prompt_stops_merge_with_request_stops() {
+    let config = ServerConfig {
+        default_stop_sequences: vec!["<<STOP>>".to_string()],
+        ..ServerConfig::default()
+    };
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            stop_sequences: Some(vec!["###".to_string(), "<<STOP>>".to_string()]),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(
+        options.stop_sequences,
+        Some(vec!["<<STOP>>".to_string(), "###".to_string()]),
+        "server-wide reverse-prompt stops merge with (and deduplicate against) the request stops"
+    );
+
+    let options = build_server_generate_options(&config, RequestOptionOverrides::default());
+    assert_eq!(options.stop_sequences, Some(vec!["<<STOP>>".to_string()]));
 }

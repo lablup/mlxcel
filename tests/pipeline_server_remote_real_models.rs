@@ -131,6 +131,7 @@ fn assert_remote_coordinator_matches_dense_baseline(
         max_tokens: 8,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
+        ignore_eos: false,
         priority: RequestPriority::Normal,
         logprobs: Default::default(),
         reasoning_budget: Default::default(),

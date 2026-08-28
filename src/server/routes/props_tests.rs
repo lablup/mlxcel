@@ -69,6 +69,7 @@ fn props_reports_exactly_the_documented_key_set() {
             "dry_penalty_last_n",
             "dry_sequence_breakers",
             "frequency_penalty",
+            "ignore_eos",
             "min_p",
             "n_batch",
             "n_batch_decode",
@@ -82,8 +83,11 @@ fn props_reports_exactly_the_documented_key_set() {
             "seed",
             "temperature",
             "top_k",
+            "top_n_sigma",
             "top_p",
             "typical_p",
+            "xtc_probability",
+            "xtc_threshold",
         ],
         "the /props payload key set changed. Adding a key is fine, update this list; \
          losing one is a silent break for anyone reading it back."

@@ -298,6 +298,7 @@ fn sampling_config(model_path: &Path) -> SamplingConfig {
         xtc_threshold: 0.1,
         top_n_sigma: 0.0,
         typical_p: 1.0,
+        penalty_last_n: -1,
         stop_token_ids: mlxcel::read_eos_token_ids(model_path),
     })
 }

@@ -279,7 +279,12 @@ pub fn sample_token_optimized_with_state(
     token_history: &[i32],
     state: &mut Option<SamplerState>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    // The incremental state only serves the full-history window
+    // (`penalty_last_n < 0`); a positive window rebuilds over its bounded
+    // slice each step and a zero window disables the stage, so neither
+    // allocates state (#1436).
     if state.is_none()
+        && config.penalty_last_n < 0
         && (config.repetition_penalty != 1.0
             || config.frequency_penalty != 0.0
             || config.presence_penalty != 0.0)
@@ -416,6 +421,24 @@ fn fused_sample_probs_dispatch(
 ///
 /// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
 /// [`sample_token_with_distribution`]
+/// The slice of `token_history` the repetition / frequency / presence
+/// penalties operate on, under b10621's `repeat_last_n` semantics (#1436):
+/// `0` returns the empty slice (stage disabled), a negative value returns
+/// the full history (mlxcel's pre-#1436 behavior and the CLI default), and
+/// `N > 0` returns the last `N` tokens.
+///
+/// Used by: [`preprocess_logits_for_sampling`]
+fn penalty_window(token_history: &[i32], penalty_last_n: i32) -> &[i32] {
+    if penalty_last_n == 0 {
+        &[]
+    } else if penalty_last_n < 0 {
+        token_history
+    } else {
+        let start = token_history.len().saturating_sub(penalty_last_n as usize);
+        &token_history[start..]
+    }
+}
+
 fn preprocess_logits_for_sampling(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -464,35 +487,46 @@ fn preprocess_logits_for_sampling(
         s.sync(token_history);
     }
 
-    let last_logits = if config.repetition_penalty != 1.0 && !token_history.is_empty() {
+    // b10621 `repeat_last_n` window (#1436): the repetition and
+    // frequency/presence penalties see only this slice. The incremental
+    // `SamplerState` maintains full-history aggregates, so it serves only the
+    // full-history form (`penalty_last_n < 0`, the pre-#1436 behavior it was
+    // built for, byte-identical); a positive window takes the
+    // rebuild-every-step path over at most `penalty_last_n` tokens, which is
+    // bounded and cheap (the b10621 default window is 64).
+    let penalty_history = penalty_window(token_history, config.penalty_last_n);
+    let windowed = config.penalty_last_n > 0;
+
+    let last_logits = if config.repetition_penalty != 1.0 && !penalty_history.is_empty() {
         match &mut state {
-            Some(s) => s.apply_repetition(&last_logits, config.repetition_penalty),
-            None => {
-                apply_repetition_penalty(&last_logits, token_history, config.repetition_penalty)
-            }
+            Some(s) if !windowed => s.apply_repetition(&last_logits, config.repetition_penalty),
+            _ => apply_repetition_penalty(&last_logits, penalty_history, config.repetition_penalty),
         }
     } else {
         last_logits
     };
 
-    let last_logits = if config.dry_multiplier > 0.0 && !token_history.is_empty() {
+    let last_logits = if config.dry_multiplier > 0.0
+        && config.dry_penalty_last_n != 0
+        && !token_history.is_empty()
+    {
         apply_dry_penalty(&last_logits, token_history, config)
     } else {
         last_logits
     };
 
     let last_logits = if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
-        && !token_history.is_empty()
+        && !penalty_history.is_empty()
     {
         match &mut state {
-            Some(s) => s.apply_frequency_presence(
+            Some(s) if !windowed => s.apply_frequency_presence(
                 &last_logits,
                 config.frequency_penalty,
                 config.presence_penalty,
             ),
-            None => apply_frequency_presence_penalty(
+            _ => apply_frequency_presence_penalty(
                 &last_logits,
-                token_history,
+                penalty_history,
                 config.frequency_penalty,
                 config.presence_penalty,
             ),
@@ -1087,8 +1121,14 @@ pub(crate) fn apply_dry_penalty(
         return ffi::copy(logits);
     }
 
-    let window = if config.dry_penalty_last_n == 0 {
+    // b10621 sentinel semantics (#1436): `0` disables DRY (the caller gates
+    // on it, and the empty-window guard below is the backstop);
+    // `DRY_FULL_HISTORY` scans everything (the explicit successor of the
+    // pre-#1436 `0`); any other value is a recent-token window.
+    let window = if config.dry_penalty_last_n == crate::generate::DRY_FULL_HISTORY {
         token_history
+    } else if config.dry_penalty_last_n == 0 {
+        &token_history[history_len..]
     } else {
         let start = history_len.saturating_sub(config.dry_penalty_last_n);
         &token_history[start..]
@@ -1132,7 +1172,10 @@ pub(crate) fn apply_dry_penalty(
                 }
             }
 
-            if match_len > config.dry_allowed_length {
+            // b10621 penalizes AT the allowed length (`>=`), so a repeat
+            // exactly `dry_allowed_length` long gets the `base^0` tier;
+            // pre-#1436 mlxcel used `>` and never emitted that tier.
+            if match_len >= config.dry_allowed_length {
                 let next_pos = pos + 1;
                 if next_pos < window_len {
                     let next_token = window[next_pos];
@@ -3941,5 +3984,137 @@ mod tests {
         assert_eq!(v[0], 0.0, "dropped argmax kept probability {}", v[0]);
         let total: f32 = v.iter().sum();
         assert!((total - 1.0).abs() < 1e-5);
+    }
+
+    // -- b10621 penalty window and DRY sentinels (#1436) --
+
+    #[test]
+    fn penalty_window_sentinels() {
+        let history = [1, 2, 3, 4, 5];
+        assert_eq!(penalty_window(&history, -1), &history[..]);
+        assert_eq!(penalty_window(&history, 0), &[] as &[i32]);
+        assert_eq!(penalty_window(&history, 2), &[4, 5][..]);
+        assert_eq!(penalty_window(&history, 64), &history[..]);
+    }
+
+    #[test]
+    fn repetition_penalty_windowed_ignores_tokens_outside_the_window() {
+        // History [0, 1]; window 1 sees only token 1, so token 0 keeps its
+        // raw logit while the full-history form penalizes both.
+        let logits = ffi::from_slice_f32(&[2.0, 2.0, 2.0], &[1, 1, 3]);
+        let mut windowed = SamplingConfig::greedy();
+        windowed.repetition_penalty = 2.0;
+        windowed.penalty_last_n = 1;
+        let (_, processed) = sample_token_optimized(&logits, &windowed, &[0, 1]);
+        let v = to_vec_f32(&processed);
+        assert_eq!(
+            v[0], 2.0,
+            "token 0 is outside the window and must not be penalized"
+        );
+        assert_eq!(v[1], 1.0, "token 1 is inside the window");
+        assert_eq!(v[2], 2.0);
+
+        let mut full = SamplingConfig::greedy();
+        full.repetition_penalty = 2.0;
+        full.penalty_last_n = -1;
+        let (_, processed) = sample_token_optimized(&logits, &full, &[0, 1]);
+        let v = to_vec_f32(&processed);
+        assert_eq!(v[0], 1.0);
+        assert_eq!(v[1], 1.0);
+    }
+
+    #[test]
+    fn penalty_last_n_zero_disables_the_stage_and_stays_fused_eligible() {
+        let logits = ffi::from_slice_f32(&[2.0, 2.0, 2.0], &[1, 1, 3]);
+        let mut cfg = SamplingConfig::greedy();
+        cfg.repetition_penalty = 2.0;
+        cfg.frequency_penalty = 0.5;
+        cfg.presence_penalty = 0.5;
+        cfg.penalty_last_n = 0;
+        let (_, processed) = sample_token_optimized(&logits, &cfg, &[0, 1, 2]);
+        assert_eq!(
+            to_vec_f32(&processed),
+            vec![2.0, 2.0, 2.0],
+            "a zero window makes every history penalty inert"
+        );
+        assert!(!cfg.needs_token_history());
+        assert!(config_supports_fused_batch(&cfg));
+    }
+
+    #[test]
+    fn windowed_penalties_match_full_history_when_the_window_covers_it() {
+        let logits = ffi::from_slice_f32(&[2.0, 2.0, -1.0, 2.0], &[1, 1, 4]);
+        let history = [0, 2, 1];
+        let mut covering = SamplingConfig::greedy();
+        covering.repetition_penalty = 1.5;
+        covering.frequency_penalty = 0.25;
+        covering.penalty_last_n = 64;
+        let mut full = covering.clone();
+        full.penalty_last_n = -1;
+        let (_, a) = sample_token_optimized(&logits, &covering, &history);
+        let (_, b) = sample_token_optimized(&logits, &full, &history);
+        assert_eq!(
+            to_vec_f32(&a),
+            to_vec_f32(&b),
+            "a window covering the whole history must be byte-identical to the full-history form"
+        );
+    }
+
+    #[test]
+    fn dry_penalty_last_n_zero_disables_dry() {
+        // A strongly repeating history that WOULD be penalized under any
+        // scanning window produces untouched logits at the 0 sentinel.
+        let logits = ffi::from_slice_f32(&[1.0, 1.0, 1.0], &[1, 1, 3]);
+        let mut cfg = SamplingConfig::greedy();
+        cfg.dry_multiplier = 1.0;
+        cfg.dry_base = 2.0;
+        cfg.dry_allowed_length = 1;
+        cfg.dry_penalty_last_n = 0;
+        let history = [0, 1, 2, 0, 1];
+        let (_, processed) = sample_token_optimized(&logits, &cfg, &history);
+        assert_eq!(to_vec_f32(&processed), vec![1.0, 1.0, 1.0]);
+        assert!(!cfg.needs_token_history(), "disabled DRY needs no history");
+    }
+
+    #[test]
+    fn dry_full_history_sentinel_scans_everything() {
+        // History [0,1,2,0,1]: the suffix [0,1] repeats, so token 2 (the
+        // continuation of the earlier occurrence) is penalized by
+        // multiplier * base^(match_len - allowed) = 1.0 * 2^(2-1) = 2.0.
+        let logits = ffi::from_slice_f32(&[1.0, 1.0, 1.0], &[1, 1, 3]);
+        let mut cfg = SamplingConfig::greedy();
+        cfg.dry_multiplier = 1.0;
+        cfg.dry_base = 2.0;
+        cfg.dry_allowed_length = 1;
+        cfg.dry_penalty_last_n = crate::generate::DRY_FULL_HISTORY;
+        let history = [0, 1, 2, 0, 1];
+        let (_, processed) = sample_token_optimized(&logits, &cfg, &history);
+        let v = to_vec_f32(&processed);
+        assert!(
+            (v[2] - -1.0).abs() < 1e-6,
+            "token 2 must carry the -2.0 DRY penalty, got {v:?}"
+        );
+        assert_eq!(v[0], 1.0);
+        assert_eq!(v[1], 1.0);
+    }
+
+    #[test]
+    fn dry_penalizes_at_exactly_the_allowed_length() {
+        // b10621's >= comparison: a match exactly dry_allowed_length long
+        // gets the base^0 tier (= the bare multiplier). Pre-#1436 mlxcel
+        // used > and skipped this tier entirely.
+        let logits = ffi::from_slice_f32(&[1.0, 1.0, 1.0], &[1, 1, 3]);
+        let mut cfg = SamplingConfig::greedy();
+        cfg.dry_multiplier = 0.75;
+        cfg.dry_base = 2.0;
+        cfg.dry_allowed_length = 2;
+        cfg.dry_penalty_last_n = crate::generate::DRY_FULL_HISTORY;
+        let history = [0, 1, 2, 0, 1];
+        let (_, processed) = sample_token_optimized(&logits, &cfg, &history);
+        let v = to_vec_f32(&processed);
+        assert!(
+            (v[2] - (1.0 - 0.75)).abs() < 1e-6,
+            "a match of exactly the allowed length must be penalized by multiplier * base^0, got {v:?}"
+        );
     }
 }

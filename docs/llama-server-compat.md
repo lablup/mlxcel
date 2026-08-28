@@ -160,7 +160,7 @@ The manifest is sharded by area so that the concurrent implementation chains of 
 | `ui-tools-mcp-gcp.json` | B | #1435, #1456 |
 | `streams-and-realtime.json` | B | #1444 |
 | `runtime-and-context.json` | C | #1449, #1450, #1453, #1472, #1473 |
-| `sampling-and-grammar.json` | C | #1436, #1377, #1466 |
+| `sampling-and-grammar.json` | C | #1436, #1377, #1466, #1485 |
 | `speculative.json` | C | #1433 |
 | `logging-and-presets.json` | C | #1448 |
 

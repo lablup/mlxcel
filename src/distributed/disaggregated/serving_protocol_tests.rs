@@ -220,6 +220,7 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     config.dry_sequence_breakers = vec![198];
     config.top_n_sigma = 1.5;
     config.typical_p = 0.5;
+    config.penalty_last_n = 32;
 
     let restored = sampling_from_serializable(&sampling_to_serializable(&config));
 
@@ -235,6 +236,24 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     assert_eq!(restored.dry_sequence_breakers, vec![198]);
     assert_eq!(restored.top_n_sigma, 1.5);
     assert_eq!(restored.typical_p, 0.5);
+    assert_eq!(restored.penalty_last_n, 32);
+}
+
+#[test]
+fn sampling_state_from_an_older_peer_without_penalty_last_n_defaults_to_full_history() {
+    // An old peer applied its penalties over the whole history, so the serde
+    // default must be the full-history -1, not a zero that would DISABLE the
+    // penalties the peer was applying.
+    let mut value = serde_json::to_value(sampling_to_serializable(&SamplingConfig::greedy()))
+        .expect("serialize sampling state");
+    value
+        .as_object_mut()
+        .expect("sampling state serializes as an object")
+        .remove("penalty_last_n");
+    let state: SerializableSamplingState =
+        serde_json::from_value(value).expect("deserialize legacy sampling state");
+    assert_eq!(state.penalty_last_n, -1);
+    assert_eq!(sampling_from_serializable(&state).penalty_last_n, -1);
 }
 
 #[test]

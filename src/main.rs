@@ -699,9 +699,16 @@ pub(crate) struct SamplingOptions {
     #[arg(long, default_value_t = 2, value_name = "N")]
     pub(crate) dry_allowed_length: usize,
 
-    /// DRY lookback window size (0 = use full history)
-    #[arg(long, default_value_t = 0, value_name = "N")]
-    pub(crate) dry_penalty_last_n: usize,
+    /// DRY lookback window size (-1 = full history, 0 = disable DRY,
+    /// N = last N tokens; b10621 sentinels, #1436)
+    #[arg(long, default_value_t = -1, value_name = "N", allow_hyphen_values = true)]
+    pub(crate) dry_penalty_last_n: i64,
+
+    /// Repetition / frequency / presence penalty lookback window
+    /// (-1 = full history, the default; 0 = disable those penalties;
+    /// N = last N tokens, matching llama-server's --repeat-last-n)
+    #[arg(long = "repeat-last-n", default_value_t = -1, value_name = "N", allow_hyphen_values = true)]
+    pub(crate) repeat_last_n: i32,
 
     /// Random seed for MLX's global RNG. Makes sampled generation
     /// reproducible, including the random canvas noise of diffusion models
@@ -1676,6 +1683,40 @@ pub(crate) struct ServeArgs {
         default_value_t = 1.0
     )]
     typical_p: f32,
+
+    /// Default top-n-sigma sampling (-1.0 or 0.0 = disabled, b10621 sentinel)
+    #[arg(
+        long = "top-nsigma",
+        alias = "top-n-sigma",
+        value_name = "N",
+        default_value_t = -1.0,
+        allow_hyphen_values = true
+    )]
+    top_n_sigma: f32,
+
+    /// Default XTC removal probability (0.0 = disabled)
+    #[arg(long = "xtc-probability", value_name = "N", default_value_t = 0.0)]
+    xtc_probability: f32,
+
+    /// Default XTC probability threshold (values above 0.5 make XTC inert)
+    #[arg(long = "xtc-threshold", value_name = "N", default_value_t = 0.1)]
+    xtc_threshold: f32,
+
+    /// Suppress end-of-generation tokens so generation runs to the token budget or a stop string (b10621 --ignore-eos)
+    #[arg(long = "ignore-eos")]
+    ignore_eos: bool,
+
+    /// Add a server-wide stop string, merged into every request's stop set (repeatable; b10621 -r / --reverse-prompt)
+    #[arg(short = 'r', long = "reverse-prompt", value_name = "PROMPT")]
+    reverse_prompt: Vec<String>,
+
+    /// Sampler chain order. mlxcel's chain order is fixed to b10621's default; any other order is rejected at startup
+    #[arg(long = "samplers", value_name = "SAMPLERS")]
+    samplers: Option<String>,
+
+    /// Sampler chain order in b10621's single-character form; same fixed order rule as --samplers
+    #[arg(long = "sampler-seq", alias = "sampling-seq", value_name = "SEQUENCE")]
+    sampler_seq: Option<String>,
 
     /// Random seed (-1 = random)
     #[arg(short = 's', long, default_value_t = -1)]

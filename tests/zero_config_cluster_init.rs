@@ -243,6 +243,7 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
         max_tokens: 8,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
+        ignore_eos: false,
         priority: RequestPriority::Normal,
         logprobs: Default::default(),
         reasoning_budget: Default::default(),

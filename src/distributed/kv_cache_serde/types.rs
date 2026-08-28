@@ -285,6 +285,11 @@ pub struct SerializableSamplingState {
     /// peer's frame to the disabled baseline `1.0`.
     #[serde(default = "default_typical_p_disabled")]
     pub typical_p: f32,
+    /// Penalty window (#1436). The default fn resolves an older peer's frame
+    /// to the pre-#1436 full-history behavior (`-1`), not the f32-style zero
+    /// default, which would DISABLE the penalties it was applying.
+    #[serde(default = "default_penalty_last_n_full")]
+    pub penalty_last_n: i32,
     pub stop_token_ids: Vec<i32>,
 }
 
@@ -292,6 +297,14 @@ pub struct SerializableSamplingState {
 /// on frames from peers that predate the field.
 fn default_typical_p_disabled() -> f32 {
     1.0
+}
+
+/// The `-1` full-history default for
+/// [`SerializableSamplingState::penalty_last_n`] on frames from peers that
+/// predate the field: an old peer applied its penalties over the whole
+/// history, so the window must resolve to exactly that.
+fn default_penalty_last_n_full() -> i32 {
+    -1
 }
 
 /// Complete serializable cache state for one sequence.

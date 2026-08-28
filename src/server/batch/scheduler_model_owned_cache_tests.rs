@@ -207,6 +207,7 @@ fn options() -> ServerGenerateOptions {
         max_tokens: 1,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
+        ignore_eos: false,
         priority: RequestPriority::Normal,
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,

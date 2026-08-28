@@ -935,9 +935,21 @@ fn resolved_cli_sampling_params(
         seed: args.sampling.seed,
         repetition_penalty: args.sampling.repetition_penalty,
         dry_multiplier: args.sampling.dry_multiplier,
-        dry_base: args.sampling.dry_base,
+        // b10621's CLI silently keeps the default when dry_base < 1.0
+        // (#1436), and so does this path.
+        dry_base: if args.sampling.dry_base < 1.0 {
+            1.75
+        } else {
+            args.sampling.dry_base
+        },
         dry_allowed_length: args.sampling.dry_allowed_length,
-        dry_penalty_last_n: args.sampling.dry_penalty_last_n,
+        // b10621 sentinels (#1436): -1 = full history (the CLI default,
+        // preserving pre-#1436 CLI output), 0 = DRY disabled, N = window.
+        dry_penalty_last_n: if args.sampling.dry_penalty_last_n < 0 {
+            mlxcel_core::generate::DRY_FULL_HISTORY
+        } else {
+            args.sampling.dry_penalty_last_n as usize
+        },
         // The CLI runs DRY with no sequence breakers. This is a deliberate scope
         // decision, not an oversight, and it differs in kind from the four
         // "feature off" defaults below it. Those four are genuinely off because
@@ -957,6 +969,7 @@ fn resolved_cli_sampling_params(
         xtc_threshold: 0.1,
         top_n_sigma: args.sampling.top_n_sigma,
         typical_p: args.sampling.typical_p,
+        penalty_last_n: args.sampling.repeat_last_n,
         stop_token_ids,
     }
 }

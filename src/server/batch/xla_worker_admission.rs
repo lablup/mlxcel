@@ -603,5 +603,6 @@ fn sample_params(options: &ServerGenerateOptions) -> SampleParams {
         dry_allowed_length: sampling.dry_allowed_length,
         dry_penalty_last_n: sampling.dry_penalty_last_n,
         dry_sequence_breakers: sampling.dry_sequence_breakers.clone(),
+        penalty_last_n: sampling.penalty_last_n,
     }
 }
