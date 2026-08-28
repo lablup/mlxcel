@@ -87,6 +87,19 @@ The b10621 GGML runtime options (`--n-gpu-layers`, `--split-mode`, `--mlock`, `-
 
 `LLAMA_ARG_CACHE_REUSE` is an integer minimum reuse chunk size in llama-server, not a prompt-cache enable switch. mlxcel accepts `0` without changing prompt-cache enablement and rejects positive values with an unsupported-setting error. Use `MLXCEL_PROMPT_CACHE_ENABLED` to enable or disable the cache.
 
+## Google Cloud Vertex AI variables (#1456)
+
+Both server entry points implement llama-server b10621's Vertex AI custom-container compatibility, driven purely by the `AIP_*` environment variables Google's platform sets ([custom-container requirements](https://docs.cloud.google.com/vertex-ai/docs/predictions/custom-container-requirements#aip-variables)). With `AIP_MODE` unset (or any value other than `PREDICTION`), nothing is registered and the other variables are ignored.
+
+| Variable | Default | Effect with `AIP_MODE=PREDICTION` |
+|----------|---------|-----------------------------------|
+| `AIP_MODE` | unset | `PREDICTION` (case-sensitive) enables the adapter. |
+| `AIP_HTTP_PORT` | `8080` | Overrides `--port`; a warning is logged when the two differ. An unparsable value fails startup with a diagnostic. |
+| `AIP_HEALTH_ROUTE` | unset | When set, mounted (leading slash ensured) as a GET alias of the health handler. Like the predict route, it is not a public endpoint: with API keys configured it requires a key, as in b10621. |
+| `AIP_PREDICT_ROUTE` | `/predict` | The prediction route (leading slash ensured). Startup fails when it collides with a registered API route. |
+
+`POST` on the predict route takes `{"instances": [{"@requestFormat": "chatCompletions", ...}, ...]}` (at most 128 instances) and answers `{"predictions": [...]}` in request order. `@requestFormat` names the camelCase alias of any registered route (`chatCompletions`, `completions`, `embeddings`, `rerank`, `messages`, `tokenize`, ...) or a registered path verbatim; the field is stripped and the remainder is dispatched through the ordinary handler in-process, so authentication and validation apply exactly as on a direct call. A `stream` field is forced off with a warning, and a per-instance failure becomes an error object in that slot rather than failing the batch. See [`llama-server-compat.md`](llama-server-compat.md) for the manifest entries.
+
 ## Common runtime variables
 
 | Variable | Values | Default | Notes |

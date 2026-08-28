@@ -363,6 +363,10 @@ impl EmbeddingServingMode {
 /// so route handlers can apply one consistent set of defaults.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// Vertex AI (GCP) custom-container compat routes (b10621, #1456).
+    /// Resolved once at startup from `AIP_MODE=PREDICTION` and the other
+    /// `AIP_*` variables; `None` (the default) mounts nothing.
+    pub gcp: Option<crate::server::gcp_compat::GcpRoutes>,
     /// Where a model's thoughts are reported (b10621 `--reasoning-format` /
     /// `LLAMA_ARG_THINK`, issue #1447).
     pub reasoning_format: crate::server::ReasoningFormat,
@@ -755,6 +759,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            gcp: None,
             reasoning_format: crate::server::ReasoningFormat::default(),
             skip_chat_parsing: false,
             no_prefill_assistant: false,

@@ -1267,6 +1267,9 @@ pub(super) fn build_server_config(
     };
 
     ServerConfig {
+        // Populated by `start_server` after the AIP_* environment variables
+        // resolve (#1456); the builder itself never reads the environment.
+        gcp: None,
         reasoning_format: startup.reasoning_format,
         skip_chat_parsing: startup.skip_chat_parsing,
         no_prefill_assistant: startup.no_prefill_assistant,
@@ -2051,6 +2054,28 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
 
+    // Vertex AI (GCP) custom-container compat (b10621, #1456): resolved
+    // purely from the AIP_* environment variables, before anything binds or
+    // loads. With AIP_MODE=PREDICTION, AIP_HTTP_PORT (default 8080)
+    // overrides --port, with upstream's warning when the two differ.
+    let gcp = crate::server::gcp_compat::resolve_from_env()?;
+    if let Some(resolution) = &gcp {
+        if startup.port != resolution.port {
+            tracing::warn!(
+                "Google Cloud Platform compat: overriding server port {} with AIP_HTTP_PORT {}",
+                startup.port,
+                resolution.port
+            );
+        }
+        startup.port = resolution.port;
+        tracing::info!(
+            health_route = %resolution.routes.path_health.as_deref().unwrap_or("(default /health)"),
+            predict_route = %resolution.routes.path_predict,
+            port = resolution.port,
+            "Google Cloud Platform (Vertex AI) compat enabled"
+        );
+    }
+
     // A sampler-order flag that asks for anything but the fixed b10621
     // default chain would silently sample in a different order than the
     // operator requested; fail here, before the multi-GB model load, since
@@ -2265,6 +2290,13 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
     let mut config = build_server_config(&startup, api_keys);
+
+    // Vertex AI compat routes (#1456): recorded on the config so the router
+    // mounts them, and the predict path is refused now, before the model
+    // load, when it collides with a registered route (upstream exits on the
+    // same condition in `register_gcp_compat`).
+    config.gcp = gcp.map(|resolution| resolution.routes);
+    crate::server::gcp_compat::check_predict_collision(&config)?;
 
     if config.pipeline_parallel_runtime.is_some() && distributed.pipeline_runtime.is_some() {
         anyhow::bail!(
