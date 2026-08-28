@@ -863,6 +863,30 @@ mod tests {
     }
 
     #[test]
+    fn native_speculative_dotted_fields_are_accepted_and_inert_like_b10621() {
+        // Upstream registers these seven flat dotted keys behind a schema
+        // block that is compiled out, so b10621 accepts and ignores them;
+        // mlxcel must answer the same request the same way (a 400 would
+        // refuse what upstream serves) and resolve exactly the same options
+        // as if the fields were absent.
+        let body = r#"{"prompt":"hi","speculative.n_max":8,"speculative.n_min":2,"speculative.p_min":0.5,"speculative.type":"ngram-simple","speculative.ngram_min_hits":2,"speculative.ngram_size_m":48,"speculative.ngram_size_n":12}"#;
+        let request = native_request(body);
+        assert!(reject_unsupported_native_fields(&request).is_none());
+        assert!(
+            request.speculative_n_max.is_some(),
+            "the dotted key must be captured, not dropped"
+        );
+        let with_fields = build_native_generate_options(&ServerConfig::default(), &request, None);
+        let bare = native_request(r#"{"prompt":"hi"}"#);
+        let baseline = build_native_generate_options(&ServerConfig::default(), &bare, None);
+        assert_eq!(
+            with_fields.sampling.temperature, baseline.sampling.temperature,
+            "inert fields must not perturb the resolved options"
+        );
+        assert_eq!(with_fields.max_tokens, baseline.max_tokens);
+    }
+
+    #[test]
     fn native_generation_settings_echo_typical_p() {
         let request = native_request(r#"{"prompt":"hi","typical_p":0.5}"#);
         let options = build_native_generate_options(&ServerConfig::default(), &request, None);

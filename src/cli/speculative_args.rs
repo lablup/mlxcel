@@ -247,6 +247,52 @@ pub fn env_fallback_draft_kind(value: &mut Option<String>) {
     apply_optional_string_env_fallback(value, "MLXCEL_DRAFT_KIND", "draft-kind");
 }
 
+/// Apply the legacy `LLAMA_ARG_DRAFT_MAX` env-var fallback to the resolved
+/// draft-token cap (#1433).
+///
+/// b10621 removed `--draft` / `--draft-max` and their `LLAMA_ARG_DRAFT_MAX`
+/// binding in favor of `--spec-draft-n-max` / `LLAMA_ARG_SPEC_DRAFT_N_MAX`,
+/// which is what the clap `env = ...` attribute now binds. Deployments that
+/// still export the legacy variable keep working through this fallback,
+/// which applies only when neither the CLI flag (any spelling) nor the
+/// canonical variable provided a value.
+pub fn env_fallback_draft_max(value: &mut usize, flag_was_set: bool) {
+    *value = resolve_draft_max_fallback(
+        *value,
+        flag_was_set,
+        std::env::var("LLAMA_ARG_SPEC_DRAFT_N_MAX").ok().as_deref(),
+        std::env::var("LLAMA_ARG_DRAFT_MAX").ok().as_deref(),
+    );
+}
+
+/// Pure core of [`env_fallback_draft_max`], separated so the precedence
+/// table is unit-testable without process-global environment mutation.
+///
+/// Precedence (highest first): any CLI spelling of the flag, the canonical
+/// `LLAMA_ARG_SPEC_DRAFT_N_MAX` (already injected by clap when set), then
+/// the legacy `LLAMA_ARG_DRAFT_MAX`. An unparseable legacy value is logged
+/// and ignored.
+fn resolve_draft_max_fallback(
+    current: usize,
+    flag_was_set: bool,
+    canonical_env: Option<&str>,
+    legacy_env: Option<&str>,
+) -> usize {
+    if flag_was_set || canonical_env.is_some() {
+        return current;
+    }
+    match legacy_env {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring");
+                current
+            }
+        },
+        None => current,
+    }
+}
+
 /// Apply the `MLXCEL_DRAFT_BLOCK_SIZE` env-var fallback to the raw
 /// `--draft-block-size` CLI value.
 ///

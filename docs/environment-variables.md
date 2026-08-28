@@ -33,7 +33,8 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 |--------------------|------|-----------------------|
 | `LLAMA_ARG_BATCH` | `--batch-size` | `LLAMA_ARG_BATCH_SIZE` |
 | `LLAMA_ARG_UBATCH` | `--ubatch-size` | `LLAMA_ARG_UBATCH_SIZE` |
-| `LLAMA_ARG_SPEC_DRAFT_MODEL` | `--draft-model` / `--model-draft` | `LLAMA_ARG_MODEL_DRAFT` |
+| `LLAMA_ARG_SPEC_DRAFT_MODEL` | `--draft-model` / `--model-draft` / `--spec-draft-model` | `LLAMA_ARG_MODEL_DRAFT` |
+| `LLAMA_ARG_SPEC_DRAFT_N_MAX` | `--draft-max` / `--spec-draft-n-max` | `LLAMA_ARG_DRAFT_MAX` (b10621 removed it and aborts when it is exported; mlxcel keeps it as a working fallback) |
 | `LLAMA_ARG_THINK_BUDGET` | `--reasoning-budget` | `LLAMA_ARG_REASONING_BUDGET` |
 | `LLAMA_ARG_LOG_FILE` | `--log-file` | `LLAMA_LOG_FILE` |
 | `LLAMA_ARG_CHAT_TEMPLATE` | `--chat-template` | — |

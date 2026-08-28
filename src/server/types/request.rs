@@ -1206,6 +1206,36 @@ pub struct NativeCompletionRequest {
     /// (#1436). Held as a raw value because both shapes must be inspected.
     #[serde(default)]
     pub samplers: Option<serde_json::Value>,
+    // b10621 per-request speculative fields (#1433). Upstream registers
+    // these seven FLAT dotted top-level keys behind a schema block that is
+    // compiled out (`#if 0` in server-schema.cpp), so b10621 itself accepts
+    // and ignores them. mlxcel declares the same keys and treats them
+    // identically as inert: the real controls are the server-wide
+    // --model-draft / --spec-draft-n-max / --draft-kind flags, and matching
+    // upstream's accept-and-ignore here is the compatible behavior (a 400
+    // would refuse requests b10621 answers). Held as raw values because
+    // upstream's disabled block would have taken numbers and strings alike.
+    /// b10621 `speculative.n_max` (inert upstream and here; see above).
+    #[serde(rename = "speculative.n_max", default)]
+    pub speculative_n_max: Option<serde_json::Value>,
+    /// b10621 `speculative.n_min` (inert upstream and here).
+    #[serde(rename = "speculative.n_min", default)]
+    pub speculative_n_min: Option<serde_json::Value>,
+    /// b10621 `speculative.p_min` (inert upstream and here).
+    #[serde(rename = "speculative.p_min", default)]
+    pub speculative_p_min: Option<serde_json::Value>,
+    /// b10621 `speculative.type` (inert upstream and here).
+    #[serde(rename = "speculative.type", default)]
+    pub speculative_type: Option<serde_json::Value>,
+    /// b10621 `speculative.ngram_min_hits` (inert upstream and here).
+    #[serde(rename = "speculative.ngram_min_hits", default)]
+    pub speculative_ngram_min_hits: Option<serde_json::Value>,
+    /// b10621 `speculative.ngram_size_m` (inert upstream and here).
+    #[serde(rename = "speculative.ngram_size_m", default)]
+    pub speculative_ngram_size_m: Option<serde_json::Value>,
+    /// b10621 `speculative.ngram_size_n` (inert upstream and here).
+    #[serde(rename = "speculative.ngram_size_n", default)]
+    pub speculative_ngram_size_n: Option<serde_json::Value>,
     /// Repetition penalty
     pub repeat_penalty: Option<f32>,
     /// Repetition penalty last N tokens

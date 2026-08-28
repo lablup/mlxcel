@@ -176,6 +176,7 @@ fn props_reports_the_effective_kv_cache_mode_and_kv_bits() {
         default_generation_settings: default_generation_settings(&ServerConfig::default()),
         total_slots: 1,
         kv_cache_mode: mlxcel_core::cache::KVCacheMode::Turbo4Asym.to_string(),
+        speculative: super::speculative_config(&ServerConfig::default()),
         kv_bits: 4,
         capabilities: no_side_models(),
     };
@@ -197,6 +198,7 @@ fn props_reports_the_kv_keys_even_on_a_default_server() {
         default_generation_settings: default_generation_settings(&config),
         total_slots: config.n_parallel,
         kv_cache_mode: config.kv_cache_mode.to_string(),
+        speculative: super::speculative_config(&ServerConfig::default()),
         kv_bits: config.batch_kv_quant.bits,
         capabilities: no_side_models(),
     };
@@ -215,4 +217,35 @@ fn no_side_models() -> crate::server::types::ServerCapabilities {
         embedding: None,
         reranking: None,
     }
+}
+
+#[test]
+fn speculative_config_reports_basename_kind_and_cap_without_leaking_the_path() {
+    let mut config = ServerConfig::default();
+    let value = super::speculative_config(&config);
+    assert_eq!(value["model"], serde_json::Value::Null);
+    assert_eq!(value["kind"], serde_json::Value::Null);
+    assert_eq!(value["n_max"], config.num_draft_tokens);
+
+    config.draft_model_path = Some(std::path::PathBuf::from(
+        "/secret/layout/models/qwen3-0.6b-4bit",
+    ));
+    config.draft_kind = Some("dflash".to_string());
+    config.num_draft_tokens = 24;
+    let value = super::speculative_config(&config);
+    assert_eq!(
+        value["model"], "qwen3-0.6b-4bit",
+        "basename only, never the full path"
+    );
+    assert!(
+        !value.to_string().contains("/secret/"),
+        "the payload must not leak the filesystem layout"
+    );
+    assert_eq!(value["kind"], "dflash");
+    assert_eq!(value["n_max"], 24);
+
+    // A path with no final component still reads as configured.
+    config.draft_model_path = Some(std::path::PathBuf::from("/models/draft/.."));
+    let value = super::speculative_config(&config);
+    assert_eq!(value["model"], "(configured)");
 }

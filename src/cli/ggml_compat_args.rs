@@ -840,12 +840,12 @@ impl GgmlCompatArgs {
 /// Compared as a number rather than a string so `00`, `+0` and ` 0 ` are the
 /// same request as `0`, which is what upstream's `std::stoi` makes of them. A
 /// value that is not an integer at all is not inert.
-fn numeric_equals(value: &str, inert: i64) -> bool {
+pub(crate) fn numeric_equals(value: &str, inert: i64) -> bool {
     value.trim().parse::<i64>().is_ok_and(|n| n == inert)
 }
 
 /// True when `value` parses as an integer at most `bound`.
-fn numeric_at_most(value: &str, bound: i64) -> bool {
+pub(crate) fn numeric_at_most(value: &str, bound: i64) -> bool {
     value.trim().parse::<i64>().is_ok_and(|n| n <= bound)
 }
 
@@ -855,7 +855,7 @@ fn numeric_at_most(value: &str, bound: i64) -> bool {
 /// shell variable that was never set, and refusing to start over one would
 /// make the compatibility surface worse than ignoring the flag. b10621 tests
 /// these fields with `.empty()` for the same reason.
-fn present(value: Option<&str>) -> Option<&str> {
+pub(crate) fn present(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
@@ -873,7 +873,7 @@ fn reject(
     }
 }
 
-fn reject_owned(
+pub(crate) fn reject_owned(
     option: &'static str,
     value: &str,
     limitation: &'static str,

@@ -1308,3 +1308,21 @@ fn negative_numbers_stay_rejected_on_sibling_subcommands() {
         .expect_err("`generate --max-tokens -1` must keep the default clap rejection");
     assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
 }
+
+#[test]
+fn serve_spec_draft_spellings_resolve_to_the_draft_controls() {
+    // b10621 canonical spellings (#1433) on `mlxcel serve`, mirroring the
+    // mlxcel-server assertions in src/bin/mlx_server.rs.
+    let canonical = parse_serve_args(&["--spec-draft-model", "models/draft"]);
+    assert_eq!(
+        canonical.draft_model,
+        Some(std::path::PathBuf::from("models/draft"))
+    );
+    for spelling in ["--spec-draft-n-max", "--draft-n", "--draft", "--draft-max"] {
+        let parsed = parse_serve_args(&[spelling, "24"]);
+        assert_eq!(
+            parsed.draft_max, 24,
+            "{spelling} must set the draft-token cap"
+        );
+    }
+}

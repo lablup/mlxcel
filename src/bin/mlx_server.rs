@@ -22,6 +22,7 @@ use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
+use mlxcel::cli::spec_compat_args::SpecCompatArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
 };
@@ -569,16 +570,23 @@ struct ServerArgs {
     #[arg(
         long = "model-draft",
         visible_alias = "draft-model",
+        alias = "spec-draft-model",
         env = "LLAMA_ARG_SPEC_DRAFT_MODEL",
         value_name = "PATH"
     )]
     model_draft: Option<PathBuf>,
 
-    /// Maximum number of draft tokens per speculation step
+    /// Maximum number of draft tokens per speculation step. Accepts the
+    /// b10621 canonical spelling --spec-draft-n-max and its env; the removed
+    /// b10621 spellings --draft / --draft-max stay as compatibility aliases
+    /// (b10621 itself errors on them), and the legacy LLAMA_ARG_DRAFT_MAX
+    /// env is honored as a fallback when the canonical one is unset.
     #[arg(
         long = "draft",
         visible_alias = "draft-max",
-        env = "LLAMA_ARG_DRAFT_MAX",
+        alias = "spec-draft-n-max",
+        alias = "draft-n",
+        env = "LLAMA_ARG_SPEC_DRAFT_N_MAX",
         default_value_t = 16
     )]
     draft: usize,
@@ -1393,6 +1401,12 @@ struct ServerArgs {
     #[command(flatten)]
     ggml_compat: GgmlCompatArgs,
 
+    /// b10621 speculative compatibility surface (#1433), defined once in
+    /// `mlxcel::cli::spec_compat_args` so both server binaries accept the
+    /// same spellings and classify the same values.
+    #[command(flatten)]
+    spec_compat: SpecCompatArgs,
+
     /// llama-server b10621 chat-template, reasoning, and output-parsing
     /// options (`--reasoning`, `--reasoning-format`, `--skip-chat-parsing`,
     /// `--prefill-assistant`, ...). Hidden compatibility surfaces, classified
@@ -1877,6 +1891,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
     env_fallback_draft_kind(&mut args.speculative.draft_kind);
     env_fallback_draft_block_size(&mut args.speculative.draft_block_size);
+    mlxcel::cli::speculative_args::env_fallback_draft_max(
+        &mut args.draft,
+        mlxcel::server::long_cli_flag_was_set("draft")
+            || mlxcel::server::long_cli_flag_was_set("draft-max")
+            || mlxcel::server::long_cli_flag_was_set("spec-draft-n-max")
+            || mlxcel::server::long_cli_flag_was_set("draft-n"),
+    );
     env_fallback_draft_model(&mut args.model_draft);
     env_fallback_batch_size(&mut args.batch_size);
     env_fallback_ubatch_size(&mut args.ubatch_size);
@@ -1919,6 +1940,44 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     args.ggml_compat
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // b10621 speculative compatibility options (#1433): classified before the
+    // model load like the GGML group above. n-gram / lookup speculation, GGML
+    // draft-side process placement, and draft-sampler thresholds mlxcel's
+    // MTP / DFlash verification does not use are rejected with a diagnostic;
+    // the inert forms (and the n-gram tuning knobs, inert while --spec-type
+    // stays none) are accepted.
+    args.spec_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    args.spec_compat
+        .ensure_inert()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // --spec-type translation (#1433): `none` disables speculation exactly
+    // as b10621 does (the explicit selector stops the draft-sidecar type
+    // inference), and draft-mtp / draft-dflash translate onto --draft-kind,
+    // erroring deterministically when they conflict with an explicit one.
+    let spec_type = args
+        .spec_compat
+        .resolved_spec_type()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if spec_type.disable_speculation && args.model_draft.is_some() {
+        tracing::warn!(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring the configured draft model"
+        );
+        args.model_draft = None;
+    }
+    if let Some(kind) = spec_type.draft_kind {
+        match args.speculative.draft_kind.as_deref() {
+            None => args.speculative.draft_kind = Some(kind.to_string()),
+            Some(existing) if existing == kind => {}
+            Some(existing) => {
+                anyhow::bail!(
+                    "--spec-type draft-{kind} conflicts with --draft-kind {existing}: pick one"
+                );
+            }
+        }
+    }
 
     // b10621 multimodal projector / media options (issue #1451): classified
     // before the model reference resolves, like the GGML and chat-template
@@ -2656,6 +2715,20 @@ mod tests {
             "--model-draft and its --draft-model alias must resolve to the same drafter path"
         );
         assert_eq!(primary.model_draft, Some(PathBuf::from("models/draft")));
+    }
+
+    #[test]
+    fn spec_draft_spellings_resolve_to_the_draft_controls() {
+        // b10621's canonical spellings (#1433): --spec-draft-model is the
+        // real model flag and --spec-draft-n-max the real token cap; the
+        // removed --draft / --draft-n / --draft-max spellings stay accepted
+        // as aliases of the same field (b10621 itself errors on them).
+        let canonical = parse_server_args(&["mlxcel-server", "--spec-draft-model", "models/draft"]);
+        assert_eq!(canonical.model_draft, Some(PathBuf::from("models/draft")));
+        for spelling in ["--spec-draft-n-max", "--draft-n"] {
+            let parsed = parse_server_args(&["mlxcel-server", spelling, "24"]);
+            assert_eq!(parsed.draft, 24, "{spelling} must set the draft-token cap");
+        }
     }
 
     #[test]
