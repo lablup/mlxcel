@@ -7324,7 +7324,7 @@ impl BatchScheduler {
     ) -> Option<DecodeLookahead> {
         let logits = self.lookahead_forward(seq_ids, input)?;
         let last_logits = mlxcel_core::slice_last_logits(&logits);
-        // Same pre-fused row filters (top-n-sigma) as `batched_fused_sample`,
+        // Same pre-fused row filters (top-n-sigma, typical_p) as `batched_fused_sample`,
         // so the pipelined lookahead samples from the identical distribution
         // as the synchronous fused path it accelerates. A no-op adding no
         // graph nodes while every filter is disabled.

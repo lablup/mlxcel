@@ -83,6 +83,7 @@ fn props_reports_exactly_the_documented_key_set() {
             "temperature",
             "top_k",
             "top_p",
+            "typical_p",
         ],
         "the /props payload key set changed. Adding a key is fine, update this list; \
          losing one is a silent break for anyone reading it back."

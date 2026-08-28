@@ -738,6 +738,25 @@ pub(super) fn resolve_elastic_pp_config(startup: &ServerStartupConfig) -> Option
 /// model's `max_position_embeddings` read from `config.json`, with the
 /// historical 4096 used only when neither is available. A non-negative
 /// `--n-predict N` is taken verbatim.
+/// Sanitize the server-wide `--typical` / `--typical-p` default: values
+/// outside the enabled range `(0.0, 1.0)` other than the explicit disabled
+/// form `1.0` (zero, negative, above one, non-finite) fold to `1.0` with a
+/// startup warning, so the operator learns the flag is inert instead of the
+/// sampler silently ignoring it and `/props` echoing a value that never
+/// applies. b10621 starts with such values too (its sampler treats them as
+/// disabled), so startup does not reject them.
+fn sanitize_typical_p_default(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 && value <= 1.0 {
+        value
+    } else {
+        tracing::warn!(
+            "--typical {value} is outside the enabled range (0.0, 1.0]; \
+             locally typical sampling stays disabled (1.0)"
+        );
+        1.0
+    }
+}
+
 pub(super) fn resolve_default_max_tokens(
     n_predict: i32,
     per_slot_context_size: usize,
@@ -1175,7 +1194,7 @@ pub(super) fn build_server_config(
         default_top_p: sampling_defaults.top_p,
         default_top_k: sampling_defaults.top_k,
         default_min_p: startup.min_p,
-        default_typical_p: startup.typical_p,
+        default_typical_p: sanitize_typical_p_default(startup.typical_p),
         default_repetition_penalty: startup.repeat_penalty,
         default_repetition_context_size: startup.repeat_last_n,
         default_max_tokens: resolve_default_max_tokens(

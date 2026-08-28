@@ -1425,3 +1425,17 @@ fn an_unrestricted_server_never_fails_the_mode_gate() {
             .expect("no mode flag, nothing to check");
     }
 }
+
+#[test]
+fn sanitize_typical_p_default_folds_out_of_domain_to_disabled() {
+    use super::sanitize_typical_p_default;
+    assert_eq!(sanitize_typical_p_default(0.5), 0.5);
+    assert_eq!(sanitize_typical_p_default(1.0), 1.0);
+    for bad in [0.0f32, -1.0, 1.5, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            sanitize_typical_p_default(bad),
+            1.0,
+            "--typical {bad} must fold to the disabled default"
+        );
+    }
+}

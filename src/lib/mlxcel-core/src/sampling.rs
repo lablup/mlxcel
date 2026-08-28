@@ -501,11 +501,11 @@ fn preprocess_logits_for_sampling(
         last_logits
     };
 
-    // Row filters (top-n-sigma; #1377 / #1373 add typical_p and p_less here)
-    // run on the penalized, untempered logits: after every history-based
-    // penalty and before the fused C++ chain (temperature / top_k / top_p /
-    // min_p / XTC). Disabled filters return `last_logits` unchanged with no
-    // new graph nodes, preserving the bit-exact baseline.
+    // Row filters (top-n-sigma and typical_p; #1373 adds p_less) run on the
+    // penalized, untempered logits: after every history-based penalty and
+    // before the fused C++ chain (temperature / top_k / top_p / min_p /
+    // XTC). Disabled filters return `last_logits` unchanged with no new
+    // graph nodes, preserving the bit-exact baseline.
     apply_row_filters(last_logits, &FusedSampleParams::from_config(config))
 }
 
@@ -848,6 +848,21 @@ pub fn apply_row_filters(
     }
     // p_less (#1373) slot: runs here, after top_n_sigma, when it lands.
     if params.typical_p.is_finite() && params.typical_p > 0.0 && params.typical_p < 1.0 {
+        // b10621's default sampler chain is `... top_n_sigma; top_k; typ_p;
+        // top_p; min_p ...`: typical sampling runs on the RENORMALIZED top-k
+        // survivors, so its entropy and typicality ranking are computed over
+        // the truncated distribution, not the full vocabulary. mlxcel's
+        // top_k lives in the C++ chain AFTER this hook, so to reproduce the
+        // b10621 chain position the top-k mask is applied here first, ahead
+        // of the typical filter. The C++ chain's own top_k then re-selects
+        // the same set (masking to top-k is idempotent), so no stage runs
+        // out of order and the fused dispatch is unchanged.
+        if params.top_k > 1 {
+            let vocab = ffi::array_shape(&logits).last().copied().unwrap_or(0);
+            if params.top_k < vocab {
+                logits = top_k_filter(&logits, params.top_k);
+            }
+        }
         logits = typical_p_filter(&logits, params.typical_p);
     }
     logits
@@ -910,11 +925,18 @@ pub(crate) fn top_n_sigma_filter(logits: &MlxArray, n_sigma: f32) -> UniquePtr<M
 ///
 /// All arithmetic runs in float32 on the log-softmax of the row, so the
 /// entropy is computed on the penalized, untempered distribution and an f16
-/// row cannot overflow. Entries that are not finite in the input (`-inf`
-/// masking from token bias / penalties, or a NaN from a broken forward) are
-/// mapped to `-inf` BEFORE the softmax, so they carry zero probability,
-/// contribute nothing to the entropy, sort to the end of the typicality
-/// order, and stay masked in the output.
+/// row cannot overflow. When `top_k` is active, [`apply_row_filters`] masks
+/// the row to the top-k set BEFORE calling this filter, so the log-softmax
+/// here renormalizes over the top-k survivors exactly as b10621's
+/// `top_k -> typ_p` chain order does. Entries that are not finite in the
+/// input (`-inf` masking from token bias / penalties / top-k, or a NaN from
+/// a broken forward) are mapped to `-inf` BEFORE the softmax, so they carry
+/// zero probability, contribute nothing to the entropy, sort to the end of
+/// the typicality order, and stay masked in the output. Note this includes
+/// `+inf`: a softmax cannot represent an infinite logit, so unlike
+/// [`top_n_sigma_filter`] (which keeps `+inf` entries), this filter treats
+/// them as masked. Both inputs are model failures; the divergence is
+/// documented rather than papered over.
 ///
 /// The most typical token always has an exclusive cumulative mass of
 /// `0 < typical_p`, so at least one token survives. Unlike top-p, the
@@ -1494,9 +1516,10 @@ pub(crate) fn min_p_filter(logits: &MlxArray, min_p: f32) -> UniquePtr<MlxArray>
 /// Production runs top-k inside the C++ chain or inside the rejection kernel;
 /// this is the reference copy the tests hold those against.
 ///
-/// Used by: unit tests (`fused_sample_probs_equals_softmax_of_filtered_over_t`
-/// in `sampling::tests`)
-#[allow(dead_code)]
+/// Used by: [`apply_row_filters`] (the idempotent pre-`typical_p` top-k
+/// mask that pins b10621's `top_k -> typ_p` chain position), unit tests
+/// (`fused_sample_probs_equals_softmax_of_filtered_over_t` in
+/// `sampling::tests`)
 pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
     let neg_logits = ffi::negative(logits);
     let indices = ffi::argpartition(&neg_logits, k - 1, -1);
@@ -3676,6 +3699,79 @@ mod tests {
         assert_eq!(params.typical_p, 1.0);
         let out = apply_row_filters(logits, &params);
         assert_eq!(ptr_before, &*out as *const MlxArray);
+
+        // And with a DIFFERENT filter active, typical_p = 1.0 must add
+        // nothing on top of it: the hook output equals the direct
+        // top-n-sigma filter byte for byte.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[1, 5]);
+        let cfg = SamplingConfig {
+            top_n_sigma: 1.0,
+            ..Default::default()
+        };
+        let via_hook = apply_row_filters(
+            ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[1, 5]),
+            &FusedSampleParams::from_config(&cfg),
+        );
+        let direct = top_n_sigma_filter(&logits, 1.0);
+        assert_eq!(to_vec_f32(&via_hook), to_vec_f32(&direct));
+    }
+
+    #[test]
+    fn typical_p_runs_on_the_renormalized_top_k_survivors() {
+        // b10621's chain order is `top_k -> typ_p`, so the typicality
+        // statistics come from the RENORMALIZED top-k distribution. This row
+        // is built so the two orders disagree: logits [5.0, 4.9, 0 x 50].
+        //
+        // Full-vocabulary entropy (~1.60 nats) is inflated by the 50 tail
+        // tokens, making token 1 more typical than token 0, so typ_p = 0.3
+        // over the full row would keep ONLY token 1. Over the renormalized
+        // top-2 survivors (p = [0.525, 0.475], H = 0.692) token 0 is the
+        // more typical one and typ_p = 0.3 keeps ONLY token 0.
+        let mut row = vec![0.0f32; 52];
+        row[0] = 5.0;
+        row[1] = 4.9;
+        let logits = ffi::from_slice_f32(&row, &[1, 52]);
+        let cfg = SamplingConfig {
+            top_k: 2,
+            typical_p: 0.3,
+            ..Default::default()
+        };
+        let out = apply_row_filters(logits, &FusedSampleParams::from_config(&cfg));
+        let v = to_vec_f32(&out);
+        assert!(
+            v[0].is_finite(),
+            "token 0 must survive: typicality must be computed over the \
+             renormalized top-k set (b10621 order), not the full vocabulary"
+        );
+        assert_eq!(
+            v[1],
+            f32::NEG_INFINITY,
+            "token 1 is less typical within the top-2 set"
+        );
+        for (i, x) in v.iter().enumerate().skip(2) {
+            assert_eq!(
+                *x,
+                f32::NEG_INFINITY,
+                "tail token {i} escaped the top-k mask"
+            );
+        }
+    }
+
+    #[test]
+    fn typical_p_top_k_premask_skips_oversized_k() {
+        // top_k >= vocab is a no-op upstream; the pre-mask must skip it
+        // rather than hand argpartition an out-of-range kth index.
+        let logits = ffi::from_slice_f32(&[0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln()], &[1, 3]);
+        let cfg = SamplingConfig {
+            top_k: 64,
+            typical_p: 0.3,
+            ..Default::default()
+        };
+        let out = apply_row_filters(logits, &FusedSampleParams::from_config(&cfg));
+        let v = to_vec_f32(&out);
+        // Same result as the no-top_k case: the less-typical argmax drops.
+        assert_eq!(v[0], f32::NEG_INFINITY);
+        assert!(v[1].is_finite() || v[2].is_finite());
     }
 
     #[test]
