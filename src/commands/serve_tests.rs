@@ -140,7 +140,6 @@ fn sample_args() -> crate::ServeArgs {
         tp_moe_mode: "expert_parallel".to_string(),
         tp_embedding_mode: "replicated".to_string(),
         tp_lm_head_mode: "replicated".to_string(),
-        _no_webui: false,
         ggml_compat: Default::default(),
         spec_compat: mlxcel::cli::spec_compat_args::SpecCompatArgs::default(),
         chat_compat: Default::default(),

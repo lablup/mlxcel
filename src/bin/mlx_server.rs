@@ -1335,11 +1335,6 @@ struct ServerArgs {
     #[arg(long = "decode-storage-backend", value_name = "BACKEND")]
     decode_storage_backend: Option<mlxcel::server::DecodeStorageBackend>,
 
-    // llama-server compatibility arguments (accepted but ignored).
-    /// Accepted for llama-server CLI compatibility (ignored: mlxcel has no web UI)
-    #[arg(long, hide = true)]
-    _no_webui: bool,
-
     /// Maximum number of cached post-projection image features per loaded VLM.
     ///
     /// Multi-turn conversations that revisit the same image reuse cached

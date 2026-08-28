@@ -2014,11 +2014,6 @@ pub(crate) struct ServeArgs {
     )]
     tp_lm_head_mode: String,
 
-    // llama-server compatibility arguments (accepted but ignored).
-    /// Accepted for llama-server CLI compatibility (ignored, mlxcel has no web UI)
-    #[arg(long, hide = true)]
-    _no_webui: bool,
-
     /// Decode storage backend for continuous batching.
     ///
     /// Accepted values: `auto`, `dense`, `paged`. When omitted, the server
