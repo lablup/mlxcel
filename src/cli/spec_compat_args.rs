@@ -29,12 +29,20 @@
 //! mlxcel cannot reproduce fails startup with a diagnostic naming the option,
 //! the platform limitation, and the mlxcel alternative where one exists.
 //!
-//! The n-gram tuning knobs (`--spec-ngram-*` sizes and hit counts) are a
-//! deliberate exception: they only take effect when `--spec-type` selects an
-//! n-gram mode, and mlxcel rejects every non-`none` `--spec-type`. With the
-//! selector pinned to `none`, b10621 itself ignores the tuning values, so
-//! accepting any value here reproduces upstream behavior exactly and the
-//! whole family stays inert by construction.
+//! `--spec-type` is b10621's speculation-subsystem selector (draft-simple,
+//! draft-eagle3, draft-mtp, draft-dflash, draft-dspark, and five n-gram
+//! modes; `none` disables speculation outright, draft model or not). mlxcel
+//! translates the values it can honor exactly: `none` disables the drafter
+//! (matching upstream, which stops inferring a speculation type once the
+//! selector is explicit), `draft-mtp` maps onto `--draft-kind mtp`, and
+//! `draft-dflash` onto `--draft-kind dflash`. Every other value, and any
+//! comma-list mlxcel cannot run as a single subsystem, fails startup with a
+//! per-value diagnostic.
+//!
+//! The n-gram tuning knobs (`--spec-ngram-*` sizes and hit counts) only take
+//! effect when the selector picks an n-gram mode, which mlxcel rejects, so
+//! any tuning value here is inert exactly as it is upstream with a
+//! non-n-gram selector and the whole family is accepted.
 //!
 //! Used by: mlxcel serve, mlxcel-server.
 //!
@@ -43,7 +51,8 @@
 use clap::Args;
 
 use super::ggml_compat_args::{
-    GgmlCompatRejection, env_flag, numeric_at_most, numeric_equals, present, reject_owned,
+    GgmlCompatRejection, env_bool_pair, env_flag, numeric_at_most, numeric_equals, present,
+    reject_owned,
 };
 
 /// llama-server b10621 speculative compatibility options (#1433).
@@ -66,6 +75,7 @@ pub struct SpecCompatArgs {
     /// 0.00 default (greedy, no threshold).
     #[arg(
         long = "spec-draft-p-min",
+        alias = "draft-p-min",
         env = "LLAMA_ARG_SPEC_DRAFT_P_MIN",
         value_name = "N",
         hide = true
@@ -76,15 +86,18 @@ pub struct SpecCompatArgs {
     /// 0.10 default; mlxcel drafts a single sequence and never splits.
     #[arg(
         long = "spec-draft-p-split",
+        alias = "draft-p-split",
         env = "LLAMA_ARG_SPEC_DRAFT_P_SPLIT",
         value_name = "N",
         hide = true
     )]
     pub spec_draft_p_split: Option<String>,
 
-    /// b10621 `--spec-type`: which speculation subsystems to run. Only the
-    /// `none` default is accepted (drafting is configured through
-    /// `--model-draft` instead); every n-gram mode is rejected.
+    /// b10621 `--spec-type`: which speculation subsystems to run. `none`
+    /// disables speculation (dropping any configured draft model, matching
+    /// upstream), `draft-mtp` / `draft-dflash` translate onto
+    /// `--draft-kind`; everything else is rejected. See
+    /// [`SpecCompatArgs::resolved_spec_type`].
     #[arg(
         long = "spec-type",
         env = "LLAMA_ARG_SPEC_TYPE",
@@ -98,10 +111,17 @@ pub struct SpecCompatArgs {
     #[arg(long = "spec-draft-backend-sampling", hide = true)]
     pub spec_draft_backend_sampling: bool,
 
+    /// b10621 `--no-spec-draft-backend-sampling`: move draft sampling to a
+    /// host-side CPU sampler. The operator-active half of the pair; mlxcel
+    /// cannot reproduce it, so it is rejected.
+    #[arg(long = "no-spec-draft-backend-sampling", hide = true)]
+    pub no_spec_draft_backend_sampling: bool,
+
     /// b10621 `--spec-draft-hf`: pull the draft model from a HF repo through
     /// GGML loading. Rejected; `--model-draft` accepts a repo-id directly.
     #[arg(
         long = "spec-draft-hf",
+        alias = "hf-repo-draft",
         env = "LLAMA_ARG_SPEC_DRAFT_HF_REPO",
         value_name = "REPO",
         hide = true
@@ -110,59 +130,127 @@ pub struct SpecCompatArgs {
 
     // ── GGML draft-side process placement (no GGML backend to place) ──
     /// b10621 `--spec-draft-cpu-mask` (draft CPU affinity). Rejected.
-    #[arg(long = "spec-draft-cpu-mask", value_name = "M", hide = true)]
+    #[arg(
+        long = "spec-draft-cpu-mask",
+        alias = "cpu-mask-draft",
+        value_name = "M",
+        hide = true
+    )]
     pub spec_draft_cpu_mask: Option<String>,
     /// b10621 `--spec-draft-cpu-mask-batch`. Rejected.
-    #[arg(long = "spec-draft-cpu-mask-batch", value_name = "M", hide = true)]
+    #[arg(
+        long = "spec-draft-cpu-mask-batch",
+        alias = "cpu-mask-batch-draft",
+        value_name = "M",
+        hide = true
+    )]
     pub spec_draft_cpu_mask_batch: Option<String>,
     /// b10621 `--spec-draft-cpu-range`. Rejected.
-    #[arg(long = "spec-draft-cpu-range", value_name = "lo-hi", hide = true)]
+    #[arg(
+        long = "spec-draft-cpu-range",
+        alias = "cpu-range-draft",
+        value_name = "lo-hi",
+        hide = true
+    )]
     pub spec_draft_cpu_range: Option<String>,
     /// b10621 `--spec-draft-cpu-strict`. Inert at 0.
-    #[arg(long = "spec-draft-cpu-strict", value_name = "0|1", hide = true)]
+    #[arg(
+        long = "spec-draft-cpu-strict",
+        alias = "cpu-strict-draft",
+        value_name = "0|1",
+        hide = true
+    )]
     pub spec_draft_cpu_strict: Option<String>,
     /// b10621 `--spec-draft-cpu-strict-batch`. Inert at 0.
-    #[arg(long = "spec-draft-cpu-strict-batch", value_name = "0|1", hide = true)]
+    #[arg(
+        long = "spec-draft-cpu-strict-batch",
+        alias = "cpu-strict-batch-draft",
+        value_name = "0|1",
+        hide = true
+    )]
     pub spec_draft_cpu_strict_batch: Option<String>,
     /// b10621 `--spec-draft-poll`. Inert at 50 (the upstream default).
-    #[arg(long = "spec-draft-poll", value_name = "0-100", hide = true)]
+    #[arg(
+        long = "spec-draft-poll",
+        alias = "poll-draft",
+        value_name = "0-100",
+        hide = true
+    )]
     pub spec_draft_poll: Option<String>,
     /// b10621 `--spec-draft-poll-batch`. Inert at 50.
-    #[arg(long = "spec-draft-poll-batch", value_name = "0-100", hide = true)]
+    #[arg(
+        long = "spec-draft-poll-batch",
+        alias = "poll-batch-draft",
+        value_name = "0-100",
+        hide = true
+    )]
     pub spec_draft_poll_batch: Option<String>,
     /// b10621 `--spec-draft-prio`. Inert at 0 (normal priority).
-    #[arg(long = "spec-draft-prio", value_name = "N", hide = true)]
+    #[arg(
+        long = "spec-draft-prio",
+        alias = "prio-draft",
+        value_name = "N",
+        hide = true
+    )]
     pub spec_draft_prio: Option<String>,
     /// b10621 `--spec-draft-prio-batch`. Inert at 0.
-    #[arg(long = "spec-draft-prio-batch", value_name = "N", hide = true)]
+    #[arg(
+        long = "spec-draft-prio-batch",
+        alias = "prio-batch-draft",
+        value_name = "N",
+        hide = true
+    )]
     pub spec_draft_prio_batch: Option<String>,
     /// b10621 `--spec-draft-threads`. Inert for any non-positive count
     /// ("use hardware concurrency", the upstream default request).
-    #[arg(long = "spec-draft-threads", value_name = "N", hide = true)]
+    #[arg(
+        long = "spec-draft-threads",
+        alias = "threads-draft",
+        value_name = "N",
+        hide = true
+    )]
     pub spec_draft_threads: Option<String>,
     /// b10621 `--spec-draft-threads-batch`. Same rule.
-    #[arg(long = "spec-draft-threads-batch", value_name = "N", hide = true)]
+    #[arg(
+        long = "spec-draft-threads-batch",
+        alias = "threads-batch-draft",
+        value_name = "N",
+        hide = true
+    )]
     pub spec_draft_threads_batch: Option<String>,
     /// b10621 `--spec-draft-device`: GGML offload device list. Rejected.
-    #[arg(long = "spec-draft-device", value_name = "dev1,dev2", hide = true)]
+    #[arg(
+        long = "spec-draft-device",
+        alias = "device-draft",
+        value_name = "dev1,dev2",
+        hide = true
+    )]
     pub spec_draft_device: Option<String>,
     /// b10621 `--spec-draft-ngl`: draft VRAM layer count. `auto` / `all` are
     /// inert (mlxcel runs every draft layer on the accelerator); a numeric
     /// partial offload is rejected.
     #[arg(
         long = "spec-draft-ngl",
+        alias = "gpu-layers-draft",
+        alias = "n-gpu-layers-draft",
         env = "LLAMA_ARG_N_GPU_LAYERS_DRAFT",
         value_name = "N",
         hide = true
     )]
     pub spec_draft_ngl: Option<String>,
     /// b10621 `--spec-draft-override-tensor`. Rejected.
-    #[arg(long = "spec-draft-override-tensor", value_name = "SPEC", hide = true)]
+    #[arg(
+        long = "spec-draft-override-tensor",
+        alias = "override-tensor-draft",
+        value_name = "SPEC",
+        hide = true
+    )]
     pub spec_draft_override_tensor: Option<String>,
     /// b10621 `--spec-draft-type-k`: draft KV cache dtype for K. Inert at
     /// the `f16` default, which is also mlxcel's draft KV dtype.
     #[arg(
         long = "spec-draft-type-k",
+        alias = "cache-type-k-draft",
         env = "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K",
         value_name = "TYPE",
         hide = true
@@ -171,6 +259,7 @@ pub struct SpecCompatArgs {
     /// b10621 `--spec-draft-type-v`: draft KV cache dtype for V. Same rule.
     #[arg(
         long = "spec-draft-type-v",
+        alias = "cache-type-v-draft",
         env = "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V",
         value_name = "TYPE",
         hide = true
@@ -178,11 +267,13 @@ pub struct SpecCompatArgs {
     pub spec_draft_type_v: Option<String>,
     /// b10621 `--spec-draft-cpu-moe`: keep draft MoE weights on the CPU.
     /// Rejected when set.
-    #[arg(long = "spec-draft-cpu-moe", hide = true)]
+    #[arg(long = "spec-draft-cpu-moe", alias = "cpu-moe-draft", hide = true)]
     pub spec_draft_cpu_moe: bool,
     /// b10621 `--spec-draft-n-cpu-moe`: first-N-layers CPU MoE. Rejected.
     #[arg(
         long = "spec-draft-n-cpu-moe",
+        alias = "spec-draft-ncmoe",
+        alias = "n-cpu-moe-draft",
         env = "LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE",
         value_name = "N",
         hide = true
@@ -243,6 +334,19 @@ const NO_GGML_DRAFT: &str = "mlxcel loads the draft model through MLX on the sam
 const NO_NGRAM: &str = "mlxcel's speculative decoding is MTP / DFlash draft-model verification; \
      it has no n-gram or lookup speculation subsystem";
 
+/// How a `--spec-type` value resolves onto mlxcel's speculative controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpecTypeResolution {
+    /// `--spec-type none`: b10621 disables speculation outright (the
+    /// explicit selector stops the draft-sidecar type inference), so the
+    /// caller must drop its draft model.
+    pub disable_speculation: bool,
+    /// `--spec-type draft-mtp` / `draft-dflash`: the exact `--draft-kind`
+    /// translation the caller must apply (and error on if it conflicts with
+    /// an explicit `--draft-kind`).
+    pub draft_kind: Option<&'static str>,
+}
+
 impl SpecCompatArgs {
     /// Reject every value whose b10621 meaning mlxcel cannot reproduce.
     ///
@@ -256,20 +360,111 @@ impl SpecCompatArgs {
         self.rejection().map_or(Ok(()), Err)
     }
 
+    /// Resolve `--spec-type` onto mlxcel's speculative controls (#1433).
+    ///
+    /// b10621's selector takes a comma-separated list of speculation
+    /// subsystems. mlxcel honors exactly the values it can translate:
+    /// `none` disables speculation (upstream semantics: an explicit selector
+    /// stops the draft-sidecar type inference, so a draft model with
+    /// `--spec-type none` runs no speculation), `draft-mtp` and
+    /// `draft-dflash` translate onto `--draft-kind`. Any other subsystem
+    /// (the n-gram modes, `draft-simple`, `draft-eagle3`, `draft-dspark`),
+    /// and any list asking for more than one subsystem at once, is rejected
+    /// with a per-value diagnostic.
+    ///
+    /// # Errors
+    ///
+    /// Returns the rejection for the first unsupported value.
+    pub fn resolved_spec_type(&self) -> Result<SpecTypeResolution, GgmlCompatRejection> {
+        let Some(raw) = present(self.spec_type.as_deref()) else {
+            return Ok(SpecTypeResolution::default());
+        };
+        let values: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .collect();
+        let mut resolution = SpecTypeResolution::default();
+        let mut selected: Option<&str> = None;
+        for value in values {
+            match value {
+                "none" => resolution.disable_speculation = true,
+                "draft-mtp" | "draft-dflash" => {
+                    if let Some(previous) = selected
+                        && previous != value
+                    {
+                        return Err(reject_owned(
+                            "--spec-type",
+                            raw,
+                            "mlxcel runs one speculative subsystem per server; a list selecting \
+                             several draft types cannot be honored",
+                            Some("pick one of draft-mtp or draft-dflash"),
+                        ));
+                    }
+                    selected = Some(value);
+                    resolution.draft_kind = Some(if value == "draft-mtp" {
+                        "mtp"
+                    } else {
+                        "dflash"
+                    });
+                }
+                "draft-simple" | "draft-eagle3" | "draft-dspark" => {
+                    return Err(reject_owned(
+                        "--spec-type",
+                        value,
+                        "mlxcel's draft verification implements the MTP and DFlash subsystems \
+                         only; this draft type has no mlxcel implementation",
+                        Some(
+                            "--spec-type draft-mtp or draft-dflash with --model-draft <path-or-repo-id>",
+                        ),
+                    ));
+                }
+                other if other.starts_with("ngram") => {
+                    return Err(reject_owned(
+                        "--spec-type",
+                        other,
+                        NO_NGRAM,
+                        Some(
+                            "--spec-type draft-mtp or draft-dflash with --model-draft <path-or-repo-id> for draft-model speculation",
+                        ),
+                    ));
+                }
+                other => {
+                    return Err(reject_owned(
+                        "--spec-type",
+                        other,
+                        "not a b10621 speculation type mlxcel recognizes",
+                        Some("none, draft-mtp, or draft-dflash"),
+                    ));
+                }
+            }
+        }
+        if resolution.disable_speculation && resolution.draft_kind.is_some() {
+            return Err(reject_owned(
+                "--spec-type",
+                raw,
+                "none disables speculation and cannot be combined with a draft type",
+                Some("pass either none or a single draft type"),
+            ));
+        }
+        Ok(resolution)
+    }
+
     fn rejection(&self) -> Option<GgmlCompatRejection> {
         // ── speculation subsystem selector ──
-        // b10621 reads a comma-separated list; `none` (and an absent or
-        // empty value) is the default and the only selection mlxcel honors.
-        if let Some(spec_type) = present(self.spec_type.as_deref())
-            && spec_type != "none"
-        {
+        // Validated through `resolved_spec_type` so `ensure_inert` rejects
+        // unsupported subsystems even when a caller skips the translation
+        // step; the translation itself is applied by the binaries.
+        if let Err(rejection) = self.resolved_spec_type() {
+            return Some(rejection);
+        }
+        if self.no_spec_draft_backend_sampling {
             return Some(reject_owned(
-                "--spec-type",
-                spec_type,
-                NO_NGRAM,
-                Some(
-                    "--model-draft <path-or-repo-id> (with --draft-kind mtp|dflash) for draft-model speculation",
-                ),
+                "--no-spec-draft-backend-sampling",
+                "--no-spec-draft-backend-sampling",
+                "mlxcel cannot move draft sampling to a host-side CPU sampler; its sampling \
+                 always runs as MLX ops on the accelerator",
+                None,
             ));
         }
         for (option, value) in [
@@ -408,6 +603,9 @@ impl SpecCompatArgs {
         if let Some(value) = present(self.spec_draft_ngl.as_deref())
             && value != "auto"
             && value != "all"
+            // A negative count is llama.cpp's historical spelling of "all",
+            // which is what mlxcel already does (mirrors `--gpu-layers`).
+            && !numeric_at_most(value, -1)
         {
             return Some(reject_owned(
                 "--spec-draft-ngl",
@@ -439,11 +637,28 @@ impl SpecCompatArgs {
         None
     }
 
-    /// Fold the b10621 value-less environment bindings in, using upstream's
-    /// own truthy rule (see [`crate::cli::ggml_compat_args::env_flag`]).
-    pub fn apply_env_bindings(&mut self) {
-        self.spec_draft_backend_sampling |= env_flag("LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING");
+    /// Fold the b10621 value-less environment bindings in.
+    ///
+    /// `--spec-draft-backend-sampling` is a `--x` / `--no-x` pair upstream,
+    /// so its variable goes through [`env_bool_pair`]: a truthy value
+    /// re-affirms the (inert) default, a falsey value or the
+    /// `LLAMA_ARG_NO_*` alias selects the rejected CPU-sampler half, and an
+    /// unrecognized value is an error exactly as b10621's `parse_bool_value`
+    /// throws. `--spec-draft-cpu-moe` is a plain flag and uses [`env_flag`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the variable name and raw value when a boolean variable holds
+    /// a value b10621 would reject.
+    pub fn apply_env_bindings(&mut self) -> Result<(), (&'static str, String)> {
+        match env_bool_pair("LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING") {
+            Some(Ok(true)) => self.spec_draft_backend_sampling = true,
+            Some(Ok(false)) => self.no_spec_draft_backend_sampling = true,
+            Some(Err(raw)) => return Err(("LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING", raw)),
+            None => {}
+        }
         self.spec_draft_cpu_moe |= env_flag("LLAMA_ARG_SPEC_DRAFT_CPU_MOE");
+        Ok(())
     }
 }
 

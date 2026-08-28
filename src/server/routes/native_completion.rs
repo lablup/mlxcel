@@ -564,21 +564,6 @@ fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option
         Some(ErrorResponse::new(message, "invalid_request_error").into_response())
     };
 
-    // Per-request speculative overrides (#1433): mlxcel's MTP / DFlash
-    // configuration is server-wide, so a request that asks to change the
-    // draft parameters must fail loudly rather than run with the server's
-    // settings while the client believes its own applied. An empty object
-    // sets nothing upstream and is accepted as inert.
-    if let Some(speculative) = request.speculative.as_ref() {
-        let has_keys = speculative
-            .as_object()
-            .is_none_or(|object| !object.is_empty());
-        if has_keys {
-            return refuse(format!(
-                "speculative {speculative} is not supported per request: mlxcel's speculative decoding is configured server-wide with --model-draft, --spec-draft-n-max, --draft-kind, and --draft-block-size; drop the field or change the server flags"
-            ));
-        }
-    }
     // Sampler chain order (#1436): mlxcel's chain is fixed to b10621's
     // default order, so the field is accepted only when it spells exactly
     // that order (array-of-names or character form), which is inert; any
@@ -878,26 +863,27 @@ mod tests {
     }
 
     #[test]
-    fn native_speculative_overrides_are_rejected_with_a_diagnostic() {
-        // An empty object sets nothing upstream and is inert.
-        let empty = native_request(r#"{"prompt":"hi","speculative":{}}"#);
-        assert!(reject_unsupported_native_fields(&empty).is_none());
-        for body in [
-            r#"{"prompt":"hi","speculative":{"n_max":8}}"#,
-            r#"{"prompt":"hi","speculative":{"n_min":2}}"#,
-            r#"{"prompt":"hi","speculative":{"p_min":0.5}}"#,
-            r#"{"prompt":"hi","speculative":{"type":"ngram-simple"}}"#,
-            r#"{"prompt":"hi","speculative":{"ngram_min_hits":2}}"#,
-            r#"{"prompt":"hi","speculative":{"ngram_size_m":48}}"#,
-            r#"{"prompt":"hi","speculative":{"ngram_size_n":12}}"#,
-            r#"{"prompt":"hi","speculative":42}"#,
-        ] {
-            let request = native_request(body);
-            assert!(
-                reject_unsupported_native_fields(&request).is_some(),
-                "body {body} must be rejected: per-request speculative overrides have no path into the scheduler"
-            );
-        }
+    fn native_speculative_dotted_fields_are_accepted_and_inert_like_b10621() {
+        // Upstream registers these seven flat dotted keys behind a schema
+        // block that is compiled out, so b10621 accepts and ignores them;
+        // mlxcel must answer the same request the same way (a 400 would
+        // refuse what upstream serves) and resolve exactly the same options
+        // as if the fields were absent.
+        let body = r#"{"prompt":"hi","speculative.n_max":8,"speculative.n_min":2,"speculative.p_min":0.5,"speculative.type":"ngram-simple","speculative.ngram_min_hits":2,"speculative.ngram_size_m":48,"speculative.ngram_size_n":12}"#;
+        let request = native_request(body);
+        assert!(reject_unsupported_native_fields(&request).is_none());
+        assert!(
+            request.speculative_n_max.is_some(),
+            "the dotted key must be captured, not dropped"
+        );
+        let with_fields = build_native_generate_options(&ServerConfig::default(), &request, None);
+        let bare = native_request(r#"{"prompt":"hi"}"#);
+        let baseline = build_native_generate_options(&ServerConfig::default(), &bare, None);
+        assert_eq!(
+            with_fields.sampling.temperature, baseline.sampling.temperature,
+            "inert fields must not perturb the resolved options"
+        );
+        assert_eq!(with_fields.max_tokens, baseline.max_tokens);
     }
 
     #[test]

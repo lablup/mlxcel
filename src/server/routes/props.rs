@@ -110,10 +110,14 @@ pub async fn props(State(state): State<AppState>) -> Json<PropsResponse> {
 /// otherwise carry a token).
 pub(crate) fn speculative_config(config: &ServerConfig) -> serde_json::Value {
     serde_json::json!({
-        "model": config
-            .draft_model_path
-            .as_ref()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+        "model": config.draft_model_path.as_ref().map(|p| {
+            // Basename only (a full path or repo URL could leak layout or a
+            // token); a path with no final component (trailing `/`, `..`)
+            // still reads as "configured" rather than as no draft model.
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(configured)".to_string())
+        }),
         "kind": config.draft_kind,
         "n_max": config.num_draft_tokens,
     })

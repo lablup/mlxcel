@@ -25,13 +25,18 @@
       "issue": 1433,
       "test": "src/bin/mlx_server.rs::spec_draft_spellings_resolve_to_the_draft_controls",
       "notes": "b10621 removed every spelling of this entry (the binary errors and points at --spec-draft-n-max); mlxcel keeps --draft / --draft-n / --draft-max alive as aliases of the same draft-token cap so existing deployments keep working. The legacy LLAMA_ARG_DRAFT_MAX binding is honored as a fallback when the canonical variable is unset.",
-      "divergence": [],
+      "divergence": [
+        "b10621 aborts startup whenever LLAMA_ARG_DRAFT_MAX is exported (the removed argument's environment handler throws unconditionally); mlxcel honors the variable as a working legacy fallback below the canonical LLAMA_ARG_SPEC_DRAFT_N_MAX and any CLI spelling."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--draft",
           "--draft-n",
           "--draft-max"
-        ]
+        ],
+        "env": "LLAMA_ARG_DRAFT_MAX",
+        "env_binding": "runtime",
+        "env_test": "src/cli/speculative_args_tests.rs"
       }
     },
     {
@@ -133,13 +138,17 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::backend_sampling_is_always_inert",
-      "notes": "Inert: mlxcel's draft sampling always runs as MLX ops on the accelerator, which is what the enabled default asks for.",
+      "test": "src/cli/spec_compat_args_tests.rs::no_backend_sampling_half_is_rejected",
+      "notes": "A --x/--no-x pair upstream with default enabled. The positive spelling is inert (mlxcel's draft sampling always runs as MLX ops on the accelerator); the operator-active --no- half moves draft sampling to a host CPU sampler, which mlxcel cannot reproduce, and fails startup. The environment variable goes through b10621's own bool-pair rules (truthy re-affirms, falsey or the LLAMA_ARG_NO_ alias selects the rejected half, unrecognized values error).",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-backend-sampling"
+          "--spec-draft-backend-sampling",
+          "--no-spec-draft-backend-sampling"
         ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING",
+        "env_binding": "runtime",
+        "env_test": "src/cli/spec_compat_args_tests.rs",
         "hidden": true
       }
     },
@@ -168,7 +177,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-cpu-mask"
+          "--spec-draft-cpu-mask",
+          "--cpu-mask-draft"
         ],
         "hidden": true
       }
@@ -198,7 +208,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-cpu-mask-batch"
+          "--spec-draft-cpu-mask-batch",
+          "--cpu-mask-batch-draft"
         ],
         "hidden": true
       }
@@ -228,9 +239,13 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-cpu-moe"
+          "--spec-draft-cpu-moe",
+          "--cpu-moe-draft"
         ],
-        "hidden": true
+        "hidden": true,
+        "env": "LLAMA_ARG_SPEC_DRAFT_CPU_MOE",
+        "env_binding": "runtime",
+        "env_test": "src/cli/spec_compat_args_tests.rs"
       }
     },
     {
@@ -258,7 +273,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-cpu-range"
+          "--spec-draft-cpu-range",
+          "--cpu-range-draft"
         ],
         "hidden": true
       }
@@ -287,7 +303,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-cpu-strict"
+          "--spec-draft-cpu-strict",
+          "--cpu-strict-draft"
         ],
         "hidden": true
       }
@@ -316,7 +333,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-cpu-strict-batch"
+          "--spec-draft-cpu-strict-batch",
+          "--cpu-strict-batch-draft"
         ],
         "hidden": true
       }
@@ -346,7 +364,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-device"
+          "--spec-draft-device",
+          "--device-draft"
         ],
         "hidden": true
       }
@@ -372,15 +391,17 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::defaults_are_inert",
+      "test": "src/cli/spec_compat_args_tests.rs::spec_draft_hf_is_rejected_with_the_model_draft_alternative",
       "notes": "mlxcel does not load GGUF draft checkpoints; a present repo fails startup pointing at --model-draft, which accepts a repo-id and auto-downloads the MLX checkpoint.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-hf"
+          "--spec-draft-hf",
+          "--hf-repo-draft"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_HF_REPO",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -442,7 +463,9 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-n-cpu-moe"
+          "--spec-draft-n-cpu-moe",
+          "--spec-draft-ncmoe",
+          "--n-cpu-moe-draft"
         ],
         "hidden": true
       }
@@ -471,8 +494,11 @@
         "accepted_spellings": [
           "--spec-draft-n-max",
           "--draft",
+          "--draft-n",
           "--draft-max"
-        ]
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_N_MAX",
+        "env_binding": "clap"
       }
     },
     {
@@ -500,7 +526,8 @@
           "--spec-draft-n-min"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_N_MIN",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -525,15 +552,18 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::draft_ngl_auto_and_all_are_inert_and_partial_offload_is_rejected",
-      "notes": "mlxcel keeps every draft layer on the accelerator: auto and all are inert, a numeric partial offload fails startup.",
+      "test": "src/cli/spec_compat_args_tests.rs::draft_ngl_full_offload_spellings_are_inert_and_partial_offload_is_rejected",
+      "notes": "mlxcel keeps every draft layer on the accelerator: auto, all, and the historical negative count are inert full-offload spellings; a non-negative partial offload fails startup.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-ngl"
+          "--spec-draft-ngl",
+          "--gpu-layers-draft",
+          "--n-gpu-layers-draft"
         ],
         "env": "LLAMA_ARG_N_GPU_LAYERS_DRAFT",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -561,7 +591,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-override-tensor"
+          "--spec-draft-override-tensor",
+          "--override-tensor-draft"
         ],
         "hidden": true
       }
@@ -590,10 +621,12 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-p-min"
+          "--spec-draft-p-min",
+          "--draft-p-min"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_P_MIN",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -620,10 +653,12 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-p-split"
+          "--spec-draft-p-split",
+          "--draft-p-split"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_P_SPLIT",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -650,7 +685,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-poll"
+          "--spec-draft-poll",
+          "--poll-draft"
         ],
         "hidden": true
       }
@@ -679,7 +715,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-poll-batch"
+          "--spec-draft-poll-batch",
+          "--poll-batch-draft"
         ],
         "hidden": true
       }
@@ -708,7 +745,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-prio"
+          "--spec-draft-prio",
+          "--prio-draft"
         ],
         "hidden": true
       }
@@ -737,7 +775,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-prio-batch"
+          "--spec-draft-prio-batch",
+          "--prio-batch-draft"
         ],
         "hidden": true
       }
@@ -767,7 +806,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-threads"
+          "--spec-draft-threads",
+          "--threads-draft"
         ],
         "hidden": true
       }
@@ -797,7 +837,8 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-threads-batch"
+          "--spec-draft-threads-batch",
+          "--threads-batch-draft"
         ],
         "hidden": true
       }
@@ -827,10 +868,12 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-type-k"
+          "--spec-draft-type-k",
+          "--cache-type-k-draft"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -858,10 +901,12 @@
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
-          "--spec-draft-type-v"
+          "--spec-draft-type-v",
+          "--cache-type-v-draft"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V",
-        "hidden": true
+        "hidden": true,
+        "env_binding": "clap"
       }
     },
     {
@@ -881,7 +926,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -908,7 +953,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -935,7 +980,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -962,7 +1007,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -989,7 +1034,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1016,7 +1061,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1065,7 +1110,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1092,7 +1137,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1119,7 +1164,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1146,7 +1191,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1173,7 +1218,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1200,7 +1245,7 @@
       "discovery": "help-entry-head",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
       "mlxcel": {
@@ -1269,16 +1314,18 @@
       "default": "none",
       "description": "comma-separated list of types of speculative decoding to use (default: none) (env: LLAMA_ARG_SPEC_TYPE)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
+      "state": "aliased",
       "issue": 1433,
-      "test": "src/cli/spec_compat_args_tests.rs::spec_type_none_is_inert_and_ngram_modes_are_rejected",
-      "notes": "Only the none default is accepted (the inert selector; draft speculation is configured through --model-draft with --draft-kind). Every n-gram mode fails startup with a diagnostic naming the mlxcel alternative, so a speculation subsystem mlxcel does not run can never be silently requested.",
+      "test": "src/cli/spec_compat_args_tests.rs::spec_type_resolves_the_translatable_values_and_rejects_the_rest",
+      "notes": "b10621's speculation-subsystem selector, translated where the algorithms permit: `none` disables speculation exactly as upstream does (an explicit selector stops the draft-sidecar type inference, so a configured draft model runs no speculation and mlxcel drops it with a warning), `draft-mtp` maps onto --draft-kind mtp and `draft-dflash` onto --draft-kind dflash (conflicts with an explicit --draft-kind fail deterministically). The n-gram modes, draft-simple, draft-eagle3, draft-dspark, and multi-subsystem lists fail startup with per-value diagnostics.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--spec-type"
         ],
-        "env": "LLAMA_ARG_SPEC_TYPE"
+        "env": "LLAMA_ARG_SPEC_TYPE",
+        "env_binding": "clap",
+        "hidden": true
       }
     },
     {
@@ -1292,11 +1339,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_n_max"
       }
     },
     {
@@ -1310,11 +1357,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_n_min"
       }
     },
     {
@@ -1328,11 +1375,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_ngram_min_hits"
       }
     },
     {
@@ -1346,11 +1393,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_ngram_size_m"
       }
     },
     {
@@ -1364,11 +1411,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_ngram_size_n"
       }
     },
     {
@@ -1382,11 +1429,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_p_min"
       }
     },
     {
@@ -1400,11 +1447,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1433,
-      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
-      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
+      "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
+      "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
       "mlxcel": {
-        "field": "speculative"
+        "field": "speculative_type"
       }
     }
   ]

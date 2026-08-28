@@ -257,16 +257,39 @@ pub fn env_fallback_draft_kind(value: &mut Option<String>) {
 /// which applies only when neither the CLI flag (any spelling) nor the
 /// canonical variable provided a value.
 pub fn env_fallback_draft_max(value: &mut usize, flag_was_set: bool) {
-    if flag_was_set || std::env::var("LLAMA_ARG_SPEC_DRAFT_N_MAX").is_ok() {
-        return;
+    *value = resolve_draft_max_fallback(
+        *value,
+        flag_was_set,
+        std::env::var("LLAMA_ARG_SPEC_DRAFT_N_MAX").ok().as_deref(),
+        std::env::var("LLAMA_ARG_DRAFT_MAX").ok().as_deref(),
+    );
+}
+
+/// Pure core of [`env_fallback_draft_max`], separated so the precedence
+/// table is unit-testable without process-global environment mutation.
+///
+/// Precedence (highest first): any CLI spelling of the flag, the canonical
+/// `LLAMA_ARG_SPEC_DRAFT_N_MAX` (already injected by clap when set), then
+/// the legacy `LLAMA_ARG_DRAFT_MAX`. An unparseable legacy value is logged
+/// and ignored.
+fn resolve_draft_max_fallback(
+    current: usize,
+    flag_was_set: bool,
+    canonical_env: Option<&str>,
+    legacy_env: Option<&str>,
+) -> usize {
+    if flag_was_set || canonical_env.is_some() {
+        return current;
     }
-    if let Ok(raw) = std::env::var("LLAMA_ARG_DRAFT_MAX") {
-        match raw.parse::<usize>() {
-            Ok(n) => *value = n,
+    match legacy_env {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n,
             Err(e) => {
-                tracing::warn!("LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring")
+                tracing::warn!("LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring");
+                current
             }
-        }
+        },
+        None => current,
     }
 }
 

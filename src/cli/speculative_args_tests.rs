@@ -259,3 +259,26 @@ fn env_fallback_draft_block_size_ignores_unparseable_env() {
         std::env::remove_var("MLXCEL_DRAFT_BLOCK_SIZE");
     }
 }
+
+#[test]
+fn draft_max_fallback_precedence_table() {
+    use super::resolve_draft_max_fallback;
+    // Nothing set: the legacy LLAMA_ARG_DRAFT_MAX applies.
+    assert_eq!(resolve_draft_max_fallback(16, false, None, Some("8")), 8);
+    // Any CLI spelling (--draft, --draft-n, --draft-max, --spec-draft-n-max;
+    // the --draft-n omission was the #1488 review regression) beats it.
+    assert_eq!(resolve_draft_max_fallback(24, true, None, Some("8")), 24);
+    // The canonical LLAMA_ARG_SPEC_DRAFT_N_MAX beats it (clap already
+    // injected its value into `current`).
+    assert_eq!(
+        resolve_draft_max_fallback(12, false, Some("12"), Some("8")),
+        12
+    );
+    // Unparseable legacy value is ignored.
+    assert_eq!(
+        resolve_draft_max_fallback(16, false, None, Some("lots")),
+        16
+    );
+    // No env at all: the default stands.
+    assert_eq!(resolve_draft_max_fallback(16, false, None, None), 16);
+}

@@ -24,29 +24,60 @@ fn defaults_are_inert() {
 }
 
 #[test]
-fn spec_type_none_is_inert_and_ngram_modes_are_rejected() {
+fn spec_type_resolves_the_translatable_values_and_rejects_the_rest() {
+    // `none` disables speculation (b10621 semantics: the explicit selector
+    // stops the draft-sidecar type inference, so a configured draft model
+    // runs no speculation).
     let mut a = args();
     a.spec_type = Some("none".to_string());
-    a.ensure_inert().expect("none is the inert selector");
+    let resolution = a.resolved_spec_type().expect("none resolves");
+    assert!(resolution.disable_speculation);
+    assert_eq!(resolution.draft_kind, None);
+    a.ensure_inert().expect("none passes the inertness gate");
 
+    // draft-mtp / draft-dflash are exact --draft-kind translations.
+    for (value, kind) in [("draft-mtp", "mtp"), ("draft-dflash", "dflash")] {
+        let mut a = args();
+        a.spec_type = Some(value.to_string());
+        let resolution = a.resolved_spec_type().expect("translatable draft type");
+        assert_eq!(resolution.draft_kind, Some(kind));
+        assert!(!resolution.disable_speculation);
+    }
+
+    // Every n-gram mode, the untranslatable draft types, multi-subsystem
+    // lists, none-plus-a-type combinations, and unknown values all fail with
+    // the option named.
     for mode in [
         "ngram-simple",
         "ngram-map-k",
         "ngram-map-k4v",
         "ngram-mod",
-        "draft,ngram-simple",
+        "draft-simple",
+        "draft-eagle3",
+        "draft-dspark",
+        "draft-mtp,draft-dflash",
+        "none,draft-mtp",
+        "wibble",
     ] {
         let mut a = args();
         a.spec_type = Some(mode.to_string());
         let rejection = a
             .ensure_inert()
-            .expect_err("non-none selectors must fail startup");
-        assert_eq!(rejection.option, "--spec-type");
-        assert!(
-            rejection.to_string().contains("--model-draft"),
-            "{rejection}"
-        );
+            .expect_err("untranslatable selectors must fail startup");
+        assert_eq!(rejection.option, "--spec-type", "mode {mode}");
     }
+}
+
+#[test]
+fn no_backend_sampling_half_is_rejected() {
+    // The --no- spelling is the operator-active half of the pair: it moves
+    // draft sampling to a host-side CPU sampler, which mlxcel cannot do.
+    let mut a = args();
+    a.no_spec_draft_backend_sampling = true;
+    assert_eq!(
+        a.ensure_inert().expect_err("CPU draft sampling").option,
+        "--no-spec-draft-backend-sampling"
+    );
 }
 
 #[test]
@@ -76,19 +107,31 @@ fn draft_sampler_thresholds_accept_only_their_inert_defaults() {
 
 #[test]
 fn ggml_draft_placement_values_are_rejected() {
-    let mut a = args();
-    a.spec_draft_cpu_mask = Some("0xff".to_string());
-    assert_eq!(
-        a.ensure_inert().expect_err("mask").option,
-        "--spec-draft-cpu-mask"
-    );
-
-    let mut a = args();
-    a.spec_draft_device = Some("cuda0".to_string());
-    assert_eq!(
-        a.ensure_inert().expect_err("device").option,
-        "--spec-draft-device"
-    );
+    // Reject-any-value knobs: every member of the placement family, so the
+    // manifest test pointers cover exactly what they claim.
+    let reject_any: &[(&str, fn(&mut SpecCompatArgs, String))] = &[
+        ("--spec-draft-cpu-mask", |a, v| {
+            a.spec_draft_cpu_mask = Some(v)
+        }),
+        ("--spec-draft-cpu-mask-batch", |a, v| {
+            a.spec_draft_cpu_mask_batch = Some(v);
+        }),
+        ("--spec-draft-cpu-range", |a, v| {
+            a.spec_draft_cpu_range = Some(v);
+        }),
+        ("--spec-draft-device", |a, v| a.spec_draft_device = Some(v)),
+        ("--spec-draft-override-tensor", |a, v| {
+            a.spec_draft_override_tensor = Some(v);
+        }),
+        ("--spec-draft-n-cpu-moe", |a, v| {
+            a.spec_draft_n_cpu_moe = Some(v);
+        }),
+    ];
+    for (option, set) in reject_any {
+        let mut a = args();
+        set(&mut a, "anything".to_string());
+        assert_eq!(&a.ensure_inert().expect_err(option).option, option);
+    }
 
     let mut a = args();
     a.spec_draft_cpu_moe = true;
@@ -97,20 +140,88 @@ fn ggml_draft_placement_values_are_rejected() {
         "--spec-draft-cpu-moe"
     );
 
-    // Inert-by-value knobs.
-    let mut a = args();
-    a.spec_draft_poll = Some("50".to_string());
-    a.spec_draft_prio = Some("0".to_string());
-    a.spec_draft_threads = Some("-1".to_string());
-    a.ensure_inert().expect("upstream defaults are inert");
-    let mut a = args();
-    a.spec_draft_poll = Some("10".to_string());
-    a.ensure_inert().expect_err("a non-default poll must fail");
+    // Inert-at-default knobs: the default passes, any other value fails.
+    type Setter = fn(&mut SpecCompatArgs, String);
+    let inert_pairs: &[(&str, Setter, &str, &str)] = &[
+        (
+            "--spec-draft-cpu-strict",
+            |a, v| a.spec_draft_cpu_strict = Some(v),
+            "0",
+            "1",
+        ),
+        (
+            "--spec-draft-cpu-strict-batch",
+            |a, v| a.spec_draft_cpu_strict_batch = Some(v),
+            "0",
+            "1",
+        ),
+        (
+            "--spec-draft-poll",
+            |a, v| a.spec_draft_poll = Some(v),
+            "50",
+            "10",
+        ),
+        (
+            "--spec-draft-poll-batch",
+            |a, v| a.spec_draft_poll_batch = Some(v),
+            "50",
+            "10",
+        ),
+        (
+            "--spec-draft-prio",
+            |a, v| a.spec_draft_prio = Some(v),
+            "0",
+            "2",
+        ),
+        (
+            "--spec-draft-prio-batch",
+            |a, v| a.spec_draft_prio_batch = Some(v),
+            "0",
+            "2",
+        ),
+        (
+            "--spec-draft-threads",
+            |a, v| a.spec_draft_threads = Some(v),
+            "-1",
+            "8",
+        ),
+        (
+            "--spec-draft-threads-batch",
+            |a, v| a.spec_draft_threads_batch = Some(v),
+            "-1",
+            "8",
+        ),
+    ];
+    for (option, set, inert, active) in inert_pairs {
+        let mut a = args();
+        set(&mut a, (*inert).to_string());
+        a.ensure_inert()
+            .unwrap_or_else(|r| panic!("{option} {inert} must be inert: {r}"));
+        let mut a = args();
+        set(&mut a, (*active).to_string());
+        assert_eq!(&a.ensure_inert().expect_err(option).option, option);
+    }
 }
 
 #[test]
-fn draft_ngl_auto_and_all_are_inert_and_partial_offload_is_rejected() {
-    for inert in ["auto", "all"] {
+fn spec_draft_hf_is_rejected_with_the_model_draft_alternative() {
+    let mut a = args();
+    a.spec_draft_hf = Some("org/gguf-draft".to_string());
+    let rejection = a
+        .ensure_inert()
+        .expect_err("GGUF draft pulls are unsupported");
+    assert_eq!(rejection.option, "--spec-draft-hf");
+    assert!(
+        rejection.to_string().contains("--model-draft"),
+        "{rejection}"
+    );
+}
+
+#[test]
+fn draft_ngl_full_offload_spellings_are_inert_and_partial_offload_is_rejected() {
+    // auto, all, and the historical negative count all mean "everything on
+    // the accelerator", which is what mlxcel already does.
+    for inert in ["auto", "all", "-1", "-99"] {
         let mut a = args();
         a.spec_draft_ngl = Some(inert.to_string());
         a.ensure_inert()
@@ -135,9 +246,10 @@ fn draft_kv_cache_types_accept_only_f16() {
 }
 
 #[test]
-fn ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none() {
-    // With --spec-type pinned to none, b10621 itself ignores every tuning
-    // value, so any value is inert here too.
+fn ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen() {
+    // The n-gram tuning knobs only take effect when --spec-type selects an
+    // n-gram mode, which mlxcel rejects, so any tuning value is inert
+    // exactly as it is upstream with a non-n-gram selector.
     let mut a = args();
     a.spec_ngram_simple_min_hits = Some("7".to_string());
     a.spec_ngram_map_k_size_m = Some("64".to_string());
@@ -154,10 +266,16 @@ fn lookup_caches_are_rejected() {
         a.ensure_inert().expect_err("lookup").option,
         "--lookup-cache-static"
     );
+    let mut a = args();
+    a.lookup_cache_dynamic = Some("/tmp/cache.bin".to_string());
+    assert_eq!(
+        a.ensure_inert().expect_err("lookup").option,
+        "--lookup-cache-dynamic"
+    );
 }
 
 #[test]
-fn backend_sampling_is_always_inert() {
+fn backend_sampling_positive_half_is_always_inert() {
     let mut a = args();
     a.spec_draft_backend_sampling = true;
     a.ensure_inert()

@@ -92,10 +92,37 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // MTP / DFlash verification does not use are rejected with a diagnostic;
     // the inert forms (and the n-gram tuning knobs, inert while --spec-type
     // stays none) are accepted.
-    args.spec_compat.apply_env_bindings();
+    args.spec_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
     args.spec_compat
         .ensure_inert()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // --spec-type translation (#1433): `none` disables speculation exactly
+    // as b10621 does (the explicit selector stops the draft-sidecar type
+    // inference), and draft-mtp / draft-dflash translate onto --draft-kind,
+    // erroring deterministically when they conflict with an explicit one.
+    let spec_type = args
+        .spec_compat
+        .resolved_spec_type()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if spec_type.disable_speculation && args.draft_model.is_some() {
+        tracing::warn!(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring the configured draft model"
+        );
+        args.draft_model = None;
+    }
+    if let Some(kind) = spec_type.draft_kind {
+        match args.speculative.draft_kind.as_deref() {
+            None => args.speculative.draft_kind = Some(kind.to_string()),
+            Some(existing) if existing == kind => {}
+            Some(existing) => {
+                anyhow::bail!(
+                    "--spec-type draft-{kind} conflicts with --draft-kind {existing}: pick one"
+                );
+            }
+        }
+    }
 
     // b10621 multimodal projector / media options (issue #1451): classified
     // before the model reference resolves, like the GGML and chat-template
@@ -380,7 +407,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         &mut args.draft_max,
         mlxcel::server::long_cli_flag_was_set("draft-max")
             || mlxcel::server::long_cli_flag_was_set("draft")
-            || mlxcel::server::long_cli_flag_was_set("spec-draft-n-max"),
+            || mlxcel::server::long_cli_flag_was_set("spec-draft-n-max")
+            || mlxcel::server::long_cli_flag_was_set("draft-n"),
     );
     env_fallback_draft_model(&mut args.draft_model);
     env_fallback_batch_size(&mut args.batch_size);
