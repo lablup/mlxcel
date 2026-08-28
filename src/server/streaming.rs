@@ -144,9 +144,19 @@ pub(crate) struct BlockingSseSender {
     /// Shared flag set to `true` when the client disconnects (SSE receiver is
     /// dropped). Checked by the `BatchScheduler` to cancel orphaned sequences.
     cancelled: Option<CancellationToken>,
+    /// Resumable-stream tee (#1444). When the request carried
+    /// `X-Conversation-Id`, every payload is also appended, in its on-wire
+    /// SSE framing, to the conversation's [`StreamSession`] so a
+    /// disconnected client can replay it via `GET /v1/stream`. Shared by all
+    /// sender clones; the session is finalized when the last clone drops.
+    /// While a tee is attached, a client disconnect does NOT set the
+    /// cancellation flag: generation continues into the buffer, and only
+    /// `DELETE /v1/stream` (or session replacement) cancels it.
+    tee: Option<Arc<crate::server::stream_session::ResumeTee>>,
 }
 
-/// Create an SSE channel with a cancellation token.
+/// Create an SSE channel with a cancellation token, optionally teed into a
+/// resumable stream session.
 ///
 /// Returns `(sender, stream, cancellation_token, keepalive)`. The cancellation
 /// token is an `Arc<AtomicBool>` that is set to `true` when
@@ -163,17 +173,33 @@ pub(crate) struct BlockingSseSender {
 /// arrives.
 ///
 /// Used by: chat.rs, completions.rs, native_completion.rs
-pub(crate) fn sse_channel(
+/// `session` (#1444): when `Some`, the returned cancellation token is the
+/// session's own, so `DELETE /v1/stream` aborts the generation while a mere
+/// client disconnect does not, and every payload is teed into the session
+/// buffer for replay via `GET /v1/stream`. `None` is the ordinary
+/// non-resumable SSE stream, unchanged.
+///
+/// Used by: chat.rs, completions.rs, native_completion.rs
+pub(crate) fn sse_channel_resumable(
     buffer: usize,
     ping_interval: Option<Duration>,
+    session: Option<Arc<crate::server::stream_session::StreamSession>>,
 ) -> (
     BlockingSseSender,
     impl Stream<Item = Result<Event, Infallible>>,
     CancellationToken,
     SseKeepAlive,
 ) {
-    let cancelled: CancellationToken = Arc::new(AtomicBool::new(false));
-    let (sender, rx) = payload_channel(buffer, Some(cancelled.clone()));
+    let (cancelled, tee) = match session {
+        Some(session) => (
+            session.cancellation_token(),
+            Some(Arc::new(crate::server::stream_session::ResumeTee::new(
+                session,
+            ))),
+        ),
+        None => (Arc::new(AtomicBool::new(false)) as CancellationToken, None),
+    };
+    let (sender, rx) = payload_channel(buffer, Some(cancelled.clone()), tee);
     let stream = ReceiverStream::new(rx).map(|payload| payload.map(sse_event));
     let keepalive = SseKeepAlive::from_interval(ping_interval);
     (sender, stream, cancelled, keepalive)
@@ -228,11 +254,22 @@ impl BlockingSseSender {
     }
 
     pub(crate) fn text(&self, data: impl Into<String>) {
-        if self.tx.blocking_send(Ok(data.into())).is_err() {
+        let data = data.into();
+        // Resumable stream (#1444): commit the payload to the session buffer
+        // BEFORE attempting the live socket, so a byte a client may have
+        // seen is always replayable and a disconnect can never lose it.
+        if let Some(ref tee) = self.tee {
+            tee.write_data(&data);
+        }
+        if self.tx.blocking_send(Ok(data)).is_err() {
             // The SSE receiver has been dropped, meaning the client
-            // disconnected. Signal cancellation so the BatchScheduler can
-            // abort the orphaned sequence.
-            if let Some(ref flag) = self.cancelled {
+            // disconnected. Without a session, signal cancellation so the
+            // BatchScheduler can abort the orphaned sequence. With one, the
+            // generation keeps running into the session buffer; only
+            // DELETE /v1/stream or session replacement cancels it.
+            if self.tee.is_none()
+                && let Some(ref flag) = self.cancelled
+            {
                 flag.store(true, Ordering::Relaxed);
             }
         }
@@ -246,9 +283,10 @@ impl BlockingSseSender {
 fn payload_channel(
     buffer: usize,
     cancelled: Option<CancellationToken>,
+    tee: Option<Arc<crate::server::stream_session::ResumeTee>>,
 ) -> (BlockingSseSender, mpsc::Receiver<SsePayload>) {
     let (tx, rx) = mpsc::channel(buffer);
-    (BlockingSseSender { tx, cancelled }, rx)
+    (BlockingSseSender { tx, cancelled, tee }, rx)
 }
 
 fn serialize_json_data<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {

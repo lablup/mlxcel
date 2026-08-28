@@ -33,7 +33,7 @@ use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
 use crate::server::request_options::resolve_server_max_tokens;
-use crate::server::streaming::{sse_channel, sse_response};
+use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::structured::build_constraint_from_response_format;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::response::CompletionLogprobs;
@@ -225,7 +225,21 @@ pub async fn completions(
 
     let priority = parse_priority_header(&headers);
     if request.stream {
-        stream_completion(state, request, priority, budget_override, structured).await
+        // b10621 resumable streams (#1444): `X-Conversation-Id` attaches a
+        // replayable session, scoped to the presenting API key.
+        let resumable = super::chat::ResumableStreamContext {
+            conversation_id: super::stream::conversation_id_from_headers(&headers),
+            owner: super::stream::request_stream_owner(&state, &headers),
+        };
+        stream_completion(
+            state,
+            request,
+            priority,
+            budget_override,
+            structured,
+            resumable,
+        )
+        .await
     } else {
         non_stream_completion(state, request, priority, budget_override, structured)
             .await
@@ -318,6 +332,7 @@ async fn stream_completion(
     structured: Option<
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
+    resumable: super::chat::ResumableStreamContext,
 ) -> Response {
     // Queue-depth admission control: return 503 before opening SSE stream
     if !state.can_accept_request() {
@@ -363,10 +378,31 @@ async fn stream_completion(
         Err(err) => return generation_error_to_response(err).into_response(),
     };
 
+    // b10621 `reasoning_control` (#1444): arm realtime reasoning control and
+    // make the completion addressable by its `cmpl-...` id for the lifetime
+    // of the generation task.
+    let control_force = (request.params.reasoning_control == Some(true))
+        .then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    options.reasoning_control = control_force.clone();
+    let control_registration = state.completion_controls.register(
+        request_id.clone(),
+        control_force,
+        resumable.owner.clone(),
+    );
+
+    // b10621 resumable stream (#1444): tee the SSE payloads into the
+    // conversation's session when `X-Conversation-Id` was sent.
+    let session = resumable.conversation_id.as_deref().map(|cid| {
+        state
+            .stream_sessions
+            .create_or_replace(cid, resumable.owner.clone())
+    });
+
     // sse_channel also returns an SseKeepAlive that sends periodic
     // SSE comment events to prevent proxy/client idle-timeout disconnects
     // during long prefill phases.
-    let (events, stream, cancelled, keepalive) = sse_channel(100, state.config.sse_ping_interval);
+    let (events, stream, cancelled, keepalive) =
+        sse_channel_resumable(100, state.config.sse_ping_interval, session);
 
     // Clone for the spawned task
     let request_id_clone = request_id.clone();
@@ -376,6 +412,9 @@ async fn stream_completion(
 
     // Spawn a blocking task to handle generation
     tokio::task::spawn_blocking(move || {
+        // Unregister the completion-control entry when this task exits, on
+        // every path (#1444).
+        let _control_registration = control_registration;
         // Use logprobs-aware streaming
         let token_events = finish_events.clone();
         let request_id_inner = request_id_clone.clone();

@@ -212,6 +212,7 @@ fn options() -> ServerGenerateOptions {
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        reasoning_control: None,
         prompt_cache_ctx: Some(cache_ctx()),
         structured: None,
         image_soft_tokens: None,

@@ -59,6 +59,7 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         },
         reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
         thinking_enter_block_on_start: false,
+        reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
         image_soft_tokens: None,

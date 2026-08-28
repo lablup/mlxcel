@@ -89,6 +89,10 @@ const AUDIO_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 /// authentication middleware stays outside the nest so it sees the request
 /// path as the client sent it, which is what upstream's `req.path` carries.
 pub fn create_app(state: AppState) -> Router {
+    // Start the resumable-stream GC once per session manager (#1444); a
+    // completed session is retained for replay for a bounded TTL even when
+    // no request ever touches the manager again.
+    state.stream_sessions.ensure_gc_spawned();
     let api_prefix = state.config.api_prefix.clone();
     let routes = build_routes(&state);
     let routes = if api_prefix.is_empty() {
@@ -131,6 +135,18 @@ fn build_routes(state: &AppState) -> Router<AppState> {
     let mut app = Router::new()
         // OpenAI API endpoints
         .route("/v1/chat/completions", post(routes::chat_completions))
+        // b10621 realtime control of a live completion (#1444).
+        .route(
+            "/v1/chat/completions/control",
+            post(routes::chat_completions_control),
+        )
+        // b10621 resumable-stream lifecycle (#1444): replay, discovery, and
+        // stop for streaming completions that carried `X-Conversation-Id`.
+        .route(
+            "/v1/stream",
+            get(routes::stream_get).delete(routes::stream_delete),
+        )
+        .route("/v1/streams/lookup", post(routes::streams_lookup))
         .route("/v1/completions", post(routes::completions))
         .route("/v1/models", get(routes::list_models))
         // Embeddings (OpenAI /v1/embeddings surface), served by the embedding

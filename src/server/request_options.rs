@@ -334,6 +334,10 @@ pub(crate) fn build_server_generate_options(
         logprobs: LogprobsConfig::default(),
         reasoning_budget: overrides.reasoning_budget,
         thinking_enter_block_on_start: overrides.thinking_enter_block_on_start,
+        // Default unarmed; routes that accept the b10621 `reasoning_control`
+        // field replace this with the shared force flag they registered in
+        // the completion-control registry (#1444).
+        reasoning_control: None,
         // Default unset; chat routes populate this when the prompt cache
         // store is installed (see `src/server/routes/chat.rs`).
         prompt_cache_ctx: None,

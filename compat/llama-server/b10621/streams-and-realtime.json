@@ -12,10 +12,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1444,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/stream_route_tests.rs::delete_cancels_the_generation_and_evicts_the_session",
+      "notes": "Implemented (#1444): the explicit user Stop. Cancels the generation through the session's shared cancellation token, finalizes and evicts the buffer, and answers an idempotent 204 whether or not the session existed; a missing conv_id is upstream's 400. Deferred only for the recorded cross-key divergence: another key's DELETE is the same 204 but deliberately does not touch the session.",
+      "divergence": [
+        "With more than one --api-key configured, sessions are scoped to the key that created them: another key's GET answers the same 404 as an unknown id, its lookup omits the session, and its DELETE is a 204 no-op; b10621 lets any configured key read, discover, and delete any session. With zero or one key the behavior is identical."
+      ],
+      "mlxcel": {
+        "route": "DELETE /v1/stream"
+      }
     },
     {
       "kind": "route",
@@ -27,10 +31,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1444,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/stream_route_tests.rs::resumable_chat_stream_replays_across_disconnect_without_loss_or_duplication",
+      "notes": "Implemented (#1444): replays the exact SSE bytes a streaming completion buffered under its X-Conversation-Id, from the byte offset in `from`, then follows live output until the session finalizes. All five streaming surfaces record sessions (chat completions on both spellings, /v1/completions, native /completion(s), /v1/responses, /v1/messages); the disaggregated router front does not. Buffer cap 4 MiB with front-drop, 300 s post-completion TTL, 60 s GC, plus an mlxcel-side cap of 256 retained completed sessions. Status codes and wording follow upstream server-stream.cpp: 400 'Missing conversation id in path', 404 'Stream not found or expired', 400 'Invalid 'from' offset', 400 'Stream offset lost, please restart'. A client disconnect no longer cancels a session-carrying generation; DELETE and session replacement do, through the same scheduler cancellation token. The entry stays deferred only for the recorded cross-key divergence, which is the authorization ownership #1444 deliberately requires.",
+      "divergence": [
+        "With more than one --api-key configured, sessions are scoped to the key that created them: another key's GET answers the same 404 as an unknown id, its lookup omits the session, and its DELETE is a 204 no-op; b10621 lets any configured key read, discover, and delete any session. With zero or one key the behavior is identical."
+      ],
+      "mlxcel": {
+        "route": "GET /v1/stream"
+      }
     },
     {
       "kind": "route",
@@ -42,10 +50,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1444,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/stream_route_tests.rs::reasoning_end_forces_the_armed_flag_and_expires_with_the_completion",
+      "notes": "Implemented (#1444): body {id, action}; missing id is 400 'missing completion id', any action other than reasoning_end is 400 'unknown control action', an unknown id is 200 {success:false, message:'no active completion for this id'}, a live completion that did not arm reasoning_control is 200 {success:false, message:'reasoning control not enabled for this completion'}, and an armed one is 200 {success:true}. The force flag is polled by the scheduler's thinking tracker at every sampling step, so the event-order boundary is the next sampled token: committed events are unaffected and the reasoning block closes exactly as an exhausted budget closes it. Streaming chat completions and OpenAI completions register their chatcmpl-/cmpl- ids; the native route arms the tracker but, as in b10621, never reveals an id a control request could target. Deferred only for the recorded cross-key divergence.",
+      "divergence": [
+        "With more than one --api-key configured, a control request presenting a different key than the completion's creator answers {success:false, message:'no active completion for this id'}; b10621 lets any configured key control any live completion. With zero or one key the behavior is identical."
+      ],
+      "mlxcel": {
+        "route": "POST /v1/chat/completions/control"
+      }
     },
     {
       "kind": "route",
@@ -57,10 +69,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1444,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/stream_route_tests.rs::stream_get_validates_conv_id_and_from",
+      "notes": "Implemented (#1444): answers one {conversation_id, is_done, total_bytes, started_at, completed_at} object per matching session, matching each requested id exactly and any '<id>::<model>' per-model variant, and only for ids the caller asked about, so live sessions cannot be enumerated. A malformed body is upstream's 400 'invalid body: ...'. Deferred only for the recorded cross-key divergence: the answer set is additionally limited to sessions the presenting key owns.",
+      "divergence": [
+        "With more than one --api-key configured, sessions are scoped to the key that created them: another key's GET answers the same 404 as an unknown id, its lookup omits the session, and its DELETE is a 204 no-op; b10621 lets any configured key read, discover, and delete any session. With zero or one key the behavior is identical."
+      ],
+      "mlxcel": {
+        "route": "POST /v1/streams/lookup"
+      }
     },
     {
       "kind": "native_request_field",
@@ -71,12 +87,14 @@
       "field_type": "bool",
       "description": "Create the budget sampler on demand so reasoning can be ended at runtime",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1444,
-      "test": null,
-      "notes": "Realtime reasoning control is owned by #1444.",
+      "test": "src/server/routes/stream_route_tests.rs::reasoning_end_forces_the_armed_flag_and_expires_with_the_completion",
+      "notes": "Accepted as a bool (default false) on the chat, OpenAI-completions and native completion requests, upstream's declared schema. Arming creates the runtime force-end flag on the sequence's thinking tracker, upstream's 'create the budget sampler on demand', so POST /v1/chat/completions/control can end the reasoning phase mid-generation; unarmed requests pay nothing.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "reasoning_control"
+      }
     }
   ]
 }

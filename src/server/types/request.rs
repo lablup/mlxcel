@@ -698,6 +698,14 @@ pub struct SamplingParams {
     pub thinking_token_budget: Option<i32>,
     /// Qwen-official alias for `thinking_budget_tokens`.
     pub thinking_budget: Option<i32>,
+
+    /// b10621 `reasoning_control` (#1444): arm realtime reasoning control
+    /// for this completion, so `POST /v1/chat/completions/control` with
+    /// `action: "reasoning_end"` can close the thinking block mid-
+    /// generation. Upstream's schema description: "Create the budget
+    /// sampler on demand so reasoning can be ended at runtime". Default
+    /// `false`, exactly as upstream.
+    pub reasoning_control: Option<bool>,
 }
 
 /// Stream options for controlling streaming behavior
@@ -1269,6 +1277,15 @@ pub struct NativeCompletionRequest {
     pub thinking_token_budget: Option<i32>,
     /// Qwen-official alias for `thinking_budget_tokens`.
     pub thinking_budget: Option<i32>,
+
+    /// b10621 `reasoning_control` (#1444): arm realtime reasoning control.
+    /// Declared with upstream's schema (a bool, default `false`) and wired
+    /// to the same sampler arming as the chat routes. As in b10621, the
+    /// native response never exposes the internal completion id, so a
+    /// native client has no id to address a control request to; the field's
+    /// observable behavior on this route matches upstream's.
+    #[serde(default)]
+    pub reasoning_control: Option<bool>,
 
     /// structured-output `response_format` is **not** supported
     /// on the native llama-server `/completion` endpoint. The field is

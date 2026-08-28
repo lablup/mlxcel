@@ -387,6 +387,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         logprobs: Default::default(),
         reasoning_budget: Default::default(),
         thinking_enter_block_on_start: false,
+        reasoning_control: None,
         prompt_cache_ctx: None,
         structured: Some(constraint),
         image_soft_tokens: None,

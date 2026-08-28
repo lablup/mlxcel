@@ -46,7 +46,7 @@ use crate::server::responses_translator::{
     short_uuid,
 };
 use crate::server::streaming::sse_response;
-use crate::server::streaming_responses::{ResponseStreamEmitter, responses_sse_channel};
+use crate::server::streaming_responses::{ResponseStreamEmitter, responses_sse_channel_resumable};
 use crate::server::structured::build_constraint_from_response_format;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
@@ -181,6 +181,12 @@ pub async fn create_response(
     let created_at = chrono::Utc::now().timestamp() as f64;
 
     if request.stream {
+        // b10621 resumable streams (#1444): `X-Conversation-Id` attaches a
+        // replayable session, scoped to the presenting API key.
+        let resumable = super::chat::ResumableStreamContext {
+            conversation_id: super::stream::conversation_id_from_headers(&headers),
+            owner: super::stream::request_stream_owner(&state, &headers),
+        };
         stream_create_response(
             state,
             request,
@@ -190,6 +196,7 @@ pub async fn create_response(
             priority,
             budget_override,
             structured,
+            resumable,
         )
         .await
     } else {
@@ -336,6 +343,7 @@ async fn stream_create_response(
     structured: Option<
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
+    resumable: super::chat::ResumableStreamContext,
 ) -> Response {
     if !state.can_accept_request() {
         return ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
@@ -384,8 +392,15 @@ async fn stream_create_response(
         Err(err) => return generation_error_to_response(err).into_response(),
     };
 
+    // b10621 resumable stream (#1444): tee the SSE frames into the
+    // conversation's session when `X-Conversation-Id` was sent.
+    let session = resumable.conversation_id.as_deref().map(|cid| {
+        state
+            .stream_sessions
+            .create_or_replace(cid, resumable.owner.clone())
+    });
     let (sender, stream, cancelled, keepalive) =
-        responses_sse_channel(128, state.config.sse_ping_interval);
+        responses_sse_channel_resumable(128, state.config.sse_ping_interval, session);
 
     // Review H2: register this response in the in-flight registry so
     // POST /v1/responses/:id/cancel can abort it from a different
