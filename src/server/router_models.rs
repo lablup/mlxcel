@@ -346,8 +346,19 @@ impl RouterPool {
 
         // Construct the sub-app. The provider constructor returns fast (the
         // weights load on the worker thread), which is what makes `loading`
-        // an observable state.
-        match build_model_app(&entry.name, &entry.path, &self.base_config) {
+        // an observable state; the tokenizer and chat-template reads are
+        // still filesystem work, so they run on the blocking pool rather
+        // than stalling the async runtime.
+        let (name, path, base_config) = (
+            entry.name.clone(),
+            entry.path.clone(),
+            self.base_config.clone(),
+        );
+        let built =
+            tokio::task::spawn_blocking(move || build_model_app(&name, &path, &base_config))
+                .await
+                .map_err(|join_err| RouterPoolError::LoadFailed(join_err.to_string()))?;
+        match built {
             Ok((state, router)) => {
                 if let Ok(mut guard) = entry.state.lock() {
                     guard.app = Some(LoadedApp { state, router });
