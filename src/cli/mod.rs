@@ -24,6 +24,7 @@
 pub mod batch_quant_args;
 pub mod cache_args;
 pub mod chat_compat_args;
+pub mod embedding_compat_args;
 pub mod flag_surface;
 pub mod ggml_compat_args;
 pub mod infill_args;

@@ -41,11 +41,15 @@ use crate::server::rerank_model::{RerankError, RerankModelProvider};
 use crate::server::types::ErrorResponse;
 use crate::server::types::rerank::{
     RerankInput, RerankRequest, RerankResponse, RerankResult, RerankUsage, sort_and_truncate,
+    to_tei_results,
 };
 
 /// Message of the `501` returned while no reranker is loaded.
-pub const NO_RERANKER_MODEL_MESSAGE: &str =
-    "No reranker loaded; start with -m <sequence-classifier checkpoint> or --reranker-model <path>";
+///
+/// Opens with b10621's own sentence, verbatim; see
+/// [`super::embeddings::NO_EMBEDDING_MODEL_MESSAGE`] for why (#1452).
+pub const NO_RERANKER_MODEL_MESSAGE: &str = "This server does not support reranking. Start it with `--reranking`, with a \
+     sequence-classifier checkpoint in -m, or with --reranker-model <path>.";
 
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(message, "invalid_request_error")
@@ -155,8 +159,52 @@ async fn to_rerank_item(
     })
 }
 
+/// b10621's shape checks on a rerank body, in its order and its wording.
+///
+/// Returns `None` when the body has the shape upstream accepts; mlxcel's own
+/// richer item forms (an object carrying an image) are validated afterwards,
+/// where they belong, because upstream has no equivalent to compare against.
+fn rerank_shape_error(body: &Value) -> Option<String> {
+    let object = body.as_object()?;
+    match object.get("query") {
+        None => return Some("\"query\" must be provided".to_string()),
+        // Upstream requires a bare string. mlxcel also accepts its own object
+        // form (`{"text": ..., "image": ...}`), which upstream has no
+        // equivalent for, so only a value that is neither is refused here.
+        Some(value) if !value.is_string() && !value.is_object() => {
+            return Some("\"query\" must be a string".to_string());
+        }
+        Some(_) => {}
+    }
+    let documents = object.get("documents").or_else(|| object.get("texts"));
+    match documents {
+        Some(Value::Array(items)) if !items.is_empty() => None,
+        _ => Some("\"documents\" must be a non-empty string array".to_string()),
+    }
+}
+
 /// POST /v1/rerank
 pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    // Which document-list spelling arrived decides the response envelope, and
+    // serde cannot report which alias matched, so it is read off the raw body
+    // before deserializing (#1452).
+    let tei_form = RerankRequest::is_tei_form(&body);
+    // Upstream reads whichever key is present and ignores the other; serde
+    // refuses a body carrying both as a duplicate field, so the redundant one
+    // is dropped first. `documents` wins, which is what `is_tei_form` already
+    // decided the envelope on.
+    let mut body = body;
+    if let Some(object) = body.as_object_mut()
+        && object.contains_key("documents")
+    {
+        object.remove("texts");
+    }
+    // b10621's own wording for the three shape errors, because serde's
+    // "missing field `query`" is not the string a b10621 client matches on and
+    // does not name the `texts` spelling at all (#1452).
+    if let Some(message) = rerank_shape_error(&body) {
+        return invalid_request(message).into_response();
+    }
     let request: RerankRequest = match serde_json::from_value(body) {
         Ok(request) => request,
         Err(err) => return invalid_request(format!("invalid request body: {err}")).into_response(),
@@ -267,6 +315,7 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         started.elapsed().as_millis() as u64,
     );
 
+    let echo = request.echoes_items();
     let results = scored
         .scores
         .iter()
@@ -274,14 +323,20 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .map(|(index, &relevance_score)| RerankResult {
             index,
             relevance_score,
-            document: request
-                .return_documents
-                .then(|| request.documents[index].clone()),
+            document: echo.then(|| request.documents[index].clone()),
         })
         .collect();
+    let results = sort_and_truncate(results, request.top_n);
+    if tei_form {
+        // b10621 answers a TEI request with a bare array of {index, score}
+        // and no envelope at all, which is a different top-level type, not a
+        // renamed field.
+        return Json(to_tei_results(results)).into_response();
+    }
     Json(RerankResponse {
         model: provider.model_id().to_string(),
-        results: sort_and_truncate(results, request.top_n),
+        object: RerankResponse::OBJECT,
+        results,
         usage: RerankUsage {
             prompt_tokens: scored.prompt_tokens,
             total_tokens: scored.prompt_tokens,

@@ -143,6 +143,13 @@ pub struct ServerStartupConfig {
     /// (#1442). Forwarded to [`super::config::ServerConfig::spm_infill`].
     pub spm_infill: bool,
 
+    /// `--embd-normalize` (#1452), `None` when unset.
+    pub embd_normalize: Option<crate::embeddings::EmbdNormalize>,
+    /// `--embeddings` / `--reranking` (#1452).
+    pub embedding_serving_mode: crate::server::config::EmbeddingServingMode,
+    /// `--pooling` (#1452), `None` when unset or when it named `rank`.
+    pub pooling: Option<crate::embeddings::PoolingMode>,
+
     // Batch scheduling
     pub max_batch_size: Option<usize>,
     pub max_queue_depth: usize,
@@ -539,6 +546,9 @@ impl Default for ServerStartupConfig {
             enable_slots: true,
             enable_props: false,
             spm_infill: false,
+            embd_normalize: None,
+            embedding_serving_mode: crate::server::config::EmbeddingServingMode::Any,
+            pooling: None,
             enable_metrics: false,
             warmup: true,
             temperature: 0.8,
@@ -1156,6 +1166,8 @@ pub(super) fn build_server_config(
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
         spm_infill: startup.spm_infill,
+        embd_normalize: startup.embd_normalize,
+        embedding_serving_mode: startup.embedding_serving_mode,
         enable_metrics_endpoint: startup.enable_metrics,
         default_temperature: sampling_defaults.temperature,
         default_top_p: sampling_defaults.top_p,
@@ -2527,6 +2539,12 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             config.model_aliases[1..].join(", ")
         );
     }
+    // `--pooling` is installed before any embedding checkpoint is loaded,
+    // because every family resolves its mode inside its own constructor
+    // (#1452). The cell is cleared when the flag was not given so a previous
+    // in-process server (the test harness runs several) cannot leak its
+    // choice into this one.
+    crate::embeddings::set_pooling_override(startup.pooling);
     let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
     // Rerank wiring (#1356) follows the same rule, with one addition: a
     // generative reranker's checkpoint is indistinguishable from a chat
@@ -2534,6 +2552,10 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // the same path in `-m` and `--reranker-model` loads it once on the rerank
     // worker instead of being an error.
     let rerank_model = resolve_rerank_provider(&startup, &config, &served_chat_id)?;
+    // A mode flag that resolved no worker is a command line that cannot do
+    // what it asked for, so it fails here rather than answering 501 to every
+    // request for the life of the process (#1452).
+    check_serving_mode(&config, embedding_model.is_some(), rerank_model.is_some())?;
 
     let state = AppState::with_observability(
         model_provider,
@@ -2555,6 +2577,39 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     let app = create_app(state);
 
     serve_http(&startup, app).await
+}
+
+/// Refuse a `--embeddings` / `--reranking` command line that resolved no
+/// worker able to serve that mode (#1452).
+///
+/// b10621 restricts an existing model; mlxcel selects a dedicated worker, so
+/// the flag additionally asserts that one exists. Without this check the flag
+/// would parse, generation would be off, and the only route left would answer
+/// 501 forever, which is the accepted-and-ignored failure epic #1431 exists to
+/// remove.
+pub(crate) fn check_serving_mode(
+    config: &ServerConfig,
+    has_embedding: bool,
+    has_rerank: bool,
+) -> Result<()> {
+    use crate::server::config::EmbeddingServingMode;
+    match config.embedding_serving_mode {
+        EmbeddingServingMode::Any => Ok(()),
+        EmbeddingServingMode::EmbeddingOnly if has_embedding => Ok(()),
+        EmbeddingServingMode::RerankOnly if has_rerank => Ok(()),
+        EmbeddingServingMode::EmbeddingOnly => anyhow::bail!(
+            "--embeddings restricts this server to embedding requests, but no embedding \
+             checkpoint was loaded: pass an embedding checkpoint to -m, or name one with \
+             --embedding-model <path>. `mlxcel list` reports which architectures load as \
+             embedders."
+        ),
+        EmbeddingServingMode::RerankOnly => anyhow::bail!(
+            "--reranking restricts this server to rerank requests, but no reranker was loaded: \
+             pass a sequence-classifier checkpoint to -m, or name a reranker with \
+             --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
+             reachable through --reranker-model."
+        ),
+    }
 }
 
 /// Where the embedding checkpoint comes from.

@@ -525,6 +525,24 @@ pub struct ServerStartupInput {
     /// clap group. `--spm-infill` selects the Suffix/Prefix/Middle ordering
     /// `POST /infill` assembles its prompt in (#1442).
     pub infill: crate::cli::infill_args::InfillArgs,
+    /// llama-server b10621 embedding and reranking mode flags, straight off the
+    /// shared clap group. Resolved (and refused, when unserveable) by
+    /// [`ServerStartupInput::into_startup_config`] (#1452).
+    pub embedding_compat: crate::cli::embedding_compat_args::EmbeddingCompatArgs,
+}
+
+/// Which serving restriction the resolved mode flags select.
+fn embedding_serving_mode(
+    resolved: &crate::cli::embedding_compat_args::EmbeddingCompatResolution,
+) -> crate::server::config::EmbeddingServingMode {
+    use crate::server::config::EmbeddingServingMode;
+    if resolved.rerank_only {
+        EmbeddingServingMode::RerankOnly
+    } else if resolved.embedding_only {
+        EmbeddingServingMode::EmbeddingOnly
+    } else {
+        EmbeddingServingMode::Any
+    }
 }
 
 impl ServerStartupInput {
@@ -546,6 +564,15 @@ impl ServerStartupInput {
             .rope
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
+        // b10621's embedding and reranking mode flags. Resolved here so a
+        // `--pooling none` mlxcel cannot serve, or an out-of-domain
+        // `--embd-normalize`, fails the command line rather than the first
+        // request (#1452).
+        let embedding_compat = self
+            .embedding_compat
+            .resolve()
+            .map_err(|message| anyhow::anyhow!(message))?;
+
         // b10621's prompt-cache and batching spellings, folded onto mlxcel's
         // own settings below. Resolved here for the same reason: a
         // `--cache-reuse` mlxcel cannot serve must fail the command line, not
@@ -845,6 +872,9 @@ impl ServerStartupInput {
             enable_slots: resolve_compat_toggle(self.slots, self.no_slots),
             enable_props: self.props,
             spm_infill: self.infill.spm_infill,
+            embd_normalize: embedding_compat.embd_normalize,
+            embedding_serving_mode: embedding_serving_mode(&embedding_compat),
+            pooling: embedding_compat.pooling,
             enable_metrics: self.metrics || self.metrics_port.is_some(),
             warmup: resolve_compat_toggle(self.warmup, self.no_warmup),
             temperature: self.temperature,

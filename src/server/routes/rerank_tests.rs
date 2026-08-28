@@ -235,11 +235,9 @@ async fn empty_documents_is_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .expect("message")
-            .contains("`documents` must not be empty"),
+    // b10621's own wording since #1452; the message used to be mlxcel's.
+    assert_eq!(
+        body["error"]["message"], "\"documents\" must be a non-empty string array",
         "{body}"
     );
 }
@@ -432,6 +430,22 @@ async fn model_mismatch_is_400() {
 async fn malformed_body_is_400() {
     let app = app_with(Some(text_provider()));
     let (status, body) = post(app, "/v1/rerank", json!({"documents": ["alpha"]})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // A missing `query` is one of the three shapes b10621 names itself, so the
+    // body carries upstream's sentence rather than serde's (#1452).
+    assert_eq!(
+        body["error"]["message"], "\"query\" must be provided",
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_body_that_is_not_an_object_is_still_a_serde_400() {
+    // The b10621-worded checks only cover the three shapes upstream names; a
+    // body that is not an object at all falls through to serde, which is where
+    // mlxcel's own richer item forms are validated too.
+    let app = app_with(Some(text_provider()));
+    let (status, body) = post(app, "/v1/rerank", json!([1, 2, 3])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
         body["error"]["message"]

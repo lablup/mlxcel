@@ -254,6 +254,10 @@ impl EmbeddingModel for LlamaBidirecModel {
         PoolingMode::Mean
     }
 
+    fn pooling(&self) -> PoolingMode {
+        self.pooling
+    }
+
     fn normalize(&self) -> bool {
         self.normalize
     }

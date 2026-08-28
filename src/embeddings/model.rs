@@ -79,6 +79,18 @@ pub trait EmbeddingModel {
     /// time through [`super::pooling::resolve_pooling_mode`].
     fn default_pooling(&self) -> PoolingMode;
 
+    /// The pooling this instance actually resolved, after
+    /// `1_Pooling/config.json`, the `--pooling` flag and the environment
+    /// override have been applied (#1452).
+    ///
+    /// Defaults to [`Self::default_pooling`] for the families whose pooling is
+    /// fixed in their forward pass and never consulted the config. `/props`
+    /// reports this, so a family that resolves a mode and does not override
+    /// here would report the family default and be wrong.
+    fn pooling(&self) -> PoolingMode {
+        self.default_pooling()
+    }
+
     /// Whether the engine L2-normalizes the pooled vectors (default `true`;
     /// `config.json` `normalize: false` turns it off for families that
     /// declare it).

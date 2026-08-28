@@ -27,7 +27,8 @@ use crate::models::ModelType;
 
 use super::loader::LoadedEmbeddingModel;
 use super::model::{EmbeddingBatch, EmbeddingOutput, ImageInput};
-use super::pooling::{normalize_l2, truncate_dimensions};
+use super::normalize::{EmbdNormalize, apply_embd_normalize};
+use super::pooling::truncate_dimensions;
 use super::tokenize::{EncodeOptions, EncodedBatch, EncodedRow, encode_row, truncate_token_ids};
 
 /// Default `--embedding-batch-size`: texts per forward pass.
@@ -55,6 +56,24 @@ pub struct EmbedOptions {
     /// Keep only the first `dimensions` components (re-normalized when the
     /// family normalizes). Validated against the model width.
     pub dimensions: Option<usize>,
+    /// b10621's `--embd-normalize` / per-request `embd_normalize` (#1452).
+    ///
+    /// `None` keeps the checkpoint's own choice: its `normalize` flag maps onto
+    /// [`EmbdNormalize::EUCLIDEAN`] or [`EmbdNormalize::NONE`], which is what
+    /// every mlxcel embedding response was normalized with before the value
+    /// domain became settable.
+    pub normalize: Option<EmbdNormalize>,
+}
+
+/// What [`EmbeddingEngine::postprocess`] needs, resolved once per request.
+///
+/// Bundled so the two values travel together through `run_rows` and
+/// `forward_batch` rather than growing a second parallel parameter that a
+/// future call site could forget to thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PostOptions {
+    dimensions: Option<usize>,
+    normalize: EmbdNormalize,
 }
 
 /// One embedding result: `shape == [D]` for single-vector models,
@@ -107,6 +126,12 @@ impl EmbeddingEngine {
         }
     }
 
+    /// The pooling this checkpoint resolved, for `/props` (#1452).
+    #[must_use]
+    pub fn pooling(&self) -> super::PoolingMode {
+        self.loaded.model.pooling()
+    }
+
     /// Width `D` of one vector.
     pub fn dim(&self) -> usize {
         self.loaded.limits.dim
@@ -140,6 +165,28 @@ impl EmbeddingEngine {
     /// Texts per forward pass.
     pub fn batch_size(&self) -> usize {
         self.batch_size
+    }
+
+    /// Fold the per-request options and the checkpoint's own `normalize` flag
+    /// into what post-processing needs.
+    ///
+    /// The request wins when it names a normalization; otherwise the
+    /// checkpoint's flag decides, which is the behavior every embedding
+    /// response had before `--embd-normalize` existed.
+    fn post_options(&self, options: &EmbedOptions) -> PostOptions {
+        PostOptions {
+            dimensions: options.dimensions,
+            normalize: options
+                .normalize
+                .unwrap_or_else(|| EmbdNormalize::from_model_flag(self.loaded.model.normalize())),
+        }
+    }
+
+    /// The effective normalization for a request that names none, which is
+    /// what `/props` reports.
+    #[must_use]
+    pub fn default_normalize(&self) -> EmbdNormalize {
+        EmbdNormalize::from_model_flag(self.loaded.model.normalize())
     }
 
     /// Reject a `dimensions` value outside `1..=D`.
@@ -185,7 +232,7 @@ impl EmbeddingEngine {
                 .map_err(|e| EmbeddingEngineError::Internal(e.to_string()))?;
             rows.push(row);
         }
-        self.run_rows(rows, None, options.dimensions)
+        self.run_rows(rows, None, self.post_options(options))
     }
 
     /// Embed verbatim token-id rows (no special tokens added).
@@ -215,7 +262,7 @@ impl EmbeddingEngine {
             let type_ids = needs_type_ids.then(|| vec![0; ids.len()]);
             rows.push(EncodedRow { ids, type_ids });
         }
-        self.run_rows(rows, None, options.dimensions)
+        self.run_rows(rows, None, self.post_options(options))
     }
 
     /// Embed one image (VLM embedders only). The text side of the batch is
@@ -260,7 +307,7 @@ impl EmbeddingEngine {
             type_ids: row.type_ids.map(|_| vec![0; ids.len()]),
             ids,
         };
-        self.run_rows(vec![row], Some(&images), options.dimensions)
+        self.run_rows(vec![row], Some(&images), self.post_options(options))
     }
 
     /// Sort rows by length, cut them into micro-batches, run each, and write
@@ -269,7 +316,7 @@ impl EmbeddingEngine {
         &self,
         rows: Vec<EncodedRow>,
         images: Option<&[ImageInput]>,
-        dimensions: Option<usize>,
+        post: PostOptions,
     ) -> Result<EmbedReply, EmbeddingEngineError> {
         let prompt_tokens: usize = rows.iter().map(|r| r.ids.len()).sum();
         let mut order: Vec<usize> = (0..rows.len()).collect();
@@ -283,7 +330,7 @@ impl EmbeddingEngine {
                 self.loaded.pad_token_id,
                 self.loaded.model.pad_to_max_length(),
             );
-            let produced = self.forward_batch(&batch, images, dimensions)?;
+            let produced = self.forward_batch(&batch, images, post)?;
             for (&index, vector) in chunk.iter().zip(produced) {
                 vectors[index] = Some(vector);
             }
@@ -308,7 +355,7 @@ impl EmbeddingEngine {
         &self,
         batch: &EncodedBatch,
         images: Option<&[ImageInput]>,
-        dimensions: Option<usize>,
+        post: PostOptions,
     ) -> Result<Vec<EmbeddingVector>, EmbeddingEngineError> {
         let input_ids = batch.input_ids_array();
         let attention_mask = batch.attention_mask_array();
@@ -326,7 +373,7 @@ impl EmbeddingEngine {
         let output = self.loaded.model.embed(&embed_batch).map_err(|e| {
             EmbeddingEngineError::Internal(format!("embedding forward failed: {e}"))
         })?;
-        self.postprocess(output, &batch.token_counts, dimensions)
+        self.postprocess(output, &batch.token_counts, post)
     }
 
     /// Normalize, truncate and read back one forward pass.
@@ -334,9 +381,9 @@ impl EmbeddingEngine {
         &self,
         output: EmbeddingOutput,
         token_counts: &[usize],
-        dimensions: Option<usize>,
+        post: PostOptions,
     ) -> Result<Vec<EmbeddingVector>, EmbeddingEngineError> {
-        let normalize = self.loaded.model.normalize();
+        let normalize = post.normalize;
         let shape = mlxcel_core::array_shape(&output.embeddings);
         let batch = token_counts.len();
         let expected_rank = if self.multi_vector() { 3 } else { 2 };
@@ -355,14 +402,17 @@ impl EmbeddingEngine {
 
         let mut processed: UniquePtr<MlxArray> =
             mlxcel_core::astype(&output.embeddings, dtype::FLOAT32);
-        if normalize {
-            processed = normalize_l2(&processed);
+        if !normalize.is_none() {
+            processed = apply_embd_normalize(&processed, normalize);
         }
-        let out_width = match dimensions {
+        let out_width = match post.dimensions {
             Some(n) if n < width => {
                 processed = truncate_dimensions(&processed, n);
-                if normalize {
-                    processed = normalize_l2(&processed);
+                // Truncation breaks whatever invariant the normalization
+                // established, so it is re-applied: a Matryoshka prefix of a
+                // unit vector is not a unit vector.
+                if !normalize.is_none() {
+                    processed = apply_embd_normalize(&processed, normalize);
                 }
                 n
             }

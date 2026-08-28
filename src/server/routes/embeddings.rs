@@ -32,7 +32,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::embeddings::{EmbedOptions, EmbeddingVector, ImageInput};
+use crate::embeddings::{EmbdNormalize, EmbedOptions, EmbeddingVector, ImageInput};
 use crate::server::AppState;
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
 use crate::server::media::{
@@ -47,8 +47,14 @@ use crate::server::types::embeddings::{
 };
 
 /// Message of the `501` returned while no embedding model is loaded.
-pub const NO_EMBEDDING_MODEL_MESSAGE: &str =
-    "No embedding model loaded; start with -m <embedding checkpoint> or --embedding-model <path>";
+///
+/// Opens with b10621's own sentence, verbatim, so a client that matches on the
+/// upstream string keeps working, and then names the mlxcel spellings that also
+/// select an embedding worker (#1452). The b10621 flag really is accepted here:
+/// `--embeddings` is a startup error when it resolves no embedder, so a server
+/// that reaches this message was started without asking for embeddings at all.
+pub const NO_EMBEDDING_MODEL_MESSAGE: &str = "This server does not support embeddings. Start it with `--embeddings`, with an embedding \
+     checkpoint in -m, or with --embedding-model <path>.";
 
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(message, "invalid_request_error")
@@ -265,6 +271,16 @@ pub async fn native_embeddings(State(state): State<AppState>, Json(body): Json<V
 }
 
 async fn embeddings_impl(state: AppState, body: Value, shape: EmbeddingShape) -> Response {
+    // b10621 answers a body with neither key with this exact sentence. serde
+    // would answer "missing field `input`", which names only one of the two
+    // spellings the server accepts and is not the string a b10621 client
+    // matches on (#1452).
+    if body
+        .as_object()
+        .is_some_and(|object| !object.contains_key("input") && !object.contains_key("content"))
+    {
+        return invalid_request("\"input\" or \"content\" must be provided").into_response();
+    }
     let request: EmbeddingsRequest = match serde_json::from_value(body) {
         Ok(request) => request,
         Err(err) => return invalid_request(format!("invalid request body: {err}")).into_response(),
@@ -312,9 +328,26 @@ async fn embeddings_impl(state: AppState, body: Value, shape: EmbeddingShape) ->
         Err(err) => return err.into_response(),
     };
 
+    // b10621 reads `embd_normalize` per request, defaulting to the server's
+    // `--embd-normalize` and, when that is unset too, to the checkpoint's own
+    // `normalize` flag (#1452).
+    let normalize = match request.embd_normalize {
+        Some(raw) => match EmbdNormalize::new(raw) {
+            Ok(kind) => Some(kind),
+            Err(message) => {
+                return ErrorResponse::new(
+                    message.replace("--embd-normalize", "embd_normalize"),
+                    "invalid_request_error",
+                )
+                .into_response();
+            }
+        },
+        None => state.config.embd_normalize,
+    };
     let opts = EmbedOptions {
         instruction: request.instruction,
         dimensions: request.dimensions,
+        normalize,
     };
     let started = std::time::Instant::now();
     // The provider blocks on the worker's reply channel, so keep it off the

@@ -31,13 +31,24 @@ pub struct RerankRequest {
     /// The query every document is scored against.
     pub query: RerankInput,
     /// The documents to score; at least one.
+    ///
+    /// b10621 accepts two spellings for this list and answers a **different
+    /// response shape** for each: `documents` is the Jina/Cohere form and
+    /// `texts` is the Text Embeddings Inference form. `texts` is a serde alias
+    /// here, and [`RerankRequest::is_tei_form`] recovers which one arrived so
+    /// the response can follow it (#1452).
+    #[serde(alias = "texts")]
     pub documents: Vec<RerankInput>,
     /// Keep only the `top_n` highest-scoring results.
     #[serde(default)]
     pub top_n: Option<usize>,
-    /// Echo each scored item back in its result entry.
+    /// Echo each scored item back in its result entry (Cohere spelling).
     #[serde(default)]
     pub return_documents: bool,
+    /// Echo each scored item back (b10621 / TEI spelling). Emits `text` rather
+    /// than `document`.
+    #[serde(default)]
+    pub return_text: bool,
     /// Task description for the generative rerankers. Rejected for a
     /// sequence-classifier reranker, which has nowhere to put it.
     #[serde(default)]
@@ -124,7 +135,7 @@ impl RerankInput {
     }
 }
 
-/// One scored document.
+/// One scored document, Jina/Cohere shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct RerankResult {
     /// Position of this document in the request's `documents` list.
@@ -136,6 +147,20 @@ pub struct RerankResult {
     pub document: Option<RerankInput>,
 }
 
+/// One scored document, b10621's TEI shape.
+///
+/// A different envelope, not a different computation: the score is the same
+/// number `relevance_score` carries, and the echo is spelled `text` rather than
+/// `document`. Which one a request gets is decided by the spelling it used for
+/// the document list (#1452).
+#[derive(Debug, Clone, Serialize)]
+pub struct RerankTeiResult {
+    pub index: usize,
+    pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<RerankInput>,
+}
+
 /// Token accounting of one request.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RerankUsage {
@@ -143,12 +168,58 @@ pub struct RerankUsage {
     pub total_tokens: usize,
 }
 
-/// `POST /v1/rerank` response body.
+/// `POST /v1/rerank` response body, Jina/Cohere shape.
+///
+/// `object` is emitted because b10621 emits it; it was the recorded divergence
+/// on the four rerank routes before #1452.
 #[derive(Debug, Clone, Serialize)]
 pub struct RerankResponse {
     pub model: String,
+    pub object: &'static str,
     pub results: Vec<RerankResult>,
     pub usage: RerankUsage,
+}
+
+impl RerankResponse {
+    /// The `object` value b10621 emits on this envelope.
+    pub const OBJECT: &'static str = "list";
+}
+
+impl RerankRequest {
+    /// Whether this request used b10621's TEI spelling for the document list.
+    ///
+    /// serde cannot report which alias matched, so the raw body is consulted:
+    /// `texts` present and `documents` absent is the TEI form. A body carrying
+    /// both is the Jina form, which is also what serde deserialized.
+    #[must_use]
+    pub fn is_tei_form(body: &serde_json::Value) -> bool {
+        let Some(object) = body.as_object() else {
+            return false;
+        };
+        object.contains_key("texts") && !object.contains_key("documents")
+    }
+
+    /// Whether the scored items should be echoed, under either spelling.
+    #[must_use]
+    pub fn echoes_items(&self) -> bool {
+        self.return_documents || self.return_text
+    }
+}
+
+/// Turn Jina-shaped results into b10621's TEI array.
+///
+/// Ordering and truncation have already been applied, so this is a pure
+/// renaming of the two keys.
+#[must_use]
+pub fn to_tei_results(results: Vec<RerankResult>) -> Vec<RerankTeiResult> {
+    results
+        .into_iter()
+        .map(|r| RerankTeiResult {
+            index: r.index,
+            score: r.relevance_score,
+            text: r.document,
+        })
+        .collect()
 }
 
 /// Sort scored documents the way the endpoint promises: descending by score,

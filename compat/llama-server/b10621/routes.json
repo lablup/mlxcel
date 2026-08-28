@@ -231,13 +231,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1452,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "Route separation done: /embedding and /embeddings answer b10621's native shape, a bare JSON array of {index, embedding} whose embedding is an array OF arrays, and /v1/embeddings keeps the OpenAI object. /embedding was not mounted at all before this change, and all three paths used to answer the OpenAI shape. The native handler also accepts upstream's legacy `content` spelling for the input. Shape verified against a capture of the pinned binary serving a real embedding checkpoint.",
-      "divergence": [
-        "With no embedding checkpoint loaded the 501 body names the mlxcel flags instead of b10621's \"Start it with `--embeddings`\"; the flag itself is #1452's entry."
-      ],
+      "test": "src/server/routes/embedding_rerank_mode_tests.rs::an_embedding_body_with_neither_input_nor_content_uses_the_upstream_wording",
+      "notes": "The native shape (a bare JSON array of {index, embedding} whose embedding is an array OF arrays) landed with #1441 and was verified against a capture of the pinned binary; #1452 closed the rest. The handler accepts upstream's legacy `content` spelling for the input and answers a body carrying neither key with upstream's own \"input\\\" or \\\"content\\\" must be provided\" sentence, reads the per-request `embd_normalize` over the whole b10621 domain, and the 501 body now opens with upstream's \"This server does not support embeddings. Start it with `--embeddings`\" because that flag really is accepted here.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /embedding"
       }
@@ -250,13 +248,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1452,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "Route separation done: /embedding and /embeddings answer b10621's native shape, a bare JSON array of {index, embedding} whose embedding is an array OF arrays, and /v1/embeddings keeps the OpenAI object. /embedding was not mounted at all before this change, and all three paths used to answer the OpenAI shape. The native handler also accepts upstream's legacy `content` spelling for the input. Shape verified against a capture of the pinned binary serving a real embedding checkpoint.",
-      "divergence": [
-        "With no embedding checkpoint loaded the 501 body names the mlxcel flags instead of b10621's \"Start it with `--embeddings`\"; the flag itself is #1452's entry."
-      ],
+      "test": "src/server/routes/native_route_tests.rs::the_native_embedding_path_accepts_the_content_spelling",
+      "notes": "The native shape (a bare JSON array of {index, embedding} whose embedding is an array OF arrays) landed with #1441 and was verified against a capture of the pinned binary; #1452 closed the rest. The handler accepts upstream's legacy `content` spelling for the input and answers a body carrying neither key with upstream's own \"input\\\" or \\\"content\\\" must be provided\" sentence, reads the per-request `embd_normalize` over the whole b10621 domain, and the 501 body now opens with upstream's \"This server does not support embeddings. Start it with `--embeddings`\" because that flag really is accepted here.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /embeddings"
       }
@@ -289,14 +285,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1452,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430). Mounted with all four b10621 spellings (#1430); the response omits b10621's top-level \"object\": \"list\" and mlxcel uses the Cohere return_documents/document spelling rather than b10621's TEI return_text. #1452 owns envelope parity.",
-      "divergence": [
-        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
-        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
-      ],
+      "test": "src/server/routes/embedding_rerank_mode_tests.rs::the_jina_envelope_carries_the_object_key",
+      "notes": "All four aliases mounted (#1430); #1452 aligned the envelope. The Jina response now carries b10621's top-level \"object\": \"list\", and a request that spells its document list `texts` gets b10621's TEI shape instead: a bare array of {index, score} with `text` echoed under `return_text`. The Cohere `documents` / `return_documents` / `document` spelling mlxcel already served keeps working, and a body carrying both list spellings stays on the Jina envelope. The three shape errors use upstream's own wording. The route is served exactly when the operator asked for reranking; mlxcel spells that request as `--reranking`, `--pooling rank`, `--reranker-model <path>`, or a reranker checkpoint in -m, and the 501 body opens with upstream's \"This server does not support reranking. Start it with `--reranking`\".",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /rerank"
       }
@@ -309,14 +302,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1452,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
-      "divergence": [
-        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
-        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
-      ],
+      "test": "src/server/routes/embedding_rerank_mode_tests.rs::a_texts_request_gets_b10621s_tei_array",
+      "notes": "The /reranking spelling of POST /rerank; all four paths reach one handler. See POST /rerank.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /reranking"
       }
@@ -482,14 +472,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1452,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
-      "divergence": [
-        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
-        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
-      ],
+      "test": "src/server/routes/embedding_rerank_mode_tests.rs::return_documents_still_echoes_under_the_cohere_spelling",
+      "notes": "The /v1 spelling of POST /rerank; all four paths reach one handler. See POST /rerank.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/rerank"
       }
@@ -502,14 +489,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1452,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
-      "divergence": [
-        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
-        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
-      ],
+      "test": "src/server/routes/embedding_rerank_mode_tests.rs::the_jina_envelope_carries_the_object_key",
+      "notes": "The /v1/reranking spelling of POST /rerank; all four paths reach one handler. See POST /rerank.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/reranking"
       }

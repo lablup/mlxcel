@@ -142,6 +142,10 @@ impl EmbeddingModel for ModernBertEmbeddingModel {
         PoolingMode::Mean
     }
 
+    fn pooling(&self) -> PoolingMode {
+        self.pooling
+    }
+
     fn embedding_dim(&self) -> usize {
         self.encoder.hidden_size()
     }

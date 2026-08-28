@@ -561,6 +561,7 @@ fn embeddinggemma_checkpoint_loads_and_ranks_the_matching_document() {
             &crate::embeddings::EmbedOptions {
                 instruction: None,
                 dimensions: Some(256),
+                normalize: None,
             },
         )
         .expect("EmbeddingGemma embeds at 256 dimensions");

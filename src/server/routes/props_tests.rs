@@ -172,6 +172,7 @@ fn props_reports_the_effective_kv_cache_mode_and_kv_bits() {
         total_slots: 1,
         kv_cache_mode: mlxcel_core::cache::KVCacheMode::Turbo4Asym.to_string(),
         kv_bits: 4,
+        capabilities: no_side_models(),
     };
 
     let payload = serde_json::to_value(&response).expect("PropsResponse serializes");
@@ -192,9 +193,21 @@ fn props_reports_the_kv_keys_even_on_a_default_server() {
         total_slots: config.n_parallel,
         kv_cache_mode: config.kv_cache_mode.to_string(),
         kv_bits: config.batch_kv_quant.bits,
+        capabilities: no_side_models(),
     };
 
     let payload = serde_json::to_value(&response).expect("PropsResponse serializes");
     assert_eq!(payload["kv_cache_mode"], serde_json::json!("fp16"));
     assert_eq!(payload["kv_bits"], serde_json::json!(0));
+}
+
+/// The capability block of a plain generation server: no side models, no mode
+/// restriction.
+fn no_side_models() -> crate::server::types::ServerCapabilities {
+    crate::server::types::ServerCapabilities {
+        generation: true,
+        serving_mode: None,
+        embedding: None,
+        reranking: None,
+    }
 }

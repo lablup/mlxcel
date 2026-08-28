@@ -69,6 +69,23 @@ pub use tokenize::tokenize;
 /// Explain a terminal generation-unavailable state without exposing worker or
 /// channel implementation details.
 pub(crate) fn chat_unavailable_message(state: &AppState) -> Option<String> {
+    // b10621's `--embeddings` / `--reranking` restrict the server to that
+    // workload, so generation is refused even when a chat model is loaded next
+    // to the side model (#1452). The flag is named in the body, because
+    // "generation is off here" and "the chat model failed to load" are
+    // different operational problems and the 501 is the only place a client
+    // sees either.
+    if let Some(flag) = state.config.embedding_serving_mode.flag() {
+        return Some(format!(
+            "This server was started with {flag} and serves only its {} routes; generation is \
+             disabled. Drop {flag} to serve generation from the same process, or start a second \
+             server with -m <chat model>.",
+            match state.config.embedding_serving_mode {
+                crate::server::config::EmbeddingServingMode::RerankOnly => "reranking",
+                _ => "embedding",
+            }
+        ));
+    }
     if !state.model_provider.is_chat_unavailable() {
         return None;
     }
@@ -146,3 +163,7 @@ pub(crate) fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse 
 #[cfg(test)]
 #[path = "native_route_tests.rs"]
 mod native_route_tests;
+
+#[cfg(test)]
+#[path = "embedding_rerank_mode_tests.rs"]
+mod embedding_rerank_mode_tests;

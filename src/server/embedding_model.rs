@@ -95,6 +95,19 @@ pub trait EmbeddingModelProvider: Send + Sync {
     /// Whether outputs are `[num_real_tokens, D]` matrices.
     fn multi_vector(&self) -> bool;
 
+    /// The pooling the loaded checkpoint resolved (#1452).
+    ///
+    /// Defaulted so an implementation that predates the capability report, and
+    /// the test doubles, keep compiling; the shipping worker overrides it.
+    fn pooling(&self) -> crate::embeddings::PoolingMode {
+        crate::embeddings::PoolingMode::Mean
+    }
+
+    /// The normalization applied when a request names none (#1452).
+    fn embd_normalize(&self) -> crate::embeddings::EmbdNormalize {
+        crate::embeddings::EmbdNormalize::EUCLIDEAN
+    }
+
     /// Whether `image_url` items are accepted.
     fn supports_images(&self) -> bool {
         false

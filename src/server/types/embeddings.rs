@@ -37,6 +37,14 @@ pub struct EmbeddingsRequest {
     /// Forwarded to the family's text formatting (instruction prefix).
     #[serde(default)]
     pub instruction: Option<String>,
+    /// b10621's per-request `embd_normalize` (#1452).
+    ///
+    /// Held as the raw integer b10621 states it as, because the domain is open
+    /// above 2 (any `p` is a p-norm) and cannot be an enum. Validated by the
+    /// route so an out-of-domain value is a 400 naming the domain rather than
+    /// a 422 from serde.
+    #[serde(default)]
+    pub embd_normalize: Option<i32>,
     /// Accepted for OpenAI compatibility and ignored.
     #[serde(default)]
     pub user: Option<String>,

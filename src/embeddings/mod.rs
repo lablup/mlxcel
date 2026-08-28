@@ -35,6 +35,7 @@ pub mod limits;
 pub mod loader;
 pub mod maxsim;
 pub mod model;
+pub mod normalize;
 pub mod pooling;
 pub mod tokenize;
 
@@ -72,7 +73,8 @@ pub use loader::{
 };
 pub use maxsim::{maxsim, maxsim_mlx};
 pub use model::{EmbeddingBatch, EmbeddingModel, EmbeddingOutput, ImageInput};
+pub use normalize::{EmbdNormalize, apply_embd_normalize};
 pub use pooling::{
-    POOLING_ENV, PoolingConfig, PoolingMode, normalize_l2, pool, resolve_pooling_mode,
-    truncate_dimensions,
+    POOLING_ENV, PoolingConfig, PoolingMode, normalize_l2, pool, pooling_override,
+    resolve_pooling_mode, set_pooling_override, truncate_dimensions,
 };

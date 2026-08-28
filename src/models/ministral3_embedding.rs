@@ -181,6 +181,10 @@ impl EmbeddingModel for Ministral3EmbeddingModel {
         PoolingMode::Mean
     }
 
+    fn pooling(&self) -> PoolingMode {
+        self.pooling
+    }
+
     fn normalize(&self) -> bool {
         self.normalize
     }
