@@ -440,13 +440,20 @@ fn cache_list_reports_the_store_in_b10621s_format() {
     seed_checkpoint(&store, "mlx-community/gemma-3-4b-it-4bit");
 
     for (bin, leading) in invocations() {
-        // `--models-dir` on the command line, not the environment: the
+        // `--model-store-root` on the command line, not the environment: the
         // store `--cache-list` reports must be the one the same invocation
-        // would load from.
+        // would load from. #1438 reserved `--models-dir` for b10621 router
+        // discovery, so pointing this at that spelling would silently report
+        // the developer's real cache instead of the seeded temporary one, and
+        // the assertion below would depend on whatever happens to be cached.
         let output = run(
             bin,
             &leading,
-            &["--cache-list", "--models-dir", &store.to_string_lossy()],
+            &[
+                "--cache-list",
+                "--model-store-root",
+                &store.to_string_lossy(),
+            ],
             &[],
         );
         assert!(
