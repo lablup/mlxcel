@@ -2,7 +2,7 @@
 
 `mlxcel serve` and `mlxcel-server` expose the three OpenAI-compatible audio endpoints: text-to-speech (`/v1/audio/speech`), transcription (`/v1/audio/transcriptions`), and translation (`/v1/audio/translations`).
 
-**Current status.** All three routes are mounted and functional. Speech-to-text (`/v1/audio/transcriptions` and `/v1/audio/translations`) is served by the Whisper provider: pass a Whisper checkpoint with `-m` and the STT slot is populated automatically. Text-to-speech (`/v1/audio/speech`) is served by the Kokoro-82M provider: pass a Kokoro checkpoint with `-m` and the TTS slot is populated automatically. Any route whose model kind is not loaded returns 501 after the request is fully parsed.
+**Current status.** All three routes are mounted and functional. `/v1/audio/transcriptions` is the one route llama-server also mounts, so it carries llama-server's semantics and is served by the loaded chat model when that model takes audio, falling back to the Whisper provider otherwise (issue #1446). `/v1/audio/translations` is mlxcel's own and is served by the Whisper provider: pass a Whisper checkpoint with `-m` and the STT slot is populated automatically. Text-to-speech (`/v1/audio/speech`) is served by the Kokoro-82M provider: pass a Kokoro checkpoint with `-m` and the TTS slot is populated automatically. Any route whose model kind is not loaded returns 501 after the request is fully parsed.
 
 ## Implemented endpoints
 
@@ -103,31 +103,49 @@ curl -s -X POST http://localhost:8080/v1/audio/speech \
 
 ## POST /v1/audio/transcriptions
 
+This is the one audio route llama-server also mounts, so it carries **llama-server b10621's semantics**, not mlxcel's (issue #1446). Read [`llama-server-compat.md`](llama-server-compat.md) for the full contract and the divergences that remain; this section is the operator-facing summary.
+
+**Which model transcribes.** Whichever of these the server has, in this order:
+
+1. **The loaded chat model**, when it can take audio (`gemma3n`, the omni families, and any other checkpoint whose towers accept an `input_audio` part). This is what llama-server does, and it is the only server shape llama-server can express.
+2. **A dedicated Whisper worker**, when `-m` named a Whisper checkpoint. That shape has no chat model at all and is mlxcel's own; llama-server has no equivalent.
+
+With neither, the route answers `501 not_supported_error` with `The current model does not support audio input.`
+
 **Request body (`multipart/form-data`):**
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `file` | file part | yes | Raw WAV audio bytes. The current Whisper provider decodes WAV only; other container formats return 400. |
-| `model` | text | no | STT model identifier. Forwarded to the provider. |
-| `language` | text | no | ISO-639-1 source-language hint (`en`, `ko`, etc.). |
-| `response_format` | text | no | `json` (default), `text`, or `verbose_json`. Any other non-empty value returns 400. |
-| `temperature` | text | no | Sampling temperature. Parsed as `f32`; non-numeric values return 400. |
+| `file` | file part | yes | Raw WAV audio bytes. Only RIFF/WAVE is decoded; other containers return 400. A repeated `file` part keeps the last one. |
+| `model` | text | no | Carried and ignored, as upstream carries it into the chat body. |
+| `prompt` | text | no | Replaces the ASR prompt. Default: `Transcribe audio to text`. Honored on the chat-model path; the Whisper worker ignores it. |
+| `language` | text | no | Appended to the prompt as `" (language: xx)"`, which is how upstream passes it. |
+| `response_format` | text | no | `json` only (the default). Anything else returns 400. `text` and `verbose_json` live on `/v1/audio/translations`. |
+| `temperature` | text | no | Parsed as `f32`; a value that does not parse returns 400. |
+| `max_tokens` | text | no | Parsed as an integer; a value that does not parse returns 400. |
+| `stream` | text | no | Compared against the literal `"true"`, because the form carries strings. |
 
-Unknown multipart parts are drained and ignored. The upload body limit is 25 MiB; larger uploads return 413.
+Unknown text fields are carried and ignored. A repeated text field collapses into an array and falls back to that field's default, so a duplicated `prompt` is ignored and a duplicated `response_format` resolves to `json`.
 
-**Success responses:**
+**Success response** (`json`, the default). Note that this is the transcript-event shape llama-server emits, **not** OpenAI's classic `{"text": ...}` object:
 
-- `json` (default): `{"text":"..."}` with `Content-Type: application/json`.
-- `text`: plain UTF-8 text with `Content-Type: text/plain`.
-- `verbose_json`: `{"text":"...","language":"...","duration":1.5}` with `Content-Type: application/json`. The `language` and `duration` fields are omitted when the provider does not return them.
+```json
+{"type":"transcript.text.done","text":"The quick brown fox jumps over the lazy dog.","usage":{"type":"tokens","input_tokens":206,"output_tokens":10,"total_tokens":216,"input_tokens_details":{"cached_tokens":0}}}
+```
+
+On the Whisper-worker path the `usage` counts are zeros: the worker reports no prompt or decoded token counts.
+
+**Streamed response** (`stream=true`): `text/event-stream` carrying a `{"type":"transcript.text.delta","delta":"..."}` frame, the `done` frame above, and `data: [DONE]`. mlxcel emits the whole transcript in one delta rather than incrementally.
+
+**Limits**, all applied before a decoder sees the clip: at most 32 multipart parts, 25 MiB per part, and a WAV geometry read from the header (at most 192 kHz, 8 channels, 600 seconds). A `data` chunk declaring more audio than the file carries is clamped to what is present.
 
 **Error responses:**
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Malformed multipart, non-numeric `temperature`, or unsupported `response_format`. |
+| 400 | Malformed multipart, too many parts, no `file` part (`No input file found for transcription`), a `response_format` other than `json` (`Only 'json' response_format is supported for transcription`), a non-numeric `temperature` or `max_tokens`, or a clip that is not WAV or exceeds a geometry bound. |
 | 413 | Upload body exceeds 25 MiB. |
-| 501 | No STT model is registered. Body: `{"error":{"type":"not_implemented","message":"audio model kind not loaded: stt"}}` |
+| 501 | Neither an audio-capable chat model nor an STT worker is loaded. Body: `{"error":{"type":"not_supported_error","message":"The current model does not support audio input."}}` |
 | 503 | All slots are busy: either the generation batch queue or the bounded audio worker queue (`--audio-queue-depth`) is full. |
 | 504 | The audio worker did not reply within the per-request timeout (`--audio-request-timeout-secs`). |
 
@@ -143,7 +161,15 @@ curl -s -X POST http://localhost:8080/v1/audio/transcriptions \
 
 ## POST /v1/audio/translations
 
-Same multipart shape and field semantics as `/v1/audio/transcriptions`. The difference is that the loaded model is asked to output text in English regardless of the source language. The `501` message names `stt` (the same underlying capability direction).
+An mlxcel-only route: llama-server does not mount it, so it keeps mlxcel's own semantics and is where the extra response formats live. Same multipart shape as the transcription route, with the loaded model asked to output English regardless of the source language, and served by the Whisper worker.
+
+| `response_format` | Body |
+|---|---|
+| `json` (default) | `{"text":"..."}` |
+| `text` | plain UTF-8 with `Content-Type: text/plain` |
+| `verbose_json` | `{"text":"...","language":"...","duration":1.5}`, with `language` and `duration` omitted when the provider does not return them |
+
+The `501` message names `stt` (the same underlying capability direction).
 
 ## Request validation order
 

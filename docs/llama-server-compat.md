@@ -298,6 +298,59 @@ Refused: loopback, the unspecified address, multicast and broadcast, the IPv4 pr
 
 The existing byte and decode limits are unchanged and still apply: `--max-image-payload-size`, `--max-images`, the decoder's width, height and allocation caps, the audio per-clip and per-request ceilings, and the 10-second fetch timeout.
 
+## Audio transcription
+
+`POST /v1/audio/transcriptions` and its `/audio/transcriptions` alias are the only audio routes b10621 mounts, and the only ones this section governs. `/v1/audio/speech` and `/v1/audio/translations` are mlxcel's own and are documented in [`audio-api.md`](audio-api.md).
+
+### b10621 has no speech-to-text model
+
+Upstream's route is a translation layer over `/v1/chat/completions`. It refuses unless the loaded chat model takes audio, converts the multipart form into a chat request whose single user message carries an ASR prompt plus the uploaded clip, and renders the completion as a transcript event. There is no separate ASR model anywhere in it.
+
+mlxcel's route was served by a dedicated Whisper worker, and that worker is populated only when `-m` names a Whisper checkpoint, which leaves the chat worker unloaded. The two were therefore mutually exclusive server shapes, measured on this tree:
+
+| Command line | `/v1/chat/completions` | `/v1/audio/transcriptions` (before #1446) |
+|---|---|---|
+| `mlxcel-server -m models/mlx/whisper-tiny` | 503, no chat model | transcribes |
+| `mlxcel-server -m models/mlx/gemma3n-e2b-4bit` | answers | **501 `audio model kind not loaded: stt`** |
+
+The second row is the only shape b10621 can express, and it was the one that did not work. A `llama-server` deployment that transcribes through its loaded model had no mlxcel equivalent, however closely the multipart field set matched: route-name overlap was not compatibility. That is the design decision #1446 asked for, and it was settled by measurement rather than preference.
+
+**The shared route now dispatches through the loaded chat model, exactly as upstream does.** Posting the clip to `gemma3n-e2b-4bit` returns its transcript. The Whisper worker stays the implementation when no chat model can take audio, which is the Whisper-server shape b10621 cannot express at all, so it adds no divergence in any configuration upstream can reach.
+
+### What a client sees
+
+The response is **not** OpenAI's classic `{"text": ...}` object. b10621 emits the transcript-event shape, and so does mlxcel now:
+
+```json
+{"type":"transcript.text.done","text":"The quick brown fox jumps over the lazy dog.","usage":{"type":"tokens","input_tokens":206,"output_tokens":10,"total_tokens":216,"input_tokens_details":{"cached_tokens":0}}}
+```
+
+**A client that was parsing `{"text": ...}` off `/v1/audio/transcriptions` must read `text` out of that object instead, or move to `/v1/audio/translations`, which is unchanged.** The streamed form is `data: {"type":"transcript.text.delta","delta":"..."}` frames followed by the `done` frame and `data: [DONE]`.
+
+Aligned with upstream, each checked against the pinned source rather than the schema's prose:
+
+- The capability refusal is `The current model does not support audio input.` as a 501 `not_supported_error`, and it precedes every field check, so a request that is wrong in two ways gets the 501.
+- A form with no `file` part is `No input file found for transcription` (400).
+- `response_format` defaults to `json` and anything else is `Only 'json' response_format is supported for transcription` (400). mlxcel's own `text` and `verbose_json` moved to `/v1/audio/translations`, which b10621 does not mount, so the shared route's default is upstream's.
+- The prompt is upstream's ASR preset, `Transcribe audio to text`, overridden by a `prompt` field, with a non-empty `language` appended in upstream's own `" (language: xx)"` form rather than passed as a decoder parameter.
+- `temperature` and `max_tokens` arrive as strings and are retyped, with a 400 on a value that does not parse, because upstream's `std::stof` / `std::stoul` throw `std::invalid_argument` and its wrapper maps that to 400.
+- `stream` is compared against the literal `"true"`, not a boolean vocabulary, because the form carries strings.
+- The multipart duplicate rules are upstream's: a repeated text field collapses into an array, which upstream's `json_value` then rejects on type and replaces with the default, so a duplicated `prompt` is ignored and a duplicated `response_format` falls back to `json`; a repeated `file` part keeps the last one.
+- Unknown fields are carried and ignored.
+
+### Limits
+
+Every bound is applied before a decoder sees the clip: at most 32 multipart parts, 25 MiB per part (matching the route's body limit), and a WAV geometry read from the header rather than from a decode: at most 192 kHz, 8 channels and 600 seconds. A `data` chunk that declares more audio than the file carries is clamped to what is present, so an amplifying header costs a header parse. A malformed or truncated file is a 400 naming the structural problem.
+
+### Still deferred
+
+Both route entries stay `deferred` against #1446 for two divergences a b10621 client can observe:
+
+- **Container support.** Only RIFF/WAVE is accepted. b10621's mtmd front-end decodes mp3, flac and the rest, so a non-WAV clip is a 400 here and a transcript there.
+- **Stream granularity.** A streamed response arrives as one delta carrying the whole transcript. The frame shapes and the terminator are upstream's; the incremental delivery is not.
+
+A third residue is recorded but cannot be reached from a b10621 command line: on the Whisper-server shape the `usage` counts are zeros, because the STT worker reports no token counts, and `prompt` steers nothing there.
+
 ## Regeneration
 
 ```bash

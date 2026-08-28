@@ -41,6 +41,7 @@ pub mod rerank;
 pub mod responses;
 pub mod slots;
 pub mod tokenize;
+pub mod transcription_compat;
 
 #[cfg(test)]
 #[path = "availability_tests.rs"]
