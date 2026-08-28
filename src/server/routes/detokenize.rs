@@ -23,11 +23,27 @@ use crate::server::AppState;
 use crate::server::types::{DetokenizeRequest, DetokenizeResponse, ErrorResponse};
 
 /// POST /detokenize
+///
+/// Special tokens are rendered rather than skipped, as upstream's
+/// `tokens_to_str` does. An absent or empty `tokens` answers `{"content": ""}`
+/// instead of failing, which is upstream's behavior too (#1442).
+///
+/// A token whose bytes are not valid UTF-8 on its own is joined with its
+/// neighbours before decoding, so a split multi-byte character round trips;
+/// bytes that still cannot form a character come back as U+FFFD, which is what
+/// upstream emits as well because its JSON writer is configured to replace
+/// rather than throw.
 pub async fn detokenize(
     State(state): State<AppState>,
     Json(request): Json<DetokenizeRequest>,
 ) -> Result<Json<DetokenizeResponse>, ErrorResponse> {
-    let ids: Vec<u32> = request.tokens.iter().map(|&x| x as u32).collect();
+    let Some(tokens) = request.tokens.as_ref() else {
+        return Ok(Json(DetokenizeResponse {
+            content: String::new(),
+        }));
+    };
+
+    let ids: Vec<u32> = tokens.iter().map(|&x| x as u32).collect();
 
     let content = state.tokenizer.decode(&ids, false).map_err(|e| {
         ErrorResponse::new(

@@ -521,6 +521,10 @@ pub struct ServerStartupInput {
     /// [`ServerStartupInput::into_startup_config`] so both server binaries
     /// reject the same command lines with the same message.
     pub rope: crate::cli::rope_args::RopeOverrideArgs,
+    /// llama-server b10621 fill-in-the-middle flags, straight off the shared
+    /// clap group. `--spm-infill` selects the Suffix/Prefix/Middle ordering
+    /// `POST /infill` assembles its prompt in (#1442).
+    pub infill: crate::cli::infill_args::InfillArgs,
 }
 
 impl ServerStartupInput {
@@ -840,6 +844,7 @@ impl ServerStartupInput {
             chat_template_file: self.chat_template_file,
             enable_slots: resolve_compat_toggle(self.slots, self.no_slots),
             enable_props: self.props,
+            spm_infill: self.infill.spm_infill,
             enable_metrics: self.metrics || self.metrics_port.is_some(),
             warmup: resolve_compat_toggle(self.warmup, self.no_warmup),
             temperature: self.temperature,

@@ -194,6 +194,7 @@ fn sample_input() -> ServerStartupInput {
         diffusion_threshold: 0.9,
         rope: crate::cli::rope_args::RopeOverrideArgs::default(),
         cache_compat: crate::cli::cache_args::CacheCompatArgs::default(),
+        infill: crate::cli::infill_args::InfillArgs::default(),
     }
 }
 

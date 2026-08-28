@@ -1307,20 +1307,42 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Tokenize request (POST /tokenize)
-#[derive(Debug, Clone, Deserialize)]
+/// Tokenize request (POST /tokenize).
+///
+/// b10621's own body, whose four fields are independent: `content` is the
+/// "mixed" prompt shape (a string, or an array whose elements are strings or
+/// already-tokenized ids), `add_special` runs the BOS/EOS post-processor,
+/// `parse_special` decides whether a special-token spelling written into the
+/// text is recognized as that token, and `with_pieces` switches the response
+/// from a flat id list to one object per token (#1442).
+///
+/// Every field is optional, `content` included: upstream answers an absent
+/// `content` with an empty token list rather than an error.
+///
+/// Upstream reference:
+/// <https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server.cpp>
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TokenizeRequest {
-    /// Text content to tokenize
-    pub content: String,
-    /// Whether to add special tokens (BOS/EOS)
+    /// Text content to tokenize: a string, or an array of strings and token ids.
+    pub content: Option<serde_json::Value>,
+    /// Whether to add special tokens (BOS/EOS). Upstream default: `false`.
     pub add_special: Option<bool>,
+    /// Whether special-token spellings in `content` are parsed as those tokens.
+    /// Upstream default: `true`.
+    pub parse_special: Option<bool>,
+    /// Whether to answer with `{id, piece}` objects instead of bare ids.
+    /// Upstream default: `false`.
+    pub with_pieces: Option<bool>,
 }
 
-/// Detokenize request (POST /detokenize)
-#[derive(Debug, Clone, Deserialize)]
+/// Detokenize request (POST /detokenize).
+///
+/// `tokens` is optional: upstream answers an absent list with an empty string
+/// rather than an error.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct DetokenizeRequest {
     /// Token IDs to decode
-    pub tokens: Vec<i32>,
+    pub tokens: Option<Vec<i32>>,
 }
 
 // ---------------------------------------------------------------------------

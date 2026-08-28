@@ -34,6 +34,7 @@ pub mod embedding_model;
 pub mod embedding_worker;
 pub(crate) mod florence2_worker;
 mod http_timeout;
+pub mod infill;
 pub mod kokoro_tts;
 mod listen;
 mod media;

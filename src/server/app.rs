@@ -197,7 +197,32 @@ fn build_routes(state: &AppState) -> Router<AppState> {
         // llama-server compatible endpoints
         .route("/completion", post(routes::native_completion))
         .route("/tokenize", post(routes::tokenize))
-        .route("/detokenize", post(routes::detokenize));
+        .route("/detokenize", post(routes::detokenize))
+        // Fill-in-the-middle. Mounted unconditionally, like every other route:
+        // whether the loaded model can serve it is a property of its
+        // vocabulary, and the handler answers 501 naming the missing FIM
+        // tokens rather than 404, so a client can tell "this server does not
+        // implement infill" from "this model cannot do it" (#1442).
+        .route("/infill", post(routes::infill))
+        // Prompt inspection: render or count a prompt without generating from
+        // it (#1442).
+        .route("/apply-template", post(routes::apply_template))
+        .route(
+            "/chat/completions/input_tokens",
+            post(routes::chat_input_tokens),
+        )
+        .route(
+            "/v1/chat/completions/input_tokens",
+            post(routes::chat_input_tokens),
+        )
+        .route(
+            "/responses/input_tokens",
+            post(routes::responses_input_tokens),
+        )
+        .route(
+            "/v1/responses/input_tokens",
+            post(routes::responses_input_tokens),
+        );
 
     // Conditionally enable /props endpoint
     if enable_props {

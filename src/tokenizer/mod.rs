@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod fim;
+pub mod pieces;
 mod thinking;
 mod tiktoken;
 
@@ -21,6 +23,7 @@ use sentencepiece::SentencePieceProcessor;
 use std::collections::HashMap;
 use std::path::Path;
 
+pub use fim::{FimToken, FimTokens, FimTriple};
 pub use thinking::{ThinkingMarkers, find_subseq, rfind_subseq};
 pub use tiktoken::TiktokenTokenizer;
 
@@ -46,6 +49,9 @@ pub struct SentencePieceTokenizer {
     added_token_contents: HashMap<u32, String>,
     bos_id: Option<u32>,
     add_bos: bool,
+    /// Byte-fallback token ids, resolved on first use. See
+    /// [`SentencePieceTokenizer::byte_fallback_ids`].
+    byte_fallback_ids: std::sync::OnceLock<HashMap<u32, u8>>,
 }
 
 impl MlxcelTokenizer {
@@ -219,6 +225,115 @@ impl MlxcelTokenizer {
             // windowed re-decode path rather than per-piece inspection.
             Self::SentencePiece(_) | Self::Tiktoken(_) => None,
         }
+    }
+
+    /// Encode with `llama-server`'s two independent switches (#1442).
+    ///
+    /// `add_special` is the BOS/EOS post-processor, exactly as
+    /// [`Self::encode`] takes it. `parse_special` is the separate question of
+    /// whether a special token written out in the *input text* is recognized
+    /// as that token or tokenized as ordinary characters. b10621 defaults it
+    /// to `true` on `/tokenize`, which is what [`Self::encode`] already does,
+    /// so only an explicit `parse_special: false` takes the second path.
+    ///
+    /// Upstream reference: `tokenize_mixed` in
+    /// <https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/utils.hpp>
+    pub fn encode_with_special(
+        &self,
+        text: &str,
+        add_special: bool,
+        parse_special: bool,
+    ) -> Result<Vec<u32>> {
+        if parse_special {
+            return self.encode(text, add_special);
+        }
+        match self {
+            Self::HuggingFace(t) => {
+                // Encode normally first. When no added-vocabulary token came
+                // out, the text held no special-token spelling and the two
+                // modes agree, so the answer is already correct.
+                let normal = t
+                    .encode(text, add_special)
+                    .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+                let added = t.get_added_vocabulary();
+                if !normal
+                    .get_ids()
+                    .iter()
+                    .any(|id| added.simple_id_to_token(*id).is_some())
+                {
+                    return Ok(normal.get_ids().to_vec());
+                }
+                // A spelling really is present, so the modes differ.
+                // `set_encode_special_tokens(true)` is the crate's own name for
+                // "do not split on added tokens" and needs `&mut`, so reaching
+                // it from a shared `&self` costs a clone of the tokenizer. The
+                // check above keeps that off every ordinary request: it is paid
+                // only when the caller asked for the non-default AND wrote a
+                // marker into the text.
+                let mut plain = t.clone();
+                plain.set_encode_special_tokens(true);
+                let encoding = plain
+                    .encode(text, add_special)
+                    .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+                Ok(encoding.get_ids().to_vec())
+            }
+            Self::SentencePiece(t) => t.encode_without_special_parsing(text, add_special),
+            Self::Tiktoken(t) => t.encode_without_special_parsing(text),
+        }
+    }
+
+    /// The raw bytes one token stands for, as `common_token_to_piece` returns
+    /// them (#1442).
+    ///
+    /// `None` when the id is outside the vocabulary. The bytes are not
+    /// necessarily valid UTF-8: a byte-level BPE token routinely holds part of
+    /// a multi-byte character, which is exactly the case `/tokenize`'s
+    /// `with_pieces` array form exists for.
+    pub fn token_piece_bytes(&self, id: u32) -> Option<Vec<u8>> {
+        match self {
+            Self::HuggingFace(t) => {
+                let raw = t.id_to_token(id)?;
+                // A SentencePiece-style byte-fallback entry is one raw byte and
+                // never survives a decode, which turns it into U+FFFD.
+                if let Some(byte) = pieces::byte_fallback_value(&raw) {
+                    return Some(vec![byte]);
+                }
+                match t.decode(&[id], false) {
+                    // The decoder ran the vocabulary entry through the model's
+                    // own transformations (byte-level unmapping, Metaspace,
+                    // WordPiece prefix stripping), so prefer its answer.
+                    Ok(text) if !pieces::lost_bytes(&raw, &text) => Some(text.into_bytes()),
+                    // It reported a replacement character the entry did not
+                    // carry, meaning bytes were dropped; recover them from the
+                    // byte-level alphabet instead.
+                    _ => Some(pieces::byte_level_bytes(&raw)),
+                }
+            }
+            Self::SentencePiece(t) => t.piece_bytes(id),
+            Self::Tiktoken(t) => t.piece_bytes(id),
+        }
+    }
+
+    /// The id a vocabulary entry holds, by its exact spelling.
+    ///
+    /// Used by FIM discovery ([`Self::fim_tokens`]), which asks the vocabulary
+    /// about a fixed list of marker spellings.
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        match self {
+            Self::HuggingFace(t) => t.token_to_id(token),
+            Self::SentencePiece(t) => t.token_to_id(token),
+            Self::Tiktoken(t) => t.token_to_id(token),
+        }
+    }
+
+    /// The fill-in-the-middle markers this vocabulary declares (#1442).
+    ///
+    /// Drives `POST /infill`'s capability gate: a model without the prefix,
+    /// suffix and middle tokens cannot be served and is refused with the
+    /// upstream diagnostic rather than prompted with markers it would emit as
+    /// literal text.
+    pub fn fim_tokens(&self) -> FimTokens {
+        FimTokens::discover(|spelling| self.token_to_id(spelling))
     }
 
     /// Resolve think and tool-call markers from this tokenizer's vocab.
@@ -427,7 +542,85 @@ impl SentencePieceTokenizer {
             added_token_contents,
             bos_id,
             add_bos,
+            byte_fallback_ids: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Encode without recognizing special-token spellings written into the
+    /// input text (`parse_special: false`, #1442).
+    ///
+    /// The BOS prefix is still governed by `add_special_tokens`, which is a
+    /// separate switch upstream too.
+    fn encode_without_special_parsing(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<Vec<u32>> {
+        let mut result = Vec::new();
+        if add_special_tokens
+            && self.add_bos
+            && let Some(bos) = self.bos_id
+        {
+            result.push(bos);
+        }
+        let pieces = self
+            .processor
+            .encode(text)
+            .map_err(|e| anyhow::anyhow!("SentencePiece encode failed: {}", e))?;
+        result.extend(pieces.iter().map(|piece| piece.id));
+        Ok(result)
+    }
+
+    /// The id a vocabulary entry holds, by its exact spelling.
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        if let Some(&id) = self.special_token_to_id.get(token) {
+            return Some(id);
+        }
+        // `piece_to_id` answers `Some(unk_id)` for an unknown piece on some
+        // models, so an id equal to `unk_id` only counts when the caller
+        // actually asked for the unknown piece.
+        match self.processor.piece_to_id(token) {
+            Ok(Some(id)) if id != self.processor.unk_id() => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Map of byte-fallback token id to the byte it stands for.
+    ///
+    /// Built once, lazily, by asking the processor for each `<0xXX>` spelling.
+    /// It exists because the crate's `decode_piece_ids` **panics** when the
+    /// decoded bytes are not valid UTF-8, which is exactly what a lone
+    /// byte-fallback token produces, so `piece_bytes` must answer those ids
+    /// without going through a decode.
+    fn byte_fallback_ids(&self) -> &HashMap<u32, u8> {
+        self.byte_fallback_ids.get_or_init(|| {
+            let mut map = HashMap::new();
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                let spelling = format!("<0x{byte:02X}>");
+                if let Ok(Some(id)) = self.processor.piece_to_id(&spelling) {
+                    map.insert(id, byte);
+                }
+            }
+            map
+        })
+    }
+
+    /// Raw bytes for one token; see `MlxcelTokenizer::token_piece_bytes`.
+    fn piece_bytes(&self, id: u32) -> Option<Vec<u8>> {
+        if let Some(&byte) = self.byte_fallback_ids().get(&id) {
+            return Some(vec![byte]);
+        }
+        if let Some(special) = self.id_to_special_token.get(&id) {
+            return Some(special.clone().into_bytes());
+        }
+        if let Some(content) = self.added_token_contents.get(&id) {
+            return Some(content.clone().into_bytes());
+        }
+        self.processor
+            .decode_piece_ids(&[id])
+            .ok()
+            .map(String::into_bytes)
     }
 
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
