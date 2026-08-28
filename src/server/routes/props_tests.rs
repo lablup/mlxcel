@@ -176,6 +176,7 @@ fn props_reports_the_effective_kv_cache_mode_and_kv_bits() {
         default_generation_settings: default_generation_settings(&ServerConfig::default()),
         total_slots: 1,
         kv_cache_mode: mlxcel_core::cache::KVCacheMode::Turbo4Asym.to_string(),
+        speculative: serde_json::json!({"model": null, "kind": null, "n_max": 16}),
         kv_bits: 4,
         capabilities: no_side_models(),
     };
@@ -197,6 +198,7 @@ fn props_reports_the_kv_keys_even_on_a_default_server() {
         default_generation_settings: default_generation_settings(&config),
         total_slots: config.n_parallel,
         kv_cache_mode: config.kv_cache_mode.to_string(),
+        speculative: serde_json::json!({"model": null, "kind": null, "n_max": 16}),
         kv_bits: config.batch_kv_quant.bits,
         capabilities: no_side_models(),
     };

@@ -96,8 +96,26 @@ pub async fn props(State(state): State<AppState>) -> Json<PropsResponse> {
         // mode in force" checkable by a client rather than only greppable in
         // the startup log.
         kv_cache_mode: state.config.kv_cache_mode.to_string(),
+        speculative: speculative_config(&state.config),
         kv_bits: state.config.batch_kv_quant.bits,
         capabilities: server_capabilities(&state),
+    })
+}
+
+/// The resolved speculative configuration block of `/props` (#1433).
+///
+/// Reported so an operator can confirm what `--model-draft` /
+/// `--spec-draft-n-max` / `--draft-kind` resolved to, without exposing the
+/// draft checkpoint's full path (only its basename; a repo-id or URL could
+/// otherwise carry a token).
+pub(crate) fn speculative_config(config: &ServerConfig) -> serde_json::Value {
+    serde_json::json!({
+        "model": config
+            .draft_model_path
+            .as_ref()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+        "kind": config.draft_kind,
+        "n_max": config.num_draft_tokens,
     })
 }
 

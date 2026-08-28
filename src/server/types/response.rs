@@ -626,6 +626,12 @@ pub struct PropsResponse {
     /// one `tracing::warn!` line, invisible to a client and gone after log
     /// rotation. An operator reads this to answer "what am I actually running".
     pub kv_cache_mode: String,
+    /// Resolved speculative-decoding configuration (#1433): whether a draft
+    /// model is configured, its resolved kind override (or `null` for
+    /// auto-detect), and the draft-token cap. The draft model is reported as
+    /// its directory basename, not the full path, so `/props` leaks neither
+    /// the operator's filesystem layout nor any token embedded in a URL.
+    pub speculative: serde_json::Value,
     /// Effective batched KV quantization width (`--kv-bits`), `0` when batched
     /// KV quantization is off. Reported alongside [`Self::kv_cache_mode`]
     /// because it is an independent second route to a quantized cache and is

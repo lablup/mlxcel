@@ -247,6 +247,29 @@ pub fn env_fallback_draft_kind(value: &mut Option<String>) {
     apply_optional_string_env_fallback(value, "MLXCEL_DRAFT_KIND", "draft-kind");
 }
 
+/// Apply the legacy `LLAMA_ARG_DRAFT_MAX` env-var fallback to the resolved
+/// draft-token cap (#1433).
+///
+/// b10621 removed `--draft` / `--draft-max` and their `LLAMA_ARG_DRAFT_MAX`
+/// binding in favor of `--spec-draft-n-max` / `LLAMA_ARG_SPEC_DRAFT_N_MAX`,
+/// which is what the clap `env = ...` attribute now binds. Deployments that
+/// still export the legacy variable keep working through this fallback,
+/// which applies only when neither the CLI flag (any spelling) nor the
+/// canonical variable provided a value.
+pub fn env_fallback_draft_max(value: &mut usize, flag_was_set: bool) {
+    if flag_was_set || std::env::var("LLAMA_ARG_SPEC_DRAFT_N_MAX").is_ok() {
+        return;
+    }
+    if let Ok(raw) = std::env::var("LLAMA_ARG_DRAFT_MAX") {
+        match raw.parse::<usize>() {
+            Ok(n) => *value = n,
+            Err(e) => {
+                tracing::warn!("LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring")
+            }
+        }
+    }
+}
+
 /// Apply the `MLXCEL_DRAFT_BLOCK_SIZE` env-var fallback to the raw
 /// `--draft-block-size` CLI value.
 ///

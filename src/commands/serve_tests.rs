@@ -132,6 +132,7 @@ fn sample_args() -> crate::ServeArgs {
         tp_lm_head_mode: "replicated".to_string(),
         _no_webui: false,
         ggml_compat: Default::default(),
+        spec_compat: mlxcel::cli::spec_compat_args::SpecCompatArgs::default(),
         chat_compat: Default::default(),
         multimodal_compat: Default::default(),
         cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),

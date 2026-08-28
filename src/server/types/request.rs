@@ -1206,6 +1206,15 @@ pub struct NativeCompletionRequest {
     /// (#1436). Held as a raw value because both shapes must be inspected.
     #[serde(default)]
     pub samplers: Option<serde_json::Value>,
+    /// b10621 per-request speculative-decoding overrides (`speculative.n_max`
+    /// / `n_min` / `p_min` / `type` / `ngram_*`). mlxcel's MTP / DFlash
+    /// configuration is server-wide (`--model-draft`, `--spec-draft-n-max`,
+    /// `--draft-kind`), with no per-request override path into the
+    /// scheduler's speculative loop, so any present key here is rejected
+    /// with a 400 naming those flags instead of being silently ignored
+    /// (#1433). An empty object is inert and accepted.
+    #[serde(default)]
+    pub speculative: Option<serde_json::Value>,
     /// Repetition penalty
     pub repeat_penalty: Option<f32>,
     /// Repetition penalty last N tokens

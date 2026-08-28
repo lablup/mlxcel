@@ -23,6 +23,7 @@ use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::GgmlCompatArgs;
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
+use mlxcel::cli::spec_compat_args::SpecCompatArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
 use mlxcel::downloader::DownloadArgs;
@@ -1164,16 +1165,23 @@ pub(crate) struct ServeArgs {
     #[arg(
         long,
         visible_alias = "model-draft",
+        alias = "spec-draft-model",
         env = "LLAMA_ARG_SPEC_DRAFT_MODEL",
         value_name = "PATH"
     )]
     draft_model: Option<PathBuf>,
 
-    /// Maximum number of draft tokens per speculation step
+    /// Maximum number of draft tokens per speculation step. Accepts the
+    /// b10621 canonical spelling --spec-draft-n-max and its env; the removed
+    /// b10621 spellings --draft / --draft-max stay as compatibility aliases
+    /// (b10621 itself errors on them), and the legacy LLAMA_ARG_DRAFT_MAX
+    /// env is honored as a fallback when the canonical one is unset.
     #[arg(
         long,
         visible_alias = "draft",
-        env = "LLAMA_ARG_DRAFT_MAX",
+        alias = "spec-draft-n-max",
+        alias = "draft-n",
+        env = "LLAMA_ARG_SPEC_DRAFT_N_MAX",
         default_value_t = 16
     )]
     draft_max: usize,
@@ -2082,6 +2090,12 @@ pub(crate) struct ServeArgs {
     /// exactly the same set (issue #1445).
     #[command(flatten)]
     ggml_compat: GgmlCompatArgs,
+
+    /// b10621 speculative compatibility surface (#1433), defined once in
+    /// `mlxcel::cli::spec_compat_args` so both server binaries accept the
+    /// same spellings and classify the same values.
+    #[command(flatten)]
+    spec_compat: SpecCompatArgs,
 
     /// llama-server b10621 chat-template, reasoning, and output-parsing
     /// options (`--reasoning`, `--reasoning-format`, `--skip-chat-parsing`,

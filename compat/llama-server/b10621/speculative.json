@@ -21,20 +21,16 @@
       "default": null,
       "description": "the argument has been removed. use --spec-draft-n-max or --spec-ngram-mod-n-max (env: LLAMA_ARG_DRAFT_MAX)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1433,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Accepted (--draft, --draft-max; default 16) with the canonical env. b10621 marks this spelling family as removed in favor of --spec-draft-n-max / --spec-ngram-mod-n-max; #1433 owns the mapping onto MTP/DFlash.",
+      "test": "src/bin/mlx_server.rs::spec_draft_spellings_resolve_to_the_draft_controls",
+      "notes": "b10621 removed every spelling of this entry (the binary errors and points at --spec-draft-n-max); mlxcel keeps --draft / --draft-n / --draft-max alive as aliases of the same draft-token cap so existing deployments keep working. The legacy LLAMA_ARG_DRAFT_MAX binding is honored as a fallback when the canonical variable is unset.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--draft",
+          "--draft-n",
           "--draft-max"
-        ],
-        "env": "LLAMA_ARG_DRAFT_MAX",
-        "env_binding": "clap",
-        "defaults": [
-          "16"
         ]
       }
     },
@@ -55,10 +51,10 @@
       "default": null,
       "description": "the argument has been removed. use --spec-draft-n-min or --spec-ngram-mod-n-min (env: LLAMA_ARG_DRAFT_MIN)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Removed upstream: b10621 errors on both spellings with a pointer to --spec-draft-n-min, and mlxcel never accepted them, so the two surfaces agree in rejecting the flag.",
       "divergence": [],
       "mlxcel": null
     },
@@ -78,12 +74,17 @@
       "default": null,
       "description": "path to dynamic lookup cache to use for lookup decoding (updated by generation)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::lookup_caches_are_rejected",
+      "notes": "Lookup decoding has no mlxcel subsystem; a present path fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--lookup-cache-dynamic"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -101,12 +102,17 @@
       "default": null,
       "description": "path to static lookup cache to use for lookup decoding (not updated by generation)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::lookup_caches_are_rejected",
+      "notes": "Lookup decoding has no mlxcel subsystem; a present path fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--lookup-cache-static"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -125,12 +131,17 @@
       "default": "enabled",
       "description": "offload draft sampling to the backend (default: enabled) (env: LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::backend_sampling_is_always_inert",
+      "notes": "Inert: mlxcel's draft sampling always runs as MLX ops on the accelerator, which is what the enabled default asks for.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-backend-sampling"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -150,12 +161,17 @@
       "default": "same as --cpu-mask",
       "description": "Draft model CPU affinity mask. Complements cpu-range-draft (default: same as --cpu-mask)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-cpu-mask"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -175,12 +191,17 @@
       "default": "same as --cpu-mask",
       "description": "Draft model CPU affinity mask. Complements cpu-range-draft (default: same as --cpu-mask)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-cpu-mask-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -200,12 +221,17 @@
       "default": null,
       "description": "keep all Mixture of Experts (MoE) weights in the CPU for the draft model (env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-cpu-moe"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -225,12 +251,17 @@
       "default": null,
       "description": "Ranges of CPUs for affinity. Complements --cpu-mask-draft",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-cpu-range"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -249,12 +280,17 @@
       "default": "same as --cpu-strict",
       "description": "Use strict CPU placement for draft model (default: same as --cpu-strict)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-cpu-strict"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -273,12 +309,17 @@
       "default": "--cpu-strict-draft",
       "description": "Use strict CPU placement for draft model (default: --cpu-strict-draft)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-cpu-strict-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -298,12 +339,17 @@
       "default": null,
       "description": "comma-separated list of devices to use for offloading the draft model (none = don't offload) use --list-devices to see a list of available devices",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-device"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -324,12 +370,18 @@
       "default": "unused",
       "description": "Same as --hf-repo, but for the draft model (default: unused) (env: LLAMA_ARG_SPEC_DRAFT_HF_REPO)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::defaults_are_inert",
+      "notes": "mlxcel does not load GGUF draft checkpoints; a present repo fails startup pointing at --model-draft, which accepts a repo-id and auto-downloads the MLX checkpoint.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-hf"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_HF_REPO",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -349,13 +401,14 @@
       "default": "unused",
       "description": "draft model for speculative decoding (default: unused) (env: LLAMA_ARG_SPEC_DRAFT_MODEL)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1433,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "--model-draft accepted with the canonical env; the --spec-draft-model canonical spelling is not. Draft-model semantics map onto MTP/DFlash checkpoints, owned by #1433.",
+      "notes": "The canonical spelling, the --model-draft long alias, and the LLAMA_ARG_SPEC_DRAFT_MODEL binding all resolve to the MTP / DFlash draft checkpoint on both binaries; mlxcel additionally accepts its own --draft-model spelling.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
+          "--spec-draft-model",
           "--model-draft"
         ],
         "env": "LLAMA_ARG_SPEC_DRAFT_MODEL",
@@ -382,12 +435,17 @@
       "default": null,
       "description": "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU for the draft model (env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-n-cpu-moe"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -404,12 +462,18 @@
       "default": "3",
       "description": "number of tokens to draft for speculative decoding (default: 3) (env: LLAMA_ARG_SPEC_DRAFT_N_MAX)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/bin/mlx_server.rs::spec_draft_spellings_resolve_to_the_draft_controls",
+      "notes": "Maps onto mlxcel's draft-token cap (--draft / --draft-max) with the canonical spelling and the LLAMA_ARG_SPEC_DRAFT_N_MAX binding accepted on both binaries. The default differs: b10621 drafts 3 tokens, mlxcel's MTP / DFlash tuning defaults to 16, so the entry is aliased rather than supported.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-n-max",
+          "--draft",
+          "--draft-max"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -426,12 +490,18 @@
       "default": "0",
       "description": "minimum number of draft tokens to use for speculative decoding (default: 0) (env: LLAMA_ARG_SPEC_DRAFT_N_MIN)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::draft_sampler_thresholds_accept_only_their_inert_defaults",
+      "notes": "MTP / DFlash verify whole draft blocks and have no per-step minimum; the 0 default (no minimum) is inert and accepted, any other value fails startup pointing at --draft-block-size.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-n-min"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_N_MIN",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -453,12 +523,18 @@
       "default": "auto",
       "description": "max. number of draft model layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto) (env: LLAMA_ARG_N_GPU_LAYERS_DRAFT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::draft_ngl_auto_and_all_are_inert_and_partial_offload_is_rejected",
+      "notes": "mlxcel keeps every draft layer on the accelerator: auto and all are inert, a numeric partial offload fails startup.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-ngl"
+        ],
+        "env": "LLAMA_ARG_N_GPU_LAYERS_DRAFT",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -478,12 +554,17 @@
       "default": null,
       "description": "override tensor buffer type for draft model",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-override-tensor"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -502,12 +583,18 @@
       "default": "0.00",
       "description": "minimum speculative decoding probability (greedy) (default: 0.00) (env: LLAMA_ARG_SPEC_DRAFT_P_MIN)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::draft_sampler_thresholds_accept_only_their_inert_defaults",
+      "notes": "mlxcel verifies draft tokens against the target distribution instead of thresholding draft probabilities; the 0.00 default (greedy, no threshold) is inert, any other value fails startup.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-p-min"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_P_MIN",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -526,12 +613,18 @@
       "default": "0.10",
       "description": "speculative decoding split probability (default: 0.10) (env: LLAMA_ARG_SPEC_DRAFT_P_SPLIT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::draft_sampler_thresholds_accept_only_their_inert_defaults",
+      "notes": "mlxcel drafts a single sequence and never tree-splits; the 0.10 default is inert, any other value fails startup.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-p-split"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_P_SPLIT",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -550,12 +643,17 @@
       "default": "same as --poll",
       "description": "Use polling to wait for draft model work (default: same as --poll)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-poll"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -574,12 +672,17 @@
       "default": "--poll-draft",
       "description": "Use polling to wait for draft model work (default: --poll-draft)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-poll-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -598,12 +701,17 @@
       "default": "0",
       "description": "set draft process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-prio"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -622,12 +730,17 @@
       "default": "0",
       "description": "set draft process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-prio-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -647,12 +760,17 @@
       "default": "same as --threads",
       "description": "number of threads to use during generation (default: same as --threads)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-threads"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -672,12 +790,17 @@
       "default": "same as --threads-draft",
       "description": "number of threads to use during batch and prompt processing (default: same as --threads-draft)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
+      "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-threads-batch"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -697,12 +820,18 @@
       "default": "f16",
       "description": "KV cache data type for K for the draft model allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::draft_kv_cache_types_accept_only_f16",
+      "notes": "mlxcel's draft KV cache runs at f16; the f16 default is inert and every GGML quantized cache type fails startup.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-type-k"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -722,12 +851,18 @@
       "default": "f16",
       "description": "KV cache data type for V for the draft model allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::draft_kv_cache_types_accept_only_f16",
+      "notes": "mlxcel's draft KV cache runs at f16; the f16 default is inert and every GGML quantized cache type fails startup.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-draft-type-v"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -744,12 +879,17 @@
       "default": "1",
       "description": "minimum hits for ngram-map-k speculative decoding (default: 1)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-map-k-min-hits"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -766,12 +906,17 @@
       "default": "48",
       "description": "ngram size M for ngram-map-k speculative decoding, length of draft m-gram (default: 48)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-map-k-size-m"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -788,12 +933,17 @@
       "default": "12",
       "description": "ngram size N for ngram-map-k speculative decoding, length of lookup n-gram (default: 12)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-map-k-size-n"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -810,12 +960,17 @@
       "default": "1",
       "description": "minimum hits for ngram-map-k4v speculative decoding (default: 1)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-map-k4v-min-hits"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -832,12 +987,17 @@
       "default": "48",
       "description": "ngram size M for ngram-map-k4v speculative decoding, length of draft m-gram (default: 48)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-map-k4v-size-m"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -854,12 +1014,17 @@
       "default": "12",
       "description": "ngram size N for ngram-map-k4v speculative decoding, length of lookup n-gram (default: 12)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-map-k4v-size-n"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -876,10 +1041,10 @@
       "default": null,
       "description": "the argument has been removed. use the respective --spec-ngram-*-min-hits",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Removed upstream (errors with a pointer to the per-mode --spec-ngram-*-min-hits); mlxcel never accepted it, so both surfaces reject it.",
       "divergence": [],
       "mlxcel": null
     },
@@ -898,12 +1063,17 @@
       "default": "24",
       "description": "ngram-mod lookup length (default: 24)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-mod-n-match"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -920,12 +1090,17 @@
       "default": "64",
       "description": "maximum number of ngram tokens to use for ngram-based speculative decoding (default: 64)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-mod-n-max"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -942,12 +1117,17 @@
       "default": "48",
       "description": "minimum number of ngram tokens to use for ngram-based speculative decoding (default: 48)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-mod-n-min"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -964,12 +1144,17 @@
       "default": "1",
       "description": "minimum hits for ngram-simple speculative decoding (default: 1)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-simple-min-hits"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -986,12 +1171,17 @@
       "default": "48",
       "description": "ngram size M for ngram-simple speculative decoding, length of draft m-gram (default: 48)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-simple-size-m"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -1008,12 +1198,17 @@
       "default": "12",
       "description": "ngram size N for ngram-simple speculative decoding, length of lookup n-gram (default: 12)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_the_selector_is_pinned_to_none",
+      "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-ngram-simple-size-n"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -1030,10 +1225,10 @@
       "default": null,
       "description": "the argument has been removed. use the respective --spec-ngram-*-size-m",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Removed upstream (errors with a pointer to the per-mode --spec-ngram-*-size-m); mlxcel never accepted it, so both surfaces reject it.",
       "divergence": [],
       "mlxcel": null
     },
@@ -1052,10 +1247,10 @@
       "default": null,
       "description": "the argument has been removed. use the respective --spec-ngram-*-size-n or --spec-ngram-mod-n-match",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Removed upstream (errors with a pointer to the per-mode --spec-ngram-*-size-n); mlxcel never accepted it, so both surfaces reject it.",
       "divergence": [],
       "mlxcel": null
     },
@@ -1074,12 +1269,17 @@
       "default": "none",
       "description": "comma-separated list of types of speculative decoding to use (default: none) (env: LLAMA_ARG_SPEC_TYPE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/cli/spec_compat_args_tests.rs::spec_type_none_is_inert_and_ngram_modes_are_rejected",
+      "notes": "Only the none default is accepted (the inert selector; draft speculation is configured through --model-draft with --draft-kind). Every n-gram mode fails startup with a diagnostic naming the mlxcel alternative, so a speculation subsystem mlxcel does not run can never be silently requested.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--spec-type"
+        ],
+        "env": "LLAMA_ARG_SPEC_TYPE"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1090,12 +1290,14 @@
       "field_type": "num",
       "description": "Maximum number of tokens to draft during speculative decoding",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1106,12 +1308,14 @@
       "field_type": "num",
       "description": "Minimum number of draft tokens to use for speculative decoding",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1122,12 +1326,14 @@
       "field_type": "num",
       "description": "Minimum hits at ngram lookup for mgram to be proposed",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1138,12 +1344,14 @@
       "field_type": "num",
       "description": "Mgram size for speculative tokens in ngram-based speculative decoding",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1154,12 +1362,14 @@
       "field_type": "num",
       "description": "Ngram size for lookup in ngram-based speculative decoding",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1170,12 +1380,14 @@
       "field_type": "num",
       "description": "Minimum speculative decoding probability for draft tokens (0 = greedy)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1186,12 +1398,14 @@
       "field_type": "str",
       "description": "Speculative decoding method (for debugging and research purposes)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1433,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_speculative_overrides_are_rejected_with_a_diagnostic",
+      "notes": "Per-request speculative overrides have no path into mlxcel's server-wide MTP / DFlash configuration; any present key under the declared `speculative` object is rejected with a 400 naming the server flags, and an empty object is accepted as inert (it sets nothing upstream either).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "speculative"
+      }
     }
   ]
 }

@@ -86,6 +86,17 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
+    // b10621 speculative compatibility options (#1433): classified before the
+    // model load like the GGML group above. n-gram / lookup speculation, GGML
+    // draft-side process placement, and draft-sampler thresholds mlxcel's
+    // MTP / DFlash verification does not use are rejected with a diagnostic;
+    // the inert forms (and the n-gram tuning knobs, inert while --spec-type
+    // stays none) are accepted.
+    args.spec_compat.apply_env_bindings();
+    args.spec_compat
+        .ensure_inert()
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
     // b10621 multimodal projector / media options (issue #1451): classified
     // before the model reference resolves, like the GGML and chat-template
     // groups, so `--mmproj projector.gguf` is reported immediately rather than
@@ -365,6 +376,12 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
     env_fallback_draft_kind(&mut args.speculative.draft_kind);
     env_fallback_draft_block_size(&mut args.speculative.draft_block_size);
+    mlxcel::cli::speculative_args::env_fallback_draft_max(
+        &mut args.draft_max,
+        mlxcel::server::long_cli_flag_was_set("draft-max")
+            || mlxcel::server::long_cli_flag_was_set("draft")
+            || mlxcel::server::long_cli_flag_was_set("spec-draft-n-max"),
+    );
     env_fallback_draft_model(&mut args.draft_model);
     env_fallback_batch_size(&mut args.batch_size);
     env_fallback_ubatch_size(&mut args.ubatch_size);

@@ -32,5 +32,6 @@ pub mod llama_short_flags;
 pub mod max_tokens;
 pub mod multimodal_compat_args;
 pub mod rope_args;
+pub mod spec_compat_args;
 pub mod speculative_args;
 pub mod turbo_args;
