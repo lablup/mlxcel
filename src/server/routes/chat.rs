@@ -273,6 +273,9 @@ pub async fn chat_completions(
     if let Err(message) = validate_top_n_sigma(request.params.top_n_sigma) {
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
+    if let Err(message) = validate_typical_p(request.params.typical_p) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
 
     // Reject image, audio and video content blocks the loaded checkpoint
     // cannot consume, before any referenced URL or file is read. Capability is
@@ -1280,6 +1283,22 @@ pub(crate) fn validate_top_n_sigma(top_n_sigma: Option<f32>) -> Result<(), &'sta
     Ok(())
 }
 
+/// Validate the locally-typical-sampling parameter.
+///
+/// `typical_p` must be finite and in `(0.0, 1.0]` when set (`1.0` disables
+/// the filter); an absent field (`None`) is always valid and lets the
+/// server-wide `--typical` default apply. `0.0` is rejected rather than
+/// treated as "keep one token": b10621's schema leaves the low end of the
+/// range undeclared, and a zero cutoff would otherwise mask every token.
+pub(crate) fn validate_typical_p(typical_p: Option<f32>) -> Result<(), &'static str> {
+    if let Some(value) = typical_p
+        && !(value.is_finite() && value > 0.0 && value <= 1.0)
+    {
+        return Err("typical_p must be in (0.0, 1.0]");
+    }
+    Ok(())
+}
+
 /// Maximum number of tools allowed in a single request.
 pub(crate) const MAX_TOOLS: usize = 128;
 
@@ -1473,6 +1492,7 @@ pub(crate) fn build_generate_options(
             xtc_probability: params.xtc_probability,
             xtc_threshold: params.xtc_threshold,
             top_n_sigma: params.top_n_sigma,
+            typical_p: params.typical_p,
             stop_sequences: params.stop.clone(),
             priority: RequestPriority::default(),
             // the caller (non_stream_chat_completion /
@@ -1589,6 +1609,25 @@ mod tests {
             validate_top_n_sigma(Some(f32::INFINITY)),
             Err("top_n_sigma must be >= 0.0")
         );
+    }
+
+    #[test]
+    fn validate_typical_p_accepts_unset_disabled_and_in_range() {
+        assert!(validate_typical_p(None).is_ok());
+        assert!(validate_typical_p(Some(1.0)).is_ok());
+        assert!(validate_typical_p(Some(0.5)).is_ok());
+        assert!(validate_typical_p(Some(0.001)).is_ok());
+    }
+
+    #[test]
+    fn chat_rejects_out_of_domain_typical_p() {
+        for bad in [0.0f32, -0.5, 1.5, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                validate_typical_p(Some(bad)),
+                Err("typical_p must be in (0.0, 1.0]"),
+                "typical_p={bad} must be rejected"
+            );
+        }
     }
 
     #[test]

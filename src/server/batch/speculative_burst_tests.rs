@@ -1705,6 +1705,29 @@ fn sampling_config_eq_ignores_inert_greedy_top_n_sigma() {
 }
 
 #[test]
+fn sampling_config_eq_distinguishes_typical_p() {
+    let a = SamplingConfig::default();
+    let b = SamplingConfig {
+        typical_p: 0.5,
+        ..SamplingConfig::default()
+    };
+    assert!(!super::speculative_burst::sampling_config_eq(&a, &b));
+}
+
+#[test]
+fn sampling_config_eq_ignores_inert_greedy_typical_p() {
+    let a = SamplingConfig::greedy();
+    let b = SamplingConfig {
+        typical_p: 0.5,
+        ..SamplingConfig::greedy()
+    };
+    assert!(
+        super::speculative_burst::sampling_config_eq(&a, &b),
+        "greedy rows differing only in an inert typical_p must share a batched window"
+    );
+}
+
+#[test]
 fn sampling_config_eq_distinguishes_stop_token_ids() {
     let a = SamplingConfig::default();
     let b = SamplingConfig {

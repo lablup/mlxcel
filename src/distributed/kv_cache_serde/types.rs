@@ -280,7 +280,18 @@ pub struct SerializableSamplingState {
     /// to the disabled baseline instead of failing the handoff.
     #[serde(default)]
     pub top_n_sigma: f32,
+    /// Locally typical sampling (#1377). The default fn (not the f32 zero
+    /// default, which would be an INVALID enabled value) resolves an older
+    /// peer's frame to the disabled baseline `1.0`.
+    #[serde(default = "default_typical_p_disabled")]
+    pub typical_p: f32,
     pub stop_token_ids: Vec<i32>,
+}
+
+/// The `1.0` "disabled" default for [`SerializableSamplingState::typical_p`]
+/// on frames from peers that predate the field.
+fn default_typical_p_disabled() -> f32 {
+    1.0
 }
 
 /// Complete serializable cache state for one sequence.

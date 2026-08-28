@@ -514,6 +514,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         top_p: args.top_p,
         top_p_was_set: long_cli_flag_was_set("top-p"),
         min_p: args.min_p,
+        typical_p: args.typical_p,
         seed: args.seed,
         repeat_last_n: args.repeat_last_n,
         repeat_penalty: args.repeat_penalty,

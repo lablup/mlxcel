@@ -657,6 +657,12 @@ pub struct SamplingParams {
     /// maximum. Must be finite and `>= 0.0`; validated at the request layer.
     pub top_n_sigma: Option<f32>,
 
+    /// Locally typical sampling cutoff (`1.0` = disabled). Keeps the tokens
+    /// whose surprisal is closest to the row entropy until `typical_p`
+    /// probability mass accumulates. Must be finite and in `(0.0, 1.0]`;
+    /// validated at the request layer.
+    pub typical_p: Option<f32>,
+
     // OpenAI-compatible frequency/presence penalties
     /// Frequency penalty (0.0 = disabled) - penalizes based on frequency
     pub frequency_penalty: Option<f32>,
@@ -1163,6 +1169,15 @@ pub struct NativeCompletionRequest {
     pub top_p: Option<f32>,
     /// Min-p sampling
     pub min_p: Option<f32>,
+    /// Locally typical sampling, parameter p (`1.0` = disabled). b10621
+    /// declares the field with no schema limits
+    /// (<https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-schema.cpp>
+    /// leaves the range commented out), so the route sanitizes rather than
+    /// rejects: a present value outside the enabled range `(0.0, 1.0)`
+    /// resolves to the explicit disabled form `1.0`, overriding any
+    /// server-wide `--typical` default exactly like an upstream request
+    /// value replaces the server default.
+    pub typical_p: Option<f32>,
     /// Repetition penalty
     pub repeat_penalty: Option<f32>,
     /// Repetition penalty last N tokens

@@ -32,6 +32,7 @@ fn sample_params() -> ResolvedSamplingParams {
         xtc_probability: 0.4,
         xtc_threshold: 0.15,
         top_n_sigma: 1.5,
+        typical_p: 0.4,
         stop_token_ids: vec![1, 2],
     }
 }
@@ -108,6 +109,20 @@ fn build_sampling_config_keeps_dry_sequence_breakers_at_zero_temperature() {
     // Greedy determinism is untouched: DRY is a logits pre-processing step.
     assert_eq!(config.top_k, 1);
     assert_eq!(config.top_p, 1.0);
+}
+
+#[test]
+fn build_sampling_config_threads_typical_p_in_both_branches() {
+    let params = sample_params();
+    assert_eq!(params.typical_p, 0.4);
+    let config = build_sampling_config(params);
+    assert_eq!(config.typical_p, 0.4);
+
+    let mut greedy_params = sample_params();
+    greedy_params.temperature = 0.0;
+    let config = build_sampling_config(greedy_params);
+    assert_eq!(config.temperature, 0.0);
+    assert_eq!(config.typical_p, 0.4);
 }
 
 #[test]

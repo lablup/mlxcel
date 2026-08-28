@@ -664,6 +664,10 @@ pub struct FusedSampleParams {
     /// RNG-free, so it stays fused-eligible: [`apply_row_filters`] applies it
     /// to the whole `[B, V]` batch before the single fused dispatch.
     pub top_n_sigma: f32,
+    /// Locally typical sampling cutoff (`1.0` disables). Row-wise,
+    /// history-free and RNG-free like `top_n_sigma`, and applied by the same
+    /// [`apply_row_filters`] hook before the single fused dispatch.
+    pub typical_p: f32,
 }
 
 impl FusedSampleParams {
@@ -681,6 +685,7 @@ impl FusedSampleParams {
             top_p: config.top_p,
             min_p: config.min_p,
             top_n_sigma: config.effective_top_n_sigma(),
+            typical_p: config.effective_typical_p(),
         }
     }
 
@@ -695,6 +700,7 @@ impl FusedSampleParams {
             && self.top_p.to_bits() == other.top_p.to_bits()
             && self.min_p.to_bits() == other.min_p.to_bits()
             && self.top_n_sigma.to_bits() == other.top_n_sigma.to_bits()
+            && self.typical_p.to_bits() == other.typical_p.to_bits()
     }
 }
 
@@ -811,15 +817,17 @@ fn token_ids_to_host(tokens: &MlxArray) -> Vec<i32> {
 /// top_n_sigma -> p_less (#1373) -> typical_p (#1377)
 /// ```
 ///
-/// (the latter two land in their own issues; their slots in this function fix
-/// the order here so neither can accidentally reorder the chain).
+/// (`p_less` lands in its own issue; its slot in this function fixes the
+/// order here so it cannot accidentally reorder the chain).
 ///
 /// Returns the input pointer unchanged, adding NO graph nodes, when every
 /// filter is disabled or when the config is greedy (`temperature == 0.0 ||
 /// top_k == 1`), so the disabled baseline and the greedy path both stay
 /// byte-identical. A non-finite or non-positive `top_n_sigma` counts as
 /// disabled, which also makes the b10621 `-1.0` "disabled" sentinel inert
-/// rather than a mask-everything threshold.
+/// rather than a mask-everything threshold; a `typical_p` outside the open
+/// interval `(0.0, 1.0)` (b10621 documents `1.0` as disabled and leaves the
+/// low end of the range undeclared) counts as disabled the same way.
 ///
 /// Used by: [`preprocess_logits_for_sampling`] (per-row sampler, and through
 /// it [`effective_token_distribution`] / [`sample_token_with_distribution`]),
@@ -839,7 +847,9 @@ pub fn apply_row_filters(
         logits = top_n_sigma_filter(&logits, params.top_n_sigma);
     }
     // p_less (#1373) slot: runs here, after top_n_sigma, when it lands.
-    // typical_p (#1377) slot: runs here, after p_less, when it lands.
+    if params.typical_p.is_finite() && params.typical_p > 0.0 && params.typical_p < 1.0 {
+        logits = typical_p_filter(&logits, params.typical_p);
+    }
     logits
 }
 
@@ -889,6 +899,66 @@ pub(crate) fn top_n_sigma_filter(logits: &MlxArray, n_sigma: f32) -> UniquePtr<M
     // runs in and doubling the `[B, V]` tensor. Same masking convention as
     // `min_p_filter` / `top_k_filter` otherwise: kept entries pass through
     // from the original logits.
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, ffi::array_dtype(logits));
+    ffi::where_cond(&keep, logits, &neg_inf)
+}
+
+/// Locally typical sampling filter (Meister et al., "Locally Typical
+/// Sampling"): keep the tokens whose surprisal `-log p` is closest to the
+/// row entropy `H`, accumulating probability mass in that typicality order
+/// until it reaches `typical_p`, and mask the rest to `-inf`.
+///
+/// All arithmetic runs in float32 on the log-softmax of the row, so the
+/// entropy is computed on the penalized, untempered distribution and an f16
+/// row cannot overflow. Entries that are not finite in the input (`-inf`
+/// masking from token bias / penalties, or a NaN from a broken forward) are
+/// mapped to `-inf` BEFORE the softmax, so they carry zero probability,
+/// contribute nothing to the entropy, sort to the end of the typicality
+/// order, and stay masked in the output.
+///
+/// The most typical token always has an exclusive cumulative mass of
+/// `0 < typical_p`, so at least one token survives. Unlike top-p, the
+/// argmax CAN be dropped when it is less typical than the mid-probability
+/// tokens, which is why [`apply_row_filters`] skips this filter on the
+/// greedy path.
+///
+/// Rows are independent (`axis = -1` throughout), and the output carries the
+/// original logits dtype (the mask fill is cast to it, mirroring
+/// [`top_n_sigma_filter`]).
+///
+/// Used by: [`apply_row_filters`], unit tests
+pub(crate) fn typical_p_filter(logits: &MlxArray, typical_p: f32) -> UniquePtr<MlxArray> {
+    let neg_inf_f32 = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    // Sanitize in f32: every non-finite entry (already-masked -inf, NaN,
+    // +inf) becomes -inf so it cannot poison the softmax statistics.
+    let raw = ffi::astype(logits, dtype::FLOAT32);
+    let f = ffi::where_cond(&ffi::isfinite(&raw), &raw, &neg_inf_f32);
+    let logp = ffi::log_softmax(&f, -1); // -inf entries stay -inf
+    let p = ffi::exp(&logp); // masked entries are exactly 0
+    let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
+    // p * log p with the 0 * -inf = NaN case forced to 0.
+    let plogp = ffi::where_cond(&ffi::greater(&p, &zero), &ffi::multiply(&p, &logp), &zero);
+    // Entropy per row, [B, 1].
+    let entropy = ffi::negative(&ffi::sum_axis(&plogp, -1, true));
+    let finite_lp = ffi::isfinite(&logp);
+    // |(-log p) - H|: distance from typicality. Masked entries sort last.
+    let dev = ffi::abs(&ffi::subtract(&ffi::negative(&logp), &entropy));
+    let pos_inf = ffi::full_f32(&[1], f32::INFINITY, dtype::FLOAT32);
+    let shifted = ffi::where_cond(&finite_lp, &dev, &pos_inf);
+    // Ascending sort: most typical first.
+    let order = ffi::argsort(&shifted, -1);
+    let p_sorted = ffi::take_along_axis(&p, &order, -1);
+    // Exclusive cumulative mass strictly before each token in typicality
+    // order: inclusive cumsum minus the entry itself.
+    let cum_incl = ffi::cumsum(&p_sorted, -1, false, true);
+    let cum_excl = ffi::subtract(&cum_incl, &p_sorted);
+    // Inverse permutation back to vocabulary order.
+    let inv = ffi::argsort(&order, -1);
+    let cum_excl_orig = ffi::take_along_axis(&cum_excl, &inv, -1);
+    let tp = ffi::full_f32(&[1], typical_p, dtype::FLOAT32);
+    let keep = ffi::logical_and(&ffi::less(&cum_excl_orig, &tp), &finite_lp);
+    // Mask fill in the ORIGINAL dtype (see `top_n_sigma_filter` on why an
+    // f32 fill would silently promote f16/bf16 logits).
     let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, ffi::array_dtype(logits));
     ffi::where_cond(&keep, logits, &neg_inf)
 }
@@ -3480,5 +3550,300 @@ mod tests {
             (total - 1.0).abs() < 1e-5,
             "distribution not normalized: {total}"
         );
+    }
+
+    // -- typical_p row filter (#1377) --
+
+    /// Host-side f64 reference of `typical_p_filter`'s kept set.
+    fn typical_p_reference_keep(logits: &[f32], typical_p: f64) -> Vec<bool> {
+        let finite: Vec<bool> = logits.iter().map(|x| x.is_finite()).collect();
+        let max = logits
+            .iter()
+            .filter(|x| x.is_finite())
+            .fold(f64::NEG_INFINITY, |m, &x| m.max(x as f64));
+        let z: f64 = logits
+            .iter()
+            .filter(|x| x.is_finite())
+            .map(|&x| ((x as f64) - max).exp())
+            .sum();
+        let p: Vec<f64> = logits
+            .iter()
+            .map(|&x| {
+                if x.is_finite() {
+                    ((x as f64) - max).exp() / z
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let entropy: f64 = -p
+            .iter()
+            .filter(|&&pi| pi > 0.0)
+            .map(|&pi| pi * pi.ln())
+            .sum::<f64>();
+        let mut order: Vec<usize> = (0..logits.len()).collect();
+        let dev: Vec<f64> = p
+            .iter()
+            .zip(&finite)
+            .map(|(&pi, &fin)| {
+                if fin && pi > 0.0 {
+                    ((-pi.ln()) - entropy).abs()
+                } else {
+                    f64::INFINITY
+                }
+            })
+            .collect();
+        order.sort_by(|&a, &b| dev[a].partial_cmp(&dev[b]).unwrap());
+        let mut keep = vec![false; logits.len()];
+        let mut cum = 0.0f64;
+        for &i in &order {
+            if !finite[i] {
+                break;
+            }
+            if cum < typical_p {
+                keep[i] = true;
+            }
+            cum += p[i];
+        }
+        keep
+    }
+
+    /// Deterministic LCG so the reference test needs no rand dependency.
+    fn lcg_next(state: &mut u64) -> f32 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        // top 24 bits -> [0, 1)
+        ((*state >> 40) as f32) / (1u64 << 24) as f32
+    }
+
+    #[test]
+    fn typical_p_filter_matches_host_reference() {
+        let mut rng = 0x1377_u64;
+        for case in 0..40 {
+            let v = 8 + (case * 5) % 193;
+            let logits_host: Vec<f32> = (0..v).map(|_| (lcg_next(&mut rng) - 0.5) * 6.0).collect();
+            let tp = [0.2f32, 0.5, 0.9, 0.95][case % 4];
+            let logits = ffi::from_slice_f32(&logits_host, &[1, v as i32]);
+            let out = to_vec_f32(&typical_p_filter(&logits, tp));
+            let reference = typical_p_reference_keep(&logits_host, tp as f64);
+            // Compare only tokens whose exclusive cumulative mass is not
+            // within 1e-4 of the boundary, where f32-vs-f64 rounding can
+            // legitimately flip the strict comparison.
+            let max = logits_host
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let z: f64 = logits_host.iter().map(|&x| ((x - max) as f64).exp()).sum();
+            let p: Vec<f64> = logits_host
+                .iter()
+                .map(|&x| ((x - max) as f64).exp() / z)
+                .collect();
+            let entropy: f64 = -p.iter().map(|&pi| pi * pi.ln()).sum::<f64>();
+            let mut order: Vec<usize> = (0..v).collect();
+            order.sort_by(|&a, &b| {
+                ((-p[a].ln()) - entropy)
+                    .abs()
+                    .partial_cmp(&((-p[b].ln()) - entropy).abs())
+                    .unwrap()
+            });
+            let mut cum_excl = vec![0.0f64; v];
+            let mut cum = 0.0f64;
+            for &i in &order {
+                cum_excl[i] = cum;
+                cum += p[i];
+            }
+            for i in 0..v {
+                if (cum_excl[i] - tp as f64).abs() <= 1e-4 {
+                    continue;
+                }
+                assert_eq!(
+                    out[i].is_finite(),
+                    reference[i],
+                    "case {case} (V={v}, typical_p={tp}): token {i} diverges from the host reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typical_p_one_disables_via_hook() {
+        // typical_p = 1.0 must add zero graph nodes: the exact input pointer
+        // comes back from the hook.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0], &[1, 3]);
+        let ptr_before = &*logits as *const MlxArray;
+        let params = FusedSampleParams::from_config(&SamplingConfig::default());
+        assert_eq!(params.typical_p, 1.0);
+        let out = apply_row_filters(logits, &params);
+        assert_eq!(ptr_before, &*out as *const MlxArray);
+    }
+
+    #[test]
+    fn typical_p_filter_smaller_keeps_fewer() {
+        let logits_host: Vec<f32> = (0..50).map(|i| ((i * 7) % 13) as f32 * 0.3).collect();
+        let logits = ffi::from_slice_f32(&logits_host, &[1, 50]);
+        let mut prev = 0usize;
+        for tp in [0.2f32, 0.5, 0.9, 0.99] {
+            let kept = to_vec_f32(&typical_p_filter(&logits, tp))
+                .iter()
+                .filter(|x| x.is_finite())
+                .count();
+            assert!(
+                kept >= prev,
+                "kept count decreased from {prev} to {kept} at typical_p={tp}"
+            );
+            assert!(
+                kept > 0,
+                "at least one token must survive at typical_p={tp}"
+            );
+            prev = kept;
+        }
+    }
+
+    #[test]
+    fn typical_p_filter_can_drop_argmax() {
+        // p = [0.45, 0.275, 0.275]: H = 1.069 nats, surprisals
+        // [0.799, 1.291, 1.291], deviations [0.271, 0.222, 0.222]. The two
+        // 0.275 tokens are MORE typical than the argmax and their mass 0.55
+        // accumulates first, so typical_p = 0.3 masks index 0.
+        let logits = ffi::from_slice_f32(&[0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln()], &[1, 3]);
+        let v = to_vec_f32(&typical_p_filter(&logits, 0.3));
+        assert_eq!(
+            v[0],
+            f32::NEG_INFINITY,
+            "the less-typical argmax must be dropped"
+        );
+        assert!(v[1].is_finite() || v[2].is_finite());
+    }
+
+    #[test]
+    fn typical_p_filter_ignores_neg_inf_entries() {
+        let base = [0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln()];
+        let with_masked = [
+            0.45f32.ln(),
+            0.275f32.ln(),
+            0.275f32.ln(),
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let a = to_vec_f32(&typical_p_filter(&ffi::from_slice_f32(&base, &[1, 3]), 0.3));
+        let b = to_vec_f32(&typical_p_filter(
+            &ffi::from_slice_f32(&with_masked, &[1, 5]),
+            0.3,
+        ));
+        for i in 0..3 {
+            assert_eq!(
+                a[i].is_finite(),
+                b[i].is_finite(),
+                "appending -inf entries changed the kept set at index {i}"
+            );
+        }
+        assert_eq!(b[3], f32::NEG_INFINITY);
+        assert_eq!(b[4], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn typical_p_filter_nan_entry_does_not_mask_the_row() {
+        // A NaN logit is sanitized to -inf before the softmax, so it cannot
+        // poison the entropy or the kept set.
+        let base = [0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln()];
+        let with_nan = [0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln(), f32::NAN];
+        let a = to_vec_f32(&typical_p_filter(&ffi::from_slice_f32(&base, &[1, 3]), 0.3));
+        let b = to_vec_f32(&typical_p_filter(
+            &ffi::from_slice_f32(&with_nan, &[1, 4]),
+            0.3,
+        ));
+        for i in 0..3 {
+            assert_eq!(a[i].is_finite(), b[i].is_finite());
+        }
+        assert_eq!(b[3], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn typical_p_filter_preserves_dtype() {
+        let logits_f32 = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0], &[1, 4]);
+        let logits_f16 = ffi::astype(&logits_f32, dtype::FLOAT16);
+        let filtered = typical_p_filter(&logits_f16, 0.5);
+        assert_eq!(ffi::array_dtype(&filtered), dtype::FLOAT16);
+    }
+
+    #[test]
+    fn typical_p_skipped_on_greedy() {
+        // Greedy must still return the argmax even when typical_p would
+        // drop it (the can_drop_argmax row above).
+        let logits = ffi::from_slice_f32(&[0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln()], &[1, 1, 3]);
+        let mut config = SamplingConfig::greedy();
+        config.typical_p = 0.3;
+        let (token, _) = sample_token_optimized(&logits, &config, &[]);
+        ffi::eval(&token);
+        assert_eq!(ffi::item_i32(&token), 0);
+    }
+
+    #[test]
+    fn batched_fused_sample_honors_typical_p() {
+        // 64 rows [10, 0, 0, 0, 0]: the argmax holds ~99.98% of the mass, so
+        // it is by far the most typical token and typical_p = 0.3 keeps only
+        // it; every draw must be index 0.
+        const B: usize = 64;
+        let mut flat = Vec::with_capacity(B * 5);
+        for _ in 0..B {
+            flat.extend_from_slice(&[10.0f32, 0.0, 0.0, 0.0, 0.0]);
+        }
+        let logits = ffi::from_slice_f32(&flat, &[B as i32, 1, 5]);
+        let cfg = SamplingConfig {
+            typical_p: 0.3,
+            ..Default::default()
+        };
+        let params = FusedSampleParams::from_config(&cfg);
+        assert_eq!(params.typical_p, 0.3);
+        let tokens = batched_fused_sample(&logits, &params);
+        assert_eq!(tokens, vec![0; B]);
+    }
+
+    #[test]
+    fn fused_sample_params_matches_compares_typical_p() {
+        let base = FusedSampleParams::from_config(&SamplingConfig::with_temperature(0.7));
+        assert!(base.matches(&base));
+        let diff = FusedSampleParams {
+            typical_p: 0.5,
+            ..base
+        };
+        assert!(!base.matches(&diff));
+        assert!(diff.matches(&diff));
+    }
+
+    #[test]
+    fn fused_sample_params_normalizes_inert_typical_p() {
+        // Greedy rows and out-of-domain values normalize to the disabled 1.0
+        // so necessarily-identical rows stay on the shared fused paths.
+        let mut greedy = SamplingConfig::greedy();
+        greedy.typical_p = 0.5;
+        assert_eq!(FusedSampleParams::from_config(&greedy).typical_p, 1.0);
+        for bad in [0.0f32, -0.5, 1.5, f32::NAN, f32::INFINITY] {
+            let cfg = SamplingConfig {
+                typical_p: bad,
+                ..Default::default()
+            };
+            assert_eq!(
+                FusedSampleParams::from_config(&cfg).typical_p,
+                1.0,
+                "typical_p={bad} must normalize to the disabled form"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_token_distribution_zeroes_typical_p_masked_tokens() {
+        // The #902 distribution must carry zero mass on the dropped argmax.
+        let logits = ffi::from_slice_f32(&[0.45f32.ln(), 0.275f32.ln(), 0.275f32.ln()], &[1, 1, 3]);
+        let cfg = SamplingConfig {
+            typical_p: 0.3,
+            ..Default::default()
+        };
+        let probs = effective_token_distribution(&logits, &cfg, &[]);
+        let v = to_vec_f32(&probs);
+        assert_eq!(v[0], 0.0, "dropped argmax kept probability {}", v[0]);
+        let total: f32 = v.iter().sum();
+        assert!((total - 1.0).abs() < 1e-5);
     }
 }

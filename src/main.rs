@@ -670,6 +670,17 @@ pub(crate) struct SamplingOptions {
     )]
     pub(crate) top_n_sigma: f32,
 
+    /// Locally typical sampling: keep tokens whose surprisal is closest to
+    /// the row entropy until P probability mass accumulates (1.0 = disabled)
+    #[arg(
+        long = "typical-p",
+        alias = "typical",
+        default_value_t = 1.0,
+        value_name = "FLOAT",
+        value_parser = parse_typical_p
+    )]
+    pub(crate) typical_p: f32,
+
     /// Repetition penalty multiplier
     #[arg(long, default_value_t = 1.0, value_name = "FLOAT")]
     pub(crate) repetition_penalty: f32,
@@ -709,6 +720,19 @@ fn parse_non_negative_f32(s: &str) -> Result<f32, String> {
         Ok(v)
     } else {
         Err(format!("must be >= 0.0, got {v}"))
+    }
+}
+
+/// Clap value parser: a finite f32 in the half-open interval (0, 1].
+///
+/// Used by: `--typical-p` (reject zero, negative, above-one, and non-finite
+/// values at parse time; `1.0` is the explicit disabled form).
+fn parse_typical_p(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if v.is_finite() && v > 0.0 && v <= 1.0 {
+        Ok(v)
+    } else {
+        Err(format!("must be in (0.0, 1.0], got {v}"))
     }
 }
 
@@ -1643,6 +1667,15 @@ pub(crate) struct ServeArgs {
     /// Default min-P sampling
     #[arg(long, default_value_t = 0.05)]
     min_p: f32,
+
+    /// Default locally typical sampling, parameter p (1.0 = disabled)
+    #[arg(
+        long = "typical",
+        alias = "typical-p",
+        value_name = "N",
+        default_value_t = 1.0
+    )]
+    typical_p: f32,
 
     /// Random seed (-1 = random)
     #[arg(short = 's', long, default_value_t = -1)]

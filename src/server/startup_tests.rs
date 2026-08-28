@@ -124,6 +124,7 @@ fn build_server_config_applies_normalized_startup_values() {
         top_p: 0.95,
         top_k: 32,
         min_p: 0.05,
+        typical_p: 1.0,
         repeat_penalty: 1.2,
         repeat_last_n: 96,
         n_predict: -1,

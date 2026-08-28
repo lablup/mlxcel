@@ -83,6 +83,10 @@ pub(crate) struct RequestOptionOverrides {
     /// Top-n-sigma logit-filter override. Validated at the request layer
     /// (finite, `>= 0.0`) before it reaches here.
     pub top_n_sigma: Option<f32>,
+    /// Locally typical sampling override. Validated at the request layer
+    /// (finite, in `(0.0, 1.0]`) on the OpenAI-shaped endpoints; the native
+    /// `/completion` route sanitizes out-of-domain values itself.
+    pub typical_p: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
     pub priority: RequestPriority,
     /// per-request thinking-token budget override.
@@ -259,6 +263,11 @@ pub(crate) fn build_server_generate_options(
         // Like XTC, top-n-sigma is request-only with no server-level default:
         // an absent field always resolves to the disabled baseline (`0.0`).
         top_n_sigma: overrides.top_n_sigma.unwrap_or(0.0),
+        // Unlike XTC and top-n-sigma, typical_p follows the classic sampler
+        // knobs (--temp / --top-p / --min-p): the server-wide --typical /
+        // --typical-p default applies when the request omits the field,
+        // matching llama-server's sampling-params surface.
+        typical_p: overrides.typical_p.unwrap_or(config.default_typical_p),
         stop_token_ids: Vec::new(),
     });
 

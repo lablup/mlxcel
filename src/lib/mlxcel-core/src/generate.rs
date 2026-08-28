@@ -887,6 +887,16 @@ pub struct SamplingConfig {
     /// path (`temperature == 0.0 || top_k == 1`) skips the filter entirely.
     /// See [`crate::sampling::apply_row_filters`].
     pub top_n_sigma: f32,
+    /// Locally typical sampling (`1.0` = disabled, the default). Keeps the
+    /// tokens whose surprisal `-log p` is closest to the row entropy,
+    /// accumulating probability mass in that typicality order until it
+    /// reaches `typical_p`, and masks the rest to `-inf`. Unlike top-p the
+    /// argmax can be dropped, which is why the greedy path
+    /// (`temperature == 0.0 || top_k == 1`) skips the filter entirely.
+    /// Valid enabled range `(0.0, 1.0)`; `1.0` is a zero-overhead no-op that
+    /// preserves the bit-exact baseline. See
+    /// [`crate::sampling::apply_row_filters`].
+    pub typical_p: f32,
 }
 
 impl Default for SamplingConfig {
@@ -912,6 +922,7 @@ impl Default for SamplingConfig {
             xtc_threshold: 0.1,
             xtc_special_token_ids: Vec::new(),
             top_n_sigma: 0.0,
+            typical_p: 1.0,
         }
     }
 }
@@ -940,6 +951,7 @@ impl SamplingConfig {
             xtc_threshold: 0.1,
             xtc_special_token_ids: Vec::new(),
             top_n_sigma: 0.0,
+            typical_p: 1.0,
         }
     }
 
@@ -969,6 +981,23 @@ impl SamplingConfig {
             self.top_n_sigma
         } else {
             0.0
+        }
+    }
+
+    /// The typical-p value the sampler will actually apply: `1.0` (disabled)
+    /// when the config is greedy (`temperature == 0.0 || top_k == 1`), or
+    /// when the raw field is outside the enabled range `(0.0, 1.0)` or
+    /// non-finite. Batch-uniformity gates compare THIS value, mirroring
+    /// [`SamplingConfig::effective_top_n_sigma`], so rows whose sampled
+    /// outputs are necessarily identical stay on the shared fused paths.
+    pub fn effective_typical_p(&self) -> f32 {
+        if self.temperature == 0.0 || self.top_k == 1 {
+            return 1.0;
+        }
+        if self.typical_p.is_finite() && self.typical_p > 0.0 && self.typical_p < 1.0 {
+            self.typical_p
+        } else {
+            1.0
         }
     }
 

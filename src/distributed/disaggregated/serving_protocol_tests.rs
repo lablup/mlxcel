@@ -219,6 +219,7 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     config.stop_token_ids = vec![13, 14];
     config.dry_sequence_breakers = vec![198];
     config.top_n_sigma = 1.5;
+    config.typical_p = 0.5;
 
     let restored = sampling_from_serializable(&sampling_to_serializable(&config));
 
@@ -233,6 +234,7 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     assert_eq!(restored.stop_token_ids, vec![13, 14]);
     assert_eq!(restored.dry_sequence_breakers, vec![198]);
     assert_eq!(restored.top_n_sigma, 1.5);
+    assert_eq!(restored.typical_p, 0.5);
 }
 
 #[test]
@@ -250,4 +252,20 @@ fn sampling_state_from_an_older_peer_without_top_n_sigma_defaults_to_disabled() 
         serde_json::from_value(value).expect("deserialize legacy sampling state");
     assert_eq!(state.top_n_sigma, 0.0);
     assert_eq!(sampling_from_serializable(&state).top_n_sigma, 0.0);
+}
+
+#[test]
+fn sampling_state_from_an_older_peer_without_typical_p_defaults_to_disabled() {
+    // The serde default must be the DISABLED value 1.0, not the f32 zero
+    // default, which would be an invalid always-on cutoff.
+    let mut value = serde_json::to_value(sampling_to_serializable(&SamplingConfig::greedy()))
+        .expect("serialize sampling state");
+    value
+        .as_object_mut()
+        .expect("sampling state serializes as an object")
+        .remove("typical_p");
+    let state: SerializableSamplingState =
+        serde_json::from_value(value).expect("deserialize legacy sampling state");
+    assert_eq!(state.typical_p, 1.0);
+    assert_eq!(sampling_from_serializable(&state).typical_p, 1.0);
 }

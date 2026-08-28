@@ -224,6 +224,7 @@ pub struct ServerStartupConfig {
     pub top_p: f32,
     pub top_p_was_set: bool,
     pub min_p: f32,
+    pub typical_p: f32,
     pub seed: Option<u64>,
     pub repeat_last_n: usize,
     pub repeat_penalty: f32,
@@ -558,6 +559,7 @@ impl Default for ServerStartupConfig {
             top_p: 0.95,
             top_p_was_set: false,
             min_p: 0.05,
+            typical_p: 1.0,
             seed: None,
             repeat_last_n: 64,
             repeat_penalty: 1.0,
@@ -1173,6 +1175,7 @@ pub(super) fn build_server_config(
         default_top_p: sampling_defaults.top_p,
         default_top_k: sampling_defaults.top_k,
         default_min_p: startup.min_p,
+        default_typical_p: startup.typical_p,
         default_repetition_penalty: startup.repeat_penalty,
         default_repetition_context_size: startup.repeat_last_n,
         default_max_tokens: resolve_default_max_tokens(

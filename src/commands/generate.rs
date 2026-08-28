@@ -956,6 +956,7 @@ fn resolved_cli_sampling_params(
         xtc_probability: 0.0,
         xtc_threshold: 0.1,
         top_n_sigma: args.sampling.top_n_sigma,
+        typical_p: args.sampling.typical_p,
         stop_token_ids,
     }
 }

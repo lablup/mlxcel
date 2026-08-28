@@ -98,6 +98,7 @@ fn sample_input() -> ServerStartupInput {
         top_p: 0.9,
         top_p_was_set: false,
         min_p: 0.1,
+        typical_p: 1.0,
         seed: 42,
         repeat_last_n: 64,
         repeat_penalty: 1.1,
