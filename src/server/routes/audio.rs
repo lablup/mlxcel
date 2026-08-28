@@ -30,6 +30,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use base64::Engine;
+
+use super::transcription_compat as compat;
 use crate::audio::encode_wav_pcm16;
 use crate::server::AppState;
 use crate::server::audio_model::{
@@ -103,9 +106,168 @@ pub async fn audio_speech(
     build_audio_response(&audio_format, body)
 }
 
-/// POST /v1/audio/transcriptions (speech-to-text, transcribe in place).
+/// POST /v1/audio/transcriptions and POST /audio/transcriptions.
+///
+/// The one audio route b10621 also mounts, so it carries b10621's semantics
+/// rather than mlxcel's (issue #1446): the loaded chat model transcribes when
+/// it can take audio, the multipart field set and its errors are upstream's,
+/// and the response is upstream's `transcript.text.done` event. mlxcel's own
+/// Whisper worker stays the implementation for a Whisper-server deployment,
+/// which b10621 has no way to express; see
+/// [`crate::server::routes::transcription_compat`] for why that is a fallback
+/// rather than an alias.
 pub async fn audio_transcriptions(State(state): State<AppState>, multipart: Multipart) -> Response {
-    transcribe(state, multipart, false).await
+    compat_transcribe(state, multipart).await
+}
+
+/// b10621's transcription flow.
+async fn compat_transcribe(state: AppState, multipart: Multipart) -> Response {
+    use compat::{
+        AsrUsage, NO_AUDIO_SUPPORT_MESSAGE, NO_INPUT_FILE_MESSAGE, asr_user_prompt,
+        build_asr_chat_request, ensure_clip_within_limits, ensure_json_response_format,
+        parse_multipart, parse_numeric_field, transcription_delta_event, transcription_done_event,
+        wants_stream,
+    };
+
+    if !state.can_accept_request() {
+        return ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
+            .into_response();
+    }
+
+    // Parse the form before consulting the model, as upstream's httplib layer
+    // does, so a malformed body is a 400 rather than a capability error.
+    let form = match parse_multipart(multipart).await {
+        Ok(form) => form,
+        Err(err) => return err.into_response(),
+    };
+
+    // Upstream reads `response_format` and the numeric fields inside its
+    // conversion function, which runs after the capability check but before the
+    // file is looked at. The order matters: a request with no audio-capable
+    // model and a bad `response_format` gets the 501, not the 400.
+    let chat_can_transcribe =
+        state.media_support.audio && super::chat_not_available(&state).is_none();
+    let stt_provider = state
+        .audio_model
+        .clone()
+        .filter(|provider| provider.supports(AudioModelKind::Stt));
+    if !chat_can_transcribe && stt_provider.is_none() {
+        return ErrorResponse::not_supported(NO_AUDIO_SUPPORT_MESSAGE).into_response();
+    }
+
+    let Some(file) = form.file.clone() else {
+        return ErrorResponse::new(NO_INPUT_FILE_MESSAGE, "invalid_request_error").into_response();
+    };
+    if let Err(err) = ensure_json_response_format(&form) {
+        return err.into_response();
+    }
+    let temperature = match parse_numeric_field::<f32>(&form, "temperature") {
+        Ok(value) => value,
+        Err(err) => return err.into_response(),
+    };
+    let max_tokens = match parse_numeric_field::<usize>(&form, "max_tokens") {
+        Ok(value) => value,
+        Err(err) => return err.into_response(),
+    };
+    // Bound the clip from its header, before a decoder sees it.
+    if let Err(err) = ensure_clip_within_limits(&file.bytes) {
+        return err.into_response();
+    }
+    let language = form.text("language").map(str::to_owned);
+    let prompt = asr_user_prompt(form.text("prompt"), language.as_deref());
+    let streaming = wants_stream(&form);
+
+    let (text, usage) = if chat_can_transcribe {
+        let request = build_asr_chat_request(
+            state.display_model_id().to_string(),
+            prompt,
+            base64::engine::general_purpose::STANDARD.encode(&file.bytes),
+            temperature,
+            max_tokens,
+        );
+        match super::chat::non_stream_chat_completion(
+            state.clone(),
+            request,
+            crate::server::batch::RequestPriority::default(),
+            crate::server::config::ReasoningBudgetOverride::default(),
+            None,
+        )
+        .await
+        {
+            Ok(response) => {
+                let usage = AsrUsage {
+                    input_tokens: response.0.usage.prompt_tokens as u32,
+                    output_tokens: response.0.usage.completion_tokens as u32,
+                    cached_tokens: response
+                        .0
+                        .usage
+                        .prompt_tokens_details
+                        .as_ref()
+                        .map_or(0, |details| details.cached_tokens as u32),
+                };
+                let text = response
+                    .0
+                    .choices
+                    .first()
+                    .and_then(|choice| choice.message.content.clone())
+                    .unwrap_or_default();
+                (text, usage)
+            }
+            Err(err) => return err.into_response(),
+        }
+    } else {
+        // The Whisper-server shape: no chat model, a dedicated STT worker. The
+        // response is still upstream's event, so a client cannot tell which
+        // implementation answered; the token counts are the ones the worker can
+        // report, which is none.
+        let Some(provider) = stt_provider else {
+            return ErrorResponse::not_supported(NO_AUDIO_SUPPORT_MESSAGE).into_response();
+        };
+        let input = AudioTranscribeInput {
+            audio: file.bytes.clone(),
+            filename: file.filename.clone(),
+            language,
+            temperature,
+            translate: false,
+        };
+        let result = tokio::task::spawn_blocking(move || provider.transcribe(input)).await;
+        match result {
+            Ok(Ok(output)) => (output.text, AsrUsage::default()),
+            Ok(Err(err)) => return audio_model_error_response(err).into_response(),
+            Err(join_err) => {
+                tracing::error!("audio transcription task panicked: {join_err}");
+                return ErrorResponse::new("audio transcription failed", "server_error")
+                    .into_response();
+            }
+        }
+    };
+
+    let done = transcription_done_event(&text, usage);
+    if !streaming {
+        return Json(done).into_response();
+    }
+    // b10621 terminates the ASR stream with `data: [DONE]`, like every other
+    // OpenAI-shaped stream it serves. mlxcel emits the whole transcript in one
+    // delta rather than incrementally; the frame shapes and the terminator are
+    // upstream's, the granularity is not.
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        transcription_delta_event(&text),
+        done
+    );
+    match Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(body))
+    {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::error!("failed to build transcription stream: {err}");
+            ErrorResponse::new("failed to build transcription stream", "server_error")
+                .into_response()
+        }
+    }
 }
 
 /// POST /v1/audio/translations (speech-to-text, translate to English).

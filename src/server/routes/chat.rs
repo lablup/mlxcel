@@ -369,7 +369,10 @@ pub(crate) fn parse_priority_header(headers: &HeaderMap) -> RequestPriority {
         .unwrap_or_default()
 }
 
-async fn non_stream_chat_completion(
+/// `pub(crate)` so the b10621 transcription-compatibility route can dispatch
+/// through the same chat pipeline upstream's own handler does, without a JSON
+/// round-trip: it returns the typed `ChatCompletionResponse` (issue #1446).
+pub(crate) async fn non_stream_chat_completion(
     state: AppState,
     request: ChatCompletionRequest,
     priority: RequestPriority,
