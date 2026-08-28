@@ -895,7 +895,9 @@ fn dry_base_below_one_falls_back_to_the_server_default() {
 }
 
 #[test]
-fn reverse_prompt_stops_merge_with_request_stops() {
+fn reverse_prompt_stops_follow_the_b10621_replace_semantics() {
+    // Upstream seeds the stop set from the CLI antiprompt list and REPLACES
+    // it wholesale when the request carries any effective stop string.
     let config = ServerConfig {
         default_stop_sequences: vec!["<<STOP>>".to_string()],
         ..ServerConfig::default()
@@ -903,16 +905,44 @@ fn reverse_prompt_stops_merge_with_request_stops() {
     let options = build_server_generate_options(
         &config,
         RequestOptionOverrides {
-            stop_sequences: Some(vec!["###".to_string(), "<<STOP>>".to_string()]),
+            stop_sequences: Some(vec!["###".to_string()]),
             ..RequestOptionOverrides::default()
         },
     );
     assert_eq!(
         options.stop_sequences,
-        Some(vec!["<<STOP>>".to_string(), "###".to_string()]),
-        "server-wide reverse-prompt stops merge with (and deduplicate against) the request stops"
+        Some(vec!["###".to_string()]),
+        "a request with effective stops discards the server-wide reverse-prompt strings"
     );
 
+    // No request stops (absent or empty): the CLI list applies.
     let options = build_server_generate_options(&config, RequestOptionOverrides::default());
     assert_eq!(options.stop_sequences, Some(vec!["<<STOP>>".to_string()]));
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            stop_sequences: Some(Vec::new()),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(options.stop_sequences, Some(vec!["<<STOP>>".to_string()]));
+}
+
+#[test]
+fn dry_penalty_last_n_wire_values_clamp_below_the_full_history_sentinel() {
+    // usize::MAX from the wire must not select the internal DRY_FULL_HISTORY
+    // sentinel; upstream's schema ceiling is INT32_MAX.
+    let config = ServerConfig::default();
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            dry_penalty_last_n: Some(usize::MAX),
+            ..RequestOptionOverrides::default()
+        },
+    );
+    assert_eq!(options.sampling.dry_penalty_last_n, i32::MAX as usize);
+    assert_ne!(
+        options.sampling.dry_penalty_last_n,
+        mlxcel_core::generate::DRY_FULL_HISTORY
+    );
 }

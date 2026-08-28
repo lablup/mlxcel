@@ -742,16 +742,22 @@ pub(super) fn resolve_elastic_pp_config(startup: &ServerStartupConfig) -> Option
     Some(cfg)
 }
 
-/// Resolve the per-request default token budget applied when a request omits
-/// `max_tokens` / `n_predict`.
-///
-/// llama-server parity (issue #476): a negative `--n-predict` (`-1`, the
-/// default) means "generate until the context window is full". It resolves to
-/// the effective per-slot context window — an explicit `--ctx-size` (already
-/// divided across slots into `per_slot_context_size`) when set, otherwise the
-/// model's `max_position_embeddings` read from `config.json`, with the
-/// historical 4096 used only when neither is available. A non-negative
-/// `--n-predict N` is taken verbatim.
+/// Sanitize the server-wide `--dry-base` default: b10621's CLI silently
+/// keeps its 1.75 default for a value below 1.0 (its sampler additionally
+/// disables DRY outright below 1.0), so a sub-1.0 flag value folds back to
+/// the default with a warning instead of running DRY at a shrinking base no
+/// upstream deployment can produce.
+fn sanitize_dry_base_default(value: f32) -> f32 {
+    if value >= 1.0 {
+        value
+    } else {
+        tracing::warn!(
+            "--dry-base {value} is below 1.0; b10621 ignores such values, keeping the 1.75 default"
+        );
+        1.75
+    }
+}
+
 /// Sanitize the server-wide `--top-nsigma` default: b10621's flag default is
 /// `-1.0` and its sampler treats every non-positive value as disabled, so
 /// those (and non-finite input) fold to mlxcel's `0.0` disabled form without
@@ -820,6 +826,16 @@ fn sanitize_typical_p_default(value: f32) -> f32 {
     }
 }
 
+/// Resolve the per-request default token budget applied when a request omits
+/// `max_tokens` / `n_predict`.
+///
+/// llama-server parity (issue #476): a negative `--n-predict` (`-1`, the
+/// default) means "generate until the context window is full". It resolves to
+/// the effective per-slot context window — an explicit `--ctx-size` (already
+/// divided across slots into `per_slot_context_size`) when set, otherwise the
+/// model's `max_position_embeddings` read from `config.json`, with the
+/// historical 4096 used only when neither is available. A non-negative
+/// `--n-predict N` is taken verbatim.
 pub(super) fn resolve_default_max_tokens(
     n_predict: i32,
     per_slot_context_size: usize,
@@ -1281,7 +1297,7 @@ pub(super) fn build_server_config(
         default_frequency_penalty: startup.frequency_penalty,
         default_presence_penalty: startup.presence_penalty,
         default_dry_multiplier: startup.dry_multiplier,
-        default_dry_base: startup.dry_base,
+        default_dry_base: sanitize_dry_base_default(startup.dry_base),
         default_dry_allowed_length: startup.dry_allowed_length,
         default_dry_penalty_last_n: resolve_dry_penalty_last_n(startup.dry_penalty_last_n),
         // Left empty here on purpose: `--dry-sequence-breaker` takes token
@@ -2024,6 +2040,12 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
 
+    // A sampler-order flag that asks for anything but the fixed b10621
+    // default chain would silently sample in a different order than the
+    // operator requested; fail here, before the multi-GB model load, since
+    // the check depends only on the two flag strings (#1436).
+    check_sampler_order(startup.samplers.as_deref(), startup.sampler_seq.as_deref())?;
+
     // issue #1350: the KV cache mode was resolved against the model family in
     // `into_startup_config`, which runs before the subscriber above exists.
     // Report the substitution now, so the log states the mode the caches are
@@ -2654,10 +2676,6 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // what it asked for, so it fails here rather than answering 501 to every
     // request for the life of the process (#1452).
     check_serving_mode(&config, embedding_model.is_some(), rerank_model.is_some())?;
-    // A sampler-order flag that asks for anything but the fixed b10621
-    // default chain would silently sample in a different order than the
-    // operator requested; fail startup instead (#1436).
-    check_sampler_order(startup.samplers.as_deref(), startup.sampler_seq.as_deref())?;
 
     let state = AppState::with_observability(
         model_provider,

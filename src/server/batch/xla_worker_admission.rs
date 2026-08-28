@@ -38,6 +38,21 @@ pub(super) fn validate_xla_output_features(logprobs: bool, structured: bool) -> 
     Ok(())
 }
 
+/// `--ignore-eos` / `ignore_eos` is implemented as a token-bias suppression
+/// on the MLX scheduler path (#1436); the XLA sampler carries no token bias,
+/// so a request that asked for it must fail loudly instead of stopping at
+/// EOS anyway.
+pub(super) fn validate_xla_ignore_eos(ignore_eos: bool) -> Result<(), String> {
+    if ignore_eos {
+        return Err(
+            "the OpenXLA backend does not support ignore_eos (no token-bias path); \
+             run the MLX serving path to suppress end-of-generation tokens"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// Validate, tokenize, and submit one request. Images enter the bounded
     /// preprocessing stage; text reaches the engine directly.
@@ -66,6 +81,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         if let Err(error) =
             validate_xla_output_features(options.logprobs.enabled, options.structured.is_some())
         {
+            let _ = response_tx.send(GenerateEvent::Error(error));
+            return;
+        }
+        if let Err(error) = validate_xla_ignore_eos(options.ignore_eos) {
             let _ = response_tx.send(GenerateEvent::Error(error));
             return;
         }

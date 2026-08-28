@@ -182,7 +182,12 @@ fn build_server_config_applies_normalized_startup_values() {
     assert_eq!(config.default_dry_multiplier, 0.6);
     assert_eq!(config.default_dry_base, 2.0);
     assert_eq!(config.default_dry_allowed_length, 4);
-    assert_eq!(config.default_dry_penalty_last_n, 0);
+    // -1 resolves to the explicit full-history sentinel since #1436 (the
+    // pre-#1436 code mapped it to 0, which now means "DRY disabled").
+    assert_eq!(
+        config.default_dry_penalty_last_n,
+        mlxcel_core::generate::DRY_FULL_HISTORY
+    );
     assert_eq!(config.draft_model_path, Some(PathBuf::from("draft")));
     assert_eq!(config.num_draft_tokens, 5);
     // max_batch_size derived from n_parallel (no explicit override);

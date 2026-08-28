@@ -407,20 +407,6 @@ fn fused_sample_probs_dispatch(
     }
 }
 
-/// Everything [`sample_token_optimized`] does to the logits *before* the fused
-/// top-k / top-p / min-p / XTC / temperature sampler: last-position slice,
-/// token bias, repetition penalty, DRY, frequency/presence penalty. XTC is no
-/// longer applied here: since #1379 it lives inside the C++ chain, after
-/// min-p, on the renormalised filtered row (see [`fused_sample_dispatch`]).
-///
-/// Split out so the speculative acceptance path (issue #902) can obtain the
-/// exact same pre-sampler logits and hand them to [`ffi::fused_sample_probs`],
-/// which then applies the identical filter chain the sampler itself runs. The
-/// effective categorical distribution is therefore derived from the sampler's
-/// own code rather than reconstructed alongside it.
-///
-/// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
-/// [`sample_token_with_distribution`]
 /// The slice of `token_history` the repetition / frequency / presence
 /// penalties operate on, under b10621's `repeat_last_n` semantics (#1436):
 /// `0` returns the empty slice (stage disabled), a negative value returns
@@ -439,6 +425,20 @@ fn penalty_window(token_history: &[i32], penalty_last_n: i32) -> &[i32] {
     }
 }
 
+/// Everything [`sample_token_optimized`] does to the logits *before* the fused
+/// top-k / top-p / min-p / XTC / temperature sampler: last-position slice,
+/// token bias, repetition penalty, DRY, frequency/presence penalty. XTC is no
+/// longer applied here: since #1379 it lives inside the C++ chain, after
+/// min-p, on the renormalised filtered row (see [`fused_sample_dispatch`]).
+///
+/// Split out so the speculative acceptance path (issue #902) can obtain the
+/// exact same pre-sampler logits and hand them to [`ffi::fused_sample_probs`],
+/// which then applies the identical filter chain the sampler itself runs. The
+/// effective categorical distribution is therefore derived from the sampler's
+/// own code rather than reconstructed alongside it.
+///
+/// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
+/// [`sample_token_with_distribution`]
 fn preprocess_logits_for_sampling(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -1120,6 +1120,12 @@ pub(crate) fn apply_dry_penalty(
     if history_len < 2 {
         return ffi::copy(logits);
     }
+    // b10621's sampler disables DRY outright when dry_base < 1.0 (its
+    // llama-sampler init early-outs); the request layers already sanitize,
+    // so this is the defense-in-depth mirror of that early-out.
+    if config.dry_base < 1.0 {
+        return ffi::copy(logits);
+    }
 
     // b10621 sentinel semantics (#1436): `0` disables DRY (the caller gates
     // on it, and the empty-window guard below is the backstop);
@@ -1179,10 +1185,17 @@ pub(crate) fn apply_dry_penalty(
                 let next_pos = pos + 1;
                 if next_pos < window_len {
                     let next_token = window[next_pos];
-                    let penalty = config.dry_multiplier
-                        * config
-                            .dry_base
-                            .powi((match_len - config.dry_allowed_length) as i32);
+                    // Upstream caps the exponent at FLOAT_MAX_LOG / ln(base)
+                    // (~158 at base 1.75) so a very long full-history match
+                    // cannot push the penalty to infinity; mirror the cap.
+                    let mut exponent = (match_len - config.dry_allowed_length) as f32;
+                    if config.dry_base > 1.0 {
+                        let max_exponent = 88.722_84_f32 / config.dry_base.ln();
+                        if exponent > max_exponent {
+                            exponent = max_exponent;
+                        }
+                    }
+                    let penalty = config.dry_multiplier * config.dry_base.powf(exponent);
                     let entry = penalties.entry(next_token).or_insert(0.0);
                     if penalty > *entry {
                         *entry = penalty;

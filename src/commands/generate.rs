@@ -938,7 +938,7 @@ fn resolved_cli_sampling_params(
         // b10621's CLI silently keeps the default when dry_base < 1.0
         // (#1436), and so does this path.
         dry_base: if args.sampling.dry_base < 1.0 {
-            1.75
+            crate::DEFAULT_DRY_BASE
         } else {
             args.sampling.dry_base
         },

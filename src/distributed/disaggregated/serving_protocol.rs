@@ -282,7 +282,10 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         loop_detection: Default::default(),
         // XTC is likewise not yet part of the wire frame; the decode node
         // keeps the disabled baseline (`xtc_probability == 0.0`) until this
-        // is wired into `SerializableSamplingState` as a follow-up.
+        // is wired into `SerializableSamplingState` as a follow-up. The same
+        // gap applies to `ignore_eos` (#1436): it is delivered through the
+        // node-local token-bias map, which this frame deliberately drops, so
+        // a decode node continues honoring EOS after a handoff.
         xtc_probability: Default::default(),
         xtc_threshold: Default::default(),
         xtc_special_token_ids: Default::default(),

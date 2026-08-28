@@ -1187,12 +1187,13 @@ pub struct NativeCompletionRequest {
     /// disabled, so the route maps non-positive and non-finite values to the
     /// explicit disabled form rather than rejecting them (#1436).
     pub top_n_sigma: Option<f32>,
-    /// XTC removal probability. b10621 schema domain `0.0..=1.0`, values
-    /// outside it rejected with a 400 (#1436).
+    /// XTC removal probability. b10621 declares a SOFT `0.0..=1.0` schema
+    /// limit, clamping out-of-range values into the domain instead of
+    /// rejecting them; the route clamps identically (#1436).
     pub xtc_probability: Option<f32>,
-    /// XTC probability threshold. b10621 schema domain `0.0..=1.0` (values
-    /// above `0.5` are valid and make XTC inert), outside it rejected with a
-    /// 400 (#1436).
+    /// XTC probability threshold. Same soft `0.0..=1.0` clamp as
+    /// `xtc_probability`; values above `0.5` are in range and make XTC
+    /// inert, matching upstream (#1436).
     pub xtc_threshold: Option<f32>,
     /// Suppress end-of-generation tokens so generation runs to the token
     /// budget or a stop string (#1436).

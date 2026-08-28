@@ -981,7 +981,7 @@ struct ServerArgs {
         alias = "top-n-sigma",
         value_name = "N",
         default_value_t = -1.0,
-        allow_hyphen_values = true
+        allow_negative_numbers = true
     )]
     top_n_sigma: f32,
 
@@ -1042,8 +1042,9 @@ struct ServerArgs {
     #[arg(long = "dry-allowed-length", default_value_t = 2)]
     dry_allowed_length: usize,
 
-    /// DRY lookback window (-1 = full context)
-    #[arg(long = "dry-penalty-last-n", default_value_t = 64)]
+    /// DRY lookback window (0 = disable DRY, matching b10621; negatives
+    /// rejected at parse time exactly as b10621 does)
+    #[arg(long = "dry-penalty-last-n", default_value_t = 64, value_parser = clap::value_parser!(i32).range(0..))]
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")

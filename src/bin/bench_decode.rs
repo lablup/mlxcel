@@ -290,7 +290,7 @@ fn sampling_config(model_path: &Path) -> SamplingConfig {
         dry_multiplier: 0.0,
         dry_base: 1.75,
         dry_allowed_length: 2,
-        dry_penalty_last_n: 0,
+        dry_penalty_last_n: mlxcel_core::generate::DRY_FULL_HISTORY,
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,

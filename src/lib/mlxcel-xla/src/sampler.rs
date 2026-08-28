@@ -199,6 +199,11 @@ fn apply_dry(logits: &mut [f32], history: &[i32], params: &SampleParams) {
     if hlen < 2 {
         return;
     }
+    // b10621's sampler disables DRY outright when dry_base < 1.0; mirror
+    // of the mlxcel-core early-out.
+    if params.dry_base < 1.0 {
+        return;
+    }
     // b10621 sentinels (#1436): usize::MAX = full history, 0 = disabled
     // (the caller gates; the empty slice is the backstop).
     let window: &[i32] = if params.dry_penalty_last_n == usize::MAX {
@@ -245,10 +250,14 @@ fn apply_dry(logits: &mut [f32], history: &[i32], params: &SampleParams) {
                 let next_pos = pos + 1;
                 if next_pos < wlen {
                     let next_token = window[next_pos];
-                    let penalty = params.dry_multiplier
-                        * params
-                            .dry_base
-                            .powi((match_len - params.dry_allowed_length) as i32);
+                    let mut exponent = (match_len - params.dry_allowed_length) as f32;
+                    if params.dry_base > 1.0 {
+                        let max_exponent = 88.722_84_f32 / params.dry_base.ln();
+                        if exponent > max_exponent {
+                            exponent = max_exponent;
+                        }
+                    }
+                    let penalty = params.dry_multiplier * params.dry_base.powf(exponent);
                     let entry = penalties.entry(next_token).or_insert(0.0);
                     if penalty > *entry {
                         *entry = penalty;

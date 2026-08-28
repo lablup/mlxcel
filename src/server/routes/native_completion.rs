@@ -576,20 +576,6 @@ fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option
             "samplers {samplers} is not supported: mlxcel's sampler chain order is fixed to the b10621 default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature, character form edskypmxt); send that order or omit the field"
         ));
     }
-    // b10621's /completion schema declares hard 0..=1 limits on both XTC
-    // fields and answers an out-of-range value with a 400 (#1436).
-    if request
-        .xtc_probability
-        .is_some_and(|v| !v.is_finite() || !(0.0..=1.0).contains(&v))
-    {
-        return refuse("xtc_probability must be between 0.0 and 1.0".to_string());
-    }
-    if request
-        .xtc_threshold
-        .is_some_and(|v| !v.is_finite() || !(0.0..=1.0).contains(&v))
-    {
-        return refuse("xtc_threshold must be between 0.0 and 1.0".to_string());
-    }
     if request.n_cmpl.is_some_and(|n| n != 1) {
         return refuse(
             "n_cmpl (alias n) above 1 is not supported on /completion; mlxcel serves one \
@@ -669,11 +655,12 @@ fn build_native_generate_options(
             dry_penalty_last_n: request.dry_penalty_last_n,
             dry_sequence_breakers: request.dry_sequence_breakers.clone(),
             // b10621's /completion schema declares both XTC fields with
-            // 0..=1 limits; values in range pass through (a threshold above
-            // 0.5 is valid and inert, matching upstream), and out-of-range
-            // values are rejected with a 400 before this point (#1436).
-            xtc_probability: request.xtc_probability,
-            xtc_threshold: request.xtc_threshold,
+            // SOFT 0..=1 limits: an out-of-range value is CLAMPED into the
+            // domain, not rejected (its field_num::eval only throws for hard
+            // limits). A threshold above 0.5 is in range and inert, matching
+            // upstream (#1436).
+            xtc_probability: request.xtc_probability.map(|v| v.clamp(0.0, 1.0)),
+            xtc_threshold: request.xtc_threshold.map(|v| v.clamp(0.0, 1.0)),
             // b10621 treats `top_n_sigma <= 0.0` (its default is `-1.0`) as
             // disabled, so non-positive and non-finite values map to the
             // explicit disabled form 0.0, which still overrides a
@@ -799,28 +786,34 @@ mod tests {
     }
 
     #[test]
-    fn native_completion_maps_xtc_fields_and_rejects_out_of_range() {
+    fn native_completion_maps_xtc_fields_with_the_b10621_soft_clamp() {
         let request =
             native_request(r#"{"prompt":"hi","xtc_probability":0.4,"xtc_threshold":0.2}"#);
         assert!(reject_unsupported_native_fields(&request).is_none());
         let options = build_native_generate_options(&ServerConfig::default(), &request, None);
         assert_eq!(options.sampling.xtc_probability, 0.4);
         assert_eq!(options.sampling.xtc_threshold, 0.2);
-        // b10621 declares 0..=1 limits on both fields; a threshold above 0.5
-        // is in range (and inert), while values outside 0..=1 get a 400.
+        // A threshold above 0.5 is in range (and inert), matching upstream.
         let inert = native_request(r#"{"prompt":"hi","xtc_threshold":0.9}"#);
-        assert!(reject_unsupported_native_fields(&inert).is_none());
-        for body in [
-            r#"{"prompt":"hi","xtc_probability":1.5}"#,
-            r#"{"prompt":"hi","xtc_probability":-0.1}"#,
-            r#"{"prompt":"hi","xtc_threshold":1.5}"#,
-            r#"{"prompt":"hi","xtc_threshold":-0.1}"#,
+        let options = build_native_generate_options(&ServerConfig::default(), &inert, None);
+        assert_eq!(options.sampling.xtc_threshold, 0.9);
+        // b10621 declares SOFT 0..=1 limits: out-of-range values CLAMP into
+        // the domain (a 200, not a 400), so the resolved values sit on the
+        // boundary.
+        for (body, expect_p, expect_t) in [
+            (r#"{"prompt":"hi","xtc_probability":1.5}"#, 1.0_f32, 0.1_f32),
+            (r#"{"prompt":"hi","xtc_probability":-0.1}"#, 0.0, 0.1),
+            (r#"{"prompt":"hi","xtc_threshold":1.5}"#, 0.0, 1.0),
+            (r#"{"prompt":"hi","xtc_threshold":-0.1}"#, 0.0, 0.0),
         ] {
             let request = native_request(body);
             assert!(
-                reject_unsupported_native_fields(&request).is_some(),
-                "body {body} must be rejected"
+                reject_unsupported_native_fields(&request).is_none(),
+                "body {body} must be accepted (clamped, matching upstream's soft limits)"
             );
+            let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+            assert_eq!(options.sampling.xtc_probability, expect_p, "body {body}");
+            assert_eq!(options.sampling.xtc_threshold, expect_t, "body {body}");
         }
     }
 

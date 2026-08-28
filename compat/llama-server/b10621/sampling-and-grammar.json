@@ -64,7 +64,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "The off-by-one is fixed (#1436): a repeat exactly dry_allowed_length long now receives the base^0 tier, matching upstream's >= comparison.",
+      "notes": "The off-by-one is fixed (#1436): a repeat exactly dry_allowed_length long now receives the base^0 tier, matching upstream's >= comparison. Known corner: at dry_allowed_length 0 the minimum observable match length is 1, so mlxcel's lowest tier is base^1 where upstream's zero-length positions emit base^0.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -151,7 +151,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Sentinels reconciled (#1436): 0 disables DRY (upstream), the flag's documented -1 maps to the explicit full-history form, positive values are the scan window.",
+      "notes": "Sentinels reconciled (#1436): 0 disables DRY (upstream's sentinel) and negatives are rejected at parse time exactly as b10621's CLI does; a full-history scan is reachable through a window at least the context length. The offline mlxcel generate CLI (not a compat surface) additionally accepts -1 as its explicit full-history spelling.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -323,7 +323,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Implemented as upstream does: a -inf logit bias on every end-of-generation token at enqueue time, so generation runs to the token budget or a stop string.",
+      "notes": "Implemented as upstream does on the MLX serving path: a -inf logit bias on every end-of-generation token at enqueue time, so generation runs to the token budget or a stop string. The OpenXLA worker has no token-bias path and rejects an ignore_eos request with a diagnostic; the disaggregated decode-role handoff does not carry token bias (same recorded gap as XTC there).",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -601,7 +601,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Repeatable server-wide stop strings merged into every request's stop set, matching upstream's antiprompt list. The -r short form is also registered on both binaries; the conformance dump indexes long spellings only, so the claim lists the long form.",
+      "notes": "Repeatable server-wide stop strings with b10621 replace semantics: the CLI list seeds every request's stop set, and a request carrying any effective stop string replaces it wholesale, falling back to the CLI list only when the request supplied none. The -r short form is also registered on both binaries; the conformance dump indexes long spellings only, so the claim lists the long form.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
@@ -1030,7 +1030,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "0 disables DRY (b10621 sentinel, #1436); the schema floor of 0 is enforced by the unsigned deserialization.",
+      "notes": "0 disables DRY (b10621 sentinel, #1436); the schema floor of 0 is enforced by the unsigned deserialization and the value is clamped to upstream's INT32_MAX ceiling so a wire value cannot collide with the internal full-history sentinel.",
       "divergence": [],
       "mlxcel": {
         "field": "dry_penalty_last_n"
@@ -1148,7 +1148,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "Implemented as a -inf end-of-generation bias, matching upstream's EOG logit-bias mechanism.",
+      "notes": "Implemented as a -inf end-of-generation bias, matching upstream's EOG logit-bias mechanism, on the MLX serving path; the OpenXLA worker rejects it with a diagnostic instead of silently stopping at EOS.",
       "divergence": [],
       "mlxcel": {
         "field": "ignore_eos"
@@ -1532,7 +1532,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "b10621 schema limits 0..=1 enforced with a 400; in-range values pass to the in-chain XTC filter.",
+      "notes": "b10621 declares SOFT 0..=1 schema limits: an out-of-range value is clamped into the domain, not rejected; the route clamps identically and in-range values pass to the in-chain XTC filter.",
       "divergence": [],
       "mlxcel": {
         "field": "xtc_probability"
@@ -1550,7 +1550,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "b10621 schema limits 0..=1 enforced with a 400; a threshold above 0.5 is accepted and inert, matching upstream.",
+      "notes": "Same soft 0..=1 clamp as xtc_probability; a threshold above 0.5 is in range and inert, matching upstream.",
       "divergence": [],
       "mlxcel": {
         "field": "xtc_threshold"

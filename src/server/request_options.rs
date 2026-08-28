@@ -253,9 +253,12 @@ pub(crate) fn build_server_generate_options(
         dry_allowed_length: overrides
             .dry_allowed_length
             .unwrap_or(config.default_dry_allowed_length),
+        // Clamped to upstream's INT32_MAX schema ceiling so a wire value can
+        // never collide with the internal DRY_FULL_HISTORY sentinel (#1436).
         dry_penalty_last_n: overrides
             .dry_penalty_last_n
-            .unwrap_or(config.default_dry_penalty_last_n),
+            .unwrap_or(config.default_dry_penalty_last_n)
+            .min(i32::MAX as usize),
         dry_sequence_breakers: overrides
             .dry_sequence_breakers
             .unwrap_or_else(|| config.default_dry_sequence_breakers.clone()),
@@ -288,9 +291,9 @@ pub(crate) fn build_server_generate_options(
         // every request that does not carry its own repeat_last_n. Before
         // #1436 the flag was parsed and echoed by /props but never reached
         // the sampler, which scanned the full history.
-        penalty_last_n: overrides
-            .penalty_last_n
-            .unwrap_or(config.default_repetition_context_size as i32),
+        penalty_last_n: overrides.penalty_last_n.unwrap_or_else(|| {
+            i32::try_from(config.default_repetition_context_size).unwrap_or(i32::MAX)
+        }),
         stop_token_ids: Vec::new(),
     });
 
@@ -307,21 +310,17 @@ pub(crate) fn build_server_generate_options(
         overrides.request_carries_loop_amplifier,
     );
 
-    // b10621 -r / --reverse-prompt (#1436): the server-wide stop strings are
-    // always active, concatenated with whatever the request supplied, the
-    // same way upstream's antiprompt list joins the request's stop array.
-    let stop_sequences = if config.default_stop_sequences.is_empty() {
-        overrides.stop_sequences
-    } else {
-        let mut merged = config.default_stop_sequences.clone();
-        if let Some(request_stops) = overrides.stop_sequences {
-            for stop in request_stops {
-                if !merged.contains(&stop) {
-                    merged.push(stop);
-                }
-            }
+    // b10621 -r / --reverse-prompt (#1436): upstream seeds the task's stop
+    // set from the CLI antiprompt list and then REPLACES it wholesale when
+    // the request carries any effective stop string, falling back to the CLI
+    // list only when the request supplied none. A request's non-empty `stop`
+    // therefore discards the server-wide strings, exactly as b10621 does.
+    let stop_sequences = match overrides.stop_sequences {
+        Some(request_stops) if !request_stops.is_empty() => Some(request_stops),
+        _ if !config.default_stop_sequences.is_empty() => {
+            Some(config.default_stop_sequences.clone())
         }
-        Some(merged)
+        other => other,
     };
 
     ServerGenerateOptions {

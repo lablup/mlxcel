@@ -692,7 +692,7 @@ pub(crate) struct SamplingOptions {
     pub(crate) dry_multiplier: f32,
 
     /// DRY exponential base for penalty scaling
-    #[arg(long, default_value_t = 1.75, value_name = "FLOAT")]
+    #[arg(long, default_value_t = DEFAULT_DRY_BASE, value_name = "FLOAT")]
     pub(crate) dry_base: f32,
 
     /// DRY minimum match length before penalty applies
@@ -701,13 +701,13 @@ pub(crate) struct SamplingOptions {
 
     /// DRY lookback window size (-1 = full history, 0 = disable DRY,
     /// N = last N tokens; b10621 sentinels, #1436)
-    #[arg(long, default_value_t = -1, value_name = "N", allow_hyphen_values = true)]
+    #[arg(long, default_value_t = -1, value_name = "N", allow_negative_numbers = true)]
     pub(crate) dry_penalty_last_n: i64,
 
     /// Repetition / frequency / presence penalty lookback window
     /// (-1 = full history, the default; 0 = disable those penalties;
     /// N = last N tokens, matching llama-server's --repeat-last-n)
-    #[arg(long = "repeat-last-n", default_value_t = -1, value_name = "N", allow_hyphen_values = true)]
+    #[arg(long = "repeat-last-n", default_value_t = -1, value_name = "N", allow_negative_numbers = true)]
     pub(crate) repeat_last_n: i32,
 
     /// Random seed for MLX's global RNG. Makes sampled generation
@@ -716,6 +716,11 @@ pub(crate) struct SamplingOptions {
     #[arg(long, value_name = "N")]
     pub(crate) seed: Option<u64>,
 }
+
+/// The DRY exponential-base default shared by the clap default and the
+/// below-1.0 fallback in `resolved_cli_sampling_params`, so the two cannot
+/// silently drift apart.
+pub(crate) const DEFAULT_DRY_BASE: f32 = 1.75;
 
 /// Clap value parser: a finite f32 that is zero or positive.
 ///
@@ -1690,7 +1695,7 @@ pub(crate) struct ServeArgs {
         alias = "top-n-sigma",
         value_name = "N",
         default_value_t = -1.0,
-        allow_hyphen_values = true
+        allow_negative_numbers = true
     )]
     top_n_sigma: f32,
 
@@ -1751,8 +1756,9 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value_t = 2)]
     dry_allowed_length: usize,
 
-    /// DRY lookback window (-1 = full context)
-    #[arg(long, default_value_t = 64)]
+    /// DRY lookback window (0 = disable DRY, matching b10621; negatives
+    /// rejected at parse time exactly as b10621 does)
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(i32).range(0..))]
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
