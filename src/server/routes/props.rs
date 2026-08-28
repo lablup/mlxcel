@@ -39,6 +39,7 @@ pub(crate) fn default_generation_settings(config: &ServerConfig) -> serde_json::
         "top_k": config.default_top_k,
         "top_p": config.default_top_p,
         "min_p": config.default_min_p,
+        "typical_p": config.default_typical_p,
         "repeat_penalty": config.default_repetition_penalty,
         "repeat_last_n": config.default_repetition_context_size,
         "seed": config.default_seed.unwrap_or(u64::MAX),

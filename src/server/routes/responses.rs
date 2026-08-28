@@ -66,7 +66,7 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 
 use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
-    validate_top_n_sigma, validate_xtc_params,
+    validate_top_n_sigma, validate_typical_p, validate_xtc_params,
 };
 use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
 
@@ -124,6 +124,9 @@ pub async fn create_response(
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
     if let Err(message) = validate_top_n_sigma(translated.chat_request.params.top_n_sigma) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
+    if let Err(message) = validate_typical_p(translated.chat_request.params.typical_p) {
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
@@ -1225,6 +1228,18 @@ mod tests {
         assert_eq!(
             validate_top_n_sigma(translated.chat_request.params.top_n_sigma),
             Err("top_n_sigma must be >= 0.0")
+        );
+    }
+
+    #[test]
+    fn responses_rejects_above_one_typical_p() {
+        let request: CreateResponseRequest =
+            serde_json::from_str(r#"{"model":"m","input":"hi","typical_p":1.5}"#).unwrap();
+        let translated = responses_request_to_chat(&request, None, None).unwrap();
+        assert_eq!(translated.chat_request.params.typical_p, Some(1.5));
+        assert_eq!(
+            validate_typical_p(translated.chat_request.params.typical_p),
+            Err("typical_p must be in (0.0, 1.0]")
         );
     }
 

@@ -347,6 +347,7 @@ fn native_generation_settings(
         "min_p": sampling.min_p,
         "xtc_probability": sampling.xtc_probability,
         "xtc_threshold": sampling.xtc_threshold,
+        "typical_p": sampling.typical_p,
         "repeat_penalty": sampling.repetition_penalty,
         "presence_penalty": sampling.presence_penalty,
         "frequency_penalty": sampling.frequency_penalty,
@@ -621,6 +622,19 @@ fn build_native_generate_options(
             // manifest flip to land in one change, so until then the filter
             // stays at the disabled baseline on this endpoint.
             top_n_sigma: None,
+            // b10621 declares `typical_p` with no schema limits and treats
+            // any value at or above 1.0 as disabled, so a present value
+            // outside the enabled range (0.0, 1.0) maps to the explicit
+            // disabled form 1.0. It still overrides a server-wide --typical
+            // default, exactly like an upstream request value replaces the
+            // server default; only an ABSENT field lets the default apply.
+            typical_p: request.typical_p.map(|v| {
+                if v.is_finite() && v > 0.0 && v < 1.0 {
+                    v
+                } else {
+                    1.0
+                }
+            }),
             stop_sequences: request.stop.clone(),
             priority: RequestPriority::default(),
             // the caller fills this from the validated request
@@ -645,4 +659,62 @@ fn build_native_generate_options(
             request_carries_loop_amplifier: false,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::ServerConfig;
+
+    fn native_request(json: &str) -> NativeCompletionRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn native_completion_maps_typical_p() {
+        let request = native_request(r#"{"prompt":"hi","typical_p":0.5}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        assert_eq!(options.sampling.typical_p, 0.5);
+    }
+
+    #[test]
+    fn native_completion_out_of_domain_typical_p_is_the_explicit_disable() {
+        // b10621 declares the field with no schema limits and treats values
+        // at or above 1.0 as disabled. A present out-of-domain value must
+        // resolve to the explicit disabled form (1.0) and override the
+        // server-wide default, not fall back to it.
+        let config = ServerConfig {
+            default_typical_p: 0.4,
+            ..Default::default()
+        };
+        for body in [
+            r#"{"prompt":"hi","typical_p":1.0}"#,
+            r#"{"prompt":"hi","typical_p":0.0}"#,
+            r#"{"prompt":"hi","typical_p":-1.0}"#,
+            r#"{"prompt":"hi","typical_p":2.5}"#,
+        ] {
+            let request = native_request(body);
+            let options = build_native_generate_options(&config, &request, None);
+            assert_eq!(options.sampling.typical_p, 1.0, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn native_completion_absent_typical_p_takes_the_server_default() {
+        let config = ServerConfig {
+            default_typical_p: 0.4,
+            ..Default::default()
+        };
+        let request = native_request(r#"{"prompt":"hi"}"#);
+        let options = build_native_generate_options(&config, &request, None);
+        assert_eq!(options.sampling.typical_p, 0.4);
+    }
+
+    #[test]
+    fn native_generation_settings_echo_typical_p() {
+        let request = native_request(r#"{"prompt":"hi","typical_p":0.5}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        let settings = native_generation_settings(&request, &options);
+        assert_eq!(settings["typical_p"], 0.5);
+    }
 }

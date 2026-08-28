@@ -87,6 +87,7 @@ fn sample_args() -> crate::ServeArgs {
         top_k: 50,
         top_p: 0.95,
         min_p: 0.2,
+        typical_p: 1.0,
         seed: -1,
         repeat_last_n: 32,
         repeat_penalty: 1.2,

@@ -49,6 +49,9 @@ pub struct ResolvedSamplingParams {
     /// Top-n-sigma logit filter (`0.0` = disabled). Non-negative and finite,
     /// enforced at the request layer.
     pub top_n_sigma: f32,
+    /// Locally typical sampling cutoff (`1.0` = disabled). In `(0.0, 1.0]`
+    /// and finite, enforced at the request layer.
+    pub typical_p: f32,
     pub stop_token_ids: Vec<i32>,
 }
 
@@ -80,6 +83,7 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             // row-filter hook gates on `temperature == 0.0 || top_k == 1`),
             // so the config faithfully mirrors what the request resolved.
             top_n_sigma: params.top_n_sigma,
+            typical_p: params.typical_p,
             stop_token_ids: params.stop_token_ids,
             ..SamplingConfig::greedy()
         }
@@ -101,6 +105,7 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             xtc_probability: params.xtc_probability,
             xtc_threshold: params.xtc_threshold,
             top_n_sigma: params.top_n_sigma,
+            typical_p: params.typical_p,
             stop_token_ids: params.stop_token_ids,
             token_bias: TokenBiasMap::default(),
             // Loop detection defaults to disabled here. The server control

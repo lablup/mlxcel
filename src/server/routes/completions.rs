@@ -42,7 +42,7 @@ use crate::tokenizer::MlxcelTokenizer;
 
 use super::chat::{
     build_generate_options, decode_token, parse_priority_header, structured_error_to_response,
-    validate_top_n_sigma, validate_xtc_params,
+    validate_top_n_sigma, validate_typical_p, validate_xtc_params,
 };
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
@@ -170,6 +170,9 @@ pub async fn completions(
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
     if let Err(message) = validate_top_n_sigma(request.params.top_n_sigma) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
+    if let Err(message) = validate_typical_p(request.params.typical_p) {
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
@@ -491,6 +494,24 @@ mod tests {
             serde_json::from_str(r#"{"model":"m","prompt":"hi","top_n_sigma":1.5}"#).unwrap();
         assert_eq!(request.params.top_n_sigma, Some(1.5));
         assert!(validate_top_n_sigma(request.params.top_n_sigma).is_ok());
+    }
+
+    #[test]
+    fn completions_rejects_zero_typical_p() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","typical_p":0.0}"#).unwrap();
+        assert_eq!(
+            validate_typical_p(request.params.typical_p),
+            Err("typical_p must be in (0.0, 1.0]")
+        );
+    }
+
+    #[test]
+    fn completions_accepts_typical_p_in_range() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","typical_p":0.5}"#).unwrap();
+        assert_eq!(request.params.typical_p, Some(0.5));
+        assert!(validate_typical_p(request.params.typical_p).is_ok());
     }
 
     #[test]

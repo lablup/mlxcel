@@ -415,6 +415,9 @@ pub struct ServerConfig {
     pub default_top_p: f32,
     pub default_top_k: i32,
     pub default_min_p: f32,
+    /// Server-wide default for locally typical sampling (`1.0` = disabled),
+    /// set by `--typical` / `--typical-p` (#1377).
+    pub default_typical_p: f32,
     pub default_repetition_penalty: f32,
     pub default_repetition_context_size: usize,
     pub default_max_tokens: usize,
@@ -742,6 +745,7 @@ impl Default for ServerConfig {
             default_top_p: 0.95,
             default_top_k: 40,
             default_min_p: 0.05,
+            default_typical_p: 1.0,
             default_repetition_penalty: 1.0,
             default_repetition_context_size: 64,
             default_max_tokens: 512,

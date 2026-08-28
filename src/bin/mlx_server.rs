@@ -966,6 +966,15 @@ struct ServerArgs {
     #[arg(long = "min-p", default_value_t = 0.05)]
     min_p: f32,
 
+    /// Default locally typical sampling, parameter p (1.0 = disabled)
+    #[arg(
+        long = "typical",
+        alias = "typical-p",
+        value_name = "N",
+        default_value_t = 1.0
+    )]
+    typical_p: f32,
+
     /// Random seed (-1 = random)
     #[arg(short = 's', long = "seed", default_value_t = -1)]
     seed: i64,
@@ -2095,6 +2104,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         top_p: args.top_p,
         top_p_was_set: long_cli_flag_was_set("top-p"),
         min_p: args.min_p,
+        typical_p: args.typical_p,
         seed: args.seed,
         repeat_last_n: args.repeat_last_n,
         repeat_penalty: args.repeat_penalty,

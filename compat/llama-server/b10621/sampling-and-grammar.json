@@ -820,12 +820,20 @@
       "default": "1.00, 1.0 = disabled",
       "description": "locally typical sampling, parameter p (default: 1.00, 1.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1377,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Server-wide default via --typical / --typical-p on both binaries (mlxcel serve and mlxcel-server), default 1.0 = disabled, matching b10621. Chain position matches b10621 (top_k -> typ_p -> top_p -> min_p): when top_k is active, an idempotent Rust-side top-k mask runs ahead of the typical filter so the typicality statistics come from the renormalized top-k survivors, and the fused chain's own top_k then re-selects the same set. An out-of-range startup value folds to disabled with a warning, mirroring the upstream sampler treating such values as inert.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--typical",
+          "--typical-p"
+        ],
+        "defaults": [
+          "1"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -1462,12 +1470,14 @@
       "field_type": "num",
       "description": "Enable locally typical sampling with parameter p (1.0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1377,
-      "test": null,
-      "notes": null,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "b10621 declares the field with no schema limits; a present value outside the enabled range (0.0, 1.0) resolves to the explicit disabled form 1.0 and still overrides the server-wide default. Chain position matches b10621: typicality is computed over the renormalized top-k survivors (see the --typical entry).",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "typical_p"
+      }
     },
     {
       "kind": "native_request_field",
