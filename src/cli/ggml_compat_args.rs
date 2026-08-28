@@ -330,6 +330,37 @@ pub struct GgmlCompatArgs {
     )]
     pub numa: Option<String>,
 
+    // ── control vectors (#1449) ─────────────────────────────────────────
+    /// b10621 `--control-vector`: add an activation-steering vector.
+    /// Rejected when present: mlxcel's model forwards have no per-layer
+    /// steering-addition path, and a vector accepted but not applied would
+    /// silently change what the deployment believes it is serving.
+    #[arg(long = "control-vector", value_name = "FNAME", hide = true)]
+    pub control_vector: Vec<String>,
+
+    /// b10621 `--control-vector-scaled`: an activation-steering vector with
+    /// an explicit scale. Rejected for the same reason as
+    /// `--control-vector`; the issue's scale-zero baseline criterion applies
+    /// only to an implemented path, which this deliberately is not.
+    #[arg(
+        long = "control-vector-scaled",
+        value_name = "FNAME:SCALE",
+        hide = true
+    )]
+    pub control_vector_scaled: Vec<String>,
+
+    /// b10621 `--control-vector-layer-range START END`: the inclusive layer
+    /// range vectors apply to. Inert without vectors (it configures nothing,
+    /// exactly as upstream), and every vector flag is rejected above, so the
+    /// range alone is accepted silently.
+    #[arg(
+        long = "control-vector-layer-range",
+        value_name = "START END",
+        num_args = 2,
+        hide = true
+    )]
+    pub control_vector_layer_range: Option<Vec<String>>,
+
     // ── model metadata and buffers ──────────────────────────────────────
     /// b10621 `--override-kv`: override GGUF metadata by key.
     #[arg(long = "override-kv", value_name = "KEY=TYPE:VALUE,...", hide = true)]
@@ -733,6 +764,31 @@ impl GgmlCompatArgs {
                  memory its tensors live in",
                 None,
             ));
+        }
+
+        // ── control vectors (#1449) ─────────────────────────────────────
+        // Activation steering changes model behavior, not loading, so a
+        // vector cannot be accepted as a no-op. The layer range alone is
+        // inert (without vectors it configures nothing, exactly as
+        // upstream) and is accepted silently.
+        for (option, values) in [
+            ("--control-vector", &self.control_vector),
+            ("--control-vector-scaled", &self.control_vector_scaled),
+        ] {
+            if let Some(value) = values.first() {
+                return Some(reject_owned(
+                    option,
+                    value,
+                    "mlxcel has no control-vector application path: its model forwards do not \
+                     add per-layer activation-steering directions, and accepting the vector \
+                     without applying it would silently change what the deployment believes it \
+                     is serving",
+                    Some(
+                        "logit-level steering via --lang-bias or the per-request logit_bias \
+                         field, which mlxcel does apply",
+                    ),
+                ));
+            }
         }
 
         // ── model metadata and buffers ──────────────────────────────────
