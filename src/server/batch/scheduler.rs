@@ -8314,6 +8314,8 @@ impl BatchScheduler {
                 // Recorded once here, where the finished sequence's timings are
                 // available, never on the per-token hot path.
                 self.batch_observability.record_request_completion(
+                    result.prompt_tokens,
+                    result.cached_tokens,
                     result.prompt_eval_ms,
                     result.generation_only_ms,
                     result.completion_tokens,

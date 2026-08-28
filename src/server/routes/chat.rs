@@ -478,6 +478,13 @@ pub(crate) async fn non_stream_chat_completion(
     // For non-video models the route guard above already rejected the
     // request, so `prepared.videos` is always empty here unless the
     // model supports video.
+    // Slot accounting (#1440): ties this request to a numbered slot for
+    // GET /slots. Taken before `options` moves into the provider call.
+    let slot = state.slots.begin(
+        &prepared.prompt,
+        super::slots::slot_params_json(&options, false),
+        Some(options.max_tokens as i64),
+    );
     let mut result = state
         .model_provider
         .generate_with_media_and_videos_declared(
@@ -496,6 +503,12 @@ pub(crate) async fn non_stream_chat_completion(
     // human-readable `content` that carries the same answer as text.
     let florence2_result = result.structured_output.take();
 
+    slot.finish(
+        result.prompt_tokens,
+        result.cached_tokens,
+        result.completion_tokens,
+        &result.text,
+    );
     state.metrics.record_request(
         result.prompt_tokens,
         result.completion_tokens,
@@ -951,6 +964,13 @@ async fn stream_chat_completion(
         // task; the guard unregisters the id on drop, whatever exit path
         // the task takes (#1444).
         let _control_registration = control_registration;
+        // Slot accounting (#1440): ties this request to a numbered slot for
+        // GET /slots. Taken before `options` moves into the provider call.
+        let slot = state.slots.begin(
+            &prepared.prompt,
+            super::slots::slot_params_json(&options, true),
+            Some(options.max_tokens as i64),
+        );
         // Send initial chunk with role
         let initial =
             ChatCompletionChunk::initial(request_id_clone.clone(), model_id_clone.clone());
@@ -1018,6 +1038,7 @@ async fn stream_chat_completion(
                 queue_reservation,
                 cancelled,
                 |token, lp_data| {
+                    slot.on_token(&token);
                     // Single lock per token (issue #633): accumulate raw text,
                     // push this token's lp_data, run the stream filter, and drain
                     // the lp buffer under one lock. `lp_data` is pushed before
@@ -1193,6 +1214,15 @@ async fn stream_chat_completion(
                 None,
             );
             let _ = finish_events.json(&chunk);
+        }
+
+        if let Ok(r) = &result {
+            slot.finish(
+                r.prompt_tokens,
+                r.cached_tokens,
+                r.completion_tokens,
+                &r.text,
+            );
         }
 
         // Check for tool calls in accumulated output

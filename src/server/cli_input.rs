@@ -156,6 +156,10 @@ pub struct ServerStartupInput {
     pub no_slots: bool,
     pub props: bool,
     pub metrics: bool,
+    /// `--slot-save-path`: storage root for the `POST /slots/:id_slot`
+    /// save/restore actions (#1440). `None` keeps them disabled, b10621's
+    /// default.
+    pub slot_save_path: Option<PathBuf>,
     pub warmup: bool,
     pub no_warmup: bool,
     pub temperature: f32,
@@ -884,6 +888,7 @@ impl ServerStartupInput {
             chat_template_file: self.chat_template_file,
             enable_slots: resolve_compat_toggle(self.slots, self.no_slots),
             enable_props: self.props,
+            slot_save_path: self.slot_save_path,
             spm_infill: self.infill.spm_infill,
             embd_normalize: embedding_compat.embd_normalize,
             embedding_serving_mode: embedding_serving_mode(&embedding_compat),

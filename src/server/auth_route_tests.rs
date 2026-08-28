@@ -227,6 +227,8 @@ async fn the_observability_endpoints_are_protected() {
 #[tokio::test]
 async fn both_the_v1_and_the_native_route_spellings_are_protected() {
     let protected = [
+        (Method::POST, "/props"),
+        (Method::POST, "/slots/0"),
         (Method::POST, "/v1/chat/completions"),
         (Method::POST, "/chat/completions"),
         (Method::POST, "/v1/completions"),

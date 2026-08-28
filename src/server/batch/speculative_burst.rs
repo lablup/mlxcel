@@ -1774,6 +1774,12 @@ where
     match result {
         Ok(output) => {
             let diagnostics = output.diagnostics.clone();
+            // b10621 spec_decode_* Prometheus counters (#1440).
+            super::observability::spec_counters::record(
+                diagnostics.proposed_tokens,
+                diagnostics.accepted_tokens,
+                diagnostics.rounds,
+            );
             tracing::info!(
                 block_size = diagnostics.block_size,
                 rounds = diagnostics.rounds,

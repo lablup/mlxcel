@@ -42,7 +42,17 @@ mod metrics_audio;
 use metrics_audio::append_audio_preprocess_metrics;
 
 /// GET /metrics -- Prometheus text format
+///
+/// Always mounted; without `--metrics` it answers b10621's own diagnostic
+/// instead of a 404 (#1440). The body opens with the b10621 `llamacpp:`
+/// metric families a llama-server scrape config matches, followed by
+/// mlxcel's native `mlxcel_` families.
 pub async fn metrics(State(state): State<AppState>) -> Response {
+    if !state.config.enable_metrics_endpoint {
+        return super::slots::llama_not_supported(
+            "This server does not support metrics endpoint. Start it with `--metrics`",
+        );
+    }
     let m = &state.metrics;
 
     let requests = m.requests_total.load(Ordering::Relaxed);
@@ -351,14 +361,166 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 
     append_pipeline_metrics(&mut body, &pp_snapshot);
 
+    let mut full = String::new();
+    append_llamacpp_metrics(&mut full, &state);
+    full.push_str(&body);
+
     (
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        body,
+        [
+            (
+                header::CONTENT_TYPE.as_str(),
+                "text/plain; version=0.0.4; charset=utf-8".to_string(),
+            ),
+            (
+                // b10621 sends the server start time on every scrape so
+                // Prometheus can detect counter resets across restarts.
+                "Process-Start-Time-Unix",
+                state.started_at_unix.to_string(),
+            ),
+        ],
+        full,
     )
         .into_response()
+}
+
+/// The b10621 `llamacpp:` metric families (#1440), name-for-name what
+/// `server_task_result_metrics::to_metrics` exports at the pinned commit
+/// (https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-task.cpp),
+/// so a Prometheus scrape config written for llama-server matches mlxcel
+/// unchanged.
+fn append_llamacpp_metrics(body: &mut String, state: &AppState) {
+    let obs = &state.batch_observability;
+    let load = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
+
+    let prompt_tokens = load(&obs.llama_prompt_tokens_processed);
+    let prompt_cached = load(&obs.llama_prompt_tokens_cached);
+    let prompt_us = load(&obs.llama_prompt_us_total);
+    let predicted_tokens = load(&obs.llama_predicted_tokens);
+    let predicted_us = load(&obs.llama_predicted_us_total);
+    let n_decode = load(&obs.llama_decode_calls);
+    let n_tokens_max = load(&obs.llama_n_tokens_max);
+    let busy_slots = load(&obs.llama_busy_slots_total);
+    let (spec_draft, spec_accepted, spec_steps) =
+        crate::server::batch::observability::spec_counters::snapshot();
+
+    // b10621 averages its throughput gauges over the window between two
+    // scrapes (`reset_bucket` after each one); differencing the cumulative
+    // counters against the previous scrape's baseline produces the same
+    // bucket averages without a second set of hot-path counters.
+    let (bucket_prompt_rate, bucket_predict_rate) = {
+        let mut baseline = state
+            .llama_scrape
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let d_prompt_tokens = prompt_tokens.saturating_sub(baseline.prompt_tokens);
+        let d_prompt_us = prompt_us.saturating_sub(baseline.prompt_us);
+        let d_pred_tokens = predicted_tokens.saturating_sub(baseline.predicted_tokens);
+        let d_pred_us = predicted_us.saturating_sub(baseline.predicted_us);
+        baseline.prompt_tokens = prompt_tokens;
+        baseline.prompt_us = prompt_us;
+        baseline.predicted_tokens = predicted_tokens;
+        baseline.predicted_us = predicted_us;
+        let rate = |tokens: u64, us: u64| {
+            if us == 0 {
+                0.0
+            } else {
+                tokens as f64 * 1.0e6 / us as f64
+            }
+        };
+        (
+            rate(d_prompt_tokens, d_prompt_us),
+            rate(d_pred_tokens, d_pred_us),
+        )
+    };
+
+    let counters: [(&str, &str, f64); 10] = [
+        (
+            "prompt_tokens_total",
+            "Number of prompt tokens processed, excluding cached tokens",
+            prompt_tokens as f64,
+        ),
+        (
+            "prompt_tokens_cached_total",
+            "Number of prompt tokens reused from the cache",
+            prompt_cached as f64,
+        ),
+        (
+            "prompt_seconds_total",
+            "Total time spent processing prompts",
+            prompt_us as f64 / 1.0e6,
+        ),
+        (
+            "tokens_predicted_total",
+            "Number of generation tokens processed",
+            predicted_tokens as f64,
+        ),
+        (
+            "tokens_predicted_seconds_total",
+            "Total time spent generating tokens",
+            predicted_us as f64 / 1.0e6,
+        ),
+        (
+            "n_decode_total",
+            "Total number of llama_decode() calls, excluding speculative decoding and multimodal decoding",
+            n_decode as f64,
+        ),
+        (
+            "n_tokens_max",
+            "Largest observed sequence length (prompt + generation)",
+            n_tokens_max as f64,
+        ),
+        (
+            "spec_decode_num_draft_tokens_total",
+            "Speculative: Total draft tokens generated",
+            spec_draft as f64,
+        ),
+        (
+            "spec_decode_num_accepted_tokens_total",
+            "Speculative: Total draft tokens accepted by the target model",
+            spec_accepted as f64,
+        ),
+        (
+            "spec_decode_num_drafts_total",
+            "Speculative: Total speculative decoding verification steps",
+            spec_steps as f64,
+        ),
+    ];
+    let gauges: [(&str, &str, f64); 5] = [
+        (
+            "prompt_tokens_seconds",
+            "Average prompt throughput in tokens/s",
+            bucket_prompt_rate,
+        ),
+        (
+            "predicted_tokens_seconds",
+            "Average generation throughput in tokens/s",
+            bucket_predict_rate,
+        ),
+        (
+            "requests_processing",
+            "Number of requests processing",
+            state.batch_metrics.active_count() as f64,
+        ),
+        (
+            "requests_deferred",
+            "Number of requests deferred",
+            state.batch_metrics.queue_depth() as f64,
+        ),
+        (
+            "n_busy_slots_per_decode",
+            "Average number of busy slots per llama_decode() call",
+            busy_slots as f64 / (n_decode as f64).max(1.0),
+        ),
+    ];
+    let mut add_items = |kind: &str, items: &[(&str, &str, f64)]| {
+        for (name, help, value) in items {
+            let _ = writeln!(body, "# HELP llamacpp:{name} {help}");
+            let _ = writeln!(body, "# TYPE llamacpp:{name} {kind}");
+            let _ = writeln!(body, "llamacpp:{name} {value}");
+        }
+    };
+    add_items("counter", &counters);
+    add_items("gauge", &gauges);
 }
 
 /// Append one per-request histogram family in Prometheus text format.
@@ -496,3 +658,7 @@ fn append_pipeline_metrics(body: &mut String, snap: &PipelineObservabilitySnapsh
         snap.repartition.total_us_total, snap.repartition.total_count
     );
 }
+
+#[cfg(test)]
+#[path = "metrics_llama_tests.rs"]
+mod metrics_llama_tests;

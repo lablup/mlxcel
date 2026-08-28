@@ -198,6 +198,32 @@ pub struct BatchObservability {
     /// reports how often lookahead actually engaged.
     pub decode_lookahead_steps: AtomicU64,
 
+    // -- llama-server b10621 metric families (issue #1440) --
+    /// Prompt tokens actually forwarded through prefill, excluding tokens
+    /// satisfied by the prompt cache (b10621 `prompt_tokens_total`).
+    pub llama_prompt_tokens_processed: AtomicU64,
+    /// Prompt tokens satisfied by the prompt cache
+    /// (b10621 `prompt_tokens_cached_total`).
+    pub llama_prompt_tokens_cached: AtomicU64,
+    /// Cumulative prompt-processing time in microseconds
+    /// (b10621 `prompt_seconds_total`).
+    pub llama_prompt_us_total: AtomicU64,
+    /// Tokens generated across all requests (b10621 `tokens_predicted_total`).
+    pub llama_predicted_tokens: AtomicU64,
+    /// Cumulative generation time in microseconds
+    /// (b10621 `tokens_predicted_seconds_total`).
+    pub llama_predicted_us_total: AtomicU64,
+    /// Non-empty decode steps: the mlxcel analogue of one `llama_decode()`
+    /// call (b10621 `n_decode_total`). Excludes the zero-sized guard steps
+    /// `decode_steps_processed` also counts.
+    pub llama_decode_calls: AtomicU64,
+    /// Sum of batch sizes over non-empty decode steps
+    /// (numerator of b10621 `n_busy_slots_per_decode`).
+    pub llama_busy_slots_total: AtomicU64,
+    /// Largest observed prompt+generation sequence length
+    /// (b10621 `n_tokens_max`).
+    pub llama_n_tokens_max: AtomicU64,
+
     // -- Gauges (point-in-time values set by the scheduler) --
     /// Number of sequences currently in the active decode batch.
     pub current_batch_size: AtomicUsize,
@@ -333,6 +359,14 @@ impl BatchObservability {
             mixed_steps_processed: AtomicU64::new(0),
             prefill_grants_processed: AtomicU64::new(0),
             decode_lookahead_steps: AtomicU64::new(0),
+            llama_prompt_tokens_processed: AtomicU64::new(0),
+            llama_prompt_tokens_cached: AtomicU64::new(0),
+            llama_prompt_us_total: AtomicU64::new(0),
+            llama_predicted_tokens: AtomicU64::new(0),
+            llama_predicted_us_total: AtomicU64::new(0),
+            llama_decode_calls: AtomicU64::new(0),
+            llama_busy_slots_total: AtomicU64::new(0),
+            llama_n_tokens_max: AtomicU64::new(0),
             current_batch_size: AtomicUsize::new(0),
             current_queue_depth: AtomicUsize::new(0),
             cache_pool_active: AtomicUsize::new(0),
@@ -473,6 +507,15 @@ impl BatchObservability {
         self.decode_steps_processed.fetch_add(1, Ordering::Relaxed);
         self.total_decode_tokens
             .fetch_add(batch_size as u64, Ordering::Relaxed);
+        // b10621's `n_decode_total` counts real `llama_decode()` calls; the
+        // zero-sized guard step above never dispatches a forward, so it is
+        // excluded from the llama family while `decode_steps_processed`
+        // keeps its historical meaning.
+        if batch_size > 0 {
+            self.llama_decode_calls.fetch_add(1, Ordering::Relaxed);
+            self.llama_busy_slots_total
+                .fetch_add(batch_size as u64, Ordering::Relaxed);
+        }
     }
 
     /// Record that one decode step was served by the lookahead async_eval
@@ -577,10 +620,32 @@ impl BatchObservability {
     /// not measurable.
     pub fn record_request_completion(
         &self,
+        prompt_tokens: usize,
+        cached_tokens: usize,
         prompt_eval_ms: u64,
         generation_only_ms: u64,
         completion_tokens: usize,
     ) {
+        // llama-server b10621 metric families (#1440): per-request
+        // accumulation matching upstream's `metrics.on_prompt_eval` /
+        // `metrics.on_prediction`, recorded even for a request that produced
+        // no completion tokens (upstream still counts its prompt).
+        self.llama_prompt_tokens_processed.fetch_add(
+            prompt_tokens.saturating_sub(cached_tokens) as u64,
+            Ordering::Relaxed,
+        );
+        self.llama_prompt_tokens_cached
+            .fetch_add(cached_tokens as u64, Ordering::Relaxed);
+        self.llama_prompt_us_total
+            .fetch_add(prompt_eval_ms * 1000, Ordering::Relaxed);
+        self.llama_predicted_tokens
+            .fetch_add(completion_tokens as u64, Ordering::Relaxed);
+        self.llama_predicted_us_total
+            .fetch_add(generation_only_ms * 1000, Ordering::Relaxed);
+        self.llama_n_tokens_max.fetch_max(
+            (prompt_tokens + completion_tokens) as u64,
+            Ordering::Relaxed,
+        );
         if completion_tokens == 0 {
             return;
         }
@@ -1102,9 +1167,9 @@ mod tests {
     fn record_request_completion_populates_histograms() {
         let obs = BatchObservability::new();
         // 200ms TTFT, 100 decode tokens over 1000ms decode -> 100 tok/s.
-        obs.record_request_completion(200, 1000, 100);
+        obs.record_request_completion(108, 0, 200, 1000, 100);
         // 40ms TTFT, 20 tokens over 500ms -> 40 tok/s.
-        obs.record_request_completion(40, 500, 20);
+        obs.record_request_completion(28, 0, 40, 500, 20);
 
         let ttft = obs.ttft_ms_snapshot();
         assert_eq!(ttft.count, 2);
@@ -1131,12 +1196,12 @@ mod tests {
     fn record_request_completion_skips_zero_token_requests() {
         let obs = BatchObservability::new();
         // Zero completion tokens: neither histogram should record anything.
-        obs.record_request_completion(500, 0, 0);
+        obs.record_request_completion(8, 0, 500, 0, 0);
         assert_eq!(obs.ttft_ms_snapshot().count, 0);
         assert_eq!(obs.decode_tok_s_snapshot().count, 0);
 
         // One token with a 0ms decode phase: TTFT records, decode rate skips.
-        obs.record_request_completion(120, 0, 1);
+        obs.record_request_completion(9, 0, 120, 0, 1);
         assert_eq!(obs.ttft_ms_snapshot().count, 1);
         assert_eq!(obs.decode_tok_s_snapshot().count, 0);
     }
@@ -1145,7 +1210,7 @@ mod tests {
     fn histogram_counts_plus_inf_observations() {
         let obs = BatchObservability::new();
         // 40000ms exceeds the largest finite TTFT bound (30000ms).
-        obs.record_request_completion(40_000, 1000, 10);
+        obs.record_request_completion(18, 0, 40_000, 1000, 10);
         let ttft = obs.ttft_ms_snapshot();
         assert_eq!(ttft.count, 1);
         // No finite bucket captured the observation; the +Inf bucket (== count)
@@ -1265,5 +1330,40 @@ mod tests {
         assert!(json.contains("\"reason\":\"layout_constraints\""));
         assert!(json.contains("\"seq_id\":5"));
         assert!(json.contains("\"context_len\":99"));
+    }
+}
+
+/// Process-wide speculative-decoding counters (issue #1440).
+///
+/// b10621's three `spec_decode_*` Prometheus counters accumulate in its
+/// server metrics object. mlxcel's speculative work happens deep inside the
+/// burst and slice drivers, which have no path to the per-server
+/// [`BatchObservability`]; a process hosts exactly one serving worker, so
+/// process statics carry the same information without threading a handle
+/// through every driver. Fed by the DFlash burst driver and the MTP
+/// tick-slice rounds; the opt-in B>1 batched burst drivers
+/// (`MLXCEL_ENABLE_MTP_BATCH`) are noted on the manifest entry.
+pub mod spec_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DRAFT_TOKENS: AtomicU64 = AtomicU64::new(0);
+    static ACCEPTED_TOKENS: AtomicU64 = AtomicU64::new(0);
+    static VERIFY_STEPS: AtomicU64 = AtomicU64::new(0);
+
+    /// Record `proposed` draft tokens offered, `accepted` of them kept, over
+    /// `rounds` verification steps.
+    pub fn record(proposed: usize, accepted: usize, rounds: usize) {
+        DRAFT_TOKENS.fetch_add(proposed as u64, Ordering::Relaxed);
+        ACCEPTED_TOKENS.fetch_add(accepted as u64, Ordering::Relaxed);
+        VERIFY_STEPS.fetch_add(rounds as u64, Ordering::Relaxed);
+    }
+
+    /// `(draft_tokens, accepted_tokens, verify_steps)` totals.
+    pub fn snapshot() -> (u64, u64, u64) {
+        (
+            DRAFT_TOKENS.load(Ordering::Relaxed),
+            ACCEPTED_TOKENS.load(Ordering::Relaxed),
+            VERIFY_STEPS.load(Ordering::Relaxed),
+        )
     }
 }

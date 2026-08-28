@@ -500,13 +500,13 @@ async fn a_restricted_server_reports_healthy_once_its_worker_is_up() {
 }
 
 #[tokio::test]
-async fn an_unrestricted_server_keeps_the_chat_oriented_health_answer() {
-    // The mode-aware branch must not change what any server that exists today
-    // reports; the wider "-m is an embedding checkpoint" case belongs to #1440.
+async fn an_unrestricted_server_answers_the_b10621_health_body() {
+    // #1440 aligned /health with b10621: the ready body is exactly
+    // {"status": "ok"} for restricted and unrestricted servers alike; the
+    // former rich payload lives on GET /slots and GET /metrics now.
     let (status, body) = get(app(true, true, EmbeddingServingMode::Any), "/health").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body["batch"].is_object(), "{body}");
-    assert!(body["context_size"].as_u64().is_some(), "{body}");
+    assert_eq!(body, serde_json::json!({ "status": "ok" }), "{body}");
 }
 
 #[tokio::test]

@@ -139,6 +139,9 @@ pub struct ServerStartupConfig {
     pub enable_props: bool,
     pub enable_metrics: bool,
 
+    /// `--slot-save-path`: storage root for slot save/restore files (#1440).
+    pub slot_save_path: Option<PathBuf>,
+
     /// `--spm-infill`: the Suffix/Prefix/Middle ordering for `POST /infill`
     /// (#1442). Forwarded to [`super::config::ServerConfig::spm_infill`].
     pub spm_infill: bool,
@@ -557,6 +560,7 @@ impl Default for ServerStartupConfig {
             chat_template_file: None,
             enable_slots: true,
             enable_props: false,
+            slot_save_path: None,
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: crate::server::config::EmbeddingServingMode::Any,
@@ -1277,6 +1281,7 @@ pub(super) fn build_server_config(
         n_parallel: startup.n_parallel,
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
+        slot_save_path: startup.slot_save_path.clone(),
         spm_infill: startup.spm_infill,
         embd_normalize: startup.embd_normalize,
         embedding_serving_mode: startup.embedding_serving_mode,
@@ -1623,11 +1628,15 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
     tracing::info!("  POST {prefix}/completion           - llama-server native completion");
     tracing::info!("  POST {prefix}/tokenize             - Tokenize text");
     tracing::info!("  POST {prefix}/detokenize           - Detokenize tokens");
+    tracing::info!("  GET  {prefix}/props                - Server properties");
     if startup.enable_props {
-        tracing::info!("  GET  {prefix}/props                - Server properties");
+        tracing::info!("  POST {prefix}/props                - Update server properties");
     }
     if startup.enable_slots {
         tracing::info!("  GET  {prefix}/slots                - Slot status");
+    }
+    if startup.slot_save_path.is_some() {
+        tracing::info!("  POST {prefix}/slots/:id_slot       - Slot save/restore/erase");
     }
     tracing::info!("  GET  {prefix}/health               - Health check");
 }

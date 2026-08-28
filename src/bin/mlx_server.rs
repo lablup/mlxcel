@@ -969,6 +969,10 @@ struct ServerArgs {
     #[arg(long = "metrics", env = "LLAMA_ARG_ENDPOINT_METRICS")]
     metrics: bool,
 
+    /// Path to save slot kv cache (default: disabled)
+    #[arg(long = "slot-save-path", value_name = "PATH")]
+    slot_save_path: Option<PathBuf>,
+
     /// Enable model warmup on startup
     #[arg(long = "warmup", overrides_with = "_no_warmup", default_value_t = true)]
     warmup: bool,
@@ -2266,6 +2270,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         no_slots: args._no_slots,
         props: args.props,
         metrics: args.metrics,
+        slot_save_path: args.slot_save_path,
         warmup: args.warmup,
         no_warmup: args._no_warmup,
         temperature: args.temp,
