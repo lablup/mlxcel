@@ -84,6 +84,10 @@ pub struct ServerStartupConfig {
     /// b10621 multi-adapter LoRA specification (#1439); empty when
     /// `adapter_path` (the trivial single-adapter case) serves instead.
     pub lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
+    /// Runtime (unfused) LoRA serving state (#1439): `Some` when the
+    /// adapters serve unfused with live scale handles, `None` when they fuse
+    /// at load (`--lora-fuse`, tensor/pipeline parallelism, or no adapters).
+    pub lora_runtime: Option<std::sync::Arc<crate::lora::RuntimeLoraSet>>,
     /// Served model id: the first `--alias` entry, or `None`.
     pub model_alias: Option<String>,
     /// Every `--alias` entry, primary first (issue #1434). Empty when the flag
@@ -552,6 +556,7 @@ impl Default for ServerStartupConfig {
             model_path: PathBuf::new(),
             adapter_path: None,
             lora_adapters: Vec::new(),
+            lora_runtime: None,
             model_alias: None,
             model_aliases: Vec::new(),
             host: "127.0.0.1".to_string(),
@@ -1369,6 +1374,7 @@ pub(super) fn build_server_config(
             .map(crate::server::model_source::parse_model_aliases)
             .unwrap_or_default(),
         lora_adapters: startup.lora_adapters.clone(),
+        lora_runtime: startup.lora_runtime.clone(),
         spm_infill: startup.spm_infill,
         embd_normalize: startup.embd_normalize,
         embedding_serving_mode: startup.embedding_serving_mode,
@@ -1617,6 +1623,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             stop_sequences: None,
             ignore_eos: false,
             priority: crate::server::batch::RequestPriority::Normal,
+            lora_scales: None,
             logprobs: Default::default(),
             reasoning_budget: Default::default(),
             // warmup prompt is the raw literal "Hello", not a

@@ -270,6 +270,7 @@ fn make_slice_sequence_with_id(
         max_tokens,
         eos_token_ids: Vec::new(),
         priority: RequestPriority::Normal,
+        lora_scales: None,
         logprobs_config: LogprobsConfig::default(),
         vlm_embeddings: None,
         images: Vec::new(),

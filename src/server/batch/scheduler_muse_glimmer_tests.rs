@@ -281,6 +281,7 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
         stop_sequences: None,
         ignore_eos: false,
         priority: RequestPriority::Normal,
+        lora_scales: None,
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,

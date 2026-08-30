@@ -1155,6 +1155,10 @@ pub(crate) struct ServeArgs {
     #[arg(long = "lora-init-without-apply")]
     lora_init_without_apply: bool,
 
+    /// Fuse LoRA adapters into the base weights at load (mlxcel-native, zero decode overhead; runtime scale changes and per-request selection are then refused)
+    #[arg(long = "lora-fuse")]
+    lora_fuse: bool,
+
     /// Model alias (shown in API responses instead of directory name)
     #[arg(short = 'a', long, env = "LLAMA_ARG_ALIAS", value_name = "NAME")]
     alias: Option<String>,

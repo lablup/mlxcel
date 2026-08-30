@@ -113,6 +113,7 @@ fn make_test_sequence() -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
         max_tokens: 64,
         eos_token_ids: vec![2],
         priority: RequestPriority::Normal,
+        lora_scales: None,
         logprobs_config: LogprobsConfig::default(),
         vlm_embeddings: None,
         images: Vec::new(),

@@ -20,7 +20,7 @@
 //! not need to remember llama-server compatibility rules.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mlxcel_core::cache::{BatchKvQuantConfig, DEFAULT_KV_GROUP_SIZE, KvQuantScheme};
 use mlxcel_core::lang_analyzer::LangBiasConfig;
@@ -50,6 +50,11 @@ pub struct ServerStartupInput {
     pub lora_scaled: Option<String>,
     /// b10621 `--lora-init-without-apply` (#1439).
     pub lora_init_without_apply: bool,
+    /// mlxcel-native `--lora-fuse` (#1439): fuse adapters into the base
+    /// weights at load (the pre-runtime behavior, zero decode overhead).
+    /// Runtime scale changes are then refused, as they were before the
+    /// unfused path existed.
+    pub lora_fuse: bool,
     /// Raw `-a/--alias` value, still in b10621's comma-separated list form.
     /// [`ServerStartupInput::into_startup_config`] splits it (issue #1434).
     pub model_alias: Option<String>,
@@ -628,24 +633,56 @@ impl ServerStartupInput {
             self.lora_init_without_apply,
         )?;
         crate::lora::multi::validate_adapter_paths(&parsed_lora)?;
+        // The tensor-parallel and pipeline loaders shard or partition the
+        // base weights, which the unfused runtime terms do not follow yet;
+        // adapters there stay on the fused single-adapter channel.
+        let parallel_load = self.tp_size > 1 || self.pp_layers.is_some() || self.pp_auto.is_some();
+        // b10621 keeps adapters as runtime-swappable layers, so the unfused
+        // runtime path is the default whenever the b10621 spellings are used
+        // (#1439). `--lora-fuse` opts back into fusing at load (zero decode
+        // overhead, runtime scale changes refused), and the parallel loaders
+        // imply it.
+        let runtime_lora_mode = !parsed_lora.is_empty()
+            && self.adapter_path.is_none()
+            && !self.lora_fuse
+            && !parallel_load;
+        // The trivial single-adapter fused case still loads through the
+        // pre-#1439 `adapter_path` channel, so that load stays byte-identical
+        // and stays available to the tensor-parallel and legacy sequential
+        // workers, which have no spec-list entry point.
+        let legacy_single = if runtime_lora_mode || self.adapter_path.is_some() {
+            None
+        } else {
+            crate::lora::multi::is_legacy_single(&parsed_lora).map(Path::to_path_buf)
+        };
         let (adapter_path, lora_adapters) = if self.adapter_path.is_some() {
             // Programmatic callers that set adapter_path directly keep it.
             (self.adapter_path.clone(), Vec::new())
-        } else if let Some(single) = crate::lora::multi::is_legacy_single(&parsed_lora) {
-            (Some(single.to_path_buf()), Vec::new())
         } else {
-            (None, parsed_lora)
+            // `lora_adapters` is the specification the inventory route and
+            // the per-request `lora` field are resolved against, so it holds
+            // every operator-named adapter whichever channel loads it. A
+            // legacy single adapter used to leave it empty, which made
+            // `GET /lora-adapters` report `[]` for a server started with
+            // `--lora <path>`.
+            (legacy_single.clone(), parsed_lora)
         };
         // Multi-adapter fusion runs on the standard MLX load path only; the
         // tensor-parallel and pipeline loaders take the single-adapter
         // channel. Refusing here beats fusing nothing silently.
-        if !lora_adapters.is_empty()
-            && (self.tp_size > 1 || self.pp_layers.is_some() || self.pp_auto.is_some())
-        {
+        if legacy_single.is_none() && !lora_adapters.is_empty() && parallel_load {
             anyhow::bail!(
-                "--lora-scaled / multiple --lora adapters are not supported together with                  tensor or pipeline parallelism yet; use a single unscaled --lora adapter"
+                "--lora-scaled / multiple --lora adapters are not supported together with \
+                 tensor or pipeline parallelism yet; use a single unscaled --lora adapter"
             );
         }
+        let lora_runtime = if runtime_lora_mode {
+            Some(std::sync::Arc::new(
+                crate::lora::RuntimeLoraSet::from_specs(&lora_adapters)?,
+            ))
+        } else {
+            None
+        };
 
         // Migration guard for the #1438 semantic change: `--models-dir` used
         // to be the mlxcel model-store root and now selects b10621 router
@@ -994,6 +1031,7 @@ impl ServerStartupInput {
             enable_slots: resolve_compat_toggle(self.slots, self.no_slots),
             enable_props: self.props,
             slot_save_path: self.slot_save_path,
+            lora_runtime,
             router_models_dir: self.router_models_dir,
             models_max: self.models_max,
             models_autoload: self.models_autoload,

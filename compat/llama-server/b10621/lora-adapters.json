@@ -20,7 +20,7 @@
       "state": "supported",
       "issue": 1439,
       "test": "src/lora/multi.rs",
-      "notes": "Comma-separated adapter paths load at scale 1.0 in listed order and fuse into the base weights at model load (#1439); fusion adds deltas, so multi-adapter results are order-independent while logs and failure attribution stay deterministic. The mlxcel-native --adapter spelling remains an alias. Runtime swappability is the POST /lora-adapters entry's business.",
+      "notes": "Comma-separated adapter paths load at scale 1.0 in listed order and serve unfused by default, as low-rank terms the linear layers add per forward, which is what makes the scales runtime-swappable (#1439). Multi-adapter results are order-independent because the terms sum, while logs and failure attribution stay deterministic in listed order. The mlxcel-native --adapter spelling remains an alias for the fused single-adapter load. The mlxcel-native `--lora-fuse` opts back into fusing the adapters into the base weights at load (zero decode overhead, no runtime scale change), which is what the tensor-parallel and pipeline loaders take because they shard the base weights in ways the runtime terms do not follow; that flag is not a b10621 spelling and cannot be reached from a b10621 command line.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -44,13 +44,11 @@
       "default": "disabled",
       "description": "load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1439,
       "test": "src/server/routes/lora_adapters_tests.rs",
-      "notes": "Accepted on both binaries: adapters are validated at load (a broken adapter still fails startup) and GET /lora-adapters reports them at scale 0.0, upstream's initial state. Deferred because the flag's purpose, applying the adapters later through POST /lora-adapters, needs runtime (unfused) LoRA application that mlxcel does not have (#1439).",
-      "divergence": [
-        "The loaded-but-unapplied adapters can never be applied afterwards: POST /lora-adapters refuses the scale change where b10621 activates them at runtime (#1439)."
-      ],
+      "notes": "Accepted on both binaries: the adapters are validated at load (a broken adapter still fails startup), served unfused at user scale 0.0, and reported at 0.0 by `GET /lora-adapters`, upstream's initial state. A term at scale 0.0 adds no operation at all, so the server answers byte-identically to one started without adapters until the scales are raised. The flag's purpose is then honored: `POST /lora-adapters` raises the scales and every request admitted afterwards runs with the adapters applied, with no restart (#1439). The mlxcel-native `--lora-fuse` opts back into fusing the adapters into the base weights at load (zero decode overhead, no runtime scale change), which is what the tensor-parallel and pipeline loaders take because they shard the base weights in ways the runtime terms do not follow; that flag is not a b10621 spelling and cannot be reached from a b10621 command line.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -79,7 +77,7 @@
       "state": "supported",
       "issue": 1439,
       "test": "src/lora/multi.rs",
-      "notes": "Comma-separated FNAME:SCALE pairs (split on the last colon so absolute paths keep their separators) fuse with the user scale multiplied into the adapter's own alpha/r, exactly as upstream multiplies its per-adapter scale. A non-numeric, NaN, or infinite scale fails startup: fusing a non-finite delta would poison every weight the adapter touches (#1439).",
+      "notes": "Comma-separated FNAME:SCALE pairs (split on the last colon so absolute paths keep their separators) set each adapter's initial user scale, which the layers multiply by the adapter's own alpha/r at forward time, exactly the product upstream applies and the same product the fused path bakes in. A non-numeric, NaN, or infinite scale fails startup: a non-finite term would poison every activation the adapter touches (#1439). The scale is the server default a later `POST /lora-adapters` replaces.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -99,7 +97,7 @@
       "state": "supported",
       "issue": 1439,
       "test": "src/server/routes/lora_adapters_tests.rs",
-      "notes": "Reports every configured adapter in b10621's entry shape: id, path, scale (0.0 for a loaded-but-not-applied adapter, upstream's --lora-init-without-apply report), task_name and prompt_prefix (empty: b10621 reads them from GGUF adapter metadata, which MLX adapter directories do not carry; upstream reports empty strings for adapters without that metadata too). The alora invocation keys appear only for alora adapters upstream, and no MLX adapter is one.",
+      "notes": "Reports every configured adapter in b10621's entry shape: id, path, scale (the live server-default scale, so a `POST /lora-adapters` swap is visible here exactly as upstream reports params_base, and 0.0 for a `--lora-init-without-apply` adapter that has not been raised), task_name and prompt_prefix (empty: b10621 reads them from GGUF adapter metadata, which MLX adapter directories do not carry; upstream reports empty strings for adapters without that metadata too). The alora invocation keys appear only for alora adapters upstream, and no MLX adapter is one.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -114,13 +112,11 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1439,
       "test": "src/server/routes/lora_adapters_tests.rs",
-      "notes": "Mounted with upstream's request contract: a non-array body answers the exact \"Request body must be an array\" 400, entries are resolved with upstream's construct_lora_list rule (listed ids set their scale, unlisted drop to 0.0, unknown ids are ignored), and a request resolving to the configuration already in force answers {\"success\": true}.",
-      "divergence": [
-        "A request that changes any adapter scale is refused with a diagnostic naming --lora-scaled and a restart; b10621 applies the new scales at runtime. mlxcel fuses adapters into the weights at load, so a runtime swap requires the unfused-LoRA forward path this entry stays deferred for (#1439)."
-      ],
+      "notes": "Full upstream semantics on the unfused runtime path, which is the default whenever the b10621 spellings are used (#1439). A non-array body answers the exact \"Request body must be an array\" 400; entries resolve with upstream's construct_lora_list rule (listed ids set their scale, unlisted drop to 0.0, unknown ids are ignored); the resolved vector replaces the server default that `GET /lora-adapters` reports and that every subsequently admitted request snapshots. Timing matches upstream's SERVER_TASK_TYPE_SET_LORA: a generation already in flight keeps the snapshot it was admitted under, because the scheduler writes the shared scale handles once per batch from the executing group's snapshot, and b10621's own can_batch_with rule keeps a batch to a single snapshot. The mlxcel-native `--lora-fuse` opts back into fusing the adapters into the base weights at load (zero decode overhead, no runtime scale change), which is what the tensor-parallel and pipeline loaders take because they shard the base weights in ways the runtime terms do not follow; that flag is not a b10621 spelling and cannot be reached from a b10621 command line.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "route": "POST /lora-adapters"
@@ -135,13 +131,11 @@
       "field_type": "json",
       "description": "A list of LoRA adapters to apply to this request. Each entry must have `id` and `scale` fields. Adapters not listed default to scale 0.0",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1439,
       "test": "src/server/routes/native_completion.rs",
-      "notes": "Declared on NativeCompletionRequest and resolved with upstream's rule (listed ids set scales, unlisted drop to 0.0). A value resolving to the fused configuration is accepted as inert, which is also what it means upstream; a different per-request adapter set is refused with a 400 naming GET /lora-adapters and --lora-scaled, following the #1441 policy of refusing rather than silently serving on weights the client did not ask for.",
-      "divergence": [
-        "Per-request adapter selection cannot change the served weights: any non-inert value is refused where b10621 swaps the slot's adapter set for that request (#1439)."
-      ],
+      "notes": "Declared on NativeCompletionRequest and resolved with upstream's rule (listed ids set scales, unlisted drop to 0.0, unknown ids ignored). On the unfused runtime path (the default) the resolved vector becomes this request's own scale snapshot, replacing the server default for its forwards only, so two concurrent requests naming different adapter sets cannot leak into each other: the scheduler refuses to batch mismatched snapshots at every admission point (single prefill, the padded batched-prefill window drain, the speculative burst window and the handoff paths) and applies the executing group's snapshot before its forwards. The mlxcel-native `--lora-fuse` opts back into fusing the adapters into the base weights at load (zero decode overhead, no runtime scale change), which is what the tensor-parallel and pipeline loaders take because they shard the base weights in ways the runtime terms do not follow; that flag is not a b10621 spelling and cannot be reached from a b10621 command line.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "field": "lora"

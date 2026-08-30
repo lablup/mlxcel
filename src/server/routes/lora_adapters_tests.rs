@@ -163,3 +163,87 @@ async fn unknown_ids_are_ignored_like_upstreams_construct_lora_list() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+// ── Runtime (unfused) path (#1439) ──────────────────────────────────────────
+
+fn app_with_runtime(scales: &[f32]) -> (Router, Arc<crate::lora::RuntimeLoraSet>) {
+    let set = Arc::new(crate::lora::RuntimeLoraSet::stub(scales));
+    let adapters = set.adapters.iter().map(|a| a.spec.clone()).collect();
+    let (options_tx, _options_rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig {
+            lora_adapters: adapters,
+            lora_runtime: Some(set.clone()),
+            ..Default::default()
+        },
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("lora-test-model"),
+        batch_metrics,
+    );
+    (create_app(state), set)
+}
+
+/// The runtime path accepts a scale change: the resolved scales become the
+/// server default, the handles the layers read follow at the next batch
+/// application, and GET reports the new configuration (b10621's
+/// `SERVER_TASK_TYPE_SET_LORA` semantics).
+#[tokio::test]
+async fn post_applies_a_scale_change_on_the_runtime_path() {
+    let (app, set) = app_with_runtime(&[1.0, 0.5]);
+
+    let (status, body) = send(app.clone(), Method::POST, r#"[{"id":0,"scale":0.25}]"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["success"], true);
+    // Upstream's construct_lora_list: listed ids set their scale, unlisted
+    // drop to 0.0.
+    assert_eq!(set.server_scales(), vec![0.25, 0.0]);
+
+    let (status, body) = send(app, Method::GET, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["scale"], 0.25);
+    assert_eq!(body[1]["scale"], 0.0);
+}
+
+/// `--lora-init-without-apply` end state: adapters at 0.0 can be activated
+/// later through POST, the flag's entire purpose upstream.
+#[tokio::test]
+async fn init_without_apply_adapters_activate_through_post() {
+    let (app, set) = app_with_runtime(&[0.0]);
+    let (status, body) = send(app.clone(), Method::POST, r#"[{"id":0,"scale":1.0}]"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(set.server_scales(), vec![1.0]);
+    let (_, body) = send(app, Method::GET, "").await;
+    assert_eq!(body[0]["scale"], 1.0);
+}
+
+/// A non-array body keeps upstream's exact 400 on the runtime path too.
+#[tokio::test]
+async fn runtime_path_still_refuses_a_non_array_body() {
+    let (app, set) = app_with_runtime(&[1.0]);
+    let (status, body) = send(app, Method::POST, r#"{"id":0}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["message"], "Request body must be an array");
+    assert_eq!(set.server_scales(), vec![1.0], "scales unchanged");
+}
+
+/// A POST swap changes the server default without touching the applied
+/// handles: those are written per batch from each request's snapshot, so an
+/// in-flight generation keeps its configuration.
+#[tokio::test]
+async fn post_changes_the_default_not_the_live_handles() {
+    let (app, set) = app_with_runtime(&[1.0]);
+    let (status, _) = send(app, Method::POST, r#"[{"id":0,"scale":0.5}]"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(set.server_scales(), vec![0.5]);
+    assert_eq!(
+        set.adapters[0].handle.get(),
+        1.0,
+        "handles change only when the worker applies a batch snapshot"
+    );
+    set.apply_scales(&set.server_scales());
+    assert_eq!(set.adapters[0].handle.get(), 0.5);
+}

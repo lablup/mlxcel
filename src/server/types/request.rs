@@ -1326,10 +1326,12 @@ pub struct NativeCompletionRequest {
     pub samplers: Option<serde_json::Value>,
     /// b10621 `lora`: a per-request adapter configuration, an array of
     /// `{id, scale}` where unlisted adapters drop to scale 0.0 (#1439).
-    /// mlxcel fuses adapters into the weights at load time, so only a value
-    /// resolving to the configuration already in force is accepted as inert;
-    /// anything else is refused with a diagnostic rather than silently served
-    /// on the wrong weights. Held raw because the inert check inspects it.
+    /// On the unfused runtime path (the default) the resolved vector becomes
+    /// this request's own scale snapshot and applies to its forwards only.
+    /// Under `--lora-fuse` the adapters are baked into the weights, so only a
+    /// value resolving to the configuration already in force is accepted as
+    /// inert; anything else is refused with a diagnostic rather than silently
+    /// served on the wrong weights. Held raw because both checks inspect it.
     #[serde(default)]
     pub lora: Option<serde_json::Value>,
     // b10621 per-request speculative fields (#1433). Upstream registers

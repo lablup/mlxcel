@@ -83,8 +83,8 @@ use crate::vlm_runtime::prepared_embedding_refs;
 
 use super::active::ActiveBatch;
 use super::prefill_cohort::{
-    PrefillCohortKind, PrefillRow, batched_window_admits, default_batched_prefill_token_budget,
-    plan_prefill_cohorts,
+    PrefillCohortKind, PrefillRow, batched_window_admits, batched_window_admits_lora,
+    default_batched_prefill_token_budget, plan_prefill_cohorts,
 };
 use super::queue::PrefillQueue;
 use super::sequence::{
@@ -323,6 +323,16 @@ pub struct BatchScheduler {
     // -- Model & tokenizer --
     model: LoadedModel,
     tokenizer: MlxcelTokenizer,
+
+    // -- Runtime LoRA (#1439) --
+    /// The server's runtime-LoRA state, when adapters serve unfused. The
+    /// scheduler applies each executing group's snapshot to the shared
+    /// handles before its forwards, mirroring b10621's once-per-batch
+    /// `common_set_adapter_lora`.
+    pub(crate) lora_runtime: Option<Arc<crate::lora::RuntimeLoraSet>>,
+    /// The snapshot currently written into the handles, so repeated ticks of
+    /// one batch write nothing.
+    pub(crate) lora_applied: Option<Arc<Vec<f32>>>,
 
     // -- Generation infrastructure --
     //

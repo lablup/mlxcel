@@ -396,6 +396,10 @@ struct ServerArgs {
     #[arg(long = "lora-init-without-apply")]
     lora_init_without_apply: bool,
 
+    /// Fuse LoRA adapters into the base weights at load (mlxcel-native, zero decode overhead; runtime scale changes and per-request selection are then refused)
+    #[arg(long = "lora-fuse")]
+    lora_fuse: bool,
+
     /// Host address to bind to (or Unix socket path when --port 0)
     #[arg(long, env = "LLAMA_ARG_HOST", default_value = "127.0.0.1")]
     host: String,
@@ -2354,6 +2358,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         lora: args.lora.clone(),
         lora_scaled: args.lora_scaled.clone(),
         lora_init_without_apply: args.lora_init_without_apply,
+        lora_fuse: args.lora_fuse,
         model_alias: args.alias,
         host: args.host,
         port: args.port,

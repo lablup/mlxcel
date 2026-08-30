@@ -464,6 +464,7 @@ impl BatchScheduler {
             max_tokens: options.max_tokens,
             eos_token_ids: self.config_eos.clone(),
             priority: options.priority,
+            lora_scales: options.lora_scales.clone(),
             logprobs_config: options.logprobs,
             vlm_embeddings,
             images,

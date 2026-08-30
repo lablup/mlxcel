@@ -17,12 +17,14 @@
 //!
 //! b10621 loads any number of adapters from `--lora a,b` (scale 1.0 each) and
 //! `--lora-scaled a:0.5,b:2.0`, keeps them as runtime-swappable layers, and
-//! reports them by id on `GET /lora-adapters`. mlxcel fuses adapters into the
-//! base weights at load time, one after another in the order the flags listed
-//! them (fusion adds deltas, so the result is order-independent, but the
-//! order is still fixed so logs and failure attribution are deterministic).
-//! The parsed specification is what the inventory route reports and what the
-//! per-request `lora` field is validated against.
+//! reports them by id on `GET /lora-adapters`. mlxcel serves them the same
+//! way by default, as unfused low-rank terms behind live scale handles (see
+//! [`super::runtime`]); `--lora-fuse` bakes them into the base weights at load
+//! instead, one after another in the order the flags listed them. Either way
+//! the terms sum, so the result is order-independent, but the order is fixed
+//! so logs and failure attribution are deterministic. The parsed specification
+//! is what the inventory route reports and what the per-request `lora` field
+//! is resolved against.
 
 use std::path::{Path, PathBuf};
 

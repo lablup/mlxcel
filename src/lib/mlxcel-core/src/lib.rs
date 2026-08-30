@@ -3432,6 +3432,8 @@ pub mod memory;
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.
 pub mod rope_proportional;
 
+pub mod runtime_lora;
+
 // Unicode-script classifier and language-steering index for Axis B.
 // Public so that mlxcel (the main crate) and downstream sub-issues (B3–B8)
 // can consume it without further structural changes.

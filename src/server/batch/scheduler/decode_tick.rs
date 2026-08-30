@@ -225,6 +225,15 @@ impl BatchScheduler {
         }
 
         let _span = tracing::info_span!("decode_step", batch_size = seq_ids.len(),).entered();
+        // Apply the batch's runtime-LoRA snapshot (#1439); admission
+        // guarantees every member shares it, so the first member speaks for
+        // the batch.
+        let batch_lora = self
+            .active_batch
+            .iter_sequences()
+            .next()
+            .and_then(|seq| seq.lora_scales.clone());
+        self.ensure_lora_applied(batch_lora.as_ref());
         self.batch_observability.record_decode_step(seq_ids.len());
 
         // Lookahead async_eval pipeline (issue #632). Eligible batches overlap

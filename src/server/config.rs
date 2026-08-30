@@ -211,6 +211,15 @@ pub struct ServerGenerateOptions {
     /// `--keep` and the half-window discard default.
     pub retention: RetentionOverride,
 
+    /// Effective LoRA adapter user scales for this request (#1439): the
+    /// server-default snapshot taken at admission, or the request's own
+    /// `lora` field resolved through upstream's rule. `None` when the server
+    /// has no runtime-LoRA state. Batches only ever contain one snapshot,
+    /// and the executing worker applies it before the batch's forwards, so a
+    /// concurrent `POST /lora-adapters` never changes a generation already
+    /// in flight.
+    pub lora_scales: Option<std::sync::Arc<Vec<f32>>>,
+
     /// per-request Gemma 4 image soft-token budget.
     ///
     /// `None` means "no override": the Gemma 4 preprocessor uses the budget
@@ -538,6 +547,14 @@ pub struct ServerConfig {
     /// legacy single-adapter `adapter_path` plumbing (one adapter, scale 1,
     /// applied) serves the request instead.
     pub lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
+    /// Runtime (unfused) LoRA serving state (#1439). `Some` when adapters
+    /// serve unfused: `GET /lora-adapters` reports its live server scales,
+    /// `POST /lora-adapters` replaces them, requests snapshot them at
+    /// admission, and the worker applies each batch's snapshot to the shared
+    /// handles the layers read. `None` under `--lora-fuse`, parallel
+    /// loaders, or without adapters, where the fused-boundary refusals
+    /// apply.
+    pub lora_runtime: Option<std::sync::Arc<crate::lora::RuntimeLoraSet>>,
     /// `--embd-normalize`: the server-wide embedding normalization, `None`
     /// when the operator did not choose one and the checkpoint's own
     /// `normalize` flag decides (#1452).
@@ -913,6 +930,7 @@ impl Default for ServerConfig {
             slot_save_path: None,
             model_tags: Vec::new(),
             lora_adapters: Vec::new(),
+            lora_runtime: None,
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: EmbeddingServingMode::Any,

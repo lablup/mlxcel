@@ -639,16 +639,17 @@ fn native_samplers_is_the_default_order(value: &serde_json::Value) -> bool {
 /// inert value and refused otherwise, with a message naming the field and what
 /// to use instead, so a `llama-server` request that depends on one fails
 /// loudly here instead of returning a plausible-looking wrong answer.
-/// Refuse a per-request `lora` value that asks for a different adapter
-/// configuration than the one fused at load (#1439).
+/// Validate the per-request `lora` field (#1439).
 ///
-/// b10621 swaps adapter scales per request; mlxcel's adapters are fused into
-/// the weights, so the only honest answers are accepting a value that
-/// resolves to the configuration in force (inert, upstream's own semantics
-/// for that value) and refusing anything else with a diagnostic, instead of
-/// serving the request on weights the client did not ask for. The resolution
-/// rule is upstream's: listed ids set their scale, unlisted adapters drop to
-/// 0.0, unknown ids are ignored.
+/// With the unfused runtime path (the default), the field carries upstream's
+/// full semantics: listed ids set their scale, unlisted adapters drop to 0.0,
+/// unknown ids are ignored, and the resolved snapshot applies to this
+/// request's forwards only (see [`resolve_request_lora_scales`]). Under
+/// `--lora-fuse`, adapters are baked into the weights, so the only honest
+/// answers are accepting a value that resolves to the configuration in force
+/// (inert, upstream's own semantics for that value) and refusing anything
+/// else with a diagnostic, instead of serving the request on weights the
+/// client did not ask for.
 fn reject_non_inert_lora_field(
     state: &AppState,
     request: &NativeCompletionRequest,
@@ -663,6 +664,10 @@ fn reject_non_inert_lora_field(
             .into_response(),
         );
     };
+    if state.config.lora_runtime.is_some() {
+        // Runtime path: every resolvable value is servable per request.
+        return None;
+    }
     let current: Vec<f32> = state
         .config
         .lora_adapters
@@ -675,11 +680,26 @@ fn reject_non_inert_lora_field(
     }
     Some(
         ErrorResponse::new(
-            "per-request LoRA adapter selection is not supported: mlxcel fuses adapters into the model weights at load time, so this request's `lora` value cannot be served. Send the server's current adapter configuration (GET /lora-adapters), or restart with --lora / --lora-scaled for a different one",
+            "per-request LoRA adapter selection is not supported with --lora-fuse: the adapters are fused into the model weights at load time, so this request's `lora` value cannot be served. Send the server's current adapter configuration (GET /lora-adapters), or restart without --lora-fuse",
             "invalid_request_error",
         )
         .into_response(),
     )
+}
+
+/// Resolve the request's `lora` field into the per-request scale snapshot
+/// (#1439), upstream's `construct_lora_list` rule. `None` keeps the
+/// server-default snapshot the options builder took.
+fn resolve_request_lora_scales(
+    config: &ServerConfig,
+    request: &NativeCompletionRequest,
+) -> Option<std::sync::Arc<Vec<f32>>> {
+    config.lora_runtime.as_ref()?;
+    let entries = request.lora.as_ref()?.as_array()?;
+    Some(std::sync::Arc::new(super::lora_adapters::requested_scales(
+        entries,
+        config.lora_adapters.len(),
+    )))
 }
 
 fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option<Response> {
@@ -870,6 +890,14 @@ fn build_native_generate_options_with_live(
         n_keep: Some(request.n_keep.unwrap_or(config.n_keep)),
         n_discard: request.n_discard,
     };
+    // Per-request adapter scales (#1439): the request's own `lora` field
+    // replaces the server-default snapshot the options builder took, for this
+    // request's forwards only. Resolved in this funnel rather than at the
+    // route, so the `#[allow(dead_code)]` test helper sees the same field the
+    // live path does.
+    if let Some(scales) = resolve_request_lora_scales(config, request) {
+        options.lora_scales = Some(scales);
+    }
     options
 }
 

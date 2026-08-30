@@ -41,6 +41,7 @@ fn sample_input() -> ServerStartupInput {
         lora: None,
         lora_scaled: None,
         lora_init_without_apply: false,
+        lora_fuse: false,
         model_alias: Some("alias".to_string()),
         host: "127.0.0.1".to_string(),
         port: 8080,
@@ -2050,4 +2051,119 @@ mod reasoning_template_kwargs {
             "a per-request kwarg outranks both the flag and --chat-template-kwargs"
         );
     }
+}
+
+// ── Runtime vs fused LoRA channel selection (#1439) ─────────────────────────
+
+/// A temporary adapter directory that parses as a LoRA adapter. The startup
+/// path reads `adapter_config.json` (the runtime set needs each adapter's
+/// `alpha / rank`) and validates the directory exists, so a bare path will not
+/// do.
+fn stub_adapter_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mlxcel-lora-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("adapter dir");
+    std::fs::write(
+        dir.join("adapter_config.json"),
+        r#"{"fine_tune_type":"lora","lora_parameters":{"rank":8,"scale":2.0}}"#,
+    )
+    .expect("adapter config");
+    dir
+}
+
+/// The b10621 spellings serve unfused by default: the specification reaches
+/// the inventory route, the shared scale handles exist, and no adapter is
+/// baked into the weights.
+#[test]
+fn b10621_lora_spellings_select_the_runtime_channel() {
+    let dir = stub_adapter_dir("runtime");
+    let mut input = sample_input();
+    input.adapter_path = None;
+    input.lora = Some(dir.to_string_lossy().into_owned());
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert!(
+        startup.lora_runtime.is_some(),
+        "the default b10621 path serves adapters unfused"
+    );
+    assert_eq!(startup.lora_adapters.len(), 1);
+    assert!(
+        startup.adapter_path.is_none(),
+        "the runtime channel never takes the fused single-adapter path"
+    );
+}
+
+/// `--lora-fuse` opts back into fusing, and the single unscaled adapter keeps
+/// the pre-#1439 `adapter_path` load. The specification still reaches
+/// `lora_adapters`, which is what `GET /lora-adapters` reports: leaving it
+/// empty made the inventory answer `[]` for a server started with `--lora`.
+#[test]
+fn lora_fuse_keeps_the_legacy_load_and_still_reports_the_adapter() {
+    let dir = stub_adapter_dir("fused");
+    let mut input = sample_input();
+    input.adapter_path = None;
+    input.lora = Some(dir.to_string_lossy().into_owned());
+    input.lora_fuse = true;
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert!(
+        startup.lora_runtime.is_none(),
+        "--lora-fuse has no runtime scale handles"
+    );
+    assert_eq!(
+        startup.adapter_path.as_deref(),
+        Some(dir.as_path()),
+        "the trivial single-adapter case keeps the pre-#1439 load channel"
+    );
+    assert_eq!(
+        startup.lora_adapters.len(),
+        1,
+        "the inventory route must still see the adapter"
+    );
+}
+
+/// `--lora-init-without-apply` starts every adapter at 0.0 on the runtime
+/// channel, which is exactly upstream's initial state and the only state from
+/// which a later `POST /lora-adapters` can raise them.
+#[test]
+fn init_without_apply_loads_at_zero_on_the_runtime_channel() {
+    let dir = stub_adapter_dir("initzero");
+    let mut input = sample_input();
+    input.adapter_path = None;
+    input.lora = Some(dir.to_string_lossy().into_owned());
+    input.lora_init_without_apply = true;
+    let startup = input.into_startup_config().expect("valid startup input");
+    let runtime = startup.lora_runtime.expect("runtime set");
+    assert_eq!(runtime.server_scales(), vec![0.0]);
+    assert_eq!(runtime.adapters[0].handle.get(), 0.0);
+}
+
+/// A single unscaled adapter still loads under tensor parallelism, on the
+/// fused channel the parallel loaders require. Reporting it must not turn
+/// that into the multi-adapter refusal.
+#[test]
+fn a_single_adapter_under_tensor_parallelism_is_still_accepted() {
+    let dir = stub_adapter_dir("tp");
+    let mut input = sample_input();
+    input.adapter_path = None;
+    input.lora = Some(dir.to_string_lossy().into_owned());
+    input.tp_size = 2;
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert!(startup.lora_runtime.is_none());
+    assert_eq!(startup.adapter_path.as_deref(), Some(dir.as_path()));
+}
+
+/// A scaled adapter under tensor parallelism is still refused: the parallel
+/// loaders take the single-adapter channel only.
+#[test]
+fn a_scaled_adapter_under_tensor_parallelism_is_refused() {
+    let dir = stub_adapter_dir("tpscaled");
+    let mut input = sample_input();
+    input.adapter_path = None;
+    input.lora_scaled = Some(format!("{}:0.5", dir.to_string_lossy()));
+    input.tp_size = 2;
+    let err = input
+        .into_startup_config()
+        .expect_err("a scaled adapter cannot fuse under tensor parallelism");
+    assert!(
+        err.to_string().contains("tensor or pipeline parallelism"),
+        "unexpected error: {err}"
+    );
 }

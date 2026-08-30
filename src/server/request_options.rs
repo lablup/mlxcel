@@ -362,6 +362,13 @@ pub(crate) fn build_server_generate_options_with_live(
         // parts after the helper returns; the raw text-completion endpoints
         // carry no image parts and always leave it `None`.
         image_soft_tokens: None,
+        // Snapshot the server-default adapter scales at admission (#1439);
+        // the native-completion route replaces this when the request carries
+        // its own `lora` field.
+        lora_scales: config
+            .lora_runtime
+            .as_ref()
+            .map(|set| std::sync::Arc::new(set.server_scales())),
     }
 }
 

@@ -199,6 +199,7 @@ fn make_seq_with(
         max_tokens: MAX_TOKENS,
         eos_token_ids: Vec::new(),
         priority: RequestPriority::Normal,
+        lora_scales: None,
         logprobs_config: Default::default(),
         vlm_embeddings: None,
         images: Vec::new(),

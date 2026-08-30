@@ -130,7 +130,7 @@ pub use loading::{
     load_molmo2_xla_vision_reference,
 };
 pub use loading::{
-    context_window_from_config, load_model, load_model_with_adapter,
+    context_window_from_config, load_model, load_model_with_adapter, load_model_with_adapter_specs,
     load_model_with_tensor_parallel, load_qwen3_omni_speech, read_eos_token_ids,
     read_generation_config_defaults, read_model_context_window,
 };

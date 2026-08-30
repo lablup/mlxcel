@@ -34,6 +34,7 @@ fn sample_args() -> crate::ServeArgs {
         adapter: Some("adapters/bar".to_string()),
         lora_scaled: None,
         lora_init_without_apply: false,
+        lora_fuse: false,
         alias: Some("alias".to_string()),
         host: "127.0.0.1".to_string(),
         port: 9000,

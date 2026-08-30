@@ -133,6 +133,7 @@ fn assert_remote_coordinator_matches_dense_baseline(
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
         ignore_eos: false,
+        lora_scales: None,
         priority: RequestPriority::Normal,
         logprobs: Default::default(),
         reasoning_budget: Default::default(),

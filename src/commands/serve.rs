@@ -553,6 +553,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         lora: args.adapter.clone(),
         lora_scaled: args.lora_scaled.clone(),
         lora_init_without_apply: args.lora_init_without_apply,
+        lora_fuse: args.lora_fuse,
         model_alias: args.alias,
         host: args.host,
         port: args.port,

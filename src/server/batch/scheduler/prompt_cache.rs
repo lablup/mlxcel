@@ -769,6 +769,9 @@ impl BatchScheduler {
         let Some((tokens, ctx)) = self.prompt_cache_warmups.pop_front() else {
             return;
         };
+        // Warm-ups compute KV for future requests, which snapshot the server
+        // default; run them under it (#1439).
+        self.ensure_lora_applied(None);
         let Some(store) = self.prompt_cache.clone() else {
             return;
         };

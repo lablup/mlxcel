@@ -19,6 +19,46 @@ impl BatchScheduler {
     // Prefill execution (chunked or full)
     // ------------------------------------------------------------------
 
+    /// Write `snapshot` into the runtime-LoRA handles when it differs from
+    /// what is applied (#1439). `None` (a sequence admitted without a
+    /// snapshot, e.g. a disaggregated handoff) resolves to the server
+    /// default at application time. A no-op without runtime-LoRA state.
+    pub(crate) fn ensure_lora_applied(&mut self, snapshot: Option<&Arc<Vec<f32>>>) {
+        let Some(set) = &self.lora_runtime else {
+            return;
+        };
+        let desired: Arc<Vec<f32>> = match snapshot {
+            Some(scales) => scales.clone(),
+            None => Arc::new(set.server_scales()),
+        };
+        if self
+            .lora_applied
+            .as_ref()
+            .is_some_and(|applied| **applied == *desired)
+        {
+            return;
+        }
+        tracing::debug!("runtime lora: applying snapshot {:?}", desired);
+        set.apply_scales(&desired);
+        self.lora_applied = Some(desired);
+    }
+
+    /// Whether `seq` may run concurrently with the active batch under the
+    /// b10621 lora batching rule (`can_batch_with` requires equal adapter
+    /// sets): true when the batch is empty, there is no runtime-LoRA state,
+    /// or the snapshots match (#1439).
+    pub(crate) fn lora_compatible_with_active(&self, seq_lora: Option<&Arc<Vec<f32>>>) -> bool {
+        if self.lora_runtime.is_none() || self.active_batch.is_empty() {
+            return true;
+        }
+        let active = self
+            .active_batch
+            .iter_sequences()
+            .next()
+            .and_then(|seq| seq.lora_scales.as_ref());
+        batched_window_admits_lora(true, active, seq_lora)
+    }
+
     /// Prefill a sequence. If `prefill_chunk_size > 0` and the prompt
     /// exceeds one chunk, the prefill is split across multiple ticks with
     /// decode interleaving.
@@ -34,6 +74,24 @@ impl BatchScheduler {
         if self.active_batch.is_full() && self.enable_preemption && !self.try_evict_for_preemption()
         {
             // Cannot evict -- skip prefill this tick
+            return;
+        }
+
+        // b10621's lora batching rule (#1439, upstream `can_batch_with`):
+        // a request whose adapter-scale snapshot differs from the active
+        // batch's must not join it. Run a decode step instead so the tick
+        // makes progress and the batch drains toward admitting the head.
+        if let Some(head_lora) = self.prefill_queue.peek_lora_scales()
+            && !self.lora_compatible_with_active(head_lora.as_ref())
+        {
+            tracing::debug!(
+                "runtime lora: deferring prefill of a mismatched-snapshot head ({:?})",
+                head_lora
+            );
+            let ids = self.active_batch.sequence_ids();
+            if !ids.is_empty() {
+                self.execute_decode_step(&ids);
+            }
             return;
         }
 
@@ -78,6 +136,10 @@ impl BatchScheduler {
         // eligible requests and drives them all through the batched
         // round-loop driver in one tick. A window of size 1 falls back
         // to the B=1 burst.
+        // Apply this request's runtime-LoRA snapshot before any forward it
+        // triggers, the speculative burst's self-contained lifecycle
+        // included (#1439).
+        self.ensure_lora_applied(seq.lora_scales.as_ref());
         let seq = match self.try_speculative_burst(seq) {
             // Burst (B=1 or batched) handled the request(s) end-to-end,
             // or the scheduler took ownership of the sequence as a
@@ -211,6 +273,15 @@ impl BatchScheduler {
     /// is instead routed to the normal chunk-aware single-sequence path. `0`
     /// (uncapped) always admits.
     pub(super) fn batched_prefill_admits_head(&self) -> bool {
+        // #1439: a head whose runtime-LoRA snapshot differs from the active
+        // batch's cannot join it at all, batched or not. Refusing here routes
+        // the tick to `execute_prefill`, which owns the defer-and-decode path
+        // that drains the batch until the head can be admitted.
+        if let Some(head_lora) = self.prefill_queue.peek_lora_scales()
+            && !self.lora_compatible_with_active(head_lora.as_ref())
+        {
+            return false;
+        }
         let budget = self.max_batch_prefill_tokens;
         if budget == 0 {
             return true;
@@ -253,6 +324,14 @@ impl BatchScheduler {
         // ([`Self::batched_prefill_admits_head`]) has already kept a head too
         // long to batch out of this path entirely.
         let budget = self.max_batch_prefill_tokens;
+        // #1439: b10621's `can_batch_with` requires an equal adapter set, and
+        // a padded batched forward runs every row under one set of shared
+        // scale handles, so the window stops at the first row whose snapshot
+        // differs from the head's. Those rows stay queued and prefill on a
+        // later tick under their own snapshot; without this the second
+        // request's adapters would silently serve the first one's output.
+        let head_lora: Option<Arc<Vec<f32>>> = self.prefill_queue.peek_lora_scales().flatten();
+        let lora_partitioned = self.lora_runtime.is_some();
         let mut seqs: Vec<SequenceInfo> = Vec::with_capacity(batch_size);
         let mut window_max_len = 0usize;
         while seqs.len() < batch_size {
@@ -260,6 +339,11 @@ impl BatchScheduler {
                 break;
             };
             if !batched_window_admits(seqs.len(), window_max_len, next_len, budget) {
+                break;
+            }
+            let next_lora = self.prefill_queue.peek_lora_scales().flatten();
+            if !batched_window_admits_lora(lora_partitioned, head_lora.as_ref(), next_lora.as_ref())
+            {
                 break;
             }
             let Some(seq) = self.prefill_queue.dequeue() else {
@@ -295,6 +379,10 @@ impl BatchScheduler {
         // ownership of exactly its members. Dispatching cohorts in plan order
         // reproduces window (priority) order across the cohort boundaries.
         let mut slots: Vec<Option<SequenceInfo>> = seqs.into_iter().map(Some).collect();
+        // Every row in the window shares `head_lora` (the drain above kept it
+        // that way), so one application covers every cohort's forwards,
+        // batched and sequential alike (#1439).
+        self.ensure_lora_applied(head_lora.as_ref());
         for cohort in plan {
             match cohort.kind {
                 // Behavior note (#332): a cold row that previously fell back to
@@ -954,6 +1042,15 @@ impl BatchScheduler {
     /// inter-token latency this issue has to measure. There is one source of
     /// truth for "is decode live" and it is the active batch.
     pub(super) fn continue_chunked_prefill(&mut self) -> bool {
+        // Re-apply the parked sequence's runtime-LoRA snapshot (#1439): the
+        // interleaved decode batch may have applied its own between chunks.
+        let chunked_lora = self
+            .chunked_prefill_seq
+            .as_ref()
+            .and_then(|seq| seq.lora_scales.clone());
+        if self.chunked_prefill_seq.is_some() {
+            self.ensure_lora_applied(chunked_lora.as_ref());
+        }
         let mut seq = match self.chunked_prefill_seq.take() {
             Some(s) => s,
             None => return false,

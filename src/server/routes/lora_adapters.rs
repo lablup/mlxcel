@@ -20,11 +20,13 @@
 //! `prompt_prefix`), with a not-applied adapter reported at scale 0.0 exactly
 //! as upstream reports `--lora-init-without-apply`. `POST /lora-adapters`
 //! carries b10621's request contract (an array of `{id, scale}`, unlisted
-//! adapters dropping to 0.0), but mlxcel fuses adapters into the weights at
-//! load time, so only a request that resolves to the configuration already
-//! in force can be acknowledged; anything else is refused with a diagnostic
-//! naming `--lora-scaled` and a restart, the divergence recorded on the
-//! manifest entry.
+//! adapters dropping to 0.0). On the unfused runtime path (the default,
+//! #1439) the resolved scales replace the server default and apply to every
+//! request admitted afterwards, exactly upstream's `SERVER_TASK_TYPE_SET_LORA`
+//! semantics: in-flight generations keep the snapshot they were admitted
+//! with. Under `--lora-fuse` the adapters are baked into the weights, so
+//! only a request that resolves to the configuration already in force can be
+//! acknowledged; anything else is refused with a diagnostic.
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Json, Response};
@@ -32,8 +34,12 @@ use axum::response::{IntoResponse, Json, Response};
 use super::slots::{llama_invalid_request, llama_not_supported};
 use crate::server::AppState;
 
-/// The effective per-adapter scales currently in force.
+/// The effective per-adapter scales currently in force: the runtime set's
+/// live server scales, or the fused-at-load configuration.
 fn current_scales(state: &AppState) -> Vec<f32> {
+    if let Some(set) = &state.config.lora_runtime {
+        return set.server_scales();
+    }
     state
         .config
         .lora_adapters
@@ -60,6 +66,7 @@ pub(crate) fn requested_scales(entries: &[serde_json::Value], adapter_count: usi
 
 /// GET /lora-adapters
 pub async fn get_lora_adapters(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let scales = current_scales(&state);
     let entries: Vec<serde_json::Value> = state
         .config
         .lora_adapters
@@ -69,7 +76,10 @@ pub async fn get_lora_adapters(State(state): State<AppState>) -> Json<serde_json
             serde_json::json!({
                 "id": id,
                 "path": spec.path.to_string_lossy(),
-                "scale": spec.reported_scale(),
+                // The live server scale on the runtime path (a POST swap is
+                // visible here, exactly as upstream reports params_base);
+                // the fused configuration otherwise.
+                "scale": scales.get(id).copied().unwrap_or_else(|| spec.reported_scale()),
                 // b10621 reads these from GGUF adapter metadata; MLX adapter
                 // directories carry neither, so both are truthfully empty.
                 "task_name": "",
@@ -94,6 +104,14 @@ pub async fn post_lora_adapters(
     };
     let current = current_scales(&state);
     let requested = requested_scales(entries, current.len());
+    if let Some(set) = &state.config.lora_runtime {
+        // Runtime path (#1439): the resolved scales become the server
+        // default. Requests admitted afterwards snapshot them; in-flight
+        // generations keep the snapshot they were admitted with, exactly
+        // like upstream's slots.
+        set.set_server_scales(requested);
+        return Json(serde_json::json!({ "success": true })).into_response();
+    }
     if requested == current {
         // The configuration asked for is the configuration in force:
         // acknowledging it is genuinely inert, and it is what upstream
@@ -101,9 +119,9 @@ pub async fn post_lora_adapters(
         return Json(serde_json::json!({ "success": true })).into_response();
     }
     llama_not_supported(
-        "changing LoRA adapter scales at runtime is not supported: mlxcel fuses adapters into \
-         the model weights at load time. Restart the server with --lora-scaled FNAME:SCALE (or \
-         --lora) to serve the requested configuration",
+        "changing LoRA adapter scales at runtime is not supported under --lora-fuse: the \
+         adapters are fused into the model weights at load time. Restart without --lora-fuse, \
+         or with --lora-scaled FNAME:SCALE for a different fused configuration",
     )
 }
 

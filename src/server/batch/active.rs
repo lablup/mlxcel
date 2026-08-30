@@ -165,6 +165,7 @@ mod tests {
             max_tokens: 64,
             eos_token_ids: vec![2],
             priority: crate::server::batch::RequestPriority::Normal,
+            lora_scales: None,
             logprobs_config: Default::default(),
             vlm_embeddings: None,
             images: Vec::new(),

@@ -273,6 +273,11 @@ pub struct SequenceInfo {
     pub eos_token_ids: Vec<i32>,
     /// Request priority for prefill ordering and eviction decisions.
     pub priority: RequestPriority,
+    /// Runtime-LoRA scale snapshot taken at admission (#1439). Sequences
+    /// with different snapshots never share a forward (b10621's
+    /// `can_batch_with` rule); the scheduler applies the executing group's
+    /// snapshot to the shared handles before its forwards.
+    pub lora_scales: Option<std::sync::Arc<Vec<f32>>>,
     /// Log probability configuration for this request.
     pub logprobs_config: LogprobsConfig,
 

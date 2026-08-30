@@ -255,6 +255,7 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
         stop_sequences: None,
         ignore_eos: false,
         priority: RequestPriority::Normal,
+        lora_scales: None,
         logprobs: Default::default(),
         reasoning_budget: Default::default(),
         thinking_enter_block_on_start: false,

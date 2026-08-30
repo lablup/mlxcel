@@ -384,6 +384,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         sampling: mlxcel::SamplingConfig::greedy(),
         stop_sequences: None,
         ignore_eos: false,
+        lora_scales: None,
         priority: mlxcel::server::batch::RequestPriority::Normal,
         logprobs: Default::default(),
         reasoning_budget: Default::default(),
