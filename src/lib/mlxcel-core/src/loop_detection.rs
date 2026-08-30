@@ -29,6 +29,8 @@
 //! zero-overhead no-op that preserves the bit-exact baseline for every model
 //! that does not opt in.
 
+use serde::{Deserialize, Serialize};
+
 /// Hard upper bound on the effective `max_pattern_size` actually scanned by
 /// [`detect_repetition_loop`], regardless of the configured value.
 ///
@@ -59,7 +61,8 @@ pub const MAX_EFFECTIVE_PATTERN_SIZE: usize = 64;
 /// way [`crate::generate::SamplingConfig::token_bias`] /
 /// [`crate::generate::SamplingConfig::stop_token_ids`] keep an empty no-op
 /// baseline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoopDetectionConfig {
     /// Largest N-gram pattern size to scan. `0` disables detection entirely.
     pub max_pattern_size: usize,

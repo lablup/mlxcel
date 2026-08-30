@@ -75,16 +75,22 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::body::Body;
 use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -100,7 +106,10 @@ use crate::distributed::request_tracker::RequestId;
 use crate::distributed::tcp_transport::TcpTransport;
 use crate::distributed::transport::{Transport, TransportBackend};
 use crate::server::ChatTemplateProcessor;
-use crate::server::config::{ServerConfig, ServerGenerateOptions};
+use crate::server::config::{
+    LiveSettings, ReasoningBudgetOverride, ServerConfig, ServerGenerateOptions,
+};
+use crate::server::runtime_settings::{self, KnobSpec, Rejected};
 use crate::server::streaming::{SseKeepAlive, sse_response};
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::request::ChatCompletionRequest;
@@ -165,8 +174,21 @@ pub struct RouterState {
     /// Tokenizer matching the served model.
     pub tokenizer: Arc<MlxcelTokenizer>,
 
+    /// Model directory used to resolve derived language-bias token maps.
+    pub model_path: PathBuf,
+
     /// Server configuration (used for default sampling params etc.).
     pub config: Arc<ServerConfig>,
+
+    /// Immutable startup defaults used as the base of PATCH `replace`.
+    pub startup_live: Arc<LiveSettings>,
+
+    /// Atomically published request-settings snapshot. Writers serialize
+    /// through the lock; readers only hold it long enough to clone the Arc.
+    pub(crate) current_live: Arc<RwLock<Arc<LiveSettings>>>,
+
+    /// Serializes PATCH transactions while derived settings are recomputed.
+    pub(crate) settings_update_lock: Arc<Mutex<()>>,
 
     /// Maximum time to wait for each half of the disaggregated response.
     pub handoff_timeout: Duration,
@@ -184,6 +206,7 @@ impl RouterState {
         reply_to: String,
         chat_template: Arc<ChatTemplateProcessor>,
         tokenizer: Arc<MlxcelTokenizer>,
+        model_path: PathBuf,
     ) -> Result<Self> {
         // Build a registry of ONLY the prefill and decode peers the router can
         // route to. The router itself is deliberately NOT registered: it is a
@@ -249,6 +272,15 @@ impl RouterState {
         );
 
         let prefill_fallback = config.prefill_peers.clone();
+        let mut startup_settings = config.live_settings();
+        startup_settings.resolved_token_bias =
+            crate::server::model_provider::model_worker::resolve_worker_token_bias(
+                startup_settings.lang_bias_config.as_ref(),
+                &tokenizer,
+                &model_path,
+            );
+        let startup_live = Arc::new(startup_settings);
+        let current_live = Arc::new(RwLock::new(startup_live.clone()));
 
         Ok(Self {
             transport,
@@ -262,9 +294,23 @@ impl RouterState {
             decode_hits: Mutex::new(HashMap::new()),
             chat_template,
             tokenizer,
+            model_path,
             config,
+            startup_live,
+            current_live,
+            settings_update_lock: Arc::new(Mutex::new(())),
             handoff_timeout: Duration::from_secs(HANDOFF_TIMEOUT_SECS),
         })
+    }
+
+    /// Clone one immutable settings snapshot without holding the lock across
+    /// prompt rendering, network dispatch, or streaming.
+    #[must_use]
+    pub fn live(&self) -> Arc<LiveSettings> {
+        self.current_live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Select a prefill node for a request, returning both its registry id (when
@@ -577,12 +623,130 @@ async fn router_stats(State(state): State<Arc<RouterState>>) -> Json<serde_json:
     ))
 }
 
+#[derive(Serialize)]
+struct RouterSettingsResponse {
+    schema: Vec<KnobSpec>,
+    current: Map<String, Value>,
+    fingerprint: String,
+}
+
+#[derive(Serialize)]
+struct RouterPatchSettingsResponse {
+    applied: Map<String, Value>,
+    rejected: Vec<Rejected>,
+    current: Map<String, Value>,
+    fingerprint: String,
+}
+
+fn router_settings_response(state: &RouterState) -> RouterSettingsResponse {
+    let live = state.live();
+    RouterSettingsResponse {
+        schema: runtime_settings::schema(&state.config),
+        current: runtime_settings::current(&live, &state.config),
+        fingerprint: runtime_settings::fingerprint(&live),
+    }
+}
+
+async fn router_get_settings(
+    State(state): State<Arc<RouterState>>,
+) -> Json<RouterSettingsResponse> {
+    Json(router_settings_response(&state))
+}
+
+async fn router_patch_settings(
+    State(state): State<Arc<RouterState>>,
+    Json(body): Json<Value>,
+) -> std::result::Result<Json<RouterPatchSettingsResponse>, (StatusCode, Json<Value>)> {
+    let Value::Object(body) = body else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "settings PATCH body must be a JSON object"})),
+        ));
+    };
+    let (op, values) = runtime_settings::parse_patch_body(body)
+        .map_err(|reason| (StatusCode::BAD_REQUEST, Json(json!({"error": reason}))))?;
+
+    let update_state = state.clone();
+    let (result, next, old_values) = tokio::task::spawn_blocking(move || {
+        let _update_guard = update_state
+            .settings_update_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = update_state.live();
+        let mut result = runtime_settings::apply(
+            &update_state.startup_live,
+            &previous,
+            op,
+            &values,
+            &update_state.config,
+        );
+        result.next.resolved_token_bias =
+            crate::server::model_provider::model_worker::resolve_worker_token_bias(
+                result.next.lang_bias_config.as_ref(),
+                &update_state.tokenizer,
+                &update_state.model_path,
+            );
+        let next = Arc::new(result.next.clone());
+        let old_values = runtime_settings::mutable_values(&previous);
+        let mut guard = update_state
+            .current_live
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = next.clone();
+        (result, next, old_values)
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!("router settings update task failed: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "settings update failed"})),
+        )
+    })?;
+    let new_values = runtime_settings::mutable_values(&next);
+    for (name, new_value) in &new_values {
+        let old_value = old_values.get(name).cloned().unwrap_or(Value::Null);
+        if old_value == *new_value {
+            continue;
+        }
+        tracing::info!(
+            setting = name,
+            old = %old_value,
+            new = %new_value,
+            "live server setting updated"
+        );
+    }
+    Ok(Json(RouterPatchSettingsResponse {
+        applied: result.applied,
+        rejected: result.rejected,
+        current: runtime_settings::current(&next, &state.config),
+        fingerprint: runtime_settings::fingerprint(&next),
+    }))
+}
+
+/// API-key middleware for the disaggregated HTTP front. It uses the same
+/// credential parsing and public-path set as the single-model application.
+async fn router_api_key_auth(
+    State(state): State<Arc<RouterState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if state.config.api_keys.is_empty() || super::app::is_public_endpoint(request.uri().path()) {
+        return next.run(request).await;
+    }
+    match super::auth::presented_credential(request.headers()) {
+        Some(presented) if state.config.api_keys.accepts(presented) => next.run(request).await,
+        _ => super::auth::unauthorized_response(),
+    }
+}
+
 /// POST /v1/chat/completions
 async fn router_chat_completions(
     State(state): State<Arc<RouterState>>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
-    match route_chat(state, request).await {
+    let live = state.live();
+    match route_chat(state, live, request).await {
         Ok(resp) => resp,
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -628,7 +792,11 @@ fn has_declared_media(media: super::media::MediaRequestMetadata) -> bool {
 }
 
 /// Core chat routing logic: tokenizes, sends to prefill, merges result.
-async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> Result<Response> {
+async fn route_chat(
+    state: Arc<RouterState>,
+    live: Arc<LiveSettings>,
+    request: ChatCompletionRequest,
+) -> Result<Response> {
     // Admission control first: reject with 503 when the cluster cannot take the
     // request (issue #201), before spending work on template rendering.
     if let Some(resp) = admission_reject(&state) {
@@ -652,12 +820,35 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         .into_response());
     }
 
+    let effective_max_tokens = crate::server::request_options::resolve_server_max_tokens_with_live(
+        &state.config,
+        &live,
+        request.params.max_tokens,
+    );
+    let raw_budget = crate::server::thinking_budget::pick_budget_alias(
+        request.params.thinking_budget_tokens,
+        request.params.thinking_token_budget,
+        request.params.thinking_budget,
+    );
+    let effective_budget = match crate::server::thinking_budget::resolve_request_budget(
+        raw_budget,
+        live.reasoning_budget,
+        effective_max_tokens,
+    ) {
+        Ok(budget) => budget,
+        Err(error) => {
+            return Ok(
+                ErrorResponse::new(error.to_string(), "invalid_request_error").into_response(),
+            );
+        }
+    };
+
     // Render the chat template and reject multimodal requests (the
     // disaggregated path is text-only for pool-backed Fp16 families).
     let prepared = match super::chat_request::prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         false,
         false,
     )
@@ -706,14 +897,15 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
     // Loop-detection amplifier signal (issues #967 and #977): the same
     // tool-shaped prompt derivation as the single-node chat route.
     //
-    // This value is currently inert on this path: `sampling_to_serializable`
-    // does not put `loop_detection` on the wire and
-    // `serving_protocol::sampling_from_serializable` hardcodes the disabled
-    // baseline, so the decode node never runs the detector. It is computed
-    // anyway so the front is correct the day the field is serialized.
     let amplified = crate::server::request_options::chat_carries_loop_amplifier(&request);
-    let opts =
-        super::routes::chat::build_generate_options(&request.params, &state.config, amplified);
+    let mut opts = super::routes::chat::build_generate_options_with_live(
+        &request.params,
+        &state.config,
+        &live,
+        amplified,
+    );
+    opts.reasoning_budget = ReasoningBudgetOverride::Explicit(effective_budget);
+    opts.thinking_enter_block_on_start = primed_open_thinking;
 
     // Assign a request id and dispatch the prefill request through the shared
     // tokenize -> select_prefill -> send body (issue #200). The chat id scheme
@@ -734,7 +926,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         let state2 = state.clone();
         let request_id_str2 = request_id_str.clone();
         let model = request.model.clone();
-        let handoff_timeout = state.handoff_timeout;
+        let handoff_timeout = Duration::from_secs(live.timeout_seconds);
         let max_tokens = opts.max_tokens;
 
         let mut filter = stream_filter;
@@ -897,7 +1089,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             let r = drive_handoff_result(
                 &mut rx,
                 &request_id_str,
-                state.handoff_timeout,
+                Duration::from_secs(live.timeout_seconds),
                 opts.max_tokens,
                 |text| {
                     frame_counted += 1;
@@ -948,7 +1140,8 @@ async fn router_completions(
     State(state): State<Arc<RouterState>>,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
-    match route_completion(state, request).await {
+    let live = state.live();
+    match route_completion(state, live, request).await {
         Ok(resp) => resp,
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -970,13 +1163,9 @@ async fn router_completions(
 ///
 /// # Parity notes
 ///
-/// - `logprobs`, `response_format` (structured output), and explicit
-///   reasoning/thinking budgets are rejected with a 400. The
-///   [`PrefillRequestFrame`] carries only sampling and max_tokens, so the
-///   worker-side behavior these options trigger (per-token logprob data, a
-///   structured-output constraint, reasoning-budget enforcement) cannot be
-///   reproduced on the router path. Rejecting keeps the router consistent with
-///   single-node rather than returning 200 with silently divergent output.
+/// - `logprobs` and `response_format` (structured output) are rejected with a
+///   400 because their worker-side state is not represented by the handoff.
+///   Sampling and reasoning-budget defaults are carried per request.
 /// - `completion_tokens` uses the worker's authoritative generated-token count
 ///   carried over the wire ([`ResultFrame::generated_tokens`], issue #387),
 ///   which is exact even for byte-fallback tokenizers (e.g. Gemma `<0xXX>` byte
@@ -985,7 +1174,11 @@ async fn router_completions(
 ///   `count >= max_tokens` formula the worker uses, so it matches single-node.
 ///   Against a mixed-version cluster where a node predates the wire field, the
 ///   router falls back to counting emitted text pieces (the prior behavior).
-async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -> Result<Response> {
+async fn route_completion(
+    state: Arc<RouterState>,
+    live: Arc<LiveSettings>,
+    request: CompletionRequest,
+) -> Result<Response> {
     // Admission control first: reject with 503 when the cluster cannot take the
     // request (issue #201), before any per-request work.
     if let Some(resp) = admission_reject(&state) {
@@ -1017,24 +1210,11 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         .into_response());
     }
 
-    // Reasoning/thinking-budget enforcement is worker-side and is not carried by
-    // the PrefillRequestFrame, so it cannot be reproduced on the router path.
-    // Reject an explicit budget rather than emit un-budgeted output that
-    // diverges from single-node. A request with no budget alias set still works
-    // (the default unbounded path needs no frame support).
-    if crate::server::thinking_budget::pick_budget_alias(
+    let raw_budget = crate::server::thinking_budget::pick_budget_alias(
         request.params.thinking_budget_tokens,
         request.params.thinking_token_budget,
         request.params.thinking_budget,
-    )
-    .is_some()
-    {
-        return Ok(ErrorResponse::new(
-            "the disaggregated router does not support reasoning/thinking budgets on /v1/completions",
-            "invalid_request_error",
-        )
-        .into_response());
-    }
+    );
 
     let prompt = request.prompt.clone();
     // Same default/override resolution as the single-node completion route.
@@ -1042,7 +1222,26 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
     // Loop-detection amplifier signal (issue #967): `CompletionRequest` has no
     // `tools` field and the `response_format` guard above already rejected any
     // structured-output request with a 400, so neither amplifier can be present.
-    let opts = super::routes::chat::build_generate_options(&request.params, &state.config, false);
+    let mut opts = super::routes::chat::build_generate_options_with_live(
+        &request.params,
+        &state.config,
+        &live,
+        false,
+    );
+    let effective_budget = match crate::server::thinking_budget::resolve_request_budget(
+        raw_budget,
+        live.reasoning_budget,
+        opts.max_tokens,
+    ) {
+        Ok(budget) => budget,
+        Err(error) => {
+            return Ok(
+                ErrorResponse::new(error.to_string(), "invalid_request_error").into_response(),
+            );
+        }
+    };
+    opts.reasoning_budget = ReasoningBudgetOverride::Explicit(effective_budget);
+    opts.thinking_enter_block_on_start = false;
 
     // Assign a request id and dispatch the prefill request through the shared
     // tokenize -> select_prefill -> send body. The completion id format
@@ -1067,7 +1266,7 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         let state2 = state.clone();
         let model = request.model.clone();
         let response_id2 = response_id.clone();
-        let handoff_timeout = state.handoff_timeout;
+        let handoff_timeout = Duration::from_secs(live.timeout_seconds);
         let max_tokens = opts.max_tokens;
 
         tokio::spawn(async move {
@@ -1164,7 +1363,7 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         let r = drive_handoff_result(
             &mut rx,
             &response_id,
-            state.handoff_timeout,
+            Duration::from_secs(live.timeout_seconds),
             opts.max_tokens,
             |piece| {
                 text.push_str(piece);
@@ -1255,13 +1454,24 @@ async fn start_handoff(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ResultFrame>();
     state.pending.lock().unwrap().insert(request_id, tx);
 
+    let mut sampling = sampling_to_serializable(&opts.sampling);
+    sampling.reasoning_budget = match opts.reasoning_budget {
+        ReasoningBudgetOverride::InheritServerDefault | ReasoningBudgetOverride::Explicit(None) => {
+            -1
+        }
+        ReasoningBudgetOverride::Explicit(Some(budget)) => {
+            i32::try_from(budget.cap()).unwrap_or(i32::MAX)
+        }
+    };
+    sampling.thinking_enter_block_on_start = opts.thinking_enter_block_on_start;
+
     // Build the prefill request frame once; re-encode per send attempt so a
     // failover retry can reuse it without requiring the transport message to be
     // cloneable.
     let frame = PrefillRequestFrame {
         request_id,
         prompt_tokens: token_ids,
-        sampling: sampling_to_serializable(&opts.sampling),
+        sampling,
         max_tokens: opts.max_tokens as u64,
         reply_to: state.reply_to.clone(),
         decode_target: decode.as_ref().map(|d| d.addr.clone()),
@@ -1707,12 +1917,27 @@ fn chat_completion_json(
 /// - `POST /v1/chat/completions` - chat completions (streaming and non-streaming)
 /// - `POST /v1/completions` - text completions (streaming and non-streaming)
 pub fn create_router_app(state: Arc<RouterState>) -> Router {
-    Router::new()
+    let mut app = Router::new()
         .route("/health", get(router_health))
         .route("/router/stats", get(router_stats))
         .route("/v1/chat/completions", post(router_chat_completions))
-        .route("/v1/completions", post(router_completions))
-        .with_state(state)
+        .route("/v1/completions", post(router_completions));
+    if state.config.enable_settings_endpoint {
+        app = app
+            .route(
+                "/v1/settings",
+                get(router_get_settings).patch(router_patch_settings),
+            )
+            .route(
+                "/settings",
+                get(router_get_settings).patch(router_patch_settings),
+            );
+    }
+    app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        router_api_key_auth,
+    ))
+    .with_state(state)
 }
 
 #[cfg(test)]

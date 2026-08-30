@@ -21,7 +21,8 @@ use super::{
     resolve_generation_sampling_defaults, resolve_loop_detection_env,
     resolve_parallel_context_size, resolve_remote_pipeline_topology,
     resolve_tensor_parallel_runtime_support, validate_parallel_context_startup,
-    validate_pipeline_parallel_startup, validate_tensor_parallel_startup,
+    validate_pipeline_parallel_startup, validate_settings_endpoint_exposure,
+    validate_tensor_parallel_startup,
 };
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
@@ -67,6 +68,62 @@ fn api_keys_from_the_flag_and_the_file_join_one_set() {
     assert!(resolved.accepts("secret-key"));
     assert!(!resolved.accepts("# comment"));
 
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn settings_endpoint_without_keys_allows_only_local_listeners() {
+    let no_keys = crate::server::ApiKeys::default();
+    for host in [
+        "127.0.0.1",
+        "127.255.255.254",
+        "::1",
+        "[::1]",
+        "localhost",
+        "LOCALHOST",
+    ] {
+        validate_settings_endpoint_exposure(true, host, 8080, &no_keys)
+            .unwrap_or_else(|error| panic!("{host} should be treated as local-only: {error:#}"));
+    }
+    validate_settings_endpoint_exposure(true, "/tmp/mlxcel-settings.sock", 8080, &no_keys)
+        .expect("a Unix domain socket is local-only");
+    validate_settings_endpoint_exposure(true, "/tmp/mlxcel-legacy-socket", 0, &no_keys)
+        .expect("the legacy port-zero Unix socket spelling is local-only");
+}
+
+#[test]
+fn settings_endpoint_without_keys_rejects_non_loopback_listeners() {
+    let no_keys = crate::server::ApiKeys::default();
+    for host in ["0.0.0.0", "::", "[::]", "192.0.2.10", "example.com"] {
+        let error = validate_settings_endpoint_exposure(true, host, 8080, &no_keys)
+            .expect_err("an unauthenticated non-loopback settings endpoint must be rejected");
+        let message = format!("{error:#}");
+        assert!(message.contains("--settings"), "{message}");
+        assert!(message.contains("API key"), "{message}");
+        assert!(message.contains(host), "{message}");
+    }
+}
+
+#[test]
+fn settings_endpoint_allows_external_listener_when_disabled_or_authenticated() {
+    let no_keys = crate::server::ApiKeys::default();
+    validate_settings_endpoint_exposure(false, "0.0.0.0", 8080, &no_keys)
+        .expect("the guard is inactive when the endpoint is disabled");
+
+    let api_keys = crate::server::resolve_api_keys(&["secret".to_string()], &[])
+        .expect("the test key should resolve");
+    validate_settings_endpoint_exposure(true, "0.0.0.0", 8080, &api_keys)
+        .expect("authentication permits a non-loopback settings endpoint");
+}
+
+#[test]
+fn settings_endpoint_comment_only_key_file_fails_before_guard() {
+    let dir = temp_path("settings-empty-api-key");
+    let key_file = dir.join("keys.txt");
+    std::fs::write(&key_file, "# comment only\n\n").unwrap();
+    let error = crate::server::resolve_api_keys(&[], std::slice::from_ref(&key_file))
+        .expect_err("a configured file with no resolved keys must fail startup");
+    assert!(format!("{error:#}").contains("contributed no key"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

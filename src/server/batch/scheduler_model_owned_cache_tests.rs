@@ -230,6 +230,7 @@ fn enqueue(sched: &mut BatchScheduler, prompt_tokens: Vec<i32>) -> mpsc::Receive
         Vec::new(),
         tx,
         Arc::new(AtomicBool::new(false)),
+        true,
     );
     rx
 }

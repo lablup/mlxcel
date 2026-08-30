@@ -234,6 +234,38 @@ fn top_level_help_keeps_model_specific_guidance_in_the_model_catalog() {
 }
 
 #[test]
+fn settings_cli_mlxcel_serve_help_exposes_flag() {
+    let mut command = Cli::command();
+    let help = command
+        .find_subcommand_mut("serve")
+        .expect("serve subcommand")
+        .render_long_help()
+        .to_string();
+
+    assert!(
+        help.contains("--settings"),
+        "`mlxcel serve --help` is missing --settings:\n{help}"
+    );
+}
+
+#[test]
+fn settings_cli_mlxcel_serve_defaults_off_and_explicit_flag_enables() {
+    let default = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo"])
+        .expect("serve defaults should parse");
+    let Commands::Serve(default) = default.command else {
+        panic!("expected serve command");
+    };
+    assert!(!default.settings, "the settings endpoint must default off");
+
+    let enabled = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--settings"])
+        .expect("serve --settings should parse");
+    let Commands::Serve(enabled) = enabled.command else {
+        panic!("expected serve command");
+    };
+    assert!(enabled.settings, "--settings must propagate through clap");
+}
+
+#[test]
 fn embedding_and_reranking_commands_are_discoverable_in_help() {
     let mut command = Cli::command();
     let top_level = command.render_long_help().to_string();

@@ -48,8 +48,8 @@ use mlxcel::server::{
     env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_ubatch_size, long_cli_flag_was_set, resolve_llama_model_source, start_server,
-    superseded_model_notice,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
+    resolve_llama_model_source, start_server, superseded_model_notice,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -1031,6 +1031,10 @@ struct ServerArgs {
     #[arg(long = "metrics", env = "LLAMA_ARG_ENDPOINT_METRICS")]
     metrics: bool,
 
+    /// Enable authenticated GET/PATCH /v1/settings endpoints
+    #[arg(long = "settings")]
+    settings: bool,
+
     /// Path to save slot kv cache (default: disabled)
     #[arg(long = "slot-save-path", value_name = "PATH")]
     slot_save_path: Option<PathBuf>,
@@ -1935,6 +1939,7 @@ fn run_download(args: DownloadArgs) -> anyhow::Result<()> {
 }
 
 fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInput> {
+    env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
     // Translate `--turbo-boundary-v` into the `MLXCEL_KV_BOUNDARY_V_LAYERS`
     // env var before any caller of `mlxcel-core` constructs a cache.
     // mlxcel-core reads this env var on first cache instantiation, and the
@@ -2373,6 +2378,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         no_slots: args._no_slots,
         props: args.props,
         metrics: args.metrics,
+        settings: args.settings,
         slot_save_path: args.slot_save_path,
         router_models_dir: args.models_dir.clone(),
         models_max: args.models_max,
@@ -2535,6 +2541,18 @@ mod tests {
             }
             Self(saved)
         }
+
+        fn unset(keys: &[&'static str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in keys {
+                // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+                unsafe { std::env::remove_var(key) };
+            }
+            Self(saved)
+        }
     }
 
     impl Drop for ScopedEnv {
@@ -2587,6 +2605,40 @@ mod tests {
             "test argv should exercise legacy server-start mode"
         );
         cli.server
+    }
+
+    #[test]
+    fn settings_cli_mlxcel_server_help_exposes_flag() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(
+            help.contains("--settings"),
+            "`mlxcel-server --help` is missing --settings:\n{help}"
+        );
+    }
+
+    #[test]
+    fn settings_cli_mlxcel_server_defaults_off_and_propagates_explicit_flag() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+        let _settings_env = ScopedEnv::unset(&["MLXCEL_ENABLE_SETTINGS_ENDPOINT"]);
+
+        let models_dir = tempfile::tempdir().expect("models directory");
+        let models_dir = models_dir.path().to_string_lossy();
+        let default = parse_server_args(&["mlxcel-server", "--models-dir", &models_dir]);
+        assert!(!default.settings, "the settings endpoint must default off");
+        let default = build_startup_input(default).expect("default startup input");
+        assert!(!default.settings, "the default must remain off downstream");
+
+        let enabled =
+            parse_server_args(&["mlxcel-server", "--models-dir", &models_dir, "--settings"]);
+        assert!(enabled.settings, "--settings must propagate through clap");
+        let enabled = build_startup_input(enabled).expect("enabled startup input");
+        assert!(enabled.settings, "--settings must reach startup input");
     }
 
     #[test]

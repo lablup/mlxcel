@@ -405,6 +405,40 @@ impl std::str::FromStr for ReasoningAliasField {
     }
 }
 
+/// Request-scoped server defaults that can be replaced without rebuilding the
+/// model worker. A request clones one immutable snapshot and keeps it for its
+/// whole lifetime, so a concurrent settings update cannot split prompt
+/// rendering and generation across different defaults.
+#[derive(Debug, Clone)]
+pub struct LiveSettings {
+    /// Pre-resolved language bias carried by requests. Not part of the JSON
+    /// settings surface; it is derived from `lang_bias_config` before publish.
+    pub(crate) resolved_token_bias: mlxcel_core::sampling::TokenBiasMap,
+    pub timeout_seconds: u64,
+    pub default_temperature: f32,
+    pub default_top_p: f32,
+    pub default_top_k: i32,
+    pub default_min_p: f32,
+    pub default_repetition_penalty: f32,
+    pub default_repetition_context_size: usize,
+    pub default_max_tokens: usize,
+    pub default_seed: Option<u64>,
+    pub default_frequency_penalty: f32,
+    pub default_presence_penalty: f32,
+    pub default_dry_multiplier: f32,
+    pub default_dry_base: f32,
+    pub default_dry_allowed_length: usize,
+    pub default_dry_penalty_last_n: usize,
+    pub default_dry_sequence_breakers: Vec<i32>,
+    pub lang_bias_config: Option<LangBiasConfig>,
+    pub reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
+    pub chat_template_kwargs: Option<crate::server::chat_template_kwargs::ChatTemplateKwargs>,
+    pub loop_detection: Option<mlxcel_core::LoopDetectionConfig>,
+    pub max_denoising_steps: Option<usize>,
+    pub diffusion_sampler: String,
+    pub diffusion_threshold: f32,
+}
+
 /// Server configuration derived from CLI-compatible startup arguments.
 ///
 /// Default values intentionally track `llama-server` behavior where practical
@@ -468,6 +502,8 @@ pub struct ServerConfig {
     pub enable_slots_endpoint: bool,
     pub enable_props_endpoint: bool,
     pub enable_metrics_endpoint: bool,
+    /// Opt-in runtime settings management endpoint.
+    pub enable_settings_endpoint: bool,
     /// `--slot-save-path`: directory for `POST /slots/:id_slot` save/restore
     /// files. `None` disables the slot actions, b10621's default (#1440).
     pub slot_save_path: Option<std::path::PathBuf>,
@@ -848,6 +884,7 @@ impl Default for ServerConfig {
             embd_normalize: None,
             embedding_serving_mode: EmbeddingServingMode::Any,
             enable_metrics_endpoint: false,
+            enable_settings_endpoint: false,
             default_temperature: 0.8,
             default_top_p: 0.95,
             default_top_k: 40,
@@ -927,6 +964,41 @@ impl Default for ServerConfig {
             diffusion_threshold: 0.9,
             loop_detection: None,
             model_is_gemma4_family: false,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Build the startup snapshot for request-scoped live settings.
+    #[must_use]
+    pub fn live_settings(&self) -> LiveSettings {
+        LiveSettings {
+            resolved_token_bias: mlxcel_core::sampling::TokenBiasMap::default(),
+            timeout_seconds: crate::server::model_provider::effective_decode_timeout_seconds(
+                self.decode_timeout_seconds,
+            ),
+            default_temperature: self.default_temperature,
+            default_top_p: self.default_top_p,
+            default_top_k: self.default_top_k,
+            default_min_p: self.default_min_p,
+            default_repetition_penalty: self.default_repetition_penalty,
+            default_repetition_context_size: self.default_repetition_context_size,
+            default_max_tokens: self.default_max_tokens,
+            default_seed: self.default_seed,
+            default_frequency_penalty: self.default_frequency_penalty,
+            default_presence_penalty: self.default_presence_penalty,
+            default_dry_multiplier: self.default_dry_multiplier,
+            default_dry_base: self.default_dry_base,
+            default_dry_allowed_length: self.default_dry_allowed_length,
+            default_dry_penalty_last_n: self.default_dry_penalty_last_n,
+            default_dry_sequence_breakers: self.default_dry_sequence_breakers.clone(),
+            lang_bias_config: self.lang_bias_config.clone(),
+            reasoning_budget: self.reasoning_budget,
+            chat_template_kwargs: self.chat_template_kwargs.clone(),
+            loop_detection: self.loop_detection,
+            max_denoising_steps: self.max_denoising_steps,
+            diffusion_sampler: self.diffusion_sampler.clone(),
+            diffusion_threshold: self.diffusion_threshold,
         }
     }
 }

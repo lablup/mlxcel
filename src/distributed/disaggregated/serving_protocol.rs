@@ -48,8 +48,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use mlxcel_core::generate::SamplingConfig;
+use mlxcel_core::sampling::TokenBiasMap;
 
-use crate::distributed::kv_cache_serde::SerializableSamplingState;
+use crate::distributed::kv_cache_serde::{SerializableSamplingState, SerializableTokenBiasEntry};
 use crate::distributed::transport::TransportMessage;
 
 /// Control operation tag for a [`PrefillRequestFrame`].
@@ -227,10 +228,18 @@ pub fn control_parts(message: TransportMessage) -> Result<(String, Bytes)> {
 /// Copy the decode-relevant fields of a live [`SamplingConfig`] into the
 /// serializable mirror carried on the wire.
 ///
-/// The server-wide `token_bias` map is intentionally dropped: it is a node-local
-/// policy applied at sampling time, not a per-request handoff field, and both
-/// nodes resolve their own.
 pub fn sampling_to_serializable(config: &SamplingConfig) -> SerializableSamplingState {
+    let mut token_bias: Vec<_> = config
+        .token_bias
+        .iter()
+        .map(|(&token_id, &bias)| SerializableTokenBiasEntry {
+            token_id,
+            bias_bits: bias.to_bits(),
+            byte_fragment: config.token_bias.is_byte_fragment(token_id),
+        })
+        .collect();
+    token_bias.sort_unstable_by_key(|entry| entry.token_id);
+
     SerializableSamplingState {
         temperature: config.temperature,
         top_k: config.top_k,
@@ -249,14 +258,25 @@ pub fn sampling_to_serializable(config: &SamplingConfig) -> SerializableSampling
         typical_p: config.typical_p,
         penalty_last_n: config.penalty_last_n,
         stop_token_ids: config.stop_token_ids.clone(),
+        token_bias,
+        loop_detection: config.loop_detection,
+        reasoning_budget: -1,
+        thinking_enter_block_on_start: false,
     }
 }
 
 /// Reconstruct a live [`SamplingConfig`] from the serializable wire mirror.
-///
-/// The inverse of [`sampling_to_serializable`]; `token_bias` is left at its
-/// default (the receiving node applies its own server-wide bias, if any).
 pub fn sampling_from_serializable(state: &SerializableSamplingState) -> SamplingConfig {
+    let mut token_bias = TokenBiasMap::new();
+    for entry in &state.token_bias {
+        let bias = f32::from_bits(entry.bias_bits);
+        if entry.byte_fragment {
+            token_bias.insert_byte_fragment(entry.token_id, bias);
+        } else {
+            token_bias.insert(entry.token_id, bias);
+        }
+    }
+
     SamplingConfig {
         temperature: state.temperature,
         top_k: state.top_k,
@@ -275,17 +295,14 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         typical_p: state.typical_p,
         penalty_last_n: state.penalty_last_n,
         stop_token_ids: state.stop_token_ids.clone(),
-        token_bias: Default::default(),
-        // Loop detection is not yet serialized across the disaggregated
-        // prefill/decode handoff; the decode node keeps the disabled baseline.
-        // Wiring it into `SerializableSamplingState` is a follow-up.
-        loop_detection: Default::default(),
-        // XTC is likewise not yet part of the wire frame; the decode node
+        token_bias,
+        loop_detection: state.loop_detection,
+        // XTC is not yet part of the wire frame; the decode node
         // keeps the disabled baseline (`xtc_probability == 0.0`) until this
-        // is wired into `SerializableSamplingState` as a follow-up. The same
-        // gap applies to `ignore_eos` (#1436): it is delivered through the
-        // node-local token-bias map, which this frame deliberately drops, so
-        // a decode node continues honoring EOS after a handoff.
+        // is wired into `SerializableSamplingState` as a follow-up. The
+        // request-level `ignore_eos` flag (#1436) is likewise not represented
+        // by this mirror; carrying the already-resolved token-bias map preserves
+        // language bias but does not synthesize EOS suppression on this path.
         xtc_probability: Default::default(),
         xtc_threshold: Default::default(),
         xtc_special_token_ids: Default::default(),

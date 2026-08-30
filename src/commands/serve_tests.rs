@@ -86,6 +86,7 @@ fn sample_args() -> crate::ServeArgs {
         _no_slots: true,
         props: true,
         metrics: false,
+        settings: false,
         slot_save_path: None,
         model_store_root: None,
         models_dir: None,
@@ -220,6 +221,17 @@ fn build_startup_input_preserves_edge_flags_for_normalization() {
         vec!["\n".to_string(), "\t".to_string()]
     );
     assert_eq!(input.decode_storage_backend, None);
+}
+
+#[test]
+fn settings_cli_build_startup_input_defaults_off_and_propagates_enablement() {
+    let default = build_startup_input(sample_args()).expect("default startup input");
+    assert!(!default.settings, "the settings endpoint must default off");
+
+    let mut args = sample_args();
+    args.settings = true;
+    let enabled = build_startup_input(args).expect("enabled startup input");
+    assert!(enabled.settings, "--settings must reach startup input");
 }
 
 #[test]

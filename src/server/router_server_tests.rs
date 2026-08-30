@@ -25,7 +25,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
-use super::{RouterServerState, create_router_app};
+use super::{
+    RouterServerState, buffer_dispatch_body, create_router_app, dispatch_model_name, parse_query,
+};
 use crate::downloader::DownloadHooks;
 use crate::server::ServerStartupConfig;
 use crate::server::config::ServerConfig;
@@ -378,6 +380,87 @@ async fn dispatch_refusals_match_the_proxy_contract() {
     let (status, body) = send(app, Method::GET, "/slots?model=alpha", "", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["message"], "model is not loaded");
+}
+
+#[tokio::test]
+async fn dispatch_get_patch_model_free_requests_require_a_query_model() {
+    let root = temp_models_dir("dispatch-model-free");
+    add_fake_model(&root, "alpha");
+    let app = router_app_with(root, ServerConfig::default(), false);
+
+    for (method, path, payload) in [
+        (Method::GET, "/slots", ""),
+        (Method::PATCH, "/v1/settings", r#"{"temperature":0.25}"#),
+    ] {
+        let (status, body) = send(app.clone(), method.clone(), path, payload, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {body}");
+        assert_eq!(
+            body["error"]["message"], "model name is missing from the request",
+            "{method} {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dispatch_get_patch_api_key_guards_query_selected_models() {
+    let root = temp_models_dir("dispatch-auth");
+    add_fake_model(&root, "alpha");
+    let config = ServerConfig {
+        api_keys: crate::server::resolve_api_keys(&["router-key".to_string()], &[]).expect("keys"),
+        ..Default::default()
+    };
+    let app = router_app_with(root, config, false);
+
+    for (method, path, payload) in [
+        (Method::GET, "/slots?model=alpha", ""),
+        (
+            Method::PATCH,
+            "/v1/settings?model=alpha",
+            r#"{"temperature":0.25}"#,
+        ),
+    ] {
+        let (status, _) = send(app.clone(), method.clone(), path, payload, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+
+        let (status, body) = send(
+            app.clone(),
+            method.clone(),
+            path,
+            payload,
+            Some("router-key"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {body}");
+        assert_eq!(
+            body["error"]["message"], "model is not loaded",
+            "{method} {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dispatch_get_patch_patch_forwards_the_body_and_uses_the_query_model() {
+    let query = parse_query(Some("model=alpha"));
+    let payload = br#"{"model":"body-model","temperature":0.25}"#;
+    let body = buffer_dispatch_body(&Method::PATCH, Body::from(payload.as_slice()))
+        .await
+        .expect("PATCH body must fit within the dispatch cap");
+
+    assert_eq!(body.as_ref(), payload);
+    assert_eq!(
+        dispatch_model_name(&Method::PATCH, &query, &body),
+        "alpha",
+        "PATCH model selection must come from the query, not the JSON body"
+    );
+
+    let get_body = buffer_dispatch_body(&Method::GET, Body::from("not forwarded"))
+        .await
+        .expect("GET has no buffered dispatch body");
+    assert!(get_body.is_empty());
+    assert_eq!(
+        dispatch_model_name(&Method::GET, &query, &get_body),
+        "alpha"
+    );
 }
 
 #[tokio::test]

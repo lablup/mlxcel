@@ -78,6 +78,10 @@ fn test_sampling_state() -> SerializableSamplingState {
         typical_p: 1.0,
         penalty_last_n: -1,
         stop_token_ids: vec![2],
+        token_bias: Vec::new(),
+        loop_detection: Default::default(),
+        reasoning_budget: -1,
+        thinking_enter_block_on_start: false,
     }
 }
 

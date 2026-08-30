@@ -18,7 +18,7 @@
 //! `POST /models/load`, `POST /models/unload`, `GET /models/sse`, the router
 //! `GET /props`, `/health`) and dispatches every other request into the pool
 //! entry named by the request's `model` (JSON body field on POST, `?model=`
-//! query on GET), exactly upstream's `proxy_post` / `proxy_get` contract:
+//! query on GET/PATCH), exactly upstream's `proxy_post` / `proxy_get` contract:
 //! a missing name, an unknown name, and a not-loaded model with autoload off
 //! answer upstream's own 400s. CORS and API-key authentication run once at
 //! this level; the dispatched sub-apps run without a CORS layer so the
@@ -393,24 +393,38 @@ fn parse_query(query: Option<&str>) -> HashMap<String, String> {
 }
 
 /// The fallback dispatcher: b10621 `proxy_post` / `proxy_get` in-process.
+fn dispatch_forwards_body(method: &Method) -> bool {
+    method == Method::POST || method == Method::PATCH
+}
+
+async fn buffer_dispatch_body(method: &Method, body: Body) -> Result<axum::body::Bytes, Response> {
+    if !dispatch_forwards_body(method) {
+        return Ok(axum::body::Bytes::new());
+    }
+    axum::body::to_bytes(body, DISPATCH_BODY_CAP)
+        .await
+        .map_err(|_| llama_invalid_request("request body too large"))
+}
+
+fn dispatch_model_name(method: &Method, query: &HashMap<String, String>, body: &[u8]) -> String {
+    if method == Method::POST {
+        body_model_name(body).unwrap_or_default()
+    } else {
+        query.get("model").cloned().unwrap_or_default()
+    }
+}
+
 async fn dispatch(state: RouterServerState, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let query = parse_query(parts.uri.query());
     let autoload = is_autoload(&state, &query);
 
-    let is_post = parts.method == Method::POST;
-    let (name, body_bytes) = if is_post {
-        let bytes = match axum::body::to_bytes(body, DISPATCH_BODY_CAP).await {
-            Ok(bytes) => bytes,
-            Err(_) => return llama_invalid_request("request body too large"),
-        };
-        (body_model_name(&bytes).unwrap_or_default(), bytes)
-    } else {
-        (
-            query.get("model").cloned().unwrap_or_default(),
-            axum::body::Bytes::new(),
-        )
+    let forwards_body = dispatch_forwards_body(&parts.method);
+    let body_bytes = match buffer_dispatch_body(&parts.method, body).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
+    let name = dispatch_model_name(&parts.method, &query, &body_bytes);
 
     let entry = match state.pool.resolve(&name, autoload) {
         Ok(entry) => entry,
@@ -423,7 +437,7 @@ async fn dispatch(state: RouterServerState, request: Request<Body>) -> Response 
     }
 
     let rebuilt = Request::from_parts(parts, Body::from(body_bytes));
-    state.pool.dispatch(&entry, rebuilt, is_post).await
+    state.pool.dispatch(&entry, rebuilt, forwards_body).await
 }
 
 async fn dispatch_fallback(
@@ -495,12 +509,11 @@ mod router_server_tests;
 /// build the pool, and serve the b10621 router surface (issue #1438).
 /// Reached from [`super::startup::start_server`] when `--models-dir` or
 /// `--models-preset` is set and no model argument was given.
-pub async fn run_router_server(startup: super::ServerStartupConfig) -> anyhow::Result<()> {
+pub async fn run_router_server(
+    startup: super::ServerStartupConfig,
+    api_keys: super::ApiKeys,
+) -> anyhow::Result<()> {
     let models_dir = startup.router_models_dir.clone();
-    let api_keys = super::resolve_api_keys(&startup.api_keys, &startup.api_key_files)?;
-    if !api_keys.is_empty() {
-        tracing::info!("API-key authentication enabled ({} keys)", api_keys.len());
-    }
 
     // b10621 loads INI presets per model; a parse error or untranslatable
     // key fails startup rather than serving un-preset models (#1438).

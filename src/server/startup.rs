@@ -148,6 +148,8 @@ pub struct ServerStartupConfig {
     pub enable_slots: bool,
     pub enable_props: bool,
     pub enable_metrics: bool,
+    /// `--settings`: expose the authenticated live-settings management API.
+    pub enable_settings: bool,
 
     /// `--slot-save-path`: storage root for slot save/restore files (#1440).
     pub slot_save_path: Option<PathBuf>,
@@ -603,6 +605,7 @@ impl Default for ServerStartupConfig {
             embedding_serving_mode: crate::server::config::EmbeddingServingMode::Any,
             pooling: None,
             enable_metrics: false,
+            enable_settings: false,
             warmup: true,
             temperature: 0.8,
             temperature_was_set: false,
@@ -1332,6 +1335,7 @@ pub(super) fn build_server_config(
         n_parallel: startup.n_parallel,
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
+        enable_settings_endpoint: startup.enable_settings,
         slot_save_path: startup.slot_save_path.clone(),
         model_tags: startup
             .tags
@@ -2102,6 +2106,43 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
     Ok(())
 }
 
+fn is_loopback_bind_host(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn validate_settings_endpoint_exposure(
+    enabled: bool,
+    host: &str,
+    port: u16,
+    api_keys: &crate::server::ApiKeys,
+) -> Result<()> {
+    if !enabled || !api_keys.is_empty() {
+        return Ok(());
+    }
+
+    let resolution = crate::server::transport::resolve_listen_target(host, port)?;
+    let local_only = match &resolution.target {
+        crate::server::transport::ListenTarget::Unix(_) => true,
+        crate::server::transport::ListenTarget::Tcp { host, .. } => is_loopback_bind_host(host),
+    };
+    if local_only {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "--settings exposes live server configuration and requires at least one resolved API key \
+         when --host {host:?} is not loopback. Configure --api-key or --api-key-file, bind to \
+         127.0.0.1, ::1, or localhost, or use a Unix domain socket"
+    )
+}
+
 /// Start the server with the given startup configuration.
 ///
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
@@ -2130,6 +2171,33 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
 
+    // Resolve credentials before either router-mode early return. Security
+    // checks must use the actual parsed keys: a configured key file may contain
+    // only comments and blank lines, which is still an unauthenticated server.
+    let api_keys = crate::server::resolve_api_keys(&startup.api_keys, &startup.api_key_files)?;
+    validate_settings_endpoint_exposure(
+        startup.enable_settings,
+        &startup.host,
+        startup.port,
+        &api_keys,
+    )?;
+    if !api_keys.is_empty() {
+        // Never the key material itself: a count is all an operator needs to
+        // confirm the file was read, and it is all a log should ever carry.
+        tracing::info!("API-key authentication enabled ({} keys)", api_keys.len());
+    } else if matches!(
+        startup.cors_policy.origins,
+        crate::server::OriginPolicy::Wildcard
+    ) {
+        // Upstream emits the same warning at startup: an origin policy of `*`
+        // with no API key is reachable by any page in the browser.
+        tracing::warn!(
+            "CORS is set to allow all origins ('*') and no API key is set; this can be a \
+             security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / \
+             --allowed-origins"
+        );
+    }
+
     // b10621 router mode: no model argument plus `--models-dir` or
     // `--models-preset` serves the model-management surface instead of
     // loading one checkpoint (#1438). Preset files are parsed and applied
@@ -2138,7 +2206,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     if startup.model_path.as_os_str().is_empty()
         && (startup.router_models_dir.is_some() || startup.models_preset.is_some())
     {
-        return crate::server::router_server::run_router_server(startup).await;
+        return crate::server::router_server::run_router_server(startup, api_keys).await;
     }
 
     // Outside router mode `--models-preset` steers nothing; accepting and
@@ -2349,23 +2417,6 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // -- Distributed mode initialization --
     let distributed = resolve_distributed_startup(&startup).await?;
 
-    let api_keys = crate::server::resolve_api_keys(&startup.api_keys, &startup.api_key_files)?;
-    if !api_keys.is_empty() {
-        // Never the key material itself: a count is all an operator needs to
-        // confirm the file was read, and it is all a log should ever carry.
-        tracing::info!("API-key authentication enabled ({} keys)", api_keys.len());
-    } else if matches!(
-        startup.cors_policy.origins,
-        crate::server::OriginPolicy::Wildcard
-    ) {
-        // Upstream emits the same warning at startup: an origin policy of `*`
-        // with no API key is reachable by any page in the browser.
-        tracing::warn!(
-            "CORS is set to allow all origins ('*') and no API key is set; this can be a \
-             security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / \
-             --allowed-origins"
-        );
-    }
     let mut config = build_server_config(&startup, api_keys);
 
     // Vertex AI compat routes (#1456): recorded on the config so the router
@@ -2514,6 +2565,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             reply_to,
             chat_template_arc,
             tokenizer_arc,
+            startup.model_path.clone(),
         )?);
         crate::server::router_front::spawn_result_demux(state.clone());
         crate::server::router_front::spawn_health_monitor(state.clone());

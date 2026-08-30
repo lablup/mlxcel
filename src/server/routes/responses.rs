@@ -35,7 +35,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::server::AppState;
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::conversation_store::ConversationItem;
@@ -59,16 +58,19 @@ use crate::server::types::responses_response::{
     ResponseStatus,
 };
 use crate::server::types::responses_stream::ResponseStreamEvent;
+use crate::server::{AppState, LiveSettings};
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
     super::generation_error_to_response(err)
 }
 
 use super::chat::{
-    build_generate_options, build_prompt_cache_request_context, parse_priority_header,
+    build_generate_options_with_live, build_prompt_cache_request_context, parse_priority_header,
     validate_top_n_sigma, validate_typical_p, validate_xtc_params,
 };
-use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
+use crate::server::request_options::{
+    chat_carries_loop_amplifier, resolve_server_max_tokens_with_live,
+};
 
 /// POST /v1/responses
 pub async fn create_response(
@@ -76,6 +78,7 @@ pub async fn create_response(
     headers: HeaderMap,
     Json(request): Json<CreateResponseRequest>,
 ) -> Response {
+    let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -152,29 +155,24 @@ pub async fn create_response(
     };
 
     // Resolve thinking budget the same way the chat path does.
-    let effective_max_tokens =
-        resolve_server_max_tokens(&state.config, translated.chat_request.params.max_tokens);
+    let effective_max_tokens = resolve_server_max_tokens_with_live(
+        &state.config,
+        &live,
+        translated.chat_request.params.max_tokens,
+    );
     let raw_budget = pick_budget_alias(
         translated.chat_request.params.thinking_budget_tokens,
         translated.chat_request.params.thinking_token_budget,
         translated.chat_request.params.thinking_budget,
     );
-    let budget_override = match resolve_request_budget(
-        raw_budget,
-        state.config.reasoning_budget,
-        effective_max_tokens,
-    ) {
-        Ok(eff) => {
-            if raw_budget.is_some() {
-                ReasoningBudgetOverride::Explicit(eff)
-            } else {
-                ReasoningBudgetOverride::InheritServerDefault
+    let budget_override =
+        match resolve_request_budget(raw_budget, live.reasoning_budget, effective_max_tokens) {
+            Ok(effective) => ReasoningBudgetOverride::Explicit(effective),
+            Err(err) => {
+                return ErrorResponse::new(err.to_string(), "invalid_request_error")
+                    .into_response();
             }
-        }
-        Err(err) => {
-            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
-        }
-    };
+        };
 
     let priority = parse_priority_header(&headers);
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
@@ -189,6 +187,7 @@ pub async fn create_response(
         };
         stream_create_response(
             state,
+            live,
             request,
             translated,
             response_id,
@@ -202,6 +201,7 @@ pub async fn create_response(
     } else {
         non_stream_create_response(
             state,
+            live,
             request,
             translated,
             response_id,
@@ -217,6 +217,7 @@ pub async fn create_response(
 #[allow(clippy::too_many_arguments)]
 async fn non_stream_create_response(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: CreateResponseRequest,
     translated: crate::server::responses_translator::TranslatedRequest,
     response_id: String,
@@ -237,7 +238,7 @@ async fn non_stream_create_response(
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &translated.chat_request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -252,8 +253,12 @@ async fn non_stream_create_response(
     // translator maps the tool fields onto the chat request. Structured output
     // alone no longer arms the family default.
     let amplified = chat_carries_loop_amplifier(&translated.chat_request);
-    let mut options =
-        build_generate_options(&translated.chat_request.params, &state.config, amplified);
+    let mut options = build_generate_options_with_live(
+        &translated.chat_request.params,
+        &state.config,
+        &live,
+        amplified,
+    );
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
@@ -267,6 +272,7 @@ async fn non_stream_create_response(
     // chat path.
     options.prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -282,13 +288,14 @@ async fn non_stream_create_response(
     );
     let result = state
         .model_provider
-        .generate_with_media_and_videos_declared(
+        .generate_with_media_and_videos_declared_live(
             prepared.prompt,
             options,
             prepared.image_data,
             prepared.audio_data,
             prepared.videos,
             prepared.media,
+            &live,
         );
 
     let result = match result {
@@ -348,6 +355,7 @@ async fn non_stream_create_response(
 #[allow(clippy::too_many_arguments)]
 async fn stream_create_response(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: CreateResponseRequest,
     translated: crate::server::responses_translator::TranslatedRequest,
     response_id: String,
@@ -369,7 +377,7 @@ async fn stream_create_response(
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &translated.chat_request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -384,8 +392,12 @@ async fn stream_create_response(
     // translator maps the tool fields onto the chat request. Structured output
     // alone no longer arms the family default.
     let amplified = chat_carries_loop_amplifier(&translated.chat_request);
-    let mut options =
-        build_generate_options(&translated.chat_request.params, &state.config, amplified);
+    let mut options = build_generate_options_with_live(
+        &translated.chat_request.params,
+        &state.config,
+        &live,
+        amplified,
+    );
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
@@ -396,6 +408,7 @@ async fn stream_create_response(
     // path too, before `options`/`translated` move into the spawned task.
     options.prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -502,7 +515,7 @@ async fn stream_create_response(
 
         let result = state_for_task
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
                 prepared.prompt,
                 options,
                 prepared.image_data,
@@ -511,6 +524,7 @@ async fn stream_create_response(
                 prepared.media,
                 queue_reservation,
                 cancelled,
+                &live,
                 |token, _lp| {
                     slot.on_token(&token);
                     if let Ok(mut acc) = acc_clone.lock() {

@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
-use super::{default_generation_settings, geometry_block};
+use super::{default_generation_settings, default_generation_settings_with_live, geometry_block};
 use crate::server::config::ServerConfig;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, create_app};
 use crate::tokenizer::MlxcelTokenizer;
@@ -89,6 +89,46 @@ fn props_reports_an_unset_breaker_list_as_empty_rather_than_omitting_it() {
         serde_json::json!([]),
         "the key must exist even when no breakers are configured"
     );
+}
+
+#[test]
+fn props_reports_the_same_patched_defaults_as_live_settings() {
+    let config = ServerConfig::default();
+    let mut live = config.live_settings();
+    live.default_max_tokens = 73;
+    live.default_temperature = 0.27;
+    live.default_top_k = 17;
+    live.default_top_p = 0.81;
+    live.default_min_p = 0.04;
+    live.default_seed = Some(42);
+    live.default_repetition_penalty = 1.12;
+    live.default_repetition_context_size = 256;
+    live.default_frequency_penalty = 0.13;
+    live.default_presence_penalty = 0.29;
+    live.default_dry_multiplier = 0.37;
+    live.default_dry_base = 1.61;
+    live.default_dry_allowed_length = 5;
+    live.default_dry_penalty_last_n = 211;
+    live.default_dry_sequence_breakers = vec![3, 5];
+
+    let settings = default_generation_settings_with_live(&config, &live);
+
+    assert_eq!(settings["n_predict"], serde_json::json!(73));
+    assert_eq!(settings["max_tokens"], serde_json::json!(73));
+    assert_eq!(settings["temperature"], serde_json::json!(0.27_f32));
+    assert_eq!(settings["top_k"], serde_json::json!(17));
+    assert_eq!(settings["top_p"], serde_json::json!(0.81_f32));
+    assert_eq!(settings["min_p"], serde_json::json!(0.04_f32));
+    assert_eq!(settings["seed"], serde_json::json!(42));
+    assert_eq!(settings["repeat_penalty"], serde_json::json!(1.12_f32));
+    assert_eq!(settings["repeat_last_n"], serde_json::json!(256));
+    assert_eq!(settings["frequency_penalty"], serde_json::json!(0.13_f32));
+    assert_eq!(settings["presence_penalty"], serde_json::json!(0.29_f32));
+    assert_eq!(settings["dry_multiplier"], serde_json::json!(0.37_f32));
+    assert_eq!(settings["dry_base"], serde_json::json!(1.61_f32));
+    assert_eq!(settings["dry_allowed_length"], serde_json::json!(5));
+    assert_eq!(settings["dry_penalty_last_n"], serde_json::json!(211));
+    assert_eq!(settings["dry_sequence_breakers"], serde_json::json!([3, 5]));
 }
 
 /// The reported key set is the contract this function was extracted to make

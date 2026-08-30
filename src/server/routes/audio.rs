@@ -22,6 +22,8 @@
 //! seam in [`AppState::audio_model`]. While that slot is `None` every route
 //! returns a structured `501 Not Implemented` after parsing the request.
 
+use std::sync::Arc;
+
 use axum::{
     Json,
     body::Body,
@@ -117,11 +119,16 @@ pub async fn audio_speech(
 /// [`crate::server::routes::transcription_compat`] for why that is a fallback
 /// rather than an alias.
 pub async fn audio_transcriptions(State(state): State<AppState>, multipart: Multipart) -> Response {
-    compat_transcribe(state, multipart).await
+    let live = state.live();
+    compat_transcribe(state, live, multipart).await
 }
 
 /// b10621's transcription flow.
-async fn compat_transcribe(state: AppState, multipart: Multipart) -> Response {
+async fn compat_transcribe(
+    state: AppState,
+    live: Arc<crate::server::LiveSettings>,
+    multipart: Multipart,
+) -> Response {
     use compat::{
         AsrUsage, NO_AUDIO_SUPPORT_MESSAGE, NO_INPUT_FILE_MESSAGE, asr_user_prompt,
         build_asr_chat_request, ensure_clip_within_limits, ensure_json_response_format,
@@ -185,11 +192,14 @@ async fn compat_transcribe(state: AppState, multipart: Multipart) -> Response {
             temperature,
             max_tokens,
         );
+        let reasoning_budget =
+            crate::server::config::ReasoningBudgetOverride::Explicit(live.reasoning_budget);
         match super::chat::non_stream_chat_completion(
             state.clone(),
+            live,
             request,
             crate::server::batch::RequestPriority::default(),
-            crate::server::config::ReasoningBudgetOverride::default(),
+            reasoning_budget,
             None,
         )
         .await

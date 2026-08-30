@@ -73,5 +73,6 @@ pub use types::{
     CACHE_FORMAT_VERSION_V1, CACHE_FORMAT_VERSION_V2, CacheIngestLimits, CacheMetadata, CacheType,
     ExpectedBlockGeometry, RawTensorData, SerializableCacheEntry, SerializableCacheState,
     SerializablePagedBlock, SerializablePagedLayerState, SerializablePagedSequenceState,
-    SerializableSamplingState, SerializableSequenceBackend, validate_raw_tensor,
+    SerializableSamplingState, SerializableSequenceBackend, SerializableTokenBiasEntry,
+    validate_raw_tensor,
 };

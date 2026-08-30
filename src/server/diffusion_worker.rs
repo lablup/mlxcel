@@ -207,6 +207,7 @@ pub(crate) fn run_diffusion_worker_loop(
                 // pre-tokenized ids (issue #633) are not used here.
                 prompt_token_ids: _,
                 options,
+                runtime,
                 images,
                 audio,
                 videos,
@@ -216,11 +217,14 @@ pub(crate) fn run_diffusion_worker_loop(
                 cancelled,
             } => {
                 drop(queue_reservation);
+                let request_defaults = runtime
+                    .as_ref()
+                    .map_or(&defaults, |runtime| &runtime.diffusion);
                 handle_diffusion_request(
                     model,
                     tokenizer,
                     model_path,
-                    &defaults,
+                    request_defaults,
                     config_eos,
                     &prompt,
                     &options,
@@ -534,6 +538,7 @@ pub(crate) fn run_llada2_worker_loop(
                 // pre-tokenized ids (issue #633) are not used here.
                 prompt_token_ids: _,
                 options,
+                runtime,
                 images,
                 audio,
                 videos,
@@ -543,10 +548,13 @@ pub(crate) fn run_llada2_worker_loop(
                 cancelled,
             } => {
                 drop(queue_reservation);
+                let request_steps = runtime
+                    .map(|runtime| runtime.diffusion.max_denoising_steps)
+                    .unwrap_or(steps_override);
                 handle_llada2_request(
                     model,
                     tokenizer,
-                    steps_override,
+                    request_steps,
                     config_eos,
                     &prompt,
                     &options,

@@ -60,6 +60,7 @@ pub mod router_models;
 pub mod router_presets;
 pub mod router_server;
 pub mod routes;
+pub mod runtime_settings;
 pub mod slot_persist;
 pub mod slots_state;
 pub mod speculative_dispatch;
@@ -101,12 +102,12 @@ pub use cli_input::{
     env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_ubatch_size, long_cli_flag_was_set, resolve_batch_kv_quant_config,
-    resolve_compat_toggle, resolve_kv_cache_mode,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
+    resolve_batch_kv_quant_config, resolve_compat_toggle, resolve_kv_cache_mode,
 };
 pub use config::{
-    DecodeStorageBackend, PipelineParallelRuntimeConfig, PreemptionPolicy, ReasoningAliasField,
-    RemotePipelineStageConfig, ServerConfig, ServerGenerateOptions,
+    DecodeStorageBackend, LiveSettings, PipelineParallelRuntimeConfig, PreemptionPolicy,
+    ReasoningAliasField, RemotePipelineStageConfig, ServerConfig, ServerGenerateOptions,
 };
 pub use cors::{CorsPolicy, OriginPolicy};
 pub use media::{

@@ -311,6 +311,8 @@ impl ServingCoordinator {
                 req.prompt_tokens,
                 req.sampling,
                 req.max_tokens,
+                -1,
+                false,
                 req.response_tx,
                 req.cancelled,
             )?;
@@ -354,7 +356,14 @@ impl ServingCoordinator {
                 .await
                 .context("decode role loop: receive handoff frame from the prefill peer")?;
             scheduler
-                .ingest_handoff_as_active(&bytes, meta.max_tokens, meta.sampling, meta.response_tx)
+                .ingest_handoff_as_active(
+                    &bytes,
+                    meta.max_tokens,
+                    meta.sampling,
+                    -1,
+                    false,
+                    meta.response_tx,
+                )
                 .context("decode role loop: ingest handoff frame as an active sequence")?;
             scheduler.decode_handoff_until_idle();
         }
@@ -481,10 +490,15 @@ impl ServingCoordinator {
             // Drive the standard full-prefill + extract entry, capturing the
             // first token on a local channel so it can be returned over the wire.
             let (token_tx, token_rx) = mpsc::channel();
+            let reasoning_budget = request.sampling.reasoning_budget;
+            let thinking_enter_block_on_start = request.sampling.thinking_enter_block_on_start;
+            let sampling = sampling_from_serializable(&request.sampling);
             let frame = match scheduler.prefill_text_request_for_handoff(
                 request.prompt_tokens,
-                sampling_from_serializable(&request.sampling),
+                sampling,
                 request.max_tokens as usize,
+                reasoning_budget,
+                thinking_enter_block_on_start,
                 token_tx,
                 Arc::new(AtomicBool::new(false)),
             ) {
@@ -745,11 +759,16 @@ impl ServingCoordinator {
                 .context("decode role: receive the KV handoff after its metadata")?;
 
             let (token_tx, token_rx) = mpsc::channel();
+            let reasoning_budget = meta.sampling.reasoning_budget;
+            let thinking_enter_block_on_start = meta.sampling.thinking_enter_block_on_start;
+            let sampling = sampling_from_serializable(&meta.sampling);
             scheduler
                 .ingest_handoff_as_active(
                     &bytes,
                     meta.max_tokens as usize,
-                    sampling_from_serializable(&meta.sampling),
+                    sampling,
+                    reasoning_budget,
+                    thinking_enter_block_on_start,
                     token_tx,
                 )
                 .context("decode role: ingest the handoff as an active sequence")?;

@@ -267,6 +267,7 @@ pub(crate) fn run_florence2_worker_loop(
                 // used here.
                 prompt_token_ids: _,
                 options,
+                runtime: _,
                 images,
                 audio,
                 videos,

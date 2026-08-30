@@ -167,6 +167,7 @@ pub struct ServerStartupInput {
     pub no_slots: bool,
     pub props: bool,
     pub metrics: bool,
+    pub settings: bool,
     /// `--slot-save-path`: storage root for the `POST /slots/:id_slot`
     /// save/restore actions (#1440). `None` keeps them disabled, b10621's
     /// default.
@@ -972,6 +973,7 @@ impl ServerStartupInput {
             embedding_serving_mode: embedding_serving_mode(&embedding_compat),
             pooling: embedding_compat.pooling,
             enable_metrics: self.metrics || self.metrics_port.is_some(),
+            enable_settings: self.settings,
             warmup: resolve_compat_toggle(self.warmup, self.no_warmup),
             temperature: self.temperature,
             temperature_was_set: self.temperature_was_set,
@@ -1422,6 +1424,24 @@ pub fn env_fallback_log_file(value: &mut Option<PathBuf>) {
 pub fn env_fallback_endpoint_slots(value: &mut bool, slots_was_set: bool, no_slots_was_set: bool) {
     const KEY: &str = "LLAMA_ARG_ENDPOINT_SLOTS";
     if slots_was_set || no_slots_was_set {
+        return;
+    }
+    if let Ok(raw) = std::env::var(KEY) {
+        match parse_env_bool(&raw) {
+            Some(parsed) => *value = parsed,
+            None => tracing::warn!(
+                "{KEY} has unparseable value {:?}; ignoring (expected on/off/true/false/1/0)",
+                raw
+            ),
+        }
+    }
+}
+
+/// Apply `MLXCEL_ENABLE_SETTINGS_ENDPOINT` after clap parsing so deployments
+/// may use the common `1` / `0` spellings as well as `true` / `false`.
+pub fn env_fallback_settings_endpoint(value: &mut bool, cli_was_set: bool) {
+    const KEY: &str = "MLXCEL_ENABLE_SETTINGS_ENDPOINT";
+    if cli_was_set {
         return;
     }
     if let Ok(raw) = std::env::var(KEY) {
