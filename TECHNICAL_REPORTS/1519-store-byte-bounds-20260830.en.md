@@ -40,10 +40,10 @@ Initial `HashMap` allocation is capped even when an operator configures an extre
 - `cargo test --lib store_byte_budgets_round_trip_through_into_startup_config -- --nocapture` passed.
 - `cargo test --bin mlxcel serve_store_byte_budget -- --nocapture` passed.
 - `cargo test --bin mlxcel-server store_byte_budget -- --nocapture` passed.
-- `cargo test --bin mlxcel-server settings_cli_mlxcel_server -- --nocapture` passed after rebasing over PR #1518.
-- `cargo test --bin mlxcel settings_cli_mlxcel_serve -- --nocapture` passed after rebasing over PR #1518.
-- `cargo test --bin mlxcel settings_cli_build_startup_input_defaults_off_and_propagates_enablement -- --nocapture` passed after rebasing over PR #1518.
-- `cargo test --lib settings_cli -- --nocapture` passed after rebasing over PR #1518.
+- `cargo test --bin mlxcel-server settings_cli_mlxcel_server -- --nocapture` passed after preserving runtime-settings PR #1516 while rebasing onto main through PR #1518, the chat-template-cache head.
+- `cargo test --bin mlxcel settings_cli_mlxcel_serve -- --nocapture` passed after preserving runtime-settings PR #1516 while rebasing onto main through PR #1518, the chat-template-cache head.
+- `cargo test --bin mlxcel settings_cli_build_startup_input_defaults_off_and_propagates_enablement -- --nocapture` passed after preserving runtime-settings PR #1516 while rebasing onto main through PR #1518, the chat-template-cache head.
+- `cargo test --lib settings_cli -- --nocapture` passed after preserving runtime-settings PR #1516 while rebasing onto main through PR #1518, the chat-template-cache head.
 - `cargo test --test llama_compat_manifest manifest_option_claims_hold_on_both_server_binaries -- --nocapture` passed.
 - `python3 scripts/ci/check_llama_compat_manifest.py` passed.
 - `cargo fmt --all --check` passed.

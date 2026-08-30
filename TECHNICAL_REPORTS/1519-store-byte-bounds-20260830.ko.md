@@ -40,10 +40,10 @@ Byte limit은 stored request item 안의 base64 image data를 포함한 well-for
 - `cargo test --lib store_byte_budgets_round_trip_through_into_startup_config -- --nocapture` 통과.
 - `cargo test --bin mlxcel serve_store_byte_budget -- --nocapture` 통과.
 - `cargo test --bin mlxcel-server store_byte_budget -- --nocapture` 통과.
-- `cargo test --bin mlxcel-server settings_cli_mlxcel_server -- --nocapture` 통과, PR #1518 위로 rebase한 뒤 확인.
-- `cargo test --bin mlxcel settings_cli_mlxcel_serve -- --nocapture` 통과, PR #1518 위로 rebase한 뒤 확인.
-- `cargo test --bin mlxcel settings_cli_build_startup_input_defaults_off_and_propagates_enablement -- --nocapture` 통과, PR #1518 위로 rebase한 뒤 확인.
-- `cargo test --lib settings_cli -- --nocapture` 통과, PR #1518 위로 rebase한 뒤 확인.
+- `cargo test --bin mlxcel-server settings_cli_mlxcel_server -- --nocapture` 통과, runtime-settings PR #1516을 보존하면서 chat-template-cache head인 PR #1518까지 포함한 main 위로 rebase한 뒤 확인.
+- `cargo test --bin mlxcel settings_cli_mlxcel_serve -- --nocapture` 통과, runtime-settings PR #1516을 보존하면서 chat-template-cache head인 PR #1518까지 포함한 main 위로 rebase한 뒤 확인.
+- `cargo test --bin mlxcel settings_cli_build_startup_input_defaults_off_and_propagates_enablement -- --nocapture` 통과, runtime-settings PR #1516을 보존하면서 chat-template-cache head인 PR #1518까지 포함한 main 위로 rebase한 뒤 확인.
+- `cargo test --lib settings_cli -- --nocapture` 통과, runtime-settings PR #1516을 보존하면서 chat-template-cache head인 PR #1518까지 포함한 main 위로 rebase한 뒤 확인.
 - `cargo test --test llama_compat_manifest manifest_option_claims_hold_on_both_server_binaries -- --nocapture` 통과.
 - `python3 scripts/ci/check_llama_compat_manifest.py` 통과.
 - `cargo fmt --all --check` 통과.
