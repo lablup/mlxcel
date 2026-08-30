@@ -241,6 +241,7 @@ async fn non_stream_create_response(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await;
     let prepared = match prepared {
@@ -380,6 +381,7 @@ async fn stream_create_response(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await;
     let prepared = match prepared {

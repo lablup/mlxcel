@@ -921,7 +921,7 @@ fn template_sig_separates_two_top_level_efforts() {
         let mut req = request(user_hi());
         req.reasoning_effort = Some(effort.to_string());
         let resolved = resolve_effective_kwargs(processor, &req, None, &req.merged_extra_body());
-        template_sig(processor.template_source(), &resolved, None, None)
+        template_sig(processor.template_source(), &resolved, None, None, false)
     };
 
     let qwen = qwen3_8();

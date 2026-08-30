@@ -102,6 +102,15 @@ fn history_boundary_render_attempted() {}
 
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
+    /// b10621 `--prefill-assistant` (#1470): the trailing assistant text this
+    /// prompt continues from, when the request had one and prefill is on.
+    ///
+    /// The prompt already carries it; this copy exists so the route can put it
+    /// back at the head of the response when the request sets `echo`, which is
+    /// upstream's only consumer of that field
+    /// (`task_result_state`: an `is_continuation` request with `echo == false`
+    /// primes the parser so the prefill is not re-emitted).
+    pub(crate) assistant_prefill: Option<String>,
     /// The same conversation re-rendered with `add_generation_prompt = false`
     /// (issue #1143): the history-boundary form of this request's prompt.
     ///
@@ -325,7 +334,15 @@ pub(crate) async fn prepare_chat_request(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
 ) -> Result<PreparedChatRequest> {
-    prepare_chat_request_with_cache(processor, request, server_default_kwargs, false, false).await
+    prepare_chat_request_with_cache(
+        processor,
+        request,
+        server_default_kwargs,
+        false,
+        false,
+        false,
+    )
+    .await
 }
 
 /// Full variant of [`prepare_chat_request`] with explicit prompt-cache
@@ -346,6 +363,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     server_default_kwargs: Option<&ChatTemplateKwargs>,
     prompt_cache_enabled: bool,
     snapshot_reuse_capable: bool,
+    prefill_assistant: bool,
 ) -> Result<PreparedChatRequest> {
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
@@ -394,12 +412,23 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // that follows it, rather than paying for both and discarding the result on
     // the worker thread.
     //
+    // b10621 `--prefill-assistant` (#1470). Resolved before the render because
+    // it decides BOTH which messages the template sees (the continuation
+    // message is dropped) and how the prompt ends (the generation prompt, then
+    // the continuation text, with no closing tag).
+    let prefill = super::assistant_prefill::resolve(request, prefill_assistant)
+        .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+
     let render_history_prefix = prompt_cache_enabled
         && snapshot_reuse_capable
         && !super::prompt_cache::boundary_snapshot_disabled()
         && declared_images == 0
         && declared_audio == 0
-        && declared_videos == 0;
+        && declared_videos == 0
+        // Under a prefill the primary prompt is `messages[:-1]` plus the
+        // continuation text, so a history render of the full list is not a
+        // prefix of it and would produce a snapshot the next turn cannot use.
+        && prefill.is_none();
 
     // Render the prompt, and — when the prompt cache is on — the same
     // conversation as history (`add_generation_prompt = false`). Both renders
@@ -420,7 +449,14 @@ pub(crate) async fn prepare_chat_request_with_cache(
         // shape. The typed `ChatMessage` path only carries role + flattened
         // text, which would otherwise drop image/audio/video positions before
         // processor-aware templates can render their placeholder tokens.
-        let raw_messages = build_raw_json_messages_with_thinking(request, preserve_thinking);
+        let mut raw_messages = build_raw_json_messages_with_thinking(request, preserve_thinking);
+        // Under a prefill the continuation message is not rendered by the
+        // template: it is appended after the generation prompt below.
+        if prefill.is_some()
+            && let Some(array) = raw_messages.as_array_mut()
+        {
+            array.pop();
+        }
         // Build the stripped ChatMessages in parallel so the fallback path can
         // use them without re-running strip_rolling_checkpoint.
         let stripped = build_chat_messages_with_thinking(request, preserve_thinking);
@@ -452,7 +488,10 @@ pub(crate) async fn prepare_chat_request_with_cache(
             }
         }
     } else {
-        let messages = build_chat_messages_with_thinking(request, preserve_thinking);
+        let mut messages = build_chat_messages_with_thinking(request, preserve_thinking);
+        if prefill.is_some() {
+            messages.pop();
+        }
         match processor.apply_with_kwargs(&messages, effective_tools, &merged_kwargs) {
             Ok(rendered) => {
                 let history = render_history_prefix.then(|| {
@@ -525,8 +564,23 @@ pub(crate) async fn prepare_chat_request_with_cache(
         .validate_resolved_image_count()
         .map_err(anyhow::Error::from)?;
 
+    // Append the continuation text after the template's own generation prompt.
+    // A reasoning-only continuation is representable only when that prompt
+    // primed an open thinking block, because the open marker is the template's.
+    let (prompt, assistant_prefill) = match prefill.as_ref() {
+        None => (prompt, None),
+        Some(prefill) => {
+            let primed = super::routes::chat::primed_open_thinking_close_marker(&prompt);
+            let continued = super::assistant_prefill::append_to_prompt(&prompt, prefill, primed)
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            let echoed = (!prefill.is_reasoning).then(|| prefill.text.clone());
+            (continued, echoed)
+        }
+    };
+
     Ok(PreparedChatRequest {
         prompt,
+        assistant_prefill,
         history_prompt,
         image_data,
         media,

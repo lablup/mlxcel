@@ -851,6 +851,7 @@ async fn route_chat(
         live.chat_template_kwargs.as_ref(),
         false,
         false,
+        !state.config.no_prefill_assistant,
     )
     .await
     {

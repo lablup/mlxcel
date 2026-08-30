@@ -933,6 +933,7 @@ mod tests {
             None,
             false,
             false,
+            true,
         )
         .await
         {
@@ -958,6 +959,7 @@ mod tests {
             None,
             false,
             false,
+            true,
         )
         .await
         .expect("engine-side render failure should keep fallback behavior");

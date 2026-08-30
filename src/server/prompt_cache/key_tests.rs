@@ -205,8 +205,8 @@ fn sample_tool(name: &str) -> Tool {
 #[test]
 fn template_sig_is_stable_for_identical_inputs() {
     let kw = ChatTemplateKwargs::from_json_str(r#"{"preserve_thinking": true}"#).unwrap();
-    let a = template_sig("tpl", &kw, None, None);
-    let b = template_sig("tpl", &kw, None, None);
+    let a = template_sig("tpl", &kw, None, None, false);
+    let b = template_sig("tpl", &kw, None, None, false);
     assert_eq!(a, b);
     assert_eq!(a.len(), 64, "must be 64-char hex");
 }
@@ -214,8 +214,8 @@ fn template_sig_is_stable_for_identical_inputs() {
 #[test]
 fn template_sig_changes_when_template_source_changes() {
     let kw = ChatTemplateKwargs::new();
-    let a = template_sig("template-a", &kw, None, None);
-    let b = template_sig("template-b", &kw, None, None);
+    let a = template_sig("template-a", &kw, None, None, false);
+    let b = template_sig("template-b", &kw, None, None, false);
     assert_ne!(a, b);
 }
 
@@ -223,8 +223,8 @@ fn template_sig_changes_when_template_source_changes() {
 fn template_sig_changes_when_kwargs_change() {
     let kw_a = ChatTemplateKwargs::from_json_str(r#"{"preserve_thinking": true}"#).unwrap();
     let kw_b = ChatTemplateKwargs::from_json_str(r#"{"preserve_thinking": false}"#).unwrap();
-    let a = template_sig("tpl", &kw_a, None, None);
-    let b = template_sig("tpl", &kw_b, None, None);
+    let a = template_sig("tpl", &kw_a, None, None, false);
+    let b = template_sig("tpl", &kw_b, None, None, false);
     assert_ne!(a, b);
 }
 
@@ -234,8 +234,8 @@ fn template_sig_canonicalizes_kwargs_key_order() {
     // these to the same digest so map-insertion-order drift is absorbed.
     let kw_a = ChatTemplateKwargs::from_json_str(r#"{"a": 1, "b": 2}"#).unwrap();
     let kw_b = ChatTemplateKwargs::from_json_str(r#"{"b": 2, "a": 1}"#).unwrap();
-    let a = template_sig("tpl", &kw_a, None, None);
-    let b = template_sig("tpl", &kw_b, None, None);
+    let a = template_sig("tpl", &kw_a, None, None, false);
+    let b = template_sig("tpl", &kw_b, None, None, false);
     assert_eq!(a, b, "kwargs key order must not affect the signature");
 }
 
@@ -247,12 +247,14 @@ fn template_sig_changes_when_tool_choice_mode_changes() {
         &kw,
         Some(&ToolChoice::Mode("auto".to_string())),
         None,
+        false,
     );
     let b = template_sig(
         "tpl",
         &kw,
         Some(&ToolChoice::Mode("none".to_string())),
         None,
+        false,
     );
     assert_ne!(a, b);
 }
@@ -260,12 +262,13 @@ fn template_sig_changes_when_tool_choice_mode_changes() {
 #[test]
 fn template_sig_distinguishes_absent_from_auto_tool_choice() {
     let kw = ChatTemplateKwargs::new();
-    let absent = template_sig("tpl", &kw, None, None);
+    let absent = template_sig("tpl", &kw, None, None, false);
     let auto = template_sig(
         "tpl",
         &kw,
         Some(&ToolChoice::Mode("auto".to_string())),
         None,
+        false,
     );
     assert_ne!(absent, auto);
 }
@@ -275,8 +278,8 @@ fn template_sig_changes_when_tools_added() {
     let kw = ChatTemplateKwargs::new();
     let tools_a: Vec<Tool> = vec![];
     let tools_b = vec![sample_tool("get_weather")];
-    let a = template_sig("tpl", &kw, None, Some(&tools_a));
-    let b = template_sig("tpl", &kw, None, Some(&tools_b));
+    let a = template_sig("tpl", &kw, None, Some(&tools_a), false);
+    let b = template_sig("tpl", &kw, None, Some(&tools_b), false);
     assert_ne!(a, b);
 }
 
@@ -285,8 +288,8 @@ fn template_sig_changes_when_tool_removed() {
     let kw = ChatTemplateKwargs::new();
     let two = vec![sample_tool("get_weather"), sample_tool("send_email")];
     let one = vec![sample_tool("get_weather")];
-    let a = template_sig("tpl", &kw, None, Some(&two));
-    let b = template_sig("tpl", &kw, None, Some(&one));
+    let a = template_sig("tpl", &kw, None, Some(&two), false);
+    let b = template_sig("tpl", &kw, None, Some(&one), false);
     assert_ne!(a, b);
 }
 
@@ -297,8 +300,8 @@ fn template_sig_changes_when_tools_reordered() {
     let kw = ChatTemplateKwargs::new();
     let forward = vec![sample_tool("a"), sample_tool("b")];
     let reversed = vec![sample_tool("b"), sample_tool("a")];
-    let a = template_sig("tpl", &kw, None, Some(&forward));
-    let b = template_sig("tpl", &kw, None, Some(&reversed));
+    let a = template_sig("tpl", &kw, None, Some(&forward), false);
+    let b = template_sig("tpl", &kw, None, Some(&reversed), false);
     assert_ne!(
         a, b,
         "tool reordering must invalidate the template signature"
@@ -310,8 +313,8 @@ fn template_sig_treats_empty_tools_and_none_tools_identically() {
     // Both map to the same "no tools" marker in the digest.
     let kw = ChatTemplateKwargs::new();
     let empty: Vec<Tool> = vec![];
-    let a = template_sig("tpl", &kw, None, None);
-    let b = template_sig("tpl", &kw, None, Some(&empty));
+    let a = template_sig("tpl", &kw, None, None, false);
+    let b = template_sig("tpl", &kw, None, Some(&empty), false);
     assert_eq!(a, b);
 }
 
@@ -346,8 +349,8 @@ fn template_sig_changes_with_tool_name() {
     // Two tools with the same type and description but different names must
     // still yield different signatures.
     let kw = ChatTemplateKwargs::new();
-    let a = template_sig("tpl", &kw, None, Some(&[sample_tool("alpha")]));
-    let b = template_sig("tpl", &kw, None, Some(&[sample_tool("beta")]));
+    let a = template_sig("tpl", &kw, None, Some(&[sample_tool("alpha")]), false);
+    let b = template_sig("tpl", &kw, None, Some(&[sample_tool("beta")]), false);
     assert_ne!(a, b);
 }
 
@@ -356,7 +359,7 @@ fn template_sig_fits_into_prompt_cache_key() {
     // Smoke: signature hex can slot straight into the cache key's
     // `template_sig` field.
     let kw = ChatTemplateKwargs::new();
-    let sig = template_sig("tpl", &kw, None, None);
+    let sig = template_sig("tpl", &kw, None, None, false);
     let toks = tokens(4);
     let key = text_key("m", None, sig.as_str(), None, &toks);
     assert_eq!(key.template_sig, sig.as_str());

@@ -221,6 +221,7 @@ async fn non_stream_messages(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await
     {
@@ -376,6 +377,7 @@ async fn stream_messages(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await
     {
@@ -693,6 +695,7 @@ pub async fn anthropic_count_tokens(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await
     {

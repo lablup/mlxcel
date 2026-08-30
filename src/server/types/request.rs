@@ -967,6 +967,33 @@ impl ChatCompletionRequest {
         }
     }
 
+    /// b10621 `echo` (#1470): whether an assistant prefill is included in the
+    /// output.
+    ///
+    /// Upstream's only consumer is `task_result_state`, which primes the chat
+    /// parser so a continuation's prefill is NOT re-emitted when `echo` is
+    /// false (the default); with `echo` true the prefilled assistant text
+    /// leads the response. The key arrives as an unknown root field and is
+    /// therefore read out of the flattened capture rather than declared, which
+    /// is also how upstream sees it: `oaicompat_chat_params_parse` copies every
+    /// body key it did not handle itself into the native parameter object.
+    ///
+    /// Inert on a request that carries no trailing assistant message, as it is
+    /// upstream.
+    #[must_use]
+    pub fn resolve_echo(&self) -> bool {
+        self.extra_body_fields
+            .get("echo")
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                self.extra_body
+                    .as_ref()
+                    .and_then(|extra| extra.get("echo"))
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
     /// Resolve the request-level `prompt_cache_key`.
     ///
     /// Precedence (first non-empty wins):
@@ -1480,6 +1507,20 @@ pub struct NativeCompletionRequest {
     /// non-empty one is refused with a 400 naming the deferral.
     #[serde(default)]
     pub preserved_tokens: Option<serde_json::Value>,
+
+    /// b10621 `echo` (#1470): include an assistant prefill in the output.
+    ///
+    /// Declared here because upstream declares it in the same native schema,
+    /// and inert here because upstream's only consumer
+    /// (`task_result_state`, which primes the chat parser so a continuation's
+    /// prefill is not re-emitted) fires only when the request is a chat
+    /// continuation. `POST /completion` takes a raw prompt with no chat
+    /// template and therefore never is one, so the field does nothing on this
+    /// route upstream either. The chat routes read the same key out of their
+    /// own body (`ChatCompletionRequest::resolve_echo`), which is where it has
+    /// an effect.
+    #[serde(default)]
+    pub echo: Option<bool>,
 
     // thinking-token budget (Qwen3-family reasoning cap).
     /// Primary / llama.cpp-compatible name for the reasoning-token cap.

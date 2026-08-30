@@ -16,6 +16,7 @@
 
 pub mod anthropic_translator;
 pub mod app;
+pub(crate) mod assistant_prefill;
 pub mod audio_model;
 pub(crate) mod audio_worker;
 pub mod auth;

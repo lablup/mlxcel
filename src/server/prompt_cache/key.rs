@@ -459,9 +459,25 @@ pub fn template_sig(
     chat_template_kwargs: &ChatTemplateKwargs,
     tool_choice: Option<&ToolChoice>,
     tools: Option<&[Tool]>,
+    assistant_prefill: bool,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"mlxcel:prompt-cache:template-sig:v1");
+
+    // b10621 `--prefill-assistant` (#1470). The same conversation renders two
+    // different prompts depending on whether its trailing assistant message is
+    // continued or answered: one ends with the generation prompt plus the
+    // continuation text, the other renders that message as a completed turn
+    // and opens a fresh one. Without this dimension the two share a bucket and
+    // the second request re-prefills from the point where they diverge.
+    write_field(
+        &mut hasher,
+        if assistant_prefill {
+            b"prefill:on".as_slice()
+        } else {
+            b"prefill:off".as_slice()
+        },
+    );
 
     write_field(&mut hasher, chat_template_source.as_bytes());
 

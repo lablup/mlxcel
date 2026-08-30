@@ -748,6 +748,15 @@ impl AppState {
     pub fn should_render_history_boundary_snapshot(&self) -> bool {
         !self.model_provider.is_loaded() || self.model_provider.supports_snapshot_reuse()
     }
+
+    /// b10621 `--prefill-assistant` / `LLAMA_ARG_PREFILL_ASSISTANT` (#1470).
+    ///
+    /// Upstream prefills by default: a trailing assistant message is a prefix
+    /// the model continues. `--no-prefill-assistant` turns that off and makes
+    /// it a completed turn the model answers instead.
+    pub fn prefill_assistant(&self) -> bool {
+        !self.config.no_prefill_assistant
+    }
 }
 
 #[cfg(test)]

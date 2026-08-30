@@ -2962,8 +2962,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // know the request path does not honour it yet.
     if config.no_prefill_assistant {
         tracing::info!(
-            "--no-prefill-assistant is what mlxcel already does: a trailing assistant message \
-             is answered with a fresh turn, not continued. llama-server continues it by default"
+            "--no-prefill-assistant: a trailing assistant message is answered with a fresh turn \
+             rather than continued. Assistant prefill is on by default since #1470, matching \
+             llama-server"
         );
     }
     if config.reasoning_budget_message.is_some() {

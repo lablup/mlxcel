@@ -139,6 +139,13 @@ pub(crate) fn build_prompt_cache_request_context(
         &merged_kwargs,
         request.tool_choice.as_ref(),
         request.tools.as_deref(),
+        // The dimension only matters when this request actually has a trailing
+        // assistant message: hashing the flag unconditionally would split every
+        // bucket in the store the first time an operator passes
+        // `--no-prefill-assistant`.
+        state.prefill_assistant()
+            && crate::server::assistant_prefill::resolve(request, true)
+                .is_ok_and(|prefill| prefill.is_some()),
     );
     let session_key =
         resolve_session_key(request.resolve_prompt_cache_key(), request.resolve_user()).to_string();
@@ -465,6 +472,7 @@ pub(crate) async fn non_stream_chat_completion(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;
@@ -537,6 +545,16 @@ pub(crate) async fn non_stream_chat_completion(
         super::slots::slot_params_json(&options, false),
         Some(options.max_tokens as i64),
     );
+    // b10621 `echo` (#1470): with a prefilled assistant message and `echo`
+    // set, the prefill leads the response. Upstream reaches the same shape by
+    // NOT priming its chat parser, so the first diff carries the continuation
+    // text; prepending it to the generated text here feeds the identical
+    // string through tool-call parsing, the reasoning split and the
+    // `--reasoning-format` placement.
+    let echo_prefill = request
+        .resolve_echo()
+        .then(|| prepared.assistant_prefill.clone())
+        .flatten();
     let mut result = state
         .model_provider
         .generate_with_media_and_videos_declared_live(
@@ -549,6 +567,10 @@ pub(crate) async fn non_stream_chat_completion(
             &live,
         )
         .map_err(generation_error_to_response)?;
+
+    if let Some(prefill) = echo_prefill.as_deref() {
+        result.text.insert_str(0, prefill);
+    }
 
     // Structured Florence-2 task output (issue #1073): produced only by the
     // seq2seq worker, `None` for every other family. Attached below as the
@@ -894,6 +916,7 @@ pub(crate) async fn stream_asr_completion(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await
     {
@@ -1068,6 +1091,7 @@ async fn stream_chat_completion(
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
+        state.prefill_assistant(),
     )
     .await;
     let prepared = match prepared {
@@ -1076,6 +1100,11 @@ async fn stream_chat_completion(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
+    // b10621 `echo` (#1470), captured before `prepared` is consumed.
+    let echo_prefill = request
+        .resolve_echo()
+        .then(|| prepared.assistant_prefill.clone())
+        .flatten();
     // Build the prompt-cache context AFTER preparation so the multimodal
     // digest sees the resolved image/audio bytes.
     let prompt_cache_ctx = build_prompt_cache_request_context(
@@ -1224,6 +1253,21 @@ async fn stream_chat_completion(
         let initial =
             ChatCompletionChunk::initial(request_id_clone.clone(), model_id_clone.clone());
         let _ = finish_events.json(&initial);
+
+        // b10621 `echo` (#1470): a prefilled assistant message leads the
+        // response when `echo` is set. Upstream reaches the same shape by not
+        // priming its chat parser, so the first diff already carries the
+        // continuation text; here it is one content delta ahead of the token
+        // stream, which is byte-identical once the deltas are concatenated.
+        if let Some(prefill) = echo_prefill.as_deref() {
+            let chunk = ChatCompletionChunk::content_with_logprobs(
+                request_id_clone.clone(),
+                model_id_clone.clone(),
+                prefill.to_string(),
+                None,
+            );
+            let _ = finish_events.json(&chunk);
+        }
 
         // Accumulate full output for tool call parsing at the end
         let token_events = finish_events.clone();
@@ -1702,9 +1746,22 @@ const OPEN_THINKING_SUFFIXES: &[&str] = &["<|channel>thought\n", "<think>\n"];
 ///   opening token that never appears because the prompt already contains
 ///   it).
 pub(crate) fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
+    primed_open_thinking_close_marker(prompt).is_some()
+}
+
+/// The close marker the model is expected to emit for the thinking block this
+/// generation prompt primed, or `None` when it primed none.
+///
+/// Paired positionally with [`OPEN_THINKING_SUFFIXES`], and ordered
+/// longest-first with it so a prompt matches exactly one family.
+///
+/// Used by: server::chat_request (b10621 assistant prefill, #1470)
+pub(crate) fn primed_open_thinking_close_marker(prompt: &str) -> Option<&'static str> {
     OPEN_THINKING_SUFFIXES
         .iter()
-        .any(|suffix| prompt.ends_with(suffix))
+        .zip(OPEN_THINKING_CLOSE_MARKERS.iter())
+        .find(|(suffix, _)| prompt.ends_with(**suffix))
+        .map(|(_, close)| *close)
 }
 
 /// Close markers for each supported open-thinking priming convention. Paired

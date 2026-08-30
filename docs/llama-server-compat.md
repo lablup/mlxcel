@@ -371,7 +371,7 @@ Value-taking options bind their `LLAMA_ARG_*` variable through clap, which passe
 | `deepseek-legacy` | the answer with the `<think>` tags | the thoughts |
 | `auto` (default) | as `deepseek` here | the thoughts |
 
-mlxcel's pre-#1447 behavior was `deepseek` unconditionally. The same placement applies on the disaggregated router front, which serves the same route. The entry stays `deferred` against #1470 for three reasons recorded on it: `auto` resolves to `deepseek` rather than being detected from the template, because mlxcel's reasoning split uses one marker set for every family it supports; in a *streamed* response under `none` or `deepseek-legacy` the thinking text reaches `delta.content` but its literal delimiters do not, because the streaming filter drops them as it matches them; and whether a streamed `deepseek-legacy` response should carry the thoughts in one field or both is unverified, because upstream's `reasoning_in_content` consumer sits outside the pinned source set.
+mlxcel's pre-#1447 behavior was `deepseek` unconditionally. The same placement applies on the disaggregated router front, which serves the same route. The entry stays `deferred` against #1470 for two reasons recorded on it: `auto` resolves to `deepseek` rather than being detected from the template, because mlxcel's reasoning split uses one marker set for every family it supports; and in a *streamed* response under `none` or `deepseek-legacy` the thinking text reaches `delta.content` but its literal delimiters do not, because the streaming filter drops them as it matches them. The third reason is gone: #1470 settled the `reasoning_in_content` question against the full b10621 tree. Upstream sets that flag in `tools/server/server-schema.cpp` and reports it from `params_to_json`, and no parser reads it, so it is a dead field at this commit and a streamed `deepseek-legacy` response carries the thoughts in both fields exactly as the help text documents, which is what mlxcel already does.
 
 The native `--reasoning-alias-field <none|reasoning>` policy is orthogonal to that placement table. It defaults to duplicating any emitted `reasoning_content` into an identical `reasoning` field for OpenRouter-style clients; `none` keeps the b10621-compatible field alone.
 
@@ -391,7 +391,19 @@ b10621 accepts either Jinja template text or one of 54 built-in identifiers (`ch
 
 ### Still deferred
 
-Four entries are `deferred` against #1470 rather than claimed. `--reasoning-format` is the one whose behavior is otherwise complete; its streamed delimiter loss and the unverified `reasoning_in_content` question keep it there. `--prefill-assistant` is b10621's default and mlxcel diverges from it *with no flag passed*: a trailing assistant message is answered with a fresh turn here and continued upstream. `--reasoning-budget-message` parses and warns at startup but is not yet injected before the end-of-thinking tag. The native `echo` field is a plain completion feature mlxcel lacks. Every other native field in this shard is `not_applicable`: mlxcel's `POST /completion` is a raw-prompt endpoint with no chat template and no chat parsing for them to configure.
+Two entries are `deferred` against #1470, down from four. `--reasoning-format` is the one whose behavior is otherwise complete; the streamed delimiter loss keeps it there. `--reasoning-budget-message` parses and warns at startup but is not yet injected before the end-of-thinking tag. Every native field in this shard other than `echo` is `not_applicable`: mlxcel's `POST /completion` is a raw-prompt endpoint with no chat template and no chat parsing for them to configure.
+
+### Assistant prefill and `echo` (#1470)
+
+`--prefill-assistant` is served, and it is on by default as it is upstream: when the last message of a chat request is an assistant message it is a prefix the model continues, not a turn it answers. `--no-prefill-assistant` restores the pre-#1470 behavior. Two or more trailing assistant messages are refused with b10621's own wording.
+
+mlxcel reaches the continued prompt through the chat template rather than through per-family C++. b10621 renders `messages[:-1]`, then appends a hand-written per-family generation prompt and the continuation text; mlxcel renders `messages[:-1]` with `add_generation_prompt = true`, which *is* the family's own assistant-turn opener, and appends the continuation text with no closing tag. The result is the same prompt for the families upstream has handlers for, and a correct one for every other family mlxcel loads.
+
+The rendering is a prompt-cache key dimension. The continued prompt is a strict prefix of the answered one, so without the dimension a boundary snapshot recorded under one rendering could be adopted by the other, which continues from a different point in the same string; the boundary render itself is skipped entirely under a prefill for the same reason.
+
+`echo` selects whether the prefill leads the response. It is inert on `POST /completion`, which is upstream's behavior too: despite a help text about echoing input tokens, the field's only consumer primes the chat parser so a *continuation's* prefill is not re-emitted, and a raw-prompt request is never a continuation. On the chat routes `echo: true` puts the prefilled assistant text at the head of `message.content`, and of the streamed deltas.
+
+One case is refused rather than served: a trailing assistant message carrying only `reasoning` and no `content`, where the chat template did not prime an open thinking block. The open marker is the template's, and reconstructing it would mean hard-coding a per-family marker table in the request path.
 
 ## Multimodal projectors and request media
 
