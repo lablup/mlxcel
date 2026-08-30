@@ -470,6 +470,8 @@ A template that refuses the value calls Jinja's `raise_exception`, and that now 
 
 The `400` is specific to a deliberate refusal, not to render failures in general. mlxcel tells the two apart at the type level: `raise_exception` attaches a `TemplateRejection` sentinel as the error's source, so a template that mlxcel genuinely cannot render (an unimplemented filter, a malformed template) still degrades to the plain prompt exactly as it did before. The type is `pub`, so it is nameable outside the crate (`mlxcel::server::chat_template::TemplateRejection`), but its constructor and its field are both private, so nothing outside the render path can construct one and forge a false rejection. The rule applies to any template that validates a caller-supplied value, not just to `reasoning_effort`: templates that reject an `enable_thinking` value, a tool-choice value, or an unsupported role behave the same way.
 
+The compiled MiniJinja environment is cached on the `ChatTemplateProcessor` for the lifetime of the loaded template. The typed-message renderer, raw JSON renderer, history renderer and probe renders all look up the same compiled `"chat"` template instead of rebuilding the environment, filters and bytecode on each call. The cache stores only the operator/model-supplied template and environment configuration; per-request messages, tools and kwargs are still rebuilt for every render, so request isolation and the `TemplateRejection` source-chain behavior above remain unchanged.
+
 The Responses API's `reasoning.effort` feeds this same resolver and remains echoed unchanged on the response object. Its derived controls likewise override server-wide template defaults per key.
 
 ### `tojson` in chat templates behaves like Python `json.dumps`
