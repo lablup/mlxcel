@@ -150,7 +150,9 @@ impl NemotronOmniFeatureExtractor {
 
         // STFT with `pad_mode="constant"`: pad waveform with `n_fft / 2`
         // zeros on each side and frame at hop_length stride.
-        let padded_len = waveform.len() + 2 * half_window;
+        let Some(padded_len) = waveform.len().checked_add(2 * half_window) else {
+            return (vec![0.0; self.num_mel_bins], 1);
+        };
         let num_frames = padded_len / self.hop_length;
         if num_frames == 0 {
             // Edge case: extremely short clip. Match upstream's
@@ -167,7 +169,10 @@ impl NemotronOmniFeatureExtractor {
         padded[half_window..half_window + preemphasized.len()].copy_from_slice(&preemphasized);
 
         let mut fft_buf = vec![0.0f64; self.n_fft];
-        let mut features = vec![0.0f32; num_frames * self.num_mel_bins];
+        let Some(feature_len) = num_frames.checked_mul(self.num_mel_bins) else {
+            return (vec![0.0; self.num_mel_bins], 1);
+        };
+        let mut features = vec![0.0f32; feature_len];
 
         for frame_idx in 0..num_frames {
             let start = frame_idx * self.hop_length;
