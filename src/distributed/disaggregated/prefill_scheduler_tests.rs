@@ -30,6 +30,15 @@ fn default_sampling() -> SerializableSamplingState {
         loop_detection: Default::default(),
         reasoning_budget: -1,
         thinking_enter_block_on_start: false,
+        mirostat: 0,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
+        dynatemp_range: 0.0,
+        dynatemp_exponent: 1.0,
+        adaptive_target: -1.0,
+        adaptive_decay: 0.9,
+        min_keep: 0,
+        dry_breaker_heads: std::collections::HashMap::new(),
     }
 }
 

@@ -57,10 +57,36 @@ pub struct ResolvedSamplingParams {
     /// `N > 0` = last N tokens.
     pub penalty_last_n: i32,
     pub stop_token_ids: Vec<i32>,
+    /// Mirostat mode (#1485): `0` disabled, `1` Mirostat, `2` Mirostat 2.0
+    /// (validated at the request/CLI layers).
+    pub mirostat: i32,
+    /// Mirostat target entropy tau (#1485).
+    pub mirostat_tau: f32,
+    /// Mirostat learning rate eta (#1485).
+    pub mirostat_eta: f32,
+    /// Dynamic-temperature range (#1485; `0.0` = disabled). NOTE: a positive
+    /// range keeps even a `temperature <= 0.0` request off the greedy
+    /// branch, because b10621's `temp_ext` re-widens it into a stochastic
+    /// draw.
+    pub dynatemp_range: f32,
+    /// Dynamic-temperature exponent (#1485).
+    pub dynatemp_exponent: f32,
+    /// Adaptive-p target (#1485): already gated on the sampler list naming
+    /// `adaptive_p` (negative = disabled).
+    pub adaptive_target: f32,
+    /// Adaptive-p EMA decay (#1485; clamped `0.0..=0.99` upstream).
+    pub adaptive_decay: f32,
+    /// b10621 `min_keep` (#1485): minimum candidates the truncation
+    /// samplers keep (`0`/`1` inert).
+    pub min_keep: usize,
 }
 
 pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
-    if params.temperature <= 0.0 {
+    // A positive dynatemp range re-widens a zero temperature into a
+    // stochastic draw (b10621 `temp_ext`, #1485), so such a request must not
+    // collapse onto the greedy `top_k = 1` shape.
+    let dynatemp_active = params.dynatemp_range > 0.0 && params.dynatemp_range.is_finite();
+    if params.temperature <= 0.0 && !dynatemp_active {
         SamplingConfig {
             min_p: params.min_p,
             seed: params.seed,
@@ -90,6 +116,18 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             typical_p: params.typical_p,
             penalty_last_n: params.penalty_last_n,
             stop_token_ids: params.stop_token_ids,
+            // #1485: threaded through even on the greedy branch so the
+            // config mirrors what the request resolved; mirostat still runs
+            // its own (argmax-degenerate) path at temperature 0, exactly as
+            // b10621's plain-temp stage collapses the candidate set there.
+            mirostat: params.mirostat,
+            mirostat_tau: params.mirostat_tau,
+            mirostat_eta: params.mirostat_eta,
+            dynatemp_range: params.dynatemp_range,
+            dynatemp_exponent: params.dynatemp_exponent,
+            adaptive_target: params.adaptive_target,
+            adaptive_decay: params.adaptive_decay,
+            min_keep: params.min_keep,
             ..SamplingConfig::greedy()
         }
     } else {
@@ -113,6 +151,17 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             typical_p: params.typical_p,
             penalty_last_n: params.penalty_last_n,
             stop_token_ids: params.stop_token_ids,
+            mirostat: params.mirostat,
+            mirostat_tau: params.mirostat_tau,
+            mirostat_eta: params.mirostat_eta,
+            dynatemp_range: params.dynatemp_range,
+            dynatemp_exponent: params.dynatemp_exponent,
+            adaptive_target: params.adaptive_target,
+            adaptive_decay: params.adaptive_decay,
+            min_keep: params.min_keep,
+            // Derived from breaker strings against the vocabulary at
+            // enqueue time (#1485); empty here.
+            dry_breaker_heads: std::sync::Arc::new(std::collections::HashMap::new()),
             token_bias: TokenBiasMap::default(),
             // Loop detection defaults to disabled here. The server control
             // plane sets `sampling.loop_detection` after this helper returns,

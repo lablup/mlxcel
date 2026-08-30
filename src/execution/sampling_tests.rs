@@ -35,6 +35,14 @@ fn sample_params() -> ResolvedSamplingParams {
         typical_p: 0.4,
         penalty_last_n: -1,
         stop_token_ids: vec![1, 2],
+        mirostat: 0,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
+        dynatemp_range: 0.0,
+        dynatemp_exponent: 1.0,
+        adaptive_target: -1.0,
+        adaptive_decay: 0.9,
+        min_keep: 0,
     }
 }
 

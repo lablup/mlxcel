@@ -12,153 +12,177 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Resolution of the `--dry-sequence-breaker` CLI strings into token IDs.
+//! b10621 DRY sequence-breaker semantics (#1485).
 //!
-//! The flag takes token *strings* (matching llama.cpp's spelling of the same
-//! flag), while [`mlxcel_core::SamplingConfig`] and the per-request HTTP field
-//! both take token *IDs*. Bridging the two needs the tokenizer, which is why
-//! the value cannot simply be copied into [`crate::server::ServerConfig`] at
-//! `build_server_config` time: that runs before the model's tokenizer is
-//! loaded. The server resolves it immediately after the tokenizer is available
-//! and fails startup on anything it cannot represent, rather than dropping the
-//! flag silently (#1103).
+//! `--dry-sequence-breaker` and the native `dry_sequence_breakers` field take
+//! breaker *strings*, exactly as llama-server b10621 does. Breaker token data
+//! is derived by scanning the vocabulary for tokens whose decoded text
+//! carries (or ends inside) a breaker string, the port of upstream
+//! `get_overlapping_token_sequences` in
+//! <https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/src/llama-sampler.cpp>.
+//! The result is a head-token map ([`mlxcel_core::SamplingConfig::dry_breaker_heads`]):
+//! a token whose text contains the breaker outright is a head with an empty
+//! tail and breaks matching on its own; a token whose text ends with a proper
+//! prefix of the breaker is a head whose tail (the tokenization of the
+//! remainder) must follow in the window for the break to fire.
 //!
-//! The single-token requirement is forced by the data model. The sampler's
-//! breaker check is `config.dry_sequence_breakers.contains(&window[p1])` over
-//! a `Vec<i32>`, so a multi-token breaker has no representation at all. A
-//! breaker that does not encode to exactly one token is therefore an error
-//! naming the offending string, matching the posture `--allowed-origins` takes
-//! for a malformed origin (see [`crate::server::cors`]).
+//! The scan needs the whole vocabulary surface, so it runs where the
+//! tokenizer lives: the scheduler derives (and caches) the map at enqueue
+//! time. Pre-#1485 this module resolved each string to exactly one token id
+//! and failed startup otherwise; that restriction is gone because the head
+//! map represents multi-token breakers faithfully.
 
-use anyhow::{Context, Result, bail};
+use std::collections::HashMap;
 
 use crate::tokenizer::MlxcelTokenizer;
 
-/// Resolve the raw `--dry-sequence-breaker` strings into sampler token IDs.
-///
-/// Empty entries are skipped, which absorbs a stray delimiter such as
-/// `--dry-sequence-breaker 'a,'`. A flag that was set but yielded nothing is a
-/// configuration error rather than a silent "no breakers" result, because the
-/// operator clearly intended a policy. Both rules mirror
-/// [`crate::server::cors::parse_allowed_origins`].
-pub(crate) fn resolve_dry_sequence_breakers(
-    tokenizer: &MlxcelTokenizer,
-    raw: &[String],
-) -> Result<Vec<i32>> {
-    let mut ids = Vec::with_capacity(raw.len());
+/// b10621's default DRY sequence breakers, applied when the flag is absent.
+pub(crate) const DEFAULT_DRY_SEQUENCE_BREAKERS: [&str; 4] = ["\n", ":", "\"", "*"];
 
+/// The default breaker set as owned strings, for
+/// [`crate::server::ServerConfig`]'s default.
+pub(crate) fn default_breaker_strings() -> Vec<String> {
+    DEFAULT_DRY_SEQUENCE_BREAKERS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Upstream caps a breaker at 40 bytes (`MAX_CHAR_LEN`) with a warning.
+const MAX_BREAKER_LEN: usize = 40;
+
+/// Upstream caps a derived tail at 20 tokens (`MAX_SEQ_LEN`).
+const MAX_TAIL_LEN: usize = 20;
+
+/// Resolve the raw `--dry-sequence-breaker` CLI values into the effective
+/// breaker string set, following b10621's flag handler: an absent flag keeps
+/// the default set (`\n`, `:`, `"`, `*`); giving the flag replaces the
+/// defaults with exactly the given values in order; the sentinel value
+/// `none` clears everything accumulated so far (so a lone `none` runs DRY
+/// with no breakers). Shell escapes are interpreted per
+/// [`unescape_breaker`]; empty entries from a stray comma are skipped.
+pub(crate) fn resolve_breaker_strings(raw: &[String]) -> Vec<String> {
+    if raw.is_empty() {
+        return default_breaker_strings();
+    }
+    let mut out = Vec::new();
     for entry in raw {
-        // `is_empty`, deliberately not `trim().is_empty()`: a single space is
-        // a legitimate breaker in most BPE vocabularies, and trimming would
-        // silently discard it.
+        if entry == "none" {
+            out.clear();
+            continue;
+        }
         if entry.is_empty() {
             continue;
         }
+        out.push(unescape_breaker(entry));
+    }
+    out
+}
 
-        let text = unescape_breaker(entry);
-        let encoded = encode_breaker(tokenizer, &text).with_context(|| {
-            format!("failed to tokenize --dry-sequence-breaker value {entry:?}")
-        })?;
+/// Cap one breaker at upstream's 40-byte truncation, backing off to the
+/// nearest character boundary (upstream truncates raw bytes, which can split
+/// a multi-byte character; matching on a broken byte sequence is not
+/// representable over `&str`, so the boundary floor is the closest faithful
+/// form).
+fn cap_breaker(s: &str) -> &str {
+    if s.len() <= MAX_BREAKER_LEN {
+        return s;
+    }
+    let mut end = MAX_BREAKER_LEN;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    tracing::warn!(breaker = %s, "truncating DRY sequence breaker to {MAX_BREAKER_LEN} bytes");
+    &s[..end]
+}
 
-        if encoded.len() != 1 {
-            bail!(
-                "invalid --dry-sequence-breaker value {entry:?}: this model encodes it as {} \
-                 tokens ({}), but a DRY sequence breaker must be exactly one token because the \
-                 sampler matches breakers by token id. Pick a value this model represents as a \
-                 single token, or drop this entry.",
-                encoded.len(),
-                describe_tokens(tokenizer, &encoded)
-            );
+/// The b10621 vocabulary scan (`get_overlapping_token_sequences`): derive
+/// the DRY head-token map for `breakers` over this tokenizer's vocabulary.
+///
+/// For every vocabulary token, the token's decoded text is tested against
+/// each breaker: containing the breaker outright yields a head with an empty
+/// tail, and ending with a proper prefix of the breaker yields a head whose
+/// tail is the tokenization (special parsing off, upstream's
+/// `tokenize(str.substr(i), false, false)`) of the breaker's remainder,
+/// capped at [`MAX_TAIL_LEN`] tokens. Duplicate tails per head are dropped,
+/// as upstream drops them.
+///
+/// `vocab_texts[id]` is the decoded text of token `id`
+/// ([`decode_vocab_texts`]); tokens with no text never become heads.
+pub(crate) fn derive_breaker_heads(
+    tokenizer: &MlxcelTokenizer,
+    vocab_texts: &[String],
+    breakers: &[String],
+) -> HashMap<i32, Vec<Vec<i32>>> {
+    let mut heads: HashMap<i32, Vec<Vec<i32>>> = HashMap::new();
+    for raw in breakers {
+        if raw.is_empty() {
+            continue;
         }
-
-        let id = encoded[0];
-        ids.push(i32::try_from(id).with_context(|| {
-            format!(
-                "--dry-sequence-breaker value {entry:?} encodes to token id {id}, which does \
-                 not fit in the i32 the sampler uses"
-            )
-        })?);
+        let breaker = cap_breaker(raw);
+        let sb = breaker.as_bytes();
+        for (tid, word) in vocab_texts.iter().enumerate() {
+            if word.is_empty() {
+                continue;
+            }
+            let tid = tid as i32;
+            if word.contains(breaker) {
+                let tails = heads.entry(tid).or_default();
+                if !tails.iter().any(Vec::is_empty) {
+                    tails.push(Vec::new());
+                }
+                continue;
+            }
+            let wb = word.as_bytes();
+            for pos in 0..wb.len() {
+                if wb[pos] != sb[0] {
+                    continue;
+                }
+                let mut i = 1;
+                let mut matched = true;
+                while i < sb.len() && pos + i < wb.len() {
+                    if wb[pos + i] != sb[i] {
+                        matched = false;
+                        break;
+                    }
+                    i += 1;
+                }
+                // A full in-word match was handled by `contains` above; here
+                // the word ended inside the breaker, leaving a tail.
+                if !matched || pos + i < wb.len() {
+                    continue;
+                }
+                let tail_text = String::from_utf8_lossy(&sb[i..]);
+                let mut tail: Vec<i32> = tokenizer
+                    .encode_with_special(&tail_text, false, false)
+                    .map(|ids| ids.into_iter().map(|id| id as i32).collect())
+                    .unwrap_or_default();
+                tail.truncate(MAX_TAIL_LEN);
+                let tails = heads.entry(tid).or_default();
+                if !tails.contains(&tail) {
+                    tails.push(tail);
+                }
+            }
+        }
     }
-
-    if !raw.is_empty() && ids.is_empty() {
-        bail!(
-            "--dry-sequence-breaker was set but contained no usable breaker (every entry was \
-             empty). Note that the flag splits its value on commas, so a bare \",\" produces \
-             two empty entries and a comma cannot itself be a breaker. Remove the flag to run \
-             DRY without breakers, or pass at least one single-token string."
-        );
-    }
-
-    Ok(ids)
+    heads
 }
 
-/// Anchor prepended to a breaker before tokenizing, so that what is measured is
-/// the breaker's own token contribution.
-///
-/// A single ASCII letter is used because it is present in every vocabulary this
-/// server can load, and because it is the least likely character to merge with
-/// an arbitrary breaker.
-const BREAKER_ANCHOR: &str = "a";
-
-/// Tokenize one breaker, discounting any fixed prefix the tokenizer's
-/// normalizer adds.
-///
-/// Encoding the breaker on its own is the obvious implementation and is wrong
-/// for a whole family of checkpoints. A SentencePiece-derived `tokenizer.json`
-/// carries a `Prepend "▁"` normalizer, usually alongside `Replace " " -> "▁"`,
-/// so the text handed to the model is not the text that was passed in:
-///
-/// - On Mixtral, `encode("\n")` yields `["▁", "<0x0A>"]`, two tokens, even
-///   though the newline is a single vocabulary entry (id 13). The breaker is
-///   perfectly representable; the bare encoding just asks the wrong question,
-///   and startup would fail on the example in this flag's own help text.
-/// - Worse, `encode(" ")` normalizes to `"▁▁"` and yields ONE token, the
-///   double-space entry (id 259). That passes a length check and installs a
-///   breaker the operator did not ask for, silently. It is the same class of
-///   failure this whole flag was inert for.
-///
-/// Encoding `anchor + breaker` and subtracting the anchor's own encoding
-/// measures the breaker's contribution instead, so a fixed prefix cannot
-/// inflate the count or shift the id. When the anchor does not survive as a
-/// prefix (it merged with the breaker) or encodes to nothing, there is nothing
-/// to subtract and the bare encoding is used, which is the previous behavior.
-fn encode_breaker(tokenizer: &MlxcelTokenizer, text: &str) -> Result<Vec<u32>> {
-    let bare = tokenizer.encode(text, false)?;
-
-    let anchor = tokenizer.encode(BREAKER_ANCHOR, false)?;
-    if anchor.is_empty() {
-        return Ok(bare);
+/// Decode every vocabulary token's text once, for [`derive_breaker_heads`].
+/// Tokens whose bytes are not valid UTF-8 are decoded lossily: a breaker is
+/// matched over text, exactly as upstream matches over `detokenize`'s
+/// output.
+pub(crate) fn decode_vocab_texts(tokenizer: &MlxcelTokenizer) -> Vec<String> {
+    let vocab = tokenizer.vocab_size();
+    let mut texts = Vec::with_capacity(vocab);
+    for id in 0..vocab {
+        let text = tokenizer
+            .token_piece_bytes(id as u32)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        texts.push(text);
     }
-
-    let anchored = tokenizer.encode(&format!("{BREAKER_ANCHOR}{text}"), false)?;
-    Ok(anchored
-        .strip_prefix(anchor.as_slice())
-        .map_or(bare, <[u32]>::to_vec))
-}
-
-/// Render token ids with the pieces they decode to, for an error message.
-///
-/// The pieces are what make a normalizer artifact visible: `"▁"=28705,
-/// "<0x0A>"=13` tells an operator that their tokenizer prepended a word
-/// boundary marker, where a bare `[28705, 13]` does not.
-fn describe_tokens(tokenizer: &MlxcelTokenizer, ids: &[u32]) -> String {
-    ids.iter()
-        .map(|id| match tokenizer.token_piece(*id) {
-            Some(piece) => format!("{piece:?}={id}"),
-            None => format!("<unknown>={id}"),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Public wrapper over [`describe_tokens`] for startup logging, so a resolved
-/// breaker can be read back as pieces rather than as bare ids.
-pub(crate) fn describe_resolved_breakers(tokenizer: &MlxcelTokenizer, ids: &[i32]) -> String {
-    let unsigned: Vec<u32> = ids
-        .iter()
-        .filter_map(|id| u32::try_from(*id).ok())
-        .collect();
-    describe_tokens(tokenizer, &unsigned)
+    texts
 }
 
 /// Interpret the four C-style escapes an operator can realistically type at a

@@ -64,16 +64,17 @@ fn default_generation_settings_with_live(
         "ignore_eos": config.default_ignore_eos,
         "repeat_penalty": live.default_repetition_penalty,
         "repeat_last_n": live.default_repetition_context_size,
-        "seed": live.default_seed.unwrap_or(u64::MAX),
+        "seed": live.default_seed.unwrap_or(u64::from(u32::MAX)),
         "frequency_penalty": live.default_frequency_penalty,
         "presence_penalty": live.default_presence_penalty,
         "dry_multiplier": live.default_dry_multiplier,
         "dry_base": live.default_dry_base,
         "dry_allowed_length": live.default_dry_allowed_length,
         "dry_penalty_last_n": live.default_dry_penalty_last_n,
-        // Reported as resolved token IDs rather than as the strings the
-        // operator typed, because the IDs are what the sampler compares
-        // against and what a per-request `dry_sequence_breakers` overrides.
+        // Reported as the breaker STRINGS since #1485, b10621's own value
+        // domain: the flag, the native field, and this report all carry
+        // strings now, and the head-token data the sampler compares against
+        // is derived from them per request.
         "dry_sequence_breakers": live.default_dry_sequence_breakers,
         // b10621 context retention (#1472 gave these a real analogue, so
         // #1440's omission policy no longer applies to them): `n_keep` is the
@@ -82,6 +83,29 @@ fn default_generation_settings_with_live(
         // make server-settable and therefore always reports as upstream's 0.
         "n_keep": config.n_keep,
         "n_discard": 0,
+        // #1485 sampling remainder.
+        "mirostat": config.default_mirostat,
+        "mirostat_tau": config.default_mirostat_tau,
+        "mirostat_eta": config.default_mirostat_eta,
+        "dynatemp_range": config.default_dynatemp_range,
+        "dynatemp_exponent": config.default_dynatemp_exponent,
+        "adaptive_target": config.default_adaptive_target,
+        "adaptive_decay": config.default_adaptive_decay,
+        // #1485 grammar surfaces. `grammar` reports the GBNF the server was
+        // started with; a `--json-schema` default reports the empty string,
+        // because mlxcel compiles a schema through llguidance's own JSON
+        // front end rather than converting it to GBNF first, so there is no
+        // converted grammar text to report. `grammar_lazy`, the triggers and
+        // the preserved set have no server-wide flag upstream either, so they
+        // report their per-request defaults.
+        "grammar": config
+            .default_grammar
+            .as_ref()
+            .and_then(|g| g.gbnf.clone())
+            .unwrap_or_default(),
+        "grammar_lazy": false,
+        "grammar_triggers": serde_json::Value::Array(Vec::new()),
+        "preserved_tokens": serde_json::Value::Array(Vec::new()),
     })
 }
 

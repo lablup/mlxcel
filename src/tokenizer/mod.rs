@@ -353,6 +353,22 @@ impl MlxcelTokenizer {
         }
     }
 
+    /// The number of ids this vocabulary can decode, i.e. the exclusive
+    /// upper bound for iterating [`Self::token_piece_bytes`] (#1485).
+    ///
+    /// Used by the DRY breaker-head derivation
+    /// (`crate::server::dry_breakers::decode_vocab_texts`), which scans the
+    /// whole vocabulary surface once. The model's logit row may be padded
+    /// wider; padded ids decode to nothing and can never be breaker heads,
+    /// so the tokenizer's own bound is the right one.
+    pub fn vocab_size(&self) -> usize {
+        match self {
+            Self::HuggingFace(t) => t.get_vocab_size(true),
+            Self::SentencePiece(t) => t.vocab_size(),
+            Self::Tiktoken(t) => t.vocab_size(),
+        }
+    }
+
     /// The id a vocabulary entry holds, by its exact spelling.
     ///
     /// Used by FIM discovery ([`Self::fim_tokens`]), which asks the vocabulary
@@ -554,6 +570,19 @@ impl MlxcelTokenizer {
 }
 
 impl SentencePieceTokenizer {
+    /// The exclusive id bound this wrapper can decode: the SentencePiece
+    /// vocabulary size, extended past any added-token id living outside it
+    /// (#1485; see `MlxcelTokenizer::vocab_size`).
+    pub fn vocab_size(&self) -> usize {
+        let added_bound = self
+            .added_token_contents
+            .keys()
+            .map(|&id| id as usize + 1)
+            .max()
+            .unwrap_or(0);
+        self.processor.len().max(added_bound)
+    }
+
     fn new(
         processor: SentencePieceProcessor,
         special_tokens: HashMap<String, u32>,

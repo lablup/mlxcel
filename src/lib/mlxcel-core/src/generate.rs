@@ -914,6 +914,70 @@ pub struct SamplingConfig {
     /// over only the last `N` generated tokens, matching b10621's windowed
     /// penalty ring buffer. DRY has its own window (`dry_penalty_last_n`).
     pub penalty_last_n: i32,
+    /// Mirostat mode, b10621's `--mirostat` (#1485): `0` disables (the
+    /// default), `1` selects Mirostat, `2` selects Mirostat 2.0. A non-zero
+    /// value REPLACES the whole sampler chain, exactly as b10621's
+    /// `common_sampler_init` does: penalties, DRY, and every truncation
+    /// filter (top-k / top-p / min-p / typical / top-n-sigma / XTC) are
+    /// skipped, and the step becomes token-bias -> temperature ->
+    /// mirostat-select. Requires per-sequence state (the surprise target
+    /// `mu`), so a mirostat config never joins the fused batch path.
+    pub mirostat: i32,
+    /// Mirostat target entropy tau (b10621 default `5.0`). Unused while
+    /// `mirostat == 0`.
+    pub mirostat_tau: f32,
+    /// Mirostat learning rate eta (b10621 default `0.1`). Unused while
+    /// `mirostat == 0`.
+    pub mirostat_eta: f32,
+    /// Dynamic-temperature half range, b10621's `--dynatemp-range` (#1485):
+    /// `0.0` disables (the default). When positive, the temperature stage
+    /// scales by an entropy-dependent temperature in
+    /// `[max(0, temperature - range), temperature + range]` instead of the
+    /// fixed `temperature`, computed per step over the candidates that
+    /// survive the preceding filters (b10621's `llama_sampler_temp_ext`).
+    /// Data-dependent, so the row runs the Rust extended chain rather than
+    /// the fused C++ chain. NOTE: a positive range makes even a
+    /// `temperature == 0.0` config stochastic, exactly as it does upstream;
+    /// see [`SamplingConfig::is_greedy_path`].
+    pub dynatemp_range: f32,
+    /// Dynamic-temperature exponent (b10621 default `1.0`): how the
+    /// normalized candidate entropy maps into the range. Unused while
+    /// `dynatemp_range <= 0.0`.
+    pub dynatemp_exponent: f32,
+    /// Adaptive-p target probability, b10621's `--adaptive-target` (#1485):
+    /// negative disables (the default `-1.0`). Enabled ONLY when the request
+    /// also names the `adaptive_p` stage in its sampler list (b10621
+    /// activates the sampler solely through `params.samplers`), which the
+    /// resolution layer expresses by leaving this field negative otherwise.
+    /// When enabled the final draw is replaced by b10621's adaptive-p
+    /// transform over the post-chain distribution, with a per-sequence EMA
+    /// state, so such a config never joins the fused batch path.
+    pub adaptive_target: f32,
+    /// Adaptive-p EMA decay (b10621 default `0.90`, valid `0.0..=0.99`);
+    /// history approximates `1 / (1 - decay)` tokens. Unused while
+    /// `adaptive_target < 0.0`.
+    pub adaptive_decay: f32,
+    /// b10621's `min_keep` (#1485): when `>= 2`, the top-p / min-p /
+    /// typical-p truncations each keep at least this many candidates (in
+    /// their own keep order), and XTC skips its removal entirely when it
+    /// would leave fewer survivors. `0` and `1` are no-ops (every filter
+    /// already keeps at least one token). A `min_keep >= 2` row runs the
+    /// Rust extended chain, because the C++ fused filters have no floor
+    /// parameter.
+    pub min_keep: usize,
+    /// DRY restart-sequence heads derived from b10621's breaker STRINGS
+    /// (#1485): maps a head token id to the list of tail token sequences
+    /// that, together with the head, spell out a breaker string
+    /// (`get_overlapping_token_sequences` in upstream
+    /// `src/llama-sampler.cpp`). A head with an empty tail (the common case:
+    /// the token's decoded text contains the breaker string outright) breaks
+    /// DRY matching at its position on its own; a head with a non-empty tail
+    /// breaks only when the following window tokens spell the tail. Derived
+    /// once per breaker set (server startup for the CLI default set, enqueue
+    /// time for per-request sets) because the derivation needs the
+    /// vocabulary. The legacy `dry_sequence_breakers` id list keeps its
+    /// exact-token semantics alongside for the mlxcel-native surfaces.
+    pub dry_breaker_heads: std::sync::Arc<std::collections::HashMap<i32, Vec<Vec<i32>>>>,
 }
 
 impl Default for SamplingConfig {
@@ -941,6 +1005,15 @@ impl Default for SamplingConfig {
             top_n_sigma: 0.0,
             typical_p: 1.0,
             penalty_last_n: -1,
+            mirostat: 0,
+            mirostat_tau: 5.0,
+            mirostat_eta: 0.1,
+            dynatemp_range: 0.0,
+            dynatemp_exponent: 1.0,
+            adaptive_target: -1.0,
+            adaptive_decay: 0.9,
+            min_keep: 0,
+            dry_breaker_heads: std::sync::Arc::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -971,6 +1044,15 @@ impl SamplingConfig {
             top_n_sigma: 0.0,
             typical_p: 1.0,
             penalty_last_n: -1,
+            mirostat: 0,
+            mirostat_tau: 5.0,
+            mirostat_eta: 0.1,
+            dynatemp_range: 0.0,
+            dynatemp_exponent: 1.0,
+            adaptive_target: -1.0,
+            adaptive_decay: 0.9,
+            min_keep: 0,
+            dry_breaker_heads: std::sync::Arc::new(std::collections::HashMap::new()),
         }
     }
 
@@ -993,7 +1075,7 @@ impl SamplingConfig {
     /// are not needlessly split off the fused batch, pipelined-lookahead, or
     /// batched-speculative paths.
     pub fn effective_top_n_sigma(&self) -> f32 {
-        if self.temperature == 0.0 || self.top_k == 1 {
+        if self.is_greedy_path() || self.effective_mirostat() != 0 {
             return 0.0;
         }
         if self.top_n_sigma > 0.0 && self.top_n_sigma.is_finite() {
@@ -1010,7 +1092,7 @@ impl SamplingConfig {
     /// [`SamplingConfig::effective_top_n_sigma`], so rows whose sampled
     /// outputs are necessarily identical stay on the shared fused paths.
     pub fn effective_typical_p(&self) -> f32 {
-        if self.temperature == 0.0 || self.top_k == 1 {
+        if self.is_greedy_path() || self.effective_mirostat() != 0 {
             return 1.0;
         }
         if self.typical_p.is_finite() && self.typical_p > 0.0 && self.typical_p < 1.0 {
@@ -1018,6 +1100,108 @@ impl SamplingConfig {
         } else {
             1.0
         }
+    }
+
+    /// Whether the sampler resolves to the deterministic argmax path.
+    ///
+    /// This is the pre-#1485 `temperature == 0.0 || top_k == 1` check, with
+    /// one refinement from b10621's `llama_sampler_temp_ext`: a positive
+    /// `dynatemp_range` re-widens a `temperature == 0.0` config into a
+    /// stochastic one (the dynamic temperature lands in
+    /// `[max(0, temp - range), temp + range]`), so only `top_k == 1` stays
+    /// unconditionally greedy. Every greedy fold (`effective_*`, fused-batch
+    /// gates, filter skips) routes through this so the definition cannot
+    /// drift between call sites.
+    pub fn is_greedy_path(&self) -> bool {
+        self.top_k == 1
+            || (self.temperature == 0.0
+                && !(self.dynatemp_range > 0.0 && self.dynatemp_range.is_finite()))
+    }
+
+    /// The mirostat mode the sampler will actually run: `1` or `2` when the
+    /// raw field selects a version, else `0` (disabled). Values outside
+    /// `{0, 1, 2}` are refused at the request/CLI layers (where b10621 would
+    /// abort the process in `common_sampler_init`); the fold here is the
+    /// defense-in-depth mirror so an unvalidated caller degrades to the
+    /// disabled chain instead of an undefined mode.
+    pub fn effective_mirostat(&self) -> i32 {
+        if self.mirostat == 1 || self.mirostat == 2 {
+            self.mirostat
+        } else {
+            0
+        }
+    }
+
+    /// The dynamic-temperature half range the sampler will actually apply:
+    /// `0.0` (disabled) unless the raw field is positive and finite. A
+    /// `top_k == 1` config folds to disabled (one candidate leaves no
+    /// entropy to map), but `temperature == 0.0` does NOT: b10621's
+    /// `temp_ext` applies the dynamic range regardless of the base
+    /// temperature. Mirostat replaces the whole chain, so it folds this
+    /// stage off too.
+    pub fn effective_dynatemp_range(&self) -> f32 {
+        if self.top_k == 1 || self.effective_mirostat() != 0 {
+            return 0.0;
+        }
+        if self.dynatemp_range > 0.0 && self.dynatemp_range.is_finite() {
+            self.dynatemp_range
+        } else {
+            0.0
+        }
+    }
+
+    /// The `min_keep` floor the sampler will actually apply: `0` (inert)
+    /// unless the raw field is `>= 2` on a non-greedy, non-mirostat config.
+    /// `0` and `1` are inert because every truncation filter already keeps
+    /// at least one candidate, and the greedy path keeps exactly the argmax
+    /// whatever the floor, so folding them keeps such rows on the fused
+    /// batch path.
+    pub fn effective_min_keep(&self) -> usize {
+        if self.is_greedy_path() || self.effective_mirostat() != 0 || self.min_keep < 2 {
+            0
+        } else {
+            self.min_keep
+        }
+    }
+
+    /// The adaptive-p target the sampler will actually use: `-1.0`
+    /// (disabled) unless the raw field is a finite non-negative value on a
+    /// non-greedy, non-mirostat config (b10621 clamps the enabled value into
+    /// `[0, 1]` at apply time; the resolution layers enforce the domain).
+    /// Greedy folds to disabled because a single-candidate draw is the same
+    /// token with or without the transform, which keeps such rows on the
+    /// fused batch path.
+    pub fn effective_adaptive_target(&self) -> f32 {
+        if self.is_greedy_path() || self.effective_mirostat() != 0 {
+            return -1.0;
+        }
+        if self.adaptive_target.is_finite() && self.adaptive_target >= 0.0 {
+            self.adaptive_target.min(1.0)
+        } else {
+            -1.0
+        }
+    }
+
+    /// Whether this config runs the Rust extended sampler chain
+    /// ([`crate::sampling`]'s `apply_extended_chain`) instead of the fused
+    /// C++ chain: any of dynamic temperature, a `min_keep` floor, or
+    /// adaptive-p requires arithmetic the C++ chain has no parameters for.
+    /// Mirostat is NOT part of this: it bypasses the chain entirely on its
+    /// own path.
+    pub fn needs_extended_chain(&self) -> bool {
+        self.effective_mirostat() == 0
+            && (self.effective_dynatemp_range() > 0.0
+                || self.effective_min_keep() >= 2
+                || self.effective_adaptive_target() >= 0.0)
+    }
+
+    /// Whether the sampler carries mutable per-sequence feedback state
+    /// across steps: mirostat's surprise target `mu`, or adaptive-p's EMA.
+    /// Such a config must be sampled through
+    /// [`crate::sampling::sample_token_optimized_with_state`] so the state
+    /// persists, and can never join the fused batch path.
+    pub fn needs_sampler_feedback_state(&self) -> bool {
+        self.effective_mirostat() != 0 || self.effective_adaptive_target() >= 0.0
     }
 
     /// Check if any penalty-based sampling is enabled.
@@ -1029,6 +1213,12 @@ impl SamplingConfig {
     /// what lets a request that zeroes its windows stay on the fused batch
     /// path.
     pub fn needs_token_history(&self) -> bool {
+        // Mirostat replaces the whole chain (b10621's common_sampler_init):
+        // penalties and DRY never run, so their configuration cannot make
+        // the row need history.
+        if self.effective_mirostat() != 0 {
+            return false;
+        }
         let penalties_active = self.penalty_last_n != 0
             && (self.repetition_penalty != 1.0
                 || self.frequency_penalty != 0.0

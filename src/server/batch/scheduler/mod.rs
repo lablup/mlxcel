@@ -44,8 +44,10 @@ use mlxcel_core::generation_policy::{
 };
 use mlxcel_core::hardware;
 use mlxcel_core::sampling::{
-    FusedSampleParams, TokenBiasMap, apply_row_filters, batched_fused_sample, compute_logprobs,
-    row_supports_fused_batch, sample_token_optimized, sample_token_optimized_with_state,
+    FusedSampleParams, LogprobSource, TokenBiasMap, apply_row_filters, batched_fused_sample,
+    compute_logprobs, compute_post_sampling_probs, row_supports_fused_batch,
+    sample_token_optimized, sample_token_optimized_with_state,
+    sample_token_with_state_and_distribution,
 };
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
@@ -522,6 +524,19 @@ pub struct BatchScheduler {
     ///
     /// Empty map = bit-exact baseline path (no sampling change, no alloc).
     token_bias: TokenBiasMap,
+    /// Decoded text of every vocabulary token, filled lazily on the first
+    /// DRY breaker-head derivation (#1485) and reused for every later
+    /// breaker set.
+    dry_vocab_texts: Option<std::sync::Arc<Vec<String>>>,
+    /// Derived DRY breaker head maps keyed by breaker-string set (#1485):
+    /// the server-wide default set is derived once and every request that
+    /// inherits it hits this cache; per-request sets each pay one
+    /// vocabulary scan. Bounded (cleared at 16 entries) because distinct
+    /// sets are operator-driven, not attacker-driven state.
+    dry_breaker_cache: std::collections::HashMap<
+        Vec<String>,
+        std::sync::Arc<std::collections::HashMap<i32, Vec<Vec<i32>>>>,
+    >,
 
     /// Reserved output-illegal token ids for the loaded model (issue #350).
     ///

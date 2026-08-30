@@ -49,6 +49,10 @@ fn sample_result() -> GenerationResult {
 fn sample_options() -> crate::server::ServerGenerateOptions {
     crate::server::ServerGenerateOptions {
         retention: Default::default(),
+        dry_breaker_strings: None,
+        logit_bias: Vec::new(),
+        logit_bias_texts: Vec::new(),
+        post_sampling_probs: false,
         max_tokens: 1,
         sampling: SamplingConfig::default(),
         stop_sequences: None,
@@ -58,12 +62,14 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         logprobs: LogprobsConfig {
             enabled: false,
             top_k: 0,
+            source: Default::default(),
         },
         reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
         thinking_enter_block_on_start: false,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
+        grammar: None,
         image_soft_tokens: None,
     }
 }

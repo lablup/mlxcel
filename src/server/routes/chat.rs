@@ -65,7 +65,8 @@ pub(crate) fn structured_error_to_response(err: StructuredOutputError) -> ErrorR
     match err {
         StructuredOutputError::InvalidRequest(_)
         | StructuredOutputError::InvalidSchema(_)
-        | StructuredOutputError::SchemaTooLarge(_) => {
+        | StructuredOutputError::SchemaTooLarge(_)
+        | StructuredOutputError::InvalidGrammar(_) => {
             ErrorResponse::new(err.to_string(), "invalid_request_error")
         }
         StructuredOutputError::UnsupportedTokenizer(_) | StructuredOutputError::Matcher(_) => {
@@ -520,6 +521,7 @@ pub(crate) async fn non_stream_chat_completion(
         options.logprobs = LogprobsConfig {
             enabled: true,
             top_k,
+            source: Default::default(),
         };
     }
 
@@ -1136,6 +1138,7 @@ async fn stream_chat_completion(
         options.logprobs = LogprobsConfig {
             enabled: true,
             top_k,
+            source: Default::default(),
         };
     }
 
@@ -1828,6 +1831,30 @@ pub(crate) fn build_generate_options_with_live(
     live: &LiveSettings,
     request_carries_loop_amplifier: bool,
 ) -> ServerGenerateOptions {
+    // OpenAI `logit_bias` (#1485): keys are token ids as strings; a key
+    // that is not an integer is tokenized at enqueue time and the bias
+    // applies to every resulting token, the same string-key form b10621's
+    // schema handler accepts. A present (even empty) map replaces the
+    // server-wide `--logit-bias` set, as upstream's handler clears and
+    // rebuilds the list.
+    let (logit_bias, logit_bias_texts) = match &params.logit_bias {
+        Some(map) => {
+            let mut nums = Vec::new();
+            let mut texts = Vec::new();
+            for (key, &bias) in map {
+                match key.parse::<i32>() {
+                    Ok(id) => nums.push((id, bias)),
+                    Err(_) => texts.push((key.clone(), bias)),
+                }
+            }
+            // Deterministic application order across the HashMap.
+            nums.sort_by_key(|&(id, _)| id);
+            texts.sort_by(|a, b| a.0.cmp(&b.0));
+            (Some(nums), texts)
+        }
+        None => (None, Vec::new()),
+    };
+
     build_server_generate_options_with_live(
         config,
         live,
@@ -1878,6 +1905,24 @@ pub(crate) fn build_generate_options_with_live(
                 params.min_count,
             ),
             request_carries_loop_amplifier,
+            // #1485: the OpenAI-shaped surface exposes only logit_bias; the
+            // mirostat / dynatemp / adaptive-p / min_keep / n_probs fields
+            // are native-`/completion` schema, so the server-wide defaults
+            // resolve for them.
+            logit_bias,
+            logit_bias_texts,
+            dry_sequence_breaker_strings: None,
+            mirostat: None,
+            mirostat_tau: None,
+            mirostat_eta: None,
+            dynatemp_range: None,
+            dynatemp_exponent: None,
+            adaptive_target: None,
+            adaptive_decay: None,
+            adaptive_p_named: None,
+            min_keep: None,
+            n_probs: None,
+            post_sampling_probs: None,
         },
     )
 }

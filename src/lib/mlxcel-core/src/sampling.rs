@@ -211,6 +211,19 @@ impl TokenBiasMap {
 ///
 /// Used by: standard generation, speculative decoding, batch scheduler, MTP
 /// verify (Gemma4 target adapter)
+impl TokenBiasMap {
+    /// Add `bias` onto the entry for `token_id`, creating it at zero first
+    /// (#1485). b10621's logit-bias sampler applies every `(token, bias)`
+    /// entry additively, so a token named twice (say, once by id and once
+    /// through a string key that tokenizes to it) accumulates both biases;
+    /// a plain insert would silently keep only the last. `-inf` saturates
+    /// (`-inf + x == -inf`), so a ban composes with any further bias.
+    pub fn accumulate(&mut self, token_id: i32, bias: f32) {
+        let entry = self.entries.entry(token_id).or_insert(0.0);
+        *entry += bias;
+    }
+}
+
 pub fn apply_token_bias(logits: &MlxArray, bias: &TokenBiasMap) -> UniquePtr<MlxArray> {
     if bias.is_empty() {
         return ffi::copy(logits);
@@ -279,18 +292,13 @@ pub fn sample_token_optimized_with_state(
     token_history: &[i32],
     state: &mut Option<SamplerState>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    // The incremental state only serves the full-history window
+    // The incremental penalty state only serves the full-history window
     // (`penalty_last_n < 0`); a positive window rebuilds over its bounded
     // slice each step and a zero window disables the stage, so neither
-    // allocates state (#1436).
-    if state.is_none()
-        && config.penalty_last_n < 0
-        && (config.repetition_penalty != 1.0
-            || config.frequency_penalty != 0.0
-            || config.presence_penalty != 0.0)
-    {
-        *state = Some(SamplerState::for_config(config));
-    }
+    // allocates state (#1436). The #1485 feedback samplers (mirostat,
+    // adaptive-p) also allocate here, carrying their `mu` / EMA across
+    // steps.
+    ensure_sampler_state(config, state);
     sample_token_optimized_core(logits, config, token_history, state.as_mut())
 }
 
@@ -308,6 +316,57 @@ fn sample_token_optimized_core(
     token_history: &[i32],
     state: Option<&mut SamplerState>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let (token, adjusted, _probs) =
+        sample_token_optimized_core_full(logits, config, token_history, state, false);
+    (token, adjusted)
+}
+
+/// Full-form core sampler shared by every entry point: samples one token and,
+/// when `want_distribution` is set, also returns the float32 `[1, vocab]`
+/// post-chain distribution the draw came from (b10621's `post_sampling_probs`
+/// view). Routes to one of three paths (#1485):
+///
+/// - **mirostat** (`effective_mirostat() != 0`): b10621 replaces the whole
+///   chain, so this bypasses penalties, DRY, and every truncation filter and
+///   runs token-bias -> temperature -> mirostat-select with the per-sequence
+///   `mu` from `state` ([`mirostat_sample_core`]).
+/// - **extended chain** (`needs_extended_chain()`): dynamic temperature, a
+///   `min_keep` floor, or adaptive-p require arithmetic the fused C++ chain
+///   has no parameters for, so the whole b10621 filter order runs as Rust
+///   graph ops ([`apply_extended_chain`]) ending in a plain categorical (or
+///   the adaptive-p transform draw).
+/// - **fused** (everything else): the pre-#1485 path, byte-identical.
+fn sample_token_optimized_core_full(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    mut state: Option<&mut SamplerState>,
+    want_distribution: bool,
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    Option<UniquePtr<MlxArray>>,
+) {
+    if config.effective_mirostat() != 0 {
+        return mirostat_sample_core(logits, config, state, want_distribution);
+    }
+
+    if config.needs_extended_chain() {
+        let adjusted =
+            preprocess_penalty_stages(logits, config, token_history, state.as_deref_mut());
+        let gate = xtc_gate_draw(config);
+        let filtered = apply_extended_chain(&adjusted, config, gate.as_deref());
+        let (token, probs) = if config.effective_adaptive_target() >= 0.0 {
+            adaptive_p_sample(&filtered, config, state, want_distribution)
+        } else {
+            let token = ffi::fused_sample(&filtered, 1.0, 0, 1.0, 0.0);
+            let probs = want_distribution.then(|| ffi::softmax(&filtered, -1));
+            (token, probs)
+        };
+        crate::sampling_dispatch::report_sampling_dispatch();
+        return (token, adjusted, probs);
+    }
+
     let last_logits = preprocess_logits_for_sampling(logits, config, token_history, state);
 
     let gate = xtc_gate_draw(config);
@@ -315,7 +374,49 @@ fn sample_token_optimized_core(
     // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
     // step in steady state; see `sampling_dispatch` for why this is not `debug`.
     crate::sampling_dispatch::report_sampling_dispatch();
-    (token, last_logits)
+    let probs = want_distribution
+        .then(|| fused_sample_probs_dispatch(&last_logits, config, gate.as_deref()));
+    (token, last_logits, probs)
+}
+
+/// Stateful sampling with the post-chain distribution (#1485): the
+/// [`sample_token_optimized_with_state`] behavior plus the float32
+/// `[1, vocab]` distribution the draw came from, sharing one XTC gate draw
+/// between the token and the distribution so both see the same gate outcome.
+/// This is what the native `/completion` route's `post_sampling_probs` view
+/// reports.
+///
+/// Used by: `BatchScheduler` decode steps for `post_sampling_probs` requests
+pub fn sample_token_with_state_and_distribution(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    state: &mut Option<SamplerState>,
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+) {
+    ensure_sampler_state(config, state);
+    let (token, adjusted, probs) =
+        sample_token_optimized_core_full(logits, config, token_history, state.as_mut(), true);
+    let probs = probs.expect("want_distribution returns a distribution on every path");
+    (token, adjusted, probs)
+}
+
+/// Create the per-sequence [`SamplerState`] on first use when `config` needs
+/// one: an incremental full-history penalty state (the pre-#1485 condition),
+/// or the #1485 sampler feedback state (mirostat `mu`, adaptive-p EMA).
+fn ensure_sampler_state(config: &SamplingConfig, state: &mut Option<SamplerState>) {
+    if state.is_none()
+        && ((config.penalty_last_n < 0
+            && (config.repetition_penalty != 1.0
+                || config.frequency_penalty != 0.0
+                || config.presence_penalty != 0.0))
+            || config.needs_sampler_feedback_state())
+    {
+        *state = Some(SamplerState::for_config(config));
+    }
 }
 
 /// One lazy `[1]` f32 uniform draw for the XTC gate, or `None` when XTC is
@@ -443,6 +544,64 @@ fn preprocess_logits_for_sampling(
     logits: &MlxArray,
     config: &SamplingConfig,
     token_history: &[i32],
+    state: Option<&mut SamplerState>,
+) -> UniquePtr<MlxArray> {
+    let last_logits = preprocess_penalty_stages(logits, config, token_history, state);
+
+    // Row filters (top-n-sigma and typical_p; #1373 adds p_less) run on the
+    // penalized, untempered logits: after every history-based penalty and
+    // before the fused C++ chain (temperature / top_k / top_p / min_p /
+    // XTC). Disabled filters return `last_logits` unchanged with no new
+    // graph nodes, preserving the bit-exact baseline.
+    apply_row_filters(last_logits, &FusedSampleParams::from_config(config))
+}
+
+/// The token-bias stage shared by [`preprocess_penalty_stages`] and the
+/// mirostat bypass path (#1485): applies [`SamplingConfig::token_bias`] with
+/// the B9 observability counters, or returns the input unchanged (no new
+/// graph nodes) when the map is empty.
+fn apply_token_bias_stage(
+    last_logits: UniquePtr<MlxArray>,
+    config: &SamplingConfig,
+) -> UniquePtr<MlxArray> {
+    if config.token_bias.is_empty() {
+        return last_logits;
+    }
+    // B9 — increment applied counter (zero overhead when bias is empty).
+    LANG_BIAS_APPLIED_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+    // B9 — check if the pre-bias argmax token was `-inf`-suppressed.
+    // Evaluation is required to extract the integer id; the argmax is a
+    // lightweight reduction over the last logits slice already in memory.
+    let top_arr = ffi::argmax_last_axis(&last_logits);
+    ffi::eval(&top_arr);
+    let top_id = ffi::item_i32(&top_arr);
+    if config
+        .token_bias
+        .get(&top_id)
+        .is_some_and(|b| b.is_infinite() && b.is_sign_negative())
+    {
+        LANG_BIAS_TOKENS_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        // separate counter for suppressions that originated
+        // from the opt-in byte-fragment classifier. Strict subset of the
+        // total-suppressed counter above.
+        if config.token_bias.is_byte_fragment(top_id) {
+            LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    apply_token_bias(&last_logits, &config.token_bias)
+}
+
+/// The bias/penalty half of [`preprocess_logits_for_sampling`]: last-position
+/// slice, token bias, repetition penalty, DRY, frequency/presence penalty,
+/// WITHOUT the row filters. The extended chain (#1485) consumes this
+/// directly, because its filters need `min_keep` parameters the shared
+/// [`apply_row_filters`] hook deliberately does not carry.
+fn preprocess_penalty_stages(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
     mut state: Option<&mut SamplerState>,
 ) -> UniquePtr<MlxArray> {
     // Use optimized slice_last_logits: [batch, seq, vocab] -> [batch, vocab].
@@ -452,34 +611,7 @@ fn preprocess_logits_for_sampling(
     // Language policy is an external decision, not history-based, so it takes
     // precedence. -inf composes correctly with downstream penalties:
     //   -inf × k == -inf,  -inf + f == -inf.
-    let last_logits = if !config.token_bias.is_empty() {
-        // B9 — increment applied counter (zero overhead when bias is empty).
-        LANG_BIAS_APPLIED_TOTAL.fetch_add(1, Ordering::Relaxed);
-
-        // B9 — check if the pre-bias argmax token was `-inf`-suppressed.
-        // Evaluation is required to extract the integer id; the argmax is a
-        // lightweight reduction over the last logits slice already in memory.
-        let top_arr = ffi::argmax_last_axis(&last_logits);
-        ffi::eval(&top_arr);
-        let top_id = ffi::item_i32(&top_arr);
-        if config
-            .token_bias
-            .get(&top_id)
-            .is_some_and(|b| b.is_infinite() && b.is_sign_negative())
-        {
-            LANG_BIAS_TOKENS_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
-            // separate counter for suppressions that originated
-            // from the opt-in byte-fragment classifier. Strict subset of the
-            // total-suppressed counter above.
-            if config.token_bias.is_byte_fragment(top_id) {
-                LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        apply_token_bias(&last_logits, &config.token_bias)
-    } else {
-        last_logits
-    };
+    let last_logits = apply_token_bias_stage(last_logits, config);
 
     // Synchronize the incremental state to the current history once, before any
     // penalty reads it. No-op when `state` is `None`.
@@ -515,7 +647,7 @@ fn preprocess_logits_for_sampling(
         last_logits
     };
 
-    let last_logits = if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
+    if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
         && !penalty_history.is_empty()
     {
         match &mut state {
@@ -533,14 +665,7 @@ fn preprocess_logits_for_sampling(
         }
     } else {
         last_logits
-    };
-
-    // Row filters (top-n-sigma and typical_p; #1373 adds p_less) run on the
-    // penalized, untempered logits: after every history-based penalty and
-    // before the fused C++ chain (temperature / top_k / top_p / min_p /
-    // XTC). Disabled filters return `last_logits` unchanged with no new
-    // graph nodes, preserving the bit-exact baseline.
-    apply_row_filters(last_logits, &FusedSampleParams::from_config(config))
+    }
 }
 
 /// The exact categorical distribution [`sample_token_optimized`] would draw
@@ -567,6 +692,10 @@ pub fn effective_token_distribution(
     config: &SamplingConfig,
     token_history: &[i32],
 ) -> UniquePtr<MlxArray> {
+    debug_assert!(
+        config.effective_mirostat() == 0 && !config.needs_extended_chain(),
+        "speculative distribution paths exclude the #1485 feedback/extended sampler configs; admission must gate them out"
+    );
     let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
     let gate = xtc_gate_draw(config);
     fused_sample_probs_dispatch(&processed, config, gate.as_deref())
@@ -589,6 +718,10 @@ pub fn sample_token_with_distribution(
     config: &SamplingConfig,
     token_history: &[i32],
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    debug_assert!(
+        config.effective_mirostat() == 0 && !config.needs_extended_chain(),
+        "speculative distribution paths exclude the #1485 feedback/extended sampler configs; admission must gate them out"
+    );
     let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
     // One gate draw for BOTH calls: the token and the reported distribution
     // must see the same XTC gate outcome, and only one uniform may leave the
@@ -759,7 +892,15 @@ impl FusedSampleParams {
 ///
 /// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
 pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
-    !config.needs_token_history() && config.token_bias.is_empty() && config.xtc_probability <= 0.0
+    !config.needs_token_history()
+        && config.token_bias.is_empty()
+        && config.xtc_probability <= 0.0
+        // #1485: mirostat carries per-sequence feedback state and replaces
+        // the chain; the extended chain (dynatemp / min_keep / adaptive-p)
+        // needs per-row Rust filter arithmetic the fused dispatch has no
+        // parameters for. Both must take the per-row sampler.
+        && config.effective_mirostat() == 0
+        && !config.needs_extended_chain()
 }
 
 /// Per-row eligibility for the batched fused fast path.
@@ -902,6 +1043,343 @@ pub fn apply_row_filters(
     logits
 }
 
+/// The Rust extended sampler chain (#1485): the full b10621 filter order
+///
+/// ```text
+/// top_n_sigma -> top_k -> typical_p -> top_p -> min_p -> xtc -> temperature
+/// ```
+///
+/// as MLX graph ops on the penalized, untempered `[1, vocab]` logits, with
+/// the `min_keep` floor on the four filters b10621 gives one to (top-p,
+/// min-p, typical-p, XTC's skip rule) and the dynamic-temperature transform
+/// in the temperature slot. Used only when
+/// [`SamplingConfig::needs_extended_chain`] holds; every other config stays
+/// on the fused C++ chain, byte-identical to before #1485.
+///
+/// Returns float32 logits already divided by the (possibly dynamic)
+/// temperature, ready for a plain categorical draw (`ffi::fused_sample`
+/// with `temperature 1.0` and every filter disabled).
+///
+/// `xtc_gate` is the same one-uniform gate draw the fused path consumes
+/// ([`xtc_gate_draw`]); pass `None` when `xtc_probability <= 0.0`.
+fn apply_extended_chain(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    xtc_gate: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let min_keep = config.effective_min_keep();
+    let mut x = ffi::astype(logits, dtype::FLOAT32);
+
+    let top_n_sigma = config.effective_top_n_sigma();
+    if top_n_sigma > 0.0 {
+        x = top_n_sigma_filter(&x, top_n_sigma);
+    }
+    if config.top_k > 1 {
+        let vocab = ffi::array_shape(&x).last().copied().unwrap_or(0);
+        if config.top_k < vocab {
+            x = top_k_filter(&x, config.top_k);
+        }
+    }
+    let typical_p = config.effective_typical_p();
+    if typical_p < 1.0 {
+        x = typical_p_filter_min_keep(&x, typical_p, min_keep);
+    }
+    if config.top_p < 1.0 && config.top_p >= 0.0 {
+        x = top_p_filter_min_keep(&x, config.top_p, min_keep);
+    }
+    if config.min_p > 0.0 {
+        x = min_p_filter_min_keep(&x, config.min_p, min_keep);
+    }
+    if let Some(gate) = xtc_gate {
+        let filtered = apply_xtc_filter_min_keep(
+            &x,
+            config.xtc_threshold,
+            &config.xtc_special_token_ids,
+            min_keep,
+        );
+        let probability = ffi::full_f32(&[1], config.xtc_probability, dtype::FLOAT32);
+        let gate_hit = ffi::less(gate, &probability);
+        x = ffi::where_cond(&gate_hit, &filtered, &x);
+    }
+
+    if config.effective_dynatemp_range() > 0.0 {
+        dynatemp_transform(
+            &x,
+            config.temperature,
+            config.effective_dynatemp_range(),
+            config.dynatemp_exponent,
+        )
+    } else {
+        // Plain temperature, divided exactly as the C++ chain divides it.
+        // `needs_extended_chain` folds to `false` on the greedy path, so
+        // `temperature > 0.0` holds here.
+        let t = ffi::full_f32(&[1], config.temperature, dtype::FLOAT32);
+        ffi::divide(&x, &t)
+    }
+}
+
+/// b10621's `llama_sampler_temp_ext` (#1485): map the normalized entropy of
+/// the surviving candidate distribution into
+/// `[max(0, temp - range), temp + range]` through `norm_entropy ^ exponent`,
+/// and scale the logits by that dynamic temperature.
+///
+/// The entropy is computed over the candidates that survive the preceding
+/// filters (masked `-inf` entries carry zero probability and do not count),
+/// normalized by `ln(candidate_count)`, exactly upstream's
+/// `entropy / max_entropy`. A row with one (or zero) surviving candidates
+/// passes through unscaled, upstream's `size <= 1` early return. The dynamic
+/// temperature is floored at `1e-6` so an entropy of exactly zero degrades
+/// to an argmax-equivalent draw instead of a division by zero (upstream
+/// reaches its greedy `temp <= 0` branch in that case; the sampled token is
+/// the same argmax either way).
+fn dynatemp_transform(
+    logits: &MlxArray,
+    temperature: f32,
+    range: f32,
+    exponent: f32,
+) -> UniquePtr<MlxArray> {
+    let f = ffi::astype(logits, dtype::FLOAT32);
+    let finite = ffi::isfinite(&f);
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let sanitized = ffi::where_cond(&finite, &f, &neg_inf);
+
+    let n = ffi::sum_axis(&ffi::astype(&finite, dtype::FLOAT32), -1, true);
+    let logp = ffi::log_softmax(&sanitized, -1);
+    let p = ffi::exp(&logp);
+    let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
+    let plogp = ffi::where_cond(&ffi::greater(&p, &zero), &ffi::multiply(&p, &logp), &zero);
+    let entropy = ffi::negative(&ffi::sum_axis(&plogp, -1, true));
+    let max_entropy = ffi::log(&n);
+    let norm = ffi::divide(&entropy, &max_entropy);
+
+    let min_temp = (temperature - range).max(0.0);
+    let max_temp = temperature + range;
+    let exp_arr = ffi::full_f32(&[1], exponent, dtype::FLOAT32);
+    let scaled_norm = ffi::power(&norm, &exp_arr);
+    let span = ffi::full_f32(&[1], max_temp - min_temp, dtype::FLOAT32);
+    let base = ffi::full_f32(&[1], min_temp, dtype::FLOAT32);
+    let dyn_temp = ffi::add(&base, &ffi::multiply(&span, &scaled_norm));
+    let floor = ffi::full_f32(&[1], 1e-6, dtype::FLOAT32);
+    let dyn_temp = ffi::maximum(&dyn_temp, &floor);
+
+    let scaled = ffi::divide(&sanitized, &dyn_temp);
+    // Upstream returns without touching a single-candidate row.
+    let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
+    let multi = ffi::greater(&n, &one);
+    ffi::where_cond(&multi, &scaled, &sanitized)
+}
+
+/// b10621's adaptive-p draw (#1485, upstream `llama_sampler_adaptive_p`):
+/// replaces the final categorical over the post-chain distribution. The
+/// pre-transform probabilities are `softmax` of the filtered, tempered
+/// logits; the adapted target is derived from the per-sequence EMA
+/// (`2 * target - weighted_sum / total_weight`, clamped to `[0, 1]`); each
+/// finite logit is rewritten to `5 - 10 d^2 / (1 + d)` with
+/// `d = |p - adapted_target| / 0.3`; and the token is drawn from the softmax
+/// of the transformed row. The selected token's ORIGINAL probability is read
+/// back and parked as `pending` on the state; the caller confirms it with
+/// [`SamplerState::accept_token`] once the token is final (a post-sample
+/// override, e.g. a thinking-budget forced close, must NOT update the EMA,
+/// mirroring upstream's accept-time id check).
+///
+/// A `state` of `None` (a stateless caller) uses the initial EMA, which is
+/// upstream's freshly-reset sampler; production decode paths always pass
+/// state.
+fn adaptive_p_sample(
+    filtered: &MlxArray,
+    config: &SamplingConfig,
+    state: Option<&mut SamplerState>,
+    want_distribution: bool,
+) -> (UniquePtr<MlxArray>, Option<UniquePtr<MlxArray>>) {
+    let target = config.effective_adaptive_target();
+    let decay = config.adaptive_decay.clamp(0.0, 0.99);
+
+    let f = ffi::astype(filtered, dtype::FLOAT32);
+    let p = ffi::softmax(&f, -1);
+
+    let adaptive = state.map(|s| {
+        s.adaptive
+            .get_or_insert_with(|| AdaptivePState::new(target, decay))
+    });
+    let (weighted_sum, total_weight) = adaptive
+        .as_ref()
+        .map(|a| (a.weighted_sum, a.total_weight))
+        .unwrap_or_else(|| AdaptivePState::initial_ema(target, decay));
+
+    let adapted = if total_weight == 0.0 {
+        target.clamp(0.0, 1.0)
+    } else {
+        (2.0 * target.clamp(0.0, 1.0) - weighted_sum / total_weight).clamp(0.0, 1.0)
+    };
+
+    // Adaptive probability transform: quadratic near the target, linear
+    // decay in the tails (upstream's DISTRIBUTION_WIDTH 0.3, PEAK 5.0,
+    // SHARPNESS 10.0 constants).
+    let adapted_arr = ffi::full_f32(&[1], adapted, dtype::FLOAT32);
+    let inv_width = ffi::full_f32(&[1], 1.0 / 0.3, dtype::FLOAT32);
+    let d = ffi::multiply(&ffi::abs(&ffi::subtract(&p, &adapted_arr)), &inv_width);
+    let d2 = ffi::multiply(&d, &d);
+    let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
+    let sharp = ffi::full_f32(&[1], 10.0, dtype::FLOAT32);
+    let peak = ffi::full_f32(&[1], 5.0, dtype::FLOAT32);
+    let decayed = ffi::divide(&ffi::multiply(&sharp, &d2), &ffi::add(&one, &d));
+    let transformed_vals = ffi::subtract(&peak, &decayed);
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let transformed = ffi::where_cond(&ffi::isfinite(&f), &transformed_vals, &neg_inf);
+
+    let token = ffi::fused_sample(&transformed, 1.0, 0, 1.0, 0.0);
+
+    // Read back the selected token's ORIGINAL probability for the EMA.
+    let idx = ffi::reshape(&ffi::astype(&token, dtype::INT32), &[1, 1]);
+    let sel_p = ffi::take_along_axis(&p, &idx, -1);
+    ffi::eval(&sel_p);
+    let orig_p = ffi::item_f32(&sel_p);
+    let token_id = token_ids_to_host(&token)[0];
+    if let Some(a) = adaptive {
+        a.pending = Some((token_id, orig_p));
+    }
+
+    let probs = want_distribution.then(|| ffi::softmax(&transformed, -1));
+    (token, probs)
+}
+
+/// b10621's mirostat bypass path (#1485, upstream `common_sampler_init` with
+/// `mirostat != 0`): token-bias -> plain temperature -> mirostat-select.
+/// Penalties, DRY, and every truncation filter are skipped, exactly as
+/// upstream skips its whole `params.samplers` chain.
+///
+/// Mirostat v2 truncates to the tokens whose surprise `-log2 p` is at most
+/// `mu` (always keeping at least the argmax), renormalizes, draws, and
+/// updates `mu -= eta * (observed_surprise - tau)`. Mirostat v1 first
+/// estimates the Zipf exponent `s_hat` from the top `m = 100` sorted
+/// probabilities, derives the truncation size
+/// `k = ((s_hat - 1) * 2^mu / (1 - N^-(s_hat - 1)))^(1 / s_hat)`, truncates
+/// to top-k, then draws and updates `mu` the same way. The observed surprise
+/// is measured on the truncated, renormalized distribution, as upstream
+/// measures it.
+///
+/// `temperature <= 0.0` degrades to the argmax with surprise `0` (upstream's
+/// plain `llama_sampler_init_temp(temp)` stage collapses the candidate set
+/// to the argmax before mirostat runs), still updating `mu`.
+///
+/// The second return value is the biased, untempered logits, the same
+/// "adjusted logits" view the fused path returns for logprobs.
+fn mirostat_sample_core(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    state: Option<&mut SamplerState>,
+    want_distribution: bool,
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    Option<UniquePtr<MlxArray>>,
+) {
+    let version = config.effective_mirostat();
+    let tau = config.mirostat_tau;
+    let eta = config.mirostat_eta;
+
+    let mirostat = state.map(|s| s.mirostat.get_or_insert_with(|| MirostatState::new(tau)));
+    let mut mu = mirostat.as_ref().map_or(2.0 * tau, |m| m.mu);
+
+    let last = ffi::slice_last_logits(logits);
+    let biased = apply_token_bias_stage(last, config);
+
+    const LN_2: f32 = std::f32::consts::LN_2;
+
+    let (token, probs) = if config.temperature <= 0.0 {
+        // The plain temperature stage collapses to the argmax; mirostat then
+        // draws the single candidate with observed surprise 0.
+        let token = ffi::fused_sample(&biased, 0.0, 0, 1.0, 0.0);
+        ffi::eval(&token);
+        mu -= eta * (0.0 - tau);
+        let probs = want_distribution.then(|| ffi::fused_sample_probs(&biased, 0.0, 0, 1.0, 0.0));
+        (token, probs)
+    } else {
+        let t = ffi::full_f32(&[1], config.temperature, dtype::FLOAT32);
+        let x = ffi::divide(&ffi::astype(&biased, dtype::FLOAT32), &t);
+        let logp = ffi::log_softmax(&x, -1);
+
+        let masked = if version == 2 {
+            // Surprise -log2 p <= mu, with the argmax always surviving: the
+            // row-minimum surprise is the argmax's, so flooring the threshold
+            // there reproduces upstream's keep-at-least-one truncation.
+            let surprise = crate::ops::multiply_scalar(&ffi::negative(&logp), 1.0 / LN_2);
+            let mu_arr = ffi::full_f32(&[1], mu, dtype::FLOAT32);
+            let row_min = ffi::min_axis(&surprise, -1, true);
+            let thresh = ffi::maximum(&mu_arr, &row_min);
+            let keep = ffi::less_equal(&surprise, &thresh);
+            let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+            ffi::where_cond(&keep, &x, &neg_inf)
+        } else {
+            // v1: estimate s_hat from the sorted top-m probabilities, derive
+            // the truncation size k, and top-k the row.
+            let vocab = ffi::array_shape(&x).last().copied().unwrap_or(0);
+            let m = 100.min(vocab);
+            let p = ffi::exp(&logp);
+            let top = ffi::topk(&p, m, -1);
+            ffi::eval(&top);
+            let bytes = ffi::array_to_raw_bytes(&ffi::astype(&top, dtype::FLOAT32));
+            let mut top_probs: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            top_probs.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+            let mut sum_ti_bi = 0.0f64;
+            let mut sum_ti_sq = 0.0f64;
+            for i in 0..top_probs.len().saturating_sub(1) {
+                if top_probs[i + 1] <= 0.0 {
+                    break;
+                }
+                let t_i = (((i + 2) as f64) / ((i + 1) as f64)).ln();
+                let b_i = ((top_probs[i] as f64) / (top_probs[i + 1] as f64)).ln();
+                sum_ti_bi += t_i * b_i;
+                sum_ti_sq += t_i * t_i;
+            }
+            let s_hat = if sum_ti_sq > 0.0 {
+                sum_ti_bi / sum_ti_sq
+            } else {
+                f64::NAN
+            };
+            let epsilon_hat = s_hat - 1.0;
+            let k = ((epsilon_hat * (mu as f64).exp2())
+                / (1.0 - (vocab as f64).powf(-epsilon_hat)))
+            .powf(1.0 / s_hat);
+            let k = if k.is_finite() {
+                (k as i64).clamp(1, vocab as i64) as i32
+            } else {
+                // Degenerate distribution (upstream feeds the same estimate
+                // into an unchecked int cast): keep the whole row.
+                vocab
+            };
+            if k < vocab {
+                top_k_filter(&x, k)
+            } else {
+                ffi::copy(&x)
+            }
+        };
+
+        let token = ffi::fused_sample(&masked, 1.0, 0, 1.0, 0.0);
+
+        // Observed surprise of the drawn token within the truncated,
+        // renormalized distribution.
+        let idx = ffi::reshape(&ffi::astype(&token, dtype::INT32), &[1, 1]);
+        let sel_lp = ffi::take_along_axis(&ffi::log_softmax(&masked, -1), &idx, -1);
+        ffi::eval(&sel_lp);
+        let observed_surprise = -ffi::item_f32(&sel_lp) / LN_2;
+        mu -= eta * (observed_surprise - tau);
+
+        let probs = want_distribution.then(|| ffi::softmax(&masked, -1));
+        (token, probs)
+    };
+
+    if let Some(m) = mirostat {
+        m.mu = mu;
+    }
+    crate::sampling_dispatch::report_sampling_dispatch();
+    (token, biased, probs)
+}
+
 /// Top-n-sigma logit filter: keep only the tokens whose logit lies within
 /// `n_sigma` standard deviations of the row maximum
 /// (`logit >= max - n_sigma * std`), masking the rest to `-inf`.
@@ -984,6 +1462,19 @@ pub(crate) fn top_n_sigma_filter(logits: &MlxArray, n_sigma: f32) -> UniquePtr<M
 ///
 /// Used by: [`apply_row_filters`], unit tests
 pub(crate) fn typical_p_filter(logits: &MlxArray, typical_p: f32) -> UniquePtr<MlxArray> {
+    typical_p_filter_min_keep(logits, typical_p, 0)
+}
+
+/// [`typical_p_filter`] with b10621's `min_keep` floor (#1485): at least
+/// `min_keep` tokens survive, taken in TYPICALITY order (upstream's
+/// `llama_sampler_typical` keeps its first `min_keep` sorted candidates
+/// regardless of the accumulated mass). `min_keep <= 1` adds no graph nodes
+/// over the plain filter.
+pub(crate) fn typical_p_filter_min_keep(
+    logits: &MlxArray,
+    typical_p: f32,
+    min_keep: usize,
+) -> UniquePtr<MlxArray> {
     let neg_inf_f32 = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
     // Sanitize in f32: every non-finite entry (already-masked -inf, NaN,
     // +inf) becomes -inf so it cannot poison the softmax statistics.
@@ -1012,7 +1503,18 @@ pub(crate) fn typical_p_filter(logits: &MlxArray, typical_p: f32) -> UniquePtr<M
     let inv = ffi::argsort(&order, -1);
     let cum_excl_orig = ffi::take_along_axis(&cum_excl, &inv, -1);
     let tp = ffi::full_f32(&[1], typical_p, dtype::FLOAT32);
-    let keep = ffi::logical_and(&ffi::less(&cum_excl_orig, &tp), &finite_lp);
+    let mut keep = ffi::logical_and(&ffi::less(&cum_excl_orig, &tp), &finite_lp);
+    if min_keep >= 2 {
+        // b10621 `min_keep` (#1485): force-keep the first `min_keep` tokens
+        // in typicality order. `inv` maps each vocab position to its
+        // typicality rank, so `rank < min_keep` is the forced set; the
+        // finite gate keeps masked entries out even when the row has fewer
+        // finite candidates than the floor.
+        let rank = ffi::astype(&inv, dtype::FLOAT32);
+        let floor = ffi::full_f32(&[1], min_keep as f32, dtype::FLOAT32);
+        let forced = ffi::logical_and(&ffi::less(&rank, &floor), &finite_lp);
+        keep = ffi::logical_or(&keep, &forced);
+    }
     // Mask fill in the ORIGINAL dtype (see `top_n_sigma_filter` on why an
     // f32 fill would silently promote f16/bf16 logits).
     let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, ffi::array_dtype(logits));
@@ -1105,6 +1607,41 @@ pub(crate) fn apply_frequency_presence_penalty(
     ffi::subtract(logits, &penalty_broadcast)
 }
 
+/// Whether DRY matching breaks at `window[pos]` (#1485).
+///
+/// Two breaker sources compose:
+/// - `dry_sequence_breakers`: exact token ids (the mlxcel-native surfaces),
+///   the pre-#1485 semantics unchanged.
+/// - `dry_breaker_heads`: head-token entries derived from b10621's breaker
+///   STRINGS by scanning the vocabulary (upstream
+///   `get_overlapping_token_sequences`). A head with an empty tail breaks on
+///   its own (the token's decoded text contains the breaker string, the
+///   overwhelmingly common case; for a single-character breaker this is the
+///   only form). A head with a non-empty tail breaks only when the window
+///   tokens after `pos` spell the tail out in full, which is how a
+///   multi-character breaker split across token boundaries is recognized.
+fn dry_breaks_at(config: &SamplingConfig, window: &[i32], pos: usize) -> bool {
+    if config.dry_sequence_breakers.contains(&window[pos]) {
+        return true;
+    }
+    if config.dry_breaker_heads.is_empty() {
+        return false;
+    }
+    config
+        .dry_breaker_heads
+        .get(&window[pos])
+        .is_some_and(|tails| {
+            tails.iter().any(|tail| {
+                tail.is_empty()
+                    || (pos + tail.len() < window.len()
+                        && tail
+                            .iter()
+                            .enumerate()
+                            .all(|(j, &t)| window[pos + 1 + j] == t))
+            })
+        })
+}
+
 /// Apply DRY (Don't Repeat Yourself) penalty to logits.
 ///
 /// This runs on CPU as sequential pattern matching, which keeps the matching
@@ -1167,7 +1704,7 @@ pub(crate) fn apply_dry_penalty(
                 p1 -= 1;
                 p2 -= 1;
 
-                if config.dry_sequence_breakers.contains(&window[p1]) {
+                if dry_breaks_at(config, window, p1) {
                     break;
                 }
 
@@ -1232,6 +1769,60 @@ pub(crate) fn apply_dry_penalty(
     ffi::add(logits, &penalty_arr)
 }
 
+/// Mirostat per-sequence feedback state (#1485): the surprise target `mu`,
+/// initialized to `2 * tau` (upstream `llama_sampler_init_mirostat[_v2]`)
+/// and updated `mu -= eta * (observed_surprise - tau)` after every draw.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MirostatState {
+    /// Current surprise target, in bits.
+    pub mu: f32,
+}
+
+impl MirostatState {
+    /// Fresh state for a target entropy `tau` (upstream's `2 * tau` init).
+    pub fn new(tau: f32) -> Self {
+        Self { mu: 2.0 * tau }
+    }
+}
+
+/// Adaptive-p per-sequence feedback state (#1485): the EMA over the original
+/// probabilities of the accepted tokens (upstream
+/// `llama_sampler_adaptive_p`). `weighted_sum / total_weight` is the running
+/// mean the adapted target is derived from; both are seeded so that the mean
+/// starts exactly at `target`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdaptivePState {
+    /// EMA decay captured at creation (clamped to `0.0..=0.99` upstream).
+    pub decay: f32,
+    /// `sum(p_i * decay^i)` over accepted tokens, seeded `target / (1 - decay)`.
+    pub weighted_sum: f32,
+    /// `sum(decay^i)`, converging to `1 / (1 - decay)`, seeded there.
+    pub total_weight: f32,
+    /// The (token id, original probability) pair the last draw parked,
+    /// awaiting [`SamplerState::accept_token`]. Cleared on accept whether or
+    /// not the ids matched, mirroring upstream's accept hook.
+    pub pending: Option<(i32, f32)>,
+}
+
+impl AdaptivePState {
+    /// Fresh state (upstream `llama_sampler_init_adaptive_p` seeding).
+    pub fn new(target: f32, decay: f32) -> Self {
+        let (weighted_sum, total_weight) = Self::initial_ema(target, decay);
+        Self {
+            decay,
+            weighted_sum,
+            total_weight,
+            pending: None,
+        }
+    }
+
+    /// The seed EMA values: `target / (1 - decay)` and `1 / (1 - decay)`.
+    pub fn initial_ema(target: f32, decay: f32) -> (f32, f32) {
+        let decay = decay.clamp(0.0, 0.99);
+        (target.max(0.0) / (1.0 - decay), 1.0 / (1.0 - decay))
+    }
+}
+
 /// Per-sequence incremental sampler state for history-based penalties.
 ///
 /// Long generations re-derive the same penalty inputs on every decode step:
@@ -1261,6 +1852,14 @@ pub(crate) fn apply_dry_penalty(
 /// Used by: [`sample_token_optimized_with_state`]
 #[derive(Debug, Clone, Default)]
 pub struct SamplerState {
+    /// Mirostat per-sequence state (#1485): present exactly while the config
+    /// runs a mirostat mode. Carries the surprise target `mu` across steps.
+    pub mirostat: Option<MirostatState>,
+    /// Adaptive-p per-sequence state (#1485): present exactly while the
+    /// config enables adaptive-p. Carries the EMA and the pending
+    /// (token, original probability) pair awaiting
+    /// [`SamplerState::accept_token`].
+    pub adaptive: Option<AdaptivePState>,
     /// Maintain `seen_sorted` (repetition penalty is active).
     track_seen: bool,
     /// Maintain `counts` (frequency or presence penalty is active).
@@ -1401,6 +2000,24 @@ impl SamplerState {
         self.sparse_val = val;
         result
     }
+
+    /// Confirm the token a draw finally emitted (#1485). Adaptive-p parks the
+    /// sampled token and its ORIGINAL probability as `pending`; upstream's
+    /// accept hook folds that probability into the EMA only when the accepted
+    /// token IS the sampled one, so a post-sample override (a thinking-budget
+    /// forced close, for example) leaves the EMA untouched. Call this once
+    /// per emitted token on every decode path that can carry adaptive-p
+    /// state; a no-op for every other config (no `adaptive` state, or no
+    /// pending pair).
+    pub fn accept_token(&mut self, token: i32) {
+        if let Some(a) = &mut self.adaptive
+            && let Some((pending_token, orig_p)) = a.pending.take()
+            && pending_token == token
+        {
+            a.weighted_sum = orig_p + a.decay * a.weighted_sum;
+            a.total_weight = 1.0 + a.decay * a.total_weight;
+        }
+    }
 }
 
 /// Configuration for log probability computation during generation.
@@ -1412,6 +2029,25 @@ pub struct LogprobsConfig {
     pub enabled: bool,
     /// Number of top alternative tokens to return (0 = only the selected token)
     pub top_k: usize,
+    /// Which distribution the report is taken from (#1485).
+    pub source: LogprobSource,
+}
+
+/// The distribution a per-token probability report is computed over (#1485).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogprobSource {
+    /// The penalty-adjusted, pre-chain logits (`adjusted_logits` from
+    /// [`sample_token_optimized`]): mlxcel's OpenAI-shaped `logprobs`
+    /// behavior since #340, the default.
+    #[default]
+    Adjusted,
+    /// The raw model logits, before token bias and penalties: b10621's
+    /// pre-sampling `n_probs` view (`get_token_probabilities` reads the
+    /// context logits directly).
+    RawModel,
+    /// The post-sampling-chain distribution the draw came from: b10621's
+    /// `post_sampling_probs` view, reported as LINEAR probabilities.
+    PostSampling,
 }
 
 /// Log probability data for a single generated token.
@@ -1548,6 +2184,62 @@ pub fn compute_logprobs(
     })
 }
 
+/// Post-sampling probability report (#1485, b10621's
+/// `post_sampling_probs`): the selected token's probability and the top
+/// `top_n` (token, probability) pairs, taken from the float32 `[1, vocab]`
+/// POST-CHAIN distribution the draw actually came from (the second return of
+/// [`sample_token_with_state_and_distribution`]). Values are LINEAR
+/// probabilities, not logs, carried in [`TokenLogprobData`]'s fields;
+/// zero-probability entries are dropped from the top list, matching
+/// upstream's `populate_token_probs` post-sampling arm, which breaks at the
+/// first `p == 0` candidate.
+pub fn compute_post_sampling_probs(
+    probs: &MlxArray,
+    selected_token: i32,
+    top_n: usize,
+) -> TokenLogprobData {
+    let idx = ffi::from_slice_i32(&[selected_token], &[1, 1]);
+    let sel = ffi::take_along_axis(probs, &idx, -1);
+    ffi::eval(&sel);
+    let selected_prob = ffi::item_f32(&sel);
+
+    let top_alternatives = if top_n > 0 {
+        let vocab = ffi::array_shape(probs).last().copied().unwrap_or(0);
+        let k = (top_n as i32).min(vocab).max(1);
+        let neg = ffi::negative(probs);
+        let part = ffi::argpartition(&neg, k - 1, -1);
+        let shape = ffi::array_shape(&part);
+        let ndim = shape.len();
+        let starts = vec![0i32; ndim];
+        let mut stops = shape.clone();
+        stops[ndim - 1] = k.min(stops[ndim - 1]);
+        let top_idx = ffi::slice(&part, &starts, &stops);
+        let top_p = ffi::take_along_axis(probs, &top_idx, -1);
+        ffi::eval(&top_idx);
+        ffi::eval(&top_p);
+        let idx_bytes = ffi::array_to_raw_bytes(&top_idx);
+        let p_bytes = ffi::array_to_raw_bytes(&top_p);
+        let mut pairs: Vec<(i32, f32)> = (0..(k as usize).min(idx_bytes.len() / 4))
+            .filter_map(|i| {
+                let t: [u8; 4] = idx_bytes[i * 4..(i + 1) * 4].try_into().ok()?;
+                let p: [u8; 4] = p_bytes[i * 4..(i + 1) * 4].try_into().ok()?;
+                Some((i32::from_ne_bytes(t), f32::from_ne_bytes(p)))
+            })
+            .filter(|&(_, p)| p > 0.0)
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs
+    } else {
+        Vec::new()
+    };
+
+    TokenLogprobData {
+        token_id: selected_token,
+        logprob: selected_prob,
+        top_alternatives,
+    }
+}
+
 /// Apply min-p filtering to logits.
 ///
 /// Production runs min-p inside the C++ chain (`fused_sample_filter_logits`)
@@ -1657,6 +2349,83 @@ pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
     ffi::take_along_axis(&filtered_sorted, &unsort_indices, -1)
 }
 
+/// Production top-p (nucleus) filter for the Rust extended chain (#1485),
+/// with b10621's `min_keep` floor: keep tokens in probability-descending
+/// order while the exclusive cumulative mass is `<= p` (the same keep rule
+/// as the reference [`top_p_filter`]), and force-keep at least `min_keep`
+/// candidates in that order regardless of the mass, upstream
+/// `llama_sampler_top_p`'s `i + 1 >= min_keep` continuation. Non-finite
+/// entries are sanitized to `-inf` first so they carry zero probability,
+/// sort to the tail, and can never be resurrected by the floor (the forced
+/// set is gated on finiteness). Output is float32.
+pub(crate) fn top_p_filter_min_keep(
+    logits: &MlxArray,
+    p: f32,
+    min_keep: usize,
+) -> UniquePtr<MlxArray> {
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let raw = ffi::astype(logits, dtype::FLOAT32);
+    let f = ffi::where_cond(&ffi::isfinite(&raw), &raw, &neg_inf);
+
+    let probs = ffi::softmax(&f, -1);
+    let order = ffi::argsort(&ffi::negative(&probs), -1);
+    let sorted_probs = ffi::take_along_axis(&probs, &order, -1);
+    let cum_incl = ffi::cumsum(&sorted_probs, -1, false, true);
+    let cum_excl = ffi::subtract(&cum_incl, &sorted_probs);
+
+    let sorted_f = ffi::take_along_axis(&f, &order, -1);
+    let finite_sorted = ffi::isfinite(&sorted_f);
+    let p_arr = ffi::full_f32(&[1], p, dtype::FLOAT32);
+    let mut keep = ffi::logical_and(&ffi::less_equal(&cum_excl, &p_arr), &finite_sorted);
+    if min_keep >= 2 {
+        // Position index 0..V-1 within the sorted row: inclusive cumsum of
+        // ones, minus one.
+        let ones = ffi::ones(&ffi::array_shape(&f), dtype::FLOAT32);
+        let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
+        let pos = ffi::subtract(&ffi::cumsum(&ones, -1, false, true), &one);
+        let floor = ffi::full_f32(&[1], min_keep as f32, dtype::FLOAT32);
+        let forced = ffi::logical_and(&ffi::less(&pos, &floor), &finite_sorted);
+        keep = ffi::logical_or(&keep, &forced);
+    }
+
+    let filtered_sorted = ffi::where_cond(&keep, &sorted_f, &neg_inf);
+    let unsort = ffi::argsort(&order, -1);
+    ffi::take_along_axis(&filtered_sorted, &unsort, -1)
+}
+
+/// Production min-p filter for the Rust extended chain (#1485), with
+/// b10621's `min_keep` floor: keep tokens whose probability is at least
+/// `p * max_probability` (the same threshold as the reference
+/// [`min_p_filter`], which equals upstream's `logit >= max_logit + ln(p)`),
+/// and force-keep at least `min_keep` candidates in probability-descending
+/// order, upstream `llama_sampler_min_p`'s `i >= min_keep` continuation.
+/// Output is float32; non-finite entries are sanitized to `-inf` and stay
+/// masked.
+pub(crate) fn min_p_filter_min_keep(
+    logits: &MlxArray,
+    p: f32,
+    min_keep: usize,
+) -> UniquePtr<MlxArray> {
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
+    let raw = ffi::astype(logits, dtype::FLOAT32);
+    let finite = ffi::isfinite(&raw);
+    let f = ffi::where_cond(&finite, &raw, &neg_inf);
+
+    let probs = ffi::softmax(&f, -1);
+    let max_prob = ffi::max_axis(&probs, -1, true);
+    let p_arr = ffi::full_f32(&[1], p, dtype::FLOAT32);
+    let threshold = ffi::multiply(&max_prob, &p_arr);
+    let mut keep = ffi::greater_equal(&probs, &threshold);
+    if min_keep >= 2 {
+        let order = ffi::argsort(&ffi::negative(&probs), -1);
+        let rank = ffi::astype(&ffi::argsort(&order, -1), dtype::FLOAT32);
+        let floor = ffi::full_f32(&[1], min_keep as f32, dtype::FLOAT32);
+        let forced = ffi::logical_and(&ffi::less(&rank, &floor), &finite);
+        keep = ffi::logical_or(&keep, &forced);
+    }
+    ffi::where_cond(&keep, &f, &neg_inf)
+}
+
 /// Apply XTC (Exclude Top Choices) filtering to logits.
 ///
 /// Among the tokens whose probability exceeds `threshold`, if two or more
@@ -1692,6 +2461,24 @@ pub(crate) fn apply_xtc_filter(
     logits: &MlxArray,
     threshold: f32,
     allowlist: &[i32],
+) -> UniquePtr<MlxArray> {
+    apply_xtc_filter_min_keep(logits, threshold, allowlist, 0)
+}
+
+/// [`apply_xtc_filter`] with b10621's `min_keep` skip rule (#1485): when the
+/// removal would leave fewer than `min_keep` survivors
+/// (`candidates - removed < min_keep`, upstream `llama_sample_xtc_apply`'s
+/// `cur_p->size - pos_last >= ctx->min_keep` guard), the whole removal is
+/// skipped for that row. `min_keep <= 1` adds no graph nodes over the plain
+/// filter (a removal always leaves at least the least-probable
+/// above-threshold token). This is the production XTC used by the Rust
+/// extended chain; the fused C++ chain keeps its own XTC for every
+/// `min_keep`-less config.
+pub(crate) fn apply_xtc_filter_min_keep(
+    logits: &MlxArray,
+    threshold: f32,
+    allowlist: &[i32],
+    min_keep: usize,
 ) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     let vocab_size = *shape.last().unwrap() as usize;
@@ -1745,7 +2532,21 @@ pub(crate) fn apply_xtc_filter(
     };
 
     // Gate the whole filter on having >= 2 above-threshold candidates.
-    let remove_mask = ffi::logical_and(&remove_candidate, &has_two_or_more);
+    let mut remove_mask = ffi::logical_and(&remove_candidate, &has_two_or_more);
+
+    if min_keep >= 2 {
+        // b10621 `min_keep` skip rule (#1485): survivors after removal are
+        // the finite candidates minus the removed above-threshold set (all
+        // but its least-probable member). If that leaves fewer than
+        // `min_keep`, the removal does not run for this row.
+        let finite = ffi::astype(&ffi::isfinite(logits), dtype::FLOAT32);
+        let n_finite = ffi::sum_axis(&finite, -1, true);
+        let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
+        let survivors = ffi::add(&ffi::subtract(&n_finite, &count), &one);
+        let floor = ffi::full_f32(&[1], min_keep as f32, dtype::FLOAT32);
+        let enough = ffi::greater_equal(&survivors, &floor);
+        remove_mask = ffi::logical_and(&remove_mask, &enough);
+    }
 
     let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT32);
     ffi::where_cond(&remove_mask, &neg_inf, logits)
@@ -2041,6 +2842,7 @@ mod tests {
         let config = LogprobsConfig {
             enabled: false,
             top_k: 0,
+            source: Default::default(),
         };
         let result = compute_logprobs(&logits, 2, &config);
         assert!(result.is_none());
@@ -2053,6 +2855,7 @@ mod tests {
         let config = LogprobsConfig {
             enabled: true,
             top_k: 0,
+            source: Default::default(),
         };
         let result = compute_logprobs(&logits, 2, &config).expect("should return Some");
         assert_eq!(result.token_id, 2);
@@ -2068,6 +2871,7 @@ mod tests {
         let config = LogprobsConfig {
             enabled: true,
             top_k: 2,
+            source: Default::default(),
         };
         // Select token 1 (low logprob) so top-k will include better alternatives
         let result = compute_logprobs(&logits, 1, &config).expect("should return Some");
@@ -2084,6 +2888,7 @@ mod tests {
         let config = LogprobsConfig {
             enabled: true,
             top_k: 10,
+            source: Default::default(),
         };
         let result = compute_logprobs(&logits, 2, &config).expect("should return Some");
         // top_k is clamped to vocab size (3), so at most 3 alternatives
@@ -2114,6 +2919,7 @@ mod tests {
         let config = LogprobsConfig {
             enabled: true,
             top_k,
+            source: Default::default(),
         };
         if target_dtype == dtype::FLOAT32 {
             compute_logprobs(&f32_logits, selected_token, &config).expect("should return Some")
@@ -2767,6 +3573,7 @@ mod tests {
         let cfg = LogprobsConfig {
             enabled: true,
             top_k: 0,
+            source: Default::default(),
         };
         let fast = compute_logprobs(&logits, SELECTED_LOWEST, &cfg).expect("should return Some");
         assert!(fast.top_alternatives.is_empty());
@@ -2798,6 +3605,7 @@ mod tests {
         let cfg = LogprobsConfig {
             enabled: true,
             top_k: 0,
+            source: Default::default(),
         };
         let fast =
             compute_logprobs(&f16_logits, SELECTED_LOWEST, &cfg).expect("should return Some");
@@ -4129,5 +4937,422 @@ mod tests {
             (v[2] - (1.0 - 0.75)).abs() < 1e-6,
             "a match of exactly the allowed length must be penalized by multiplier * base^0, got {v:?}"
         );
+    }
+
+    // -- #1485: min_keep floors --
+
+    #[test]
+    fn top_p_min_keep_forces_floor_in_probability_order() {
+        // Softmax of [0,1,2,3,8] puts ~0.99 on index 4, so top_p 0.5
+        // naturally keeps only {4}; a floor of 3 forces the top three by
+        // probability: {2, 3, 4}.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 8.0], &[1, 5]);
+        let natural = to_vec_f32(&top_p_filter_min_keep(&logits, 0.5, 0));
+        assert_eq!(kept_indices(&natural), vec![4]);
+        let floored = to_vec_f32(&top_p_filter_min_keep(&logits, 0.5, 3));
+        assert_eq!(kept_indices(&floored), vec![2, 3, 4]);
+        // min_keep 1 adds nothing over the natural cut.
+        let one = to_vec_f32(&top_p_filter_min_keep(&logits, 0.5, 1));
+        assert_eq!(kept_indices(&one), vec![4]);
+    }
+
+    #[test]
+    fn top_p_min_keep_floor_never_resurrects_masked_entries() {
+        // Two finite candidates, three -inf-masked ones. A floor of 4 keeps
+        // only the finite pair: masked entries carry zero probability and
+        // the forced set is gated on finiteness.
+        let neg = f32::NEG_INFINITY;
+        let logits = ffi::from_slice_f32(&[neg, 1.0, neg, 2.0, neg], &[1, 5]);
+        let v = to_vec_f32(&top_p_filter_min_keep(&logits, 0.1, 4));
+        assert_eq!(kept_indices(&v), vec![1, 3]);
+    }
+
+    #[test]
+    fn min_p_min_keep_forces_floor_in_probability_order() {
+        // min_p 0.9 keeps only tokens with p >= 0.9 * p_max: just the argmax
+        // here; a floor of 2 forces the runner-up back in.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 8.0], &[1, 5]);
+        let natural = to_vec_f32(&min_p_filter_min_keep(&logits, 0.9, 0));
+        assert_eq!(kept_indices(&natural), vec![4]);
+        let floored = to_vec_f32(&min_p_filter_min_keep(&logits, 0.9, 2));
+        assert_eq!(kept_indices(&floored), vec![3, 4]);
+    }
+
+    #[test]
+    fn typical_p_min_keep_forces_floor_in_typicality_order() {
+        let n = 16;
+        let raw = lcg_logits(0x1485, n);
+        let logits = ffi::from_slice_f32(&raw, &[1, n as i32]);
+        // Tiny typical_p keeps exactly one token (the most typical).
+        let natural = kept_indices(&to_vec_f32(&typical_p_filter_min_keep(&logits, 1e-6, 0)));
+        assert_eq!(natural.len(), 1);
+        let floored = kept_indices(&to_vec_f32(&typical_p_filter_min_keep(&logits, 1e-6, 5)));
+        assert_eq!(
+            floored.len(),
+            5,
+            "the floor forces exactly min_keep survivors"
+        );
+        assert!(
+            floored.contains(&natural[0]),
+            "the naturally kept most-typical token stays in the forced set"
+        );
+        // The forced set is the five most typical by the host reference
+        // ordering: |(-log p) - H| ascending.
+        let probs: Vec<f64> = {
+            let mx = raw.iter().cloned().fold(f32::MIN, f32::max) as f64;
+            let exps: Vec<f64> = raw.iter().map(|&x| ((x as f64) - mx).exp()).collect();
+            let z: f64 = exps.iter().sum();
+            exps.iter().map(|e| e / z).collect()
+        };
+        let h: f64 = -probs.iter().map(|p| p * p.ln()).sum::<f64>();
+        let mut by_typicality: Vec<usize> = (0..n).collect();
+        by_typicality.sort_by(|&a, &b| {
+            let da = ((-probs[a].ln()) - h).abs();
+            let db = ((-probs[b].ln()) - h).abs();
+            da.partial_cmp(&db).unwrap()
+        });
+        let mut expected: Vec<usize> = by_typicality[..5].to_vec();
+        expected.sort_unstable();
+        assert_eq!(floored, expected);
+    }
+
+    #[test]
+    fn xtc_min_keep_skips_removal_when_too_few_would_survive() {
+        // Row of 4 candidates, three above the 0.2 threshold. Removal keeps
+        // the least-probable above-threshold token plus the below-threshold
+        // one: 2 survivors. min_keep 3 > 2 must skip the removal entirely.
+        let logits = ffi::from_slice_f32(&[2.0, 1.8, 1.6, -2.0], &[1, 4]);
+        let removed = to_vec_f32(&apply_xtc_filter_min_keep(&logits, 0.2, &[], 0));
+        assert_eq!(kept_indices(&removed), vec![2, 3]);
+        let skipped = to_vec_f32(&apply_xtc_filter_min_keep(&logits, 0.2, &[], 3));
+        assert_eq!(kept_indices(&skipped), vec![0, 1, 2, 3]);
+        // A floor the survivors satisfy leaves the removal in place.
+        let kept2 = to_vec_f32(&apply_xtc_filter_min_keep(&logits, 0.2, &[], 2));
+        assert_eq!(kept_indices(&kept2), vec![2, 3]);
+    }
+
+    // -- #1485: dynamic temperature --
+
+    #[test]
+    fn dynatemp_uniform_row_scales_by_max_temp() {
+        // A uniform distribution has normalized entropy 1, so the dynamic
+        // temperature is exactly temp + range.
+        let logits = ffi::from_slice_f32(&[1.5; 8], &[1, 8]);
+        let out = to_vec_f32(&dynatemp_transform(&logits, 0.8, 0.5, 1.0));
+        for x in &out {
+            assert!((x - 1.5 / 1.3).abs() < 1e-5, "expected 1.5/1.3, got {x}");
+        }
+    }
+
+    #[test]
+    fn dynatemp_matches_host_reference_on_peaked_row() {
+        let raw = [4.0f32, 1.0, 0.5, 0.0, -1.0, -3.0];
+        let (temp, range, exponent) = (1.0f32, 0.6f32, 1.7f32);
+        let logits = ffi::from_slice_f32(&raw, &[1, raw.len() as i32]);
+        let out = to_vec_f32(&dynatemp_transform(&logits, temp, range, exponent));
+        // Host reference in f64.
+        let mx = raw.iter().cloned().fold(f32::MIN, f32::max) as f64;
+        let exps: Vec<f64> = raw.iter().map(|&x| ((x as f64) - mx).exp()).collect();
+        let z: f64 = exps.iter().sum();
+        let probs: Vec<f64> = exps.iter().map(|e| e / z).collect();
+        let h: f64 = -probs.iter().map(|p| p * p.ln()).sum::<f64>();
+        let norm = h / (raw.len() as f64).ln();
+        let min_t = (temp - range).max(0.0) as f64;
+        let max_t = (temp + range) as f64;
+        let dyn_t = min_t + (max_t - min_t) * norm.powf(exponent as f64);
+        for (o, r) in out.iter().zip(raw.iter()) {
+            let expect = (*r as f64) / dyn_t;
+            assert!(
+                ((*o as f64) - expect).abs() < 1e-4,
+                "expected {expect}, got {o} (dyn_t {dyn_t})"
+            );
+        }
+    }
+
+    #[test]
+    fn dynatemp_single_candidate_passes_through() {
+        let neg = f32::NEG_INFINITY;
+        let logits = ffi::from_slice_f32(&[neg, 3.0, neg], &[1, 3]);
+        let out = to_vec_f32(&dynatemp_transform(&logits, 0.0, 0.5, 1.0));
+        assert_eq!(out[1], 3.0, "a single-candidate row is not rescaled");
+        assert!(out[0].is_infinite() && out[2].is_infinite());
+    }
+
+    #[test]
+    fn dynatemp_keeps_temperature_zero_config_off_the_greedy_path() {
+        let mut config = SamplingConfig::with_temperature(0.0);
+        assert!(config.is_greedy_path());
+        config.dynatemp_range = 0.5;
+        assert!(
+            !config.is_greedy_path(),
+            "a positive range re-widens temp 0"
+        );
+        assert!(config.needs_extended_chain());
+        assert!(!config_supports_fused_batch(&config));
+        config.top_k = 1;
+        assert!(config.is_greedy_path(), "top_k 1 stays greedy regardless");
+    }
+
+    // -- #1485: mirostat --
+
+    fn mirostat_config(version: i32, tau: f32, eta: f32, temperature: f32) -> SamplingConfig {
+        SamplingConfig {
+            mirostat: version,
+            mirostat_tau: tau,
+            mirostat_eta: eta,
+            temperature,
+            // Deliberately hostile settings that mirostat must ignore:
+            top_k: 2,
+            top_p: 0.1,
+            min_p: 0.5,
+            repetition_penalty: 1.5,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mirostat_v2_tiny_mu_selects_the_argmax_and_updates_mu() {
+        let config = mirostat_config(2, 1e-4, 0.25, 1.0);
+        let logits = ffi::from_slice_f32(&[0.0, 5.0, 1.0, -2.0], &[1, 1, 4]);
+        let mut state = None;
+        let (tok, _adj) = sample_token_optimized_with_state(&logits, &config, &[], &mut state);
+        ffi::eval(&tok);
+        assert_eq!(ffi::item_i32(&tok), 1, "mu ~= 2e-4 truncates to the argmax");
+        let st = state.expect("mirostat allocates the feedback state");
+        let m = st.mirostat.expect("mirostat state present");
+        // Only the argmax survives, so its renormalized probability is 1 and
+        // the observed surprise 0: mu <- mu - eta * (0 - tau) = mu + eta*tau.
+        let expected = 2.0 * 1e-4 + 0.25 * 1e-4;
+        assert!(
+            (m.mu - expected).abs() < 1e-6,
+            "mu update mismatch: got {}, expected {expected}",
+            m.mu
+        );
+    }
+
+    #[test]
+    fn mirostat_ignores_penalties_and_truncation_filters() {
+        let config = mirostat_config(2, 1e-4, 0.1, 1.0);
+        assert!(
+            !config.needs_token_history(),
+            "mirostat skips the penalty stages"
+        );
+        assert_eq!(config.effective_top_n_sigma(), 0.0);
+        assert_eq!(config.effective_typical_p(), 1.0);
+        assert!(!config_supports_fused_batch(&config));
+        // The hostile top_k/top_p/min_p above must not steer the draw: with a
+        // huge mu nothing truncates and the post-chain distribution is the
+        // plain softmax of the logits.
+        let config = mirostat_config(2, 1e6, 0.1, 1.0);
+        let raw = [0.0f32, 2.0, 1.0, -1.0];
+        let logits = ffi::from_slice_f32(&raw, &[1, 1, 4]);
+        let mut state = None;
+        let (_tok, _adj, probs) =
+            sample_token_with_state_and_distribution(&logits, &config, &[], &mut state);
+        let p = to_vec_f32(&probs);
+        let mx = raw.iter().cloned().fold(f32::MIN, f32::max);
+        let exps: Vec<f32> = raw.iter().map(|&x| (x - mx).exp()).collect();
+        let z: f32 = exps.iter().sum();
+        for (got, e) in p.iter().zip(exps.iter()) {
+            assert!(
+                (got - e / z).abs() < 1e-5,
+                "mirostat with huge mu must sample the untruncated softmax; got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirostat_v1_peaked_row_truncates_to_the_argmax() {
+        let config = mirostat_config(1, 0.1, 0.3, 1.0);
+        let logits = ffi::from_slice_f32(&[10.0, 0.0, 0.0, 0.0], &[1, 1, 4]);
+        let mut state = None;
+        let (tok, _adj) = sample_token_optimized_with_state(&logits, &config, &[], &mut state);
+        ffi::eval(&tok);
+        assert_eq!(
+            ffi::item_i32(&tok),
+            0,
+            "the Zipf estimate on a near-delta distribution yields k = 1"
+        );
+        let m = state.unwrap().mirostat.unwrap();
+        let expected = 2.0 * 0.1 + 0.3 * 0.1; // observed surprise 0
+        assert!((m.mu - expected).abs() < 1e-6, "got {}", m.mu);
+    }
+
+    #[test]
+    fn mirostat_temperature_zero_draws_the_argmax() {
+        let config = mirostat_config(2, 5.0, 0.1, 0.0);
+        let logits = ffi::from_slice_f32(&[1.0, 0.0, 4.0], &[1, 1, 3]);
+        let mut state = None;
+        let (tok, _adj) = sample_token_optimized_with_state(&logits, &config, &[], &mut state);
+        ffi::eval(&tok);
+        assert_eq!(ffi::item_i32(&tok), 2);
+        let m = state.unwrap().mirostat.unwrap();
+        assert!((m.mu - (10.0 + 0.1 * 5.0)).abs() < 1e-5);
+    }
+
+    // -- #1485: adaptive-p --
+
+    #[test]
+    fn adaptive_p_state_accept_updates_ema_only_on_matching_token() {
+        let mut st = SamplerState {
+            adaptive: Some(AdaptivePState::new(0.5, 0.9)),
+            ..Default::default()
+        };
+        let (ws0, tw0) = AdaptivePState::initial_ema(0.5, 0.9);
+        st.adaptive.as_mut().unwrap().pending = Some((7, 0.42));
+        st.accept_token(3); // overridden token: EMA untouched, pending cleared
+        {
+            let a = st.adaptive.as_ref().unwrap();
+            assert_eq!(a.weighted_sum, ws0);
+            assert_eq!(a.total_weight, tw0);
+            assert!(a.pending.is_none());
+        }
+        st.adaptive.as_mut().unwrap().pending = Some((7, 0.42));
+        st.accept_token(7);
+        let a = st.adaptive.as_ref().unwrap();
+        assert!((a.weighted_sum - (0.42 + 0.9 * ws0)).abs() < 1e-6);
+        assert!((a.total_weight - (1.0 + 0.9 * tw0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adaptive_p_transform_prefers_tokens_near_the_target() {
+        // Original probabilities roughly [0.70, 0.26, 0.02, 0.02]; with a
+        // target of 0.25 the transformed argmax must be index 1.
+        let mut config = SamplingConfig {
+            adaptive_target: 0.25,
+            adaptive_decay: 0.9,
+            temperature: 1.0,
+            ..Default::default()
+        };
+        config.top_k = 0;
+        assert!(config.needs_extended_chain());
+        let logits = ffi::from_slice_f32(&[4.0, 3.0, 0.5, 0.5], &[1, 1, 4]);
+        let mut state = None;
+        let (tok, _adj, probs) =
+            sample_token_with_state_and_distribution(&logits, &config, &[], &mut state);
+        ffi::eval(&tok);
+        let p = to_vec_f32(&probs);
+        let argmax = p
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(
+            argmax, 1,
+            "post-transform mass concentrates near the target: {p:?}"
+        );
+        let st = state.expect("adaptive-p allocates the feedback state");
+        let a = st.adaptive.as_ref().expect("adaptive state present");
+        let (tok_id, orig_p) = a.pending.expect("draw parks the pending pair");
+        assert_eq!(tok_id, ffi::item_i32(&tok));
+        assert!(orig_p > 0.0 && orig_p < 1.0);
+    }
+
+    #[test]
+    fn adaptive_p_disabled_target_stays_on_the_fused_path() {
+        let config = SamplingConfig {
+            adaptive_target: -1.0,
+            ..Default::default()
+        };
+        assert!(!config.needs_extended_chain());
+        assert!(config_supports_fused_batch(&config));
+        assert!(!config.needs_sampler_feedback_state());
+    }
+
+    // -- #1485: DRY breaker heads --
+
+    #[test]
+    fn dry_breaker_head_with_empty_tail_breaks_matching() {
+        // History "1 2 3 9 1 2 3" repeats "1 2 3"; without breakers the next
+        // token 9 is penalized. Marking 2 as a breaker head cuts the match
+        // below the allowed length.
+        let history = [1, 2, 3, 9, 1, 2, 3];
+        let mut config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 2.0,
+            dry_allowed_length: 2,
+            ..Default::default()
+        };
+        let logits = ffi::from_slice_f32(&[0.0; 12], &[1, 12]);
+        let v = to_vec_f32(&apply_dry_penalty(&logits, &history, &config));
+        assert!(
+            v[9] < 0.0,
+            "baseline: the repeated continuation is penalized"
+        );
+        config.dry_breaker_heads =
+            std::sync::Arc::new(std::collections::HashMap::from([(2, vec![Vec::new()])]));
+        let v = to_vec_f32(&apply_dry_penalty(&logits, &history, &config));
+        assert_eq!(v[9], 0.0, "a breaker head stops the backward match");
+    }
+
+    #[test]
+    fn dry_breaker_head_with_tail_requires_the_full_sequence() {
+        let history = [1, 2, 3, 9, 1, 2, 3];
+        let mut config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 2.0,
+            dry_allowed_length: 2,
+            ..Default::default()
+        };
+        // Head 2 with tail [8]: "2 8" never occurs, so matching proceeds.
+        config.dry_breaker_heads =
+            std::sync::Arc::new(std::collections::HashMap::from([(2, vec![vec![8]])]));
+        let logits = ffi::from_slice_f32(&[0.0; 12], &[1, 12]);
+        let v = to_vec_f32(&apply_dry_penalty(&logits, &history, &config));
+        assert!(v[9] < 0.0, "an unmatched tail does not break");
+        // Head 2 with tail [3]: "2 3" occurs at the matched position.
+        config.dry_breaker_heads =
+            std::sync::Arc::new(std::collections::HashMap::from([(2, vec![vec![3]])]));
+        let v = to_vec_f32(&apply_dry_penalty(&logits, &history, &config));
+        assert_eq!(v[9], 0.0, "a matched head+tail sequence breaks");
+    }
+
+    // -- #1485: post-sampling probability report --
+
+    #[test]
+    fn post_sampling_probs_reports_linear_probabilities_and_drops_zeros() {
+        let probs = ffi::from_slice_f32(&[0.5, 0.3, 0.2, 0.0], &[1, 4]);
+        let data = compute_post_sampling_probs(&probs, 1, 4);
+        assert_eq!(data.token_id, 1);
+        assert!(
+            (data.logprob - 0.3).abs() < 1e-6,
+            "linear probability, not log"
+        );
+        let tops: Vec<(i32, f32)> = data.top_alternatives.clone();
+        assert_eq!(tops.len(), 3, "the zero-probability candidate is dropped");
+        assert_eq!(tops[0].0, 0);
+        assert_eq!(tops[1].0, 1);
+        assert_eq!(tops[2].0, 2);
+    }
+
+    // -- #1485: control arms (disabled features change nothing) --
+
+    #[test]
+    fn inert_new_fields_keep_the_fused_path_and_identical_bytes() {
+        let baseline = SamplingConfig {
+            temperature: 0.7,
+            top_k: 40,
+            top_p: 0.95,
+            ..Default::default()
+        };
+        let mut inert = baseline.clone();
+        inert.min_keep = 1;
+        inert.dynatemp_range = 0.0;
+        inert.dynatemp_exponent = 2.5;
+        inert.mirostat = 0;
+        inert.mirostat_tau = 9.0;
+        inert.adaptive_target = -1.0;
+        inert.adaptive_decay = 0.5;
+        assert!(config_supports_fused_batch(&baseline));
+        assert!(config_supports_fused_batch(&inert));
+        assert!(
+            FusedSampleParams::from_config(&baseline)
+                .matches(&FusedSampleParams::from_config(&inert))
+        );
+        let logits = ffi::from_slice_f32(&lcg_logits(0xC0DE, 64), &[1, 1, 64]);
+        let (_t1, a1) = sample_token_optimized(&logits, &baseline, &[]);
+        let (_t2, a2) = sample_token_optimized(&logits, &inert, &[]);
+        assert_logits_bit_identical(&a1, &a2, "inert #1485 fields");
     }
 }

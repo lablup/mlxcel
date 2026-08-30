@@ -1853,8 +1853,14 @@ pub(crate) struct ServeArgs {
     sampler_seq: Option<String>,
 
     /// Random seed (-1 = random)
-    #[arg(short = 's', long, default_value_t = -1)]
-    seed: i64,
+    #[arg(
+        short = 's',
+        long,
+        default_value = "-1",
+        allow_negative_numbers = true,
+        value_parser = mlxcel::server::cli_input::parse_seed_arg
+    )]
+    seed: i128,
 
     /// Default repetition penalty lookback window
     #[arg(long, default_value_t = 64)]
@@ -1890,20 +1896,25 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(i32).range(0..))]
     dry_penalty_last_n: i32,
 
-    /// DRY sequence breaker token strings (e.g. "\n", "\t")
+    /// DRY sequence breaker strings (default: "\n", ":", "\"", "*"; "none" = no breakers)
     ///
     /// Sets the server-wide default that a request without its own
     /// `dry_sequence_breakers` field inherits; a request that sends the field
-    /// overrides it, including sending an empty list to run DRY with no
-    /// breakers. The resolved token IDs are reported by `/props`.
+    /// overrides it. When the flag is absent, b10621's default breaker set
+    /// (`\n`, `:`, `"`, `*`) applies; giving the flag replaces that default
+    /// with exactly the given values, and the sentinel value `none` runs DRY
+    /// with no breakers at all, both matching b10621 (#1485).
     ///
-    /// Each value must encode to exactly ONE token for the loaded model,
-    /// because the sampler matches breakers by token id. A value that does not
-    /// fails startup and names itself, rather than being dropped silently. The
+    /// A breaker no longer has to encode to one token: breaker token data is
+    /// derived by scanning the vocabulary for tokens whose decoded text
+    /// carries the breaker string (upstream's
+    /// `get_overlapping_token_sequences`), so multi-character and
+    /// multi-token breakers work as they do in b10621. Strings longer than
+    /// 40 characters are truncated with a warning, upstream's cap. The
     /// escapes `\n`, `\t`, `\r` and `\\` are interpreted, since a shell does
     /// not expand them inside quotes; any other backslash sequence is taken
-    /// literally. The value is comma-separated, so a comma cannot itself be a
-    /// breaker.
+    /// literally. The value is comma-separated, so a comma cannot itself be
+    /// a breaker.
     ///
     /// The singular `--dry-sequence-breaker` is the primary spelling on both
     /// server binaries, matching llama-server. The plural
@@ -1915,6 +1926,60 @@ pub(crate) struct ServeArgs {
         value_delimiter = ','
     )]
     dry_sequence_breakers: Vec<String>,
+
+    /// Mirostat sampling (0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0). Replaces the truncation samplers and penalties while active, as in b10621
+
+    /// BNF-like grammar to constrain generations (see samples in grammars/ dir)
+    #[arg(long = "grammar", value_name = "GRAMMAR")]
+    grammar: Option<String>,
+
+    /// file to read grammar from
+    #[arg(long = "grammar-file", value_name = "FNAME")]
+    grammar_file: Option<std::path::PathBuf>,
+
+    /// JSON schema to constrain generations (https://json-schema.org/), e.g. `{}` for any JSON object For schemas w/ external $refs, use --grammar + example/json_schema_to_grammar.py instead
+    #[arg(short = 'j', long = "json-schema", value_name = "SCHEMA")]
+    json_schema: Option<String>,
+
+    /// File containing a JSON schema to constrain generations (https://json-schema.org/), e.g. `{}` for any JSON object For schemas w/ external $refs, use --grammar + example/json_schema_to_grammar.py instead
+    #[arg(long = "json-schema-file", value_name = "FILE")]
+    json_schema_file: Option<std::path::PathBuf>,
+
+    #[arg(long = "mirostat", value_name = "N", default_value_t = 0)]
+    mirostat: i32,
+
+    /// Mirostat learning rate, parameter eta
+    #[arg(long = "mirostat-lr", value_name = "N", default_value_t = 0.1)]
+    mirostat_eta: f32,
+
+    /// Mirostat target entropy, parameter tau
+    #[arg(long = "mirostat-ent", value_name = "N", default_value_t = 5.0)]
+    mirostat_tau: f32,
+
+    /// Dynamic temperature range (0.0 = disabled)
+    #[arg(long = "dynatemp-range", value_name = "N", default_value_t = 0.0)]
+    dynatemp_range: f32,
+
+    /// Dynamic temperature exponent
+    #[arg(long = "dynatemp-exp", value_name = "N", default_value_t = 1.0)]
+    dynatemp_exponent: f32,
+
+    /// adaptive-p: select tokens near this probability (0.0 to 1.0; negative = disabled). Runs only when the sampler list names adaptive_p, as in b10621
+    #[arg(
+        long = "adaptive-target",
+        value_name = "N",
+        default_value_t = -1.0,
+        allow_negative_numbers = true
+    )]
+    adaptive_target: f32,
+
+    /// adaptive-p: decay rate for target adaptation over time (0.0 to 0.99)
+    #[arg(long = "adaptive-decay", value_name = "N", default_value_t = 0.9)]
+    adaptive_decay: f32,
+
+    /// Bias a token id in every request: TOKEN_ID(+/-)BIAS, e.g. 15043+1 raises token 15043, 15043-1 lowers it (repeatable; b10621 -l / --logit-bias)
+    #[arg(short = 'l', long = "logit-bias", value_name = "TOKEN_ID(+/-)BIAS")]
+    logit_bias: Vec<String>,
 
     // Logging.
     /// Enable verbose logging: every mlxcel message.

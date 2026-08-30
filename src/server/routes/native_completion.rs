@@ -169,6 +169,28 @@ pub(crate) async fn serve_native_completion(
         None => state.config.sse_ping_interval,
     };
 
+    // b10621 grammar surfaces (#1485). Resolution and compilation both happen
+    // before the request is admitted, so a malformed grammar answers 400
+    // instead of degrading silently into an unconstrained generation.
+    let grammar_spec = match crate::server::grammar::resolve_native_grammar(
+        state.tokenizer.as_ref(),
+        request.json_schema.as_ref(),
+        request.grammar.as_ref(),
+        request.grammar_lazy,
+        request.grammar_triggers.as_ref(),
+        request.preserved_tokens.as_ref(),
+        state.config.default_grammar.as_ref(),
+    ) {
+        Ok(spec) => spec,
+        Err(err) => {
+            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
+        }
+    };
+    let grammar = match build_native_grammar(&state, grammar_spec).await {
+        Ok(grammar) => grammar,
+        Err(response) => return response,
+    };
+
     let priority = parse_priority_header(headers);
     if request.stream.unwrap_or(false) {
         // b10621 resumable streams (#1444): `X-Conversation-Id` attaches a
@@ -187,6 +209,7 @@ pub(crate) async fn serve_native_completion(
             budget_override,
             ping_interval,
             resumable,
+            grammar,
         )
         .await
     } else {
@@ -197,9 +220,50 @@ pub(crate) async fn serve_native_completion(
             requested_n_predict,
             priority,
             budget_override,
+            grammar,
         )
         .await
         .into_response()
+    }
+}
+
+/// The compiled constraint plus the spec it came from, or `None` when the
+/// request asked for no grammar.
+type NativeGrammar = Option<(
+    std::sync::Arc<crate::server::grammar::GrammarSpec>,
+    std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
+)>;
+
+/// Compile a resolved [`crate::server::grammar::GrammarSpec`] off the runtime
+/// thread.
+///
+/// GBNF lowering plus `llguidance` compilation is CPU-bound and, on a large
+/// grammar, slow enough to stall unrelated in-flight requests if it ran on a
+/// Tokio worker, which is why the schema path already uses `spawn_blocking`.
+async fn build_native_grammar(
+    state: &AppState,
+    spec: Option<crate::server::grammar::GrammarSpec>,
+) -> Result<NativeGrammar, Response> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let spec = std::sync::Arc::new(spec);
+    let tokenizer = state.tokenizer.clone();
+    let build_spec = std::sync::Arc::clone(&spec);
+    match tokio::task::spawn_blocking(move || {
+        crate::server::structured::build_constraint_from_grammar_spec(
+            tokenizer.as_ref(),
+            &build_spec,
+        )
+    })
+    .await
+    {
+        Ok(Ok(constraint)) => Ok(Some((spec, constraint))),
+        Ok(Err(err)) => Err(super::chat::structured_error_to_response(err).into_response()),
+        Err(join_err) => {
+            tracing::error!("grammar compilation task panicked: {join_err}");
+            Err(ErrorResponse::new("grammar preparation failed", "server_error").into_response())
+        }
     }
 }
 
@@ -217,6 +281,7 @@ async fn non_stream_native_completion(
     requested_n_predict: Option<usize>,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
+    grammar: NativeGrammar,
 ) -> Result<Json<serde_json::Value>, ErrorResponse> {
     // Queue-depth admission control: reject when prefill queue is full
     if !state.can_accept_request() {
@@ -228,6 +293,10 @@ async fn non_stream_native_completion(
     let mut options = build_native_options(&request, requested_n_predict, &state, &live);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    if let Some((spec, constraint)) = grammar {
+        options.grammar = Some(spec);
+        options.structured = Some(constraint);
+    }
     // The response echoes the settings that were actually used, so keep a copy
     // before the options are moved into the generator.
     let options_snapshot = options.clone();
@@ -274,6 +343,7 @@ async fn non_stream_native_completion(
             prompt_ms,
             predicted_ms: gen_ms,
             id_slot: slot.id_slot(),
+            probs: result.logprobs,
         },
     );
     Ok(Json(project_native_response(&request, &response)))
@@ -292,6 +362,84 @@ fn project_native_response(
 ) -> serde_json::Value {
     let body = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
     select_response_fields(body, &request.response_field_paths())
+}
+
+/// The effective `n_probs` for a request (#1485): `n_probs` with the
+/// `logprobs` alias, positive values only.
+fn native_n_probs(request: &NativeCompletionRequest) -> usize {
+    request
+        .n_probs
+        .or(request.logprobs)
+        .map(|n| n.max(0) as usize)
+        .unwrap_or(0)
+}
+
+/// Clamp a probability value for JSON (#1485): serde_json serializes a
+/// non-finite float as `null`, so `-inf` (a zero probability in log space)
+/// folds to the lowest finite f32, exactly upstream's `logarithm` guard.
+fn finite_prob(value: f32) -> f32 {
+    if value.is_finite() { value } else { f32::MIN }
+}
+
+/// The longest valid-UTF-8 prefix of a token's bytes, upstream's
+/// `validate_utf8` truncation: a byte-level BPE token routinely ends inside
+/// a multi-byte character, and the `bytes` array is how a client reassembles
+/// the text across it.
+fn utf8_prefix(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(err) => String::from_utf8_lossy(&bytes[..err.valid_up_to()]).into_owned(),
+    }
+}
+
+/// One `{id, token, bytes, logprob|prob}` object of the native probability
+/// report (#1485), b10621's `completion_token_output::to_json` shape.
+fn native_prob_object(
+    tokenizer: Option<&crate::tokenizer::MlxcelTokenizer>,
+    id: i32,
+    value: f32,
+    post_sampling: bool,
+) -> serde_json::Value {
+    let bytes = tokenizer
+        .and_then(|t| t.token_piece_bytes(id as u32))
+        .unwrap_or_default();
+    let key = if post_sampling { "prob" } else { "logprob" };
+    serde_json::json!({
+        "id": id,
+        "token": utf8_prefix(&bytes),
+        "bytes": bytes,
+        key: finite_prob(value),
+    })
+}
+
+/// The native `completion_probabilities` array (#1485): one entry per
+/// generated token, each with its own probability and its `top_logprobs` /
+/// `top_probs` alternatives, b10621's `probs_vector_to_json` shape.
+fn native_completion_probabilities(
+    tokenizer: Option<&crate::tokenizer::MlxcelTokenizer>,
+    entries: &[mlxcel_core::sampling::TokenLogprobData],
+    post_sampling: bool,
+) -> serde_json::Value {
+    let top_key = if post_sampling {
+        "top_probs"
+    } else {
+        "top_logprobs"
+    };
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|lp| {
+                let mut obj = native_prob_object(tokenizer, lp.token_id, lp.logprob, post_sampling);
+                let tops: Vec<serde_json::Value> = lp
+                    .top_alternatives
+                    .iter()
+                    .map(|&(id, value)| native_prob_object(tokenizer, id, value, post_sampling))
+                    .collect();
+                obj[top_key] = serde_json::Value::Array(tops);
+                obj
+            })
+            .collect(),
+    )
 }
 
 /// The parts of a finished generation the native response is built from.
@@ -316,6 +464,9 @@ struct NativeOutcome<'a> {
     /// every slot was busy for the whole request, the sentinel upstream uses
     /// on frames that carry no slot.
     id_slot: i64,
+    /// Per-token probability data accumulated over the generation (#1485);
+    /// `None` unless the request set `n_probs`.
+    probs: Option<Vec<mlxcel_core::sampling::TokenLogprobData>>,
 }
 
 /// Assemble the b10621 native completion object.
@@ -377,6 +528,17 @@ fn build_native_response(
             outcome.tokens_predicted,
             outcome.predicted_ms,
         ),
+        completion_probabilities: match (native_n_probs(request), outcome.probs.as_ref()) {
+            (n, Some(entries)) if n > 0 => Some(native_completion_probabilities(
+                state
+                    .model_provider
+                    .prompt_tokenizer()
+                    .map(std::sync::Arc::as_ref),
+                entries,
+                request.post_sampling_probs.unwrap_or(false),
+            )),
+            _ => None,
+        },
     }
 }
 
@@ -392,7 +554,9 @@ fn native_generation_settings(
 ) -> serde_json::Value {
     let sampling = &options.sampling;
     serde_json::json!({
-        "seed": sampling.seed.unwrap_or(u64::MAX),
+        // The random sentinel reports as b10621's uint32 LLAMA_DEFAULT_SEED
+        // now that the seed domain folds into uint32 space (#1485).
+        "seed": sampling.seed.unwrap_or(u64::from(u32::MAX)),
         "temperature": sampling.temperature,
         "top_k": sampling.top_k,
         "top_p": sampling.top_p,
@@ -410,7 +574,10 @@ fn native_generation_settings(
         "dry_base": sampling.dry_base,
         "dry_allowed_length": sampling.dry_allowed_length,
         "dry_penalty_last_n": sampling.dry_penalty_last_n,
-        "dry_sequence_breakers": sampling.dry_sequence_breakers,
+        // Reported as the breaker STRINGS since #1485, b10621's own value
+        // domain for the key (the native field and the flag both carry
+        // strings now).
+        "dry_sequence_breakers": options.dry_breaker_strings.clone().unwrap_or_default(),
         "stop": options.stop_sequences.clone().unwrap_or_default(),
         "max_tokens": options.max_tokens,
         "n_predict": options.max_tokens,
@@ -419,7 +586,59 @@ fn native_generation_settings(
         "n_keep": options.retention.n_keep.unwrap_or(0),
         "n_discard": options.retention.n_discard.unwrap_or(0),
         "stream": request.stream.unwrap_or(false),
+        // #1485 sampling remainder.
+        "mirostat": sampling.mirostat,
+        "mirostat_tau": sampling.mirostat_tau,
+        "mirostat_eta": sampling.mirostat_eta,
+        "dynatemp_range": sampling.dynatemp_range,
+        "dynatemp_exponent": sampling.dynatemp_exponent,
+        "adaptive_target": sampling.adaptive_target,
+        "adaptive_decay": sampling.adaptive_decay,
+        "min_keep": sampling.min_keep,
+        "n_probs": if options.logprobs.enabled { options.logprobs.top_k } else { 0 },
+        "post_sampling_probs": options.post_sampling_probs,
+        // #1485 grammar surfaces, reported from the SAME resolution the
+        // constraint was compiled from, so the report cannot claim a grammar
+        // the sampler is not running. `grammar` is empty for a schema-sourced
+        // constraint: b10621 reports the GBNF its schema converter produced,
+        // and mlxcel has no such intermediate text.
+        "grammar": options
+            .grammar
+            .as_ref()
+            .and_then(|g| g.gbnf.clone())
+            .unwrap_or_default(),
+        "grammar_lazy": options.grammar.as_ref().is_some_and(|g| g.lazy),
+        "grammar_triggers": native_trigger_report(options.grammar.as_deref()),
+        "preserved_tokens": options
+            .grammar
+            .as_ref()
+            .map(|g| g.preserved.clone())
+            .unwrap_or_default(),
     })
+}
+
+/// `grammar_triggers` in b10621's own reporting shape: `{type, value}` plus a
+/// `token` key on the token form only.
+fn native_trigger_report(spec: Option<&crate::server::grammar::GrammarSpec>) -> serde_json::Value {
+    use crate::server::grammar::GrammarTrigger;
+    let Some(spec) = spec else {
+        return serde_json::Value::Array(Vec::new());
+    };
+    serde_json::Value::Array(
+        spec.triggers
+            .iter()
+            .map(|trigger| match trigger {
+                GrammarTrigger::Token(id) => {
+                    serde_json::json!({"type": 0, "value": "", "token": id})
+                }
+                GrammarTrigger::Word(value) => serde_json::json!({"type": 1, "value": value}),
+                GrammarTrigger::Pattern(value) => serde_json::json!({"type": 2, "value": value}),
+                GrammarTrigger::PatternFull(value) => {
+                    serde_json::json!({"type": 3, "value": value})
+                }
+            })
+            .collect(),
+    )
 }
 
 /// The prefill snapshot as the streaming arm carries it (#1441).
@@ -460,6 +679,7 @@ async fn stream_native_completion(
     budget_override: ReasoningBudgetOverride,
     ping_interval: Option<std::time::Duration>,
     resumable: super::chat::ResumableStreamContext,
+    grammar: NativeGrammar,
 ) -> Response {
     // Queue-depth admission control: return 503 before opening SSE stream
     if !state.can_accept_request() {
@@ -470,6 +690,10 @@ async fn stream_native_completion(
     let mut options = build_native_options(&request, requested_n_predict, &state, &live);
     options.priority = priority;
     options.reasoning_budget = budget_override;
+    if let Some((spec, constraint)) = grammar {
+        options.grammar = Some(spec);
+        options.structured = Some(constraint);
+    }
     // b10621 `reasoning_control` (#1444): arming creates the runtime
     // force-end flag, as upstream's on-demand budget sampler does. The
     // native response never exposes the internal completion id, so no
@@ -499,6 +723,11 @@ async fn stream_native_completion(
     let (events, stream, cancelled, keepalive) = sse_channel_resumable(100, ping_interval, session);
     let finish_events = events.clone();
     let timings_per_token = request.timings_per_token.unwrap_or(false);
+    // #1485 n_probs streaming report inputs, captured before the request
+    // moves into the worker closure.
+    let stream_n_probs = native_n_probs(&request);
+    let stream_post_sampling = request.post_sampling_probs.unwrap_or(false);
+    let stream_tokenizer = state.model_provider.prompt_tokenizer().cloned();
 
     tokio::task::spawn_blocking(move || {
         // Slot accounting (#1440): ties this request to a numbered slot for
@@ -528,7 +757,7 @@ async fn stream_native_completion(
                 queue_reservation,
                 cancelled,
                 &live,
-                |token, _lp| {
+                |token, lp| {
                     slot.on_token(&token);
                     let n =
                         emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -557,6 +786,17 @@ async fn stream_native_completion(
                             )
                         }),
                         prompt_progress: None,
+                        // b10621 streams the probability report per token
+                        // (#1485): a one-entry array in the final object's
+                        // shape, present only under `n_probs`.
+                        completion_probabilities: match (stream_n_probs, lp.as_ref()) {
+                            (n, Some(lp)) if n > 0 => Some(native_completion_probabilities(
+                                stream_tokenizer.as_deref(),
+                                std::slice::from_ref(lp),
+                                stream_post_sampling,
+                            )),
+                            _ => None,
+                        },
                     };
                     let _ = token_events.json(&chunk);
                 },
@@ -591,6 +831,7 @@ async fn stream_native_completion(
                         tokens_predicted: result.completion_tokens,
                         tokens_evaluated: result.prompt_tokens,
                         cached_tokens: result.cached_tokens,
+                        probs: result.logprobs.clone(),
                         stop_kind: &result.stop_kind,
                         prompt_ms: result.prompt_eval_ms as f64,
                         predicted_ms: result.generation_only_ms as f64,
@@ -616,32 +857,32 @@ async fn stream_native_completion(
     sse_response(stream, keepalive)
 }
 
-/// Whether a native `samplers` value spells exactly b10621's default chain
-/// order, in either of the two upstream shapes: an array of stage names or a
-/// single string of stage characters.
-fn native_samplers_is_the_default_order(value: &serde_json::Value) -> bool {
-    const DEFAULT_NAMES: [&str; 9] = [
-        "penalties",
-        "dry",
-        "top_n_sigma",
-        "top_k",
-        "typ_p",
-        "top_p",
-        "min_p",
-        "xtc",
-        "temperature",
-    ];
+/// Validate a native `samplers` value against mlxcel's fixed chain, in
+/// either of the two upstream shapes (an array of stage names or a single
+/// string of stage characters): the fixed b10621 default order is accepted,
+/// optionally extended with the `adaptive_p` stage (#1485; upstream appends
+/// that stage after the chain wherever the list names it). `Ok(named)`
+/// reports whether `adaptive_p` was named; `Err(())` is an order mlxcel
+/// cannot honor.
+fn native_samplers_validate(value: &serde_json::Value) -> Result<bool, ()> {
     match value {
         serde_json::Value::Array(items) => {
-            items.len() == DEFAULT_NAMES.len()
-                && items
-                    .iter()
-                    .zip(DEFAULT_NAMES)
-                    .all(|(item, name)| item.as_str() == Some(name))
+            let names: Vec<&str> = items
+                .iter()
+                .map(|item| item.as_str().ok_or(()))
+                .collect::<Result<_, _>>()?;
+            crate::server::startup::validate_sampler_names(&names)
         }
-        serde_json::Value::String(chars) => chars == "edskypmxt",
-        _ => false,
+        serde_json::Value::String(chars) => crate::server::startup::validate_sampler_seq(chars),
+        _ => Err(()),
     }
+}
+
+/// Whether a native `samplers` value spells an accepted chain
+/// ([`native_samplers_validate`]); kept as the boolean form the field
+/// rejection uses.
+fn native_samplers_is_the_default_order(value: &serde_json::Value) -> bool {
+    native_samplers_validate(value).is_ok()
 }
 
 /// Reject the native fields mlxcel has no equivalent for.
@@ -728,8 +969,45 @@ fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option
         && !native_samplers_is_the_default_order(samplers)
     {
         return refuse(format!(
-            "samplers {samplers} is not supported: mlxcel's sampler chain order is fixed to the b10621 default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature, character form edskypmxt); send that order or omit the field"
+            "samplers {samplers} is not supported: mlxcel's sampler chain order is fixed to the b10621 default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature, character form edskypmxt), optionally extended with adaptive_p / a (#1485); send that order or omit the field"
         ));
+    }
+
+    // #1485 value-domain validations mirroring b10621's schema handlers.
+    if let Some(mode) = request.mirostat
+        && !(0..=2).contains(&mode)
+    {
+        return refuse(format!(
+            "mirostat {mode} is not supported: valid values are 0 (disabled), 1 (Mirostat) and 2 (Mirostat 2.0)"
+        ));
+    }
+    // b10621 declares HARD limits 0.0..=0.99 on adaptive_decay.
+    if let Some(decay) = request.adaptive_decay
+        && !(decay.is_finite() && (0.0..=0.99).contains(&decay))
+    {
+        return refuse(format!(
+            "adaptive_decay: Value must be between 0 <= value <= 0.99, but got {decay}"
+        ));
+    }
+    // b10621 declares HARD limits 0..=2147483647 on min_keep.
+    if let Some(min_keep) = request.min_keep
+        && !(0..=i64::from(i32::MAX)).contains(&min_keep)
+    {
+        return refuse(format!(
+            "min_keep: Value must be between 0 <= value <= 2147483647, but got {min_keep}"
+        ));
+    }
+    // b10621 accepts only a non-empty array of STRINGS (its json_value
+    // falls back to an empty vector on any other shape and then errors).
+    if let Some(breakers) = request.dry_sequence_breakers.as_ref() {
+        let ok = breakers
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty() && arr.iter().all(serde_json::Value::is_string));
+        if !ok {
+            return refuse(
+                "Error: dry_sequence_breakers must be a non-empty array of strings".to_string(),
+            );
+        }
     }
     if request.n_cmpl.is_some_and(|n| n != 1) {
         return refuse(
@@ -808,6 +1086,17 @@ fn build_native_generate_options_with_live(
     request: &NativeCompletionRequest,
     requested_n_predict: Option<usize>,
 ) -> ServerGenerateOptions {
+    // b10621 logit_bias (#1485): a present field replaces the server-wide
+    // set wholesale (even when it parses to nothing), upstream's
+    // clear-and-rebuild handler.
+    let (logit_bias, logit_bias_texts) = match request.logit_bias.as_ref() {
+        Some(value) => {
+            let (nums, texts) = parse_native_logit_bias(value);
+            (Some(nums), texts)
+        }
+        None => (None, Vec::new()),
+    };
+
     let mut options = build_server_generate_options_with_live(
         config,
         live,
@@ -827,7 +1116,20 @@ fn build_native_generate_options_with_live(
             dry_base: request.dry_base,
             dry_allowed_length: request.dry_allowed_length,
             dry_penalty_last_n: request.dry_penalty_last_n,
-            dry_sequence_breakers: request.dry_sequence_breakers.clone(),
+            // b10621 value domain (#1485): the native field carries breaker
+            // STRINGS (validated non-empty-array-of-strings by the field
+            // rejection); the exact-id channel serves only the
+            // OpenAI-shaped surface.
+            dry_sequence_breakers: None,
+            dry_sequence_breaker_strings: request.dry_sequence_breakers.as_ref().map(|v| {
+                v.as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }),
             // b10621's /completion schema declares both XTC fields with
             // SOFT 0..=1 limits: an out-of-range value is CLAMPED into the
             // domain, not rejected (its field_num::eval only throws for hard
@@ -886,6 +1188,33 @@ fn build_native_generate_options_with_live(
             // applies here; a global `MLXCEL_LOOP_DETECTION` override still
             // does, and remains the way to enable detection on this endpoint.
             request_carries_loop_amplifier: false,
+            // #1485 sampling remainder.
+            mirostat: request.mirostat,
+            mirostat_tau: request.mirostat_tau,
+            mirostat_eta: request.mirostat_eta,
+            dynatemp_range: request.dynatemp_range,
+            dynatemp_exponent: request.dynatemp_exponent,
+            // b10621 declares a SOFT upper limit of 1.0 (values above clamp
+            // down); negative disables at the sampler.
+            adaptive_target: request.adaptive_target.map(|v| v.min(1.0)),
+            adaptive_decay: request.adaptive_decay,
+            // A present `samplers` field replaces the server-wide list
+            // wholesale, so its adaptive_p flag wins outright (the value was
+            // already validated by the field rejection).
+            adaptive_p_named: request
+                .samplers
+                .as_ref()
+                .map(|v| native_samplers_validate(v).unwrap_or(false)),
+            min_keep: request.min_keep.map(|v| v.max(0) as usize),
+            // b10621 alias order: `logprobs` counts only when `n_probs`
+            // itself is absent. Non-positive values disable the report.
+            n_probs: request
+                .n_probs
+                .or(request.logprobs)
+                .map(|n| n.max(0) as usize),
+            post_sampling_probs: request.post_sampling_probs,
+            logit_bias,
+            logit_bias_texts,
         },
     );
     // b10621 `n_keep` / `n_discard` (#1472): the per-request retention
@@ -904,6 +1233,55 @@ fn build_native_generate_options_with_live(
         options.lora_scales = Some(scales);
     }
     options
+}
+
+/// Parse the native `logit_bias` value (#1485), b10621's two shapes: an
+/// array of `[token, bias]` pairs, or an object mapping token (an id, or a
+/// string to tokenize) to bias. `false` as a bias bans the token (`-inf`);
+/// `true` and malformed entries are skipped, exactly as upstream's handler
+/// skips them. String keys come back separately for enqueue-time
+/// tokenization.
+fn parse_native_logit_bias(value: &serde_json::Value) -> (Vec<(i32, f32)>, Vec<(String, f32)>) {
+    fn parse_bias(v: &serde_json::Value) -> Option<f32> {
+        if let Some(n) = v.as_f64() {
+            return Some(n as f32);
+        }
+        if v.as_bool() == Some(false) {
+            return Some(f32::NEG_INFINITY);
+        }
+        None
+    }
+    let mut nums = Vec::new();
+    let mut texts = Vec::new();
+    match value {
+        serde_json::Value::Array(entries) => {
+            for el in entries {
+                let Some(pair) = el.as_array() else { continue };
+                if pair.len() != 2 {
+                    continue;
+                }
+                let Some(bias) = parse_bias(&pair[1]) else {
+                    continue;
+                };
+                if let Some(id) = pair[0].as_i64() {
+                    nums.push((id as i32, bias));
+                } else if let Some(text) = pair[0].as_str() {
+                    texts.push((text.to_string(), bias));
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, v) in map {
+                let Some(bias) = parse_bias(v) else { continue };
+                match key.parse::<i32>() {
+                    Ok(id) => nums.push((id, bias)),
+                    Err(_) => texts.push((key.clone(), bias)),
+                }
+            }
+        }
+        _ => {}
+    }
+    (nums, texts)
 }
 
 #[cfg(test)]
@@ -1082,5 +1460,464 @@ mod tests {
         let options = build_native_generate_options(&ServerConfig::default(), &request, None);
         let settings = native_generation_settings(&request, &options);
         assert_eq!(settings["typical_p"], 0.5);
+    }
+
+    // -- #1485 sampling remainder --
+
+    #[test]
+    fn native_completion_maps_the_1485_sampler_fields() {
+        let request = native_request(
+            r#"{"prompt":"hi","mirostat":2,"mirostat_tau":4.0,"mirostat_eta":0.2,"dynatemp_range":0.4,"dynatemp_exponent":1.5,"min_keep":3}"#,
+        );
+        assert!(reject_unsupported_native_fields(&request).is_none());
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        assert_eq!(options.sampling.mirostat, 2);
+        assert_eq!(options.sampling.mirostat_tau, 4.0);
+        assert_eq!(options.sampling.mirostat_eta, 0.2);
+        assert_eq!(options.sampling.dynatemp_range, 0.4);
+        assert_eq!(options.sampling.dynatemp_exponent, 1.5);
+        assert_eq!(options.sampling.min_keep, 3);
+    }
+
+    #[test]
+    fn native_mirostat_outside_the_declared_domain_is_refused() {
+        // b10621 would abort its own process in common_sampler_init; the
+        // actionable form of the same refusal is a 400 naming the domain.
+        for body in [
+            r#"{"prompt":"hi","mirostat":3}"#,
+            r#"{"prompt":"hi","mirostat":-1}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_some(),
+                "{body}"
+            );
+        }
+        assert!(
+            reject_unsupported_native_fields(&native_request(r#"{"prompt":"hi","mirostat":0}"#))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_adaptive_decay_and_min_keep_enforce_upstreams_hard_limits() {
+        for body in [
+            r#"{"prompt":"hi","adaptive_decay":1.0}"#,
+            r#"{"prompt":"hi","adaptive_decay":-0.1}"#,
+            r#"{"prompt":"hi","min_keep":-1}"#,
+            r#"{"prompt":"hi","min_keep":2147483648}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_some(),
+                "outside a hard schema limit must be a 400: {body}"
+            );
+        }
+        for body in [
+            r#"{"prompt":"hi","adaptive_decay":0.99}"#,
+            r#"{"prompt":"hi","min_keep":0}"#,
+            r#"{"prompt":"hi","min_keep":2147483647}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_adaptive_p_activates_only_through_the_samplers_stage() {
+        // b10621 runs adaptive-p solely when params.samplers names the
+        // stage; a bare adaptive_target is inert there and here.
+        let bare = native_request(r#"{"prompt":"hi","adaptive_target":0.3}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &bare, None);
+        assert_eq!(
+            options.sampling.adaptive_target, -1.0,
+            "inert without the stage"
+        );
+
+        let named = native_request(
+            r#"{"prompt":"hi","adaptive_target":0.3,"samplers":["penalties","dry","top_n_sigma","top_k","typ_p","top_p","min_p","xtc","temperature","adaptive_p"]}"#,
+        );
+        assert!(reject_unsupported_native_fields(&named).is_none());
+        let options = build_native_generate_options(&ServerConfig::default(), &named, None);
+        assert_eq!(options.sampling.adaptive_target, 0.3);
+        // The soft schema limit clamps values above 1.0 down, as upstream's
+        // set_limits does.
+        let clamped =
+            native_request(r#"{"prompt":"hi","adaptive_target":2.0,"samplers":"edskypmxta"}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &clamped, None);
+        assert_eq!(options.sampling.adaptive_target, 1.0);
+    }
+
+    #[test]
+    fn native_samplers_accepts_the_adaptive_p_extension_only() {
+        for body in [
+            r#"{"prompt":"hi","samplers":["adaptive_p","penalties","dry","top_n_sigma","top_k","typ_p","top_p","min_p","xtc","temperature"]}"#,
+            r#"{"prompt":"hi","samplers":"aedskypmxt"}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_none(),
+                "adaptive_p may sit anywhere in the fixed order: {body}"
+            );
+        }
+        let request = native_request(r#"{"prompt":"hi","samplers":["adaptive_p","top_k"]}"#);
+        assert!(
+            reject_unsupported_native_fields(&request).is_some(),
+            "the nine fixed stages must still all be present in order"
+        );
+    }
+
+    #[test]
+    fn native_dry_sequence_breakers_must_be_a_nonempty_string_array() {
+        for body in [
+            r#"{"prompt":"hi","dry_sequence_breakers":[]}"#,
+            r#"{"prompt":"hi","dry_sequence_breakers":[198]}"#,
+            r#"{"prompt":"hi","dry_sequence_breakers":"\n"}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_some(),
+                "b10621 wording refuses anything but a non-empty string array: {body}"
+            );
+        }
+        let request = native_request(r#"{"prompt":"hi","dry_sequence_breakers":["\n",":"]}"#);
+        assert!(reject_unsupported_native_fields(&request).is_none());
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        assert_eq!(
+            options.dry_breaker_strings,
+            Some(vec!["\n".to_string(), ":".to_string()]),
+            "the strings ride to the scheduler's vocabulary-scan derivation"
+        );
+        assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
+    }
+
+    #[test]
+    fn native_logit_bias_parses_both_upstream_shapes_and_false_bans() {
+        let array = native_request(
+            r#"{"prompt":"hi","logit_bias":[[15043,1.5],[7,false],["Hello",-2.0],[3,true],"bad"]}"#,
+        );
+        let options = build_native_generate_options(&ServerConfig::default(), &array, None);
+        assert_eq!(options.logit_bias[0], (15043, 1.5));
+        assert_eq!(options.logit_bias[1].0, 7);
+        assert_eq!(
+            options.logit_bias[1].1,
+            f32::NEG_INFINITY,
+            "false bans the token"
+        );
+        assert_eq!(
+            options.logit_bias.len(),
+            2,
+            "true and malformed entries are skipped"
+        );
+        assert_eq!(options.logit_bias_texts, vec![("Hello".to_string(), -2.0)]);
+
+        let object = native_request(r#"{"prompt":"hi","logit_bias":{"15043":1.0," Hi":false}}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &object, None);
+        assert_eq!(options.logit_bias, vec![(15043, 1.0)]);
+        assert_eq!(options.logit_bias_texts.len(), 1);
+        assert_eq!(options.logit_bias_texts[0].0, " Hi");
+        assert_eq!(options.logit_bias_texts[0].1, f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn native_logit_bias_field_replaces_the_server_wide_set() {
+        let config = ServerConfig {
+            default_logit_bias: vec![(5, 3.0)],
+            ..Default::default()
+        };
+        let absent = native_request(r#"{"prompt":"hi"}"#);
+        let options = build_native_generate_options(&config, &absent, None);
+        assert_eq!(
+            options.logit_bias,
+            vec![(5, 3.0)],
+            "absent inherits the flag set"
+        );
+
+        let empty = native_request(r#"{"prompt":"hi","logit_bias":[]}"#);
+        let options = build_native_generate_options(&config, &empty, None);
+        assert_eq!(
+            options.logit_bias,
+            Vec::<(i32, f32)>::new(),
+            "a present field clears and rebuilds, upstream's handler shape"
+        );
+    }
+
+    #[test]
+    fn native_n_probs_and_its_logprobs_alias_enable_the_report() {
+        let request = native_request(r#"{"prompt":"hi","n_probs":5}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        assert!(options.logprobs.enabled);
+        assert_eq!(options.logprobs.top_k, 5);
+        assert_eq!(
+            options.logprobs.source,
+            mlxcel_core::sampling::LogprobSource::RawModel
+        );
+
+        let alias = native_request(r#"{"prompt":"hi","logprobs":3}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &alias, None);
+        assert_eq!(options.logprobs.top_k, 3);
+
+        // n_probs wins over the alias when both are present, upstream's
+        // alias order.
+        let both = native_request(r#"{"prompt":"hi","n_probs":2,"logprobs":9}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &both, None);
+        assert_eq!(options.logprobs.top_k, 2);
+
+        let post = native_request(r#"{"prompt":"hi","n_probs":4,"post_sampling_probs":true}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &post, None);
+        assert_eq!(
+            options.logprobs.source,
+            mlxcel_core::sampling::LogprobSource::PostSampling
+        );
+        assert!(options.post_sampling_probs);
+
+        let off = native_request(r#"{"prompt":"hi","n_probs":0}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &off, None);
+        assert!(!options.logprobs.enabled);
+    }
+
+    #[test]
+    fn native_backend_sampling_is_accepted_and_inert_in_both_values() {
+        for body in [
+            r#"{"prompt":"hi","backend_sampling":true}"#,
+            r#"{"prompt":"hi","backend_sampling":false}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_none(),
+                "{body}"
+            );
+            let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+            // mlxcel's sampler IS the backend graph; nothing to switch.
+            assert!(config_is_untouched_by_backend_sampling(&options));
+        }
+    }
+
+    fn config_is_untouched_by_backend_sampling(options: &ServerGenerateOptions) -> bool {
+        let baseline = build_native_generate_options(
+            &ServerConfig::default(),
+            &native_request(r#"{"prompt":"hi"}"#),
+            None,
+        );
+        options.sampling.temperature == baseline.sampling.temperature
+            && options.sampling.top_k == baseline.sampling.top_k
+    }
+
+    /// A tiny byte-level tokenizer with a single-token `<tool>` marker, so the
+    /// preserved-token and trigger-word promotion rules can be exercised
+    /// without loading a checkpoint.
+    fn grammar_tokenizer() -> crate::tokenizer::MlxcelTokenizer {
+        let json = r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {"id": 5, "content": "<tool>", "single_word": false, "lstrip": false,
+                 "rstrip": false, "normalized": false, "special": true}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {"a": 0, "b": 1, "c": 2, " ": 3, "{": 4, "<tool>": 5},
+                "merges": []
+            }
+        }"#;
+        crate::tokenizer::MlxcelTokenizer::HuggingFace(
+            tokenizers::Tokenizer::from_bytes(json.as_bytes()).expect("fixture tokenizer builds"),
+        )
+    }
+
+    fn resolve(body: &str) -> Result<Option<crate::server::grammar::GrammarSpec>, String> {
+        let request = native_request(body);
+        let tokenizer = grammar_tokenizer();
+        crate::server::grammar::resolve_native_grammar(
+            &tokenizer,
+            request.json_schema.as_ref(),
+            request.grammar.as_ref(),
+            request.grammar_lazy,
+            request.grammar_triggers.as_ref(),
+            request.preserved_tokens.as_ref(),
+            None,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn native_grammar_surfaces_no_longer_reject_a_constrained_request() {
+        // Every one of these was a 400 before the grammar engine landed; the
+        // route must now admit them and resolve a constraint instead.
+        for body in [
+            r#"{"prompt":"hi","json_schema":{}}"#,
+            r#"{"prompt":"hi","grammar":"root ::= \"a\""}"#,
+            r#"{"prompt":"hi","grammar_lazy":true}"#,
+        ] {
+            let request = native_request(body);
+            assert!(
+                reject_unsupported_native_fields(&request).is_none(),
+                "grammar surfaces are implemented and must not be refused: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn grammar_wins_over_json_schema_by_presence_not_by_emptiness() {
+        // b10621 takes the schema branch only when `json_schema` is present
+        // AND `grammar` is absent, which its own field description contradicts.
+        let spec = resolve(
+            r#"{"prompt":"hi","json_schema":{"type":"object"},"grammar":"root ::= \"a\""}"#,
+        )
+        .unwrap()
+        .expect("a grammar is resolved");
+        assert_eq!(spec.gbnf.as_deref(), Some("root ::= \"a\""));
+        assert!(spec.schema.is_none());
+
+        // An EMPTY grammar alongside a schema leaves no grammar at all.
+        assert!(
+            resolve(r#"{"prompt":"hi","json_schema":{"type":"object"},"grammar":""}"#)
+                .unwrap()
+                .is_none()
+        );
+
+        // The schema alone takes the schema branch.
+        let spec = resolve(r#"{"prompt":"hi","json_schema":{"type":"object"}}"#)
+            .unwrap()
+            .expect("a schema is resolved");
+        assert!(spec.schema.is_some());
+        assert!(spec.gbnf.is_none());
+    }
+
+    #[test]
+    fn a_non_string_grammar_is_ignored_the_way_upstreams_json_value_ignores_it() {
+        assert!(
+            resolve(r#"{"prompt":"hi","grammar":123}"#)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_lazy_grammar_needs_triggers_only_when_the_triggers_key_is_present() {
+        // Upstream's check lives inside the `grammar_triggers` handler, so a
+        // bare `grammar_lazy: true` is accepted and simply never triggers.
+        assert!(
+            resolve(r#"{"prompt":"hi","grammar_lazy":true}"#)
+                .unwrap()
+                .is_none()
+        );
+        let err =
+            resolve(r#"{"prompt":"hi","grammar_lazy":true,"grammar_triggers":[]}"#).unwrap_err();
+        assert_eq!(err, "Error: no triggers set for lazy grammar!");
+    }
+
+    #[test]
+    fn a_single_token_trigger_word_must_be_a_preserved_token() {
+        let body = r#"{"prompt":"hi","grammar":"root ::= \"a\"","grammar_lazy":true,"grammar_triggers":[{"type":1,"value":"<tool>"}]}"#;
+        let err = resolve(body).unwrap_err();
+        assert_eq!(
+            err,
+            "Grammar trigger word should be marked as preserved token: <tool>"
+        );
+
+        let body = r#"{"prompt":"hi","grammar":"root ::= \"a\"","grammar_lazy":true,"preserved_tokens":["<tool>"],"grammar_triggers":[{"type":1,"value":"<tool>"}]}"#;
+        let spec = resolve(body).unwrap().expect("a grammar is resolved");
+        assert_eq!(
+            spec.triggers,
+            vec![crate::server::grammar::GrammarTrigger::Token(5)]
+        );
+        assert_eq!(spec.preserved, vec![5]);
+
+        // A multi-token word stays a WORD trigger and needs no preserved entry.
+        let body = r#"{"prompt":"hi","grammar":"root ::= \"a\"","grammar_lazy":true,"grammar_triggers":[{"type":1,"value":"abc"}]}"#;
+        let spec = resolve(body).unwrap().expect("a grammar is resolved");
+        assert_eq!(
+            spec.triggers,
+            vec![crate::server::grammar::GrammarTrigger::Word(
+                "abc".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_malformed_trigger_or_preserved_shape_is_refused() {
+        assert!(resolve(r#"{"prompt":"hi","grammar_triggers":{}}"#).is_err());
+        assert!(resolve(r#"{"prompt":"hi","preserved_tokens":{}}"#).is_err());
+        assert!(resolve(r#"{"prompt":"hi","grammar_triggers":[{"type":9,"value":"x"}]}"#).is_err());
+    }
+
+    #[test]
+    fn the_server_default_grammar_survives_a_request_that_sets_none() {
+        let default = crate::server::grammar::GrammarSpec::from_gbnf("root ::= \"z\"".to_string());
+        let request = native_request(r#"{"prompt":"hi","grammar":""}"#);
+        let tokenizer = grammar_tokenizer();
+        let spec = crate::server::grammar::resolve_native_grammar(
+            &tokenizer,
+            request.json_schema.as_ref(),
+            request.grammar.as_ref(),
+            request.grammar_lazy,
+            request.grammar_triggers.as_ref(),
+            request.preserved_tokens.as_ref(),
+            Some(&default),
+        )
+        .unwrap()
+        .expect("the server default is inherited");
+        assert_eq!(spec.gbnf.as_deref(), Some("root ::= \"z\""));
+    }
+
+    #[test]
+    fn native_seed_folds_into_uint32_space() {
+        let request = native_request(r#"{"prompt":"hi","seed":-2}"#);
+        assert_eq!(
+            request.seed,
+            Some(4_294_967_294),
+            "b10621's unchecked uint32 cast makes -2 a deterministic seed"
+        );
+        let random = native_request(r#"{"prompt":"hi","seed":-1}"#);
+        assert_eq!(random.seed, None);
+    }
+
+    #[test]
+    fn native_generation_settings_echo_the_1485_keys() {
+        let request = native_request(
+            r#"{"prompt":"hi","mirostat":1,"dynatemp_range":0.5,"min_keep":2,"n_probs":3,"dry_sequence_breakers":["x"]}"#,
+        );
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        let settings = native_generation_settings(&request, &options);
+        assert_eq!(settings["mirostat"], 1);
+        assert_eq!(settings["dynatemp_range"], 0.5);
+        assert_eq!(settings["min_keep"], 2);
+        assert_eq!(settings["n_probs"], 3);
+        assert_eq!(settings["post_sampling_probs"], false);
+        assert_eq!(settings["dry_sequence_breakers"], serde_json::json!(["x"]));
+        assert_eq!(settings["adaptive_target"], -1.0);
+    }
+
+    #[test]
+    fn native_probability_report_uses_upstreams_key_names() {
+        use mlxcel_core::sampling::TokenLogprobData;
+        let entries = [TokenLogprobData {
+            token_id: 3,
+            logprob: -0.5,
+            top_alternatives: vec![(3, -0.5), (7, -1.5)],
+        }];
+        let pre = native_completion_probabilities(None, &entries, false);
+        assert!(pre[0]["logprob"].is_number());
+        assert!(pre[0]["top_logprobs"].is_array());
+        assert_eq!(pre[0]["id"], 3);
+        assert_eq!(pre[0]["top_logprobs"][1]["id"], 7);
+        let post = native_completion_probabilities(None, &entries, true);
+        assert!(post[0]["prob"].is_number());
+        assert!(post[0]["top_probs"].is_array());
     }
 }

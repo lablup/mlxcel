@@ -995,6 +995,14 @@ fn resolved_cli_sampling_params(
         typical_p: args.sampling.typical_p,
         penalty_last_n: args.sampling.repeat_last_n,
         stop_token_ids,
+        mirostat: 0,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
+        dynatemp_range: 0.0,
+        dynatemp_exponent: 1.0,
+        adaptive_target: -1.0,
+        adaptive_decay: 0.9,
+        min_keep: 0,
     }
 }
 

@@ -23,7 +23,7 @@ use crate::sampling::{ResolvedSamplingParams, build_sampling_config};
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use mlxcel_core::LoopDetectionConfig;
-use mlxcel_core::sampling::LogprobsConfig;
+use mlxcel_core::sampling::{LogprobSource, LogprobsConfig};
 
 /// Conservative built-in loop-detection threshold (issue #432, recalibrated by
 /// issue #967): scan single-token through 20-token tail patterns and end
@@ -74,6 +74,48 @@ pub(crate) struct RequestOptionOverrides {
     pub dry_allowed_length: Option<usize>,
     pub dry_penalty_last_n: Option<usize>,
     pub dry_sequence_breakers: Option<Vec<i32>>,
+    /// b10621 breaker STRINGS from the native `dry_sequence_breakers` field
+    /// (#1485). `Some` replaces both the server default set and any id-based
+    /// override; the head map is derived against the vocabulary at enqueue
+    /// time.
+    pub dry_sequence_breaker_strings: Option<Vec<String>>,
+    /// Mirostat mode override (#1485), validated to `{0, 1, 2}` at the
+    /// request layer.
+    pub mirostat: Option<i32>,
+    /// Mirostat tau override (#1485).
+    pub mirostat_tau: Option<f32>,
+    /// Mirostat eta override (#1485).
+    pub mirostat_eta: Option<f32>,
+    /// Dynamic-temperature range override (#1485).
+    pub dynatemp_range: Option<f32>,
+    /// Dynamic-temperature exponent override (#1485).
+    pub dynatemp_exponent: Option<f32>,
+    /// Adaptive-p target override (#1485; soft-clamped to `<= 1.0` at the
+    /// request layer, upstream's soft schema limit).
+    pub adaptive_target: Option<f32>,
+    /// Adaptive-p decay override (#1485; hard limits `0.0..=0.99` enforced
+    /// with a 400 at the request layer).
+    pub adaptive_decay: Option<f32>,
+    /// Whether the request's `samplers` field named the `adaptive_p` stage
+    /// (#1485). `Some` (the field was present) replaces the server-wide
+    /// sampler list wholesale, as b10621 replaces `params.samplers`.
+    pub adaptive_p_named: Option<bool>,
+    /// b10621 `min_keep` override (#1485; hard limits `0..=2147483647`
+    /// enforced at the request layer).
+    pub min_keep: Option<usize>,
+    /// Resolved numeric logit biases from the request (#1485): `Some`
+    /// replaces the server-wide `--logit-bias` set wholesale, as b10621's
+    /// field handler clears and rebuilds the list.
+    pub logit_bias: Option<Vec<(i32, f32)>>,
+    /// Text-keyed logit biases from the request (#1485): each string is
+    /// tokenized (special parsing off) at enqueue time and the bias applies
+    /// to every resulting token, upstream's string-key form.
+    pub logit_bias_texts: Vec<(String, f32)>,
+    /// b10621 `n_probs` / `logprobs` (#1485): per-token top-N probability
+    /// reporting on the native route.
+    pub n_probs: Option<usize>,
+    /// b10621 `post_sampling_probs` (#1485).
+    pub post_sampling_probs: Option<bool>,
     /// XTC (Exclude Top Choices) per-step probability override. Validated at
     /// the request layer (`0.0..=1.0`) before it reaches here.
     pub xtc_probability: Option<f32>,
@@ -269,9 +311,12 @@ pub(crate) fn build_server_generate_options_with_live(
             .dry_penalty_last_n
             .unwrap_or(live.default_dry_penalty_last_n)
             .min(i32::MAX as usize),
-        dry_sequence_breakers: overrides
-            .dry_sequence_breakers
-            .unwrap_or_else(|| live.default_dry_sequence_breakers.clone()),
+        // b10621 value domain (#1485): the sampler's exact-id breaker list
+        // serves only the OpenAI-shaped id override now; string breakers
+        // (the native field, or the server-wide default set) travel on
+        // `ServerGenerateOptions::dry_breaker_strings` and are derived into
+        // the head map at enqueue time.
+        dry_sequence_breakers: overrides.dry_sequence_breakers.clone().unwrap_or_default(),
         frequency_penalty: overrides
             .frequency_penalty
             .unwrap_or(live.default_frequency_penalty),
@@ -305,6 +350,40 @@ pub(crate) fn build_server_generate_options_with_live(
             i32::try_from(live.default_repetition_context_size).unwrap_or(i32::MAX)
         }),
         stop_token_ids: Vec::new(),
+        // #1485 sampling remainder.
+        mirostat: overrides.mirostat.unwrap_or(config.default_mirostat),
+        mirostat_tau: overrides
+            .mirostat_tau
+            .unwrap_or(config.default_mirostat_tau),
+        mirostat_eta: overrides
+            .mirostat_eta
+            .unwrap_or(config.default_mirostat_eta),
+        dynatemp_range: overrides
+            .dynatemp_range
+            .unwrap_or(config.default_dynatemp_range),
+        dynatemp_exponent: overrides
+            .dynatemp_exponent
+            .unwrap_or(config.default_dynatemp_exponent),
+        // Adaptive-p runs only when the effective sampler list names the
+        // stage (b10621 activates it solely through `params.samplers`): a
+        // request `samplers` field replaces the server-wide list wholesale,
+        // so its named flag wins outright when present.
+        adaptive_target: {
+            let named = overrides
+                .adaptive_p_named
+                .unwrap_or(config.default_adaptive_p_named);
+            if named {
+                overrides
+                    .adaptive_target
+                    .unwrap_or(config.default_adaptive_target)
+            } else {
+                -1.0
+            }
+        },
+        adaptive_decay: overrides
+            .adaptive_decay
+            .unwrap_or(config.default_adaptive_decay),
+        min_keep: overrides.min_keep.unwrap_or(0),
     });
 
     // Loop-detection policy (issue #432) is resolved here, in the server
@@ -334,16 +413,54 @@ pub(crate) fn build_server_generate_options_with_live(
         other => other,
     };
 
+    // b10621 breaker precedence (#1485): native strings replace everything;
+    // an id-based (OpenAI-shaped) override runs with exactly those ids and
+    // no string set; otherwise the server-wide default strings apply.
+    let dry_breaker_strings = match (
+        overrides.dry_sequence_breaker_strings,
+        overrides.dry_sequence_breakers.is_some(),
+    ) {
+        (Some(strings), _) => Some(strings),
+        (None, true) => None,
+        (None, false) => Some(live.default_dry_sequence_breakers.clone()),
+    };
+
+    // b10621 logit-bias precedence (#1485): a request field replaces the
+    // server-wide `--logit-bias` set wholesale (upstream's handler clears
+    // and rebuilds the list); absent falls back to it.
+    let logit_bias = overrides
+        .logit_bias
+        .unwrap_or_else(|| config.default_logit_bias.clone());
+
+    // b10621 n_probs (#1485): per-token probability reporting through the
+    // shared logprobs machinery, on the source the request selected.
+    let logprobs = match overrides.n_probs {
+        Some(n) if n > 0 => LogprobsConfig {
+            enabled: true,
+            top_k: n,
+            source: if overrides.post_sampling_probs.unwrap_or(false) {
+                LogprobSource::PostSampling
+            } else {
+                LogprobSource::RawModel
+            },
+        },
+        _ => LogprobsConfig::default(),
+    };
+
     ServerGenerateOptions {
         retention: Default::default(),
         max_tokens: resolve_server_max_tokens_with_live(config, live, overrides.max_tokens),
         sampling,
         stop_sequences,
+        dry_breaker_strings,
+        logit_bias,
+        logit_bias_texts: overrides.logit_bias_texts,
+        post_sampling_probs: overrides.post_sampling_probs.unwrap_or(false),
         // b10621 --ignore-eos (#1436): a per-request ignore_eos overrides
         // the server-wide default; absent falls back to it.
         ignore_eos: overrides.ignore_eos.unwrap_or(config.default_ignore_eos),
         priority: overrides.priority,
-        logprobs: LogprobsConfig::default(),
+        logprobs,
         reasoning_budget: overrides.reasoning_budget,
         thinking_enter_block_on_start: overrides.thinking_enter_block_on_start,
         // Default unarmed; routes that accept the b10621 `reasoning_control`
@@ -357,6 +474,7 @@ pub(crate) fn build_server_generate_options_with_live(
         // that handle `response_format` populate this after the helper
         // returns — see `chat.rs` and `completions.rs`.
         structured: None,
+        grammar: None,
         // Default unset (use the checkpoint's configured Gemma 4 budget). The
         // chat routes populate this from the resolved `image_url` content
         // parts after the helper returns; the raw text-completion endpoints

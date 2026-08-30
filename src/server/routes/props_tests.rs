@@ -64,7 +64,7 @@ async fn send(app: Router, method: Method, uri: &str) -> (StatusCode, serde_json
 #[test]
 fn props_reports_the_resolved_dry_sequence_breakers() {
     let config = ServerConfig {
-        default_dry_sequence_breakers: vec![198, 271],
+        default_dry_sequence_breakers: vec!["\n".to_string(), ":".to_string()],
         ..Default::default()
     };
 
@@ -72,22 +72,23 @@ fn props_reports_the_resolved_dry_sequence_breakers() {
 
     assert_eq!(
         settings["dry_sequence_breakers"],
-        serde_json::json!([198, 271]),
+        serde_json::json!(["\n", ":"]),
         "an operator must be able to read back what --dry-sequence-breaker resolved to"
     );
 }
 
 #[test]
-fn props_reports_an_unset_breaker_list_as_empty_rather_than_omitting_it() {
+fn props_reports_the_b10621_default_breaker_set_when_the_flag_is_absent() {
     let settings = default_generation_settings(&ServerConfig::default());
 
-    // Present-but-empty and absent are different answers to "is this flag
-    // doing anything". The gap #1103 closed was that the field was absent, so
-    // there was no way to tell the flag was inert.
+    // #1485: an absent flag inherits b10621's default breaker set, and the
+    // report shows the STRINGS (upstream's own value domain for the key);
+    // `--dry-sequence-breaker none` empties the list, which stays present
+    // rather than omitted (the #1103 posture).
     assert_eq!(
         settings["dry_sequence_breakers"],
-        serde_json::json!([]),
-        "the key must exist even when no breakers are configured"
+        serde_json::json!(["\n", ":", "\"", "*"]),
+        "the key must report the effective breaker strings"
     );
 }
 
@@ -109,7 +110,7 @@ fn props_reports_the_same_patched_defaults_as_live_settings() {
     live.default_dry_base = 1.61;
     live.default_dry_allowed_length = 5;
     live.default_dry_penalty_last_n = 211;
-    live.default_dry_sequence_breakers = vec![3, 5];
+    live.default_dry_sequence_breakers = vec!["\n".to_string(), "*".to_string()];
 
     let settings = default_generation_settings_with_live(&config, &live);
 
@@ -128,7 +129,10 @@ fn props_reports_the_same_patched_defaults_as_live_settings() {
     assert_eq!(settings["dry_base"], serde_json::json!(1.61_f32));
     assert_eq!(settings["dry_allowed_length"], serde_json::json!(5));
     assert_eq!(settings["dry_penalty_last_n"], serde_json::json!(211));
-    assert_eq!(settings["dry_sequence_breakers"], serde_json::json!([3, 5]));
+    assert_eq!(
+        settings["dry_sequence_breakers"],
+        serde_json::json!(["\n", "*"])
+    );
 }
 
 /// The reported key set is the contract this function was extracted to make
@@ -148,19 +152,30 @@ fn params_reports_exactly_the_documented_key_set() {
     assert_eq!(
         keys,
         vec![
+            "adaptive_decay",
+            "adaptive_target",
             "dry_allowed_length",
             "dry_base",
             "dry_multiplier",
             "dry_penalty_last_n",
             "dry_sequence_breakers",
+            "dynatemp_exponent",
+            "dynatemp_range",
             "frequency_penalty",
+            "grammar",
+            "grammar_lazy",
+            "grammar_triggers",
             "ignore_eos",
             "max_tokens",
             "min_p",
+            "mirostat",
+            "mirostat_eta",
+            "mirostat_tau",
             "n_discard",
             "n_keep",
             "n_predict",
             "presence_penalty",
+            "preserved_tokens",
             "repeat_last_n",
             "repeat_penalty",
             "seed",

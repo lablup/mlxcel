@@ -94,6 +94,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-hfr", "--hf-repo"),
     ("-hfrd", "--spec-draft-hf"),
     ("-hft", "--hf-token"),
+    ("-jf", "--json-schema-file"),
     ("-kvo", "--kv-offload"),
     ("-kvu", "--kv-unified"),
     ("-lcd", "--lookup-cache-dynamic"),
@@ -152,7 +153,7 @@ fn long_for(token: &str) -> Option<&'static str> {
 /// as value-taking here would make `-cb -m model` swallow `-m` before clap
 /// ever saw it. Clap itself still accepts `--cont-batching true`, because a
 /// value it does consume is examined by clap rather than by this pass.
-fn value_taking_tokens(cmd: &mut clap::Command) -> HashSet<String> {
+pub(crate) fn value_taking_tokens(cmd: &mut clap::Command) -> HashSet<String> {
     cmd.build();
     let mut tokens = HashSet::new();
     for arg in cmd.get_arguments() {

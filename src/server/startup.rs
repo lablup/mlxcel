@@ -283,6 +283,22 @@ pub struct ServerStartupConfig {
     pub dry_penalty_last_n: i32, // -1 = use full context
     pub dry_sequence_breakers: Vec<String>,
 
+    /// Server-wide constrained-decoding default resolved from `--grammar`,
+    /// `--grammar-file`, `--json-schema` or `--json-schema-file` (#1485).
+    pub grammar: Option<crate::server::grammar::GrammarSpec>,
+
+    // #1485 sampling remainder
+    pub mirostat: i32,
+    pub mirostat_tau: f32,
+    pub mirostat_eta: f32,
+    pub dynatemp_range: f32,
+    pub dynatemp_exponent: f32,
+    pub adaptive_target: f32,
+    pub adaptive_decay: f32,
+    /// Parsed `-l` / `--logit-bias` pairs (already validated by
+    /// `cli_input::parse_logit_bias_flags`).
+    pub logit_bias: Vec<(i32, f32)>,
+
     // Logging
     pub verbose: bool,
     pub log_disable: bool,
@@ -658,6 +674,15 @@ impl Default for ServerStartupConfig {
             dry_allowed_length: 2,
             dry_penalty_last_n: 64,
             dry_sequence_breakers: Vec::new(),
+            grammar: None,
+            mirostat: 0,
+            mirostat_tau: 5.0,
+            mirostat_eta: 0.1,
+            dynatemp_range: 0.0,
+            dynatemp_exponent: 1.0,
+            adaptive_target: -1.0,
+            adaptive_decay: 0.9,
+            logit_bias: Vec::new(),
             verbose: false,
             log_disable: false,
             log_file: None,
@@ -852,39 +877,98 @@ fn sanitize_top_n_sigma_default(value: f32) -> f32 {
 
 /// b10621's default sampler chain, the only order mlxcel can honor: its
 /// filter chain position is fixed (#1375/#1377 pin it to exactly this
-/// order), so `--samplers` accepts precisely this list and rejects anything
-/// else at startup with the accepted form in the diagnostic.
+/// order), so `--samplers` accepts precisely this list, optionally extended
+/// with the `adaptive_p` stage (#1485; upstream appends that stage after
+/// the chain wherever the list names it, so its position carries no
+/// ordering information), and rejects anything else at startup with the
+/// accepted form in the diagnostic.
 pub(super) const B10621_DEFAULT_SAMPLERS: &str =
     "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature";
 
 /// b10621's single-character spelling of the same default chain
-/// (`--sampler-seq`).
+/// (`--sampler-seq`). The `adaptive_p` stage is the character `a` (#1485).
 pub(super) const B10621_DEFAULT_SAMPLER_SEQ: &str = "edskypmxt";
+
+/// Validate one b10621 sampler-name list against mlxcel's fixed chain
+/// (#1436, #1485): the `adaptive_p` entries are lifted out (upstream runs
+/// that stage after the chain wherever the list names it), and what remains
+/// must be exactly the fixed default order. Returns whether `adaptive_p`
+/// was named; `Err(())` means the list asks for an order mlxcel cannot
+/// honor.
+pub(crate) fn validate_sampler_names<S: AsRef<str>>(names: &[S]) -> Result<bool, ()> {
+    let mut adaptive = false;
+    let rest: Vec<&str> = names
+        .iter()
+        .map(|s| s.as_ref().trim())
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            if *s == "adaptive_p" {
+                adaptive = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    let expected: Vec<&str> = B10621_DEFAULT_SAMPLERS.split(';').collect();
+    if rest == expected {
+        Ok(adaptive)
+    } else {
+        Err(())
+    }
+}
+
+/// The single-character form of [`validate_sampler_names`] (#1436, #1485).
+pub(crate) fn validate_sampler_seq(seq: &str) -> Result<bool, ()> {
+    let mut adaptive = false;
+    let rest: String = seq
+        .trim()
+        .chars()
+        .filter(|&c| {
+            if c == 'a' {
+                adaptive = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    if rest == B10621_DEFAULT_SAMPLER_SEQ {
+        Ok(adaptive)
+    } else {
+        Err(())
+    }
+}
 
 /// Validate `--samplers` / `--sampler-seq` (#1436): mlxcel's sampler chain
 /// order is fixed to b10621's default, so the flags are accepted only with
-/// exactly that order (an inert configuration) and any other order fails
-/// startup with an actionable diagnostic instead of silently sampling in a
-/// different order than requested.
+/// exactly that order, optionally extended with the `adaptive_p` stage
+/// (#1485), and any other order fails startup with an actionable diagnostic
+/// instead of silently sampling in a different order than requested.
+/// Returns whether either flag named `adaptive_p`.
 pub(super) fn check_sampler_order(
     samplers: Option<&str>,
     sampler_seq: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(order) = samplers
-        && order.trim() != B10621_DEFAULT_SAMPLERS
-    {
-        anyhow::bail!(
-            "--samplers {order:?} is not supported: mlxcel's sampler chain order is fixed to the b10621 default {B10621_DEFAULT_SAMPLERS:?}; pass that order (or omit the flag) to proceed"
-        );
+) -> anyhow::Result<bool> {
+    let mut adaptive = false;
+    if let Some(order) = samplers {
+        let names: Vec<&str> = order.split(';').collect();
+        match validate_sampler_names(&names) {
+            Ok(named) => adaptive |= named,
+            Err(()) => anyhow::bail!(
+                "--samplers {order:?} is not supported: mlxcel's sampler chain order is fixed to the b10621 default {B10621_DEFAULT_SAMPLERS:?}, optionally extended with adaptive_p (#1485); pass that order (or omit the flag) to proceed"
+            ),
+        }
     }
-    if let Some(seq) = sampler_seq
-        && seq.trim() != B10621_DEFAULT_SAMPLER_SEQ
-    {
-        anyhow::bail!(
-            "--sampler-seq {seq:?} is not supported: mlxcel's sampler chain order is fixed to the b10621 default {B10621_DEFAULT_SAMPLER_SEQ:?}; pass that sequence (or omit the flag) to proceed"
-        );
+    if let Some(seq) = sampler_seq {
+        match validate_sampler_seq(seq) {
+            Ok(named) => adaptive |= named,
+            Err(()) => anyhow::bail!(
+                "--sampler-seq {seq:?} is not supported: mlxcel's sampler chain order is fixed to the b10621 default {B10621_DEFAULT_SAMPLER_SEQ:?}, optionally extended with the a (adaptive_p) stage (#1485); pass that sequence (or omit the flag) to proceed"
+            ),
+        }
     }
-    Ok(())
+    Ok(adaptive)
 }
 
 /// Sanitize the server-wide `--typical` / `--typical-p` default: values
@@ -1403,12 +1487,28 @@ pub(super) fn build_server_config(
         default_dry_base: sanitize_dry_base_default(startup.dry_base),
         default_dry_allowed_length: startup.dry_allowed_length,
         default_dry_penalty_last_n: resolve_dry_penalty_last_n(startup.dry_penalty_last_n),
-        // Left empty here on purpose: `--dry-sequence-breaker` takes token
-        // strings and the sampler takes token IDs, so resolving it needs the
-        // tokenizer, which `start_server` loads after this function returns. It
-        // fills the field there and fails startup on a breaker it cannot
-        // represent (#1103).
-        default_dry_sequence_breakers: Vec::new(),
+        // b10621 value domain (#1485): breaker STRINGS, with the upstream
+        // default set applied when the flag is absent and the `none`
+        // sentinel clearing it. Breaker token data is derived from these
+        // strings against the vocabulary at enqueue time, where the
+        // tokenizer lives.
+        default_dry_sequence_breakers: crate::server::dry_breakers::resolve_breaker_strings(
+            &startup.dry_sequence_breakers,
+        ),
+        default_grammar: startup.grammar.clone(),
+        default_mirostat: startup.mirostat,
+        default_mirostat_tau: startup.mirostat_tau,
+        default_mirostat_eta: startup.mirostat_eta,
+        default_dynatemp_range: startup.dynatemp_range,
+        default_dynatemp_exponent: startup.dynatemp_exponent,
+        default_adaptive_target: startup.adaptive_target,
+        default_adaptive_decay: startup.adaptive_decay,
+        default_adaptive_p_named: check_sampler_order(
+            startup.samplers.as_deref(),
+            startup.sampler_seq.as_deref(),
+        )
+        .unwrap_or(false),
+        default_logit_bias: startup.logit_bias.clone(),
         draft_model_path: startup.draft_model_path.clone(),
         num_draft_tokens: startup.draft_max,
         // forward the speculative-decoding selector flags
@@ -1625,6 +1725,10 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             priority: crate::server::batch::RequestPriority::Normal,
             lora_scales: None,
             logprobs: Default::default(),
+            dry_breaker_strings: None,
+            logit_bias: Vec::new(),
+            logit_bias_texts: Vec::new(),
+            post_sampling_probs: false,
             reasoning_budget: Default::default(),
             // warmup prompt is the raw literal "Hello", not a
             // chat-templated prompt with `<think>\n` priming, so treat the
@@ -1637,6 +1741,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             prompt_cache_ctx: None,
             // Warmup never asks for structured output.
             structured: None,
+            grammar: None,
             // Warmup is text-only; no image budget to override.
             image_soft_tokens: None,
         },
@@ -2264,7 +2369,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // default chain would silently sample in a different order than the
     // operator requested; fail here, before the multi-GB model load, since
     // the check depends only on the two flag strings (#1436).
-    check_sampler_order(startup.samplers.as_deref(), startup.sampler_seq.as_deref())?;
+    let _adaptive_p_named =
+        check_sampler_order(startup.samplers.as_deref(), startup.sampler_seq.as_deref())?;
 
     // issue #1350: the KV cache mode was resolved against the model family in
     // `into_startup_config`, which runs before the subscriber above exists.
@@ -2515,29 +2621,16 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     )?;
     let tokenizer = crate::tokenizer::load_tokenizer(&startup.model_path)?;
 
-    // `--dry-sequence-breaker` takes token strings and the sampler takes token
-    // IDs, so this is the first point in startup where the flag can be
-    // resolved. Failing here rather than dropping an unrepresentable breaker
-    // is deliberate: an inert breaker makes the DRY penalty stronger than the
-    // operator configured, with nothing in the logs or `/props` to say so
-    // (#1103).
-    config.default_dry_sequence_breakers = super::dry_breakers::resolve_dry_sequence_breakers(
-        &tokenizer,
-        &startup.dry_sequence_breakers,
-    )?;
+    // `--dry-sequence-breaker` carries b10621's string value domain since
+    // #1485; the effective set (default set, replacement values, or the
+    // `none` sentinel) was resolved into the config by
+    // `build_server_config`, and breaker token data is derived against the
+    // vocabulary at enqueue time. Log the effective set once so an operator
+    // can see which policy the server runs.
     if !config.default_dry_sequence_breakers.is_empty() {
-        // The decoded pieces are logged alongside the ids because an id on its
-        // own cannot be checked. A tokenizer that prepends a word-boundary
-        // marker can resolve a plausible-looking id for the wrong token, and
-        // the piece is the only place that shows it.
         tracing::info!(
-            breakers = ?startup.dry_sequence_breakers,
-            token_ids = ?config.default_dry_sequence_breakers,
-            pieces = %super::dry_breakers::describe_resolved_breakers(
-                &tokenizer,
-                &config.default_dry_sequence_breakers,
-            ),
-            "DRY sequence breakers resolved to token IDs"
+            breakers = ?config.default_dry_sequence_breakers,
+            "DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request)"
         );
     }
 

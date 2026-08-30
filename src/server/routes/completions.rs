@@ -292,6 +292,7 @@ async fn non_stream_completion(
         options.logprobs = LogprobsConfig {
             enabled: true,
             top_k,
+            source: Default::default(),
         };
     }
 
@@ -402,6 +403,7 @@ async fn stream_completion(
         options.logprobs = LogprobsConfig {
             enabled: true,
             top_k,
+            source: Default::default(),
         };
     }
 
