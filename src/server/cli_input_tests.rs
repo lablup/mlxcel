@@ -204,8 +204,12 @@ fn sample_input() -> ServerStartupInput {
         allowed_origins: Vec::new(),
         // Responses API store defaults.
         responses_store_max_entries: 1024,
+        responses_store_max_bytes:
+            crate::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
         responses_store_ttl_secs: 3600,
         conversation_store_max_entries: 256,
+        conversation_store_max_bytes:
+            crate::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
         conversation_store_ttl_secs: 3600,
         // (A4): default to None for baseline-path tests.
         #[cfg(feature = "surgery")]
@@ -767,6 +771,18 @@ fn prompt_cache_defaults_round_trip_through_into_startup_config() {
         startup.prompt_cache.min_prefix_tokens,
         expected.min_prefix_tokens
     );
+}
+
+#[test]
+fn store_byte_budgets_round_trip_through_into_startup_config() {
+    let mut input = sample_input();
+    input.responses_store_max_bytes = 12_345;
+    input.conversation_store_max_bytes = 67_890;
+
+    let startup = input.into_startup_config().expect("valid input");
+
+    assert_eq!(startup.responses_store_max_bytes, 12_345);
+    assert_eq!(startup.conversation_store_max_bytes, 67_890);
 }
 
 /// CLI-supplied capacity is propagated.

@@ -729,12 +729,13 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
         // CORS allow-list origins (#244); validated in into_startup_config.
         allowed_origins: args.allowed_origins,
-        // Responses API in-memory store limits. clap reads the
-        // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
-        // attributes on the flags.
+        // Responses API in-memory store limits. clap reads the matching env
+        // vars directly via the `env = ...` attributes on the flags.
         responses_store_max_entries: args.responses_store_max_entries,
+        responses_store_max_bytes: args.responses_store_max_bytes,
         responses_store_ttl_secs: args.responses_store_ttl_secs,
         conversation_store_max_entries: args.conversation_store_max_entries,
+        conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
         // (A4): forward the surgery YAML path. clap reads
         // `MLXCEL_SURGERY` directly via the `env = ...` attribute on

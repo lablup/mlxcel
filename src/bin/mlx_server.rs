@@ -957,6 +957,17 @@ struct ServerArgs {
     )]
     responses_store_max_entries: usize,
 
+    /// Approximate byte budget for the OpenAI `/v1/responses` store.
+    /// `0` keeps response storage enabled but immediately evicts every stored
+    /// response. Also reads `MLXCEL_RESPONSES_STORE_MAX_BYTES`.
+    #[arg(
+        long = "responses-store-max-bytes",
+        env = "MLXCEL_RESPONSES_STORE_MAX_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_store_max_bytes: usize,
+
     /// TTL (seconds) for in-memory Responses-API response
     /// entries. `0` disables TTL.
     /// Also reads `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
@@ -978,6 +989,17 @@ struct ServerArgs {
         value_name = "N"
     )]
     conversation_store_max_entries: usize,
+
+    /// Approximate byte budget for conversation transcripts.
+    /// `0` keeps the conversation store enabled but immediately evicts every
+    /// transcript. Also reads `MLXCEL_CONVERSATION_STORE_MAX_BYTES`.
+    #[arg(
+        long = "conversation-store-max-bytes",
+        env = "MLXCEL_CONVERSATION_STORE_MAX_BYTES",
+        default_value_t = mlxcel::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
+        value_name = "BYTES"
+    )]
+    conversation_store_max_bytes: usize,
 
     /// TTL (seconds) for conversation transcript entries.
     /// `0` disables TTL.
@@ -2493,12 +2515,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
         // CORS allow-list origins (#244); validated in into_startup_config.
         allowed_origins: args.allowed_origins,
-        // Responses API in-memory store limits. clap reads the
-        // matching `LLAMA_ARG_*` env vars directly via the `env = ...`
-        // attributes on the flags.
+        // Responses API in-memory store limits. clap reads the matching env
+        // vars directly via the `env = ...` attributes on the flags.
         responses_store_max_entries: args.responses_store_max_entries,
+        responses_store_max_bytes: args.responses_store_max_bytes,
         responses_store_ttl_secs: args.responses_store_ttl_secs,
         conversation_store_max_entries: args.conversation_store_max_entries,
+        conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
         // (A4): forward the surgery YAML path. clap reads
         // `MLXCEL_SURGERY` directly via the `env = ...` attribute on
@@ -2639,6 +2662,39 @@ mod tests {
         assert!(enabled.settings, "--settings must propagate through clap");
         let enabled = build_startup_input(enabled).expect("enabled startup input");
         assert!(enabled.settings, "--settings must reach startup input");
+    }
+
+    #[test]
+    fn store_byte_budget_flags_parse() {
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--responses-store-max-bytes",
+            "12345",
+            "--conversation-store-max-bytes",
+            "67890",
+        ]);
+
+        assert_eq!(args.responses_store_max_bytes, 12_345);
+        assert_eq!(args.conversation_store_max_bytes, 67_890);
+    }
+
+    #[test]
+    fn store_byte_budget_envs_parse_when_flags_are_absent() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_RESPONSES_STORE_MAX_BYTES", "11111"),
+            ("MLXCEL_CONVERSATION_STORE_MAX_BYTES", "22222"),
+        ]);
+
+        let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+
+        assert_eq!(args.responses_store_max_bytes, 11_111);
+        assert_eq!(args.conversation_store_max_bytes, 22_222);
     }
 
     #[test]

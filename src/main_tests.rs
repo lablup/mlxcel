@@ -1159,6 +1159,36 @@ fn parse_serve_args(rest: &[&str]) -> super::ServeArgs {
     }
 }
 
+#[test]
+fn serve_store_byte_budget_flags_parse() {
+    let args = parse_serve_args(&[
+        "--responses-store-max-bytes",
+        "12345",
+        "--conversation-store-max-bytes",
+        "67890",
+    ]);
+
+    assert_eq!(args.responses_store_max_bytes, 12_345);
+    assert_eq!(args.conversation_store_max_bytes, 67_890);
+}
+
+#[test]
+fn serve_store_byte_budget_envs_parse_when_flags_are_absent() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = ScopedEnv::set(&[
+        ("MLXCEL_RESPONSES_STORE_MAX_BYTES", "11111"),
+        ("MLXCEL_CONVERSATION_STORE_MAX_BYTES", "22222"),
+    ]);
+
+    let args = parse_serve_args(&[]);
+
+    assert_eq!(args.responses_store_max_bytes, 11_111);
+    assert_eq!(args.conversation_store_max_bytes, 22_222);
+}
+
 /// The clap error from `mlxcel serve -m models/foo <rest...>`, which must fail.
 fn serve_parse_error(rest: &[&str], expectation: &str) -> clap::Error {
     Cli::try_parse_from(serve_argv(rest)).expect_err(expectation)

@@ -15,8 +15,8 @@
 //! In-memory store for OpenAI Responses API objects.
 //!
 //! Phase 1 keeps the store entirely in-process: a synchronous
-//! [`std::sync::RwLock`] guards a `HashMap<id, Entry>` with an LRU eviction
-//! list and a TTL sweep on every insert/lookup. The store is wired into
+//! [`std::sync::RwLock`] guards a `HashMap<id, Entry>` plus an access-ordered
+//! LRU index and a TTL sweep on every insert/lookup. The store is wired into
 //! [`crate::server::state::AppState`] when `store=true` requests are
 //! allowed; persistence across restarts is reserved for Phase 3.
 //!
@@ -27,14 +27,27 @@
 //!   reference `previous_response_id`.
 //! - Delete on `DELETE /v1/responses/:id` and by the LRU/TTL sweep.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::server::types::responses_request::ResponseInputItem;
+use crate::server::store_budget::{LruKey, serialized_json_len_saturating};
+use crate::server::types::responses_request::{
+    ResponseInputContent, ResponseInputItem, ResponseInputPart, ResponseInputRole,
+    ResponseToolOutput,
+};
 use crate::server::types::responses_response::ResponseObject;
+
+/// Default approximate retained-byte budget for the in-memory response store.
+///
+/// This keeps the default bounded below the historical "1024 arbitrary
+/// multimodal entries" footprint while leaving room for several max-size image
+/// requests inside the one-hour TTL window.
+pub const DEFAULT_RESPONSES_STORE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+const INITIAL_HASH_CAPACITY_LIMIT: usize = 4096;
 
 /// Persisted entry. Inputs and outputs are kept separately so the
 /// chain-resolution path can reconstruct the original conversation
@@ -50,12 +63,34 @@ struct Entry {
     payload: StoredResponse,
     inserted_at: Instant,
     last_accessed: Instant,
+    size_bytes: usize,
+    lru_key: LruKey,
+}
+
+#[derive(Debug)]
+struct StoreState {
+    entries: HashMap<String, Entry>,
+    lru: BTreeSet<LruKey>,
+    total_bytes: usize,
+    next_sequence: u64,
+}
+
+impl StoreState {
+    fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(max_entries.min(INITIAL_HASH_CAPACITY_LIMIT)),
+            lru: BTreeSet::new(),
+            total_bytes: 0,
+            next_sequence: 0,
+        }
+    }
 }
 
 /// Configuration for [`ResponsesStore`].
 #[derive(Debug, Clone)]
 pub struct ResponsesStoreConfig {
     pub max_entries: usize,
+    pub max_bytes: usize,
     pub ttl: Duration,
 }
 
@@ -63,6 +98,7 @@ impl Default for ResponsesStoreConfig {
     fn default() -> Self {
         Self {
             max_entries: 1024,
+            max_bytes: DEFAULT_RESPONSES_STORE_MAX_BYTES,
             ttl: Duration::from_secs(3600),
         }
     }
@@ -79,7 +115,7 @@ pub type InFlightToken = Arc<AtomicBool>;
 
 /// Thread-safe response store with TTL and LRU eviction.
 pub struct ResponsesStore {
-    inner: RwLock<HashMap<String, Entry>>,
+    inner: RwLock<StoreState>,
     config: ResponsesStoreConfig,
     /// Map of `response_id → cancellation token` for streaming responses
     /// that have not yet completed. The streaming route inserts on
@@ -91,7 +127,7 @@ pub struct ResponsesStore {
 impl ResponsesStore {
     pub fn new(config: ResponsesStoreConfig) -> Self {
         Self {
-            inner: RwLock::new(HashMap::with_capacity(config.max_entries)),
+            inner: RwLock::new(StoreState::with_capacity(config.max_entries)),
             config,
             in_flight: RwLock::new(HashMap::new()),
         }
@@ -154,65 +190,70 @@ impl ResponsesStore {
         self.in_flight.write()
     }
 
-    /// Insert a response. Evicts expired and LRU entries first to keep
-    /// the map size at-or-below `max_entries`. Returns the count of
+    /// Insert a response. Evicts expired and LRU entries to keep both
+    /// entry count and approximate retained bytes under budget. Returns the count of
     /// remaining entries after the insert for tests/telemetry.
     pub fn insert(&self, id: String, payload: StoredResponse) -> usize {
         let now = Instant::now();
-        let mut map = match self.inner.write() {
+        let mut state = match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::sweep_expired(&mut map, &self.config, now);
-        Self::evict_to_capacity(&mut map, self.config.max_entries.saturating_sub(1));
-        map.insert(
+        Self::sweep_expired(&mut state, &self.config, now);
+        Self::remove_entry(&mut state, &id);
+
+        let size_bytes = Self::entry_size_bytes(&id, &payload);
+        let lru_key = Self::next_lru_key(&mut state, &id, now);
+        state.total_bytes = state.total_bytes.saturating_add(size_bytes);
+        state.lru.insert(lru_key.clone());
+        state.entries.insert(
             id,
             Entry {
                 payload,
                 inserted_at: now,
                 last_accessed: now,
+                size_bytes,
+                lru_key,
             },
         );
-        map.len()
+        Self::evict_to_limits(&mut state, &self.config);
+        state.entries.len()
     }
 
     /// Look up a stored response. Refreshes the entry's LRU stamp.
     /// Returns `None` for missing or expired entries.
     pub fn get(&self, id: &str) -> Option<StoredResponse> {
         let now = Instant::now();
-        // First take a read lock to check existence/freshness without
-        // taking the more expensive write lock on every lookup.
-        if let Ok(guard) = self.inner.read()
-            && let Some(entry) = guard.get(id)
-            && now.saturating_duration_since(entry.inserted_at) >= self.config.ttl
-        {
-            // Fall through to the write-lock branch to evict.
-        }
-
-        let mut map = match self.inner.write() {
+        let mut state = match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self::sweep_expired(&mut map, &self.config, now);
-        let entry = map.get_mut(id)?;
+        Self::sweep_expired(&mut state, &self.config, now);
+        let old_lru_key = state.entries.get(id)?.lru_key.clone();
+        state.lru.remove(&old_lru_key);
+        let lru_key = Self::next_lru_key(&mut state, id, now);
+        let entry = state.entries.get_mut(id)?;
         entry.last_accessed = now;
-        Some(entry.payload.clone())
+        entry.lru_key = lru_key.clone();
+        let payload = entry.payload.clone();
+        state.lru.insert(lru_key);
+        Some(payload)
     }
 
     /// Remove an entry. Returns the previous value when present.
     pub fn remove(&self, id: &str) -> Option<StoredResponse> {
-        let mut map = match self.inner.write() {
+        let mut state = match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        map.remove(id).map(|e| e.payload)
+        Self::remove_entry(&mut state, id).map(|e| e.payload)
     }
 
     /// Current number of live entries (snapshot).
     pub fn len(&self) -> usize {
         match self.inner.read() {
-            Ok(g) => g.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
+            Ok(g) => g.entries.len(),
+            Err(poisoned) => poisoned.into_inner().entries.len(),
         }
     }
 
@@ -225,44 +266,170 @@ impl ResponsesStore {
         &self.config
     }
 
-    fn sweep_expired(
-        map: &mut HashMap<String, Entry>,
-        config: &ResponsesStoreConfig,
-        now: Instant,
-    ) {
-        let ttl = config.ttl;
-        map.retain(|_, entry| now.saturating_duration_since(entry.inserted_at) < ttl);
-    }
-
-    fn evict_to_capacity(map: &mut HashMap<String, Entry>, target_size: usize) {
-        while map.len() > target_size {
-            // Pick the least-recently-accessed entry. O(n) per eviction;
-            // acceptable for Phase 1's expected store sizes (≤1024). The
-            // key component makes the comparator a TOTAL order: `map`
-            // iterates in `HashMap` order, which `RandomState` randomizes
-            // per instance, and without this tie-break two entries sharing
-            // `last_accessed` would resolve to whichever one hash order
-            // placed first. Comparator form avoids cloning the key that
-            // `min_by_key` would need to fold it into a tuple.
-            let Some(victim) = map
-                .iter()
-                .min_by(|(key_a, a), (key_b, b)| {
-                    a.last_accessed
-                        .cmp(&b.last_accessed)
-                        .then_with(|| key_a.cmp(key_b))
-                })
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            map.remove(&victim);
+    /// Approximate retained bytes currently accounted by the store.
+    pub fn approximate_total_bytes(&self) -> usize {
+        match self.inner.read() {
+            Ok(g) => g.total_bytes,
+            Err(poisoned) => poisoned.into_inner().total_bytes,
         }
     }
+
+    fn sweep_expired(state: &mut StoreState, config: &ResponsesStoreConfig, now: Instant) {
+        let ttl = config.ttl;
+        let expired: Vec<String> = state
+            .entries
+            .iter()
+            .filter(|(_, entry)| now.saturating_duration_since(entry.inserted_at) >= ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            Self::remove_entry(state, &id);
+        }
+    }
+
+    fn evict_to_limits(state: &mut StoreState, config: &ResponsesStoreConfig) {
+        while state.entries.len() > config.max_entries || state.total_bytes > config.max_bytes {
+            let Some(victim) = state.lru.iter().next().cloned().map(|key| key.id) else {
+                break;
+            };
+            Self::remove_entry(state, &victim);
+        }
+    }
+
+    fn remove_entry(state: &mut StoreState, id: &str) -> Option<Entry> {
+        let entry = state.entries.remove(id)?;
+        state.lru.remove(&entry.lru_key);
+        state.total_bytes = state.total_bytes.saturating_sub(entry.size_bytes);
+        Some(entry)
+    }
+
+    fn next_lru_key(state: &mut StoreState, id: &str, now: Instant) -> LruKey {
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.wrapping_add(1);
+        LruKey {
+            last_accessed: now,
+            sequence,
+            id: id.to_string(),
+        }
+    }
+
+    fn entry_size_bytes(id: &str, payload: &StoredResponse) -> usize {
+        id.len()
+            .saturating_add(serialized_json_len_saturating(&payload.response))
+            .saturating_add(input_items_size_bytes(&payload.input_items))
+    }
+}
+
+fn input_items_size_bytes(items: &[ResponseInputItem]) -> usize {
+    items.iter().fold(2usize, |bytes, item| {
+        bytes
+            .saturating_add(response_input_item_size_bytes(item))
+            .saturating_add(1)
+    })
+}
+
+pub(crate) fn response_input_item_size_bytes(item: &ResponseInputItem) -> usize {
+    match item {
+        ResponseInputItem::Message {
+            role,
+            content,
+            name,
+        } => 48usize
+            .saturating_add(response_role_size_bytes(*role))
+            .saturating_add(response_input_content_size_bytes(content))
+            .saturating_add(name.as_deref().map(str_size_bytes).unwrap_or(0)),
+        ResponseInputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+        } => 56usize
+            .saturating_add(str_size_bytes(call_id))
+            .saturating_add(str_size_bytes(name))
+            .saturating_add(str_size_bytes(arguments)),
+        ResponseInputItem::FunctionCallOutput { call_id, output } => 56usize
+            .saturating_add(str_size_bytes(call_id))
+            .saturating_add(response_tool_output_size_bytes(output)),
+        ResponseInputItem::Reasoning { content } => content.iter().fold(32usize, |bytes, part| {
+            bytes
+                .saturating_add(str_size_bytes(&part.part_type))
+                .saturating_add(str_size_bytes(&part.text))
+                .saturating_add(16)
+        }),
+    }
+}
+
+fn response_role_size_bytes(role: ResponseInputRole) -> usize {
+    match role {
+        ResponseInputRole::User => 4,
+        ResponseInputRole::Assistant => 9,
+        ResponseInputRole::System => 6,
+        ResponseInputRole::Developer => 9,
+    }
+}
+
+fn response_input_content_size_bytes(content: &ResponseInputContent) -> usize {
+    match content {
+        ResponseInputContent::Text(text) => str_size_bytes(text),
+        ResponseInputContent::Parts(parts) => parts.iter().fold(2usize, |bytes, part| {
+            bytes
+                .saturating_add(response_input_part_size_bytes(part))
+                .saturating_add(1)
+        }),
+    }
+}
+
+fn response_input_part_size_bytes(part: &ResponseInputPart) -> usize {
+    match part {
+        ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
+            32usize.saturating_add(str_size_bytes(text))
+        }
+        ResponseInputPart::InputImage {
+            image_url,
+            detail,
+            file_id,
+        } => 48usize
+            .saturating_add(image_url.as_deref().map(str_size_bytes).unwrap_or(0))
+            .saturating_add(detail.as_deref().map(str_size_bytes).unwrap_or(0))
+            .saturating_add(file_id.as_deref().map(str_size_bytes).unwrap_or(0)),
+        ResponseInputPart::InputFile { raw }
+        | ResponseInputPart::VideoUrl { raw }
+        | ResponseInputPart::InputAudio { raw } => {
+            32usize.saturating_add(serialized_json_len_saturating(raw))
+        }
+        ResponseInputPart::ImageUrl { image_url } => 40usize
+            .saturating_add(str_size_bytes(&image_url.url))
+            .saturating_add(image_url.detail.as_deref().map(str_size_bytes).unwrap_or(0))
+            .saturating_add(
+                image_url
+                    .max_soft_tokens
+                    .map(|value| serialized_json_len_saturating(&value))
+                    .unwrap_or(0),
+            ),
+        ResponseInputPart::Unknown { part_type, raw } => 32usize
+            .saturating_add(str_size_bytes(part_type))
+            .saturating_add(serialized_json_len_saturating(raw)),
+    }
+}
+
+fn response_tool_output_size_bytes(output: &ResponseToolOutput) -> usize {
+    match output {
+        ResponseToolOutput::Text(text) => str_size_bytes(text),
+        ResponseToolOutput::Parts(parts) => parts.iter().fold(2usize, |bytes, part| {
+            bytes
+                .saturating_add(response_input_part_size_bytes(part))
+                .saturating_add(1)
+        }),
+    }
+}
+
+fn str_size_bytes(value: &str) -> usize {
+    serialized_json_len_saturating(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::types::responses_request::{ResponseInputContent, ResponseInputRole};
     use crate::server::types::responses_response::{ResponseStatus, ResponseUsage};
 
     fn make_response(id: &str) -> StoredResponse {
@@ -309,6 +476,41 @@ mod tests {
         }
     }
 
+    fn make_response_with_input(id: &str, text: &str) -> StoredResponse {
+        let mut response = make_response(id);
+        response.input_items.push(ResponseInputItem::Message {
+            role: ResponseInputRole::User,
+            content: ResponseInputContent::Text(text.to_string()),
+            name: None,
+        });
+        response
+    }
+
+    fn config(max_entries: usize, max_bytes: usize) -> ResponsesStoreConfig {
+        ResponsesStoreConfig {
+            max_entries,
+            max_bytes,
+            ttl: Duration::from_secs(3600),
+        }
+    }
+
+    fn entry_bytes(id: &str, payload: &StoredResponse) -> usize {
+        ResponsesStore::entry_size_bytes(id, payload)
+    }
+
+    fn assert_indexes_consistent(store: &ResponsesStore) {
+        let state = store.inner.read().expect("store state lock");
+        let summed = state.entries.values().fold(0usize, |bytes, entry| {
+            assert!(
+                state.lru.contains(&entry.lru_key),
+                "entry missing from LRU index"
+            );
+            bytes.saturating_add(entry.size_bytes)
+        });
+        assert_eq!(state.lru.len(), state.entries.len());
+        assert_eq!(state.total_bytes, summed);
+    }
+
     #[test]
     fn insert_then_get_returns_payload() {
         let store = ResponsesStore::new(ResponsesStoreConfig::default());
@@ -331,6 +533,7 @@ mod tests {
         let store = ResponsesStore::new(ResponsesStoreConfig {
             max_entries: 2,
             ttl: Duration::from_secs(3600),
+            ..ResponsesStoreConfig::default()
         });
         store.insert("a".to_string(), make_response("a"));
         store.insert("b".to_string(), make_response("b"));
@@ -348,6 +551,7 @@ mod tests {
         let store = ResponsesStore::new(ResponsesStoreConfig {
             max_entries: 10,
             ttl: Duration::from_millis(10),
+            ..ResponsesStoreConfig::default()
         });
         store.insert("a".to_string(), make_response("a"));
         std::thread::sleep(Duration::from_millis(20));
@@ -393,5 +597,133 @@ mod tests {
             .insert("resp_stream".to_string(), token);
         store.unregister_in_flight("resp_stream");
         assert!(!store.cancel_in_flight("resp_stream"));
+    }
+
+    #[test]
+    fn byte_only_eviction_runs_under_entry_cap() {
+        let a = make_response_with_input("a", &"a".repeat(64));
+        let b = make_response_with_input("b", &"b".repeat(64));
+        let c = make_response_with_input("c", &"c".repeat(64));
+        let budget = entry_bytes("a", &a).saturating_add(entry_bytes("b", &b));
+        let store = ResponsesStore::new(config(10, budget));
+
+        store.insert("a".to_string(), a);
+        store.insert("b".to_string(), b);
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = store.get("a");
+        store.insert("c".to_string(), c);
+
+        assert!(store.get("a").is_some(), "recently accessed entry remains");
+        assert!(store.get("c").is_some(), "new entry remains");
+        assert!(
+            store.get("b").is_none(),
+            "byte pressure evicts the LRU entry"
+        );
+        assert!(store.approximate_total_bytes() <= budget);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn simultaneous_count_and_byte_pressure_evicts_to_both_limits() {
+        let a = make_response_with_input("a", &"a".repeat(32));
+        let b = make_response_with_input("b", &"b".repeat(32));
+        let c = make_response_with_input("c", &"c".repeat(32));
+        let budget = entry_bytes("b", &b).saturating_add(entry_bytes("c", &c));
+        let store = ResponsesStore::new(config(2, budget));
+
+        store.insert("a".to_string(), a);
+        store.insert("b".to_string(), b);
+        store.insert("c".to_string(), c);
+
+        assert_eq!(store.len(), 2);
+        assert!(store.get("a").is_none(), "oldest entry is evicted");
+        assert!(store.get("b").is_some());
+        assert!(store.get("c").is_some());
+        assert!(store.approximate_total_bytes() <= budget);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn oversized_single_response_is_not_retained() {
+        let payload = make_response_with_input("large", &"x".repeat(256));
+        let size = entry_bytes("large", &payload);
+        let store = ResponsesStore::new(config(10, size.saturating_sub(1)));
+
+        assert_eq!(store.insert("large".to_string(), payload), 0);
+
+        assert!(store.get("large").is_none());
+        assert_eq!(store.approximate_total_bytes(), 0);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn exact_byte_boundary_is_retained() {
+        let payload = make_response_with_input("edge", &"x".repeat(64));
+        let size = entry_bytes("edge", &payload);
+        let store = ResponsesStore::new(config(1, size));
+
+        assert_eq!(store.insert("edge".to_string(), payload), 1);
+
+        assert!(store.get("edge").is_some());
+        assert_eq!(store.len(), 1);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn replacement_updates_running_total_and_lru_index() {
+        let small = make_response_with_input("same", "small");
+        let large = make_response_with_input("same", &"x".repeat(128));
+        let large_size = entry_bytes("same", &large);
+        let store = ResponsesStore::new(config(4, large_size));
+
+        store.insert("same".to_string(), small);
+        store.insert("same".to_string(), large);
+
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.approximate_total_bytes(), large_size);
+        assert!(store.remove("same").is_some());
+        assert_eq!(store.approximate_total_bytes(), 0);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn zero_byte_budget_keeps_store_enabled_but_retains_nothing() {
+        let store = ResponsesStore::new(config(usize::MAX, 0));
+        store.insert("a".to_string(), make_response("a"));
+
+        assert_eq!(store.len(), 0);
+        assert!(store.get("a").is_none());
+        assert_eq!(store.approximate_total_bytes(), 0);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn extreme_budgets_do_not_overflow_or_preallocate_unbounded_capacity() {
+        let store = ResponsesStore::new(config(usize::MAX, usize::MAX));
+        store.insert("a".to_string(), make_response_with_input("a", "small"));
+
+        assert_eq!(store.len(), 1);
+        assert!(store.approximate_total_bytes() > 0);
+        assert_indexes_consistent(&store);
+    }
+
+    #[test]
+    fn running_total_stays_consistent_across_remove_and_ttl_sweep() {
+        let store = ResponsesStore::new(ResponsesStoreConfig {
+            max_entries: 8,
+            max_bytes: DEFAULT_RESPONSES_STORE_MAX_BYTES,
+            ttl: Duration::from_millis(10),
+        });
+        store.insert("a".to_string(), make_response_with_input("a", "first"));
+        store.insert("b".to_string(), make_response_with_input("b", "second"));
+        assert!(store.remove("a").is_some());
+        assert_indexes_consistent(&store);
+
+        std::thread::sleep(Duration::from_millis(20));
+        store.insert("c".to_string(), make_response_with_input("c", "third"));
+
+        assert!(store.get("b").is_none());
+        assert!(store.get("c").is_some());
+        assert_indexes_consistent(&store);
     }
 }
