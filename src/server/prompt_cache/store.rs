@@ -24,7 +24,7 @@
 //! locking + metrics discipline. See that module and
 //! [`super::trie`] for the lookup algorithm and data structure choice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -33,13 +33,17 @@ use mlxcel_core::generate::ModelStateSnapshot;
 
 use super::apc_lookup::{ApcStoreStats, apc_consistent_prefix_len};
 use super::block_hash::{ApcBlockHash, BlockHashChain};
-use super::entry::{CacheEntry, DetachedKvSet, DetachedKvSetHolder, ModelSnapshotEntry};
+use super::entry::{
+    CacheEntry, DetachedKvSet, DetachedKvSetHolder, ModelSnapshotEntry, SnapshotOrigin,
+};
 use super::key::{PromptCacheKey, PromptCacheKeyDigest};
 use super::metrics::{NoopPromptCacheMetrics, PromptCacheMetrics, PromptCacheRejectReason};
 use super::policy::{PromptCacheConfig, PromptCacheStats};
 use super::trie::RadixTrie;
 pub(super) use super::types::SessionlessBucketKey;
 use super::types::{BucketKey, InsertError};
+
+const MAX_SNAPSHOT_SELF_EVICTION_WARN_KEYS: usize = 4096;
 
 /// Internal entry bookkeeping.
 pub(super) struct EntrySlot {
@@ -72,6 +76,27 @@ pub struct SnapshotDivergence {
     pub common_prefix_len: usize,
     /// Token count of the stored entry.
     pub stored_len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SnapshotSelfEvictionKey {
+    sessionless: SessionlessBucketKey,
+    session_key: Option<String>,
+}
+
+struct SnapshotInsertProbe {
+    entry_bytes: usize,
+    tokens_len: usize,
+    origin: SnapshotOrigin,
+    key: SnapshotSelfEvictionKey,
+}
+
+struct SnapshotEviction {
+    entry_bytes: usize,
+    tokens_len: usize,
+    sessionless: SessionlessBucketKey,
+    session_key: Option<String>,
+    origin: SnapshotOrigin,
 }
 
 /// Result of a snapshot lookup, with the miss reason preserved.
@@ -129,6 +154,15 @@ struct Inner {
     /// replacement, not capacity pressure, so folding the two together would
     /// make eviction counters unreadable for capacity tuning (issue #1146).
     snapshot_supersedes: u64,
+    /// LRU evictions that hit the same session chain as the snapshot insert
+    /// currently being admitted. This is the runtime signature of
+    /// snapshot-capacity thrash: the store accepted the entry but could not keep
+    /// the live chain resident.
+    snapshot_self_evictions: u64,
+    /// Session chains already warned for self-eviction. Kept separate from the
+    /// counter so operators get one actionable WARN per affected session while
+    /// statistics still count every event.
+    warned_snapshot_self_evictions: HashSet<SnapshotSelfEvictionKey>,
     /// Paged detached sets that an eviction or rejection path removed from
     /// the store but could not release: returning a paged set's pool block
     /// pins requires a `CachePool` handle, which the store does not hold.
@@ -160,6 +194,8 @@ impl Inner {
             snapshot_evictions_lru: 0,
             snapshot_evictions_ttl: 0,
             snapshot_supersedes: 0,
+            snapshot_self_evictions: 0,
+            warned_snapshot_self_evictions: HashSet::new(),
             pending_paged_releases: Vec::new(),
         }
     }
@@ -199,6 +235,7 @@ impl Inner {
             snapshot_evictions_lru: self.snapshot_evictions_lru,
             snapshot_evictions_ttl: self.snapshot_evictions_ttl,
             snapshot_supersedes: self.snapshot_supersedes,
+            snapshot_self_evictions: self.snapshot_self_evictions,
         }
     }
 
@@ -333,7 +370,7 @@ impl Inner {
         }
     }
 
-    fn evict_oldest_snapshot(&mut self) -> usize {
+    fn evict_oldest_snapshot(&mut self) -> Option<SnapshotEviction> {
         // The digest bytes make the key a TOTAL order: `snapshots` iterates
         // in `HashMap` order, which `RandomState` randomizes per instance,
         // and without this tie-break component two entries sharing
@@ -345,14 +382,67 @@ impl Inner {
             .map(|(d, _)| *d);
         match oldest {
             Some(digest) => match self.remove_snapshot(&digest) {
-                Some((_, entry)) => {
+                Some((bucket, entry)) => {
                     self.snapshot_evictions_lru = self.snapshot_evictions_lru.saturating_add(1);
-                    entry.size_bytes
+                    Some(SnapshotEviction {
+                        entry_bytes: entry.size_bytes,
+                        tokens_len: entry.tokens.len(),
+                        sessionless: SessionlessBucketKey {
+                            model_id: bucket.model_id.clone(),
+                            lora_id: bucket.lora_id.clone(),
+                            template_sig: bucket.template_sig.clone(),
+                            mm_digest: bucket.mm_digest,
+                        },
+                        session_key: bucket.session_key,
+                        origin: entry.origin,
+                    })
                 }
-                None => 0,
+                None => None,
             },
-            None => 0,
+            None => None,
         }
+    }
+
+    fn record_snapshot_self_eviction_if_needed(
+        &mut self,
+        probe: Option<&SnapshotInsertProbe>,
+        evicted: &SnapshotEviction,
+    ) {
+        let Some(probe) = probe else {
+            return;
+        };
+        if evicted.sessionless != probe.key.sessionless
+            || evicted.session_key != probe.key.session_key
+        {
+            return;
+        }
+
+        self.snapshot_self_evictions = self.snapshot_self_evictions.saturating_add(1);
+        // Keep warning bookkeeping bounded even if untrusted clients generate
+        // many distinct session keys while the store is underprovisioned. The
+        // public counter above remains exact; only duplicate suppression is
+        // capped.
+        if self.warned_snapshot_self_evictions.contains(&probe.key)
+            || self.warned_snapshot_self_evictions.len() >= MAX_SNAPSHOT_SELF_EVICTION_WARN_KEYS
+        {
+            return;
+        }
+        self.warned_snapshot_self_evictions
+            .insert(probe.key.clone());
+        tracing::warn!(
+            inserted_snapshot_bytes = probe.entry_bytes,
+            evicted_snapshot_bytes = evicted.entry_bytes,
+            inserted_tokens = probe.tokens_len,
+            evicted_tokens = evicted.tokens_len,
+            snapshot_capacity_bytes = self.config.snapshot_capacity_bytes,
+            snapshot_max_entries = self.config.snapshot_max_entries,
+            inserted_snapshot_origin = ?probe.origin,
+            evicted_snapshot_origin = ?evicted.origin,
+            model_id = %probe.key.sessionless.model_id,
+            template_sig = %probe.key.sessionless.template_sig,
+            session_key = probe.key.session_key.as_deref().unwrap_or("<none>"),
+            "prompt-cache snapshot capacity self-evicted a live session chain; raise MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES or use a model-aware default"
+        );
     }
 
     /// Enforce both caps: max_entries, then capacity_bytes. Returns the
@@ -378,23 +468,27 @@ impl Inner {
         freed
     }
 
-    fn enforce_snapshot_caps(&mut self, metrics: &dyn PromptCacheMetrics) -> usize {
+    fn enforce_snapshot_caps(
+        &mut self,
+        metrics: &dyn PromptCacheMetrics,
+        probe: Option<&SnapshotInsertProbe>,
+    ) -> usize {
         let mut freed = 0;
         while self.snapshots.len() > self.config.snapshot_max_entries {
-            let n = self.evict_oldest_snapshot();
-            if n == 0 {
+            let Some(evicted) = self.evict_oldest_snapshot() else {
                 break;
-            }
-            metrics.record_snapshot_evict_lru(n);
-            freed += n;
+            };
+            metrics.record_snapshot_evict_lru(evicted.entry_bytes);
+            freed += evicted.entry_bytes;
+            self.record_snapshot_self_eviction_if_needed(probe, &evicted);
         }
         while self.snapshot_bytes > self.config.snapshot_capacity_bytes {
-            let n = self.evict_oldest_snapshot();
-            if n == 0 {
+            let Some(evicted) = self.evict_oldest_snapshot() else {
                 break;
-            }
-            metrics.record_snapshot_evict_lru(n);
-            freed += n;
+            };
+            metrics.record_snapshot_evict_lru(evicted.entry_bytes);
+            freed += evicted.entry_bytes;
+            self.record_snapshot_self_eviction_if_needed(probe, &evicted);
         }
         freed
     }
@@ -709,6 +803,15 @@ impl PromptCacheStore {
         let entry_bytes = entry.size_bytes;
         let bucket = BucketKey::from_key(key);
         let sessionless = SessionlessBucketKey::from_key(key);
+        let probe = SnapshotInsertProbe {
+            entry_bytes,
+            tokens_len: entry.tokens.len(),
+            origin: entry.origin,
+            key: SnapshotSelfEvictionKey {
+                sessionless: sessionless.clone(),
+                session_key: bucket.session_key.clone(),
+            },
+        };
 
         let mut guard = self.inner.write().expect("prompt cache inner lock");
         if !guard.config.is_enabled() {
@@ -820,7 +923,7 @@ impl PromptCacheStore {
 
         let metrics = Arc::clone(&self.metrics);
         metrics.record_snapshot_insert(entry_bytes);
-        guard.enforce_snapshot_caps(metrics.as_ref());
+        guard.enforce_snapshot_caps(metrics.as_ref(), Some(&probe));
         Ok(())
     }
 
@@ -1244,7 +1347,7 @@ impl PromptCacheStore {
             }
         }
         let metrics = Arc::clone(&self.metrics);
-        let snapshot_cap_freed = guard.enforce_snapshot_caps(metrics.as_ref());
+        let snapshot_cap_freed = guard.enforce_snapshot_caps(metrics.as_ref(), None);
         drained_freed + ttl_freed + cap_freed + snapshot_ttl_freed + snapshot_cap_freed
     }
 

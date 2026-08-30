@@ -45,6 +45,7 @@ pub mod key;
 mod lookup;
 pub mod metrics;
 pub mod policy;
+pub mod snapshot_sizing;
 pub mod store;
 mod trie;
 mod types;
@@ -77,6 +78,10 @@ pub use metrics::{
 pub use policy::{
     ApcConfig, PromptCacheConfig, PromptCacheStats, boundary_snapshot_disabled,
     cache_warmup_disabled,
+};
+pub use snapshot_sizing::{
+    MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS, MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
+    SnapshotCapacityRecommendation, recommend_model_snapshot_capacity,
 };
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};

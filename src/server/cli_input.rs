@@ -404,11 +404,12 @@ pub struct ServerStartupInput {
     // separately from detached KV entries, because their per-entry size
     // scales with model width rather than with prompt length. One
     // conversation's snapshot ranges from a few MiB on a small model to
-    // several hundred MiB on a 30B-class one, so the compiled-in default
-    // cannot be right for every deployment and these three knobs exist to
-    // size the store per model.
+    // several hundred MiB on a 30B-class one, so startup may raise the
+    // compiled-in fallback from model metadata when this capacity is left
+    // unset. These three knobs remain the authoritative operator override.
     /// Byte budget for the exact-prefix snapshot store.
-    /// `None` means "use the compiled-in default (512 MiB)".
+    /// `None` means "derive a model-aware default when possible, otherwise
+    /// use the compiled-in fallback (512 MiB)".
     /// Also accepts `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES`.
     pub prompt_cache_snapshot_capacity_bytes: Option<usize>,
 
@@ -1720,21 +1721,23 @@ pub(super) fn build_prompt_cache_config(
         hash,
     };
 
-    let cfg = PromptCacheConfig::new(
+    let mut cfg = PromptCacheConfig::new(
         enabled,
         capacity_bytes.unwrap_or(defaults.capacity_bytes),
         max_entries.unwrap_or(defaults.max_entries),
         std::time::Duration::from_secs(ttl_seconds.unwrap_or(defaults.ttl.as_secs())),
         min_prefix.unwrap_or(defaults.min_prefix_tokens),
     )
-    .with_apc(apc)
-    .with_snapshot_limits(
-        snapshot_capacity_bytes.unwrap_or(defaults.snapshot_capacity_bytes),
-        snapshot_max_entries.unwrap_or(defaults.snapshot_max_entries),
-        std::time::Duration::from_secs(
-            snapshot_ttl_seconds.unwrap_or(defaults.snapshot_ttl.as_secs()),
-        ),
-    );
+    .with_apc(apc);
+    if let Some(capacity_bytes) = snapshot_capacity_bytes {
+        cfg = cfg.with_snapshot_capacity_bytes(capacity_bytes);
+    }
+    if let Some(max_entries) = snapshot_max_entries {
+        cfg.snapshot_max_entries = max_entries;
+    }
+    if let Some(ttl_seconds) = snapshot_ttl_seconds {
+        cfg.snapshot_ttl = std::time::Duration::from_secs(ttl_seconds);
+    }
 
     Ok(cfg)
 }
