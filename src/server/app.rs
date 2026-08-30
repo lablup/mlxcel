@@ -20,7 +20,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{Method, Request},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{MethodRouter, get, post},
 };
 use tower_http::trace::TraceLayer;
@@ -29,6 +29,7 @@ use super::AppState;
 use super::auth;
 use super::cors::cors_middleware;
 use super::routes;
+use super::types::ErrorResponse;
 
 /// API-key authentication middleware, following b10621's
 /// `middleware_validate_api_key` (#1437).
@@ -79,6 +80,72 @@ pub(crate) fn is_public_endpoint(path: &str) -> bool {
 /// 2 MiB default because real audio uploads commonly exceed that threshold.
 const AUDIO_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
+/// Axum's default extractor body limit. Kept explicit so tests can assert that
+/// zero-image configurations do not accidentally lower ordinary JSON capacity.
+const AXUM_DEFAULT_BODY_LIMIT_BYTES: usize = 2_097_152;
+
+/// Fixed slack for the non-image JSON fields that share the request body.
+const MAIN_JSON_BODY_LIMIT_FIXED_OVERHEAD_BYTES: usize = 1024 * 1024;
+
+/// Per-image slack for data-URL prefixes and surrounding JSON syntax.
+const MAIN_JSON_BODY_LIMIT_PER_IMAGE_OVERHEAD_BYTES: usize = 512;
+
+/// Hard cap for the buffered JSON extractor. The image knobs can be set to
+/// extreme `usize` values by tests or misconfiguration; clamp those instead of
+/// turning the JSON extractor into an effectively unbounded allocation target.
+const MAIN_JSON_BODY_LIMIT_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+fn checked_base64_encoded_len(decoded_len: usize) -> Option<usize> {
+    decoded_len.checked_add(2)?.checked_div(3)?.checked_mul(4)
+}
+
+fn configured_image_json_body_budget_bytes(max_payload_bytes: usize, max_images: usize) -> usize {
+    if max_payload_bytes == 0 || max_images == 0 {
+        return 0;
+    }
+
+    let Some(encoded_per_image) = checked_base64_encoded_len(max_payload_bytes) else {
+        return usize::MAX;
+    };
+    let Some(encoded_images) = encoded_per_image.checked_mul(max_images) else {
+        return usize::MAX;
+    };
+    let Some(per_image_overhead) =
+        MAIN_JSON_BODY_LIMIT_PER_IMAGE_OVERHEAD_BYTES.checked_mul(max_images)
+    else {
+        return usize::MAX;
+    };
+    let Some(with_fixed_overhead) =
+        encoded_images.checked_add(MAIN_JSON_BODY_LIMIT_FIXED_OVERHEAD_BYTES)
+    else {
+        return usize::MAX;
+    };
+    with_fixed_overhead.saturating_add(per_image_overhead)
+}
+
+fn main_json_body_limit_bytes_for_limits(limits: super::media::ImageInputLimits) -> usize {
+    configured_image_json_body_budget_bytes(limits.max_payload_bytes, limits.max_images_per_request)
+        .clamp(
+            AXUM_DEFAULT_BODY_LIMIT_BYTES,
+            MAIN_JSON_BODY_LIMIT_MAX_BYTES,
+        )
+}
+
+pub(crate) fn main_json_body_limit_bytes() -> usize {
+    main_json_body_limit_bytes_for_limits(super::media::current_image_input_limits())
+}
+
+async fn openai_payload_too_large(request: Request<Body>, next: Next) -> Response {
+    let response = next.run(request).await;
+    if response.status() != axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        return response;
+    }
+
+    let mut error = ErrorResponse::new("Request body too large.", "invalid_request_error");
+    error.status = axum::http::StatusCode::PAYLOAD_TOO_LARGE;
+    error.into_response()
+}
+
 /// Create the Axum application router.
 ///
 /// Layer order matters and mirrors b10621's pre-routing handler (#1432): the
@@ -106,7 +173,7 @@ fn create_app_impl(state: AppState, with_cors: bool) -> Router {
     // no request ever touches the manager again.
     state.stream_sessions.ensure_gc_spawned();
     let api_prefix = state.config.api_prefix.clone();
-    let routes = build_routes(&state);
+    let routes = build_routes(&state).layer(DefaultBodyLimit::max(main_json_body_limit_bytes()));
     let routes = if api_prefix.is_empty() {
         routes
     } else {
@@ -116,6 +183,7 @@ fn create_app_impl(state: AppState, with_cors: bool) -> Router {
     let gcp_enabled = state.config.gcp.is_some();
     let dispatch_cell = state.gcp_dispatch.clone();
     // Middleware, innermost first.
+    let routes = routes.layer(middleware::from_fn(openai_payload_too_large));
     let routes = routes.layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
     let routes = if with_cors {
         routes.layer(middleware::from_fn_with_state(
@@ -448,15 +516,75 @@ mod auth_route_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{AUDIO_MAX_UPLOAD_BYTES, is_public_endpoint};
+    use super::{
+        AUDIO_MAX_UPLOAD_BYTES, AXUM_DEFAULT_BODY_LIMIT_BYTES,
+        MAIN_JSON_BODY_LIMIT_FIXED_OVERHEAD_BYTES, MAIN_JSON_BODY_LIMIT_MAX_BYTES,
+        MAIN_JSON_BODY_LIMIT_PER_IMAGE_OVERHEAD_BYTES, configured_image_json_body_budget_bytes,
+        is_public_endpoint, main_json_body_limit_bytes_for_limits, openai_payload_too_large,
+    };
     use axum::{
-        Router,
-        body::Body,
+        Json, Router,
+        body::{Body, Bytes, to_bytes},
         extract::DefaultBodyLimit,
         http::{Method, Request, StatusCode},
+        middleware,
         routing::post,
     };
+    use base64::Engine;
+    use serde_json::{Value, json};
     use tower::ServiceExt;
+
+    fn body_limit_test_router(limit: usize) -> Router {
+        Router::new()
+            .route(
+                "/json",
+                post(|Json(_): Json<Value>| async move { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/bytes",
+                post(|_body: Bytes| async move { StatusCode::NO_CONTENT }),
+            )
+            .layer(DefaultBodyLimit::max(limit))
+            .layer(middleware::from_fn(openai_payload_too_large))
+    }
+
+    fn encoded_image_body(decoded_sizes: &[usize]) -> Vec<u8> {
+        let content: Vec<Value> = std::iter::once(json!({"type": "text", "text": "look"}))
+            .chain(decoded_sizes.iter().map(|size| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(vec![0u8; *size]);
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:image/png;base64,{encoded}")}
+                })
+            }))
+            .collect();
+        serde_json::to_vec(&json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": content}]
+        }))
+        .expect("serialize image request")
+    }
+
+    async fn post_body(path: &str, body: Vec<u8>, limit: usize) -> axum::response::Response {
+        body_limit_test_router(limit)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        serde_json::from_slice(&bytes).expect("json response")
+    }
 
     /// Build a minimal audio sub-router using stub handlers and the same
     /// `DefaultBodyLimit` layer applied in `create_app`. Tests can call this
@@ -502,6 +630,127 @@ mod tests {
             assert!(is_public_endpoint(path), "{path}");
         }
         assert!(!is_public_endpoint("/v1/models"));
+    }
+
+    #[test]
+    fn main_json_limit_derives_from_simultaneous_image_budget() {
+        assert_eq!(
+            configured_image_json_body_budget_bytes(3, 2),
+            MAIN_JSON_BODY_LIMIT_FIXED_OVERHEAD_BYTES
+                + (2 * MAIN_JSON_BODY_LIMIT_PER_IMAGE_OVERHEAD_BYTES)
+                + 8
+        );
+
+        let mut limits = crate::server::media::ImageInputLimits {
+            max_payload_bytes: 3,
+            max_images_per_request: 2,
+            ..crate::server::media::ImageInputLimits::default()
+        };
+        assert_eq!(
+            main_json_body_limit_bytes_for_limits(limits),
+            AXUM_DEFAULT_BODY_LIMIT_BYTES
+        );
+
+        limits.max_payload_bytes = 2 * 1024 * 1024;
+        limits.max_images_per_request = 2;
+        assert!(main_json_body_limit_bytes_for_limits(limits) > AXUM_DEFAULT_BODY_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn main_json_limit_handles_zero_and_extreme_config() {
+        let zero = crate::server::media::ImageInputLimits {
+            max_payload_bytes: 0,
+            max_images_per_request: 0,
+            ..crate::server::media::ImageInputLimits::default()
+        };
+        assert_eq!(
+            main_json_body_limit_bytes_for_limits(zero),
+            AXUM_DEFAULT_BODY_LIMIT_BYTES
+        );
+
+        let extreme = crate::server::media::ImageInputLimits {
+            max_payload_bytes: usize::MAX,
+            max_images_per_request: usize::MAX,
+            ..crate::server::media::ImageInputLimits::default()
+        };
+        assert_eq!(
+            main_json_body_limit_bytes_for_limits(extreme),
+            MAIN_JSON_BODY_LIMIT_MAX_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn main_json_limit_accepts_base64_body_above_axum_default() {
+        let limits = crate::server::media::ImageInputLimits {
+            max_payload_bytes: 2 * 1024 * 1024,
+            max_images_per_request: 1,
+            ..crate::server::media::ImageInputLimits::default()
+        };
+        let limit = main_json_body_limit_bytes_for_limits(limits);
+        let body = encoded_image_body(&[2 * 1024 * 1024]);
+        assert!(body.len() > AXUM_DEFAULT_BODY_LIMIT_BYTES);
+        assert!(body.len() <= limit);
+
+        let response = post_body("/json", body, limit).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn main_json_limit_accounts_for_simultaneous_image_inputs() {
+        let limits = crate::server::media::ImageInputLimits {
+            max_payload_bytes: 1024,
+            max_images_per_request: 2,
+            ..crate::server::media::ImageInputLimits::default()
+        };
+        let limit = main_json_body_limit_bytes_for_limits(limits);
+        let body = encoded_image_body(&[1024, 1024]);
+        assert!(body.len() <= limit);
+
+        let response = post_body("/json", body, limit).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn body_limit_accepts_exact_boundary_and_rejects_one_byte_over() {
+        const TEST_LIMIT: usize = 64;
+        let exact = post_body("/bytes", vec![b'x'; TEST_LIMIT], TEST_LIMIT).await;
+        assert_eq!(exact.status(), StatusCode::NO_CONTENT);
+
+        let oversized = post_body("/bytes", vec![b'x'; TEST_LIMIT + 1], TEST_LIMIT).await;
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn oversized_body_limit_errors_are_openai_shaped_for_audio_and_json() {
+        const TEST_LIMIT: usize = 16;
+        let json_response = post_body("/json", vec![b' '; TEST_LIMIT + 1], TEST_LIMIT).await;
+        assert_eq!(json_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let json_body = response_json(json_response).await;
+        assert_eq!(json_body["error"]["type"], "invalid_request_error");
+        assert_eq!(json_body["error"]["message"], "Request body too large.");
+        assert!(json_body["error"]["code"].is_null());
+
+        let audio_app = Router::new()
+            .route(
+                "/v1/audio/transcriptions",
+                post(|_body: Bytes| async move { StatusCode::NO_CONTENT }),
+            )
+            .layer(DefaultBodyLimit::max(TEST_LIMIT))
+            .layer(middleware::from_fn(openai_payload_too_large));
+        let audio_response = audio_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/audio/transcriptions")
+                    .header("content-type", "multipart/form-data; boundary=x")
+                    .body(Body::from(vec![0u8; TEST_LIMIT + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(audio_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let audio_body = response_json(audio_response).await;
+        assert_eq!(audio_body, json_body);
     }
 
     #[tokio::test]
