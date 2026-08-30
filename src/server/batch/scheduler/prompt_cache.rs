@@ -15,6 +15,13 @@
 use super::*;
 
 impl BatchScheduler {
+    /// Maximum queued background warm-ups (issue #1144).
+    ///
+    /// Small on purpose. A warm-up is only useful until its conversation's next
+    /// turn arrives, so a deep queue would mostly hold jobs whose turn already
+    /// came and went, spending idle time on snapshots nobody will look up.
+    const MAX_PENDING_WARMUPS: usize = 8;
+
     /// Whether the installed prompt-cache store is currently accepting
     /// lookups and inserts (scheduler-level gate).
     #[inline]
@@ -706,13 +713,6 @@ impl BatchScheduler {
             }
         }
     }
-
-    /// Maximum queued background warm-ups (issue #1144).
-    ///
-    /// Small on purpose. A warm-up is only useful until its conversation's next
-    /// turn arrives, so a deep queue would mostly hold jobs whose turn already
-    /// came and went, spending idle time on snapshots nobody will look up.
-    const MAX_PENDING_WARMUPS: usize = 8;
 
     /// Queue a background warm-up for the next turn's history prefix.
     ///

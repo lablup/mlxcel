@@ -68,6 +68,14 @@ pub struct RopeScalingSpec {
     pub low_freq_factor: Option<f32>,
     pub high_freq_factor: Option<f32>,
     pub original_max_position_embeddings: Option<f32>,
+    /// YaRN low correction rotation count (`beta_fast`, upstream default 32).
+    pub beta_fast: Option<f32>,
+    /// YaRN high correction rotation count (`beta_slow`, upstream default 1).
+    pub beta_slow: Option<f32>,
+    /// YaRN attention-magnitude multiplier numerator (DeepSeek-style `mscale`).
+    pub mscale: Option<f32>,
+    /// YaRN attention-magnitude multiplier denominator (`mscale_all_dim`).
+    pub mscale_all_dim: Option<f32>,
 }
 
 impl RopeScalingSpec {
@@ -90,6 +98,10 @@ impl RopeScalingSpec {
             low_freq_factor: f32_at("low_freq_factor"),
             high_freq_factor: f32_at("high_freq_factor"),
             original_max_position_embeddings: f32_at("original_max_position_embeddings"),
+            beta_fast: f32_at("beta_fast"),
+            beta_slow: f32_at("beta_slow"),
+            mscale: f32_at("mscale"),
+            mscale_all_dim: f32_at("mscale_all_dim"),
         }
     }
 
@@ -125,6 +137,19 @@ pub enum RopeScalingKind {
     /// and handed to `fast_rope_with_freqs`. `base` is not used once a table is
     /// supplied.
     Llama3 { freqs: UniquePtr<MlxArray> },
+    /// The YaRN table (#1472), precomputed the same way, plus the
+    /// attention-magnitude multiplier the scheme applies to Q and K before the
+    /// rotation. Port of upstream's `YarnRoPE`
+    /// ([`mlx_lm/models/rope_utils.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py)),
+    /// with llama-server b10621's `--yarn-*` runtime knobs overlaid; see
+    /// [`yarn_rope_setup`].
+    Yarn {
+        freqs: UniquePtr<MlxArray>,
+        /// Multiplies Q and K before the rotation, so attention scores carry
+        /// the YaRN temperature `mscale^2`. `1.0` when the scheme resolves to
+        /// no magnitude correction.
+        mscale: f32,
+    },
 }
 
 impl RopeScalingKind {
@@ -147,10 +172,16 @@ impl RopeScalingKind {
     /// unscaled table, which is what it decoded with before this change, and the
     /// operator is told which model and which scheme. Wire a scheme in properly
     /// and the warning stops on its own.
+    /// `train_ctx` is the checkpoint's training context
+    /// (`max_position_embeddings`), the fallback for YaRN's original context
+    /// when neither `--yarn-orig-ctx` nor the block names one; b10621 falls
+    /// back to `n_ctx_train` the same way (`llama-context.cpp`,
+    /// `n_ctx_orig_yarn`). `None` when the caller's config has no such field.
     pub fn resolve(
         spec: Option<&RopeScalingSpec>,
         dims: usize,
         base: f32,
+        train_ctx: Option<f32>,
         model_label: &str,
     ) -> Self {
         // An operator-supplied `--rope-scaling` / `--rope-scale` /
@@ -196,6 +227,13 @@ impl RopeScalingKind {
                     Self::Default
                 }
             },
+            "yarn" => match yarn_rope_setup(spec, dims, base, train_ctx) {
+                Ok((freqs, mscale)) => Self::Yarn { freqs, mscale },
+                Err(reason) => {
+                    report_unusable_rope_scaling_once(model_label, "yarn", &reason);
+                    Self::Default
+                }
+            },
             other => {
                 report_unusable_rope_scaling_once(
                     model_label,
@@ -208,9 +246,13 @@ impl RopeScalingKind {
     }
 
     /// The position scale to hand `fast_rope`. `1.0` unless `linear`.
+    ///
+    /// `Yarn` rotates at unit position scale on purpose: its interpolation is
+    /// folded into the frequency table itself, exactly as upstream's
+    /// `YarnRoPE` passes `scale=1.0` next to its `_freqs`.
     pub fn scale(&self) -> f32 {
         match self {
-            Self::Default | Self::Llama3 { .. } => 1.0,
+            Self::Default | Self::Llama3 { .. } | Self::Yarn { .. } => 1.0,
             Self::Linear { scale } => *scale,
         }
     }
@@ -219,7 +261,23 @@ impl RopeScalingKind {
     pub fn freqs(&self) -> Option<&MlxArray> {
         match self {
             Self::Llama3 { freqs } => Some(freqs),
+            Self::Yarn { freqs, .. } => Some(freqs),
             _ => None,
+        }
+    }
+
+    /// The attention-magnitude multiplier the scheme applies to Q and K before
+    /// the rotation. `1.0` for every scheme but YaRN, whose temperature
+    /// correction scales attention scores by this value squared.
+    ///
+    /// A family that consumes [`Self::freqs`] must consume this next to it:
+    /// serving a YaRN table without its magnitude correction changes the
+    /// logits silently, which is the failure mode this module exists to
+    /// remove.
+    pub fn attn_scale(&self) -> f32 {
+        match self {
+            Self::Yarn { mscale, .. } => *mscale,
+            _ => 1.0,
         }
     }
 
@@ -242,6 +300,10 @@ impl RopeScalingKind {
             Self::Linear { scale } => Self::Linear { scale: *scale },
             Self::Llama3 { freqs } => Self::Llama3 {
                 freqs: mlxcel_core::copy(freqs),
+            },
+            Self::Yarn { freqs, mscale } => Self::Yarn {
+                freqs: mlxcel_core::copy(freqs),
+                mscale: *mscale,
             },
         }
     }
@@ -321,6 +383,211 @@ pub fn llama3_rope_freqs(
     // source, so what a block defers is one element copy, not this loop.
     mlxcel_core::eval(&freqs);
     Ok(freqs)
+}
+
+/// YaRN's attention-magnitude helper: `0.1 * mscale * ln(scale) + 1`, and `1`
+/// at or below unit scale.
+///
+/// The same function serves as numerator and denominator of the DeepSeek-style
+/// `mscale / mscale_all_dim` correction; with the defaults (`mscale = 1`,
+/// `mscale_all_dim = 0`) it reduces to YaRN's own `sqrt(t) = 0.1 ln(s) + 1`.
+/// Mirrors `yarn_get_mscale` in `src/models/deepseek_v2.rs` and b10621's
+/// `get_mscale`
+/// ([`src/llama-context.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/src/llama-context.cpp)).
+fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
+    if scale <= 1.0 {
+        1.0
+    } else {
+        0.1 * mscale * scale.ln() + 1.0
+    }
+}
+
+/// The pair index at which `num_rotations` full rotations fit into `max_pos`.
+///
+/// Mirrors `yarn_find_correction_dim` in `src/models/deepseek_v2.rs` and
+/// ggml's `ggml_rope_yarn_corr_dim`.
+fn yarn_find_correction_dim(num_rotations: f32, dims: usize, base: f32, max_pos: f32) -> f32 {
+    let dims_f = dims as f32;
+    (dims_f * (max_pos / (num_rotations * 2.0 * std::f32::consts::PI)).ln()) / (2.0 * base.ln())
+}
+
+/// The YaRN correction band `[low, high]` in pair-index space, clamped to
+/// `[0, dims - 1]` exactly as ggml's `ggml_rope_yarn_corr_dims` clamps it.
+fn yarn_find_correction_range(
+    beta_fast: f32,
+    beta_slow: f32,
+    dims: usize,
+    base: f32,
+    max_pos: f32,
+) -> (usize, usize) {
+    let low = yarn_find_correction_dim(beta_fast, dims, base, max_pos).floor() as i64;
+    let high = yarn_find_correction_dim(beta_slow, dims, base, max_pos).ceil() as i64;
+    (
+        low.max(0) as usize,
+        (high.max(0) as usize).min(dims.saturating_sub(1)),
+    )
+}
+
+/// The resolved YaRN parameters a table is built from.
+///
+/// Resolution order per field, mirroring b10621's `llama_context` setup: a
+/// non-sentinel `--yarn-*` flag first, then the checkpoint's own
+/// `rope_scaling` key, then the upstream default (`beta_fast` 32, `beta_slow`
+/// 1, extrapolation mix 1 for a YaRN rotation, original context falling back
+/// to the training context and then to upstream `YarnRoPE`'s 4096).
+struct YarnParams {
+    factor: f32,
+    original_ctx: f32,
+    beta_fast: f32,
+    beta_slow: f32,
+    mscale: f32,
+    mscale_all_dim: f32,
+    ext_factor: f32,
+    attn_factor: f32,
+}
+
+impl YarnParams {
+    fn resolve(spec: &RopeScalingSpec, train_ctx: Option<f32>) -> Result<Self, String> {
+        let knobs = super::rope_overrides::installed_yarn_knobs();
+
+        let Some(factor) = spec.factor else {
+            return Err("it names no numeric factor".to_string());
+        };
+
+        let params = Self {
+            factor,
+            original_ctx: knobs
+                .and_then(|k| k.orig_ctx)
+                .map(|n| n as f32)
+                .or(spec.original_max_position_embeddings)
+                .or(train_ctx)
+                .unwrap_or(4096.0),
+            beta_fast: knobs
+                .and_then(|k| k.beta_fast)
+                .or(spec.beta_fast)
+                .unwrap_or(32.0),
+            beta_slow: knobs
+                .and_then(|k| k.beta_slow)
+                .or(spec.beta_slow)
+                .unwrap_or(1.0),
+            mscale: spec.mscale.unwrap_or(1.0),
+            mscale_all_dim: spec.mscale_all_dim.unwrap_or(0.0),
+            ext_factor: knobs.and_then(|k| k.ext_factor).unwrap_or(1.0),
+            attn_factor: knobs.and_then(|k| k.attn_factor).unwrap_or(1.0),
+        };
+
+        for (name, value) in [
+            ("factor", params.factor),
+            ("original_max_position_embeddings", params.original_ctx),
+            ("beta_fast", params.beta_fast),
+            ("beta_slow", params.beta_slow),
+        ] {
+            if !is_usable_scalar(value) {
+                return Err(format!("{name} {value} is not a positive finite number"));
+            }
+        }
+        if !(params.ext_factor.is_finite() && params.ext_factor >= 0.0) {
+            return Err(format!(
+                "extrapolation mix factor {} is not a non-negative finite number",
+                params.ext_factor
+            ));
+        }
+        if !is_usable_scalar(params.attn_factor) {
+            return Err(format!(
+                "attention factor {} is not a positive finite number",
+                params.attn_factor
+            ));
+        }
+        for (name, value) in [
+            ("mscale", params.mscale),
+            ("mscale_all_dim", params.mscale_all_dim),
+        ] {
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(format!(
+                    "{name} {value} is not a non-negative finite number"
+                ));
+            }
+        }
+
+        Ok(params)
+    }
+}
+
+/// The YaRN frequency table and attention-magnitude multiplier (#1472).
+///
+/// Port of upstream `YarnRoPE`
+/// ([`mlx_lm/models/rope_utils.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py))
+/// generalized with ggml's extrapolation mix: with `fe = base^(2i/d)` (the
+/// unscaled divisor), `fi = factor * fe` (the interpolated one), and the
+/// per-pair correction ramp `r_i`, each entry is
+///
+/// ```text
+/// mix = r_i * ext_factor
+/// f_i = (fi * fe) / (fi * mix + fe * (1 - mix))
+/// ```
+///
+/// which is the linear inverse-frequency mix ggml's `rope_yarn` computes
+/// (`theta = theta_interp * (1 - mix) + theta_extrap * mix`), expressed as the
+/// divisor `fast_rope_with_freqs` expects. At `ext_factor = 1` it reduces to
+/// upstream `YarnRoPE`'s mask arithmetic exactly; at `ext_factor = 0` every
+/// pair interpolates, which is a linear scale spelled as a table.
+///
+/// The magnitude multiplier follows b10621's resolution
+/// (`llama-context.cpp`): with a non-zero extrapolation mix it is
+/// `yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)`
+/// and the `--yarn-attn-factor` value does not participate (b10621 recomputes
+/// over it); with a zero mix it is the attention factor itself.
+pub(crate) fn yarn_rope_setup(
+    spec: &RopeScalingSpec,
+    dims: usize,
+    base: f32,
+    train_ctx: Option<f32>,
+) -> Result<(UniquePtr<MlxArray>, f32), String> {
+    let params = YarnParams::resolve(spec, train_ctx)?;
+
+    let (low, high) = yarn_find_correction_range(
+        params.beta_fast,
+        params.beta_slow,
+        dims,
+        base,
+        params.original_ctx,
+    );
+
+    let half_dims = dims / 2;
+    let mut freq_vals = Vec::with_capacity(half_dims);
+    for i in 0..half_dims {
+        let exp = (2 * i) as f32 / dims as f32;
+        let fe = base.powf(exp);
+        let fi = params.factor * fe;
+
+        // The correction ramp, `1` below the band (extrapolate), `0` above it
+        // (interpolate), linear inside. Mirrors `YarnRoPE`'s
+        // `yarn_linear_ramp_mask` and deepseek_v2.rs's `freq_mask`.
+        let ramp = if i < low {
+            1.0
+        } else if i > high {
+            0.0
+        } else {
+            let t = (i - low) as f32 / (high - low).max(1) as f32;
+            1.0 - t.clamp(0.0, 1.0)
+        };
+        let mix = ramp * params.ext_factor;
+
+        freq_vals.push((fi * fe) / (fi * mix + fe * (1.0 - mix)));
+    }
+
+    let mscale = if params.ext_factor != 0.0 {
+        yarn_get_mscale(params.factor, params.mscale)
+            / yarn_get_mscale(params.factor, params.mscale_all_dim)
+    } else {
+        params.attn_factor
+    };
+
+    let freqs = mlxcel_core::from_slice_f32(&freq_vals, &[half_dims as i32]);
+    // Evaluated at load for the same reason the llama3 table is: each layer's
+    // duplicate defers one element copy, not this loop.
+    mlxcel_core::eval(&freqs);
+    Ok((freqs, mscale))
 }
 
 /// Whether a `rope_scaling` scalar can be used as a multiplier or a divisor.

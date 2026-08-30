@@ -129,18 +129,25 @@ impl BatchScheduler {
         }
     }
 
-    /// Enforce the `--max-kv-size` cap on a sequence's KV caches.
+    /// Enforce the resolved KV bound on a sequence's caches by context
+    /// shifting (#1472, b10621 `--context-shift`).
     ///
-    /// Trims `live_len(cache) - max_kv_size` tokens from every plain
-    /// `KVCache` layer whose live window exceeds the configured bound,
-    /// pinning a small leading attention-sink prefix
-    /// (`MAX_KV_SIZE_SINK_KEEP`) and dropping the excess tokens that
-    /// follow it rather than the oldest tokens overall (issue #718). Turbo-mode
-    /// caches return `0` from `KVCache::trim_front_keep_sink` (safe no-op,
-    /// see [`KVCache::trim_front_keep_sink`] for the per-mode support
-    /// matrix). Sliding-window models manage their own internal
-    /// `RotatingKVCache` and are never stored in the pool's
-    /// `Vec<KVCache>`, so they are unaffected.
+    /// With shifting disabled (the default, upstream's too) this is a no-op:
+    /// admission refuses an over-long prompt and the decode loop stops a
+    /// sequence before its next token would overflow, so nothing here needs
+    /// trimming. With it enabled, every plain `KVCache` layer whose live
+    /// window exceeds the bound is front-trimmed keeping the sequence's
+    /// resolved `keep` prefix (clamped to `bound - 4`, upstream's
+    /// `n_ctx - 4` margin) and discarding `max(excess, resolved discard)`
+    /// tokens past it, where the resolved discard is the request's
+    /// `n_discard` or half of the non-retained window (upstream's `0`
+    /// default). Discarding at least the excess is what keeps the cap an
+    /// invariant when a prefill chunk overshoots it.
+    ///
+    /// Turbo-mode caches return `0` from `KVCache::trim_front_keep_sink`
+    /// (safe no-op, see its per-mode support matrix). Sliding-window models
+    /// manage their own internal `RotatingKVCache` and are never stored in
+    /// the pool's `Vec<KVCache>`, so they are unaffected.
     ///
     /// ** H1**: `max_kv_size` has already been validated to fit
     /// in `i32` by [`crate::server::cli_input::resolve_max_kv_size`], so
@@ -155,10 +162,20 @@ impl BatchScheduler {
     /// [`Self::execute_full_prefill`], [`Self::start_chunked_prefill`],
     /// [`Self::continue_chunked_prefill`], [`Self::decode_single_step`],
     /// and [`Self::execute_batched_decode`].
-    pub(super) fn enforce_max_kv_size_for(&mut self, seq_id: SequenceId) {
+    pub(super) fn enforce_max_kv_size_for(
+        &mut self,
+        seq_id: SequenceId,
+        retention: SequenceRetention,
+    ) {
         let Some(max) = self.max_kv_size else {
             return;
         };
+        if !self.context_retention.context_shift {
+            // The bound is enforced by refusal and by the decode-loop stop
+            // (`truncated: true`), never by a silent trim; see the method
+            // docs and `docs/llama-server-compat.md`'s migration note.
+            return;
+        }
         // Defensive: even though `resolve_max_kv_size` already clamps this
         // to `i32::MAX` at startup, a future caller that bypasses the CLI
         // validation could still construct an out-of-range scheduler. Use
@@ -175,10 +192,13 @@ impl BatchScheduler {
         let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
             return;
         };
-        // Pin a small attention-sink prefix so the trimmed window keeps the
-        // leading tokens the model attends to (issue #718). Never large enough
-        // to leave no room for the recent window under the configured cap.
-        let sink_keep = MAX_KV_SIZE_SINK_KEEP.min(max_i32 - 1).max(0);
+        // The retained prefix, clamped so a shift always has room to free:
+        // upstream's `n_keep = std::min(slot.n_ctx - 4, n_keep)`.
+        let keep = i32::try_from(retention.keep.clamp(0, i64::from(max_i32 - 4).max(0)))
+            .unwrap_or(0)
+            .max(0);
+        let requested_discard =
+            i32::try_from(retention.discard.clamp(0, i64::from(i32::MAX))).unwrap_or(i32::MAX);
         for cache in caches {
             // `live_len() = offset - live_start`. We trim against the live
             // window length (what attention sees), not the monotonic
@@ -187,11 +207,11 @@ impl BatchScheduler {
             // `checked_sub` so a future arithmetic regression cannot
             // silently wrap into a negative trim depth that produces a
             // 4-billion-element slice and crashes Metal.
-            if let Some(excess) = live_len.checked_sub(max_i32)
-                && excess > 0
-            {
-                cache.trim_front_keep_sink(excess, sink_keep);
-            }
+            let Some(excess) = live_len.checked_sub(max_i32).filter(|excess| *excess > 0) else {
+                continue;
+            };
+            let trim = context_shift_trim_depth(live_len, excess, keep, requested_discard);
+            cache.trim_front_keep_sink(trim, keep);
         }
     }
 
@@ -289,8 +309,4 @@ impl BatchScheduler {
             tracing::warn!("Failed to sync paged state for {seq_id}: {err}");
         }
     }
-
-    // ------------------------------------------------------------------
-    // Request ingestion
-    // ------------------------------------------------------------------
 }

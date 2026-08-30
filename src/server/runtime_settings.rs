@@ -123,6 +123,8 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "kv_cache_mode",
     "batch_kv_quant",
     "max_kv_size",
+    "context_shift",
+    "n_keep",
     "kv_cache_budget",
     "enable_vlm_prefix_cache",
     "cors_policy",
@@ -475,6 +477,8 @@ fn read_only_reason(field: &str) -> &'static str {
         | "kv_cache_mode"
         | "batch_kv_quant"
         | "max_kv_size"
+        | "context_shift"
+        | "n_keep"
         | "kv_cache_budget"
         | "enable_vlm_prefix_cache" => SCHEDULER_REASON,
         "draft_model_path" | "num_draft_tokens" | "draft_kind" | "draft_block_size" => {
@@ -573,6 +577,8 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "kv_cache_mode" => json!(config.kv_cache_mode.to_string()),
         "batch_kv_quant" => debug(&config.batch_kv_quant),
         "max_kv_size" => json!(config.max_kv_size),
+        "context_shift" => json!(config.context_shift),
+        "n_keep" => json!(config.n_keep),
         "kv_cache_budget" => debug(&config.kv_cache_budget),
         "enable_vlm_prefix_cache" => json!(config.enable_vlm_prefix_cache),
         "cors_policy" => debug(&config.cors_policy),
@@ -613,9 +619,11 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "enable_preemption"
         | "no_batch"
         | "enable_vlm_prefix_cache"
+        | "context_shift"
         | "model_is_gemma4_family" => KnobKind::Bool,
         "context_size"
         | "n_parallel"
+        | "n_keep"
         | "num_draft_tokens"
         | "max_batch_size"
         | "max_queue_depth"

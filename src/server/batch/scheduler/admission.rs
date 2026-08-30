@@ -15,6 +15,33 @@
 use super::*;
 
 impl BatchScheduler {
+    /// Resolve a request's context-retention state against the server policy
+    /// (#1472), mirroring b10621's slot arithmetic (`server-context.cpp`):
+    /// the request's `n_keep` (falling back to `--keep`), `-1` resolved to
+    /// the whole prompt, plus one for a tokenizer-prepended BOS.
+    pub(super) fn resolve_sequence_retention(
+        &self,
+        options: &crate::server::ServerGenerateOptions,
+        prompt_tokens: &[i32],
+    ) -> SequenceRetention {
+        // The BOS check is by content rather than by tokenizer config: the
+        // sequence's token ids are what the KV window actually holds.
+        let bos_prepended = self
+            .tokenizer
+            .bos_token_id()
+            .is_some_and(|bos| prompt_tokens.first() == Some(&(bos as i32)));
+        resolve_retention_values(
+            self.context_retention,
+            options.retention,
+            prompt_tokens.len(),
+            bos_prepended,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Request ingestion
+    // ------------------------------------------------------------------
+
     pub(super) fn drain_incoming_requests(&mut self) {
         loop {
             match self.request_rx.try_recv() {
@@ -129,6 +156,28 @@ impl BatchScheduler {
             let _ = response_tx.send(GenerateEvent::Error(
                 "Empty prompt: request has no input tokens to process".to_string(),
             ));
+            return;
+        }
+
+        // b10621 context admission (#1472): a prompt that does not fit the
+        // per-slot KV bound is refused with upstream's own wording
+        // (server-context.cpp, ERROR_TYPE_EXCEED_CONTEXT_SIZE), whether or
+        // not context shifting is enabled; the shift only handles growth
+        // DURING decode. Before #1472 such a prompt was silently
+        // front-trimmed. VLM requests are exempt for the same reason upstream
+        // disables the context machinery under multimodal: their KV length is
+        // the embedding count, not the text token count.
+        if let Some(max) = self.max_kv_size
+            && images.is_empty()
+            && audio.is_empty()
+            && videos.is_empty()
+            && prompt_tokens.len() >= max
+        {
+            let _ = response_tx.send(GenerateEvent::Error(format!(
+                "request ({} tokens) exceeds the available context size ({max} tokens), try \
+                 increasing it",
+                prompt_tokens.len()
+            )));
             return;
         }
 
@@ -404,7 +453,10 @@ impl BatchScheduler {
                 prefill_start_offset
             };
 
+        let retention = self.resolve_sequence_retention(&options, &prompt_tokens);
+
         let seq = SequenceInfo {
+            retention,
             seq_id,
             state: SequenceState::Queued,
             prompt_tokens,

@@ -341,6 +341,7 @@ impl BatchScheduler {
             .map_err(|e| anyhow::anyhow!("prefill-role handoff: allocate sequence: {e}"))?;
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
         let seq = SequenceInfo {
+            retention: Default::default(),
             seq_id,
             state: SequenceState::Queued,
             prompt_tokens,
@@ -452,6 +453,7 @@ impl BatchScheduler {
         let prefill_offset = prompt_tokens.len();
 
         let seq = SequenceInfo {
+            retention: Default::default(),
             seq_id,
             state: SequenceState::Decoding,
             prompt_tokens,

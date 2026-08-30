@@ -37,46 +37,47 @@ fn the_yarn_sentinels_are_accepted_and_carry_no_override() {
         yarn_orig_ctx: Some(0),
         ..args()
     };
-    group
-        .resolve_yarn_request()
-        .expect("the sentinels mean \"use the model's own values\"");
+    assert!(
+        !group.yarn_knobs().any_set(),
+        "sentinels resolve to no knobs"
+    );
     assert_eq!(group.resolve().expect("sentinels only"), None);
 }
 
 #[test]
-fn a_real_yarn_value_is_refused_with_the_flag_named() {
+fn a_real_yarn_value_becomes_a_knob_on_the_override() {
+    // Since #1472 a non-sentinel value is a knob for the YaRN table builder,
+    // not a refusal; with no YaRN rotation in force it stays inert, exactly as
+    // it does in b10621.
     let group = RopeOverrideArgs {
-        yarn_beta_fast: Some(32.0),
+        yarn_beta_fast: Some(40.0),
         ..args()
     };
-    let err = group
+    let over = group
         .resolve()
-        .expect_err("mlxcel's shared RoPE path has no YaRN arm");
-    assert!(err.contains("--yarn-beta-fast 32"), "{err}");
-    assert!(err.contains("#1472"), "{err}");
+        .expect("a YaRN knob is serveable")
+        .expect("a knob installs an override");
+    assert_eq!(over.yarn_knobs().beta_fast, Some(40.0));
+    assert_eq!(over.yarn_knobs().beta_slow, None);
 }
 
 #[test]
-fn every_non_sentinel_yarn_flag_is_named_in_one_message() {
-    // One restart should tell the operator about all of them, not one per run.
+fn every_non_sentinel_yarn_flag_resolves_onto_the_knobs() {
     let group = RopeOverrideArgs {
         yarn_ext_factor: Some(1.0),
         yarn_attn_factor: Some(0.5),
-        yarn_beta_slow: Some(1.0),
+        yarn_beta_slow: Some(1.5),
         yarn_beta_fast: Some(32.0),
         yarn_orig_ctx: Some(4096),
         ..args()
     };
-    let err = group.resolve().expect_err("five real values");
-    for expected in [
-        "--yarn-ext-factor",
-        "--yarn-attn-factor",
-        "--yarn-beta-slow",
-        "--yarn-beta-fast",
-        "--yarn-orig-ctx 4096",
-    ] {
-        assert!(err.contains(expected), "{expected} missing from: {err}");
-    }
+    let over = group.resolve().expect("valid").expect("an override");
+    let knobs = over.yarn_knobs();
+    assert_eq!(knobs.ext_factor, Some(1.0));
+    assert_eq!(knobs.attn_factor, Some(0.5));
+    assert_eq!(knobs.beta_slow, Some(1.5));
+    assert_eq!(knobs.beta_fast, Some(32.0));
+    assert_eq!(knobs.orig_ctx, Some(4096));
 }
 
 #[test]
@@ -87,8 +88,25 @@ fn a_zero_ext_factor_is_a_real_request_not_a_sentinel() {
         yarn_ext_factor: Some(0.0),
         ..args()
     };
-    let err = group.resolve().expect_err("0.0 is full interpolation");
-    assert!(err.contains("--yarn-ext-factor 0"), "{err}");
+    let over = group.resolve().expect("valid").expect("an override");
+    assert_eq!(over.yarn_knobs().ext_factor, Some(0.0));
+}
+
+#[test]
+fn a_yarn_knob_outside_its_domain_is_refused_at_startup() {
+    let group = RopeOverrideArgs {
+        yarn_beta_fast: Some(f32::NAN),
+        ..args()
+    };
+    let err = group.resolve().expect_err("NaN cannot tune a rotation");
+    assert!(err.contains("--yarn-beta-fast"), "{err}");
+
+    let group = RopeOverrideArgs {
+        yarn_orig_ctx: Some(-8),
+        ..args()
+    };
+    let err = group.resolve().expect_err("a negative context is refused");
+    assert!(err.contains("--yarn-orig-ctx -8"), "{err}");
 }
 
 #[test]
@@ -106,26 +124,32 @@ fn the_rope_flags_resolve_into_an_override() {
 }
 
 #[test]
-fn yarn_is_checked_before_the_rope_flags() {
-    // Both halves are wrong here; the YaRN diagnostic is the more specific of
-    // the two and must be the one the operator sees.
+fn an_invalid_rope_scale_is_still_refused_next_to_a_yarn_knob() {
     let group = RopeOverrideArgs {
         rope_scale: Some(-1.0),
         yarn_beta_fast: Some(32.0),
         ..args()
     };
-    let err = group.resolve().expect_err("both halves are invalid");
-    assert!(err.contains("--yarn-beta-fast"), "{err}");
+    let err = group.resolve().expect_err("the scale half is invalid");
+    assert!(err.contains("--rope-scale"), "{err}");
 }
 
 #[test]
-fn rope_scaling_yarn_is_refused_even_with_no_yarn_flags() {
+fn rope_scaling_yarn_resolves_into_an_override() {
     let group = RopeOverrideArgs {
         rope_scaling: Some("yarn".to_string()),
+        rope_scale: Some(4.0),
         ..args()
     };
-    let err = group.resolve().expect_err("yarn has no arm on this path");
-    assert!(err.contains("--rope-scaling yarn"), "{err}");
+    let over = group
+        .resolve()
+        .expect("yarn is serveable since #1472")
+        .expect("an override");
+    assert_eq!(
+        over.scaling_type(),
+        Some(crate::models::rope_overrides::RopeScalingTypeOverride::Yarn)
+    );
+    assert_eq!(over.freq_scale(), Some(0.25));
 }
 
 #[test]

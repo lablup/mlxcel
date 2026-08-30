@@ -88,7 +88,8 @@ pub use observability::{BatchObservability, ObservabilitySnapshot, PromptCacheLa
 pub use queue::PrefillQueue;
 pub use scheduler::BatchScheduler;
 pub use sequence::{
-    BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
+    BatchSchedulerAction, ContextRetentionPolicy, FinishReason, RequestPriority, SequenceInfo,
+    SequenceRetention, SequenceState,
 };
 #[cfg(feature = "xla-iree")]
 pub(crate) use xla_worker::XlaServeWorker;

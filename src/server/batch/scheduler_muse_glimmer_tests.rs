@@ -275,6 +275,7 @@ fn scheduler() -> BatchScheduler {
 
 fn options(max_tokens: usize) -> ServerGenerateOptions {
     ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,

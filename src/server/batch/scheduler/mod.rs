@@ -88,24 +88,13 @@ use super::prefill_cohort::{
 };
 use super::queue::PrefillQueue;
 use super::sequence::{
-    BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
+    BatchSchedulerAction, ContextRetentionPolicy, FinishReason, RequestPriority, SequenceInfo,
+    SequenceRetention, SequenceState,
 };
 use super::stop_matcher::StopMatcher;
 use super::tick_policy::{
     TickChoice, TickState, decide_tick, mixed_step_enabled, resolve_prefill_grant_interval,
 };
-
-mod admission;
-mod config;
-mod decode_tick;
-mod handoff;
-#[path = "../scheduler.rs"]
-mod mtp_dispatch;
-mod paged_layout;
-mod prefill;
-mod prompt_cache;
-mod run_loop;
-mod speculative_finalize;
 
 /// Returns true when the current hardware is M5+ with Neural Accelerator
 /// support and tile-aligned prefill should be applied.
@@ -139,14 +128,6 @@ fn build_handoff_thinking_state(
     }
     Ok(state)
 }
-
-/// Number of leading tokens pinned as an attention sink when `--max-kv-size`
-/// front-trims a dense `KVCache` (issue #718). A transformer dumps its excess
-/// attention onto the first few tokens; dropping them along with the rest of
-/// the old window collapses decode into degenerate repetition. Mirrors
-/// upstream mlx-lm `RotatingKVCache(max_size=max_kv_size, keep=4)`
-/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py#L37).
-const MAX_KV_SIZE_SINK_KEEP: i32 = 4;
 
 /// Environment override for the #715 batched-prefill token budget.
 const MAX_BATCH_PREFILL_TOKENS_ENV: &str = "MLXCEL_MAX_BATCH_PREFILL_TOKENS";
@@ -461,9 +442,12 @@ pub struct BatchScheduler {
     /// chunk (full prefill, chunked prefill start, chunked prefill
     /// continuation) and every decode step,
     /// [`KVCache::trim_front_keep_sink`] is invoked on each cache whose
-    /// `live_len()` exceeds `N`, pinning a small leading attention-sink
-    /// prefix (`MAX_KV_SIZE_SINK_KEEP`) and dropping the excess tokens
-    /// that follow it rather than the oldest tokens overall. **Crucially,
+    /// `live_len()` exceeds `N`, pinning the sequence's resolved retained
+    /// prefix (b10621 `--keep` / `n_keep`, #1472; a fixed 4-token attention
+    /// sink before that, issue #718) and dropping tokens past it rather than
+    /// the oldest tokens overall. Since #1472 the trim runs only under
+    /// `--context-shift`; the default enforces the bound by refusing or
+    /// stopping instead. **Crucially,
     /// the cache's monotonic `offset` is never decremented**,
     /// `trim_front_keep_sink` advances `live_start` so RoPE relative
     /// positions stay correct (see [`KVCache::trim_front_keep_sink`] for
@@ -482,6 +466,14 @@ pub struct BatchScheduler {
     /// `--kv-quant-scheme=turboquant --max-kv-size=M` is flagged even
     /// when the legacy `--kv-cache-mode` flag is left at FP16.
     max_kv_size: Option<usize>,
+
+    /// Context-retention policy at the KV bound (#1472, b10621
+    /// `--context-shift` / `--keep`). With `context_shift` off (the default),
+    /// [`Self::enforce_max_kv_size_for`] never trims: an over-long prompt is
+    /// refused at admission and a decode that reaches the bound stops with
+    /// `truncated: true`. With it on, the trim retains each sequence's
+    /// resolved `keep` prefix and discards its resolved `discard` depth.
+    context_retention: ContextRetentionPolicy,
 
     /// Experimental VLM prompt-prefix cache sharing toggle (#124 step c,
     /// `--enable-vlm-prefix-cache`).
@@ -891,6 +883,18 @@ fn validate_dense_detached_kv_modes_against_table(
     Ok(())
 }
 
+mod admission;
+mod config;
+mod decode_tick;
+mod handoff;
+#[path = "../scheduler.rs"]
+mod mtp_dispatch;
+mod paged_layout;
+mod prefill;
+mod prompt_cache;
+mod run_loop;
+mod speculative_finalize;
+
 #[cfg(test)]
 mod structure_tests;
 
@@ -925,3 +929,52 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+/// Resolve a request's context-retention values against the server policy
+/// (#1472), pure so the arithmetic is unit-testable without a scheduler.
+///
+/// Mirrors b10621's slot shift setup (`server-context.cpp`): the request's
+/// `n_keep` falls back to the server-wide `--keep`, `-1` resolves to the
+/// whole prompt, and one token is added on top when the tokenizer prepended a
+/// BOS (`if (add_bos_token) n_keep += 1`), so "keep N prompt tokens" keeps N
+/// tokens of the operator's prompt.
+fn resolve_retention_values(
+    policy: ContextRetentionPolicy,
+    request: crate::server::config::RetentionOverride,
+    prompt_len: usize,
+    bos_prepended: bool,
+) -> SequenceRetention {
+    let requested = request.n_keep.unwrap_or(policy.n_keep);
+    let mut keep: i64 = if requested < 0 {
+        prompt_len as i64
+    } else {
+        requested
+    };
+    if bos_prepended {
+        keep += 1;
+    }
+    SequenceRetention {
+        keep,
+        discard: request.n_discard.unwrap_or(0).max(0),
+        context_exhausted: false,
+    }
+}
+
+/// How many tokens a context shift discards (#1472), pure for unit testing.
+///
+/// `excess` is how far the live window overshot the bound (chunked prefill
+/// can overshoot by a whole chunk). The requested depth (`n_discard`, or half
+/// of the non-retained window at upstream's `0` default) is raised to at
+/// least the excess so the bound is restored, and capped at `n_left - 1` so a
+/// token always remains to decode from; `keep` is already clamped to
+/// `bound - 4` by the caller, which keeps `n_left > excess` and the two
+/// bounds compatible.
+fn context_shift_trim_depth(live_len: i32, excess: i32, keep: i32, requested_discard: i32) -> i32 {
+    let n_left = live_len - keep;
+    let discard = if requested_discard > 0 {
+        requested_discard
+    } else {
+        n_left / 2
+    };
+    discard.max(excess).min((n_left - 1).max(excess))
+}

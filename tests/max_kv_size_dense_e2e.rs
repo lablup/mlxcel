@@ -25,7 +25,9 @@
 //!
 //! The fix pins a small attention-sink prefix when trimming
 //! (`KVCache::trim_front_keep_sink`, mirroring mlx-lm
-//! `RotatingKVCache(keep=4)`). This test boots a real `mlxcel-server`, sends a
+//! `RotatingKVCache(keep=4)`). Since #1472 the trim runs only under
+//! `--context-shift`, with the sink spelled `--keep 4`, so this test passes
+//! both. It boots a real `mlxcel-server`, sends a
 //! ~500-token prompt with `--max-kv-size 256` on BOTH failing configurations
 //! (`--kv-cache-mode fp16 --decode-storage-backend dense` and
 //! `--kv-cache-mode int8`), and asserts the completion is coherent and
@@ -199,6 +201,14 @@ async fn run_completion(model_path: &str, port: u16, extra_args: &[&str]) -> Opt
         &port_str,
         "--parallel",
         "1",
+        // Since #1472 the KV bound is a hard stop by default (b10621's
+        // disabled context shift): an over-long prompt is refused at
+        // admission. This test exists to exercise the rolling-window trim, so
+        // it opts back in with the sanctioned spelling, pinning the same
+        // 4-token attention sink the pre-#1472 trim pinned implicitly.
+        "--context-shift",
+        "--keep",
+        "4",
     ];
     args.extend_from_slice(extra_args);
 

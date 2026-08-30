@@ -205,6 +205,12 @@ pub struct ServerGenerateOptions {
         std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>,
     >,
 
+    /// Per-request context-retention overrides (#1472): b10621's `n_keep` /
+    /// `n_discard` native request fields. Both `None` on every route that
+    /// does not declare them; the scheduler falls back to the server-wide
+    /// `--keep` and the half-window discard default.
+    pub retention: RetentionOverride,
+
     /// per-request Gemma 4 image soft-token budget.
     ///
     /// `None` means "no override": the Gemma 4 preprocessor uses the budget
@@ -217,6 +223,21 @@ pub struct ServerGenerateOptions {
     /// so by the time the scheduler sees this field it is already known to be
     /// on the supported ladder. Ignored by every non-Gemma-4 model.
     pub image_soft_tokens: Option<usize>,
+}
+
+/// Per-request context-retention overrides (b10621 `n_keep` / `n_discard`,
+/// #1472).
+///
+/// `n_keep` is the number of leading prompt tokens retained across a context
+/// shift (`-1` = the whole initial prompt); `None` inherits the server-wide
+/// `--keep`. `n_discard` is how many tokens past the retained prefix each
+/// shift drops; `None` (and upstream's `0`) resolve to half of the
+/// non-retained window. Validated at the route; the scheduler receives only
+/// in-domain values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RetentionOverride {
+    pub n_keep: Option<i64>,
+    pub n_discard: Option<i64>,
 }
 
 /// Per-request reasoning-budget override.
@@ -784,6 +805,18 @@ pub struct ServerConfig {
     /// wins so the configured context window remains an upper bound.
     pub max_kv_size: Option<usize>,
 
+    /// Whether the scheduler may shift (front-discard) a sequence's context
+    /// to make room at [`Self::max_kv_size`] (#1472, b10621
+    /// `--context-shift`). Off (the default, upstream's too), an over-long
+    /// prompt is refused at admission and a generation that reaches the bound
+    /// stops with `truncated: true` and `stop_type: "limit"`.
+    pub context_shift: bool,
+
+    /// Server-wide default for the retained leading tokens on a context
+    /// shift (#1472, b10621 `--keep`; `-1` = the whole initial prompt).
+    /// Overridden per request by the native `n_keep` field.
+    pub n_keep: i64,
+
     /// Paged KV pool block-budget directive (epic #116 #122 b3,
     /// `--kv-cache-budget`).
     ///
@@ -949,6 +982,8 @@ impl Default for ServerConfig {
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
+            context_shift: false,
+            n_keep: 0,
             // Serving-throughput default guard (#628): pair the batched-decode
             // default with an `auto` paged KV budget so admission sheds load
             // instead of OOMing. Disable with `--kv-cache-budget none`.

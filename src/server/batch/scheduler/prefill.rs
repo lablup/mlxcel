@@ -727,7 +727,7 @@ impl BatchScheduler {
         // prompt can overshoot the cap during a single forward pass; without
         // this trim the first decode step would start with a too-wide live
         // window. With no cap configured this is a cheap early-return.
-        self.enforce_max_kv_size_for(seq.seq_id);
+        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         mlxcel_core::clear_memory_cache();
         // `prefill_offset` is a cursor into `prompt_tokens`, so it must
@@ -889,7 +889,7 @@ impl BatchScheduler {
         // 4096` would otherwise see the cap engage only after the entire
         // prefill completes — defeating the memory-bound the operator
         // configured. With no cap configured this is a cheap early-return.
-        self.enforce_max_kv_size_for(seq.seq_id);
+        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         mlxcel_core::clear_memory_cache();
         seq.prefill_offset = end;
@@ -1060,7 +1060,7 @@ impl BatchScheduler {
         // continuation chunk so a multi-chunk prefill stays bounded across
         // all chunks, not just at the very end. Cheap early-return when no
         // cap is configured.
-        self.enforce_max_kv_size_for(seq.seq_id);
+        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         seq.prefill_offset = end;
 
@@ -1274,7 +1274,7 @@ impl BatchScheduler {
             None => None,
         };
 
-        let prefill_finish_reason = if prefill_stop_word.is_some() {
+        let mut prefill_finish_reason = if prefill_stop_word.is_some() {
             Some(FinishReason::StopSequence)
         } else if structured_stopped {
             Some(FinishReason::Stop)
@@ -1283,6 +1283,19 @@ impl BatchScheduler {
         } else {
             None
         };
+        // b10621 context guard (#1472): a prompt admitted just under the KV
+        // bound can leave no room for a second token; stop here with
+        // `truncated: true` rather than overflowing on the first decode step.
+        if prefill_finish_reason.is_none()
+            && Self::context_bound_stop_due(
+                &seq,
+                self.max_kv_size,
+                self.context_retention.context_shift,
+            )
+        {
+            seq.retention.context_exhausted = true;
+            prefill_finish_reason = Some(FinishReason::Length);
+        }
         if let Some(finish_reason) = prefill_finish_reason {
             if let Err(err) = seq
                 .state

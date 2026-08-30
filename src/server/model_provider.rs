@@ -232,6 +232,12 @@ pub enum StopKind {
     /// string, which b10621 reports as `stopping_word` and which is excluded
     /// from the returned text. Maps to `stop_type: "word"`.
     Word(String),
+    /// The sequence reached the per-slot context bound with context shifting
+    /// disabled (#1472). b10621 stops such a slot with `truncated: true` and
+    /// `STOP_TYPE_LIMIT`, so this maps to `stop_type: "limit"` and is the one
+    /// stop that sets `truncated` on the native response. Distinct from
+    /// [`Limit`](Self::Limit) because the token budget was NOT reached.
+    ContextExhausted,
 }
 
 impl StopKind {
@@ -502,6 +508,11 @@ impl ModelProvider {
                 config.batch_kv_quant,
                 // forward the --max-kv-size cap to the scheduler.
                 config.max_kv_size,
+                // forward the b10621 context-retention policy (#1472).
+                crate::server::batch::ContextRetentionPolicy {
+                    context_shift: config.context_shift,
+                    n_keep: config.n_keep,
+                },
                 // forward the --kv-cache-budget directive to the worker.
                 config.kv_cache_budget,
                 // experimental VLM prompt-prefix cache toggle (#124 step c).
@@ -860,6 +871,8 @@ impl ModelProvider {
             kv_cache_mode,
             batch_kv_quant,
             max_kv_size,
+            // legacy wrapper: b10621 defaults (shift disabled, keep 0).
+            Default::default(),
             kv_cache_budget,
             enable_vlm_prefix_cache,
             serving_mode,
@@ -909,6 +922,8 @@ impl ModelProvider {
         kv_cache_mode: mlxcel_core::cache::KVCacheMode,
         batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
         max_kv_size: Option<usize>,
+        // b10621 context-retention policy at the KV bound (#1472).
+        context_retention: crate::server::batch::ContextRetentionPolicy,
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
         enable_vlm_prefix_cache: bool,
         serving_mode: crate::distributed::disaggregated::ServingMode,
@@ -966,6 +981,8 @@ impl ModelProvider {
             batch_kv_quant,
             // cap plain KVCache growth when configured.
             max_kv_size,
+            // b10621 context-retention policy (#1472).
+            context_retention,
             // paged KV pool block-budget directive; resolved to a block count
             // on the worker thread once the model geometry is known.
             kv_cache_budget,
@@ -1071,6 +1088,7 @@ impl ModelProvider {
             // #715: minimal test path never batches prefill; keep the default.
             max_batch_prefill_tokens: None,
             decode_storage_backend: crate::server::DecodeStorageBackend::Dense,
+            context_retention: Default::default(),
             pipeline_parallel_runtime: None,
             tensor_parallel: crate::distributed::ShardConfig::default(),
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,

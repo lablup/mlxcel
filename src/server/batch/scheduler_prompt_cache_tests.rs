@@ -389,6 +389,7 @@ fn sequence_info_fields_transport_cache_hit_metadata() {
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
 
     let seq = SequenceInfo {
+        retention: Default::default(),
         seq_id: SequenceId::from_raw(7),
         state: SequenceState::Queued,
         prompt_tokens,

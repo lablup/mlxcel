@@ -167,6 +167,20 @@ pub(crate) fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse 
         return ErrorResponse::service_unavailable("All slots are busy. Please try again later.");
     }
 
+    // b10621 context admission (#1472): the scheduler refuses a prompt that
+    // does not fit the per-slot KV bound with upstream's exceed-context
+    // wording, and upstream classifies that as ERROR_TYPE_EXCEED_CONTEXT_SIZE
+    // (400, "exceed_context_size_error"; server-common.cpp), not as a server
+    // error. The scheduler hands errors up as strings through
+    // GenerateEvent::Error, so the classification keys on the one wording the
+    // admission guard emits.
+    let message = err.to_string();
+    if message.contains("exceeds the available context size") {
+        let mut response = ErrorResponse::new(message, "exceed_context_size_error");
+        response.status = axum::http::StatusCode::BAD_REQUEST;
+        return response;
+    }
+
     let mut response = if err.downcast_ref::<ChatWorkerGoneError>().is_some() {
         ErrorResponse::new(
             "The chat worker has exited; check the server log.",

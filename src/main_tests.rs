@@ -1344,25 +1344,23 @@ fn serve_rejects_a_negative_value_in_the_value_parser_for_a_non_negative_option(
 }
 
 #[test]
-fn serve_sends_a_negative_parallel_to_the_value_parser_not_the_argv_parser() {
-    // b10621 documents a negative in `--parallel`'s help text while mlxcel's
-    // field is `usize`. Command-wide `allow_negative_numbers` makes `-1` a
-    // candidate value here, so the type parser is what must reject it, with a
-    // message that names the option and the value.
-    let err = serve_parse_error(
-        &["--parallel", "-1"],
-        "--parallel is usize and must reject a negative slot count",
+fn serve_resolves_a_negative_parallel_to_the_automatic_slot_count() {
+    // Since #1472 `--parallel` carries b10621's whole value domain on this
+    // binary too: `-1` (the default) is auto, resolving to 4 slots as
+    // upstream's own auto does; zero and other negatives are refused at
+    // resolution with a message naming the option and the value.
+    assert_eq!(
+        mlxcel::server::resolve_n_parallel(-1).expect("auto resolves"),
+        4
     );
-    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-    let text = err.to_string();
-    assert!(
-        text.contains("parallel") && text.contains("-1"),
-        "the --parallel rejection must name the option and the value, got: {text}"
-    );
-    assert!(
-        !text.contains("unexpected argument"),
-        "--parallel -1 must no longer be an argv-parser error, got: {text}"
-    );
+    for bad in [0i64, -2] {
+        let err = mlxcel::server::resolve_n_parallel(bad)
+            .expect_err("only -1 and positive counts are in domain");
+        assert!(
+            err.contains("--parallel") && err.contains(&bad.to_string()),
+            "the rejection must name the option and the value, got: {err}"
+        );
+    }
 }
 
 #[test]

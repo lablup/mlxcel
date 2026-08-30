@@ -139,6 +139,7 @@ impl BatchScheduler {
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
             max_kv_size: None,
+            context_retention: ContextRetentionPolicy::default(),
             // multimodal prefix-cache sharing stays off until the operator
             // opts in via `with_vlm_prefix_cache` (#124 step c).
             enable_vlm_prefix_cache: false,
@@ -319,6 +320,19 @@ impl BatchScheduler {
     /// Returns the configured maximum KV cache size (for tests).
     pub fn max_kv_size(&self) -> Option<usize> {
         self.max_kv_size
+    }
+
+    /// Install the context-retention policy (#1472, b10621 `--context-shift`
+    /// / `--keep`). Default: shifting disabled, retain 0, which is upstream's
+    /// default and makes the KV bound a hard stop.
+    pub fn with_context_retention(mut self, policy: ContextRetentionPolicy) -> Self {
+        self.context_retention = policy;
+        self
+    }
+
+    /// The configured context-retention policy (for tests).
+    pub fn context_retention(&self) -> ContextRetentionPolicy {
+        self.context_retention
     }
 
     /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,

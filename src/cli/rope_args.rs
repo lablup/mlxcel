@@ -20,37 +20,38 @@
 //! accept the same command line. The upstream definitions are in
 //! [`common/arg.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp).
 //!
-//! # The two halves, and why they end differently
+//! # The YaRN knobs (#1472)
 //!
-//! The four RoPE flags are implemented: they rewrite the checkpoint's
-//! `rope_scaling` block and `rope_theta` before the model is built, through
-//! [`crate::models::rope_overrides`]. The five YaRN flags are not: mlxcel's
-//! shared RoPE path has no YaRN arm (see
-//! [`crate::models::rope_utils::RopeScalingKind`]), so there is nothing for
-//! `--yarn-beta-fast` to tune.
+//! All nine flags are implemented. The four RoPE flags rewrite the
+//! checkpoint's `rope_scaling` block and `rope_theta` before the model is
+//! built, through [`crate::models::rope_overrides`]. The five YaRN flags
+//! resolve to [`crate::models::rope_overrides::YarnKnobs`] and tune the YaRN
+//! frequency table wherever the shared RoPE path builds one (see the `Yarn`
+//! arm of [`crate::models::rope_utils::RopeScalingKind`]), whether
+//! `--rope-scaling yarn` forced it or the checkpoint's own block declared it.
 //!
-//! They are still defined here rather than left off the binaries, because
 //! b10621 gives all five a sentinel default that means "leave the model's own
-//! values alone" (`-1.00`, and `0` for `--yarn-orig-ctx`). A deployment script
-//! that passes the sentinel is asking for the checkpoint's own behavior and
-//! must keep working; one that passes a real value is asking for something
-//! mlxcel cannot do, and epic #1431's rule is that such a request is refused
-//! with a diagnostic rather than accepted and ignored. [`resolve_yarn_request`]
-//! is that split.
+//! values alone" (`-1.00`, and `0` for `--yarn-orig-ctx`); the sentinel maps
+//! to an absent knob here, so a deployment script that spells out the
+//! upstream defaults asks for the checkpoint's own behavior and gets it. With
+//! a non-YaRN rotation in force the knobs are inert, exactly as they are in
+//! b10621, whose `llama_context` reads them only under
+//! `LLAMA_ROPE_SCALING_TYPE_YARN`.
 //!
 //! Used by: mlxcel serve, mlxcel-server.
 
 use clap::Args;
 
-use crate::models::rope_overrides::RopeRuntimeOverride;
+use crate::models::rope_overrides::{RopeRuntimeOverride, YarnKnobs};
 
 /// Shared RoPE / YaRN runtime-override flag group.
 ///
 /// Every flag is `Option<_>` with no clap default, so "not given" stays
 /// distinguishable from "given at b10621's default". That distinction is what
-/// lets a sentinel `--yarn-ext-factor -1` be accepted while an ordinary value
-/// is refused, and it keeps the resolved override out of the way entirely for
-/// the overwhelmingly common case where no rotation flag was passed.
+/// lets a sentinel `--yarn-ext-factor -1` resolve to "the model's own value"
+/// while an ordinary value becomes a knob, and it keeps the resolved override
+/// out of the way entirely for the overwhelmingly common case where no
+/// rotation flag was passed.
 #[derive(Args, Debug, Default, Clone)]
 #[command(next_help_heading = "RoPE / YaRN Options")]
 pub struct RopeOverrideArgs {
@@ -59,11 +60,9 @@ pub struct RopeOverrideArgs {
     /// Defaults to the scheme the checkpoint's own `rope_scaling` block names.
     /// `none` drops that block and rotates with the plain `base^(2i/d)` table;
     /// `linear` divides positions by `--rope-scale` (or by the checkpoint's own
-    /// factor when that flag is absent). `yarn` parses and is then refused:
-    /// mlxcel's shared RoPE path serves `default`, `linear` and `llama3` tables
-    /// only, and serving a YaRN request as one of those would change the
-    /// rotation silently. Checkpoints whose config declares YaRN still load and
-    /// rotate with it.
+    /// factor when that flag is absent); `yarn` builds the YaRN table with the
+    /// factor from `--rope-scale` / `--rope-freq-scale` and the `--yarn-*`
+    /// knobs.
     ///
     /// Applied before the model is constructed, so before any KV cache exists.
     /// Refused at startup when the loaded architecture computes its RoPE
@@ -105,7 +104,8 @@ pub struct RopeOverrideArgs {
 
     /// YaRN: original context size of the model (0 = model training context size).
     ///
-    /// Accepted at b10621's sentinel default only; see the module docs.
+    /// Tunes the YaRN correction band when a YaRN rotation is in force; see
+    /// the module docs.
     #[arg(
         long = "yarn-orig-ctx",
         env = "LLAMA_ARG_YARN_ORIG_CTX",
@@ -115,7 +115,8 @@ pub struct RopeOverrideArgs {
 
     /// YaRN: extrapolation mix factor (0.0 = full interpolation).
     ///
-    /// Accepted at b10621's sentinel default only; see the module docs.
+    /// Tunes the interpolation/extrapolation mix when a YaRN rotation is in
+    /// force; the sentinel (-1.0) resolves to 1.0 there, as it does upstream.
     #[arg(
         long = "yarn-ext-factor",
         env = "LLAMA_ARG_YARN_EXT_FACTOR",
@@ -125,7 +126,8 @@ pub struct RopeOverrideArgs {
 
     /// YaRN: scale sqrt(t) or attention magnitude.
     ///
-    /// Accepted at b10621's sentinel default only; see the module docs.
+    /// Participates only when the resolved extrapolation mix is 0, which is
+    /// b10621's own resolution order; see the module docs.
     #[arg(
         long = "yarn-attn-factor",
         env = "LLAMA_ARG_YARN_ATTN_FACTOR",
@@ -133,9 +135,9 @@ pub struct RopeOverrideArgs {
     )]
     pub yarn_attn_factor: Option<f32>,
 
-    /// YaRN: high correction dim or alpha.
+    /// YaRN: high correction dim or alpha (default 1).
     ///
-    /// Accepted at b10621's sentinel default only; see the module docs.
+    /// Tunes the YaRN correction band when a YaRN rotation is in force.
     #[arg(
         long = "yarn-beta-slow",
         env = "LLAMA_ARG_YARN_BETA_SLOW",
@@ -143,9 +145,9 @@ pub struct RopeOverrideArgs {
     )]
     pub yarn_beta_slow: Option<f32>,
 
-    /// YaRN: low correction dim or beta.
+    /// YaRN: low correction dim or beta (default 32).
     ///
-    /// Accepted at b10621's sentinel default only; see the module docs.
+    /// Tunes the YaRN correction band when a YaRN rotation is in force.
     #[arg(
         long = "yarn-beta-fast",
         env = "LLAMA_ARG_YARN_BETA_FAST",
@@ -169,61 +171,38 @@ const YARN_ORIG_CTX_SENTINEL: i64 = 0;
 impl RopeOverrideArgs {
     /// Resolve this group into a RoPE override, refusing what cannot be served.
     ///
-    /// Two failures are possible and both are startup errors, never warnings:
-    /// an unserveable YaRN request ([`resolve_yarn_request`]) and an
-    /// unserveable or self-contradictory RoPE request
-    /// ([`RopeRuntimeOverride::from_flags`]).
+    /// A self-contradictory RoPE request and a YaRN knob outside its value
+    /// domain are both startup errors, never warnings
+    /// ([`RopeRuntimeOverride::from_flags_with_yarn`]).
     pub fn resolve(&self) -> Result<Option<RopeRuntimeOverride>, String> {
-        self.resolve_yarn_request()?;
-        RopeRuntimeOverride::from_flags(
+        RopeRuntimeOverride::from_flags_with_yarn(
             self.rope_scaling.as_deref(),
             self.rope_scale,
             self.rope_freq_scale,
             self.rope_freq_base,
+            self.yarn_knobs(),
         )
     }
 
-    /// Accept the five YaRN flags at b10621's sentinels, refuse them otherwise.
+    /// The five YaRN flags as knobs, with b10621's sentinels mapped to
+    /// "use the model's own value" (#1472).
     ///
-    /// The message names every flag that was set to a real value, so an
-    /// operator passing three of them is told about three rather than fixing
-    /// them one restart at a time.
-    pub fn resolve_yarn_request(&self) -> Result<(), String> {
-        let mut requested: Vec<String> = Vec::new();
-
-        for (flag, value) in [
-            ("--yarn-ext-factor", self.yarn_ext_factor),
-            ("--yarn-attn-factor", self.yarn_attn_factor),
-            ("--yarn-beta-slow", self.yarn_beta_slow),
-            ("--yarn-beta-fast", self.yarn_beta_fast),
-        ] {
-            if let Some(value) = value
-                && value != YARN_SENTINEL
-            {
-                requested.push(format!("{flag} {value}"));
-            }
+    /// `common_params` initializes the four float knobs to `-1.0f` and the
+    /// original context to `0`, and `llama_context` substitutes the model's
+    /// own value for any that is still at the sentinel; an absent knob here is
+    /// that substitution.
+    pub fn yarn_knobs(&self) -> YarnKnobs {
+        YarnKnobs {
+            orig_ctx: self
+                .yarn_orig_ctx
+                .filter(|&value| value != YARN_ORIG_CTX_SENTINEL),
+            ext_factor: self.yarn_ext_factor.filter(|&value| value != YARN_SENTINEL),
+            attn_factor: self
+                .yarn_attn_factor
+                .filter(|&value| value != YARN_SENTINEL),
+            beta_fast: self.yarn_beta_fast.filter(|&value| value != YARN_SENTINEL),
+            beta_slow: self.yarn_beta_slow.filter(|&value| value != YARN_SENTINEL),
         }
-        if let Some(value) = self.yarn_orig_ctx
-            && value != YARN_ORIG_CTX_SENTINEL
-        {
-            requested.push(format!("--yarn-orig-ctx {value}"));
-        }
-
-        if requested.is_empty() {
-            return Ok(());
-        }
-
-        Err(format!(
-            "{} requests YaRN rotation parameters, which mlxcel's shared RoPE path does not \
-             implement: it builds \"default\", \"linear\" and \"llama3\" frequency tables only, \
-             so there is nothing for these to tune and accepting them would leave the rotation \
-             unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek \
-             V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are \
-             unaffected. Pass the b10621 defaults ({} / --yarn-orig-ctx 0), or drop the flags, \
-             to use the checkpoint's own values. Tracked by #1472.",
-            requested.join(", "),
-            YARN_SENTINEL
-        ))
     }
 }
 

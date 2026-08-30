@@ -49,6 +49,7 @@ fn make_test_sequence(id_val: u64) -> (SequenceInfo, mpsc::Receiver<GenerateEven
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
 
     let seq = SequenceInfo {
+        retention: Default::default(),
         seq_id: SequenceId::from_raw(id_val),
         state: SequenceState::Queued,
         prompt_tokens,
@@ -238,6 +239,7 @@ fn make_test_sequence_with_priority(
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
 
     let seq = SequenceInfo {
+        retention: Default::default(),
         seq_id: SequenceId::from_raw(id_val),
         state: SequenceState::Queued,
         prompt_tokens,
@@ -2015,4 +2017,136 @@ fn handoff_thinking_state_replays_primed_first_token_and_validates_raw_budget() 
 
     assert!(build_handoff_thinking_state(Some(token_ids), -2, 8, false, &[]).is_err());
     assert!(build_handoff_thinking_state(Some(token_ids), 9, 8, false, &[]).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// b10621 context retention (#1472)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retention_resolves_the_request_over_the_server_default() {
+    use super::resolve_retention_values;
+    use crate::server::batch::sequence::ContextRetentionPolicy;
+    use crate::server::config::RetentionOverride;
+
+    let policy = ContextRetentionPolicy {
+        context_shift: true,
+        n_keep: 7,
+    };
+    // No request value: the server-wide --keep applies.
+    let r = resolve_retention_values(policy, RetentionOverride::default(), 100, false);
+    assert_eq!(r.keep, 7);
+    assert_eq!(r.discard, 0, "absent n_discard is upstream's half-window 0");
+    assert!(!r.context_exhausted);
+
+    // The request wins, as every per-request override does.
+    let r = resolve_retention_values(
+        policy,
+        RetentionOverride {
+            n_keep: Some(32),
+            n_discard: Some(64),
+        },
+        100,
+        false,
+    );
+    assert_eq!(r.keep, 32);
+    assert_eq!(r.discard, 64);
+}
+
+#[test]
+fn retention_resolves_minus_one_to_the_whole_prompt_and_counts_bos() {
+    use super::resolve_retention_values;
+    use crate::server::batch::sequence::ContextRetentionPolicy;
+    use crate::server::config::RetentionOverride;
+
+    let policy = ContextRetentionPolicy {
+        context_shift: true,
+        n_keep: 0,
+    };
+    let all = resolve_retention_values(
+        policy,
+        RetentionOverride {
+            n_keep: Some(-1),
+            n_discard: None,
+        },
+        123,
+        false,
+    );
+    assert_eq!(all.keep, 123, "-1 retains the whole initial prompt");
+
+    // b10621 adds one for a prepended BOS so "keep N prompt tokens" keeps N
+    // tokens of the operator's prompt.
+    let with_bos = resolve_retention_values(
+        policy,
+        RetentionOverride {
+            n_keep: Some(8),
+            n_discard: None,
+        },
+        123,
+        true,
+    );
+    assert_eq!(with_bos.keep, 9);
+}
+
+#[test]
+fn context_shift_trim_depth_matches_the_b10621_shift_arithmetic() {
+    use super::context_shift_trim_depth;
+
+    // Upstream's default: n_discard = 0 resolves to half the non-retained
+    // window (n_left / 2), and the trim is at least the excess.
+    let trim = context_shift_trim_depth(512, 1, 32, 0);
+    assert_eq!(trim, (512 - 32) / 2);
+
+    // An explicit n_discard is honored when it clears the excess.
+    assert_eq!(context_shift_trim_depth(512, 1, 32, 64), 64);
+
+    // A chunked prefill can overshoot the bound by a whole chunk; the trim is
+    // raised to the excess so the cap is restored in one shift.
+    assert_eq!(context_shift_trim_depth(768, 256, 32, 64), 256);
+
+    // The trim never consumes the entire non-retained window.
+    let trim = context_shift_trim_depth(512, 1, 32, 10_000);
+    assert_eq!(trim, 512 - 32 - 1);
+}
+
+#[test]
+fn context_bound_stop_fires_only_with_shifting_disabled_and_a_bound() {
+    use super::BatchScheduler;
+
+    let (mut seq, _rx) = make_test_sequence(90);
+    seq.prompt_tokens = vec![0; 60];
+    seq.generated_tokens = vec![1; 3];
+
+    // 60 + 3 + 1 >= 64: the next token would not fit a 64-token bound.
+    assert!(BatchScheduler::context_bound_stop_due(
+        &seq,
+        Some(64),
+        false
+    ));
+    // One more token of headroom: not yet.
+    assert!(!BatchScheduler::context_bound_stop_due(
+        &seq,
+        Some(65),
+        false
+    ));
+    // Shifting enabled: the trim handles it instead.
+    assert!(!BatchScheduler::context_bound_stop_due(
+        &seq,
+        Some(64),
+        true
+    ));
+    // No bound configured: unbounded legacy behavior.
+    assert!(!BatchScheduler::context_bound_stop_due(&seq, None, false));
+}
+
+#[test]
+fn a_context_bound_stop_is_reported_as_truncated_with_stop_type_limit() {
+    use crate::server::model_provider::StopKind;
+
+    let (mut seq, _rx) = make_test_sequence(91);
+    seq.retention.context_exhausted = true;
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let result = seq.take_generation_result(&tokenizer, 0);
+    assert_eq!(result.stop_kind, StopKind::ContextExhausted);
+    assert_eq!(result.finish_reason, "length");
 }

@@ -15,6 +15,27 @@
 use super::*;
 
 impl BatchScheduler {
+    /// Whether a bounded sequence must stop now because its next token would
+    /// not fit the KV window with context shifting disabled (#1472).
+    ///
+    /// Token-count based (`prompt + generated + 1 >= bound`), mirroring
+    /// upstream's `slot.prompt.n_tokens() + 1 >= slot.n_ctx`: with shifting
+    /// disabled nothing ever trims, so the token count IS the live KV window,
+    /// including for the paged and Turbo cache modes whose trim operation is
+    /// a recorded no-op. VLM sequences are exempt, as upstream exempts
+    /// multimodal from the context machinery (their KV length is the
+    /// embedding count, not the text token count).
+    pub(super) fn context_bound_stop_due(
+        seq: &SequenceInfo,
+        max_kv_size: Option<usize>,
+        context_shift: bool,
+    ) -> bool {
+        !context_shift
+            && seq.vlm_embeddings.is_none()
+            && max_kv_size
+                .is_some_and(|max| seq.prompt_tokens.len() + seq.generated_tokens.len() + 1 >= max)
+    }
+
     // ------------------------------------------------------------------
     // Preemptive eviction
     // ------------------------------------------------------------------
@@ -677,7 +698,12 @@ impl BatchScheduler {
         // Sliding-window (model-internal RotatingKVCache) and Turbo-quantized
         // caches are unaffected (trim_front returns 0 for Turbo modes).
         for &seq_id in seq_ids {
-            self.enforce_max_kv_size_for(seq_id);
+            let retention = self
+                .active_batch
+                .get(seq_id)
+                .map(|seq| seq.retention)
+                .unwrap_or_default();
+            self.enforce_max_kv_size_for(seq_id, retention);
         }
 
         let mut last_tokens: Vec<i32> = Vec::with_capacity(b);
@@ -936,6 +962,26 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
+            // b10621 context guard (#1472): with context shifting disabled, a
+            // bounded sequence stops before its next token would overflow the
+            // KV window, reported as `truncated: true` with `stop_type:
+            // "limit"` rather than silently discarding old tokens.
+            if !seq.state.is_finished()
+                && Self::context_bound_stop_due(
+                    seq,
+                    self.max_kv_size,
+                    self.context_retention.context_shift,
+                )
+            {
+                seq.retention.context_exhausted = true;
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+            }
+
             // Loop / repetition guard (issue #432): end early when the raw
             // generated stream collapses into a short repeated pattern. Skip if
             // the length limit already finished this sequence; the detector is
@@ -1085,6 +1131,26 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
+            // b10621 context guard (#1472): with context shifting disabled, a
+            // bounded sequence stops before its next token would overflow the
+            // KV window, reported as `truncated: true` with `stop_type:
+            // "limit"` rather than silently discarding old tokens.
+            if !seq.state.is_finished()
+                && Self::context_bound_stop_due(
+                    seq,
+                    self.max_kv_size,
+                    self.context_retention.context_shift,
+                )
+            {
+                seq.retention.context_exhausted = true;
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+            }
+
             // Loop / repetition guard (issue #432): end early when the raw
             // generated stream collapses into a short repeated pattern. Skip if
             // the length limit already finished this sequence; the detector is
@@ -1147,7 +1213,12 @@ impl BatchScheduler {
         // each decode forward pass. Sliding-window layers are managed by the
         // model and bypass this pool path; Turbo-quantized caches silently skip
         // the trim (KVCache::trim_front returns 0 for Turbo modes).
-        self.enforce_max_kv_size_for(seq_id);
+        let retention = self
+            .active_batch
+            .get(seq_id)
+            .map(|seq| seq.retention)
+            .unwrap_or_default();
+        self.enforce_max_kv_size_for(seq_id, retention);
 
         let input = mlxcel_core::from_slice_i32(&[last_token], &[1, 1]);
         let logits = {
@@ -1317,6 +1388,23 @@ impl BatchScheduler {
                 .transition_to(SequenceState::Finished(FinishReason::Length))
         {
             tracing::error!("State transition error: {err}");
+        }
+
+        // b10621 context guard (#1472): see the batched-loop twin above.
+        if !seq.state.is_finished()
+            && Self::context_bound_stop_due(
+                seq,
+                self.max_kv_size,
+                self.context_retention.context_shift,
+            )
+        {
+            seq.retention.context_exhausted = true;
+            if let Err(err) = seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::Length))
+            {
+                tracing::error!("State transition error: {err}");
+            }
         }
 
         // Loop / repetition guard (issue #432): end early when the raw

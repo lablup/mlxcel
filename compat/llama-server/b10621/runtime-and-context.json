@@ -18,10 +18,10 @@
       "default": "2048",
       "description": "logical maximum batch size (default: 2048) (env: LLAMA_ARG_BATCH)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1472,
-      "test": "src/server/routes/props_tests.rs",
-      "notes": "Accepted as an alias for --prefill-chunk-size, which is the logical prefill batch and does have an observable effect on chunked prefill. The resolved value is now reported as `n_batch` in /props. It is not b10621's n_batch: the default differs (512 against 2048) and mlxcel schedules chunked prefill rather than filling a llama_batch, so a given value does not produce the same per-forward token count.",
+      "test": "src/server/cli_input_tests.rs",
+      "notes": "Aliased onto --prefill-chunk-size, the logical prefill batch, which has an observable effect on chunked prefill; the resolution is pinned by resolve_prefill_chunk_size tests and the resolved value is reported as `n_batch` in /props (src/server/routes/props_tests.rs). It is not b10621's n_batch: the unset default differs (512, mlxcel's --prefill-chunk-size default, against 2048) and mlxcel schedules chunked prefill rather than filling a llama_batch, so a given value does not produce the same per-forward token count. Changing mlxcel's own default to 2048 is a throughput decision deliberately not made inside a compatibility issue (#1472).",
       "divergence": [
         "default is 512 (mlxcel's --prefill-chunk-size default); b10621 defaults to 2048",
         "maps onto mlxcel's chunked-prefill chunk size rather than llama.cpp's logical llama_batch, so equal values do not produce equal per-forward token counts"
@@ -244,16 +244,20 @@
       "default": "disabled",
       "description": "whether to use context shift on infinite text generation (default: disabled) (env: LLAMA_ARG_CONTEXT_SHIFT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": null,
-      "notes": "Not accepted, and the behaviour differs in both directions. b10621 defaults context shift OFF, so a request that outgrows its context fails. mlxcel front-trims the KV live window (keeping a 4-token attention sink) once --ctx-size or --max-kv-size bounds it, which is a context shift that is always on and not switchable; with neither flag set nothing bounds the window at all.",
-      "divergence": [
-        "no flag: KV front-trimming is unconditional once a context bound exists and cannot be disabled",
-        "b10621 defaults context shift to disabled and fails an over-long request; mlxcel shifts silently"
-      ],
+      "test": "src/server/batch/scheduler_tests.rs",
+      "notes": "Both spellings and LLAMA_ARG_CONTEXT_SHIFT accepted, with upstream's disabled default. Disabled, an over-long prompt is refused at admission with upstream's exceed-context wording and a generation that reaches the per-slot bound stops with truncated: true and stop_type: \"limit\" (b10621's process_token guard); enabled, the scheduler front-discards past the sequence's resolved n_keep prefix, raising the discard to the prefill-chunk overshoot when needed. Before #1472 the shift was unconditional (a fixed 4-token attention sink) whenever --ctx-size or --max-kv-size bounded the window; docs/llama-server-compat.md carries the migration note. Mode caveats, both mlxcel-only surfaces: the trim is a recorded no-op on Turbo-quantized layers (KVCache::trim_front_keep_sink support matrix, warned at startup), and VLM sequences are exempt from the machinery exactly as upstream disables ctx_shift under multimodal.",
+      "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--context-shift",
+          "--no-context-shift"
+        ],
+        "env": "LLAMA_ARG_CONTEXT_SHIFT",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -420,16 +424,17 @@
       "default": "0, -1 = all",
       "description": "number of tokens to keep from the initial prompt (default: 0, -1 = all)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": null,
-      "notes": "Not accepted. mlxcel does pin a leading attention-sink prefix when the KV live window exceeds its cap, but the length is the fixed MAX_KV_SIZE_SINK_KEEP = 4 in src/server/batch/scheduler.rs, not an operator-settable count, and there is no -1 = keep-all form. Making it settable is what #1450 leaves open.",
-      "divergence": [
-        "no flag: the retained prefix is a fixed 4 tokens rather than an operator-settable count",
-        "b10621's -1 (retain the whole initial prompt) has no representation"
-      ],
+      "test": "src/server/batch/scheduler_tests.rs",
+      "notes": "Accepted as the server-wide default for the retained prefix on a context shift, including the -1 = retain-the-whole-initial-prompt form, overridable per request as n_keep. The resolution mirrors b10621's slot arithmetic: -1 resolves to the prompt length, one token is added when the tokenizer prepended BOS, and the value is clamped to bound - 4 at trim time (upstream's n_ctx - 4). Replaces the fixed MAX_KV_SIZE_SINK_KEEP = 4 attention sink; pass --context-shift --keep 4 to reproduce the pre-#1472 rolling window.",
+      "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--keep"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -477,12 +482,11 @@
       "description": "number of server slots (default: -1, -1 = auto) (env: LLAMA_ARG_N_PARALLEL)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1472,
+      "issue": 1473,
       "test": "src/bin/mlx_server.rs",
-      "notes": "Spelling and env match and the flag genuinely sizes both the per-slot context share (ctx_size / slots) and the decode batch width. Two things still differ: b10621 defaults to -1 (auto) while mlxcel defaults to 4, and mlxcel's field is usize so -1 is rejected by the value parser with a message naming the option and the value rather than resolving to auto.",
+      "notes": "Spelling, env, -np (argv pre-pass) and since #1472 the full b10621 value domain: the default is -1 (auto) and auto resolves to 4 slots, which is upstream's own auto resolution (server-context.cpp: \"n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\"). What remains is the second half of that upstream line: auto also switches b10621 to one unified KV buffer shared by the slots, letting a single request use the whole context, where mlxcel keeps per-slot context shares (ctx_size / slots). That is the --kv-unified surface, owned by #1473, and this entry follows it.",
       "divergence": [
-        "default is 4 server slots; b10621 defaults to -1 (auto)",
-        "-1 is rejected with a value-parser diagnostic rather than resolving to an automatic slot count"
+        "b10621's auto default also enables a unified KV buffer shared by the slots, so a default-config single request may use the whole context; mlxcel keeps per-slot context shares (see --kv-unified, #1473)"
       ],
       "rationale": null,
       "mlxcel": {
@@ -493,7 +497,7 @@
         "env": "LLAMA_ARG_N_PARALLEL",
         "env_binding": "clap",
         "defaults": [
-          "4"
+          "-1"
         ]
       }
     },
@@ -638,7 +642,7 @@
       "state": "supported",
       "issue": 1450,
       "test": "tests/llama_compat_rope_scaling_override.rs",
-      "notes": "Same value domain {none,linear,yarn} and the same LLAMA_ARG_ROPE_SCALING_TYPE binding. `none` and `linear` are applied to the checkpoint's rope_scaling block before the model is constructed, so before any KV cache exists. `yarn` parses and is refused with a diagnostic naming the families that serve YaRN from their own config: mlxcel's shared RoPE path builds \"default\", \"linear\" and \"llama3\" tables only, and b10621 itself documents the flag as \"defaults to linear unless specified by the model\", so a refusal is the only reading that does not change the rotation silently. An override that reaches no RoPE code path refuses to serve rather than starting (models::rope_overrides::verify_applied).",
+      "notes": "Same value domain {none,linear,yarn} and the same LLAMA_ARG_ROPE_SCALING_TYPE binding. All three are applied to the checkpoint's rope_scaling block before the model is constructed, so before any KV cache exists; `yarn` (since #1472) builds the YaRN frequency table on the shared RoPE path, with the factor from --rope-scale / --rope-freq-scale and the --yarn-* knobs. An override that reaches no RoPE code path refuses to serve rather than starting (models::rope_overrides::verify_applied), and a family whose own RoPE path cannot represent the requested scheme (Gemma 3's linear-only global rope, InternLM's dynamic-NTK resolver) refuses with a load error naming the scheme.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -691,15 +695,21 @@
       "default": "false",
       "description": "use full-size SWA cache (default: false) [(more info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055) (env: LLAMA_ARG_SWA_FULL)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1472,
-      "test": null,
-      "notes": "Not accepted. Sliding-window families (Gemma 3/4, Exaone 4, gpt-oss, RecurrentGemma, Step 3.5, Mellum, Ministral 3, AFMoE, DeepSeek V4) build their own RotatingKVCache inside each model's make_cache from the checkpoint's sliding_window, and nothing on the server reaches into that construction. Forcing a full-size SWA cache needs a plumbing path into every one of those call sites.",
+      "test": "src/cli/context_args_tests.rs",
+      "notes": "Accepted at its inert default (false, also LLAMA_ARG_SWA_FULL=0), and refused at startup when set: sliding-window families (Gemma 3/4, Exaone 4, gpt-oss, RecurrentGemma, Step 3.5, Mellum, Ministral 3, AFMoE, DeepSeek V4) build their own ring caches from the checkpoint's sliding_window inside each model's cache constructor, and mlxcel has no full-size SWA cache mode for the flag to select. The capability the flag purchases upstream (KV state save/restore and context shifting over SWA layers) is gated on those caches being scheduler-owned, not on the ring's size, so widening the ring would spend the memory without buying the feature. The diagnostic names the families and the inert spelling.",
       "divergence": [
-        "no flag: the SWA window is the checkpoint's and cannot be widened to full size from the server"
+        "a true value is refused at startup with a diagnostic rather than selecting a full-size SWA cache; only the inert default (false) is accepted"
       ],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--swa-full"
+        ],
+        "env": "LLAMA_ARG_SWA_FULL",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -717,10 +727,10 @@
       "default": "512",
       "description": "physical maximum batch size (default: 512) (env: LLAMA_ARG_UBATCH)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1472,
-      "test": "src/server/routes/props_tests.rs",
-      "notes": "Accepted, logged as not applicable at startup, and reported in /props as `n_ubatch` at the same value as `n_batch`. MLX on unified memory has no separate physical micro-batch to size, so there is no quantity for this to set; the value itself is read only to decide whether to emit the notice.",
+      "test": "src/server/cli_input_tests.rs",
+      "notes": "Accepted (and -ub through the argv pre-pass), logged as not applicable at startup, and reported in /props as `n_ubatch` at the same value as `n_batch`. MLX on unified memory has no separate physical micro-batch to size, so there is no quantity for this to set; the value itself is read only to decide whether to emit the notice, whose trigger is pinned by resolve_prefill_chunk_size_ubatch_sets_provided_flag.",
       "divergence": [
         "the value is not used: mlxcel has no physical micro-batch distinct from the logical prefill chunk on unified memory",
         "default is unset rather than b10621's 512"
@@ -749,14 +759,11 @@
       "default": "-1.00",
       "description": "YaRN: scale sqrt(t) or attention magnitude (default: -1.00) (env: LLAMA_ARG_YARN_ATTN_FACTOR)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": "src/cli/rope_args_tests.rs",
-      "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
-      "divergence": [
-        "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
-        "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
-      ],
+      "test": "tests/llama_compat_yarn_override.rs",
+      "notes": "Spelling and env accepted, and since #1472 a non-sentinel value tunes the rotation: the shared RoPE path builds a YaRN frequency table (RopeScalingKind::Yarn) and the knobs overlay it wherever a YaRN rotation is in force, whether --rope-scaling yarn forced it or the checkpoint's own rope_scaling block declares it. With a non-YaRN rotation in force the knobs are inert, exactly as in b10621, whose llama_context reads them only under LLAMA_ROPE_SCALING_TYPE_YARN. The families that implement YaRN outside the shared seam (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from their own config; an override installed against one of them refuses to serve (models::rope_overrides::verify_applied) rather than being ignored. Participates only when the resolved extrapolation mix is 0: with a non-zero mix b10621's llama-context.cpp recomputes the attention factor over the flag, and mlxcel mirrors that resolution order.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -781,14 +788,11 @@
       "default": "-1.00",
       "description": "YaRN: low correction dim or beta (default: -1.00) (env: LLAMA_ARG_YARN_BETA_FAST)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": "src/cli/rope_args_tests.rs",
-      "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
-      "divergence": [
-        "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
-        "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
-      ],
+      "test": "tests/llama_compat_yarn_override.rs",
+      "notes": "Spelling and env accepted, and since #1472 a non-sentinel value tunes the rotation: the shared RoPE path builds a YaRN frequency table (RopeScalingKind::Yarn) and the knobs overlay it wherever a YaRN rotation is in force, whether --rope-scaling yarn forced it or the checkpoint's own rope_scaling block declares it. With a non-YaRN rotation in force the knobs are inert, exactly as in b10621, whose llama_context reads them only under LLAMA_ROPE_SCALING_TYPE_YARN. The families that implement YaRN outside the shared seam (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from their own config; an override installed against one of them refuses to serve (models::rope_overrides::verify_applied) rather than being ignored. The sentinel (-1.0) resolves to the checkpoint's beta_fast, then upstream's default 32.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -813,14 +817,11 @@
       "default": "-1.00",
       "description": "YaRN: high correction dim or alpha (default: -1.00) (env: LLAMA_ARG_YARN_BETA_SLOW)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": "src/cli/rope_args_tests.rs",
-      "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
-      "divergence": [
-        "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
-        "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
-      ],
+      "test": "tests/llama_compat_yarn_override.rs",
+      "notes": "Spelling and env accepted, and since #1472 a non-sentinel value tunes the rotation: the shared RoPE path builds a YaRN frequency table (RopeScalingKind::Yarn) and the knobs overlay it wherever a YaRN rotation is in force, whether --rope-scaling yarn forced it or the checkpoint's own rope_scaling block declares it. With a non-YaRN rotation in force the knobs are inert, exactly as in b10621, whose llama_context reads them only under LLAMA_ROPE_SCALING_TYPE_YARN. The families that implement YaRN outside the shared seam (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from their own config; an override installed against one of them refuses to serve (models::rope_overrides::verify_applied) rather than being ignored. The sentinel (-1.0) resolves to the checkpoint's beta_slow, then upstream's default 1.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -845,14 +846,11 @@
       "default": "-1.00, 0.0 = full interpolation",
       "description": "YaRN: extrapolation mix factor (default: -1.00, 0.0 = full interpolation) (env: LLAMA_ARG_YARN_EXT_FACTOR)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": "src/cli/rope_args_tests.rs",
-      "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
-      "divergence": [
-        "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
-        "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
-      ],
+      "test": "tests/llama_compat_yarn_override.rs",
+      "notes": "Spelling and env accepted, and since #1472 a non-sentinel value tunes the rotation: the shared RoPE path builds a YaRN frequency table (RopeScalingKind::Yarn) and the knobs overlay it wherever a YaRN rotation is in force, whether --rope-scaling yarn forced it or the checkpoint's own rope_scaling block declares it. With a non-YaRN rotation in force the knobs are inert, exactly as in b10621, whose llama_context reads them only under LLAMA_ROPE_SCALING_TYPE_YARN. The families that implement YaRN outside the shared seam (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from their own config; an override installed against one of them refuses to serve (models::rope_overrides::verify_applied) rather than being ignored. The sentinel (-1.0) resolves to 1.0 for a YaRN rotation, upstream's own substitution; 0.0 is full interpolation.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -877,14 +875,11 @@
       "default": "0 = model training context size",
       "description": "YaRN: original context size of model (default: 0 = model training context size) (env: LLAMA_ARG_YARN_ORIG_CTX)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": "src/cli/rope_args_tests.rs",
-      "notes": "Spelling and env accepted. b10621's sentinel default (0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
-      "divergence": [
-        "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (0) is accepted",
-        "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
-      ],
+      "test": "tests/llama_compat_yarn_override.rs",
+      "notes": "Spelling and env accepted, and since #1472 a non-sentinel value tunes the rotation: the shared RoPE path builds a YaRN frequency table (RopeScalingKind::Yarn) and the knobs overlay it wherever a YaRN rotation is in force, whether --rope-scaling yarn forced it or the checkpoint's own rope_scaling block declares it. With a non-YaRN rotation in force the knobs are inert, exactly as in b10621, whose llama_context reads them only under LLAMA_ROPE_SCALING_TYPE_YARN. The families that implement YaRN outside the shared seam (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from their own config; an override installed against one of them refuses to serve (models::rope_overrides::verify_applied) rather than being ignored. The sentinel (0) resolves to the checkpoint's original_max_position_embeddings, then max_position_embeddings, then upstream YarnRoPE's 4096, mirroring b10621's n_ctx_orig_yarn chain.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -942,16 +937,15 @@
       "field_type": "num",
       "description": "Number of tokens after n_keep that may be discarded when shifting context (0 = half context)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": null,
-      "notes": "Not accepted on /completion. mlxcel discards exactly the excess over the KV cap on every trim, which is b10621's behaviour only when n_discard happens to equal that excess; the 0 = half-the-context default and any explicit depth have no representation.",
-      "divergence": [
-        "the field is silently dropped: every trim discards exactly the excess over the KV cap",
-        "b10621's 0 = discard half the context default has no equivalent"
-      ],
+      "test": "src/server/batch/scheduler_tests.rs",
+      "notes": "Declared on NativeCompletionRequest and honored: how many tokens past the retained prefix each context shift discards, with 0 (the default) resolving to half of the non-retained window exactly as upstream's n_left / 2. When a prefill chunk overshoots the bound the discard is raised to the excess so the cap is restored in one shift (context_shift_trim_depth). Negative values are refused with a 400 naming the field.",
+      "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "n_discard"
+      }
     },
     {
       "kind": "native_request_field",
@@ -962,15 +956,15 @@
       "field_type": "num",
       "description": "Specify the number of tokens from the initial prompt to retain when context size is exceeded. Use -1 to retain all tokens from the prompt",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1472,
-      "test": null,
-      "notes": "Not accepted on /completion. NativeCompletionRequest does not carry n_keep and does not deny unknown fields, so a client that sends it is not told it was dropped. The server-wide retention is the fixed 4-token attention sink described on --keep.",
-      "divergence": [
-        "the field is silently dropped: retention is a fixed 4-token attention sink, server-wide, not per request"
-      ],
+      "test": "src/server/batch/scheduler_tests.rs",
+      "notes": "Declared on NativeCompletionRequest and honored: the per-request retained prefix for context shifts, winning over the server-wide --keep, with -1 = retain the whole initial prompt. Out-of-domain values (below -1) are refused with a 400 naming the field (validate_retention). The resolved value is echoed in the response's generation_settings.",
+      "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "n_keep"
+      }
     }
   ]
 }

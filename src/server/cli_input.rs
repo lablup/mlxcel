@@ -566,6 +566,11 @@ pub struct ServerStartupInput {
     /// [`ServerStartupInput::into_startup_config`], which is also where an
     /// unserveable `--cache-reuse` is refused.
     pub cache_compat: crate::cli::cache_args::CacheCompatArgs,
+    /// llama-server b10621 context-retention flags (`--context-shift`,
+    /// `--keep`, `--swa-full`), straight off the shared clap group (#1472).
+    /// Resolved (and refused, for `--swa-full`) by
+    /// [`ServerStartupInput::into_startup_config`].
+    pub context_compat: crate::cli::context_args::ContextCompatArgs,
     /// llama-server b10621 RoPE / YaRN runtime overrides, straight off the
     /// shared clap group. Resolved (and refused, when unserveable) by
     /// [`ServerStartupInput::into_startup_config`] so both server binaries
@@ -673,6 +678,13 @@ impl ServerStartupInput {
         // the first request that would have reused a chunk.
         let cache_compat = self
             .cache_compat
+            .resolve()
+            .map_err(|message| anyhow::anyhow!("{message}"))?;
+        // b10621's context-retention spellings (#1472). Resolved here so an
+        // unserveable `--swa-full` fails the command line on both binaries
+        // with one message.
+        let context_compat = self
+            .context_compat
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // `--no-cache-prompt` and mlxcel's `--no-prompt-cache` are two
@@ -1055,6 +1067,11 @@ impl ServerStartupInput {
             // semantic `Option<usize>` after `resolve_max_kv_size` has
             // validated upper and lower bounds (H1 fix).
             max_kv_size: resolved_max_kv_size,
+            // b10621 context-retention policy (#1472): shift disabled by
+            // default, so an over-long request fails and a generation stops at
+            // the bound instead of silently front-trimming.
+            context_shift: context_compat.context_shift,
+            n_keep: context_compat.n_keep,
             // forward the paged KV block-budget directive verbatim (resolved
             // to a block count on the worker thread).
             kv_cache_budget: self.kv_cache_budget,
@@ -1081,6 +1098,27 @@ impl ServerStartupInput {
             diffusion_threshold: self.diffusion_threshold,
             rope_override,
         })
+    }
+}
+
+/// Resolve b10621's `--parallel` value domain (#1472).
+///
+/// `-1`, the upstream default, means "let the server choose"; b10621's auto
+/// resolves it to 4 slots (`server.cpp`: "n_parallel is set to auto, using
+/// n_parallel = 4 and kv_unified = true") and mlxcel resolves the slot count
+/// identically. The `kv_unified` half of upstream's auto is a KV-layout
+/// switch mlxcel records separately on the `--kv-unified` surface (#1473).
+/// Zero and values below `-1` are refused: upstream would fail to allocate a
+/// zero-slot context, and refusing at the flag names the domain.
+pub fn resolve_n_parallel(raw: i64) -> Result<usize, String> {
+    match raw {
+        -1 => Ok(4),
+        n if n >= 1 => usize::try_from(n)
+            .map_err(|_| format!("--parallel {n} does not fit in this platform's address space")),
+        n => Err(format!(
+            "--parallel {n} is not a slot count: pass a positive number of server slots, or \
+             -1 to let the server choose (4 slots, matching llama-server b10621's auto)"
+        )),
     }
 }
 
