@@ -17,7 +17,7 @@
 //! contract (missing / unknown / not-loaded model), the router `/props`
 //! block, and authorization on the management routes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
@@ -26,8 +26,12 @@ use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
 use super::{RouterServerState, create_router_app};
+use crate::downloader::DownloadHooks;
+use crate::server::ServerStartupConfig;
 use crate::server::config::ServerConfig;
-use crate::server::router_models::RouterPool;
+use crate::server::router_cache::{CacheSource, RouterDownloader};
+use crate::server::router_models::{RouterPool, RouterSources};
+use crate::server::router_presets::PresetCliOverrides;
 
 fn temp_models_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -48,12 +52,74 @@ fn add_fake_model(root: &std::path::Path, name: &str) {
     std::fs::write(dir.join("config.json"), "{}").expect("config.json");
 }
 
-fn router_app_with(root: PathBuf, config: ServerConfig, autoload: bool) -> Router {
-    let pool = Arc::new(RouterPool::new(root, config.clone(), 4, autoload).expect("pool"));
-    create_router_app(RouterServerState {
+/// Instant local "downloader" for route tests: materializes the snapshot and
+/// reports one terminal progress tick.
+struct InstantDownloader;
+
+impl RouterDownloader for InstantDownloader {
+    fn validate(&self, _repo_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn download(
+        &self,
+        repo_id: &str,
+        dest_root: &Path,
+        hooks: DownloadHooks,
+    ) -> anyhow::Result<()> {
+        let dest = dest_root.join(repo_id);
+        std::fs::create_dir_all(&dest)?;
+        std::fs::write(dest.join("config.json"), "{}")?;
+        if let Some(progress) = &hooks.progress {
+            progress(&format!("https://example.invalid/{repo_id}"), 1, 1);
+        }
+        Ok(())
+    }
+}
+
+fn router_state_from(
+    sources: RouterSources,
+    config: ServerConfig,
+    autoload: bool,
+) -> RouterServerState {
+    let pool = Arc::new(
+        RouterPool::new(
+            sources,
+            ServerStartupConfig::default(),
+            config.api_keys.clone(),
+            PresetCliOverrides::default(),
+            4,
+            autoload,
+        )
+        .expect("pool"),
+    );
+    RouterServerState {
         pool,
         config: Arc::new(config),
-    })
+    }
+}
+
+fn router_app_with(root: PathBuf, config: ServerConfig, autoload: bool) -> Router {
+    let sources = RouterSources {
+        models_dir: Some(root),
+        cache: None,
+        presets: Default::default(),
+    };
+    create_router_app(router_state_from(sources, config, autoload))
+}
+
+fn router_app_with_cache(
+    root: PathBuf,
+    cache_root: PathBuf,
+    config: ServerConfig,
+) -> (Router, RouterServerState) {
+    let sources = RouterSources {
+        models_dir: Some(root),
+        cache: Some(CacheSource::new(cache_root, Arc::new(InstantDownloader))),
+        presets: Default::default(),
+    };
+    let state = router_state_from(sources, config, true);
+    (create_router_app(state.clone()), state)
 }
 
 /// Status without reading the body, for endpoints whose body never ends
@@ -229,7 +295,8 @@ async fn add_and_delete_answer_their_refusal_surface() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["message"], "model 'alpha' already exists");
 
-    let (status, _) = send(
+    // Without a configured cache, a download request is a server error.
+    let (status, body) = send(
         app.clone(),
         Method::POST,
         "/models",
@@ -237,10 +304,13 @@ async fn add_and_delete_answer_their_refusal_surface() {
         None,
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "download flow is deferred"
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("requires a model cache"),
+        "{body}"
     );
 
     let (status, body) = send(app.clone(), Method::DELETE, "/models", "", None).await;
@@ -393,4 +463,169 @@ async fn model_names_cannot_be_paths() {
             "{name}"
         );
     }
+}
+
+// ── Cache-backed routes (#1438: POST /models, DELETE /models, SSE) ──────────
+
+#[tokio::test]
+async fn post_models_downloads_into_the_cache_and_lists_it_removable() {
+    let root = temp_models_dir("dl-route");
+    let cache_root = temp_models_dir("dl-route-cache");
+    let (app, state) = router_app_with_cache(root, cache_root.clone(), ServerConfig::default());
+    let mut events = state.pool.subscribe();
+
+    let (status, body) = send(
+        app.clone(),
+        Method::POST,
+        "/models",
+        r#"{"model":"mlx-community/fresh"}"#,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["success"], true);
+
+    // Wait for the background download to finish (the fake is instant, but
+    // it still crosses the spawned task).
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("events open");
+            if event["event"] == "download_finished" {
+                assert_eq!(event["model"], "mlx-community/fresh");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("download_finished");
+
+    assert!(cache_root.join("mlx-community/fresh/config.json").is_file());
+    let (status, body) = send(app, Method::GET, "/models", "", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|m| m["id"] == "mlx-community/fresh")
+        .cloned()
+        .expect("downloaded model listed");
+    assert_eq!(entry["source"], "cache");
+    assert_eq!(entry["can_remove"], true);
+}
+
+#[tokio::test]
+async fn delete_models_removes_a_cache_entry_from_disk() {
+    let root = temp_models_dir("rm-route");
+    let cache_root = temp_models_dir("rm-route-cache");
+    add_fake_model(&cache_root.join("mlx-community"), "doomed");
+    let (app, state) = router_app_with_cache(root, cache_root.clone(), ServerConfig::default());
+    let mut events = state.pool.subscribe();
+
+    let (status, body) = send(
+        app.clone(),
+        Method::DELETE,
+        "/models?model=mlx-community%2Fdoomed",
+        "",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["success"], true);
+    assert!(!cache_root.join("mlx-community/doomed").exists());
+
+    let mut saw_remove = false;
+    while let Ok(event) = events.try_recv() {
+        if event["event"] == "model_remove" && event["model"] == "mlx-community/doomed" {
+            saw_remove = true;
+        }
+    }
+    assert!(saw_remove, "model_remove reached the SSE stream");
+
+    // Removing it again is upstream's not-found 500.
+    let (status, body) = send(
+        app,
+        Method::DELETE,
+        "/models?model=mlx-community%2Fdoomed",
+        "",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body["error"]["message"],
+        "model name=mlx-community/doomed is not found"
+    );
+}
+
+/// Pins the by_design policy divergence on `POST /models`: a bare,
+/// owner-less name expands to mlxcel's default organization (the same
+/// expansion `-m <name>` and `mlxcel download <name>` apply), so the cache
+/// entry lists under the expanded repo id where b10621 would list the
+/// verbatim name.
+#[tokio::test]
+async fn post_models_expands_bare_names_to_the_default_org() {
+    let root = temp_models_dir("dl-bare");
+    let cache_root = temp_models_dir("dl-bare-cache");
+    let (app, state) = router_app_with_cache(root, cache_root, ServerConfig::default());
+    let mut events = state.pool.subscribe();
+
+    let (status, body) = send(
+        app.clone(),
+        Method::POST,
+        "/models",
+        r#"{"model":"Bare-Name-4bit"}"#,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("events open");
+            if event["event"] == "download_finished" {
+                assert_eq!(event["model"], "mlx-community/Bare-Name-4bit");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("download_finished");
+    assert!(state.pool.get("mlx-community/Bare-Name-4bit").is_some());
+}
+
+/// Dispatch accepts preset aliases end-to-end: the alias resolves to the
+/// entry and the load path addresses the entry by its real name (a broken
+/// checkpoint therefore answers a load failure, never "not found").
+#[tokio::test]
+async fn dispatch_reaches_the_load_path_through_an_alias() {
+    let checkpoint_root = temp_models_dir("alias-dispatch");
+    add_fake_model(&checkpoint_root, "ckpt");
+    let ini = format!(
+        "[aliased-model]\nmodel = {}\nalias = nickname\n",
+        checkpoint_root.join("ckpt").display()
+    );
+    let presets = crate::server::router_presets::parse_preset_text(&ini).expect("parse");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: None,
+            cache: None,
+            presets,
+        },
+        ServerConfig::default(),
+        true,
+    );
+    let app = create_router_app(state);
+    let (status, body) = send(
+        app,
+        Method::POST,
+        "/v1/chat/completions",
+        r#"{"model":"nickname","messages":[]}"#,
+        None,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "alias must resolve: {body}"
+    );
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
 }

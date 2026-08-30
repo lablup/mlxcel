@@ -2369,6 +2369,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         models_autoload: args.models_autoload,
         models_preset: args.models_preset.clone(),
         tags: args.tags.clone(),
+        model_store_root: args.model_store_root.clone(),
         warmup: args.warmup,
         no_warmup: args._no_warmup,
         temperature: args.temp,

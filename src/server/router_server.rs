@@ -79,6 +79,14 @@ fn pool_error_response(err: RouterPoolError) -> Response {
             "unavailable_error",
             &message,
         ),
+        // b10621 raises these two as runtime errors, which its handler
+        // wrapper answers as 500s with the exception text.
+        RouterPoolError::NotRemovable(name) => llama_server_error(&format!(
+            "model name={name} is not removable (not from cache)"
+        )),
+        RouterPoolError::AlreadyExists(name) => {
+            llama_invalid_request(&format!("model '{name}' already exists"))
+        }
     }
 }
 
@@ -133,9 +141,12 @@ fn router_model_json(
     let mut status = serde_json::json!({
         "value": snapshot.status.as_str(),
         // b10621 reports the child process argv; the in-process pool has
-        // none.
+        // none (recorded as a by_design divergence on --models-dir).
         "args": [],
     });
+    if let Some(preset_ini) = &snapshot.preset_ini {
+        status["preset"] = serde_json::Value::String(preset_ini.clone());
+    }
     if snapshot.failed {
         status["failed"] = true.into();
     }
@@ -146,10 +157,10 @@ fn router_model_json(
     if snapshot.audio {
         input_modalities.push("audio");
     }
-    serde_json::json!({
+    let mut model = serde_json::json!({
         "id": snapshot.name,
-        "aliases": [],
-        "tags": [],
+        "aliases": snapshot.aliases,
+        "tags": snapshot.tags,
         "object": "model",
         "owned_by": "llamacpp",
         "created": created,
@@ -158,11 +169,18 @@ fn router_model_json(
             "input_modalities": input_modalities,
             "output_modalities": ["text"],
         },
-        "source": "models_dir",
-        // Only cache-sourced models are removable in b10621; a models-dir
-        // pool has none.
-        "can_remove": false,
-    })
+        "source": snapshot.source.as_str(),
+        // Only cache-sourced models are removable, b10621's own rule.
+        "can_remove": snapshot.source == super::router_models::RouterModelSource::Cache,
+    });
+    // b10621 reflects download progress through the entry's loaded_info.
+    if let Some(info) = &snapshot.download_info {
+        model["progress"] = info
+            .get("progress")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+    }
+    model
 }
 
 /// GET /models, GET /v1/models (router list). `?reload=1` rescans the
@@ -181,6 +199,8 @@ async fn router_models_list(
         .pool
         .snapshot()
         .iter()
+        // b10621 skips cache models a preset deduplicated.
+        .filter(|snapshot| !snapshot.hidden)
         .map(|snapshot| router_model_json(snapshot, created))
         .collect();
     Json(serde_json::json!({ "data": data, "object": "list" })).into_response()
@@ -225,7 +245,9 @@ async fn router_models_unload(
     let Some(entry) = state.pool.get(&name) else {
         return llama_invalid_request("model is not found");
     };
-    if !entry.is_running() {
+    // b10621 accepts unload for running AND downloading models (unloading a
+    // downloading model cancels the download).
+    if !entry.is_running() && !entry.is_downloading() {
         return llama_invalid_request("model is not running");
     }
     match state.pool.unload(&name) {
@@ -234,8 +256,10 @@ async fn router_models_unload(
     }
 }
 
-/// POST /models (b10621 downloads the named HF repo into its cache; mlxcel
-/// does not yet, and says so instead of pretending).
+/// POST /models (b10621 `post_router_models`): validate the name as a
+/// fetchable HuggingFace repository, then download it into the model cache
+/// in the background, reporting progress through `GET /models/sse`
+/// (issue #1438).
 async fn router_models_add(
     State(state): State<RouterServerState>,
     body: axum::body::Bytes,
@@ -244,18 +268,47 @@ async fn router_models_add(
     if name.is_empty() {
         return llama_invalid_request("model must be a non-empty string");
     }
-    if state.pool.get(&name).is_some() {
+    if state.pool.lookup(&name).is_some() {
         return llama_invalid_request(&format!("model '{name}' already exists"));
     }
-    llama_server_error(
-        "adding a model by download is not supported yet; place the checkpoint directory under \
-         --models-dir and call GET /models?reload=1",
-    )
+    if !state.pool.has_cache() {
+        return llama_server_error(
+            "adding a model by download requires a model cache; set --model-store-root, \
+             MLXCEL_MODELS_DIR, or MLXCEL_CACHE_DIR",
+        );
+    }
+    // Normalize into the `<owner>/<name>` repo id the cache stores (a bare
+    // name expands to the default organization, like `-m <name>`). The
+    // normalized spelling is the entry name the SSE events and the model
+    // list will carry.
+    let repo_id = match state.pool.normalize_cache_name(&name) {
+        Ok(repo_id) => repo_id,
+        Err(err) => return llama_invalid_request(&err.to_string()),
+    };
+    if repo_id != name && state.pool.lookup(&repo_id).is_some() {
+        return llama_invalid_request(&format!("model '{repo_id}' already exists"));
+    }
+    // b10621 validates by fetching repository metadata before answering; a
+    // failed probe is a 500 from its handler wrapper. The probe blocks on
+    // the network, so it runs on the blocking pool.
+    let probe_pool = state.pool.clone();
+    let probe_repo = repo_id.clone();
+    let probed = tokio::task::spawn_blocking(move || probe_pool.validate_cache_repo(&probe_repo))
+        .await
+        .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+    if let Err(err) = probed {
+        return llama_server_error(&format!("model validation failed: {err:#}"));
+    }
+    match state.pool.start_download(&repo_id) {
+        Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(err) => pool_error_response(err),
+    }
 }
 
-/// DELETE /models (b10621 `del_router_models`): only cache-sourced models are
-/// removable, and a models-dir pool has none, so the refusals are the whole
-/// reachable surface.
+/// DELETE /models (b10621 `del_router_models`): only cache-sourced models
+/// are removable. Cancels an in-flight download or stops a running
+/// instance, deletes the snapshot from disk, and emits `model_remove`
+/// (issue #1438).
 async fn router_models_delete(
     State(state): State<RouterServerState>,
     Query(query): Query<HashMap<String, String>>,
@@ -267,9 +320,10 @@ async fn router_models_delete(
     if state.pool.get(&name).is_none() {
         return llama_server_error(&format!("model name={name} is not found"));
     }
-    llama_server_error(&format!(
-        "model name={name} is not removable (not from cache)"
-    ))
+    match state.pool.remove(&name).await {
+        Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(err) => pool_error_response(err),
+    }
 }
 
 /// GET /models/sse (b10621 `get_router_models_sse`): the model-event stream.
@@ -362,7 +416,9 @@ async fn dispatch(state: RouterServerState, request: Request<Body>) -> Response 
         Ok(entry) => entry,
         Err(err) => return pool_error_response(err),
     };
-    if autoload && let Err(err) = state.pool.ensure_ready(&name, AUTOLOAD_WAIT).await {
+    // `resolve` accepts preset aliases; the load path addresses the entry by
+    // its real name.
+    if autoload && let Err(err) = state.pool.ensure_ready(&entry.name, AUTOLOAD_WAIT).await {
         return pool_error_response(err);
     }
 
@@ -435,34 +491,68 @@ pub fn create_router_app(state: RouterServerState) -> axum::Router {
 #[path = "router_server_tests.rs"]
 mod router_server_tests;
 
-/// Run the router server: discover models, build the pool, and serve the
-/// b10621 router surface (issue #1438). Reached from
-/// [`super::startup::start_server`] when `--models-dir` is set and no model
-/// argument was given, exactly b10621's `is_router_server` condition.
+/// Run the router server: discover models (cache, `--models-dir`, presets),
+/// build the pool, and serve the b10621 router surface (issue #1438).
+/// Reached from [`super::startup::start_server`] when `--models-dir` or
+/// `--models-preset` is set and no model argument was given.
 pub async fn run_router_server(startup: super::ServerStartupConfig) -> anyhow::Result<()> {
-    let models_dir = startup
-        .router_models_dir
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("router mode requires --models-dir"))?;
+    let models_dir = startup.router_models_dir.clone();
     let api_keys = super::resolve_api_keys(&startup.api_keys, &startup.api_key_files)?;
     if !api_keys.is_empty() {
         tracing::info!("API-key authentication enabled ({} keys)", api_keys.len());
     }
-    let base_config = super::startup::build_server_config(&startup, api_keys);
+
+    // b10621 loads INI presets per model; a parse error or untranslatable
+    // key fails startup rather than serving un-preset models (#1438).
+    let presets = match startup.models_preset.as_ref() {
+        Some(path) => super::router_presets::parse_preset_file(path)?,
+        None => super::router_presets::RouterPresets::default(),
+    };
+
+    // The router's model cache is the mlxcel model store (the b10621 cache
+    // equivalent): removable entries, POST /models downloads into it.
+    let cache = crate::downloader::models_root(startup.model_store_root.as_deref()).map(|root| {
+        super::router_cache::CacheSource::new(
+            root,
+            Arc::new(super::router_cache::HfRouterDownloader),
+        )
+    });
+
+    let base_config = super::startup::build_server_config(&startup, api_keys.clone());
+    let sources = super::router_models::RouterSources {
+        models_dir: models_dir.clone(),
+        cache,
+        presets,
+    };
+    let cli_overrides = super::router_presets::PresetCliOverrides::detect();
+    let models_max = startup.models_max;
+    let models_autoload = startup.models_autoload;
     let pool = Arc::new(RouterPool::new(
-        models_dir.clone(),
-        base_config.clone(),
-        startup.models_max,
-        startup.models_autoload,
+        sources,
+        startup.clone(),
+        api_keys,
+        cli_overrides,
+        models_max,
+        models_autoload,
     )?);
     let discovered = pool.snapshot().len();
     tracing::info!(
-        "Router mode: {} models discovered under {} (models_max {}, autoload {})",
+        "Router mode: {} models discovered (models_dir {}, models_max {}, autoload {})",
         discovered,
-        models_dir.display(),
-        startup.models_max,
-        startup.models_autoload,
+        models_dir
+            .as_ref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "disabled".to_string()),
+        models_max,
+        models_autoload,
     );
+    // Preset-only `load-on-startup`: begin those loads before serving.
+    for name in pool.load_on_startup_names() {
+        tracing::info!("router: load-on-startup '{name}'");
+        if let Err(err) = pool.begin_load(&name).await {
+            tracing::warn!("router: load-on-startup '{name}' failed: {err:?}");
+        }
+    }
     let state = RouterServerState {
         pool,
         config: Arc::new(base_config),

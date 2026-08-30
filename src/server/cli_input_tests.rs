@@ -32,6 +32,7 @@ fn sample_input() -> ServerStartupInput {
     ServerStartupInput {
         chat_compat: Default::default(),
         model_path: PathBuf::from("models/foo"),
+        model_store_root: None,
         adapter_path: Some(PathBuf::from("adapters/bar")),
         lora: None,
         lora_scaled: None,

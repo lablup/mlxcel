@@ -127,8 +127,19 @@ fn router_probe_app() -> axum::Router {
     std::fs::create_dir_all(&model_dir).expect("probe models dir");
     std::fs::write(model_dir.join("config.json"), "{}").expect("probe config");
     let pool = std::sync::Arc::new(
-        crate::server::router_models::RouterPool::new(dir, ServerConfig::default(), 4, true)
-            .expect("probe pool"),
+        crate::server::router_models::RouterPool::new(
+            crate::server::router_models::RouterSources {
+                models_dir: Some(dir),
+                cache: None,
+                presets: Default::default(),
+            },
+            crate::server::ServerStartupConfig::default(),
+            Default::default(),
+            crate::server::router_presets::PresetCliOverrides::default(),
+            4,
+            true,
+        )
+        .expect("probe pool"),
     );
     crate::server::router_server::create_router_app(
         crate::server::router_server::RouterServerState {

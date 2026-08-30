@@ -491,7 +491,17 @@ async fn stream_file_cleans_up_tempfile_on_error() {
     let file_pb = mp.add(indicatif::ProgressBar::hidden());
     let agg_pb = mp.add(indicatif::ProgressBar::hidden());
 
-    let result = stream_file(&client, &url, &dest, "model.safetensors", &file_pb, &agg_pb).await;
+    let result = stream_file(
+        &client,
+        &url,
+        &dest,
+        "model.safetensors",
+        &file_pb,
+        &agg_pb,
+        0,
+        &DownloadHooks::default(),
+    )
+    .await;
     assert!(
         result.is_err(),
         "expected stream_file to return Err on dropped connection"

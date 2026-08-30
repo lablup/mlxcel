@@ -179,6 +179,10 @@ pub struct ServerStartupInput {
     pub models_preset: Option<PathBuf>,
     /// `--tags` (#1438).
     pub tags: Option<String>,
+    /// `--model-store-root`: the mlxcel model-store root override (#1438's
+    /// replacement for the pre-router `--models-dir` meaning). In router
+    /// mode this is also the model cache `POST /models` downloads into.
+    pub model_store_root: Option<PathBuf>,
     pub warmup: bool,
     pub no_warmup: bool,
     pub temperature: f32,
@@ -958,6 +962,7 @@ impl ServerStartupInput {
             models_autoload: self.models_autoload,
             models_preset: self.models_preset,
             tags: self.tags,
+            model_store_root: self.model_store_root,
             spm_infill: self.infill.spm_infill,
             embd_normalize: embedding_compat.embd_normalize,
             embedding_serving_mode: embedding_serving_mode(&embedding_compat),
