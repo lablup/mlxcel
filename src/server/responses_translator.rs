@@ -803,8 +803,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::server::chat_request::resolve_effective_kwargs;
-    use crate::server::chat_template::ChatTemplateProcessor;
+    use crate::server::chat_request::{prepare_chat_request_with_cache, resolve_effective_kwargs};
+    use crate::server::chat_template::{ChatTemplateProcessor, template_rejection_message};
     use crate::server::types::request::SamplingParams;
     use crate::server::types::responses_request::{
         ConversationRef, ResponseInput, ResponseReasoningConfig, ResponseTextConfig,
@@ -912,6 +912,57 @@ mod tests {
             translated.chat_request.reasoning_effort.as_deref(),
             Some("high")
         );
+    }
+
+    #[tokio::test]
+    async fn responses_reasoning_effort_template_rejection_survives_translation() {
+        let mut req = make_request(ResponseInput::Text("think".to_string()));
+        req.reasoning = Some(ResponseReasoningConfig {
+            effort: Some("high".to_string()),
+            summary: None,
+        });
+
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        let processor = ChatTemplateProcessor::with_template(
+            "{% if reasoning_effort not in ['low', 'medium'] %}{{ raise_exception('Unexpected reasoning effort ' ~ reasoning_effort) }}{% endif %}ok"
+                .to_string(),
+        );
+        let err = match prepare_chat_request_with_cache(
+            &processor,
+            &translated.chat_request,
+            None,
+            false,
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("unsupported Responses effort must remain a template rejection"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            template_rejection_message(&err),
+            Some("Unexpected reasoning effort high")
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_template_engine_failure_still_uses_prompt_fallback() {
+        let req = make_request(ResponseInput::Text("plain fallback".to_string()));
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
+
+        let prepared = prepare_chat_request_with_cache(
+            &processor,
+            &translated.chat_request,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect("engine-side render failure should keep fallback behavior");
+
+        assert_eq!(prepared.prompt, "User: plain fallback\n\nAssistant: ");
     }
 
     #[test]
