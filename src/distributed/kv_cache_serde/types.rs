@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::tensor_protocol::TensorDtype;
+use mlxcel_core::LoopDetectionConfig;
 use mlxcel_core::cache::{
     PagedBlockId, PagedKvLayout, PagedLayerState, PagedSequenceState, SequenceStateBackend,
 };
@@ -291,6 +292,28 @@ pub struct SerializableSamplingState {
     #[serde(default = "default_penalty_last_n_full")]
     pub penalty_last_n: i32,
     pub stop_token_ids: Vec<i32>,
+    /// Token-logit biases, encoded as raw IEEE-754 bits so non-finite values
+    /// such as negative infinity remain valid JSON.
+    #[serde(default)]
+    pub token_bias: Vec<SerializableTokenBiasEntry>,
+    /// Repetition-loop policy. Missing on older peers means disabled.
+    #[serde(default)]
+    pub loop_detection: LoopDetectionConfig,
+    /// Raw thinking-token budget: -1 unbounded, 0 immediate close, N capped.
+    #[serde(default = "default_reasoning_budget_unbounded")]
+    pub reasoning_budget: i32,
+    /// Whether the rendered prompt already entered the thinking block.
+    #[serde(default)]
+    pub thinking_enter_block_on_start: bool,
+}
+
+/// One token-bias entry in the disaggregated sampling wire state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializableTokenBiasEntry {
+    pub token_id: i32,
+    pub bias_bits: u32,
+    #[serde(default)]
+    pub byte_fragment: bool,
 }
 
 /// The `1.0` "disabled" default for [`SerializableSamplingState::typical_p`]
@@ -304,6 +327,11 @@ fn default_typical_p_disabled() -> f32 {
 /// predate the field: an old peer applied its penalties over the whole
 /// history, so the window must resolve to exactly that.
 fn default_penalty_last_n_full() -> i32 {
+    -1
+}
+
+/// The -1 unbounded reasoning default for frames from older peers.
+fn default_reasoning_budget_unbounded() -> i32 {
     -1
 }
 

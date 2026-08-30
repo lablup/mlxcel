@@ -26,13 +26,13 @@
 use super::*;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::distributed::tcp_transport::TcpTransportConfig;
 
-async fn router_test_state() -> Arc<RouterState> {
+async fn router_test_state_with_config(mut config: ServerConfig) -> Arc<RouterState> {
     let transport = Arc::new(
         TcpTransport::bind(TcpTransportConfig {
             bind_address: "127.0.0.1:0".to_string(),
@@ -42,10 +42,9 @@ async fn router_test_state() -> Arc<RouterState> {
         .expect("bind router test transport"),
     );
     let reply_to = transport.local_addr().expect("router transport address");
-    let config = ServerConfig {
-        prefill_peers: vec!["127.0.0.1:9".parse().expect("prefill address")],
-        ..ServerConfig::default()
-    };
+    if config.prefill_peers.is_empty() {
+        config.prefill_peers = vec!["127.0.0.1:9".parse().expect("prefill address")];
+    }
 
     Arc::new(
         RouterState::build(
@@ -56,9 +55,14 @@ async fn router_test_state() -> Arc<RouterState> {
                 "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
             )),
             Arc::new(MlxcelTokenizer::stub()),
+            PathBuf::from("router-test-model"),
         )
         .expect("build router test state"),
     )
+}
+
+async fn router_test_state() -> Arc<RouterState> {
+    router_test_state_with_config(ServerConfig::default()).await
 }
 
 async fn post_router_json(path: &str, body: Value) -> Response {
@@ -86,6 +90,113 @@ async fn error_message(response: Response) -> String {
         .as_str()
         .expect("error message")
         .to_string()
+}
+
+async fn response_json(response: Response) -> Value {
+    let bytes = to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("read response body");
+    serde_json::from_slice(&bytes).expect("JSON response")
+}
+
+#[tokio::test]
+async fn router_settings_route_is_absent_until_enabled() {
+    let response = create_router_app(router_test_state().await)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/settings")
+                .body(Body::empty())
+                .expect("settings request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn router_live_snapshot_preserves_the_startup_zero_timeout_fallback() {
+    let state = router_test_state_with_config(ServerConfig {
+        decode_timeout_seconds: 0,
+        ..ServerConfig::default()
+    })
+    .await;
+
+    assert_eq!(
+        state.live().timeout_seconds,
+        crate::server::model_provider::DECODE_HANG_TIMEOUT.as_secs()
+    );
+}
+
+#[tokio::test]
+async fn router_settings_route_authenticates_and_publishes_patch() {
+    let config = ServerConfig {
+        enable_settings_endpoint: true,
+        api_keys: crate::server::resolve_api_keys(&["router-key".to_string()], &[])
+            .expect("API keys"),
+        ..ServerConfig::default()
+    };
+    let app = create_router_app(router_test_state_with_config(config).await);
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/settings")
+                .body(Body::empty())
+                .expect("settings request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/settings")
+                .header("authorization", "Bearer router-key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"default_temperature":0.23}"#))
+                .expect("settings PATCH"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(patch.status(), StatusCode::OK);
+    let patch = response_json(patch).await;
+    assert!(
+        (patch["applied"]["default_temperature"]
+            .as_f64()
+            .expect("applied temperature")
+            - 0.23)
+            .abs()
+            < 1e-6
+    );
+
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/settings")
+                .header("authorization", "Bearer router-key")
+                .body(Body::empty())
+                .expect("settings GET"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(get.status(), StatusCode::OK);
+    let get = response_json(get).await;
+    assert!(
+        (get["current"]["default_temperature"]
+            .as_f64()
+            .expect("current temperature")
+            - 0.23)
+            .abs()
+            < 1e-6
+    );
+    assert_eq!(get["fingerprint"].as_str().map(str::len), Some(64));
 }
 
 fn chat_request() -> Value {
@@ -164,14 +275,6 @@ async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
                 "response_format": {"type": "json_schema"}
             }),
             "the disaggregated router does not support response_format (structured output) on /v1/completions",
-        ),
-        (
-            json!({
-                "model": "test-model",
-                "prompt": "hello",
-                "thinking_budget_tokens": 32
-            }),
-            "the disaggregated router does not support reasoning/thinking budgets on /v1/completions",
         ),
     ];
 

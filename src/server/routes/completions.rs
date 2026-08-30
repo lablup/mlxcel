@@ -28,21 +28,21 @@ use axum::{
 
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
-use crate::server::AppState;
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
-use crate::server::request_options::resolve_server_max_tokens;
+use crate::server::request_options::resolve_server_max_tokens_with_live;
 use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::structured::build_constraint_from_response_format;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::response::CompletionLogprobs;
 use crate::server::types::{CompletionChunk, CompletionRequest, CompletionResponse, ErrorResponse};
+use crate::server::{AppState, LiveSettings};
 use crate::tokenizer::MlxcelTokenizer;
 
 use super::chat::{
-    build_generate_options, decode_token, parse_priority_header, structured_error_to_response,
-    validate_top_n_sigma, validate_typical_p, validate_xtc_params,
+    build_generate_options_with_live, decode_token, parse_priority_header,
+    structured_error_to_response, validate_top_n_sigma, validate_typical_p, validate_xtc_params,
 };
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
@@ -138,6 +138,7 @@ pub async fn completions(
     headers: HeaderMap,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
+    let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -177,28 +178,21 @@ pub async fn completions(
     }
 
     // validate thinking_budget_tokens early.
-    let effective_max_tokens = resolve_server_max_tokens(&state.config, request.params.max_tokens);
+    let effective_max_tokens =
+        resolve_server_max_tokens_with_live(&state.config, &live, request.params.max_tokens);
     let raw_budget = pick_budget_alias(
         request.params.thinking_budget_tokens,
         request.params.thinking_token_budget,
         request.params.thinking_budget,
     );
-    let budget_override = match resolve_request_budget(
-        raw_budget,
-        state.config.reasoning_budget,
-        effective_max_tokens,
-    ) {
-        Ok(effective) => {
-            if raw_budget.is_some() {
-                ReasoningBudgetOverride::Explicit(effective)
-            } else {
-                ReasoningBudgetOverride::InheritServerDefault
+    let budget_override =
+        match resolve_request_budget(raw_budget, live.reasoning_budget, effective_max_tokens) {
+            Ok(effective) => ReasoningBudgetOverride::Explicit(effective),
+            Err(err) => {
+                return ErrorResponse::new(err.to_string(), "invalid_request_error")
+                    .into_response();
             }
-        }
-        Err(err) => {
-            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
-        }
-    };
+        };
 
     // + H2: build the structured-output constraint up
     // front. Grammar compilation can be slow on adversarial schemas, so
@@ -233,6 +227,7 @@ pub async fn completions(
         };
         stream_completion(
             state,
+            live,
             request,
             priority,
             budget_override,
@@ -241,7 +236,7 @@ pub async fn completions(
         )
         .await
     } else {
-        non_stream_completion(state, request, priority, budget_override, structured)
+        non_stream_completion(state, live, request, priority, budget_override, structured)
             .await
             .into_response()
     }
@@ -249,6 +244,7 @@ pub async fn completions(
 
 async fn non_stream_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: CompletionRequest,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
@@ -269,7 +265,8 @@ async fn non_stream_completion(
     let prompt = request.prompt.clone();
     // `/v1/completions` has no tool-shaped prompt signal. Since issue #977 a
     // grammar constraint alone does not arm the Gemma 4 family default.
-    let mut options = build_generate_options(&request.params, &state.config, false);
+    let mut options =
+        build_generate_options_with_live(&request.params, &state.config, &live, false);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // `/v1/completions` takes a raw prompt just like `/completion`;
@@ -302,7 +299,7 @@ async fn non_stream_completion(
     // Generate (blocking call handled by model provider's worker thread)
     let result = state
         .model_provider
-        .generate(prompt, options)
+        .generate_with_live(prompt, options, &live)
         .map_err(generation_error_to_response)?;
     slot.finish(
         result.prompt_tokens,
@@ -339,6 +336,7 @@ async fn non_stream_completion(
 
 async fn stream_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: CompletionRequest,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
@@ -358,7 +356,8 @@ async fn stream_completion(
     let prompt = request.prompt.clone();
     // `/v1/completions` has no tool-shaped prompt signal. Since issue #977 a
     // grammar constraint alone does not arm the Gemma 4 family default.
-    let mut options = build_generate_options(&request.params, &state.config, false);
+    let mut options =
+        build_generate_options_with_live(&request.params, &state.config, &live, false);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // see non_stream_completion — raw-text endpoint, no
@@ -442,7 +441,7 @@ async fn stream_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
                 prompt,
                 options,
                 Vec::new(),
@@ -451,6 +450,7 @@ async fn stream_completion(
                 MediaRequestMetadata::default(),
                 queue_reservation,
                 cancelled,
+                &live,
                 |token, lp_data| {
                     slot.on_token(&token);
                     let logprobs = if logprobs_enabled {

@@ -20,6 +20,8 @@
 //! Like the OpenAI-compatible routes, this file stays as an HTTP adapter while
 //! generation policy and SSE plumbing live in shared server modules.
 
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::State,
@@ -33,7 +35,8 @@ use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::PrefillStats;
 use crate::server::model_provider::StopKind;
 use crate::server::request_options::{
-    RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
+    RequestOptionOverrides, build_server_generate_options_with_live,
+    resolve_server_max_tokens_with_live,
 };
 use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
@@ -41,7 +44,7 @@ use crate::server::types::{
     ErrorResponse, NativeCompletionChunk, NativeCompletionRequest, NativeCompletionResponse,
     NativeTimings, StopType, select_response_fields,
 };
-use crate::server::{AppState, ServerConfig, ServerGenerateOptions};
+use crate::server::{AppState, LiveSettings, ServerConfig, ServerGenerateOptions};
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
     super::generation_error_to_response(err)
@@ -53,7 +56,8 @@ pub async fn native_completion(
     headers: HeaderMap,
     Json(request): Json<NativeCompletionRequest>,
 ) -> Response {
-    serve_native_completion(state, &headers, request).await
+    let live = state.live();
+    serve_native_completion(state, live, &headers, request).await
 }
 
 /// The native completion path, entered with an already-parsed request.
@@ -65,6 +69,7 @@ pub async fn native_completion(
 /// applies to both routes rather than being duplicated per route (#1442).
 pub(crate) async fn serve_native_completion(
     state: AppState,
+    live: Arc<LiveSettings>,
     headers: &HeaderMap,
     request: NativeCompletionRequest,
 ) -> Response {
@@ -115,28 +120,21 @@ pub(crate) async fn serve_native_completion(
 
     // validate thinking_budget_tokens early (semantics match
     // /v1/chat/completions but the cap is checked against n_predict).
-    let effective_n_predict = resolve_server_max_tokens(&state.config, requested_n_predict);
+    let effective_n_predict =
+        resolve_server_max_tokens_with_live(&state.config, &live, requested_n_predict);
     let raw_budget = pick_budget_alias(
         request.thinking_budget_tokens,
         request.thinking_token_budget,
         request.thinking_budget,
     );
-    let budget_override = match resolve_request_budget(
-        raw_budget,
-        state.config.reasoning_budget,
-        effective_n_predict,
-    ) {
-        Ok(effective) => {
-            if raw_budget.is_some() {
-                ReasoningBudgetOverride::Explicit(effective)
-            } else {
-                ReasoningBudgetOverride::InheritServerDefault
+    let budget_override =
+        match resolve_request_budget(raw_budget, live.reasoning_budget, effective_n_predict) {
+            Ok(effective) => ReasoningBudgetOverride::Explicit(effective),
+            Err(err) => {
+                return ErrorResponse::new(err.to_string(), "invalid_request_error")
+                    .into_response();
             }
-        }
-        Err(err) => {
-            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
-        }
-    };
+        };
 
     // Native fields mlxcel cannot honor are rejected with a diagnostic naming
     // the field, rather than accepted and ignored (#1441). A value that cannot
@@ -175,6 +173,7 @@ pub(crate) async fn serve_native_completion(
         };
         stream_native_completion(
             state,
+            live,
             request,
             requested_n_predict,
             priority,
@@ -186,6 +185,7 @@ pub(crate) async fn serve_native_completion(
     } else {
         non_stream_native_completion(
             state,
+            live,
             request,
             requested_n_predict,
             priority,
@@ -205,6 +205,7 @@ fn parse_priority_header(headers: &HeaderMap) -> RequestPriority {
 
 async fn non_stream_native_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: NativeCompletionRequest,
     requested_n_predict: Option<usize>,
     priority: RequestPriority,
@@ -217,7 +218,7 @@ async fn non_stream_native_completion(
         ));
     }
 
-    let mut options = build_native_options(&request, requested_n_predict, &state);
+    let mut options = build_native_options(&request, requested_n_predict, &state, &live);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // The response echoes the settings that were actually used, so keep a copy
@@ -234,7 +235,7 @@ async fn non_stream_native_completion(
 
     let result = state
         .model_provider
-        .generate(request.prompt.clone(), options)
+        .generate_with_live(request.prompt.clone(), options, &live)
         .map_err(generation_error_to_response)?;
     slot.finish(
         result.prompt_tokens,
@@ -424,6 +425,7 @@ impl StreamPrefill {
 
 async fn stream_native_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: NativeCompletionRequest,
     requested_n_predict: Option<usize>,
     priority: RequestPriority,
@@ -437,7 +439,7 @@ async fn stream_native_completion(
             .into_response();
     }
 
-    let mut options = build_native_options(&request, requested_n_predict, &state);
+    let mut options = build_native_options(&request, requested_n_predict, &state, &live);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // b10621 `reasoning_control` (#1444): arming creates the runtime
@@ -489,50 +491,54 @@ async fn stream_native_completion(
         let prefill_for_tokens = prefill.clone();
         let prefill_sink = prefill.clone();
 
-        let result = state.model_provider.generate_streaming_native_reserved(
-            prompt,
-            options,
-            MediaRequestMetadata::default(),
-            queue_reservation,
-            cancelled,
-            |token, _lp| {
-                slot.on_token(&token);
-                let n = emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let snapshot = prefill_for_tokens
-                    .lock()
-                    .map(|guard| *guard)
-                    .unwrap_or_default();
-                // Upstream's per-token frame is small: the full metadata
-                // block belongs to the final frame alone. `timings` is
-                // attached here only under `timings_per_token`.
-                let chunk = NativeCompletionChunk {
-                    index: 0,
-                    content: token.to_string(),
-                    tokens: Vec::new(),
-                    stop: false,
-                    id_slot: slot.id_slot(),
-                    tokens_predicted: n,
-                    tokens_evaluated: snapshot.stats.prompt_tokens,
-                    timings: timings_per_token.then(|| {
-                        NativeTimings::new(
-                            snapshot.stats.cached_tokens,
-                            snapshot.stats.prompt_tokens,
-                            snapshot.stats.prompt_ms as f64,
-                            n,
-                            snapshot.predicted_ms(),
-                        )
-                    }),
-                    prompt_progress: None,
-                };
-                let _ = token_events.json(&chunk);
-            },
-            |stats| {
-                slot.on_prefill(stats.prompt_tokens, stats.cached_tokens);
-                if let Ok(mut guard) = prefill_sink.lock() {
-                    *guard = StreamPrefill::observed(stats);
-                }
-            },
-        );
+        let result = state
+            .model_provider
+            .generate_streaming_native_reserved_live(
+                prompt,
+                options,
+                MediaRequestMetadata::default(),
+                queue_reservation,
+                cancelled,
+                &live,
+                |token, _lp| {
+                    slot.on_token(&token);
+                    let n =
+                        emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let snapshot = prefill_for_tokens
+                        .lock()
+                        .map(|guard| *guard)
+                        .unwrap_or_default();
+                    // Upstream's per-token frame is small: the full metadata
+                    // block belongs to the final frame alone. `timings` is
+                    // attached here only under `timings_per_token`.
+                    let chunk = NativeCompletionChunk {
+                        index: 0,
+                        content: token.to_string(),
+                        tokens: Vec::new(),
+                        stop: false,
+                        id_slot: slot.id_slot(),
+                        tokens_predicted: n,
+                        tokens_evaluated: snapshot.stats.prompt_tokens,
+                        timings: timings_per_token.then(|| {
+                            NativeTimings::new(
+                                snapshot.stats.cached_tokens,
+                                snapshot.stats.prompt_tokens,
+                                snapshot.stats.prompt_ms as f64,
+                                n,
+                                snapshot.predicted_ms(),
+                            )
+                        }),
+                        prompt_progress: None,
+                    };
+                    let _ = token_events.json(&chunk);
+                },
+                |stats| {
+                    slot.on_prefill(stats.prompt_tokens, stats.cached_tokens);
+                    if let Ok(mut guard) = prefill_sink.lock() {
+                        *guard = StreamPrefill::observed(stats);
+                    }
+                },
+            );
 
         // The final frame is the whole non-streaming object with `stop: true`,
         // built through the same function so the two shapes cannot drift.
@@ -727,17 +733,34 @@ fn build_native_options(
     request: &NativeCompletionRequest,
     requested_n_predict: Option<usize>,
     state: &AppState,
+    live: &LiveSettings,
 ) -> ServerGenerateOptions {
-    build_native_generate_options(&state.config, request, requested_n_predict)
+    build_native_generate_options_with_live(&state.config, live, request, requested_n_predict)
 }
 
+#[allow(dead_code)]
 fn build_native_generate_options(
     config: &ServerConfig,
     request: &NativeCompletionRequest,
     requested_n_predict: Option<usize>,
 ) -> ServerGenerateOptions {
-    build_server_generate_options(
+    build_native_generate_options_with_live(
         config,
+        &config.live_settings(),
+        request,
+        requested_n_predict,
+    )
+}
+
+fn build_native_generate_options_with_live(
+    config: &ServerConfig,
+    live: &LiveSettings,
+    request: &NativeCompletionRequest,
+    requested_n_predict: Option<usize>,
+) -> ServerGenerateOptions {
+    build_server_generate_options_with_live(
+        config,
+        live,
         RequestOptionOverrides {
             // Already through `resolve_n_predict`, so an upstream `-1` arrives
             // here as an unbounded budget the context clamp reduces.

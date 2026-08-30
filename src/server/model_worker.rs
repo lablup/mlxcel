@@ -875,7 +875,7 @@ fn resolve_worker_paged_block_budget(
 ///   supported by the Phase 1 vocabulary scanner).
 /// - `tokenizer.json` cannot be read from disk.
 /// - The resolver itself fails (logged; generation continues without bias).
-fn resolve_worker_token_bias(
+pub(crate) fn resolve_worker_token_bias(
     config: Option<&mlxcel_core::lang_analyzer::LangBiasConfig>,
     tokenizer: &crate::tokenizer::MlxcelTokenizer,
     model_path: &std::path::Path,

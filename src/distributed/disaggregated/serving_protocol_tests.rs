@@ -28,10 +28,13 @@ fn sample_sampling() -> SerializableSamplingState {
 
 #[test]
 fn prefill_request_frame_round_trips_through_a_control_message() {
+    let mut sampling = sample_sampling();
+    sampling.reasoning_budget = 12;
+    sampling.thinking_enter_block_on_start = true;
     let frame = PrefillRequestFrame {
         request_id: 7,
         prompt_tokens: vec![1, 2, 3, 42],
-        sampling: sample_sampling(),
+        sampling,
         max_tokens: 64,
         reply_to: "127.0.0.1:5555".to_string(),
         decode_target: None,
@@ -47,6 +50,8 @@ fn prefill_request_frame_round_trips_through_a_control_message() {
     assert_eq!(decoded.max_tokens, 64);
     assert_eq!(decoded.reply_to, "127.0.0.1:5555");
     assert_eq!(decoded.decode_target, None);
+    assert_eq!(decoded.sampling.reasoning_budget, 12);
+    assert!(decoded.sampling.thinking_enter_block_on_start);
 }
 
 /// Issue #201: a router-chosen decode target round-trips through the frame so
@@ -86,10 +91,13 @@ fn prefill_request_frame_decode_target_defaults_to_none() {
 
 #[test]
 fn decode_meta_frame_round_trips_through_a_control_message() {
+    let mut sampling = sample_sampling();
+    sampling.reasoning_budget = 7;
+    sampling.thinking_enter_block_on_start = true;
     let frame = DecodeMetaFrame {
         request_id: 11,
         max_tokens: 32,
-        sampling: sample_sampling(),
+        sampling,
         reply_to: "127.0.0.1:6666".to_string(),
     };
     let message = frame.encode().expect("encode decode meta");
@@ -100,6 +108,8 @@ fn decode_meta_frame_round_trips_through_a_control_message() {
     assert_eq!(decoded.request_id, 11);
     assert_eq!(decoded.max_tokens, 32);
     assert_eq!(decoded.reply_to, "127.0.0.1:6666");
+    assert_eq!(decoded.sampling.reasoning_budget, 7);
+    assert!(decoded.sampling.thinking_enter_block_on_start);
 }
 
 #[test]
@@ -221,8 +231,22 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     config.top_n_sigma = 1.5;
     config.typical_p = 0.5;
     config.penalty_last_n = 32;
+    config.token_bias.insert(41, 0.25);
+    config.token_bias.insert(42, f32::NEG_INFINITY);
+    config.token_bias.insert_byte_fragment(43, -0.5);
+    config.loop_detection = mlxcel_core::LoopDetectionConfig::new(2, 8, 3);
 
-    let restored = sampling_from_serializable(&sampling_to_serializable(&config));
+    let serialized = sampling_to_serializable(&config);
+    assert_eq!(
+        serialized
+            .token_bias
+            .iter()
+            .map(|entry| entry.token_id)
+            .collect::<Vec<_>>(),
+        vec![41, 42, 43],
+        "token-bias entries should have deterministic wire order"
+    );
+    let restored = sampling_from_serializable(&serialized);
 
     assert_eq!(restored.temperature, 0.7);
     assert_eq!(restored.top_k, 40);
@@ -237,6 +261,80 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     assert_eq!(restored.top_n_sigma, 1.5);
     assert_eq!(restored.typical_p, 0.5);
     assert_eq!(restored.penalty_last_n, 32);
+    assert_eq!(
+        restored.token_bias.get(&41).copied().map(f32::to_bits),
+        Some(0.25f32.to_bits())
+    );
+    assert_eq!(
+        restored.token_bias.get(&42).copied().map(f32::to_bits),
+        Some(f32::NEG_INFINITY.to_bits())
+    );
+    assert_eq!(
+        restored.token_bias.get(&43).copied().map(f32::to_bits),
+        Some((-0.5f32).to_bits())
+    );
+    assert!(!restored.token_bias.is_byte_fragment(41));
+    assert!(restored.token_bias.is_byte_fragment(43));
+    assert_eq!(
+        restored.loop_detection,
+        mlxcel_core::LoopDetectionConfig::new(2, 8, 3)
+    );
+}
+
+#[test]
+fn sampling_state_encodes_negative_infinity_as_json_safe_bits() {
+    let mut config = SamplingConfig::greedy();
+    config
+        .token_bias
+        .insert_byte_fragment(17, f32::NEG_INFINITY);
+
+    let state = sampling_to_serializable(&config);
+    let json = serde_json::to_value(&state).expect("non-finite token bias must remain JSON-safe");
+    assert_eq!(
+        json["token_bias"][0]["bias_bits"].as_u64(),
+        Some(u64::from(f32::NEG_INFINITY.to_bits()))
+    );
+    assert_eq!(json["token_bias"][0]["byte_fragment"], true);
+    assert!(
+        !json.to_string().contains("inf"),
+        "the wire JSON must never contain a non-finite float literal"
+    );
+
+    let decoded: SerializableSamplingState =
+        serde_json::from_value(json).expect("decode JSON-safe token bias");
+    let restored = sampling_from_serializable(&decoded);
+    assert_eq!(
+        restored.token_bias.get(&17).copied().map(f32::to_bits),
+        Some(f32::NEG_INFINITY.to_bits())
+    );
+    assert!(restored.token_bias.is_byte_fragment(17));
+}
+
+#[test]
+fn sampling_state_new_fields_default_for_older_peers() {
+    let mut value = serde_json::to_value(sampling_to_serializable(&SamplingConfig::greedy()))
+        .expect("serialize sampling state");
+    let object = value
+        .as_object_mut()
+        .expect("sampling state serializes as an object");
+    for field in [
+        "token_bias",
+        "loop_detection",
+        "reasoning_budget",
+        "thinking_enter_block_on_start",
+    ] {
+        object.remove(field);
+    }
+
+    let state: SerializableSamplingState =
+        serde_json::from_value(value).expect("deserialize legacy sampling state");
+    assert!(state.token_bias.is_empty());
+    assert_eq!(
+        state.loop_detection,
+        mlxcel_core::LoopDetectionConfig::disabled()
+    );
+    assert_eq!(state.reasoning_budget, -1);
+    assert!(!state.thinking_enter_block_on_start);
 }
 
 #[test]

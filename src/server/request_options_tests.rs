@@ -14,8 +14,8 @@
 
 use super::{
     LOOP_DETECTION_RECOMMENDED, RequestOptionOverrides, build_server_generate_options,
-    carries_loop_amplifier, chat_carries_loop_amplifier, loop_detection_from_request,
-    resolve_loop_detection, resolve_server_max_tokens,
+    build_server_generate_options_with_live, carries_loop_amplifier, chat_carries_loop_amplifier,
+    loop_detection_from_request, resolve_loop_detection, resolve_server_max_tokens,
 };
 use crate::server::ServerConfig;
 use crate::server::types::request::{ChatCompletionRequest, FunctionDefinition, Tool};
@@ -138,6 +138,47 @@ fn build_server_generate_options_uses_server_defaults() {
     assert_eq!(options.sampling.top_n_sigma, config.default_top_n_sigma);
     assert!(!options.ignore_eos);
     assert_eq!(options.stop_sequences, None);
+}
+
+#[test]
+fn build_server_generate_options_uses_one_patched_live_snapshot() {
+    let config = ServerConfig::default();
+    let mut live = config.live_settings();
+    live.default_max_tokens = 123;
+    live.default_temperature = 0.31;
+    live.default_top_k = 17;
+    live.default_top_p = 0.73;
+    live.default_min_p = 0.08;
+    live.default_repetition_penalty = 1.17;
+    live.default_repetition_context_size = 41;
+    live.default_seed = Some(7);
+    live.default_frequency_penalty = 0.21;
+    live.default_presence_penalty = 0.32;
+    live.default_dry_multiplier = 0.44;
+    live.default_dry_base = 2.0;
+    live.default_dry_allowed_length = 5;
+    live.default_dry_penalty_last_n = 37;
+    live.default_dry_sequence_breakers = vec![11, 19];
+
+    let options =
+        build_server_generate_options_with_live(&config, &live, RequestOptionOverrides::default());
+
+    assert_eq!(options.max_tokens, 123);
+    assert_eq!(options.sampling.temperature, 0.31);
+    assert_eq!(options.sampling.top_k, 17);
+    assert_eq!(options.sampling.top_p, 0.73);
+    assert_eq!(options.sampling.min_p, 0.08);
+    assert_eq!(options.sampling.repetition_penalty, 1.17);
+    assert_eq!(options.sampling.penalty_last_n, 41);
+    assert_eq!(options.sampling.seed, Some(7));
+    assert_eq!(options.sampling.frequency_penalty, 0.21);
+    assert_eq!(options.sampling.presence_penalty, 0.32);
+    assert_eq!(options.sampling.dry_multiplier, 0.44);
+    assert_eq!(options.sampling.dry_base, 2.0);
+    assert_eq!(options.sampling.dry_allowed_length, 5);
+    assert_eq!(options.sampling.dry_penalty_last_n, 37);
+    assert_eq!(options.sampling.dry_sequence_breakers, vec![11, 19]);
+    assert_ne!(options.sampling.temperature, config.default_temperature);
 }
 
 #[test]
@@ -867,8 +908,8 @@ fn completions_route_keeps_grammar_only_requests_disabled() {
 #[test]
 fn disaggregated_chat_front_gates_on_rendered_tools() {
     // `router_front::route_chat` takes the same `ChatCompletionRequest` and calls
-    // the same `build_generate_options`. The resolved value is inert today:
-    // `loop_detection` is not carried by the PrefillRequestFrame.
+    // the same `build_generate_options`; the resolved value is then carried in
+    // the PrefillRequestFrame sampling state.
     assert_eq!(
         chat_route_loop_detection(&chat_request_with_tools(Some("none"))),
         LoopDetectionConfig::disabled()

@@ -47,6 +47,7 @@ pub async fn infill(
     headers: HeaderMap,
     Json(mut body): Json<serde_json::Value>,
 ) -> Response {
+    let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -97,7 +98,7 @@ pub async fn infill(
         }
     };
 
-    super::native_completion::serve_native_completion(state, &headers, request).await
+    super::native_completion::serve_native_completion(state, live, &headers, request).await
 }
 
 #[cfg(test)]

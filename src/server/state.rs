@@ -19,8 +19,8 @@
 //! than construction details.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use crate::distributed::pipeline::{PipelineObservability, PpTracer};
 use crate::tokenizer::MlxcelTokenizer;
@@ -33,7 +33,7 @@ use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
 use super::rerank_model::RerankModelProvider;
 use super::responses_store::ResponsesStore;
 use super::slots_state::SlotRegistry;
-use super::{ChatTemplateProcessor, ModelProvider, ServerConfig};
+use super::{ChatTemplateProcessor, LiveSettings, ModelProvider, ServerConfig};
 
 /// Server-wide metrics counters (atomic, lock-free).
 pub struct Metrics {
@@ -403,6 +403,14 @@ impl ModelMediaSupport {
 pub struct AppState {
     pub model_provider: Arc<ModelProvider>,
     pub config: Arc<ServerConfig>,
+    /// Immutable startup defaults used as the base of PATCH `replace`.
+    pub startup_live: Arc<LiveSettings>,
+    /// Atomically published request-settings snapshot. Readers only hold the
+    /// lock long enough to clone the Arc.
+    pub(crate) current_live: Arc<RwLock<Arc<LiveSettings>>>,
+    /// Serializes PATCH transactions while derived values are recomputed
+    /// outside `current_live`'s short publication lock.
+    pub(crate) settings_update_lock: Arc<std::sync::Mutex<()>>,
     pub chat_template: Arc<ChatTemplateProcessor>,
     /// Tokenizer for tokenize/detokenize endpoints (thread-safe).
     pub tokenizer: Arc<MlxcelTokenizer>,
@@ -527,9 +535,21 @@ impl AppState {
     ) -> Self {
         let slots_debug = slots_debug_from_env();
         let slots = build_slot_registry(&config, slots_debug);
+        let mut startup_settings = config.live_settings();
+        startup_settings.resolved_token_bias =
+            super::model_provider::model_worker::resolve_worker_token_bias(
+                startup_settings.lang_bias_config.as_ref(),
+                &tokenizer,
+                &model_path,
+            );
+        let startup_live = Arc::new(startup_settings);
+        let current_live = Arc::new(RwLock::new(startup_live.clone()));
         Self {
             model_provider,
             config: Arc::new(config),
+            startup_live,
+            current_live,
+            settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
             tokenizer: Arc::new(tokenizer),
             model_path,
@@ -572,9 +592,21 @@ impl AppState {
     ) -> Self {
         let slots_debug = slots_debug_from_env();
         let slots = build_slot_registry(&config, slots_debug);
+        let mut startup_settings = config.live_settings();
+        startup_settings.resolved_token_bias =
+            super::model_provider::model_worker::resolve_worker_token_bias(
+                startup_settings.lang_bias_config.as_ref(),
+                &tokenizer,
+                &model_path,
+            );
+        let startup_live = Arc::new(startup_settings);
+        let current_live = Arc::new(RwLock::new(startup_live.clone()));
         Self {
             model_provider,
             config: Arc::new(config),
+            startup_live,
+            current_live,
+            settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
             tokenizer: Arc::new(tokenizer),
             model_path,
@@ -687,6 +719,16 @@ impl AppState {
             .model_alias
             .as_deref()
             .unwrap_or_else(|| self.model_provider.model_id())
+    }
+
+    /// Clone the settings snapshot for one request without holding the lock
+    /// across prompt rendering, dispatch, or streaming.
+    #[must_use]
+    pub fn live(&self) -> Arc<LiveSettings> {
+        self.current_live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Check whether the server can accept a new request based on queue depth.

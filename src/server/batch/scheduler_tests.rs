@@ -26,9 +26,9 @@ use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
 
 use super::{
-    MAX_CONSECUTIVE_EVAL_FAILURES, advance_eval_failure_count, effective_decode_storage_backend,
-    eval_failures_reached_limit, resolve_max_batch_prefill_tokens, select_eviction_victim_from,
-    vlm_prefix_sharing_allowed,
+    MAX_CONSECUTIVE_EVAL_FAILURES, advance_eval_failure_count, build_handoff_thinking_state,
+    effective_decode_storage_backend, eval_failures_reached_limit,
+    resolve_max_batch_prefill_tokens, select_eviction_victim_from, vlm_prefix_sharing_allowed,
 };
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::queue::PrefillQueue;
@@ -39,6 +39,7 @@ use crate::server::batch::stop_matcher::StopMatcher;
 use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
+use crate::server::thinking_budget::{ThinkingDecision, ThinkingTokenIds};
 
 /// Build a minimal `SequenceInfo` for scheduling tests.
 fn make_test_sequence(id_val: u64) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
@@ -1979,4 +1980,39 @@ fn boundary_capture_applies_respects_adopted_prefix() {
     // A boundary at or past the prompt length would leave no suffix.
     assert!(!boundary_capture_applies(60, 0, 60));
     assert!(!boundary_capture_applies(61, 0, 60));
+}
+
+#[test]
+fn handoff_thinking_state_replays_generated_tokens_before_decode() {
+    let token_ids = ThinkingTokenIds {
+        open: 10,
+        close: 11,
+    };
+    let state =
+        build_handoff_thinking_state(Some(token_ids), 2, 16, false, &[token_ids.open, 101, 102])
+            .expect("valid handoff thinking state");
+
+    assert_eq!(state.in_block_count, 2);
+    assert_eq!(
+        state.decide_override(103),
+        ThinkingDecision::ForceClose(token_ids.close)
+    );
+}
+
+#[test]
+fn handoff_thinking_state_replays_primed_first_token_and_validates_raw_budget() {
+    let token_ids = ThinkingTokenIds {
+        open: 10,
+        close: 11,
+    };
+    let state = build_handoff_thinking_state(Some(token_ids), 1, 8, true, &[101])
+        .expect("valid primed handoff thinking state");
+    assert_eq!(state.in_block_count, 1);
+    assert_eq!(
+        state.decide_override(102),
+        ThinkingDecision::ForceClose(token_ids.close)
+    );
+
+    assert!(build_handoff_thinking_state(Some(token_ids), -2, 8, false, &[]).is_err());
+    assert!(build_handoff_thinking_state(Some(token_ids), 9, 8, false, &[]).is_err());
 }

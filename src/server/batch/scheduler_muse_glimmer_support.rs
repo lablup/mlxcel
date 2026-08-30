@@ -314,6 +314,7 @@ pub(super) fn enqueue(
         Vec::new(),
         tx,
         Arc::new(AtomicBool::new(false)),
+        true,
     );
     rx
 }

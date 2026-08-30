@@ -18,7 +18,7 @@
 //! but once their overrides are resolved they should map onto the same
 //! `ServerGenerateOptions` policy.
 
-use super::{ServerConfig, ServerGenerateOptions};
+use super::{LiveSettings, ServerConfig, ServerGenerateOptions};
 use crate::sampling::{ResolvedSamplingParams, build_sampling_config};
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
@@ -228,46 +228,56 @@ pub(crate) fn resolve_loop_detection(
     LoopDetectionConfig::disabled()
 }
 
+#[allow(dead_code)]
 pub(crate) fn build_server_generate_options(
     config: &ServerConfig,
     overrides: RequestOptionOverrides,
 ) -> ServerGenerateOptions {
+    build_server_generate_options_with_live(config, &config.live_settings(), overrides)
+}
+
+/// Build request options from one immutable live-settings snapshot.
+pub(crate) fn build_server_generate_options_with_live(
+    config: &ServerConfig,
+    live: &LiveSettings,
+    overrides: RequestOptionOverrides,
+) -> ServerGenerateOptions {
     let mut sampling = build_sampling_config(ResolvedSamplingParams {
-        temperature: overrides.temperature.unwrap_or(config.default_temperature),
-        top_k: overrides.top_k.unwrap_or(config.default_top_k),
-        top_p: overrides.top_p.unwrap_or(config.default_top_p),
-        min_p: overrides.min_p.unwrap_or(config.default_min_p),
-        seed: overrides.seed.or(config.default_seed),
+        temperature: overrides.temperature.unwrap_or(live.default_temperature),
+        top_k: overrides.top_k.unwrap_or(live.default_top_k),
+        top_p: overrides.top_p.unwrap_or(live.default_top_p),
+        min_p: overrides.min_p.unwrap_or(live.default_min_p),
+        seed: overrides.seed.or(live.default_seed),
         repetition_penalty: overrides
             .repetition_penalty
-            .unwrap_or(config.default_repetition_penalty),
+            .unwrap_or(live.default_repetition_penalty),
         dry_multiplier: overrides
             .dry_multiplier
-            .unwrap_or(config.default_dry_multiplier),
+            .unwrap_or(live.default_dry_multiplier),
         // b10621's schema handler replaces a dry_base below 1.0 with the
         // server default rather than erroring (#1436).
         dry_base: {
-            let v = overrides.dry_base.unwrap_or(config.default_dry_base);
-            if v < 1.0 { config.default_dry_base } else { v }
+            let v = overrides.dry_base.unwrap_or(live.default_dry_base);
+            if v < 1.0 { live.default_dry_base } else { v }
         },
         dry_allowed_length: overrides
             .dry_allowed_length
-            .unwrap_or(config.default_dry_allowed_length),
+            .unwrap_or(live.default_dry_allowed_length),
         // Clamped to upstream's INT32_MAX schema ceiling so a wire value can
         // never collide with the internal DRY_FULL_HISTORY sentinel (#1436).
         dry_penalty_last_n: overrides
             .dry_penalty_last_n
-            .unwrap_or(config.default_dry_penalty_last_n)
+            .unwrap_or(live.default_dry_penalty_last_n)
             .min(i32::MAX as usize),
         dry_sequence_breakers: overrides
             .dry_sequence_breakers
-            .unwrap_or_else(|| config.default_dry_sequence_breakers.clone()),
+            .unwrap_or_else(|| live.default_dry_sequence_breakers.clone()),
         frequency_penalty: overrides
             .frequency_penalty
-            .unwrap_or(config.default_frequency_penalty),
+            .unwrap_or(live.default_frequency_penalty),
         presence_penalty: overrides
             .presence_penalty
-            .unwrap_or(config.default_presence_penalty),
+            .unwrap_or(live.default_presence_penalty),
         // #1436: XTC gained the b10621 server-wide defaults
         // (--xtc-probability / --xtc-threshold, defaults 0.0 / 0.1, the
         // disabled baseline); an absent request field resolves to them.
@@ -292,7 +302,7 @@ pub(crate) fn build_server_generate_options(
         // #1436 the flag was parsed and echoed by /props but never reached
         // the sampler, which scanned the full history.
         penalty_last_n: overrides.penalty_last_n.unwrap_or_else(|| {
-            i32::try_from(config.default_repetition_context_size).unwrap_or(i32::MAX)
+            i32::try_from(live.default_repetition_context_size).unwrap_or(i32::MAX)
         }),
         stop_token_ids: Vec::new(),
     });
@@ -305,10 +315,11 @@ pub(crate) fn build_server_generate_options(
     // preserving the bit-exact baseline.
     sampling.loop_detection = resolve_loop_detection(
         overrides.loop_detection_request,
-        config.loop_detection,
+        live.loop_detection,
         config.model_is_gemma4_family,
         overrides.request_carries_loop_amplifier,
     );
+    sampling.token_bias = live.resolved_token_bias.clone();
 
     // b10621 -r / --reverse-prompt (#1436): upstream seeds the task's stop
     // set from the CLI antiprompt list and then REPLACES it wholesale when
@@ -324,7 +335,7 @@ pub(crate) fn build_server_generate_options(
     };
 
     ServerGenerateOptions {
-        max_tokens: resolve_server_max_tokens(config, overrides.max_tokens),
+        max_tokens: resolve_server_max_tokens_with_live(config, live, overrides.max_tokens),
         sampling,
         stop_sequences,
         // b10621 --ignore-eos (#1436): a per-request ignore_eos overrides
@@ -361,14 +372,24 @@ pub(crate) fn build_server_generate_options(
 /// default is the cap; that default comes from the checkpoint context window
 /// for the `-n -1` sentinel, with 4096 as the final fallback. An omitted
 /// request budget keeps the configured server default unchanged.
+#[allow(dead_code)]
 pub(crate) fn resolve_server_max_tokens(config: &ServerConfig, requested: Option<usize>) -> usize {
+    resolve_server_max_tokens_with_live(config, &config.live_settings(), requested)
+}
+
+/// Resolve one request's generation budget from its captured live snapshot.
+pub(crate) fn resolve_server_max_tokens_with_live(
+    config: &ServerConfig,
+    live: &LiveSettings,
+    requested: Option<usize>,
+) -> usize {
     let Some(requested) = requested else {
-        return config.default_max_tokens;
+        return live.default_max_tokens;
     };
     let cap = if config.context_size > 0 {
         config.context_size
     } else {
-        config.default_max_tokens
+        live.default_max_tokens
     };
     requested.min(cap)
 }

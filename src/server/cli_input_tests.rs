@@ -17,8 +17,9 @@ use std::path::PathBuf;
 use super::{
     DecodeStorageBackend, MAX_KV_SIZE_MIN, ServerStartupInput, env_fallback_cache_type_k,
     env_fallback_cache_type_v, env_fallback_kv_bits, env_fallback_kv_group_size,
-    env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, resolve_compat_toggle,
-    resolve_kv_cache_mode, resolve_max_kv_size, resolve_prefill_chunk_size, resolve_seed,
+    env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_settings_endpoint,
+    resolve_compat_toggle, resolve_kv_cache_mode, resolve_max_kv_size, resolve_prefill_chunk_size,
+    resolve_seed,
 };
 use crate::lang_bias::LangBiasCliArgs;
 // Tests that mutate env vars (via `EnvGuard` or directly) must acquire the
@@ -94,6 +95,7 @@ fn sample_input() -> ServerStartupInput {
         no_slots: false,
         props: true,
         metrics: true,
+        settings: false,
         slot_save_path: None,
         router_models_dir: None,
         models_max: 4,
@@ -230,6 +232,25 @@ fn resolve_compat_toggle_honors_disable_override() {
 fn resolve_seed_maps_negative_values_to_random_mode() {
     assert_eq!(resolve_seed(-1), None);
     assert_eq!(resolve_seed(7), Some(7));
+}
+
+#[test]
+fn settings_cli_startup_config_defaults_off_and_propagates_enablement() {
+    let default = sample_input()
+        .into_startup_config()
+        .expect("default startup config");
+    assert!(
+        !default.enable_settings,
+        "the settings endpoint must default off"
+    );
+
+    let mut input = sample_input();
+    input.settings = true;
+    let enabled = input.into_startup_config().expect("enabled startup config");
+    assert!(
+        enabled.enable_settings,
+        "the startup config must retain settings enablement"
+    );
 }
 
 /// The #1438 migration guard, recorded as a `by_design` divergence on the
@@ -497,6 +518,32 @@ impl Drop for EnvGuard {
             std::env::remove_var(self.0);
         }
     }
+}
+
+#[test]
+fn settings_cli_env_fallback_accepts_numeric_one() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("MLXCEL_ENABLE_SETTINGS_ENDPOINT", "1");
+
+    let mut enabled = false;
+    env_fallback_settings_endpoint(&mut enabled, false);
+    assert!(
+        enabled,
+        "MLXCEL_ENABLE_SETTINGS_ENDPOINT=1 must enable the endpoint"
+    );
+}
+
+#[test]
+fn settings_cli_explicit_cli_value_wins_over_env() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("MLXCEL_ENABLE_SETTINGS_ENDPOINT", "0");
+
+    let mut enabled = true;
+    env_fallback_settings_endpoint(&mut enabled, true);
+    assert!(
+        enabled,
+        "an explicit --settings must win over the env value"
+    );
 }
 
 /// B7 acceptance test: only `LLAMA_ARG_LANG_BIAS` is set (no CLI flag) →

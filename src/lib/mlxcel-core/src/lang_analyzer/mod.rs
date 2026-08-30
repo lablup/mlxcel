@@ -892,7 +892,8 @@ impl TokenLanguageIndex {
 ///
 /// Kept in `mlxcel-core::lang_analyzer` rather than the binary crate so the
 /// server, CLI, and tests share a single core-level representation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LangBiasConfig {
     /// Ordered list of per-language bias values (earlier entries win on conflict).
     pub bias_set: LangBiasSet,

@@ -40,7 +40,8 @@ use mlxcel::server::{
     env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_ubatch_size, long_cli_flag_was_set, resolve_parallel_context_size, start_server,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
+    resolve_parallel_context_size, start_server,
 };
 use mlxcel_core::cache::KVCacheMode;
 
@@ -59,6 +60,7 @@ pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
 }
 
 async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
+    env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
     // Resolve the model reference into a concrete directory (epic #92, issue
     // #94) before the memory preflight or the server reads it. An existing
     // path is used verbatim (byte-identical to the pre-#94 local-path
@@ -607,6 +609,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         slots: args.slots,
         no_slots: args._no_slots,
         props: args.props,
+        settings: args.settings,
         slot_save_path: args.slot_save_path,
         router_models_dir: args.models_dir.clone(),
         models_max: args.models_max,

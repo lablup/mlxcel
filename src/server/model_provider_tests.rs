@@ -22,8 +22,8 @@ use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
     ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
-    ModelRequest, QueueReservationMode, SingleStreamQueueReservation, StopKind,
-    drain_generation_events, send_shutdown_signal, tokenize_prompt_for_generation,
+    ModelRequest, QueueReservationMode, RequestRuntimeDefaults, SingleStreamQueueReservation,
+    StopKind, drain_generation_events, send_shutdown_signal, tokenize_prompt_for_generation,
     tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
 use crate::server::batch::BatchObservability;
@@ -143,6 +143,59 @@ fn model_provider_relies_on_auto_traits_for_shared_state() {
 }
 
 #[test]
+fn generate_with_live_enqueues_the_captured_runtime_defaults() {
+    let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+    let worker_handle = std::thread::spawn(move || {
+        let ModelRequest::Generate {
+            runtime: Some(runtime),
+            response_tx,
+            ..
+        } = request_rx.recv().expect("request")
+        else {
+            panic!("HTTP live generation must carry runtime defaults");
+        };
+        assert_eq!(runtime.decode_timeout, Duration::from_secs(17));
+        assert_eq!(runtime.diffusion.max_denoising_steps, Some(29));
+        assert_eq!(runtime.diffusion.confidence_threshold, 0.42);
+        assert_eq!(
+            runtime.diffusion.sampler,
+            crate::server::diffusion_worker::parse_diffusion_sampler("confidence-threshold")
+                .expect("valid sampler")
+        );
+        response_tx
+            .send(GenerateEvent::Done(sample_result()))
+            .expect("response receiver");
+    });
+    let provider = ModelProvider {
+        request_tx,
+        model_id: "test-model".to_string(),
+        created_at: 0,
+        loaded: Arc::new(AtomicBool::new(true)),
+        snapshot_reuse_capable: Arc::new(AtomicBool::new(false)),
+        chat_unavailable: Arc::new(AtomicBool::new(false)),
+        batch_metrics: Arc::new(BatchMetrics::new()),
+        batch_observability: Arc::new(BatchObservability::new()),
+        max_queue_depth: usize::MAX,
+        single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
+        prompt_cache: None,
+        prompt_tokenizer: None,
+        decode_hang_timeout: DECODE_HANG_TIMEOUT,
+        _worker_handle: worker_handle,
+    };
+    let mut live = crate::server::ServerConfig::default().live_settings();
+    live.timeout_seconds = 17;
+    live.max_denoising_steps = Some(29);
+    live.diffusion_sampler = "confidence-threshold".to_string();
+    live.diffusion_threshold = 0.42;
+
+    let result = provider
+        .generate_with_live("hello".to_string(), sample_options(), &live)
+        .expect("generation");
+
+    assert_eq!(result.text, "hello");
+}
+
+#[test]
 fn provider_media_cardinality_rejection_does_not_poison_worker() {
     let (options_tx, options_rx) = mpsc::channel();
     let provider = ModelProvider::recording_for_route_tests(options_tx);
@@ -201,6 +254,7 @@ fn single_stream_queue_reservation_releases_after_failed_send() {
         prompt: "hello".to_string(),
         prompt_token_ids: None,
         options: sample_options(),
+        runtime: None,
         images: Vec::new(),
         audio: Vec::new(),
         videos: Vec::new(),
@@ -227,6 +281,7 @@ fn single_stream_queue_reservation_releases_on_dequeue_before_processing() {
             prompt: "hello".to_string(),
             prompt_token_ids: None,
             options: sample_options(),
+            runtime: None,
             images: Vec::new(),
             audio: Vec::new(),
             videos: Vec::new(),
@@ -284,6 +339,7 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
             Vec::new(),
             crate::server::media::MediaRequestMetadata::default(),
             Arc::new(AtomicBool::new(false)),
+            None,
             QueueReservationMode::PreReserved(queue_reservation),
         )
         .unwrap();
@@ -392,6 +448,21 @@ fn validated_decode_hang_timeout_uses_fallback_when_timeout_is_zero() {
     assert_ne!(dur, Duration::ZERO);
     // Must be the documented fallback constant.
     assert_eq!(dur, DECODE_HANG_TIMEOUT);
+}
+
+#[test]
+fn live_runtime_defaults_preserve_the_startup_zero_timeout_fallback() {
+    let config = crate::server::ServerConfig {
+        decode_timeout_seconds: 0,
+        ..crate::server::ServerConfig::default()
+    };
+    let live = config.live_settings();
+
+    assert_eq!(live.timeout_seconds, DECODE_HANG_TIMEOUT.as_secs());
+    assert_eq!(
+        RequestRuntimeDefaults::from_live(&live).decode_timeout,
+        DECODE_HANG_TIMEOUT
+    );
 }
 
 // ── Long-prefill regression tests ───────────────────────────────

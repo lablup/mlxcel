@@ -36,8 +36,8 @@ use crate::server::prompt_cache::key::{
     multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
 use crate::server::request_options::{
-    RequestOptionOverrides, build_server_generate_options, chat_carries_loop_amplifier,
-    resolve_server_max_tokens,
+    RequestOptionOverrides, build_server_generate_options_with_live, chat_carries_loop_amplifier,
+    resolve_server_max_tokens_with_live,
 };
 use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
@@ -49,7 +49,7 @@ use crate::server::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse,
     SamplingParams,
 };
-use crate::server::{AppState, ServerConfig, ServerGenerateOptions};
+use crate::server::{AppState, LiveSettings, ServerConfig, ServerGenerateOptions};
 use crate::tokenizer::MlxcelTokenizer;
 
 /// Map a [`StructuredOutputError`] to an HTTP error response.
@@ -102,6 +102,7 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 /// `None` to opt this request out.
 pub(crate) fn build_prompt_cache_request_context(
     state: &AppState,
+    live: &LiveSettings,
     request: &ChatCompletionRequest,
     image_data: &[Vec<u8>],
     audio_data: &[Vec<u8>],
@@ -128,7 +129,7 @@ pub(crate) fn build_prompt_cache_request_context(
     let merged_kwargs = resolve_effective_kwargs(
         &state.chat_template,
         request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         &request.merged_extra_body(),
     );
 
@@ -228,6 +229,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
+    let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -300,28 +302,21 @@ pub async fn chat_completions(
 
     // validate thinking_budget_tokens early so malformed values
     // surface as 400 before any generation work begins.
-    let effective_max_tokens = resolve_server_max_tokens(&state.config, request.params.max_tokens);
+    let effective_max_tokens =
+        resolve_server_max_tokens_with_live(&state.config, &live, request.params.max_tokens);
     let raw_budget = pick_budget_alias(
         request.params.thinking_budget_tokens,
         request.params.thinking_token_budget,
         request.params.thinking_budget,
     );
-    let budget_override = match resolve_request_budget(
-        raw_budget,
-        state.config.reasoning_budget,
-        effective_max_tokens,
-    ) {
-        Ok(effective) => {
-            if raw_budget.is_some() {
-                ReasoningBudgetOverride::Explicit(effective)
-            } else {
-                ReasoningBudgetOverride::InheritServerDefault
+    let budget_override =
+        match resolve_request_budget(raw_budget, live.reasoning_budget, effective_max_tokens) {
+            Ok(effective) => ReasoningBudgetOverride::Explicit(effective),
+            Err(err) => {
+                return ErrorResponse::new(err.to_string(), "invalid_request_error")
+                    .into_response();
             }
-        }
-        Err(err) => {
-            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
-        }
-    };
+        };
 
     // + H2: build the structured-output constraint up
     // front so any schema validation error surfaces as a 400 before
@@ -361,6 +356,7 @@ pub async fn chat_completions(
         };
         stream_chat_completion(
             state,
+            live,
             request,
             priority,
             budget_override,
@@ -369,7 +365,7 @@ pub async fn chat_completions(
         )
         .await
     } else {
-        non_stream_chat_completion(state, request, priority, budget_override, structured)
+        non_stream_chat_completion(state, live, request, priority, budget_override, structured)
             .await
             .into_response()
     }
@@ -389,6 +385,7 @@ pub(crate) fn parse_priority_header(headers: &HeaderMap) -> RequestPriority {
 /// round-trip: it returns the typed `ChatCompletionResponse` (issue #1446).
 pub(crate) async fn non_stream_chat_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: ChatCompletionRequest,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
@@ -414,7 +411,7 @@ pub(crate) async fn non_stream_chat_completion(
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -424,6 +421,7 @@ pub(crate) async fn non_stream_chat_completion(
     // digest sees the resolved image/audio bytes.
     let prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -442,7 +440,8 @@ pub(crate) async fn non_stream_chat_completion(
     // Loop-detection amplifier signal (issues #967 and #977): only tool-shaped
     // prompts arm the family default. Grammar-only requests stay disabled.
     let amplified = chat_carries_loop_amplifier(&request);
-    let mut options = build_generate_options(&request.params, &state.config, amplified);
+    let mut options =
+        build_generate_options_with_live(&request.params, &state.config, &live, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.prompt_cache_ctx = prompt_cache_ctx;
@@ -488,13 +487,14 @@ pub(crate) async fn non_stream_chat_completion(
     );
     let mut result = state
         .model_provider
-        .generate_with_media_and_videos_declared(
+        .generate_with_media_and_videos_declared_live(
             prepared.prompt,
             options,
             prepared.image_data,
             prepared.audio_data,
             prepared.videos,
             prepared.media,
+            &live,
         )
         .map_err(generation_error_to_response)?;
 
@@ -687,7 +687,7 @@ pub(crate) async fn non_stream_chat_completion(
     // a tool result rather than as assistant content, so the reply text is not
     // a reliable guess at the next prompt there.
     if let Some(ref ctx) = warmup_ctx {
-        submit_next_turn_warmup(&state, &request, ctx, &cleaned_text);
+        submit_next_turn_warmup(&state, &live, &request, ctx, &cleaned_text);
     }
 
     Ok(Json(
@@ -718,6 +718,7 @@ pub(crate) async fn non_stream_chat_completion(
 /// lands in the bucket the next turn will look in.
 fn submit_next_turn_warmup(
     state: &AppState,
+    live: &LiveSettings,
     request: &ChatCompletionRequest,
     ctx: &PromptCacheRequestContext,
     reply: &str,
@@ -731,7 +732,7 @@ fn submit_next_turn_warmup(
     let Some(history) = crate::server::chat_request::render_next_turn_history(
         &state.chat_template,
         request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         reply,
     ) else {
         return;
@@ -802,6 +803,7 @@ pub(crate) struct ResumableStreamContext {
 
 async fn stream_chat_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: ChatCompletionRequest,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
@@ -825,7 +827,7 @@ async fn stream_chat_completion(
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -840,6 +842,7 @@ async fn stream_chat_completion(
     // digest sees the resolved image/audio bytes.
     let prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -860,7 +863,8 @@ async fn stream_chat_completion(
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
     let amplified = chat_carries_loop_amplifier(&request);
-    let mut options = build_generate_options(&request.params, &state.config, amplified);
+    let mut options =
+        build_generate_options_with_live(&request.params, &state.config, &live, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.prompt_cache_ctx = prompt_cache_ctx;
@@ -1035,7 +1039,7 @@ async fn stream_chat_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
                 prepared.prompt,
                 options,
                 prepared.image_data,
@@ -1044,6 +1048,7 @@ async fn stream_chat_completion(
                 prepared.media,
                 queue_reservation,
                 cancelled,
+                &live,
                 |token, lp_data| {
                     slot.on_token(&token);
                     // Single lock per token (issue #633): accumulate raw text,
@@ -1300,7 +1305,7 @@ async fn stream_chat_completion(
                 .lock()
                 .map(|cb| cb.warmup_content.clone())
                 .unwrap_or_default();
-            submit_next_turn_warmup(state, request, ctx, &reply);
+            submit_next_turn_warmup(state, &live, request, ctx, &reply);
         }
 
         // Send finish chunk
@@ -1566,13 +1571,30 @@ pub(crate) fn extract_reasoning_content(
 /// `request_carries_loop_amplifier`. Chat-shaped callers compute it with
 /// [`crate::server::request_options::chat_carries_loop_amplifier`]; raw-prompt
 /// endpoints that accept neither tools nor a schema pass `false`.
+#[allow(dead_code)]
 pub(crate) fn build_generate_options(
     params: &SamplingParams,
     config: &ServerConfig,
     request_carries_loop_amplifier: bool,
 ) -> ServerGenerateOptions {
-    build_server_generate_options(
+    build_generate_options_with_live(
+        params,
         config,
+        &config.live_settings(),
+        request_carries_loop_amplifier,
+    )
+}
+
+/// Build chat generation options from one captured settings snapshot.
+pub(crate) fn build_generate_options_with_live(
+    params: &SamplingParams,
+    config: &ServerConfig,
+    live: &LiveSettings,
+    request_carries_loop_amplifier: bool,
+) -> ServerGenerateOptions {
+    build_server_generate_options_with_live(
+        config,
+        live,
         RequestOptionOverrides {
             max_tokens: params.max_tokens,
             temperature: params.temperature,

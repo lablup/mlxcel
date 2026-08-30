@@ -510,6 +510,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 prompt,
                 prompt_token_ids,
                 options,
+                runtime: _,
                 images,
                 audio,
                 videos,

@@ -60,7 +60,8 @@ use crate::server::types::anthropic_stream::{
 };
 
 use super::chat::{
-    MAX_TOOLS, build_generate_options, build_prompt_cache_request_context, parse_priority_header,
+    MAX_TOOLS, build_generate_options_with_live, build_prompt_cache_request_context,
+    parse_priority_header,
 };
 
 fn generation_error_to_response(err: anyhow::Error) -> Response {
@@ -78,7 +79,9 @@ fn generation_error_to_response(err: anyhow::Error) -> Response {
         AnthropicErrorResponse::api_error(format!("Generation failed: {err}")).into_response()
     }
 }
-use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
+use crate::server::request_options::{
+    chat_carries_loop_amplifier, resolve_server_max_tokens_with_live,
+};
 
 /// POST /v1/messages
 pub async fn anthropic_messages(
@@ -86,6 +89,7 @@ pub async fn anthropic_messages(
     headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
+    let live = state.live();
     if let Some(message) = super::chat_unavailable_message(&state) {
         return AnthropicErrorResponse::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -142,27 +146,23 @@ pub async fn anthropic_messages(
     }
 
     // Resolve the thinking budget exactly as the chat / responses routes do.
-    let effective_max_tokens =
-        resolve_server_max_tokens(&state.config, translated.chat_request.params.max_tokens);
+    let effective_max_tokens = resolve_server_max_tokens_with_live(
+        &state.config,
+        &live,
+        translated.chat_request.params.max_tokens,
+    );
     let raw_budget = pick_budget_alias(
         translated.chat_request.params.thinking_budget_tokens,
         translated.chat_request.params.thinking_token_budget,
         translated.chat_request.params.thinking_budget,
     );
-    let budget_override = match resolve_request_budget(
-        raw_budget,
-        state.config.reasoning_budget,
-        effective_max_tokens,
-    ) {
-        Ok(eff) => {
-            if raw_budget.is_some() {
-                ReasoningBudgetOverride::Explicit(eff)
-            } else {
-                ReasoningBudgetOverride::InheritServerDefault
+    let budget_override =
+        match resolve_request_budget(raw_budget, live.reasoning_budget, effective_max_tokens) {
+            Ok(effective) => ReasoningBudgetOverride::Explicit(effective),
+            Err(err) => {
+                return AnthropicErrorResponse::bad_request(err.to_string()).into_response();
             }
-        }
-        Err(err) => return AnthropicErrorResponse::bad_request(err.to_string()).into_response(),
-    };
+        };
 
     let include_thinking = thinking_enabled(&request);
     let priority = parse_priority_header(&headers);
@@ -176,6 +176,7 @@ pub async fn anthropic_messages(
         };
         stream_messages(
             state,
+            live,
             request,
             translated,
             priority,
@@ -187,6 +188,7 @@ pub async fn anthropic_messages(
     } else {
         non_stream_messages(
             state,
+            live,
             request,
             translated,
             priority,
@@ -199,6 +201,7 @@ pub async fn anthropic_messages(
 
 async fn non_stream_messages(
     state: AppState,
+    live: std::sync::Arc<crate::server::LiveSettings>,
     request: AnthropicRequest,
     translated: AnthropicTranslated,
     priority: crate::server::batch::RequestPriority,
@@ -215,7 +218,7 @@ async fn non_stream_messages(
     let prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
         &translated.chat_request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -231,8 +234,12 @@ async fn non_stream_messages(
     // maps `tool_choice`, so an Anthropic `tool_choice: {"type": "none"}` lands as
     // `Mode("none")` and `effective_tools` drops the declarations here too.
     let amplified = chat_carries_loop_amplifier(&translated.chat_request);
-    let mut options =
-        build_generate_options(&translated.chat_request.params, &state.config, amplified);
+    let mut options = build_generate_options_with_live(
+        &translated.chat_request.params,
+        &state.config,
+        &live,
+        amplified,
+    );
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
@@ -245,6 +252,7 @@ async fn non_stream_messages(
     // byte-identical to the chat path.
     options.prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -260,13 +268,14 @@ async fn non_stream_messages(
     );
     let result = match state
         .model_provider
-        .generate_with_media_and_videos_declared(
+        .generate_with_media_and_videos_declared_live(
             prepared.prompt,
             options,
             prepared.image_data,
             prepared.audio_data,
             prepared.videos,
             prepared.media,
+            &live,
         ) {
         Ok(r) => r,
         Err(e) => return generation_error_to_response(e),
@@ -346,6 +355,7 @@ async fn non_stream_messages(
 
 async fn stream_messages(
     state: AppState,
+    live: std::sync::Arc<crate::server::LiveSettings>,
     request: AnthropicRequest,
     translated: AnthropicTranslated,
     priority: crate::server::batch::RequestPriority,
@@ -363,7 +373,7 @@ async fn stream_messages(
     let prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
         &translated.chat_request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -379,8 +389,12 @@ async fn stream_messages(
     // maps `tool_choice`, so an Anthropic `tool_choice: {"type": "none"}` lands as
     // `Mode("none")` and `effective_tools` drops the declarations here too.
     let amplified = chat_carries_loop_amplifier(&translated.chat_request);
-    let mut options =
-        build_generate_options(&translated.chat_request.params, &state.config, amplified);
+    let mut options = build_generate_options_with_live(
+        &translated.chat_request.params,
+        &state.config,
+        &live,
+        amplified,
+    );
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
@@ -390,6 +404,7 @@ async fn stream_messages(
     // path too, before `options`/`prepared` move into the spawned task.
     options.prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -471,7 +486,7 @@ async fn stream_messages(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
                 prepared.prompt,
                 options,
                 prepared.image_data,
@@ -480,6 +495,7 @@ async fn stream_messages(
                 prepared.media,
                 queue_reservation,
                 cancelled,
+                &live,
                 |token, _lp| {
                     slot.on_token(&token);
                     if let Ok(mut acc) = acc_clone.lock() {
@@ -652,6 +668,7 @@ pub async fn anthropic_count_tokens(
     State(state): State<AppState>,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
+    let live = state.live();
     let translated = anthropic_request_to_chat(&request);
 
     // Enforce the tools array size limit before rendering the chat template.
@@ -673,7 +690,7 @@ pub async fn anthropic_count_tokens(
     let prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
         &translated.chat_request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )

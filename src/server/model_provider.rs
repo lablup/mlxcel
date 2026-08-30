@@ -31,6 +31,33 @@ use crate::server::batch::BatchObservability;
 use crate::server::media::{MediaRequestMetadata, ResolvedVideo};
 use crate::server::state::BatchMetrics;
 
+/// Request-scoped runtime values that cannot live in the public generation
+/// options without breaking its construction API.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestRuntimeDefaults {
+    pub decode_timeout: Duration,
+    pub diffusion: crate::server::diffusion_worker::DiffusionServeDefaults,
+}
+
+impl RequestRuntimeDefaults {
+    #[must_use]
+    pub fn from_live(live: &crate::server::LiveSettings) -> Self {
+        let sampler =
+            crate::server::diffusion_worker::parse_diffusion_sampler(&live.diffusion_sampler)
+                .unwrap_or_else(|_| {
+                    crate::server::diffusion_worker::DiffusionServeDefaults::default().sampler
+                });
+        Self {
+            decode_timeout: Duration::from_secs(live.timeout_seconds),
+            diffusion: crate::server::diffusion_worker::DiffusionServeDefaults {
+                sampler,
+                confidence_threshold: live.diffusion_threshold,
+                max_denoising_steps: live.max_denoising_steps,
+            },
+        }
+    }
+}
+
 /// Request to the model thread
 pub(crate) enum ModelRequest {
     Generate {
@@ -43,6 +70,10 @@ pub(crate) enum ModelRequest {
         /// Moondream3) and diagnostics.
         prompt_token_ids: Option<Vec<i32>>,
         options: ServerGenerateOptions,
+        /// Present for HTTP requests that captured a live-settings snapshot.
+        /// `None` preserves the legacy worker-owned defaults for existing
+        /// programmatic callers.
+        runtime: Option<RequestRuntimeDefaults>,
         /// Raw image bytes for VLM (empty for text-only)
         images: Vec<Vec<u8>>,
         /// Raw audio bytes for audio-language models (empty for text/vision-only)
@@ -1168,6 +1199,24 @@ impl ModelProvider {
         self.generate_with_media(prompt, options, Vec::new(), Vec::new())
     }
 
+    /// Generate using runtime defaults captured by the admitting HTTP request.
+    pub(crate) fn generate_with_live(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        live: &crate::server::LiveSettings,
+    ) -> Result<GenerationResult> {
+        self.generate_with_media_and_videos_declared_runtime(
+            prompt,
+            options,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            MediaRequestMetadata::default(),
+            Some(RequestRuntimeDefaults::from_live(live)),
+        )
+    }
+
     /// Generate text with optional images and return the full result
     pub fn generate_with_images(
         &self,
@@ -1224,9 +1273,60 @@ impl ModelProvider {
         videos: Vec<ResolvedVideo>,
         media: MediaRequestMetadata,
     ) -> Result<GenerationResult> {
-        let response_rx = self
-            .send_generate_request_with_metadata(prompt, options, images, audio, videos, media)?;
-        drain_generation_events(response_rx, self.decode_hang_timeout, |_| {})
+        self.generate_with_media_and_videos_declared_runtime(
+            prompt, options, images, audio, videos, media, None,
+        )
+    }
+
+    /// Prepared HTTP generation with one captured live-settings snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_with_media_and_videos_declared_live(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        live: &crate::server::LiveSettings,
+    ) -> Result<GenerationResult> {
+        self.generate_with_media_and_videos_declared_runtime(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            Some(RequestRuntimeDefaults::from_live(live)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_with_media_and_videos_declared_runtime(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        runtime: Option<RequestRuntimeDefaults>,
+    ) -> Result<GenerationResult> {
+        let timeout = runtime
+            .as_ref()
+            .map_or(self.decode_hang_timeout, |runtime| runtime.decode_timeout);
+        let response_rx = self.send_generate_request_with_cancellation_and_metadata(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            Arc::new(AtomicBool::new(false)),
+            runtime,
+            QueueReservationMode::Auto,
+        )?;
+        drain_generation_events(response_rx, timeout, |_| {})
     }
 
     /// Generate text with streaming callback
@@ -1386,6 +1486,7 @@ impl ModelProvider {
             videos,
             media,
             cancelled,
+            None,
             QueueReservationMode::Auto,
         )?;
         drain_generation_events_with_logprobs(response_rx, self.decode_hang_timeout, callback)
@@ -1393,7 +1494,7 @@ impl ModelProvider {
 
     /// Streaming entry that uses a route-level queue reservation acquired
     /// before the SSE response is opened.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved<F>(
         &self,
         prompt: String,
@@ -1409,6 +1510,72 @@ impl ModelProvider {
     where
         F: FnMut(String, Option<TokenLogprobData>),
     {
+        self.generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            queue_reservation,
+            cancelled,
+            None,
+            callback,
+        )
+    }
+
+    /// Reserved streaming generation with one captured live-settings snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live<F>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        live: &crate::server::LiveSettings,
+        callback: F,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+    {
+        self.generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            queue_reservation,
+            cancelled,
+            Some(RequestRuntimeDefaults::from_live(live)),
+            callback,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime<F>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        runtime: Option<RequestRuntimeDefaults>,
+        callback: F,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+    {
+        let timeout = runtime
+            .as_ref()
+            .map_or(self.decode_hang_timeout, |runtime| runtime.decode_timeout);
         let response_rx = self.send_generate_request_with_cancellation_and_metadata(
             prompt,
             options,
@@ -1417,9 +1584,10 @@ impl ModelProvider {
             videos,
             media,
             cancelled,
+            runtime,
             QueueReservationMode::PreReserved(queue_reservation),
         )?;
-        drain_generation_events_with_logprobs(response_rx, self.decode_hang_timeout, callback)
+        drain_generation_events_with_logprobs(response_rx, timeout, callback)
     }
 
     /// Streaming entry for the native `llama-server` `/completion` route
@@ -1431,7 +1599,7 @@ impl ModelProvider {
     /// the route can put the real `prompt_n` / `prompt_ms` / `cache_n` on every
     /// streaming frame the way b10621 does under `timings_per_token` instead of
     /// zeroing them until the final frame.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn generate_streaming_native_reserved<F, P>(
         &self,
         prompt: String,
@@ -1446,6 +1614,66 @@ impl ModelProvider {
         F: FnMut(String, Option<TokenLogprobData>),
         P: FnMut(PrefillStats),
     {
+        self.generate_streaming_native_reserved_runtime(
+            prompt,
+            options,
+            media,
+            queue_reservation,
+            cancelled,
+            None,
+            callback,
+            on_prefill,
+        )
+    }
+
+    /// Native reserved streaming generation with captured runtime defaults.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_native_reserved_live<F, P>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        live: &crate::server::LiveSettings,
+        callback: F,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+        P: FnMut(PrefillStats),
+    {
+        self.generate_streaming_native_reserved_runtime(
+            prompt,
+            options,
+            media,
+            queue_reservation,
+            cancelled,
+            Some(RequestRuntimeDefaults::from_live(live)),
+            callback,
+            on_prefill,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_streaming_native_reserved_runtime<F, P>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        runtime: Option<RequestRuntimeDefaults>,
+        callback: F,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+        P: FnMut(PrefillStats),
+    {
+        let timeout = runtime
+            .as_ref()
+            .map_or(self.decode_hang_timeout, |runtime| runtime.decode_timeout);
         let response_rx = self.send_generate_request_with_cancellation_and_metadata(
             prompt,
             options,
@@ -1454,14 +1682,10 @@ impl ModelProvider {
             Vec::new(),
             media,
             cancelled,
+            runtime,
             QueueReservationMode::PreReserved(queue_reservation),
         )?;
-        drain_generation_events_with_prefill(
-            response_rx,
-            self.decode_hang_timeout,
-            callback,
-            on_prefill,
-        )
+        drain_generation_events_with_prefill(response_rx, timeout, callback, on_prefill)
     }
 
     fn send_generate_request(
@@ -1493,6 +1717,7 @@ impl ModelProvider {
             videos,
             media,
             Arc::new(AtomicBool::new(false)),
+            None,
             QueueReservationMode::Auto,
         )
     }
@@ -1520,6 +1745,7 @@ impl ModelProvider {
             videos,
             media,
             cancelled,
+            None,
             QueueReservationMode::Auto,
         )
     }
@@ -1534,6 +1760,7 @@ impl ModelProvider {
         videos: Vec<ResolvedVideo>,
         media: MediaRequestMetadata,
         cancelled: Arc<AtomicBool>,
+        runtime: Option<RequestRuntimeDefaults>,
         queue_reservation_mode: QueueReservationMode,
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let mut options = options;
@@ -1602,6 +1829,7 @@ impl ModelProvider {
                 prompt,
                 prompt_token_ids,
                 options,
+                runtime,
                 images,
                 audio,
                 videos,
@@ -1703,6 +1931,19 @@ fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {
 #[doc(hidden)] // pub(crate) for tests
 pub(crate) const DECODE_HANG_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Resolve the request-visible timeout without logging.
+///
+/// Startup validation owns the warning for a zero CLI value, while every
+/// [`LiveSettings`](crate::server::LiveSettings) snapshot stores this effective
+/// value so HTTP requests and router handoffs cannot bypass the fallback.
+pub(crate) fn effective_decode_timeout_seconds(decode_timeout_seconds: u64) -> u64 {
+    if decode_timeout_seconds == 0 {
+        DECODE_HANG_TIMEOUT.as_secs()
+    } else {
+        decode_timeout_seconds
+    }
+}
+
 /// Validate `decode_timeout_seconds` from the server config and convert it to
 /// a `Duration`.
 ///
@@ -1721,9 +1962,8 @@ pub(crate) fn validated_decode_hang_timeout(decode_timeout_seconds: u64) -> Dura
              Set --decode-timeout to a positive value to suppress this warning.",
             DECODE_HANG_TIMEOUT.as_secs()
         );
-        return DECODE_HANG_TIMEOUT;
     }
-    Duration::from_secs(decode_timeout_seconds)
+    Duration::from_secs(effective_decode_timeout_seconds(decode_timeout_seconds))
 }
 
 /// Map the server's `--max-batch-size` to one of the OpenXLA engine's bundled

@@ -301,7 +301,14 @@ fn serving_handoff_parity_matches_single_node_qwen3() {
     );
     let (resp_tx, _resp_rx) = mpsc::channel();
     let decode_id = sched
-        .ingest_handoff_as_active(&delivered, MAX_TOKENS, SamplingConfig::greedy(), resp_tx)
+        .ingest_handoff_as_active(
+            &delivered,
+            MAX_TOKENS,
+            SamplingConfig::greedy(),
+            -1,
+            false,
+            resp_tx,
+        )
         .expect("decode-role ingest");
     let handoff_tokens = drive_decode(&mut sched, decode_id);
     eprintln!("handoff   decoded: {handoff_tokens:?}");
@@ -373,7 +380,14 @@ fn serving_handoff_parity_chunked_prefill_matches_single_node_qwen3() {
     let delivered = ship_over_coordinators(&wire);
     let (resp_tx, _resp_rx) = mpsc::channel();
     let decode_id = sched
-        .ingest_handoff_as_active(&delivered, MAX_TOKENS, SamplingConfig::greedy(), resp_tx)
+        .ingest_handoff_as_active(
+            &delivered,
+            MAX_TOKENS,
+            SamplingConfig::greedy(),
+            -1,
+            false,
+            resp_tx,
+        )
         .expect("decode-role ingest");
     let handoff_tokens = drive_decode(&mut sched, decode_id);
     eprintln!("chunked handoff decoded: {handoff_tokens:?}");

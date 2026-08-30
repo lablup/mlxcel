@@ -27,9 +27,9 @@
 use axum::{Json, extract::State, response::IntoResponse, response::Response};
 
 use super::slots::llama_not_supported;
-use crate::server::AppState;
 use crate::server::config::ServerConfig;
 use crate::server::types::{EmbeddingCapability, RerankCapability, ServerCapabilities};
+use crate::server::{AppState, LiveSettings};
 
 /// The `default_generation_settings.params` object of the `/props` payload.
 ///
@@ -41,32 +41,40 @@ use crate::server::types::{EmbeddingCapability, RerankCapability, ServerCapabili
 /// the server resolved a flag to, so a sampling default that the server
 /// honours but does not report here is invisible in exactly the way
 /// `--dry-sequence-breaker` was before #1103.
+#[allow(dead_code)]
 pub(crate) fn default_generation_settings(config: &ServerConfig) -> serde_json::Value {
+    default_generation_settings_with_live(config, &config.live_settings())
+}
+
+fn default_generation_settings_with_live(
+    config: &ServerConfig,
+    live: &LiveSettings,
+) -> serde_json::Value {
     serde_json::json!({
-        "n_predict": config.default_max_tokens,
-        "max_tokens": config.default_max_tokens,
-        "temperature": config.default_temperature,
-        "top_k": config.default_top_k,
-        "top_p": config.default_top_p,
-        "min_p": config.default_min_p,
+        "n_predict": live.default_max_tokens,
+        "max_tokens": live.default_max_tokens,
+        "temperature": live.default_temperature,
+        "top_k": live.default_top_k,
+        "top_p": live.default_top_p,
+        "min_p": live.default_min_p,
         "typical_p": config.default_typical_p,
         "top_n_sigma": config.default_top_n_sigma,
         "xtc_probability": config.default_xtc_probability,
         "xtc_threshold": config.default_xtc_threshold,
         "ignore_eos": config.default_ignore_eos,
-        "repeat_penalty": config.default_repetition_penalty,
-        "repeat_last_n": config.default_repetition_context_size,
-        "seed": config.default_seed.unwrap_or(u64::MAX),
-        "frequency_penalty": config.default_frequency_penalty,
-        "presence_penalty": config.default_presence_penalty,
-        "dry_multiplier": config.default_dry_multiplier,
-        "dry_base": config.default_dry_base,
-        "dry_allowed_length": config.default_dry_allowed_length,
-        "dry_penalty_last_n": config.default_dry_penalty_last_n,
+        "repeat_penalty": live.default_repetition_penalty,
+        "repeat_last_n": live.default_repetition_context_size,
+        "seed": live.default_seed.unwrap_or(u64::MAX),
+        "frequency_penalty": live.default_frequency_penalty,
+        "presence_penalty": live.default_presence_penalty,
+        "dry_multiplier": live.default_dry_multiplier,
+        "dry_base": live.default_dry_base,
+        "dry_allowed_length": live.default_dry_allowed_length,
+        "dry_penalty_last_n": live.default_dry_penalty_last_n,
         // Reported as resolved token IDs rather than as the strings the
         // operator typed, because the IDs are what the sampler compares
         // against and what a per-request `dry_sequence_breakers` overrides.
-        "dry_sequence_breakers": config.default_dry_sequence_breakers,
+        "dry_sequence_breakers": live.default_dry_sequence_breakers,
     })
 }
 
@@ -160,11 +168,12 @@ fn chat_template_caps(state: &AppState) -> serde_json::Value {
 
 /// GET /props
 pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let live = state.live();
     let tokenizer_config = read_model_json(&state, "tokenizer_config.json");
     let mut body = serde_json::json!({
         // -- b10621 key set --
         "default_generation_settings": {
-            "params": default_generation_settings(&state.config),
+            "params": default_generation_settings_with_live(&state.config, &live),
             "n_ctx": state.config.context_size,
         },
         "total_slots": state.config.n_parallel,
@@ -184,6 +193,7 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         "endpoint_slots": state.config.enable_slots_endpoint,
         "endpoint_props": state.config.enable_props_endpoint,
         "endpoint_metrics": state.config.enable_metrics_endpoint,
+        "endpoint_settings": state.config.enable_settings_endpoint,
         // mlxcel ships no web UI and no MCP CORS proxy.
         "ui": false,
         "ui_settings": {},

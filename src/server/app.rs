@@ -167,7 +167,7 @@ fn reg(
 ///
 /// Keep every `.route()` of the server in here: [`build_routes`] mounts
 /// exactly this list, so a route bypassing the inventory would not exist.
-pub(crate) fn route_inventory(_config: &crate::server::ServerConfig) -> Vec<RouteRegistration> {
+pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<RouteRegistration> {
     let audio_limit = DefaultBodyLimit::max(AUDIO_MAX_UPLOAD_BYTES);
     let mut inventory = vec![
         // OpenAI API endpoints
@@ -370,6 +370,22 @@ pub(crate) fn route_inventory(_config: &crate::server::ServerConfig) -> Vec<Rout
             get(routes::feature_disabled).post(routes::feature_disabled),
         ),
     ];
+
+    // Opt-in management API (#1312). It remains inside the ordinary API-key
+    // middleware and is absent, rather than returning a disabled stub, when
+    // the operator did not enable it.
+    if config.enable_settings_endpoint {
+        inventory.push(reg(
+            "/v1/settings",
+            Method::PATCH,
+            get(routes::get_settings).patch(routes::patch_settings),
+        ));
+        inventory.push(reg(
+            "/settings",
+            Method::PATCH,
+            get(routes::get_settings).patch(routes::patch_settings),
+        ));
+    }
 
     // b10621 mounts /props, /slots, /metrics and the slot actions
     // unconditionally and answers its own diagnostics when a gate is off

@@ -42,6 +42,7 @@ pub mod prompt_inspection;
 pub mod props;
 pub mod rerank;
 pub mod responses;
+pub mod settings;
 pub mod slots;
 pub mod stream;
 pub mod tokenize;
@@ -58,6 +59,10 @@ mod stream_route_tests;
 #[cfg(test)]
 #[path = "feature_disabled_tests.rs"]
 mod feature_disabled_tests;
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod settings_tests;
 
 pub use anthropic::{anthropic_count_tokens, anthropic_messages};
 pub use audio::{audio_speech, audio_transcriptions, audio_translations};
@@ -79,6 +84,7 @@ pub use prompt_inspection::{apply_template, chat_input_tokens, responses_input_t
 pub use props::{post_props, props};
 pub use rerank::create_rerank;
 pub use responses::{cancel_response, create_response, delete_response, retrieve_response};
+pub use settings::{get_settings, patch_settings};
 pub use slots::{slot_action, slots};
 pub use stream::{stream_delete, stream_get, streams_lookup};
 pub use tokenize::tokenize;

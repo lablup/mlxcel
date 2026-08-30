@@ -1745,6 +1745,10 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "LLAMA_ARG_ENDPOINT_METRICS")]
     metrics: bool,
 
+    /// Enable authenticated GET/PATCH /v1/settings endpoints
+    #[arg(long = "settings")]
+    settings: bool,
+
     /// Path to save slot kv cache (default: disabled)
     #[arg(long = "slot-save-path", value_name = "PATH")]
     slot_save_path: Option<PathBuf>,

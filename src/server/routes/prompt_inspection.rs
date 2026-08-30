@@ -44,10 +44,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::server::AppState;
 use crate::server::chat_request::prepare_chat_request_with_cache;
 use crate::server::responses_translator::responses_request_to_chat;
 use crate::server::types::{ChatCompletionRequest, CreateResponseRequest, ErrorResponse};
+use crate::server::{AppState, LiveSettings};
 
 /// Deserialize a request body that b10621 does not require a `model` on.
 ///
@@ -84,6 +84,7 @@ fn parse_with_default_model<T: serde::de::DeserializeOwned>(
 /// that does not generate.
 async fn render_chat_prompt(
     state: &AppState,
+    live: &LiveSettings,
     request: &ChatCompletionRequest,
 ) -> Result<String, ErrorResponse> {
     if let Err(message) = super::chat::validate_chat_tool_inputs(request) {
@@ -93,7 +94,7 @@ async fn render_chat_prompt(
     prepare_chat_request_with_cache(
         &state.chat_template,
         request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
     )
@@ -127,11 +128,12 @@ pub async fn apply_template(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    let live = state.live();
     let request: ChatCompletionRequest = match parse_with_default_model(&state, body) {
         Ok(request) => request,
         Err(err) => return err.into_response(),
     };
-    match render_chat_prompt(&state, &request).await {
+    match render_chat_prompt(&state, &live, &request).await {
         Ok(prompt) => (
             StatusCode::OK,
             Json(serde_json::json!({ "prompt": prompt })),
@@ -146,11 +148,12 @@ pub async fn chat_input_tokens(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    let live = state.live();
     let request: ChatCompletionRequest = match parse_with_default_model(&state, body) {
         Ok(request) => request,
         Err(err) => return err.into_response(),
     };
-    let prompt = match render_chat_prompt(&state, &request).await {
+    let prompt = match render_chat_prompt(&state, &live, &request).await {
         Ok(prompt) => prompt,
         Err(err) => return err.into_response(),
     };
@@ -174,6 +177,7 @@ pub async fn responses_input_tokens(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    let live = state.live();
     let request: CreateResponseRequest = match parse_with_default_model(&state, body) {
         Ok(request) => request,
         Err(err) => return err.into_response(),
@@ -188,7 +192,7 @@ pub async fn responses_input_tokens(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
-    let prompt = match render_chat_prompt(&state, &translated.chat_request).await {
+    let prompt = match render_chat_prompt(&state, &live, &translated.chat_request).await {
         Ok(prompt) => prompt,
         Err(err) => return err.into_response(),
     };
