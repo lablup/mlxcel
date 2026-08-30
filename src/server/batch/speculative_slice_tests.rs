@@ -262,6 +262,7 @@ fn make_slice_sequence_with_id(
     let prompt_tokens = vec![1, 2, 3];
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id: SequenceId::from_raw(raw_id),
         state: SequenceState::Prefilling,
@@ -315,8 +316,8 @@ fn drain_events(rx: &mpsc::Receiver<GenerateEvent>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         out.push(match ev {
-            GenerateEvent::Token(t) => ("token".to_string(), t),
-            GenerateEvent::TokenWithLogprobs(t, _) => ("token_lp".to_string(), t),
+            GenerateEvent::Token(t, _) => ("token".to_string(), t),
+            GenerateEvent::TokenWithLogprobs(t, _, _) => ("token_lp".to_string(), t),
             GenerateEvent::Prefill(_) => ("prefill".to_string(), String::new()),
             GenerateEvent::Done(_) => ("done".to_string(), String::new()),
             GenerateEvent::Error(e) => panic!("unexpected error event: {e}"),

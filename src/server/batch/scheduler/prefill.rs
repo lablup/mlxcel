@@ -981,6 +981,9 @@ impl BatchScheduler {
 
         mlxcel_core::clear_memory_cache();
         seq.prefill_offset = end;
+        // One `prompt_progress` frame per evaluated chunk, b10621's per-batch
+        // -iteration cadence (#1477).
+        seq.report_prefill_progress(end);
         // Count the first chunk too. Before issue #908 only
         // `continue_chunked_prefill` recorded, so the counter reported
         // continuations and read as zero for a prompt that ran chunk 0 and was
@@ -1160,6 +1163,8 @@ impl BatchScheduler {
         self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         seq.prefill_offset = end;
+        // Per-chunk `prompt_progress`, as on the first chunk (#1477).
+        seq.report_prefill_progress(end);
 
         tracing::debug!(
             "Chunked prefill: seq {} chunk {offset}..{end}/{total} tokens",
@@ -1409,7 +1414,7 @@ impl BatchScheduler {
         // (issue #1466). A short stop string can complete on this very token, in
         // which case generation ends here and the matched text is never emitted.
         let prefill_stop_word = match seq.decode_state.on_token(first_token, &self.tokenizer) {
-            Some(new_text) => seq.stream_decoded_text(new_text, token_lp),
+            Some(new_text) => seq.stream_decoded_text(new_text, Some(first_token), token_lp),
             None => None,
         };
 
@@ -1417,7 +1422,10 @@ impl BatchScheduler {
             Some(FinishReason::StopSequence)
         } else if structured_stopped {
             Some(FinishReason::Stop)
-        } else if seq.generated_tokens.len() >= seq.max_tokens {
+        // A generation bound can already have fired on the very first token
+        // (#1477); `t_max_predict_ms: 0` with a newline in that token is the
+        // reachable case.
+        } else if seq.bound_stopped() || seq.generated_tokens.len() >= seq.max_tokens {
             Some(FinishReason::Length)
         } else {
             None

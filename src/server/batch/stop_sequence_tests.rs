@@ -71,6 +71,7 @@ fn make_sequence(
     let prompt_tokens: Vec<i32> = Vec::new();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id: SequenceId::from_raw(1),
         state: SequenceState::Decoding,
@@ -124,7 +125,7 @@ fn drive(text: &str, stops: &[&str], max_tokens: usize, chunk_bytes: usize) -> R
             }
         }
         if let Some(t) = piece
-            && seq.stream_decoded_text(t, None).is_some()
+            && seq.stream_decoded_text(t, None, None).is_some()
         {
             seq.state
                 .transition_to(SequenceState::Finished(FinishReason::StopSequence))
@@ -151,7 +152,7 @@ fn drive(text: &str, stops: &[&str], max_tokens: usize, chunk_bytes: usize) -> R
     let mut streamed = String::new();
     while let Ok(event) = rx.try_recv() {
         match event {
-            GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => {
+            GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
                 streamed.push_str(&t);
             }
             GenerateEvent::Done(_) | GenerateEvent::Error(_) | GenerateEvent::Prefill(_) => {}

@@ -45,9 +45,10 @@ use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, SamplerState, TokenLogprobData};
 
+use super::generation_bounds::{BoundStop, GenerationBounds};
 use super::stop_matcher::StopMatcher;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
-use crate::server::model_provider::{GenerateEvent, PrefillStats};
+use crate::server::model_provider::{GenerateEvent, PrefillStats, TokenMeta};
 use crate::server::thinking_budget::ThinkingState;
 use crate::vision::merge::InputEmbeddings;
 
@@ -297,6 +298,9 @@ pub struct SequenceInfo {
     /// Streaming decode helper for incremental text emission.
     /// Used by `BatchScheduler` during prefill and decode steps.
     pub(crate) decode_state: StreamingDecodeState,
+    /// b10621's per-request generation bounds (#1477): `n_indent` and
+    /// `t_max_predict_ms`. Inert, and free, for a request that sends neither.
+    pub(crate) bounds: GenerationBounds,
     /// Streaming-safe matcher for the request's string stop sequences
     /// (issue #1466). Every decoded piece passes through it before reaching
     /// `response_tx`, so a piece that could still turn into a stop string is
@@ -413,6 +417,29 @@ impl SequenceInfo {
             prompt_tokens: self.prompt_tokens.len(),
             cached_tokens: self.already_cached_tokens,
             prompt_ms: now.duration_since(self.created_at).as_millis() as u64,
+            processed: self.prompt_tokens.len(),
+            first_token: true,
+        }));
+    }
+
+    /// Publish a mid-prefill progress observation (#1477).
+    ///
+    /// b10621 sends one `prompt_progress` frame when a slot starts processing
+    /// its prompt and one per batch iteration after that, so a client watching
+    /// a long prompt sees `processed` climb to `total` before the first content
+    /// frame. `processed` counts cache-supplied tokens too, which is why a
+    /// fully cached prompt opens at `processed == cache` rather than at zero
+    /// (measured on the pinned binary).
+    ///
+    /// Emitted unconditionally: the native route forwards it only under
+    /// `return_progress`, and every other consumer already ignores the variant.
+    pub(crate) fn report_prefill_progress(&self, processed: usize) {
+        let _ = self.response_tx.send(GenerateEvent::Prefill(PrefillStats {
+            prompt_tokens: self.prompt_tokens.len(),
+            cached_tokens: self.already_cached_tokens,
+            prompt_ms: self.created_at.elapsed().as_millis() as u64,
+            processed: processed.min(self.prompt_tokens.len()),
+            first_token: false,
         }));
     }
 
@@ -432,32 +459,61 @@ impl SequenceInfo {
     ///
     /// A caller that receives `Some(word)` must finish the sequence with
     /// [`FinishReason::StopSequence`] and stop feeding tokens.
+    /// `token_id` is the token this piece was decoded from, carried out on the
+    /// event as [`TokenMeta`] so the native streaming frame can report b10621's
+    /// `tokens` and `tokens_predicted` without re-deriving either from the text
+    /// (#1477). `None` from a call site with no single token behind the piece.
     pub(crate) fn stream_decoded_text(
         &mut self,
         text: String,
+        token_id: Option<i32>,
         logprobs: Option<TokenLogprobData>,
     ) -> Option<String> {
+        let meta = TokenMeta {
+            token_id,
+            decoded: Some(self.generated_tokens.len()),
+        };
         // No stop strings: send the piece verbatim, exactly as every call site
         // did before #1466, without building a `StopChunk` per decoded token.
         // This is the overwhelmingly common case on the decode hot path.
         if !self.stop_matcher.is_active() {
+            self.bounds.observe(&text, &text);
             let event = match logprobs {
-                Some(lp) => GenerateEvent::TokenWithLogprobs(text, lp),
-                None => GenerateEvent::Token(text),
+                Some(lp) => GenerateEvent::TokenWithLogprobs(text, meta, lp),
+                None => GenerateEvent::Token(text, meta),
             };
             let _ = self.response_tx.send(event);
             return None;
         }
 
+        // b10621 sends one partial frame per decoded token even while a stop
+        // string is being matched: that frame carries empty content and the
+        // token's own id, and its `tokens_predicted` still counts the token
+        // (measured against the pinned binary, #1477). Emitting nothing here
+        // would drop the id and make the frame count disagree with the token
+        // count. Consumers that accumulate text ignore an empty piece.
         let chunk = self.stop_matcher.push(&text);
-        if !chunk.emit.is_empty() {
-            let event = match logprobs {
-                Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, lp),
-                None => GenerateEvent::Token(chunk.emit),
-            };
-            let _ = self.response_tx.send(event);
-        }
+        // The generation bounds see the raw decoded text (what upstream appends
+        // to `generated_text`) and the emitted part separately (what arms its
+        // `has_new_line`); the two differ only mid stop-string match (#1477).
+        self.bounds.observe(&text, &chunk.emit);
+        let event = match logprobs {
+            Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, meta, lp),
+            None => GenerateEvent::Token(chunk.emit, meta),
+        };
+        let _ = self.response_tx.send(event);
         chunk.matched
+    }
+
+    /// Whether a b10621 generation bound ended this request on the step just
+    /// streamed (#1477).
+    ///
+    /// Read right after [`stream_decoded_text`](Self::stream_decoded_text) by
+    /// every decode path, alongside the stop-string result: a string stop wins
+    /// when both land on the same piece, because upstream evaluates the stop
+    /// strings first and stops feeding tokens there.
+    pub(crate) fn bound_stopped(&self) -> bool {
+        self.bounds.fired().is_some()
     }
 
     /// Close the text stream at the end of generation: push the incremental
@@ -481,12 +537,18 @@ impl SequenceInfo {
     /// past the match.
     pub(crate) fn close_text_stream(&mut self, tail: Option<String>) {
         let tail_matched = tail
-            .and_then(|t| self.stream_decoded_text(t, None))
+            .and_then(|t| self.stream_decoded_text(t, None, None))
             .is_some();
         if !self.stop_matcher.has_matched() {
             let held = self.stop_matcher.flush();
             if !held.is_empty() {
-                let _ = self.response_tx.send(GenerateEvent::Token(held));
+                // A flush spans whatever the matcher was holding, so no single
+                // token id describes it; the count is still exact.
+                let meta = TokenMeta {
+                    token_id: None,
+                    decoded: Some(self.generated_tokens.len()),
+                };
+                let _ = self.response_tx.send(GenerateEvent::Token(held, meta));
             }
         }
         if tail_matched
@@ -558,8 +620,54 @@ impl SequenceInfo {
             result.stop_kind = crate::server::model_provider::StopKind::ContextExhausted;
             result.finish_reason = "length".to_string();
         }
+        // A fired generation bound presents as b10621 presents it: `stop_type:
+        // "limit"` and the OpenAI string `"length"`, because the request ran
+        // into a bound it was given rather than reaching an end of sequence
+        // (#1477). A string stop sequence takes precedence, as upstream's
+        // ordering does.
+        if !matches!(
+            result.stop_kind,
+            crate::server::model_provider::StopKind::Word(_)
+        ) && let Some(bound) = self.bounds.fired()
+        {
+            if let BoundStop::Indent { keep_bytes } = bound {
+                // Upstream's "cut the last line": the text is erased from the
+                // first character after the offending line's leading
+                // whitespace. It does NOT re-truncate the stream, which has
+                // already sent those bytes, so the two shapes disagree there
+                // exactly as upstream's do.
+                truncate_result_text(&mut result, keep_bytes);
+            }
+            result.stop_kind = crate::server::model_provider::StopKind::Limit;
+            result.finish_reason = "length".to_string();
+        }
+        // b10621's `return_tokens` reports the raw sampled ids, including the
+        // token that completed a string stop sequence even though its text is
+        // excluded from `content` (measured against the pinned binary, #1477).
+        // `generated_tokens` is exactly that sequence.
+        result.generated_token_ids = self.generated_tokens.clone();
         result
     }
+}
+
+/// Truncate a finished result's text to `keep_bytes`, flooring to a character
+/// boundary (#1477).
+///
+/// The bound is computed over the same byte sequence the text carries, so the
+/// floor is defensive rather than expected; truncating mid-character would
+/// panic and is not worth risking on a stop rule.
+fn truncate_result_text(
+    result: &mut crate::server::model_provider::GenerationResult,
+    keep_bytes: usize,
+) {
+    if keep_bytes >= result.text.len() {
+        return;
+    }
+    let mut cut = keep_bytes;
+    while cut > 0 && !result.text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    result.text.truncate(cut);
 }
 
 // We cannot derive `Debug` automatically because `InputEmbeddings` contains

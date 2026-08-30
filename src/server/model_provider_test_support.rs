@@ -52,6 +52,10 @@ impl ModelProvider {
                             stop_kind,
                             logprobs: None,
                             cached_tokens: 0,
+                            // A canned id run so a route test can assert the
+                            // `return_tokens` projection (#1477); the counts
+                            // stay zero, as every other route test expects.
+                            generated_token_ids: vec![9001, 9002],
                             structured_output: None,
                         }));
                     }
@@ -158,7 +162,7 @@ impl ModelProvider {
                                     }
                                     text.push_str(&token);
                                     tokens_emitted += 1;
-                                    let _ = response_tx.send(GenerateEvent::Token(token));
+                                    let _ = response_tx.send(GenerateEvent::Token(token, TokenMeta::default()));
                                 }
                                 ScriptedStreamStep::Finish => break,
                             }
@@ -174,6 +178,10 @@ impl ModelProvider {
                             stop_kind: crate::server::model_provider::StopKind::Eos,
                             logprobs: None,
                             cached_tokens: 0,
+                            // A canned id run so a route test can assert the
+                            // `return_tokens` projection (#1477); the counts
+                            // stay zero, as every other route test expects.
+                            generated_token_ids: vec![9001, 9002],
                             structured_output: None,
                         }));
                     }

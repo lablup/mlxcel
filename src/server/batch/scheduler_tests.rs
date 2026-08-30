@@ -49,6 +49,7 @@ fn make_test_sequence(id_val: u64) -> (SequenceInfo, mpsc::Receiver<GenerateEven
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
 
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id: SequenceId::from_raw(id_val),
         state: SequenceState::Queued,
@@ -240,6 +241,7 @@ fn make_test_sequence_with_priority(
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
 
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id: SequenceId::from_raw(id_val),
         state: SequenceState::Queued,

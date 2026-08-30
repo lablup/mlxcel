@@ -146,6 +146,21 @@ pub fn thinking_marker_pair(raw: &str) -> Option<(&'static str, &'static str)> {
         .find(|(_, close)| raw.contains(close))
 }
 
+/// The canonical marker pair whose CLOSE marker is `close` (#1470).
+///
+/// The streaming path learns which family it is in from the close marker the
+/// prompt primed, exactly as [`thinking_marker_pair`] learns it from the close
+/// marker present in the raw text. Both read the same table, so the streamed
+/// delimiters and the non-streaming ones cannot disagree.
+// Used by: routes/chat (streaming path, --reasoning-format)
+#[must_use]
+pub fn thinking_marker_pair_for_close(close: &str) -> Option<(&'static str, &'static str)> {
+    THINKING_MARKER_PAIRS
+        .iter()
+        .copied()
+        .find(|(_, candidate)| *candidate == close)
+}
+
 /// Rebuild the `--reasoning-format none` / `deepseek-legacy` content form:
 /// the thinking block, tags included, followed by the answer.
 ///
@@ -168,9 +183,29 @@ pub fn thinking_marker_pair(raw: &str) -> Option<(&'static str, &'static str)> {
 #[must_use]
 pub fn content_with_thinking_block(raw: &str, answer: &str, reasoning: Option<&str>) -> String {
     match (thinking_marker_pair(raw), reasoning) {
-        (Some((open, close)), Some(thoughts)) => format!("{open}{thoughts}{close}{answer}"),
+        (Some((open, close)), Some(thoughts)) => {
+            let gap = post_close_whitespace(raw, close);
+            format!("{open}{thoughts}{close}{gap}{answer}")
+        }
         _ => answer.to_owned(),
     }
+}
+
+/// The whitespace the model emitted between its close marker and its answer.
+///
+/// `answer` comes from the parser, which trims it, so rebuilding from
+/// `{open}{thoughts}{close}{answer}` alone drops that run (#1470). It is real
+/// model output, and `--reasoning-format none` exists to keep the generation
+/// unparsed, so the streamed form (which passes the bytes through verbatim)
+/// and the non-streaming form disagreed by exactly those bytes: a model
+/// answering `</think>\n\n2 plus 2 equals 4.` streamed the two newlines and
+/// reported the answer without them.
+fn post_close_whitespace<'a>(raw: &'a str, close: &str) -> &'a str {
+    let Some(start) = raw.find(close).map(|i| i + close.len()) else {
+        return "";
+    };
+    let rest = &raw[start..];
+    &rest[..rest.len() - rest.trim_start().len()]
 }
 
 /// Parse model output for tool calls, trying each known format in order.

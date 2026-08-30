@@ -153,6 +153,7 @@ fn make_seq(
     let (tx, rx) = mpsc::channel();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id,
         state: SequenceState::Queued,
@@ -204,7 +205,9 @@ fn run_and_collect(
     let mut text = String::new();
     while let Ok(ev) = rx.try_recv() {
         match ev {
-            GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => text.push_str(&t),
+            GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
+                text.push_str(&t)
+            }
             _ => {}
         }
     }

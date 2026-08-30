@@ -340,8 +340,8 @@ fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> GenerationResult {
     loop {
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             GenerateEvent::Done(result) => return result,
-            GenerateEvent::Token(_)
-            | GenerateEvent::TokenWithLogprobs(_, _)
+            GenerateEvent::Token(_, _)
+            | GenerateEvent::TokenWithLogprobs(_, _, _)
             | GenerateEvent::Prefill(_) => {}
             GenerateEvent::Error(error) => panic!("unexpected generation failure: {error}"),
         }
@@ -704,7 +704,7 @@ fn stop_finish_without_a_token_event_returns_empty_content_and_no_completion_tok
 
     let result = match response_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
         GenerateEvent::Done(result) => result,
-        GenerateEvent::Token(text) | GenerateEvent::TokenWithLogprobs(text, _) => {
+        GenerateEvent::Token(text, _) | GenerateEvent::TokenWithLogprobs(text, _, _) => {
             panic!("the withheld EOS id was streamed as content: {text:?}")
         }
         GenerateEvent::Prefill(stats) => {

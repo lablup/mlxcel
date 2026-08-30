@@ -3003,6 +3003,9 @@ pub(crate) fn build_generation_result_with_cache(
         },
         logprobs: None,
         cached_tokens,
+        // Filled in by the scheduler's `take_generation_result` (#1477); every
+        // other producer generates without per-token ids.
+        generated_token_ids: Vec::new(),
         // Structured coordinate output is produced only by the Florence-2
         // seq2seq worker, which builds its result directly (issue #1073).
         structured_output: None,

@@ -57,7 +57,9 @@ use crate::models::florence2::{
 };
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::decode_request_images;
-use crate::server::model_provider::{GenerateEvent, GenerationResult, ModelRequest, StopKind};
+use crate::server::model_provider::{
+    GenerateEvent, GenerationResult, ModelRequest, StopKind, TokenMeta,
+};
 
 /// Error message sent for an audio/video Florence-2 request.
 pub(crate) const FLORENCE2_MEDIA_UNSUPPORTED_MSG: &str =
@@ -390,7 +392,7 @@ fn handle_florence2_request(
     // as a single delta rather than a token-by-token stream of raw
     // `<loc_*>` markers that would not match the non-streaming content.
     if !cancelled.load(Ordering::Relaxed) {
-        let _ = response_tx.send(GenerateEvent::Token(rendered.clone()));
+        let _ = response_tx.send(GenerateEvent::Token(rendered.clone(), TokenMeta::default()));
     }
 
     let finish_reason = florence2_finish_reason(run.generated_tokens, max_new_tokens);
@@ -412,6 +414,9 @@ fn handle_florence2_request(
         } else {
             StopKind::Eos
         },
+        // The seq2seq renderer emits one rendered answer, not a token
+        // stream, so it reports no per-token ids (#1477).
+        generated_token_ids: Vec::new(),
         logprobs: None,
         cached_tokens: 0,
         structured_output: Some(structured),

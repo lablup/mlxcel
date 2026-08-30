@@ -23,8 +23,9 @@ use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 use super::{
     ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
     ModelRequest, QueueReservationMode, RequestRuntimeDefaults, SingleStreamQueueReservation,
-    StopKind, drain_generation_events, send_shutdown_signal, tokenize_prompt_for_generation,
-    tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
+    StopKind, TokenMeta, drain_generation_events, send_shutdown_signal,
+    tokenize_prompt_for_generation, tokenize_prompt_for_generation_with_ordered_media,
+    validated_decode_hang_timeout,
 };
 use crate::server::batch::BatchObservability;
 use crate::server::state::BatchMetrics;
@@ -32,6 +33,7 @@ use crate::tokenizer::MlxcelTokenizer;
 
 fn sample_result() -> GenerationResult {
     GenerationResult {
+        generated_token_ids: Vec::new(),
         text: "hello".to_string(),
         prompt_tokens: 3,
         completion_tokens: 2,
@@ -48,6 +50,9 @@ fn sample_result() -> GenerationResult {
 
 fn sample_options() -> crate::server::ServerGenerateOptions {
     crate::server::ServerGenerateOptions {
+        n_indent: 0,
+        t_max_predict_ms: None,
+        reasoning_budget_message: None,
         retention: Default::default(),
         dry_breaker_strings: None,
         logit_bias: Vec::new(),
@@ -77,8 +82,10 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
 #[test]
 fn drain_generation_events_forwards_tokens_before_done() {
     let (tx, rx) = mpsc::channel();
-    tx.send(GenerateEvent::Token("A".to_string())).unwrap();
-    tx.send(GenerateEvent::Token("B".to_string())).unwrap();
+    tx.send(GenerateEvent::Token("A".to_string(), TokenMeta::default()))
+        .unwrap();
+    tx.send(GenerateEvent::Token("B".to_string(), TokenMeta::default()))
+        .unwrap();
     tx.send(GenerateEvent::Done(sample_result())).unwrap();
 
     let mut streamed = Vec::new();
@@ -115,8 +122,12 @@ fn drain_generation_events_accumulates_logprobs_from_token_with_logprobs() {
         logprob: -0.5,
         top_alternatives: vec![(7, -1.2)],
     };
-    tx.send(GenerateEvent::TokenWithLogprobs("Hi".to_string(), lp))
-        .unwrap();
+    tx.send(GenerateEvent::TokenWithLogprobs(
+        "Hi".to_string(),
+        TokenMeta::default(),
+        lp,
+    ))
+    .unwrap();
     tx.send(GenerateEvent::Done(sample_result())).unwrap();
 
     let mut streamed = Vec::new();
@@ -501,9 +512,13 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
     // the production code would expire here.
     let worker = thread::spawn(move || {
         thread::sleep(Duration::from_millis(80));
-        tx.send(GenerateEvent::Token("first".to_string()))
-            .expect("send token");
+        tx.send(GenerateEvent::Token(
+            "first".to_string(),
+            TokenMeta::default(),
+        ))
+        .expect("send token");
         tx.send(GenerateEvent::Done(GenerationResult {
+            generated_token_ids: Vec::new(),
             text: "first".to_string(),
             prompt_tokens: 32768,
             completion_tokens: 1,
@@ -529,11 +544,11 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
     let mut final_result: Option<GenerationResult> = None;
 
     let result = drain_generation_events_impl(&rx, Duration::from_secs(5), |event| match event {
-        GenerateEvent::Token(t) => {
+        GenerateEvent::Token(t, _) => {
             received_tokens.push(t);
             Ok(None)
         }
-        GenerateEvent::TokenWithLogprobs(t, _) => {
+        GenerateEvent::TokenWithLogprobs(t, _, _) => {
             received_tokens.push(t);
             Ok(None)
         }
@@ -584,8 +599,11 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
     // so no further events will arrive — simulating a worker that goes silent
     // after producing the first token.
     let worker = thread::spawn(move || {
-        tx.send(GenerateEvent::Token("first".to_string()))
-            .expect("send first token");
+        tx.send(GenerateEvent::Token(
+            "first".to_string(),
+            TokenMeta::default(),
+        ))
+        .expect("send first token");
         // Hold sender alive briefly so Phase 2 enters recv_timeout, then drop
         // it to also trigger Disconnected — whichever fires first is fine.
         thread::sleep(Duration::from_millis(200));
@@ -595,11 +613,11 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
     let mut received_tokens: Vec<String> = Vec::new();
 
     let result = drain_generation_events_impl(&rx, decode_hang_timeout, |event| match event {
-        GenerateEvent::Token(t) => {
+        GenerateEvent::Token(t, _) => {
             received_tokens.push(t);
             Ok(None)
         }
-        GenerateEvent::TokenWithLogprobs(t, _) => {
+        GenerateEvent::TokenWithLogprobs(t, _, _) => {
             received_tokens.push(t);
             Ok(None)
         }

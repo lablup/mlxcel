@@ -347,7 +347,15 @@ impl ChatCompatArgs {
             reasoning_format,
             skip_chat_parsing: self.skip_chat_parsing,
             no_prefill_assistant: self.no_prefill_assistant,
-            reasoning_budget_message: non_empty(self.reasoning_budget_message.as_deref())
+            // NOT `non_empty`: b10621 injects this string verbatim before the
+            // end-of-thinking tag (#1470), so its leading and trailing
+            // whitespace is part of the output. Trimming was harmless while
+            // the flag only parsed and warned; it is a divergence now that the
+            // message is emitted. Blank-only stays `None`.
+            reasoning_budget_message: self
+                .reasoning_budget_message
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
                 .map(str::to_owned),
             template_kwargs,
         })

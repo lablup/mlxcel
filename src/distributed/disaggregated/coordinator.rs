@@ -888,7 +888,14 @@ fn drain_generation_events(rx: &mpsc::Receiver<GenerateEvent>) -> DrainedGenerat
     let mut completion_tokens = None;
     while let Ok(event) = rx.try_recv() {
         match event {
-            GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => tokens.push(t),
+            // b10621 sends a partial frame per decoded token, so a piece held
+            // back by the stop matcher arrives as an empty string (#1477); a
+            // drain that accumulates text has nothing to add for one.
+            GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
+                if !t.is_empty() {
+                    tokens.push(t);
+                }
+            }
             GenerateEvent::Done(result) => {
                 done = true;
                 completion_tokens = Some(result.completion_tokens as u64);

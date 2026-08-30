@@ -115,6 +115,38 @@ pub struct FilterOutput {
     /// emitted entries, then pop `suppressed_positions` entries for placeholder
     /// chunks.
     pub consumed_positions: usize,
+    /// The canonical thinking-block delimiters matched in this call (#1470).
+    ///
+    /// `--reasoning-format none` and `deepseek-legacy` keep the thoughts in
+    /// `message.content` **with their tags**, and the streaming path has no raw
+    /// text to recover them from: the filter consumes a delimiter as it matches
+    /// it. Reporting the pair here lets the route re-emit the same markers the
+    /// non-streaming `content_with_thinking_block` rebuilds, so the two shapes
+    /// stay byte-identical.
+    ///
+    /// The value is the CANONICAL marker for the family, not the literal text
+    /// matched: Gemma 4's opener is consumed as `<|channel>thought` but the
+    /// non-streaming form writes `<|channel>`, and the two must agree. `None`
+    /// for a reasoning family the non-streaming content form does not delimit
+    /// either (the Muse `to=self` channel).
+    pub thinking_open: Option<&'static str>,
+    /// The canonical close marker matched in this call; see
+    /// [`thinking_open`](Self::thinking_open).
+    pub thinking_close: Option<&'static str>,
+}
+
+/// The canonical thinking marker pair a matched delimiter belongs to (#1470).
+///
+/// Deliberately the same two pairs `tool_calls::parser::THINKING_MARKER_PAIRS`
+/// carries, because the streamed markers have to equal the ones the
+/// non-streaming content form writes. A family absent from that list reports
+/// `None` here and is undelimited on both paths.
+fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static str)> {
+    match delimiter {
+        "<think>" | "</think>" => Some(("<think>", "</think>")),
+        "<|channel>thought" | "<|channel>" | "<channel|>" => Some(("<|channel>", "<channel|>")),
+        _ => None,
+    }
 }
 
 impl FilterOutput {
@@ -125,6 +157,8 @@ impl FilterOutput {
             reasoning: None,
             suppressed_positions: 0,
             consumed_positions: 0,
+            thinking_open: None,
+            thinking_close: None,
         }
     }
 
@@ -135,6 +169,8 @@ impl FilterOutput {
             reasoning: Some(text),
             suppressed_positions: 0,
             consumed_positions: 0,
+            thinking_open: None,
+            thinking_close: None,
         }
     }
 
@@ -149,6 +185,8 @@ impl FilterOutput {
             reasoning: None,
             suppressed_positions: n,
             consumed_positions: n,
+            thinking_open: None,
+            thinking_close: None,
         }
     }
 
@@ -465,6 +503,8 @@ impl StreamFilter {
         if fragment.is_empty() {
             return FilterOutput {
                 consumed_positions: 1,
+                thinking_open: None,
+                thinking_close: None,
                 ..FilterOutput::default()
             };
         }
@@ -595,6 +635,10 @@ impl StreamFilter {
         let mut reasoning = String::new();
         let mut suppressed_positions: usize = 0;
         let mut consumed_positions: usize = 0;
+        // #1470: the canonical delimiters matched here, for the route to
+        // re-emit under `--reasoning-format none` / `deepseek-legacy`.
+        let mut thinking_open: Option<&'static str> = None;
+        let mut thinking_close: Option<&'static str> = None;
 
         loop {
             if self.buffer.is_empty() {
@@ -625,8 +669,25 @@ impl StreamFilter {
                     let delim_positions = self.drain_fragment_lengths(delim_len);
                     suppressed_positions += delim_positions;
                     consumed_positions += delim_positions;
+                    // Read the matched bytes before they are drained: the
+                    // route needs the family's canonical marker, which the
+                    // action alone does not name (#1470).
+                    let matched: Option<(&'static str, &'static str)> =
+                        canonical_thinking_pair(&self.buffer[..delim_len]);
                     self.buffer.drain(..delim_len);
+                    let before = self.state;
                     self.apply_action(action);
+                    if let Some((open, close)) = matched {
+                        // Only a real transition counts: a delimiter the ATEM
+                        // guard swallowed changed nothing and must not make the
+                        // route emit a marker the client never earned.
+                        match (before, self.state) {
+                            (FilterState::Thinking, FilterState::Thinking) => {}
+                            (_, FilterState::Thinking) => thinking_open = Some(open),
+                            (FilterState::Thinking, _) => thinking_close = Some(close),
+                            _ => {}
+                        }
+                    }
                 }
                 None => {
                     // No complete delimiter — check for a partial match
@@ -660,6 +721,8 @@ impl StreamFilter {
             },
             suppressed_positions,
             consumed_positions,
+            thinking_open,
+            thinking_close,
         }
     }
 

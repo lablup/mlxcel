@@ -299,6 +299,23 @@ fn skip_chat_parsing_and_prefill_reach_the_resolution() {
     );
 }
 
+/// b10621 injects `--reasoning-budget-message` verbatim before the
+/// end-of-thinking tag (#1470), so its surrounding whitespace is part of the
+/// output and must survive resolution. Real-checkpoint validation caught the
+/// leading space being trimmed away: the message reached the response as
+/// `1[thinking budget reached]` instead of `1 [thinking budget reached]`.
+#[test]
+fn the_budget_message_keeps_its_surrounding_whitespace() {
+    let resolved = resolve(ChatCompatArgs {
+        reasoning_budget_message: Some(" [budget reached]\n".to_owned()),
+        ..args()
+    });
+    assert_eq!(
+        resolved.reasoning_budget_message.as_deref(),
+        Some(" [budget reached]\n")
+    );
+}
+
 #[test]
 fn a_blank_value_is_treated_as_absent() {
     // An inherited `LLAMA_ARG_REASONING=` must not stop the server.

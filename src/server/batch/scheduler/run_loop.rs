@@ -40,7 +40,10 @@ impl BatchScheduler {
         }
         let final_id = match seq_thinking.decide_override(sampled) {
             ThinkingDecision::NoOverride => sampled,
-            ThinkingDecision::ForceClose(close_id) => close_id,
+            // The `--reasoning-budget-message` run is forced token by token
+            // ahead of the close tag, exactly as the close tag itself is
+            // (#1470).
+            ThinkingDecision::ForceClose(id) | ThinkingDecision::ForceMessage(id) => id,
         };
         seq_thinking.observe(final_id);
         final_id
@@ -126,11 +129,50 @@ impl BatchScheduler {
     /// Chat endpoints set `true` (the Qwen3 chat template primes `<think>\n`);
     /// raw text endpoints (`/v1/completions`, `/completion`) set `false` so
     /// the model must emit `<think>` before any in-block counting begins.
+    /// The tokenized `--reasoning-budget-message` for this request (#1470).
+    ///
+    /// b10621 tokenizes the message once when it composes the forced run; the
+    /// memo here is the same idea against a live setting that can change, and
+    /// it keeps a configured message off the per-request encode path after the
+    /// first request. Special-token parsing is off, matching the settings
+    /// every other server-side tokenization uses.
+    pub(super) fn forced_reasoning_message(
+        &self,
+        message: Option<&str>,
+    ) -> Option<std::sync::Arc<Vec<i32>>> {
+        let message = message?;
+        if message.is_empty() {
+            return None;
+        }
+        if let Ok(memo) = self.forced_reasoning_message.try_borrow()
+            && let Some((cached, tokens)) = memo.as_ref()
+            && cached == message
+        {
+            return Some(tokens.clone());
+        }
+        let ids: Vec<i32> = self
+            .tokenizer
+            .encode_with_special(message, false, false)
+            .ok()?
+            .into_iter()
+            .map(|id| id as i32)
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let tokens = std::sync::Arc::new(ids);
+        if let Ok(mut memo) = self.forced_reasoning_message.try_borrow_mut() {
+            *memo = Some((message.to_owned(), tokens.clone()));
+        }
+        Some(tokens)
+    }
+
     pub(super) fn build_thinking_state(
         &self,
         override_: ReasoningBudgetOverride,
         enter_block_on_start: bool,
         reasoning_control: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        forced_message: Option<std::sync::Arc<Vec<i32>>>,
     ) -> ThinkingState {
         // No thinking tokens -> always disabled regardless of config.
         let Some(token_ids) = self.thinking_token_ids else {
@@ -145,6 +187,7 @@ impl BatchScheduler {
         // request can close the block at the next sampled token.
         ThinkingState::new(Some(token_ids), effective, enter_block_on_start)
             .with_force_end(reasoning_control)
+            .with_forced_message(forced_message)
     }
 
     /// Run the scheduler loop until shutdown or channel close.

@@ -283,6 +283,9 @@ pub(super) fn scheduler(parallelism: usize) -> BatchScheduler {
 
 pub(super) fn options(max_tokens: usize) -> ServerGenerateOptions {
     ServerGenerateOptions {
+        n_indent: 0,
+        t_max_predict_ms: None,
+        reasoning_budget_message: None,
         retention: Default::default(),
         dry_breaker_strings: None,
         logit_bias: Vec::new(),
@@ -342,8 +345,15 @@ pub(super) fn collect_stream(rx: &mpsc::Receiver<GenerateEvent>) -> StreamSummar
     let mut tokens = Vec::new();
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(GenerateEvent::Token(text)) => tokens.push(text),
-            Ok(GenerateEvent::TokenWithLogprobs(text, _)) => tokens.push(text),
+            Ok(GenerateEvent::Token(text, _))
+            | Ok(GenerateEvent::TokenWithLogprobs(text, _, _)) => {
+                // Empty pieces are the per-token frames b10621 sends while a
+                // stop string is being matched (#1477); a text collector skips
+                // them.
+                if !text.is_empty() {
+                    tokens.push(text);
+                }
+            }
             Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(result)) => return StreamSummary { tokens, result },
             Ok(GenerateEvent::Error(error)) => panic!("unexpected generation error: {error}"),

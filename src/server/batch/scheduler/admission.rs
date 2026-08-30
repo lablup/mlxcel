@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::server::batch::generation_bounds::GenerationBounds;
 
 impl BatchScheduler {
     /// Resolve a request's context-retention state against the server policy
@@ -452,6 +453,11 @@ impl BatchScheduler {
             options.reasoning_budget,
             options.thinking_enter_block_on_start,
             options.reasoning_control.clone(),
+            // b10621 `--reasoning-budget-message` (#1470): tokenized here,
+            // where the model's vocabulary lives, and memoised so a configured
+            // message costs one encode for the life of the scheduler rather
+            // than one per request.
+            self.forced_reasoning_message(options.reasoning_budget_message.as_deref()),
         );
 
         // Record the per-request prompt-cache context so the donate-back
@@ -508,6 +514,9 @@ impl BatchScheduler {
             // (issue #1466). Empty / absent leaves the matcher inactive, in
             // which case every decoded piece is emitted verbatim.
             stop_matcher: StopMatcher::new(options.stop_sequences.clone().unwrap_or_default()),
+            // b10621 `n_indent` / `t_max_predict_ms` (#1477). Inert, and free,
+            // for a request that sent neither.
+            bounds: GenerationBounds::new(options.n_indent, options.t_max_predict_ms),
             prefill_offset: 0,
             prefill_start_offset,
             already_cached_tokens,

@@ -191,6 +191,7 @@ fn make_seq_with(
     let (tx, rx) = mpsc::channel();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id,
         state: SequenceState::Queued,

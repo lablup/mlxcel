@@ -275,6 +275,9 @@ fn scheduler() -> BatchScheduler {
 
 fn options(max_tokens: usize) -> ServerGenerateOptions {
     ServerGenerateOptions {
+        n_indent: 0,
+        t_max_predict_ms: None,
+        reasoning_budget_message: None,
         retention: Default::default(),
         dry_breaker_strings: None,
         logit_bias: Vec::new(),
@@ -336,8 +339,8 @@ fn tiny_image_bytes() -> Vec<u8> {
 fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::GenerationResult {
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(GenerateEvent::Token(_))
-            | Ok(GenerateEvent::TokenWithLogprobs(_, _))
+            Ok(GenerateEvent::Token(_, _))
+            | Ok(GenerateEvent::TokenWithLogprobs(_, _, _))
             | Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(result)) => return result,
             Ok(GenerateEvent::Error(error)) => panic!("unexpected generation error: {error}"),
@@ -349,8 +352,8 @@ fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::Generation
 fn receive_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
     match rx.recv_timeout(Duration::from_secs(2)) {
         Ok(GenerateEvent::Error(error)) => error,
-        Ok(GenerateEvent::Token(text)) => panic!("unexpected token event: {text:?}"),
-        Ok(GenerateEvent::TokenWithLogprobs(text, _)) => {
+        Ok(GenerateEvent::Token(text, _)) => panic!("unexpected token event: {text:?}"),
+        Ok(GenerateEvent::TokenWithLogprobs(text, _, _)) => {
             panic!("unexpected token+logprobs event: {text:?}")
         }
         Ok(GenerateEvent::Done(_)) => panic!("unexpected done event"),

@@ -325,6 +325,10 @@ pub struct BatchScheduler {
     // -- Model & tokenizer --
     model: LoadedModel,
     tokenizer: MlxcelTokenizer,
+    /// Memo for the tokenized `--reasoning-budget-message` (#1470), keyed by
+    /// the message text so a changed live setting re-encodes. One entry is
+    /// enough: the message is a server-wide setting delivered per request.
+    forced_reasoning_message: std::cell::RefCell<Option<(String, std::sync::Arc<Vec<i32>>)>>,
 
     // -- Runtime LoRA (#1439) --
     /// The server's runtime-LoRA state, when adapters serve unfused. The

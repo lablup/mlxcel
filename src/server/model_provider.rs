@@ -175,9 +175,9 @@ fn uses_single_stream_queue_admission(model_path: &std::path::Path) -> bool {
 
 /// Events from generation
 pub enum GenerateEvent {
-    Token(String),
+    Token(String, TokenMeta),
     /// Token with associated log probability data (emitted when logprobs are enabled)
-    TokenWithLogprobs(String, TokenLogprobData),
+    TokenWithLogprobs(String, TokenMeta, TokenLogprobData),
     /// One-shot prefill snapshot, emitted when the first decoded token is
     /// stamped and therefore before the first [`GenerateEvent::Token`] of the
     /// same request (issue #1441).
@@ -191,6 +191,31 @@ pub enum GenerateEvent {
     Error(String),
 }
 
+/// Per-frame token metadata carried alongside a decoded text piece (#1477).
+///
+/// b10621's native streaming frame reports `tokens` (the id of the token that
+/// produced the frame) and `tokens_predicted` (the slot's generated-token count
+/// after it), and the streaming route cannot re-derive either from the text: a
+/// byte-level BPE piece is not a token boundary, and a piece held back by the
+/// stop matcher spans several tokens. Both figures therefore ride with the
+/// piece.
+///
+/// Every field is `None` from a backend that emits text spans with no 1:1
+/// decoded token behind them (the diffusion worker's denoised spans, the
+/// Florence-2 renderer, a detokenizer tail flush), which is why
+/// [`Default`] is the "nothing to report" value rather than a zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenMeta {
+    /// The id of the token that produced this piece; b10621's per-frame
+    /// `tokens` array is exactly `[token_id]`.
+    pub token_id: Option<i32>,
+    /// Generated tokens so far, including this one; b10621's `n_decoded`,
+    /// reported on the frame as `tokens_predicted`. Counting emitted frames
+    /// instead undercounts whenever the stop matcher or the incremental
+    /// detokenizer held a piece back.
+    pub decoded: Option<usize>,
+}
+
 /// What prefill produced, measured once per request when the first token is
 /// stamped (issue #1441).
 ///
@@ -201,12 +226,28 @@ pub enum GenerateEvent {
 /// `GenerationResult::prompt_eval_ms` carries at the end of the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PrefillStats {
-    /// Whole prompt length in tokens; b10621's `tokens_evaluated`.
+    /// Whole prompt length in tokens; b10621's `tokens_evaluated`, and the
+    /// `total` of its `prompt_progress` block.
     pub prompt_tokens: usize,
-    /// Prompt tokens supplied by the KV prefix cache; b10621's `cache_n`.
+    /// Prompt tokens supplied by the KV prefix cache; b10621's `cache_n`, and
+    /// the `cache` of its `prompt_progress` block.
     pub cached_tokens: usize,
-    /// Milliseconds from request receipt to the first decoded token.
+    /// Milliseconds from request receipt: time to the first decoded token on
+    /// the [`first_token`](Self::first_token) snapshot, elapsed-so-far on a
+    /// progress one. b10621 reports the same quantity as `prompt_progress`'s
+    /// `time_ms`.
     pub prompt_ms: u64,
+    /// Prompt tokens the model has evaluated so far, cache-supplied ones
+    /// included; b10621's `prompt_progress.processed` (#1477).
+    pub processed: usize,
+    /// Whether this is the one-shot snapshot taken when the first token is
+    /// stamped, rather than a mid-prefill progress observation.
+    ///
+    /// The two ride one variant on purpose: they carry the same four figures
+    /// and differ only in when they are taken, and a second `GenerateEvent`
+    /// variant would have to be handled by every consumer (including the code
+    /// behind `xla-iree`, which the local test gate never compiles).
+    pub first_token: bool,
 }
 
 /// Why a generation ended, at the granularity the native `llama-server`
@@ -272,6 +313,15 @@ pub struct GenerationResult {
     /// scheduler adopted a detached cache for this request. Exposed in the
     /// OpenAI response body as `usage.prompt_tokens_details.cached_tokens`.
     pub cached_tokens: usize,
+    /// Every token id generated for this request, in order (#1477).
+    ///
+    /// b10621's native `/completion` returns them in the top-level `tokens`
+    /// array under `return_tokens`, and they cannot be re-derived from `text`:
+    /// a string stop sequence excludes its matched text from the response
+    /// while its tokens still count, and re-tokenizing the answer is not
+    /// guaranteed to reproduce the sampled ids. Empty from a backend that
+    /// generates without per-token ids (diffusion, the Florence-2 renderer).
+    pub generated_token_ids: Vec<i32>,
     /// Structured task output for families whose parsed answer carries
     /// coordinates (Florence-2 boxes / quad boxes / polygons / OCR regions,
     /// issue #1073). `None` for every other family, which keeps the wire
@@ -1645,7 +1695,7 @@ impl ModelProvider {
         on_prefill: P,
     ) -> Result<GenerationResult>
     where
-        F: FnMut(String, Option<TokenLogprobData>),
+        F: FnMut(String, TokenMeta, Option<TokenLogprobData>),
         P: FnMut(PrefillStats),
     {
         self.generate_streaming_native_reserved_runtime(
@@ -1674,7 +1724,7 @@ impl ModelProvider {
         on_prefill: P,
     ) -> Result<GenerationResult>
     where
-        F: FnMut(String, Option<TokenLogprobData>),
+        F: FnMut(String, TokenMeta, Option<TokenLogprobData>),
         P: FnMut(PrefillStats),
     {
         self.generate_streaming_native_reserved_runtime(
@@ -1702,7 +1752,7 @@ impl ModelProvider {
         on_prefill: P,
     ) -> Result<GenerationResult>
     where
-        F: FnMut(String, Option<TokenLogprobData>),
+        F: FnMut(String, TokenMeta, Option<TokenLogprobData>),
         P: FnMut(PrefillStats),
     {
         let timeout = runtime
@@ -2038,14 +2088,21 @@ where
 
     let mut result =
         drain_generation_events_impl(&response_rx, decode_hang_timeout, |event| match event {
-            GenerateEvent::Token(token) => {
-                on_token(token);
+            // An empty piece is the per-token frame b10621 sends while a stop
+            // string is being matched (#1477): it carries the token's id and
+            // nothing to append, so a text-only consumer skips it.
+            GenerateEvent::Token(token, _) => {
+                if !token.is_empty() {
+                    on_token(token);
+                }
                 Ok(None)
             }
             // Collect logprobs even when the streaming callback ignores them.
-            GenerateEvent::TokenWithLogprobs(token, lp) => {
+            GenerateEvent::TokenWithLogprobs(token, _, lp) => {
                 accumulated_logprobs.push(lp);
-                on_token(token);
+                if !token.is_empty() {
+                    on_token(token);
+                }
                 Ok(None)
             }
             // The prefill snapshot is only consumed by the native completion
@@ -2073,12 +2130,18 @@ where
     F: FnMut(String, Option<TokenLogprobData>),
 {
     drain_generation_events_impl(&response_rx, decode_hang_timeout, |event| match event {
-        GenerateEvent::Token(token) => {
-            on_token(token, None);
+        // Empty pieces are the stop-matcher hold-back frames (#1477); only the
+        // native route has a frame to put one on.
+        GenerateEvent::Token(token, _) => {
+            if !token.is_empty() {
+                on_token(token, None);
+            }
             Ok(None)
         }
-        GenerateEvent::TokenWithLogprobs(token, lp) => {
-            on_token(token, Some(lp));
+        GenerateEvent::TokenWithLogprobs(token, _, lp) => {
+            if !token.is_empty() {
+                on_token(token, Some(lp));
+            }
             Ok(None)
         }
         GenerateEvent::Prefill(_) => Ok(None),
@@ -2102,16 +2165,19 @@ pub(super) fn drain_generation_events_with_prefill<F, P>(
     mut on_prefill: P,
 ) -> Result<GenerationResult>
 where
-    F: FnMut(String, Option<TokenLogprobData>),
+    F: FnMut(String, TokenMeta, Option<TokenLogprobData>),
     P: FnMut(PrefillStats),
 {
     drain_generation_events_impl(&response_rx, decode_hang_timeout, |event| match event {
-        GenerateEvent::Token(token) => {
-            on_token(token, None);
+        // The native arm forwards EVERY piece, empty ones included: b10621
+        // sends one partial frame per decoded token, and a piece the stop
+        // matcher held back still carries that token's id and count (#1477).
+        GenerateEvent::Token(token, meta) => {
+            on_token(token, meta, None);
             Ok(None)
         }
-        GenerateEvent::TokenWithLogprobs(token, lp) => {
-            on_token(token, Some(lp));
+        GenerateEvent::TokenWithLogprobs(token, meta, lp) => {
+            on_token(token, meta, Some(lp));
             Ok(None)
         }
         GenerateEvent::Prefill(stats) => {
@@ -2186,8 +2252,8 @@ where
 
         // Transition to decode phase on any token or result event.
         match &event {
-            GenerateEvent::Token(_)
-            | GenerateEvent::TokenWithLogprobs(_, _)
+            GenerateEvent::Token(_, _)
+            | GenerateEvent::TokenWithLogprobs(_, _, _)
             | GenerateEvent::Done(_) => {
                 decode_phase_started = true;
             }

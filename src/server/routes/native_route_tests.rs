@@ -210,23 +210,20 @@ async fn unsupported_native_fields_are_refused_with_a_diagnostic() {
     // never silently ignored. Each of these names the field and the
     // alternative.
     for (field, body) in [
+        // `n_cmpl` above 1 is the one field still refused, and at one slot the
+        // refusal is byte-equivalent to upstream's own (#1477).
         ("n_cmpl", serde_json::json!({"prompt": "hi", "n_cmpl": 2})),
         ("n_cmpl", serde_json::json!({"prompt": "hi", "n": 2})),
+        // Value-domain refusals, upstream's own hard limits: n_indent is
+        // 0..=INT32_MAX and t_max_predict_ms is -1..=INT64_MAX, both refused
+        // rather than clamped by the pinned binary.
         (
             "n_indent",
-            serde_json::json!({"prompt": "hi", "n_indent": 4}),
+            serde_json::json!({"prompt": "hi", "n_indent": -1}),
         ),
         (
             "t_max_predict_ms",
-            serde_json::json!({"prompt": "hi", "t_max_predict_ms": 500}),
-        ),
-        (
-            "return_progress",
-            serde_json::json!({"prompt": "hi", "return_progress": true}),
-        ),
-        (
-            "return_tokens",
-            serde_json::json!({"prompt": "hi", "return_tokens": true}),
+            serde_json::json!({"prompt": "hi", "t_max_predict_ms": -5}),
         ),
     ] {
         let (status, response) = post("/completion", body).await;
@@ -551,4 +548,189 @@ async fn n_predict_below_the_hard_limit_is_refused_with_the_upstream_wording() {
         message.contains("-1 <= value <= 2147483647"),
         "the diagnostic must state upstream's domain, got {message:?}"
     );
+}
+
+/// b10621 `return_tokens` (#1477): the top-level `tokens` array carries the
+/// raw generated ids when the field is set and is empty otherwise.
+///
+/// Measured on the pinned binary: `The capital of France is` answered with 8
+/// tokens returns `tokens: [12095, 13, 576, 6722, 315, 15344, 374, 21718]`
+/// against `tokens_predicted: 8`, and the same request without the field
+/// returns `tokens: []`. The ids come from the scheduler rather than from
+/// re-tokenizing the answer, because a string stop sequence excludes its
+/// matched text from `content` while its token still counts: with
+/// `stop: ["Paris"]` the binary answers `content: " "` and `tokens: [12095]`.
+#[tokio::test]
+async fn return_tokens_projects_the_generated_ids_and_is_empty_without_it() {
+    for path in ["/completion", "/completions"] {
+        let (status, with) = post(
+            path,
+            serde_json::json!({"prompt": "hi", "n_predict": 2, "return_tokens": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{with}");
+        assert_eq!(
+            with["tokens"].as_array().map(Vec::len),
+            Some(2),
+            "{path} must return the generated ids under return_tokens: {with}"
+        );
+
+        for body in [
+            serde_json::json!({"prompt": "hi", "n_predict": 2, "return_tokens": false}),
+            serde_json::json!({"prompt": "hi", "n_predict": 2}),
+        ] {
+            let (status, without) = post(path, body).await;
+            assert_eq!(status, StatusCode::OK, "{without}");
+            assert_eq!(
+                without["tokens"].as_array().map(Vec::len),
+                Some(0),
+                "{path} must return an empty array without return_tokens: {without}"
+            );
+        }
+    }
+}
+
+/// b10621 `return_progress` (#1477) is accepted on a non-streaming request and
+/// adds nothing there, matching upstream's `stream && return_progress` gate:
+/// the pinned binary answering `{"return_progress": true}` without `stream`
+/// returns the same key set as the request without it, with no
+/// `prompt_progress`.
+#[tokio::test]
+async fn return_progress_is_accepted_and_adds_nothing_to_a_non_streaming_response() {
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hi", "n_predict": 2, "return_progress": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("prompt_progress").is_none(),
+        "prompt_progress belongs to streaming frames only: {body}"
+    );
+}
+
+/// The two b10621 generation bounds are accepted at every value in their
+/// domain and reach the generation options (#1477).
+///
+/// `n_indent: 0` and `t_max_predict_ms: 0` are upstream's disabled sentinels,
+/// so they must be inert rather than refused; `-1` is the second disabled
+/// spelling of `t_max_predict_ms`.
+#[tokio::test]
+async fn the_generation_bounds_are_accepted_across_their_value_domain() {
+    for body in [
+        serde_json::json!({"prompt": "hi", "n_indent": 0}),
+        serde_json::json!({"prompt": "hi", "n_indent": 4}),
+        serde_json::json!({"prompt": "hi", "t_max_predict_ms": -1}),
+        serde_json::json!({"prompt": "hi", "t_max_predict_ms": 0}),
+        serde_json::json!({"prompt": "hi", "t_max_predict_ms": 500}),
+        serde_json::json!({"prompt": "hi", "n_indent": 4, "t_max_predict_ms": 500}),
+    ] {
+        let (status, response) = post("/completion", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body} -> {response}");
+    }
+}
+
+/// `generation_settings` reports every b10621 `task_params` key mlxcel
+/// resolves and acts on (#1477).
+///
+/// The pinned binary's block has 49 keys. mlxcel reports 47 of them; the two
+/// it omits are `backend_sampling`, whose entry records that mlxcel's sampler
+/// IS the backend graph and has no CPU chain to switch to, and
+/// `speculative.types`, which names upstream's draft-model type. Both
+/// omissions are the omit-rather-than-invent policy `GET /props` records: a
+/// key reported with an invented value would tell an operator a setting
+/// steers generation when it steers nothing.
+#[tokio::test]
+async fn generation_settings_reports_the_b10621_task_params_keys_mlxcel_resolves() {
+    let (status, body) = post("/completion", native_prompt()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let settings = body["generation_settings"]
+        .as_object()
+        .expect("generation_settings is an object");
+
+    // The 49-key block captured from the pinned binary.
+    let upstream = [
+        "adaptive_decay",
+        "adaptive_target",
+        "backend_sampling",
+        "chat_format",
+        "dry_allowed_length",
+        "dry_base",
+        "dry_multiplier",
+        "dry_penalty_last_n",
+        "dry_sequence_breakers",
+        "dynatemp_exponent",
+        "dynatemp_range",
+        "frequency_penalty",
+        "generation_prompt",
+        "grammar",
+        "grammar_lazy",
+        "grammar_triggers",
+        "ignore_eos",
+        "logit_bias",
+        "lora",
+        "max_tokens",
+        "min_keep",
+        "min_p",
+        "mirostat",
+        "mirostat_eta",
+        "mirostat_tau",
+        "n_discard",
+        "n_keep",
+        "n_predict",
+        "n_probs",
+        "post_sampling_probs",
+        "presence_penalty",
+        "preserved_tokens",
+        "reasoning_format",
+        "reasoning_in_content",
+        "repeat_last_n",
+        "repeat_penalty",
+        "samplers",
+        "seed",
+        "speculative.types",
+        "stop",
+        "stream",
+        "temperature",
+        "timings_per_token",
+        "top_k",
+        "top_n_sigma",
+        "top_p",
+        "typical_p",
+        "xtc_probability",
+        "xtc_threshold",
+    ];
+    let omitted = ["backend_sampling", "speculative.types"];
+
+    for key in upstream {
+        let present = settings.contains_key(key);
+        if omitted.contains(&key) {
+            assert!(!present, "{key} has no mlxcel analogue and must be omitted");
+        } else {
+            assert!(present, "missing {key} in {settings:?}");
+        }
+    }
+    // No key outside upstream's block: an extension here would be read as a
+    // b10621 setting by a client that trusts the name.
+    for key in settings.keys() {
+        assert!(
+            upstream.contains(&key.as_str()),
+            "{key} is not a b10621 task_params key"
+        );
+    }
+    assert_eq!(settings.len(), upstream.len() - omitted.len());
+
+    // The shapes the pinned binary uses for the keys #1477 added.
+    assert_eq!(
+        settings["samplers"].as_array().map(|v| v.len()),
+        Some(9),
+        "the fixed b10621 default chain has nine stages: {settings:?}"
+    );
+    assert!(settings["logit_bias"].is_array());
+    assert!(settings["lora"].is_array());
+    assert_eq!(settings["chat_format"], "Content-only");
+    assert_eq!(settings["generation_prompt"], "");
+    assert_eq!(settings["reasoning_format"], "deepseek");
+    assert_eq!(settings["reasoning_in_content"], false);
+    assert_eq!(settings["timings_per_token"], false);
 }

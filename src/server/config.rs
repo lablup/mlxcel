@@ -133,6 +133,23 @@ pub struct ServerGenerateOptions {
     pub max_tokens: usize,
     pub sampling: SamplingConfig,
     pub stop_sequences: Option<Vec<String>>,
+    /// b10621 `n_indent` (#1477): stop the completion when a generated line's
+    /// indentation falls below this many whitespace characters. `0` disables
+    /// it, which is upstream's schema floor and its default.
+    pub n_indent: usize,
+    /// b10621 `--reasoning-budget-message` / `LLAMA_ARG_THINK_BUDGET_MESSAGE`
+    /// (#1470): the text upstream injects immediately before the
+    /// end-of-thinking tag when the reasoning budget is exhausted or a runtime
+    /// `reasoning_end` forces the block closed. Carried as the raw string and
+    /// tokenized once by the scheduler, which owns the model's vocabulary;
+    /// `None` leaves the forced close unchanged.
+    pub reasoning_budget_message: Option<String>,
+    /// b10621 `t_max_predict_ms` (#1477): bound the prediction phase for this
+    /// request, measured from the first token and enforced only once a newline
+    /// has been generated. `None` when the request left it at or below zero,
+    /// upstream's disabled domain. Distinct from the server-wide
+    /// `--decode-timeout` watchdog, which stays as it is.
+    pub t_max_predict_ms: Option<u64>,
     /// b10621 `--ignore-eos` / `ignore_eos` (#1436): suppress every
     /// end-of-generation token with a `-inf` logit bias at enqueue time so
     /// the model keeps generating until the token budget or a string stop,
