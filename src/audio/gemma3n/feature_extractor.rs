@@ -16,7 +16,7 @@
 
 use std::f64::consts::PI;
 
-use crate::audio::{AudioCancellation, AudioPreprocessCheckpoint};
+use crate::audio::{AudioCancellation, AudioPreprocessCheckpoint, fft::real_fft_magnitude};
 
 pub const GEMMA3N_SAMPLE_RATE: u32 = 16_000;
 pub const GEMMA3N_MAX_SAMPLES: usize = 480_000;
@@ -115,6 +115,7 @@ impl Gemma3nAudioFeatureExtractor {
             let left_padding = padded_len - effective_len;
             waveform[left_padding..left_padding + effective_len]
                 .copy_from_slice(&clip[..effective_len]);
+            let mut fft_input = vec![0.0f64; FFT_LENGTH];
 
             for frame_index in 0..frames {
                 if frame_index % 8 == 0 {
@@ -122,7 +123,6 @@ impl Gemma3nAudioFeatureExtractor {
                 }
                 let start = frame_index * HOP_LENGTH;
                 let unfolded = &waveform[start..start + FRAME_LENGTH + 1];
-                let mut fft_input = vec![0.0f64; FFT_LENGTH];
                 fft_input[0] = (unfolded[0] * 0.03 * self.window[0]) as f64;
                 for i in 1..FRAME_LENGTH {
                     let emphasized = unfolded[i] - 0.97 * unfolded[i - 1];
@@ -133,7 +133,7 @@ impl Gemma3nAudioFeatureExtractor {
                     valid_mask.push(start >= left_padding && start < left_padding + effective_len);
                     continue;
                 }
-                let magnitude = real_fft_magnitude_1024(&fft_input);
+                let magnitude = real_fft_magnitude(&fft_input, FFT_LENGTH / 2 + 1);
                 for mel in 0..FEATURE_SIZE {
                     let mut value = 0.0f64;
                     for (bin, magnitude) in magnitude.iter().enumerate() {
@@ -164,65 +164,6 @@ fn check_feature_cancelled(cancelled: &dyn AudioCancellation) -> Result<(), Stri
     } else {
         Ok(())
     }
-}
-
-/// Compute the positive-frequency magnitude spectrum for the fixed 1024-point
-/// Gemma 3n transform. The in-tree generic audio helper intentionally uses a
-/// direct DFT, which is useful for small reference transforms but makes a
-/// 30-second Gemma 3n clip prohibitively expensive. This radix-2 FFT preserves
-/// the reference math while keeping frontend preprocessing practical.
-fn real_fft_magnitude_1024(input: &[f64]) -> Vec<f64> {
-    debug_assert_eq!(input.len(), FFT_LENGTH);
-    let mut real = input.to_vec();
-    let mut imaginary = vec![0.0f64; FFT_LENGTH];
-
-    let mut reversed = 0usize;
-    for index in 1..FFT_LENGTH {
-        let mut bit = FFT_LENGTH >> 1;
-        while reversed & bit != 0 {
-            reversed ^= bit;
-            bit >>= 1;
-        }
-        reversed ^= bit;
-        if index < reversed {
-            real.swap(index, reversed);
-            imaginary.swap(index, reversed);
-        }
-    }
-
-    let mut width = 2usize;
-    while width <= FFT_LENGTH {
-        let half = width / 2;
-        let angle = -2.0 * PI / width as f64;
-        let step_real = angle.cos();
-        let step_imaginary = angle.sin();
-        for start in (0..FFT_LENGTH).step_by(width) {
-            let mut twiddle_real = 1.0f64;
-            let mut twiddle_imaginary = 0.0f64;
-            for offset in 0..half {
-                let right = start + offset + half;
-                let product_real =
-                    twiddle_real * real[right] - twiddle_imaginary * imaginary[right];
-                let product_imaginary =
-                    twiddle_real * imaginary[right] + twiddle_imaginary * real[right];
-                let left = start + offset;
-                let left_real = real[left];
-                let left_imaginary = imaginary[left];
-                real[left] = left_real + product_real;
-                imaginary[left] = left_imaginary + product_imaginary;
-                real[right] = left_real - product_real;
-                imaginary[right] = left_imaginary - product_imaginary;
-                let next_real = twiddle_real * step_real - twiddle_imaginary * step_imaginary;
-                twiddle_imaginary = twiddle_real * step_imaginary + twiddle_imaginary * step_real;
-                twiddle_real = next_real;
-            }
-        }
-        width *= 2;
-    }
-
-    (0..=FFT_LENGTH / 2)
-        .map(|index| real[index].hypot(imaginary[index]))
-        .collect()
 }
 
 fn mel_filter_bank() -> Vec<f32> {

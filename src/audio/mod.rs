@@ -30,6 +30,7 @@ mod attention;
 pub mod config;
 pub mod encoder;
 pub mod feature_extractor;
+pub(crate) mod fft;
 pub mod gemma3n;
 pub mod nemotron_h_nano_omni;
 pub mod phi4mm;

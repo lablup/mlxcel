@@ -24,6 +24,8 @@
 
 use std::f64::consts::PI;
 
+use super::fft::real_fft_magnitude;
+
 /// Mel filter bank matrix: `[num_frequency_bins, num_mel_filters]`.
 fn mel_filter_bank(
     num_frequency_bins: usize,
@@ -350,7 +352,7 @@ impl AudioFeatureExtractor {
                 *item = 0.0;
             }
 
-            // Real FFT (using naive DFT for correctness; can optimize later)
+            // Real FFT magnitude on the configured FFT grid.
             let magnitude = real_fft_magnitude(&fft_input, num_freq_bins);
 
             // Mel filterbank application
@@ -403,27 +405,6 @@ impl AudioFeatureExtractor {
     pub fn feature_size(&self) -> usize {
         self.feature_size
     }
-}
-
-/// Compute magnitude of real-valued FFT using simple DFT.
-/// Returns `[num_freq_bins]` magnitudes.
-///
-/// Shared with the Whisper log-mel front-end in [`super::whisper_mel`], which
-/// squares the result to obtain the power spectrum.
-pub(crate) fn real_fft_magnitude(input: &[f64], num_bins: usize) -> Vec<f64> {
-    let n = input.len();
-    let mut magnitudes = Vec::with_capacity(num_bins);
-    for k in 0..num_bins {
-        let mut re = 0.0f64;
-        let mut im = 0.0f64;
-        for (t, &sample) in input.iter().enumerate() {
-            let angle = -2.0 * PI * k as f64 * t as f64 / n as f64;
-            re += sample * angle.cos();
-            im += sample * angle.sin();
-        }
-        magnitudes.push((re * re + im * im).sqrt());
-    }
-    magnitudes
 }
 
 /// Compute the number of audio soft tokens for a waveform of given duration.

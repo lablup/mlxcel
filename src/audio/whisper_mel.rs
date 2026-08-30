@@ -18,7 +18,7 @@
 //! sibling [`super::feature_extractor`] module. The two differ in their
 //! normalization and mel scale, so this file only adds the recognizer-specific
 //! parameters and reuses the shared DSP primitive
-//! ([`super::feature_extractor::real_fft_magnitude`]) for the per-frame
+//! ([`super::fft::real_fft_magnitude`]) for the per-frame
 //! transform.
 //!
 //! Pipeline (16 kHz mono input):
@@ -31,7 +31,7 @@
 
 use std::f64::consts::PI;
 
-use super::feature_extractor::real_fft_magnitude;
+use super::fft::real_fft_magnitude;
 
 /// Native sample rate the encoder expects.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -221,7 +221,7 @@ pub fn log_mel_spectrogram(audio: &[f32], n_mels: usize) -> (Vec<f32>, usize) {
         for i in 0..WHISPER_N_FFT {
             frame_buf[i] = (padded[start + i] * window[i]) as f64;
         }
-        // Power spectrum: square the shared DFT magnitude.
+        // Power spectrum: square the shared FFT magnitude.
         let mag = real_fft_magnitude(&frame_buf, n_freqs);
         for mel in 0..n_mels {
             let mut acc = 0.0f64;

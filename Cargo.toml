@@ -345,6 +345,11 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem
 # `BodyExt::collect` for the read-budget body tests (#1432). Already in the
 # graph through axum and hyper-util.
 http-body-util = "0.1"
+criterion = "0.5"
+
+[[bench]]
+name = "audio_fft"
+harness = false
 
 [[test]]
 name = "distributed_integration"
