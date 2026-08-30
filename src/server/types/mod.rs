@@ -22,6 +22,7 @@ pub mod native_completion;
 pub mod request;
 pub mod rerank;
 pub mod response;
+mod responses_input_part;
 pub mod responses_request;
 pub mod responses_response;
 pub mod responses_stream;

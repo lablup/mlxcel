@@ -28,7 +28,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::request::{ContentPart, FunctionDefinition, SamplingParams, ToolChoice};
+use super::request::{FunctionDefinition, SamplingParams, ToolChoice};
+pub use super::responses_input_part::{
+    INPUT_FILE_UNSUPPORTED, INPUT_IMAGE_FILE_ID_UNSUPPORTED, ResponseInputPart, ResponseToolOutput,
+};
 
 /// `POST /v1/responses` request body.
 ///
@@ -232,7 +235,10 @@ pub enum ResponseInputItem {
         arguments: String,
     },
     /// Result of a prior function call.
-    FunctionCallOutput { call_id: String, output: String },
+    FunctionCallOutput {
+        call_id: String,
+        output: ResponseToolOutput,
+    },
     /// Reasoning trace from a prior turn (rehydrated). Phase 1 records
     /// the text but does not push it through the thinking-token machinery.
     Reasoning { content: Vec<ReasoningContentPart> },
@@ -264,7 +270,7 @@ pub enum ResponseInputRole {
 #[serde(untagged)]
 pub enum ResponseInputContent {
     Text(String),
-    Parts(Vec<ContentPart>),
+    Parts(Vec<ResponseInputPart>),
 }
 
 impl ResponseInputContent {
@@ -274,7 +280,9 @@ impl ResponseInputContent {
             ResponseInputContent::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
+                        Some(text.as_str())
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()

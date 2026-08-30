@@ -39,10 +39,12 @@
 use std::sync::Arc;
 
 use crate::server::types::request::{
-    ChatCompletionRequest, Message, MessageContent, Role, Tool, ToolCallFunction, ToolCallInMessage,
+    ChatCompletionRequest, ContentPart, ImageUrl, Message, MessageContent, Role, Tool,
+    ToolCallFunction, ToolCallInMessage,
 };
 use crate::server::types::responses_request::{
-    CreateResponseRequest, ResponseInputContent, ResponseInputItem, ResponseInputRole, ResponseTool,
+    CreateResponseRequest, INPUT_FILE_UNSUPPORTED, ResponseInputContent, ResponseInputItem,
+    ResponseInputPart, ResponseInputRole, ResponseTool, ResponseToolOutput,
 };
 use crate::server::types::responses_response::{
     ConversationRefEchoed, ResponseErrorBody, ResponseFunctionCallOutput,
@@ -90,6 +92,8 @@ pub enum ResponsesTranslateError {
     TruncationUnsupported(String),
     #[error("max_output_tokens must be > 0")]
     MaxOutputTokensInvalid,
+    #[error("{0}")]
+    InvalidInputPart(String),
 }
 
 /// Inbound translation result. Carries the synthetic
@@ -192,7 +196,9 @@ pub fn responses_request_to_chat(
             tool_calls: None,
         });
     }
-    messages.extend(input_items_to_messages(&all_items));
+    messages.extend(
+        input_items_to_messages(&all_items).map_err(ResponsesTranslateError::InvalidInputPart)?,
+    );
 
     let tools = function_tools(request.tools.as_deref());
     let tool_choice = request.tool_choice.clone();
@@ -291,6 +297,80 @@ fn function_tools(tools: Option<&[ResponseTool]>) -> Option<Vec<Tool>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+const IMAGE_OUTPUT_FOLLOWUP: &str = "[Image output attached in the next message]";
+
+fn lower_parts(
+    parts: &[ResponseInputPart],
+    collect_images: bool,
+) -> Result<(Vec<ContentPart>, Vec<ImageUrl>), String> {
+    let mut lowered = Vec::with_capacity(parts.len());
+    let mut images = Vec::new();
+    for part in parts {
+        let content_part = ContentPart::try_from(part)?;
+        if collect_images && let ContentPart::ImageUrl { image_url } = &content_part {
+            images.push(image_url.clone());
+        }
+        lowered.push(content_part);
+    }
+    Ok((lowered, images))
+}
+
+fn lower_tool_output_parts(parts: &[ResponseInputPart]) -> Result<(String, Vec<ImageUrl>), String> {
+    let mut lines = Vec::new();
+    let mut images = Vec::new();
+    let mut leftovers = Vec::new();
+
+    for part in parts {
+        match part {
+            ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
+                lines.push(text.clone());
+            }
+            ResponseInputPart::InputImage { .. } => {
+                let lowered = ContentPart::try_from(part)?;
+                let ContentPart::ImageUrl { image_url } = lowered else {
+                    return Err("input_image did not lower to an image part".to_string());
+                };
+                images.push(image_url);
+            }
+            ResponseInputPart::ImageUrl { image_url } => images.push(image_url.clone()),
+            ResponseInputPart::InputFile { .. } => {
+                return Err(INPUT_FILE_UNSUPPORTED.to_string());
+            }
+            ResponseInputPart::VideoUrl { .. }
+            | ResponseInputPart::InputAudio { .. }
+            | ResponseInputPart::Unknown { .. } => leftovers.push(part.to_json_value()),
+        }
+    }
+
+    if !leftovers.is_empty() {
+        lines.push(
+            serde_json::to_string(&leftovers)
+                .map_err(|err| format!("failed to serialize function_call_output parts: {err}"))?,
+        );
+    }
+    if !images.is_empty() {
+        lines.push(IMAGE_OUTPUT_FOLLOWUP.to_string());
+    }
+
+    Ok((lines.join("\n"), images))
+}
+
+fn image_followup_message(images: Vec<ImageUrl>) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Parts(
+            images
+                .into_iter()
+                .map(|image_url| ContentPart::ImageUrl { image_url })
+                .collect(),
+        ),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }
+}
+
 /// Convert a flat list of input items into chat-completion messages.
 ///
 /// `function_call` items become assistant messages with `tool_calls`;
@@ -300,7 +380,7 @@ fn function_tools(tools: Option<&[ResponseTool]>) -> Option<Vec<Tool>> {
 /// following assistant turn (issue #362) so templates that read
 /// `message.get('reasoning')` see prior thinking. A reasoning item that is not
 /// followed by an assistant turn before the next turn boundary is dropped.
-fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
+fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, String> {
     let mut out: Vec<Message> = Vec::new();
     let mut pending_tool_calls: Vec<ToolCallInMessage> = Vec::new();
     let mut pending_reasoning: Option<String> = None;
@@ -330,14 +410,51 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                 } else {
                     None
                 };
+                let (message_content, followup_images) = match content {
+                    ResponseInputContent::Text(text) => {
+                        (MessageContent::Text(text.clone()), Vec::new())
+                    }
+                    ResponseInputContent::Parts(parts) => {
+                        let (lowered, images) = lower_parts(parts, converted_role != Role::User)?;
+                        if converted_role == Role::User {
+                            (MessageContent::Parts(lowered), Vec::new())
+                        } else {
+                            let retained = lowered
+                                .into_iter()
+                                .filter(|part| !matches!(part, ContentPart::ImageUrl { .. }))
+                                .collect::<Vec<_>>();
+                            let content = if retained
+                                .iter()
+                                .all(|part| matches!(part, ContentPart::Text { .. }))
+                            {
+                                MessageContent::Text(
+                                    retained
+                                        .iter()
+                                        .filter_map(|part| match part {
+                                            ContentPart::Text { text } => Some(text.as_str()),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(""),
+                                )
+                            } else {
+                                MessageContent::Parts(retained)
+                            };
+                            (content, images)
+                        }
+                    }
+                };
                 out.push(Message {
                     role: converted_role,
-                    content: convert_content(content),
+                    content: message_content,
                     name: name.clone(),
                     tool_call_id: None,
                     reasoning,
                     tool_calls: None,
                 });
+                if !followup_images.is_empty() {
+                    out.push(image_followup_message(followup_images));
+                }
                 // A turn boundary consumes any leftover reasoning so it cannot
                 // leak onto a later, unrelated assistant turn.
                 pending_reasoning = None;
@@ -367,14 +484,21 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
                         tool_calls: Some(std::mem::take(&mut pending_tool_calls)),
                     });
                 }
+                let (tool_content, images) = match output {
+                    ResponseToolOutput::Text(text) => (text.clone(), Vec::new()),
+                    ResponseToolOutput::Parts(parts) => lower_tool_output_parts(parts)?,
+                };
                 out.push(Message {
                     role: Role::Tool,
-                    content: MessageContent::Text(output.clone()),
+                    content: MessageContent::Text(tool_content),
                     name: None,
                     tool_call_id: Some(call_id.clone()),
                     reasoning: None,
                     tool_calls: None,
                 });
+                if !images.is_empty() {
+                    out.push(image_followup_message(images));
+                }
                 // A tool-output turn is not an assistant turn, so any buffered
                 // reasoning that was not consumed by the flush above (e.g.
                 // malformed input: Reasoning immediately followed by
@@ -413,7 +537,7 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Vec<Message> {
         });
     }
 
-    out
+    Ok(out)
 }
 
 fn convert_role(role: ResponseInputRole) -> Role {
@@ -423,13 +547,6 @@ fn convert_role(role: ResponseInputRole) -> Role {
         // mlxcel treats both as system turns.
         ResponseInputRole::Assistant => Role::Assistant,
         ResponseInputRole::System | ResponseInputRole::Developer => Role::System,
-    }
-}
-
-fn convert_content(content: &ResponseInputContent) -> MessageContent {
-    match content {
-        ResponseInputContent::Text(s) => MessageContent::Text(s.clone()),
-        ResponseInputContent::Parts(parts) => MessageContent::Parts(parts.to_vec()),
     }
 }
 
@@ -846,7 +963,7 @@ mod tests {
             // skipped. The arm must still clear pending_reasoning.
             ResponseInputItem::FunctionCallOutput {
                 call_id: "call_orphan".to_string(),
-                output: "result".to_string(),
+                output: ResponseToolOutput::Text("result".to_string()),
             },
             ResponseInputItem::Message {
                 role: ResponseInputRole::Assistant,
@@ -896,7 +1013,7 @@ mod tests {
             },
             ResponseInputItem::FunctionCallOutput {
                 call_id: "call_1".to_string(),
-                output: "done".to_string(),
+                output: ResponseToolOutput::Text("done".to_string()),
             },
             ResponseInputItem::Message {
                 role: ResponseInputRole::Assistant,

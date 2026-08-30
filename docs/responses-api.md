@@ -94,19 +94,28 @@ Phase 1 supports these typed items:
 ```jsonc
 [
   {"type":"message", "role":"user", "content":"hello"},
-  {"type":"message", "role":"system", "content":[{"type":"text", "text":"sys"}]},
+  {"type":"message", "role":"system", "content":[{"type":"input_text", "text":"sys"}]},
+  {"type":"message", "role":"user", "content":[{"type":"input_image", "image_url":"data:image/png;base64,...", "detail":"high"}]},
   {"type":"function_call", "call_id":"call_abc", "name":"f", "arguments":"{}"},
   {"type":"function_call_output", "call_id":"call_abc", "output":"ok"},
+  {"type":"function_call_output", "call_id":"call_img", "output":[{"type":"input_text", "text":"captured"}, {"type":"input_image", "image_url":"data:image/png;base64,..."}]},
   {"type":"reasoning", "content":[{"type":"reasoning_text", "text":"..."}]}
 ]
 ```
 
 `developer` role is treated like `system`. Reasoning input items are accepted and forwarded: the text content is buffered and attached to the parallel `reasoning` field of the following assistant turn. Chat templates that render `message.get('reasoning')` (such as Gemma 4) receive it there. The `preserve_thinking` kwarg controls whether the field survives the rolling-checkpoint strip: `false` (the default, unless the prompt cache is on) drops prior-turn reasoning along with any inline `<think>` blocks; `true` retains it.
 
-Message content parts reuse mlxcel's chat-completions content part types. This
-means `text`, `image_url`, `video_url`, and `input_audio` can deserialize, but
-actual execution still depends on the loaded model's media support. OpenAI
-Responses-specific `input_image` / `input_file` compatibility is not complete.
+Message items and array-valued `function_call_output.output` fields accept the Responses-native part spellings alongside mlxcel's existing chat-completions spellings:
+
+| Part | Fields | Behavior |
+|------|--------|----------|
+| `input_text` | `text: string` | Mapped to a chat-completions `text` part. |
+| `input_image` | `image_url: string`, optional `detail: "auto" \| "low" \| "high"` | Mapped to an `image_url` part; URLs and data URIs use the existing media pipeline. |
+| `input_image` with only `file_id` | `file_id: string` | Rejected with 400 because this server has no uploads store; provide `image_url` instead. |
+| `input_file` | any Responses file fields | Rejected with a named 400; PDF and document ingestion are not implemented. |
+| `text`, `image_url`, `video_url`, `input_audio` | existing chat-completions shapes | Accepted unchanged; execution still depends on the loaded model's media support. |
+
+A string-valued function output is unchanged. In an array-valued function output, text parts are joined with newlines in the tool message, non-text/non-image parts are retained as JSON text, and image parts are emitted in order as an immediately following user image turn. The tool message ends with `[Image output attached in the next message]` when that follow-up is present. Images on user message items remain in place; images on assistant, system, or developer message items are likewise moved to an immediately following user turn because supported chat templates render image placeholders on user turns.
 
 A request with no effective input is rejected with 400 before any model
 dispatch: an empty `input` array, a blank/whitespace-only string or `text`
@@ -235,4 +244,4 @@ Notable gaps:
 - no token-count endpoint;
 - no built-in tools or MCP connector execution;
 - no disk-persisted response store;
-- incomplete OpenAI Responses multimodal part compatibility.
+- no `input_file` ingestion or `file_id` resolution through an uploads store.

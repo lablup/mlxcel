@@ -150,6 +150,9 @@ mod muse_glimmer_template_tests;
 mod reasoning_effort_tests;
 
 #[cfg(test)]
+mod responses_input_parts_tests;
+
+#[cfg(test)]
 mod muse_atem_roundtrip_tests;
 
 #[cfg(test)]
