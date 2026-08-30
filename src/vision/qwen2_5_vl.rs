@@ -19,7 +19,9 @@
 use super::feature_cache::{CacheKey, SingleArrayFeatures, VisionFeatureCache};
 use super::{encoders, merge, processors};
 use crate::LanguageModel;
-use crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch;
+use crate::multimodal::qwen_vl::{
+    compute_qwen_vl_mrope_position_ids, forward_batched_with_seq_ids_dispatch,
+};
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
@@ -107,8 +109,8 @@ impl Qwen25VLModel {
             vision_output.hidden_states
         };
 
-        let merged = merge::merge_llava(
-            self.image_token_id,
+        let merged = merge::merge_llava_any(
+            &[self.image_token_id, self.video_token_id],
             image_features.as_ref().unwrap(),
             &inputs_embeds,
             input_ids,
@@ -137,85 +139,13 @@ impl Qwen25VLModel {
         input_ids: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
     ) -> UniquePtr<MlxArray> {
-        mlxcel_core::eval(input_ids);
-        let ids_shape = mlxcel_core::array_shape(input_ids);
-        let seq_len = ids_shape[1] as usize;
-
-        let mut tokens = Vec::with_capacity(seq_len);
-        for i in 0..seq_len {
-            let tok = mlxcel_core::slice(input_ids, &[0, i as i32], &[1, i as i32 + 1]);
-            mlxcel_core::eval(&tok);
-            tokens.push(mlxcel_core::item_i32(&tok));
-        }
-
-        let merge = self.spatial_merge_size as i32;
-        let mut pos_ids: Vec<Vec<i32>> = vec![Vec::new(); 3];
-        let mut image_idx = 0usize;
-        let mut st = 0usize;
-        let mut current_pos = 0i32;
-
-        let mut i = 0;
-        while i < seq_len {
-            if tokens[i] == self.image_token_id || tokens[i] == self.video_token_id {
-                let vision_start = i;
-
-                while i < seq_len
-                    && (tokens[i] == self.image_token_id || tokens[i] == self.video_token_id)
-                {
-                    i += 1;
-                }
-
-                if vision_start > st {
-                    let text_len = vision_start - st;
-                    for p in current_pos..current_pos + text_len as i32 {
-                        pos_ids[0].push(p);
-                        pos_ids[1].push(p);
-                        pos_ids[2].push(p);
-                    }
-                    current_pos += text_len as i32;
-                }
-
-                if image_idx < grid_thw.len() {
-                    let (t, h, w) = grid_thw[image_idx];
-                    let llm_h = h / merge;
-                    let llm_w = w / merge;
-                    let llm_t = t;
-
-                    for ti in 0..llm_t {
-                        for hi in 0..llm_h {
-                            for wi in 0..llm_w {
-                                pos_ids[0].push(current_pos + ti);
-                                pos_ids[1].push(current_pos + hi);
-                                pos_ids[2].push(current_pos + wi);
-                            }
-                        }
-                    }
-                    current_pos += llm_t.max(llm_h).max(llm_w);
-                    image_idx += 1;
-                }
-
-                st = i;
-                continue;
-            }
-            i += 1;
-        }
-
-        if st < seq_len {
-            let text_len = seq_len - st;
-            for p in current_pos..current_pos + text_len as i32 {
-                pos_ids[0].push(p);
-                pos_ids[1].push(p);
-                pos_ids[2].push(p);
-            }
-        }
-
-        let total_len = pos_ids[0].len() as i32;
-        let t_arr = mlxcel_core::from_slice_i32(&pos_ids[0], &[1, 1, total_len]);
-        let h_arr = mlxcel_core::from_slice_i32(&pos_ids[1], &[1, 1, total_len]);
-        let w_arr = mlxcel_core::from_slice_i32(&pos_ids[2], &[1, 1, total_len]);
-
-        let th = mlxcel_core::concatenate(t_arr.as_ref().unwrap(), h_arr.as_ref().unwrap(), 0);
-        mlxcel_core::concatenate(th.as_ref().unwrap(), w_arr.as_ref().unwrap(), 0)
+        compute_qwen_vl_mrope_position_ids(
+            input_ids,
+            grid_thw,
+            self.spatial_merge_size,
+            self.image_token_id,
+            self.video_token_id,
+        )
     }
 }
 

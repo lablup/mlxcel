@@ -16,12 +16,12 @@
 use super::decode_xla_cli_images;
 use super::{
     CliSamplingFlagState, apply_user_chat_template, apply_vlm_chat_template,
-    build_cli_sampling_config_with_flags, cli_pipeline_requested, estimate_delta_label_and_bytes,
-    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    reject_dflash_drafter_offline, resolve_cli_pipeline_assignments, resolve_cli_prompt,
-    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
-    validate_pipeline_parallel_args, validate_tensor_parallel_args,
-    validate_xla_cli_image_cardinality, validate_xla_output_audio,
+    build_cli_sampling_config_with_flags, cli_pipeline_requested, cli_video_content_part_count,
+    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
+    memory_preflight_ctx_len, reject_dflash_drafter_offline, resolve_cli_pipeline_assignments,
+    resolve_cli_prompt, should_route_offline_mtp, strip_trailing_eos,
+    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
+    validate_tensor_parallel_args, validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use mlxcel_core::cache::KVCacheMode;
@@ -321,6 +321,21 @@ fn vlm_chat_template_renders_video_content_part_in_user_turn() {
     // Image + video together render in image-then-video order.
     let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1, 0);
     assert_eq!(mixed, "user: <IMG><VID>Q");
+}
+
+#[test]
+fn cli_video_content_part_count_enables_qwen_vl_videos() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = serde_json::json!({
+        "model_type": "qwen3_vl",
+        "architectures": ["Qwen3VLForConditionalGeneration"],
+        "text_config": {"model_type": "qwen3_vl"},
+        "vision_config": {"model_type": "qwen3_vl"}
+    });
+    fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+
+    assert_eq!(cli_video_content_part_count(dir.path(), 2), 2);
+    assert_eq!(cli_video_content_part_count(dir.path(), 0), 0);
 }
 
 #[test]

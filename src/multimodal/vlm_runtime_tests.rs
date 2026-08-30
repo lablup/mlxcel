@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use super::{
-    VlmPreparationSummary, expand_gemma3n_audio_tokens, expand_gemma4_audio_tokens_for_server,
-    expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
-    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
-    prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
-    split_jina_vlm_prompt,
+    QwenMediaOrdinal, VlmPreparationSummary, expand_gemma3n_audio_tokens,
+    expand_gemma4_audio_tokens_for_server, expand_gemma4_unified_video_tokens,
+    expand_gemma4_video_tokens, expand_nemotron_h_nano_omni_audio_tokens_for_server,
+    format_molmo_v1_prompt_for_processor, prepared_embedding_refs, qwen_media_order_from_prompt,
+    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings, split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
 
@@ -140,6 +140,35 @@ fn image_block_summary_preserves_stats_shape() {
             tokens_per_image: 256,
         })
     );
+}
+
+#[test]
+fn qwen_media_order_from_prompt_preserves_rendered_mixed_order() {
+    const IMAGE: i32 = 151_655;
+    const VIDEO: i32 = 151_656;
+    let prompt = vec![1, VIDEO, 2, IMAGE, IMAGE, 3, VIDEO, VIDEO, 4];
+
+    let order = qwen_media_order_from_prompt(&prompt, IMAGE, VIDEO, 1, 2).unwrap();
+
+    assert_eq!(
+        order,
+        vec![
+            QwenMediaOrdinal::Video(0),
+            QwenMediaOrdinal::Image(0),
+            QwenMediaOrdinal::Video(1),
+        ]
+    );
+}
+
+#[test]
+fn qwen_media_order_from_prompt_rejects_missing_video_placeholder() {
+    const IMAGE: i32 = 151_655;
+    const VIDEO: i32 = 151_656;
+    let prompt = vec![1, IMAGE, 2];
+
+    let err = qwen_media_order_from_prompt(&prompt, IMAGE, VIDEO, 1, 1).unwrap_err();
+
+    assert!(err.to_string().contains("prompt/media mismatch"));
 }
 
 #[test]

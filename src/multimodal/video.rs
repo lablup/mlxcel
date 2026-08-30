@@ -126,6 +126,28 @@ pub const FPS_MIN_FRAMES: usize = 4;
 /// Upper bound on sampled frame count (mirrors upstream `FPS_MAX_FRAMES`).
 pub const FPS_MAX_FRAMES: usize = 768;
 
+/// Frame sampling policy for callers that need checkpoint-specific video
+/// bounds. The default preserves the historical Gemma/Kimi behavior: clamp to
+/// the global `[FPS_MIN_FRAMES, FPS_MAX_FRAMES]` window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSamplingPolicy {
+    pub min_frames: usize,
+    pub max_frames: usize,
+    pub frame_factor: usize,
+    pub reject_over_max: bool,
+}
+
+impl Default for FrameSamplingPolicy {
+    fn default() -> Self {
+        Self {
+            min_frames: FPS_MIN_FRAMES,
+            max_frames: FPS_MAX_FRAMES,
+            frame_factor: FRAME_FACTOR,
+            reject_over_max: false,
+        }
+    }
+}
+
 /// Default cap on source-video pixel count (width × height). Env var
 /// `MLXCEL_VIDEO_MAX_PIXELS` overrides. Default = 4096 × 4096 = 16 777 216.
 const DEFAULT_MAX_PIXELS: u64 = 4096 * 4096;
@@ -275,6 +297,16 @@ pub enum VideoError {
          (set MLXCEL_VIDEO_MAX_DURATION_SEC to override)"
     )]
     DurationTooLong { seconds: f64, max_seconds: f64 },
+    /// The caller requested fail-closed frame sampling and the unclamped
+    /// requested sample count exceeds the model's declared maximum.
+    #[error(
+        "video sampling requested {requested_frames} frame(s), exceeding max_frames={max_frames}; \
+         lower --fps or use a shorter clip"
+    )]
+    SampledFramesTooMany {
+        requested_frames: usize,
+        max_frames: usize,
+    },
 }
 
 // ─── RAII drop guard ────────────────────────────────────────────────────────
@@ -604,21 +636,53 @@ pub fn smart_nframes(
     target_fps: Option<f64>,
     target_nframes: Option<usize>,
 ) -> Result<usize, VideoError> {
-    if total_frames < FRAME_FACTOR {
+    smart_nframes_with_policy(
+        total_frames,
+        video_fps,
+        target_fps,
+        target_nframes,
+        FrameSamplingPolicy::default(),
+    )
+}
+
+/// Compute sampled frame count with caller-supplied bounds.
+///
+/// When `reject_over_max` is true, the requested rounded sample count is
+/// rejected instead of clamped whenever it exceeds `max_frames`. This is used
+/// by Qwen-VL, whose processor sidecar treats `max_frames` as a named request
+/// limit rather than a silent truncation point.
+pub fn smart_nframes_with_policy(
+    total_frames: usize,
+    video_fps: f64,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+) -> Result<usize, VideoError> {
+    let frame_factor = policy.frame_factor.max(1);
+    if total_frames < frame_factor {
         return Err(VideoError::Extract {
             path: PathBuf::new(),
             message: format!(
-                "video has only {total_frames} frame(s); need at least {FRAME_FACTOR}"
+                "video has only {total_frames} frame(s); need at least {frame_factor}"
             ),
         });
     }
 
+    let min_frames = policy.min_frames.max(frame_factor);
+    let max_frames = policy.max_frames.max(min_frames);
+
     if let Some(n) = target_nframes {
-        let nframes = round_by_factor(n as f64, FRAME_FACTOR);
-        if nframes < FRAME_FACTOR || nframes > total_frames {
+        let nframes = round_by_factor(n as f64, frame_factor);
+        if policy.reject_over_max && nframes > max_frames {
+            return Err(VideoError::SampledFramesTooMany {
+                requested_frames: nframes,
+                max_frames,
+            });
+        }
+        if nframes < frame_factor || nframes > total_frames {
             return Err(VideoError::Extract {
                 path: PathBuf::new(),
-                message: format!("nframes={nframes} out of range [{FRAME_FACTOR}, {total_frames}]"),
+                message: format!("nframes={nframes} out of range [{frame_factor}, {total_frames}]"),
             });
         }
         return Ok(nframes);
@@ -634,20 +698,30 @@ pub fn smart_nframes(
     let video_fps_safe = if video_fps > 0.0 { video_fps } else { 1.0 };
 
     let raw = total_frames as f64 / video_fps_safe * fps;
-    let max_cap = ceil_by_factor(FPS_MIN_FRAMES as f64, FRAME_FACTOR).max(FRAME_FACTOR);
-    let upper = floor_by_factor(FPS_MAX_FRAMES.min(total_frames) as f64, FRAME_FACTOR);
+    let requested = ceil_by_factor(raw, frame_factor)
+        .max(ceil_by_factor(min_frames as f64, frame_factor))
+        .min(total_frames);
+    if policy.reject_over_max && requested > max_frames {
+        return Err(VideoError::SampledFramesTooMany {
+            requested_frames: requested,
+            max_frames,
+        });
+    }
+
+    let max_cap = ceil_by_factor(min_frames as f64, frame_factor).max(frame_factor);
+    let upper = floor_by_factor(max_frames.min(total_frames) as f64, frame_factor);
     let upper = upper.max(max_cap);
 
     let bounded = raw
         .max(max_cap as f64)
         .min(upper as f64)
         .min(total_frames as f64);
-    let nframes = floor_by_factor(bounded, FRAME_FACTOR);
-    let nframes = nframes.max(FRAME_FACTOR).min(total_frames);
-    if !(FRAME_FACTOR..=total_frames).contains(&nframes) {
+    let nframes = floor_by_factor(bounded, frame_factor);
+    let nframes = nframes.max(frame_factor).min(total_frames);
+    if !(frame_factor..=total_frames).contains(&nframes) {
         return Err(VideoError::Extract {
             path: PathBuf::new(),
-            message: format!("nframes={nframes} out of range [{FRAME_FACTOR}, {total_frames}]"),
+            message: format!("nframes={nframes} out of range [{frame_factor}, {total_frames}]"),
         });
     }
     Ok(nframes)
@@ -1006,21 +1080,43 @@ pub fn load_video_source_with_limits(
     target_nframes: Option<usize>,
     limits: &VideoLimits,
 ) -> Result<Vec<DynamicImage>, VideoError> {
+    load_video_source_with_policy(
+        source,
+        target_fps,
+        target_nframes,
+        FrameSamplingPolicy::default(),
+        limits,
+    )
+}
+
+/// Like [`load_video_source_with_limits`], with caller-supplied frame sampling
+/// bounds.
+pub fn load_video_source_with_policy(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+    limits: &VideoLimits,
+) -> Result<Vec<DynamicImage>, VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
     }
     let canonical = source.canonical_path().to_path_buf();
     let meta = probe_video(source, limits)?;
-    let nframes =
-        smart_nframes(meta.total_frames, meta.fps, target_fps, target_nframes).map_err(|err| {
-            match err {
-                VideoError::Extract { message, .. } => VideoError::Extract {
-                    path: canonical.clone(),
-                    message,
-                },
-                other => other,
-            }
-        })?;
+    let nframes = smart_nframes_with_policy(
+        meta.total_frames,
+        meta.fps,
+        target_fps,
+        target_nframes,
+        policy,
+    )
+    .map_err(|err| match err {
+        VideoError::Extract { message, .. } => VideoError::Extract {
+            path: canonical.clone(),
+            message,
+        },
+        other => other,
+    })?;
 
     let indices = uniform_indices(meta.total_frames, nframes);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
@@ -1044,6 +1140,29 @@ pub fn load_videos(
     let mut all = Vec::with_capacity(paths.len());
     for path in paths {
         all.push(load_video(path, target_fps, target_nframes)?);
+    }
+    Ok(all)
+}
+
+/// Convenience variant of [`load_videos`] that applies caller-supplied frame
+/// sampling bounds to every input.
+pub fn load_videos_with_policy(
+    paths: &[PathBuf],
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+) -> Result<Vec<Vec<DynamicImage>>, VideoError> {
+    let limits = VideoLimits::from_env();
+    let mut all = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = VideoSource::Path(path.clone());
+        all.push(load_video_source_with_policy(
+            &source,
+            target_fps,
+            target_nframes,
+            policy,
+            &limits,
+        )?);
     }
     Ok(all)
 }

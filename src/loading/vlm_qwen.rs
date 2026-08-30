@@ -74,7 +74,7 @@ pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen2VL vision encoder: {}", e))?;
 
     // Build image processor
-    let processor = qwen_vl_processor(&vision_config);
+    let processor = qwen_vl_processor(model_path, &vision_config)?;
 
     // Get token IDs from config
     let token_ids = qwen_vl_token_ids(
@@ -84,7 +84,7 @@ pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
             video_token_id: 151656,
             vision_start_token_id: 151652,
         },
-    );
+    )?;
 
     let vlm = vision::Qwen2VLModel {
         text_model,
@@ -182,8 +182,10 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
             video_token_id: 151656,
             vision_start_token_id: 151652,
         },
-    );
-    let processor = qwen_vl_processor(&vision_config);
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let processor = qwen_vl_processor(model_path, &vision_config)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     let projector = mlxcel_xla::IreeQwen2VlProjector::load(model_path, device)
         .map_err(HostPreprocessorError::Iree)?;
     Qwen2VlIreeHostPreprocessor::from_parts(
@@ -224,7 +226,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
         Qwen25VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen2.5VL vision encoder: {}", e))?;
 
-    let processor = qwen_vl_processor(&vision_config);
+    let processor = qwen_vl_processor(model_path, &vision_config)?;
     let token_ids = qwen_vl_token_ids(
         &full_config,
         QwenVisionTokenIds {
@@ -232,7 +234,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
             video_token_id: 151656,
             vision_start_token_id: 151652,
         },
-    );
+    )?;
 
     let vlm = vision::Qwen25VLModel {
         text_model,
@@ -271,7 +273,8 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
         Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL vision encoder: {}", e))?;
 
-    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+    let processor =
+        qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
     let token_ids = qwen_vl_token_ids(
         &full_config,
         QwenVisionTokenIds {
@@ -279,7 +282,7 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
             video_token_id: 151656,
             vision_start_token_id: 151652,
         },
-    );
+    )?;
 
     let vlm = vision::Qwen3VLModel {
         text_model,
@@ -317,7 +320,8 @@ pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
         Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VLMoe vision encoder: {}", e))?;
 
-    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+    let processor =
+        qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
     let token_ids = qwen_vl_token_ids(
         &full_config,
         QwenVisionTokenIds {
@@ -325,7 +329,7 @@ pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
             video_token_id: 151656,
             vision_start_token_id: 151652,
         },
-    );
+    )?;
 
     let vlm = vision::Qwen3VLMoeModel {
         text_model,
@@ -433,7 +437,8 @@ fn load_qwen3_5_vlm_with_variant(
         Qwen3VLVisionEncoder::from_weights(&vision_weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3.5 vision encoder: {}", e))?;
 
-    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+    let processor =
+        qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
     let token_ids = qwen35_vl_token_ids(&full_config, text_config.vocab_size)?;
 
     let vlm = vision::Qwen35VLModel {
@@ -498,7 +503,7 @@ pub(crate) fn load_glm4v(model_path: &Path) -> Result<LoadedModel> {
     let vision_encoder = Glm4vVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
         .map_err(|e| anyhow::anyhow!("Failed to load GLM-4V vision encoder: {}", e))?;
 
-    let processor = qwen_vl_processor(&vision_config);
+    let processor = qwen_vl_processor(model_path, &vision_config)?;
     let token_ids = qwen_vl_token_ids(
         &full_config,
         QwenVisionTokenIds {
@@ -506,7 +511,7 @@ pub(crate) fn load_glm4v(model_path: &Path) -> Result<LoadedModel> {
             video_token_id: 151364,
             vision_start_token_id: 151339,
         },
-    );
+    )?;
 
     let vlm = vision::Glm4vModel {
         text_model,
@@ -617,7 +622,7 @@ pub(crate) fn load_glm_ocr(model_path: &Path) -> Result<LoadedModel> {
             .map_err(|e| anyhow::anyhow!("Failed to load GLM-OCR vision encoder: {}", e))?;
 
     // OCR pixel bounds (preprocessor_config `size` = shortest/longest edge).
-    let mut processor = qwen_vl_processor(&vision_config);
+    let mut processor = qwen_vl_processor(model_path, &vision_config)?;
     processor.min_pixels = 12544;
     processor.max_pixels = 9633792;
 
@@ -744,7 +749,7 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
     let vision_encoder = Glm4vVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
         .map_err(|e| anyhow::anyhow!("Failed to load GLM-4V MoE vision encoder: {}", e))?;
 
-    let processor = qwen_vl_processor(&vision_config);
+    let processor = qwen_vl_processor(model_path, &vision_config)?;
     let token_ids = qwen_vl_token_ids(
         &full_config,
         QwenVisionTokenIds {
@@ -752,7 +757,7 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
             video_token_id: 151364,
             vision_start_token_id: 151339,
         },
-    );
+    )?;
 
     let vlm = vision::Glm4vMoeModel {
         text_model,
@@ -873,7 +878,8 @@ pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni audio tower: {}", e))?;
 
-    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+    let processor =
+        qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
 
     let id = |key: &str, default: i64| -> i32 {
         thinker.get(key).and_then(|v| v.as_i64()).unwrap_or(default) as i32

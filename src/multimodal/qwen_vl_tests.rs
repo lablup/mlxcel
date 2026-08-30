@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::{
-    InsertedQwenVlmTokens, forward_batched_with_seq_ids_dispatch, insert_qwen_vl_image_tokens,
+    InsertedQwenVlmTokens, QwenVisualGrid, QwenVisualKind, forward_batched_with_seq_ids_dispatch,
+    insert_qwen_vl_image_tokens, insert_qwen_vl_media_tokens, qwen_vl_mrope_positions_from_tokens,
 };
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
@@ -30,7 +31,9 @@ fn insert_qwen_vl_image_tokens_inserts_blocks_after_bos() {
         stats,
         Some(InsertedQwenVlmTokens {
             image_blocks: 1,
+            video_blocks: 0,
             total_image_tokens: 4,
+            total_video_tokens: 0,
         })
     );
     assert_eq!(prompt_tokens, vec![1, 100, 103, 103, 103, 103, 101, 42, 43]);
@@ -53,7 +56,9 @@ fn insert_qwen_vl_image_tokens_expands_single_placeholder_per_image() {
         stats,
         Some(InsertedQwenVlmTokens {
             image_blocks: 1,
+            video_blocks: 0,
             total_image_tokens: 4,
+            total_video_tokens: 0,
         })
     );
     assert_eq!(prompt_tokens, vec![1, 100, 103, 103, 103, 103, 101, 42, 43]);
@@ -72,7 +77,9 @@ fn insert_qwen_vl_image_tokens_expands_one_placeholder_per_image_multi() {
         stats,
         Some(InsertedQwenVlmTokens {
             image_blocks: 2,
+            video_blocks: 0,
             total_image_tokens: 6,
+            total_video_tokens: 0,
         })
     );
     assert_eq!(prompt_tokens, vec![1, 203, 203, 203, 203, 7, 203, 203, 8]);
@@ -103,13 +110,162 @@ fn insert_qwen_vl_image_tokens_supports_multiple_images() {
         stats,
         Some(InsertedQwenVlmTokens {
             image_blocks: 2,
+            video_blocks: 0,
             total_image_tokens: 6,
+            total_video_tokens: 0,
         })
     );
     assert_eq!(
         prompt_tokens,
         vec![1, 200, 203, 203, 203, 203, 201, 200, 203, 203, 201, 7]
     );
+}
+
+#[test]
+fn insert_qwen_vl_media_tokens_expands_video_placeholder() {
+    let mut prompt_tokens = vec![1, 100, 104, 101, 42];
+    let stats = insert_qwen_vl_media_tokens(
+        &mut prompt_tokens,
+        &[QwenVisualGrid {
+            kind: QwenVisualKind::Video,
+            grid_thw: (2, 4, 4),
+        }],
+        2,
+        100,
+        103,
+        104,
+    )
+    .unwrap();
+
+    assert_eq!(
+        stats,
+        Some(InsertedQwenVlmTokens {
+            image_blocks: 0,
+            video_blocks: 1,
+            total_image_tokens: 0,
+            total_video_tokens: 8,
+        })
+    );
+    assert_eq!(
+        prompt_tokens,
+        vec![1, 100, 104, 104, 104, 104, 104, 104, 104, 104, 101, 42]
+    );
+}
+
+#[test]
+fn insert_qwen_vl_media_tokens_preserves_mixed_prompt_order() {
+    let mut prompt_tokens = vec![1, 100, 104, 101, 9, 100, 103, 101, 42];
+    let stats = insert_qwen_vl_media_tokens(
+        &mut prompt_tokens,
+        &[
+            QwenVisualGrid {
+                kind: QwenVisualKind::Video,
+                grid_thw: (2, 4, 4),
+            },
+            QwenVisualGrid {
+                kind: QwenVisualKind::Image,
+                grid_thw: (1, 4, 4),
+            },
+        ],
+        2,
+        100,
+        103,
+        104,
+    )
+    .unwrap();
+
+    assert_eq!(
+        stats,
+        Some(InsertedQwenVlmTokens {
+            image_blocks: 1,
+            video_blocks: 1,
+            total_image_tokens: 4,
+            total_video_tokens: 8,
+        })
+    );
+    assert_eq!(
+        prompt_tokens,
+        vec![
+            1, 100, 104, 104, 104, 104, 104, 104, 104, 104, 101, 9, 100, 103, 103, 103, 103, 101,
+            42,
+        ]
+    );
+}
+
+#[test]
+fn insert_qwen_vl_media_tokens_rejects_wrong_expanded_cardinality() {
+    let mut prompt_tokens = vec![1, 100, 104, 104, 104, 101, 42];
+    let error = insert_qwen_vl_media_tokens(
+        &mut prompt_tokens,
+        &[QwenVisualGrid {
+            kind: QwenVisualKind::Video,
+            grid_thw: (2, 4, 4),
+        }],
+        2,
+        100,
+        103,
+        104,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("cardinality mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn insert_qwen_vl_media_tokens_rejects_adjacent_cross_kind_runs() {
+    let mut prompt_tokens = vec![
+        1, 103, 103, 103, 103, 104, 104, 104, 104, 104, 104, 104, 104, 42,
+    ];
+    let error = insert_qwen_vl_media_tokens(
+        &mut prompt_tokens,
+        &[
+            QwenVisualGrid {
+                kind: QwenVisualKind::Image,
+                grid_thw: (1, 4, 4),
+            },
+            QwenVisualGrid {
+                kind: QwenVisualKind::Video,
+                grid_thw: (2, 4, 4),
+            },
+        ],
+        2,
+        100,
+        103,
+        104,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("adjacent"),
+        "error should reject MRoPE-ambiguous adjacent runs, got: {error}"
+    );
+}
+
+#[test]
+fn qwen_vl_mrope_positions_keep_video_temporal_axis() {
+    let tokens = vec![1, 100, 104, 104, 104, 104, 104, 104, 104, 104, 101, 42];
+    let positions =
+        qwen_vl_mrope_positions_from_tokens(&tokens, &[(2, 4, 4)], 2, 103, 104).unwrap();
+
+    assert_eq!(
+        &positions[0][2..10],
+        &[2, 2, 2, 2, 3, 3, 3, 3],
+        "video temporal positions must advance across grid_t"
+    );
+    assert_eq!(
+        &positions[1][2..10],
+        &[2, 2, 3, 3, 2, 2, 3, 3],
+        "height positions must use h / spatial_merge_size"
+    );
+    assert_eq!(
+        &positions[2][2..10],
+        &[2, 3, 2, 3, 2, 3, 2, 3],
+        "width positions must use w / spatial_merge_size"
+    );
+    assert_eq!(positions[0].len(), tokens.len());
 }
 
 // -- dispatch helper integration tests ----------------------

@@ -119,7 +119,8 @@ fn qwen_vl_token_ids_applies_defaults_and_overrides() {
             "vision_start_token_id": 22
         }),
         defaults,
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         ids,
@@ -162,7 +163,7 @@ fn older_qwen_vl_families_still_resolve_token_ids_from_defaults() {
     ] {
         // A config that omits every id must still load, from the defaults.
         assert_eq!(
-            qwen_vl_token_ids(&json!({}), defaults),
+            qwen_vl_token_ids(&json!({}), defaults).unwrap(),
             defaults,
             "{family}: an empty config must fall back to the family defaults"
         );
@@ -175,7 +176,8 @@ fn older_qwen_vl_families_still_resolve_token_ids_from_defaults() {
                 "vision_start_token_id": 9
             }),
             defaults,
-        );
+        )
+        .unwrap();
         assert_eq!(
             overridden,
             QwenVisionTokenIds {
@@ -186,6 +188,32 @@ fn older_qwen_vl_families_still_resolve_token_ids_from_defaults() {
             "{family}: explicit ids must be read from the config"
         );
     }
+}
+
+#[test]
+fn qwen_vl_token_ids_rejects_negative_and_overflowing_config_ids() {
+    let defaults = QwenVisionTokenIds {
+        image_token_id: 151655,
+        video_token_id: 151656,
+        vision_start_token_id: 151652,
+    };
+
+    let negative = qwen_vl_token_ids(&json!({ "video_token_id": -1 }), defaults)
+        .expect_err("negative Qwen-family token ids must not load");
+    assert!(
+        negative.to_string().contains("video_token_id"),
+        "error must name the invalid field, got: {negative}"
+    );
+
+    let overflow = qwen_vl_token_ids(
+        &json!({ "vision_start_token_id": 1_099_511_627_776i64 }),
+        defaults,
+    )
+    .expect_err("overflowing Qwen-family token ids must not load");
+    assert!(
+        overflow.to_string().contains("vision_start_token_id"),
+        "error must name the invalid field, got: {overflow}"
+    );
 }
 
 /// The Qwen3.5 family requires `vision_start_token_id` from the config. The
@@ -252,6 +280,17 @@ fn qwen35_vl_token_ids_default_only_the_image_and_video_ids() {
             video_token_id: 248057,
             vision_start_token_id: 248053,
         }
+    );
+}
+
+#[test]
+fn qwen35_vl_token_ids_range_checks_default_image_and_video_ids() {
+    let err = qwen35_vl_token_ids(&json!({ "vision_start_token_id": 248053 }), 248056)
+        .expect_err("default image/video ids beyond vocab_size must not load");
+
+    assert!(
+        err.to_string().contains("image_token_id default"),
+        "error must name the default token id field, got: {err}"
     );
 }
 

@@ -39,13 +39,17 @@ use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
 use crate::pixtral_prompt::insert_pixtral_image_tokens;
-use crate::qwen_vl::{insert_qwen_vl_image_tokens, insert_qwen3_omni_image_tokens};
+use crate::qwen_vl::{
+    InsertedQwenVlmTokens, QwenVisualGrid, QwenVisualKind, insert_qwen_vl_image_tokens,
+    insert_qwen_vl_media_tokens, insert_qwen3_omni_image_tokens,
+};
 use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_tokens};
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
+use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
 use crate::vlm_prompt::{ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks};
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use crate::{LanguageModel, LoadedModel, VlmRuntimeRef};
@@ -66,7 +70,9 @@ const JINA_VLM_USER_TURN: &str = "User: ";
 pub enum VlmPreparationSummary {
     QwenVlm {
         image_blocks: usize,
+        video_blocks: usize,
         total_image_tokens: i32,
+        total_video_tokens: i32,
     },
     MiniCPMO {
         image_slots: usize,
@@ -310,6 +316,197 @@ fn first_explicit_key(keys: Option<&[Option<CacheKey>]>) -> Option<CacheKey> {
     keys.and_then(|slice| slice.iter().find_map(|k| k.clone()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QwenMediaOrdinal {
+    Image(usize),
+    Video(usize),
+}
+
+impl QwenMediaOrdinal {
+    fn kind(self) -> QwenVisualKind {
+        match self {
+            Self::Image(_) => QwenVisualKind::Image,
+            Self::Video(_) => QwenVisualKind::Video,
+        }
+    }
+}
+
+fn qwen_media_order_from_prompt(
+    prompt_tokens: &[i32],
+    image_token_id: i32,
+    video_token_id: i32,
+    image_count: usize,
+    video_count: usize,
+) -> Result<Vec<QwenMediaOrdinal>> {
+    let mut prompt_kinds = Vec::new();
+    let mut i = 0usize;
+    while i < prompt_tokens.len() {
+        let kind = if prompt_tokens[i] == image_token_id {
+            Some(QwenVisualKind::Image)
+        } else if prompt_tokens[i] == video_token_id {
+            Some(QwenVisualKind::Video)
+        } else {
+            None
+        };
+        let Some(kind) = kind else {
+            i += 1;
+            continue;
+        };
+        let token_id = prompt_tokens[i];
+        prompt_kinds.push(kind);
+        while i < prompt_tokens.len() && prompt_tokens[i] == token_id {
+            i += 1;
+        }
+        if i < prompt_tokens.len()
+            && (prompt_tokens[i] == image_token_id || prompt_tokens[i] == video_token_id)
+        {
+            anyhow::bail!(
+                "Qwen-VL prompt has adjacent {:?} visual token run with no framing token between \
+                 media items",
+                kind
+            );
+        }
+    }
+
+    if prompt_kinds.is_empty() {
+        let mut fallback = Vec::with_capacity(image_count + video_count);
+        fallback.extend((0..image_count).map(QwenMediaOrdinal::Image));
+        fallback.extend((0..video_count).map(QwenMediaOrdinal::Video));
+        return Ok(fallback);
+    }
+
+    let prompt_image_count = prompt_kinds
+        .iter()
+        .filter(|&&kind| kind == QwenVisualKind::Image)
+        .count();
+    let prompt_video_count = prompt_kinds
+        .iter()
+        .filter(|&&kind| kind == QwenVisualKind::Video)
+        .count();
+    if prompt_image_count != image_count || prompt_video_count != video_count {
+        anyhow::bail!(
+            "Qwen-VL prompt/media mismatch: prompt has {} image block(s) and {} video block(s), \
+             but request decoded {} image(s) and {} video(s)",
+            prompt_image_count,
+            prompt_video_count,
+            image_count,
+            video_count
+        );
+    }
+
+    let mut next_image = 0usize;
+    let mut next_video = 0usize;
+    let order = prompt_kinds
+        .into_iter()
+        .map(|kind| match kind {
+            QwenVisualKind::Image => {
+                let idx = next_image;
+                next_image += 1;
+                QwenMediaOrdinal::Image(idx)
+            }
+            QwenVisualKind::Video => {
+                let idx = next_video;
+                next_video += 1;
+                QwenMediaOrdinal::Video(idx)
+            }
+        })
+        .collect();
+    Ok(order)
+}
+
+/// Return the loaded Qwen VLM runtime variants that support video input.
+///
+/// Qwen3-Omni is deliberately excluded: it has its own audio/image runtime and
+/// has not been qualified against the Qwen-VL video processor path in this
+/// issue.
+pub fn qwen_video_runtime(model: &LoadedModel) -> Option<&dyn crate::qwen_vl::QwenVlRuntime> {
+    match model {
+        LoadedModel::Qwen2VL(model) => Some(model),
+        LoadedModel::Qwen25VL(model) => Some(model),
+        LoadedModel::Qwen3VL(model) => Some(model),
+        LoadedModel::Qwen3VLMoe(model) => Some(model),
+        LoadedModel::Qwen35VLM(model) | LoadedModel::Qwen35MoeVLM(model) => Some(model),
+        _ => None,
+    }
+}
+
+/// Compute Qwen-VL embeddings for a mixed image/video request.
+///
+/// The media order is taken from the rendered prompt when it already contains
+/// image/video placeholders; otherwise it falls back to the CLI's historical
+/// images-then-videos order for text-only or no-template prompts.
+pub fn compute_qwen_vl_media_embeddings(
+    qwen: &dyn crate::qwen_vl::QwenVlRuntime,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[DynamicImage],
+    videos: &[Vec<DynamicImage>],
+    image_cache_keys: Option<&[Option<CacheKey>]>,
+    caches: Option<&ModelVisionCaches>,
+) -> Result<(InputEmbeddings, InsertedQwenVlmTokens)> {
+    let info = qwen.prompt_info();
+    let media_order = qwen_media_order_from_prompt(
+        prompt_tokens,
+        info.image_token_id,
+        info.video_token_id,
+        images.len(),
+        videos.len(),
+    )?;
+    if media_order.is_empty() {
+        anyhow::bail!("Qwen-VL media embedding requested with no images or videos");
+    }
+
+    let media_inputs = media_order
+        .iter()
+        .map(|ordinal| match *ordinal {
+            QwenMediaOrdinal::Image(idx) => Qwen2VLMediaInput::Image(&images[idx]),
+            QwenMediaOrdinal::Video(idx) => Qwen2VLMediaInput::Video(&videos[idx]),
+        })
+        .collect::<Vec<_>>();
+    let (pixel_values, grid_thw) = info
+        .processor
+        .preprocess_media_with_grid(&media_inputs)
+        .map_err(anyhow::Error::msg)?;
+    let visual_grids = media_order
+        .iter()
+        .zip(grid_thw.iter())
+        .map(|(ordinal, &grid)| QwenVisualGrid {
+            kind: ordinal.kind(),
+            grid_thw: grid,
+        })
+        .collect::<Vec<_>>();
+    let stats = insert_qwen_vl_media_tokens(
+        prompt_tokens,
+        &visual_grids,
+        info.spatial_merge_size,
+        info.vision_start_token_id,
+        info.image_token_id,
+        info.video_token_id,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("Qwen-VL failed to prepare visual placeholder tokens"))?;
+
+    let active_caches = if videos.is_empty() {
+        caches.filter(|c| c.enabled())
+    } else {
+        None
+    };
+    let qwen_cache_key = if active_caches.is_some() {
+        first_explicit_key(image_cache_keys)
+            .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
+    } else {
+        None
+    };
+
+    let input_ids_arr = prompt_ids_array(prompt_tokens);
+    let embeddings = qwen.input_embeddings_with_cache(
+        &input_ids_arr,
+        &pixel_values,
+        &grid_thw,
+        qwen_cache_key.as_ref(),
+        active_caches,
+    );
+    Ok((embeddings, stats))
+}
+
 /// Build a per-image cache key list, preferring explicit caller-supplied keys
 /// and falling back to pixel-byte hashing for entries the caller left `None`.
 ///
@@ -474,38 +671,20 @@ where
             .map(Some)
         }
         VlmRuntimeRef::Qwen(qwen) => {
-            let info = qwen.prompt_info();
-            let (pixel_values, grid_thw) = info.processor.preprocess_with_grid(images);
-            let preparation = insert_qwen_vl_image_tokens(
+            let (embeddings, stats) = compute_qwen_vl_media_embeddings(
+                qwen,
                 prompt_tokens,
-                &grid_thw,
-                info.spatial_merge_size,
-                info.vision_start_token_id,
-                info.image_token_id,
-            )
-            .map(|stats| VlmPreparationSummary::QwenVlm {
-                image_blocks: stats.image_blocks,
-                total_image_tokens: stats.total_image_tokens,
-            });
-
-            // Qwen-VL families take one concatenated pixel tensor per request.
-            // Use the first explicit cache key when provided; otherwise derive
-            // one from the pixel bytes when caching is enabled.
-            let qwen_cache_key = if active_caches.is_some() {
-                first_explicit_key(image_cache_keys)
-                    .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
-            } else {
-                None
-            };
-
-            let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = qwen.input_embeddings_with_cache(
-                &input_ids_arr,
-                &pixel_values,
-                &grid_thw,
-                qwen_cache_key.as_ref(),
+                images,
+                &[],
+                image_cache_keys,
                 active_caches,
-            );
+            )?;
+            let preparation = Some(VlmPreparationSummary::QwenVlm {
+                image_blocks: stats.image_blocks,
+                video_blocks: stats.video_blocks,
+                total_image_tokens: stats.total_image_tokens,
+                total_video_tokens: stats.total_video_tokens,
+            });
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
@@ -523,7 +702,9 @@ where
             )
             .map(|stats| VlmPreparationSummary::QwenVlm {
                 image_blocks: stats.image_blocks,
+                video_blocks: stats.video_blocks,
                 total_image_tokens: stats.total_image_tokens,
+                total_video_tokens: stats.total_video_tokens,
             });
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
@@ -574,7 +755,9 @@ where
             )
             .map(|stats| VlmPreparationSummary::QwenVlm {
                 image_blocks: stats.image_blocks,
+                video_blocks: stats.video_blocks,
                 total_image_tokens: stats.total_image_tokens,
+                total_video_tokens: stats.total_video_tokens,
             });
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
@@ -627,7 +810,9 @@ where
             )
             .map(|stats| VlmPreparationSummary::QwenVlm {
                 image_blocks: stats.image_blocks,
+                video_blocks: stats.video_blocks,
                 total_image_tokens: stats.total_image_tokens,
+                total_video_tokens: stats.total_video_tokens,
             });
 
             let _ = active_caches;
@@ -1567,7 +1752,9 @@ where
                 )
                 .map(|stats| VlmPreparationSummary::QwenVlm {
                     image_blocks: stats.image_blocks,
+                    video_blocks: 0,
                     total_image_tokens: stats.total_image_tokens,
+                    total_video_tokens: 0,
                 });
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
@@ -1595,7 +1782,9 @@ where
             )
             .map(|stats| VlmPreparationSummary::QwenVlm {
                 image_blocks: stats.image_blocks,
+                video_blocks: stats.video_blocks,
                 total_image_tokens: stats.total_image_tokens,
+                total_video_tokens: stats.total_video_tokens,
             });
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
@@ -1626,7 +1815,9 @@ where
             )
             .map(|stats| VlmPreparationSummary::QwenVlm {
                 image_blocks: stats.image_blocks,
+                video_blocks: stats.video_blocks,
                 total_image_tokens: stats.total_image_tokens,
+                total_video_tokens: stats.total_video_tokens,
             });
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
