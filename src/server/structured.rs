@@ -65,6 +65,8 @@ use thiserror::Error;
 // `TOK_ENV_CACHE`.
 use toktrie_hf_tokenizers::{ByteTokenizer, ByteTokenizerEnv};
 
+use crate::server::gbnf::{GbnfError, GbnfVocab, compile_gbnf};
+use crate::server::grammar::{GrammarSpec, LazyGate, LazyOutcome};
 use crate::tokenizer::MlxcelTokenizer;
 
 // ---------------------------------------------------------------------------
@@ -144,6 +146,13 @@ pub enum StructuredOutputError {
     /// llguidance details go to server logs only.
     #[error("constrained-decoding error: {0}")]
     Matcher(String),
+
+    /// A GBNF grammar or lazy-trigger surface mlxcel refused. The message is
+    /// b10621's own diagnostic wherever upstream has one, so a client that
+    /// already handles llama-server's grammar errors keeps working; it is
+    /// surfaced verbatim rather than prefixed.
+    #[error("{0}")]
+    InvalidGrammar(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +299,13 @@ fn resolve_tok_env(serialized_bytes: &[u8]) -> Result<(TokenizerFingerprint, Tok
 pub struct StructuredOutputConstraint {
     matcher: Matcher,
     vocab_size: usize,
+    /// Token environment, kept so the lazy gate can read a token's raw piece
+    /// and re-tokenize the buffered text it activates on.
+    tok_env: TokEnv,
+    /// Lazy-grammar gate (b10621 `grammar_lazy`). `None` for an eager
+    /// constraint, which is every `response_format` request and every
+    /// non-lazy grammar.
+    lazy: Option<LazyGate>,
     /// Scratch buffer for [`Self::compute_mask`] — reused across calls so
     /// the per-token decode path does not allocate a fresh `Vec<bool>` of
     /// length `vocab_size` (~150 KB for a 150k-vocab tokenizer).
@@ -308,6 +324,7 @@ impl std::fmt::Debug for StructuredOutputConstraint {
         f.debug_struct("StructuredOutputConstraint")
             .field("vocab_size", &self.vocab_size)
             .field("is_stopped", &self.matcher.is_stopped())
+            .field("lazy", &self.lazy)
             .finish()
     }
 }
@@ -393,9 +410,71 @@ impl StructuredOutputConstraint {
     /// the previous step. Treating that as a no-op keeps the scheduler from
     /// abort-on-stop and matches upstream mlx-vlm's behavior, which simply
     /// drops the consume call when `matcher.is_stopped()`.
+    /// `true` while a lazy grammar is still waiting for its trigger.
+    ///
+    /// b10621 applies no mask at all in this state
+    /// (`llama_sampler_grammar_apply` returns early on `awaiting_trigger`), so
+    /// the caller must leave the logits untouched rather than treat an empty
+    /// mask as "nothing is allowed".
+    pub fn is_gated(&self) -> bool {
+        self.lazy.as_ref().is_some_and(LazyGate::awaiting)
+    }
+
+    /// Feed the buffered text a lazy trigger activated on into the matcher.
+    ///
+    /// b10621's grammar is code-point structured, so it replays a partial token
+    /// piece directly. `llguidance` advances by whole tokens, so the activated
+    /// byte range is re-tokenized instead. The matcher consumes bytes
+    /// underneath, so a re-tokenization of the same bytes reaches the same
+    /// state; the divergence is confined to a trigger that starts inside a
+    /// token, where the re-tokenized split may differ from upstream's.
+    fn feed_activation(&mut self, outcome: LazyOutcome) -> Result<(), StructuredOutputError> {
+        let tokens = match outcome {
+            LazyOutcome::StillWaiting => return Ok(()),
+            LazyOutcome::ActivateTokens(tokens) => tokens,
+            LazyOutcome::ActivateBytes(bytes) => self.tok_env.tokenize_bytes(&bytes),
+        };
+        for token in tokens {
+            if token as usize >= self.vocab_size {
+                continue;
+            }
+            self.matcher.consume_token(token).map_err(|e| {
+                tracing::error!("lazy-grammar activation replay failed: {e}");
+                StructuredOutputError::Matcher(
+                    "lazy grammar activated on text the grammar does not accept; the trigger \
+                     must match where the grammar can start"
+                        .to_string(),
+                )
+            })?;
+        }
+        if let Some(err) = self.matcher.get_error() {
+            tracing::error!("matcher error after lazy-grammar activation: {err}");
+            return Err(StructuredOutputError::Matcher(
+                "matcher entered error state".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn consume_token(&mut self, token: i32) -> Result<(), StructuredOutputError> {
         if self.matcher.is_stopped() {
             return Ok(());
+        }
+        if self.is_gated() {
+            if token < 0 || token as usize >= self.vocab_size {
+                // Out-of-range ids cannot be trigger tokens and have no piece;
+                // an inert grammar simply keeps waiting.
+                return Ok(());
+            }
+            let token_u32 = token as u32;
+            let piece = self.tok_env.tok_trie().token(token_u32).to_vec();
+            let outcome = self
+                .lazy
+                .as_mut()
+                .map_or(LazyOutcome::StillWaiting, |gate| {
+                    gate.observe(token_u32, &piece)
+                });
+            return self.feed_activation(outcome);
         }
         if token < 0 {
             return Err(StructuredOutputError::Matcher(format!(
@@ -520,22 +599,12 @@ fn measure_schema_complexity(value: &serde_json::Value) -> (usize, usize) {
     (max_depth, refs)
 }
 
-/// Build a constraint from a raw JSON-Schema [`serde_json::Value`].
+/// Resolve the byte-level token environment for `tokenizer`.
 ///
-/// The schema is wrapped exactly like upstream mlx-vlm wraps it — via
-/// `TopLevelGrammar::from_json_schema`. mlxcel keeps this entry point public
-/// so unit tests can build constraints without going through the HTTP layer.
-///
-/// **Security**: this function applies pre-compilation size / depth / `$ref`
-/// limits and configures llguidance with tightened `ParserLimits`
-/// (`max_grammar_size`, `max_lexer_states`) and `verbose_errors: false`
-/// so an adversarial schema cannot exhaust the compiler nor leak parser
-/// state via the public error message. Verbose llguidance error details
-/// are routed to `tracing::error!` instead of the public surface.
-pub fn build_json_schema_constraint(
-    tokenizer: &MlxcelTokenizer,
-    schema: serde_json::Value,
-) -> Result<Arc<Mutex<StructuredOutputConstraint>>, StructuredOutputError> {
+/// Shared by every constraint builder: the schema path, the GBNF path and the
+/// tests. Serializes the tokenizer once and reuses the process-wide
+/// fingerprinted cache.
+fn tok_env_for(tokenizer: &MlxcelTokenizer) -> Result<TokEnv, StructuredOutputError> {
     let hf_tokenizer = tokenizer.hf_tokenizer().ok_or_else(|| {
         StructuredOutputError::UnsupportedTokenizer(
             "structured outputs require a HuggingFace tokenizer.json; the loaded \
@@ -543,34 +612,34 @@ pub fn build_json_schema_constraint(
                 .to_string(),
         )
     })?;
-
-    // Pre-compilation guard: reject oversized / deeply-nested schemas
-    // BEFORE any grammar work. This is the first line of defence against
-    // CPU/memory-exhaustion DoS via crafted schemas.
-    validate_schema_bounds(&schema)?;
-
-    // Serialise the tokenizer ONCE per request. The bytes feed both the
-    // SHA-256 fingerprint and (on cache miss) the `ByteTokenizer::from_json_bytes`
-    // call. Previously we serialised twice on every request (once for the
-    // hash, once for the build) even when the cache was hot.
     let serialized = hf_tokenizer.to_string(false).map_err(|e| {
         tracing::error!("tokenizer serialisation failed: {e}");
         StructuredOutputError::UnsupportedTokenizer(
             "tokenizer could not be serialised for structured-output adapter".to_string(),
         )
     })?;
-    let serialized_bytes = serialized.as_bytes();
-
-    let (_fingerprint, tok_env) = resolve_tok_env(serialized_bytes).map_err(|e| {
+    let (_fingerprint, tok_env) = resolve_tok_env(serialized.as_bytes()).map_err(|e| {
         tracing::error!("tokenizer-env resolution failed: {e}");
         StructuredOutputError::UnsupportedTokenizer(
             "failed to build byte-level token environment".to_string(),
         )
     })?;
+    Ok(tok_env)
+}
 
+/// Compile a `TopLevelGrammar` into a per-request constraint.
+///
+/// **Security**: configures `llguidance` with tightened `ParserLimits`
+/// (`max_grammar_size`, `max_lexer_states`) and `verbose_errors: false` so an
+/// adversarial grammar cannot exhaust the compiler nor leak parser state via
+/// the public error message. Verbose details go to `tracing::error!`.
+fn build_constraint(
+    tok_env: TokEnv,
+    grammar: TopLevelGrammar,
+    lazy: Option<LazyGate>,
+    on_error: impl Fn() -> StructuredOutputError,
+) -> Result<Arc<Mutex<StructuredOutputConstraint>>, StructuredOutputError> {
     let vocab_size = tok_env.tok_trie().vocab_size();
-
-    let grammar = TopLevelGrammar::from_json_schema(schema);
 
     let mut factory = ParserFactory::new(
         &tok_env,
@@ -586,11 +655,9 @@ pub fn build_json_schema_constraint(
     )
     .map_err(|e| {
         tracing::error!("ParserFactory build failed: {e}");
-        StructuredOutputError::InvalidSchema("schema compilation failed".to_string())
+        on_error()
     })?;
 
-    // Tighten the grammar / lexer caps and disable verbose-error output
-    // so llguidance does not leak parser state via its `e.to_string()`.
     {
         let limits = factory.limits_mut();
         limits.max_grammar_size = MAX_GRAMMAR_SIZE;
@@ -601,18 +668,15 @@ pub fn build_json_schema_constraint(
     let parser = factory.create_parser(grammar);
     let matcher = Matcher::new(parser);
     if let Some(err) = matcher.get_error() {
-        // `verbose_errors: false` already strips schema/grammar internals
-        // from `err`, but we still avoid echoing the raw error back to
-        // the client — log it server-side and surface a generic message.
         tracing::error!("matcher build error: {err}");
-        return Err(StructuredOutputError::InvalidSchema(
-            "schema compilation failed".to_string(),
-        ));
+        return Err(on_error());
     }
 
     Ok(Arc::new(Mutex::new(StructuredOutputConstraint {
         matcher,
         vocab_size,
+        tok_env,
+        lazy,
         mask_buf: Vec::with_capacity(vocab_size),
         // The bias buffer is sized lazily on first call (vocab_size_hint
         // depends on the model logits axis, which the constraint builder
@@ -620,6 +684,99 @@ pub fn build_json_schema_constraint(
         // first per-token call as well.
         bias_buf: Vec::with_capacity(vocab_size),
     })))
+}
+
+/// Build a constraint from a raw JSON-Schema [`serde_json::Value`].
+///
+/// The schema is wrapped exactly like upstream mlx-vlm wraps it — via
+/// `TopLevelGrammar::from_json_schema`. mlxcel keeps this entry point public
+/// so unit tests can build constraints without going through the HTTP layer.
+pub fn build_json_schema_constraint(
+    tokenizer: &MlxcelTokenizer,
+    schema: serde_json::Value,
+) -> Result<Arc<Mutex<StructuredOutputConstraint>>, StructuredOutputError> {
+    // Pre-compilation guard: reject oversized / deeply-nested schemas BEFORE
+    // any grammar work. This is the first line of defence against
+    // CPU/memory-exhaustion DoS via crafted schemas.
+    validate_schema_bounds(&schema)?;
+    let tok_env = tok_env_for(tokenizer)?;
+    build_constraint(
+        tok_env,
+        TopLevelGrammar::from_json_schema(schema),
+        None,
+        || StructuredOutputError::InvalidSchema("schema compilation failed".to_string()),
+    )
+}
+
+/// `<token-text>` resolution for the GBNF front end, wired to mlxcel's
+/// tokenizer with b10621's own flags.
+struct TokenizerVocab<'a>(&'a MlxcelTokenizer);
+
+impl GbnfVocab for TokenizerVocab<'_> {
+    fn tokenize_exact_one(&self, text: &str) -> Option<u32> {
+        let ids = self.0.encode_with_special(text, false, true).ok()?;
+        match ids.as_slice() {
+            [id] => Some(*id),
+            _ => None,
+        }
+    }
+}
+
+/// Compile GBNF text into a constraint.
+///
+/// Grammar parse failures carry b10621's own diagnostic; only the `llguidance`
+/// compilation step is genericised, because its messages describe the lowered
+/// Lark rather than anything the caller wrote.
+pub fn build_gbnf_constraint(
+    tokenizer: &MlxcelTokenizer,
+    gbnf: &str,
+    lazy: Option<LazyGate>,
+) -> Result<Arc<Mutex<StructuredOutputConstraint>>, StructuredOutputError> {
+    let vocab = TokenizerVocab(tokenizer);
+    let lark = compile_gbnf(gbnf, Some(&vocab)).map_err(|e| match e {
+        GbnfError::Parse(m) | GbnfError::Token(m) | GbnfError::Unsupported(m) => {
+            StructuredOutputError::InvalidGrammar(m)
+        }
+    })?;
+    let tok_env = tok_env_for(tokenizer)?;
+    build_constraint(tok_env, TopLevelGrammar::from_lark(lark), lazy, || {
+        StructuredOutputError::InvalidGrammar("failed to compile grammar".to_string())
+    })
+}
+
+/// Build a constraint from a resolved [`GrammarSpec`].
+///
+/// The two sources land on different `llguidance` front ends: a JSON schema
+/// goes through `from_json_schema` (mlxcel's existing path, and a closer match
+/// to the schema semantics than round-tripping through GBNF would be), while a
+/// GBNF grammar goes through the [`crate::server::gbnf`] lowering.
+pub fn build_constraint_from_grammar_spec(
+    tokenizer: &MlxcelTokenizer,
+    spec: &GrammarSpec,
+) -> Result<Arc<Mutex<StructuredOutputConstraint>>, StructuredOutputError> {
+    let lazy = if spec.lazy {
+        Some(
+            LazyGate::new(&spec.triggers)
+                .map_err(|e| StructuredOutputError::InvalidGrammar(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    if let Some(gbnf) = spec.gbnf.as_deref() {
+        return build_gbnf_constraint(tokenizer, gbnf, lazy);
+    }
+    let schema = spec
+        .schema
+        .clone()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    validate_schema_bounds(&schema)?;
+    let tok_env = tok_env_for(tokenizer)?;
+    build_constraint(
+        tok_env,
+        TopLevelGrammar::from_json_schema(schema),
+        lazy,
+        || StructuredOutputError::InvalidSchema("schema compilation failed".to_string()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +901,13 @@ pub fn apply_structured_mask_to_logits(
     // id past its own logits axis); anything the matcher does NOT cover
     // up to `vocab_size_hint` defaults to disallowed (conservative — an
     // unknown id cannot satisfy the grammar).
+    // A lazy grammar that has not triggered constrains nothing at all, so the
+    // logits pass through untouched. This is not the same as an empty mask,
+    // which below is (correctly) an error.
+    if constraint.is_gated() {
+        return Ok(mlxcel_core::copy(logits));
+    }
+
     let vocab_size = vocab_size_hint;
 
     // Compute the mask (borrows `constraint.mask_buf` mutably). Read out

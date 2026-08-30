@@ -284,6 +284,10 @@ pub(super) fn scheduler(parallelism: usize) -> BatchScheduler {
 pub(super) fn options(max_tokens: usize) -> ServerGenerateOptions {
     ServerGenerateOptions {
         retention: Default::default(),
+        dry_breaker_strings: None,
+        logit_bias: Vec::new(),
+        logit_bias_texts: Vec::new(),
+        post_sampling_probs: false,
         max_tokens,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
@@ -296,6 +300,7 @@ pub(super) fn options(max_tokens: usize) -> ServerGenerateOptions {
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
+        grammar: None,
         image_soft_tokens: None,
     }
 }

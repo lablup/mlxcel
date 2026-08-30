@@ -380,6 +380,10 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
 
     let options = mlxcel::server::ServerGenerateOptions {
         retention: Default::default(),
+        dry_breaker_strings: None,
+        logit_bias: Vec::new(),
+        logit_bias_texts: Vec::new(),
+        post_sampling_probs: false,
         max_tokens: 128,
         sampling: mlxcel::SamplingConfig::greedy(),
         stop_sequences: None,
@@ -392,6 +396,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: Some(constraint),
+        grammar: None,
         image_soft_tokens: None,
     };
 
@@ -1046,5 +1051,161 @@ fn apply_mask_covers_the_qwen3_8_padded_lm_head() {
             .iter()
             .any(|value| value.is_finite()),
         "an unstarted string schema must leave at least one real token id allowed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GBNF grammars (#1485)
+//
+// The byte-level fixture tokenizer maps one byte to one token, so a token id
+// IS the byte it emits. That makes the mask directly readable: "is byte b
+// allowed here" is `mask[b as usize]`.
+// ---------------------------------------------------------------------------
+
+/// Compile a GBNF grammar against the fixture tokenizer.
+fn gbnf_constraint(
+    gbnf: &str,
+) -> std::sync::Arc<std::sync::Mutex<mlxcel::server::structured::StructuredOutputConstraint>> {
+    let mlxcel_tok = mlxcel_tokenizer_from_hf(build_byte_level_tokenizer());
+    mlxcel::server::structured::build_gbnf_constraint(&mlxcel_tok, gbnf, None)
+        .expect("grammar compiles")
+}
+
+#[test]
+fn a_gbnf_grammar_masks_every_byte_the_grammar_forbids() {
+    // `root ::= "a" [bc]+ "!"`: only `a` may start, then one or more of b/c,
+    // then `!`.
+    let constraint = gbnf_constraint("root ::= \"a\" [bc]+ \"!\"\n");
+    let mut guard = constraint.lock().expect("uncontended");
+
+    let allowed_now = |guard: &mut mlxcel::server::structured::StructuredOutputConstraint| {
+        guard
+            .compute_mask()
+            .expect("mask available")
+            .iter()
+            .enumerate()
+            .filter(|(_, ok)| **ok)
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        allowed_now(&mut guard),
+        vec![b'a' as usize],
+        "only the grammar's first literal may open the output"
+    );
+    guard.consume_token(i32::from(b'a')).expect("'a' conforms");
+
+    let after_a = allowed_now(&mut guard);
+    assert_eq!(after_a, vec![b'b' as usize, b'c' as usize]);
+
+    guard.consume_token(i32::from(b'b')).expect("'b' conforms");
+    let after_b = allowed_now(&mut guard);
+    assert_eq!(after_b, vec![b'!' as usize, b'b' as usize, b'c' as usize]);
+
+    guard.consume_token(i32::from(b'!')).expect("'!' conforms");
+    assert!(
+        guard.is_stopped() || allowed_now(&mut guard).is_empty(),
+        "the grammar is satisfied and admits no further content byte"
+    );
+}
+
+#[test]
+fn a_gbnf_grammar_rejects_a_non_conforming_token() {
+    let constraint = gbnf_constraint("root ::= \"ab\"\n");
+    let mut guard = constraint.lock().expect("uncontended");
+    let _ = guard.compute_mask().expect("mask available");
+    let outcome = guard.consume_token(i32::from(b'z'));
+    assert!(
+        outcome.is_err(),
+        "a byte outside the grammar must be refused, not silently absorbed"
+    );
+}
+
+#[test]
+fn gbnf_repetition_bounds_are_enforced_at_decode_time() {
+    let constraint = gbnf_constraint("root ::= \"a\"{2,3}\n");
+    let mut guard = constraint.lock().expect("uncontended");
+    for _ in 0..2 {
+        guard.consume_token(i32::from(b'a')).expect("within bounds");
+    }
+    // A third `a` is still legal; a fourth is not.
+    guard
+        .consume_token(i32::from(b'a'))
+        .expect("third is legal");
+    assert!(
+        guard.is_stopped() || guard.consume_token(i32::from(b'a')).is_err(),
+        "the upper repetition bound must be enforced"
+    );
+}
+
+#[test]
+fn a_malformed_gbnf_grammar_is_refused_with_upstreams_wording() {
+    let mlxcel_tok = mlxcel_tokenizer_from_hf(build_byte_level_tokenizer());
+    let err =
+        mlxcel::server::structured::build_gbnf_constraint(&mlxcel_tok, "root ::= missing\n", None)
+            .expect_err("an undefined rule reference is refused");
+    assert_eq!(err.to_string(), "Undefined rule identifier 'missing'");
+
+    let err =
+        mlxcel::server::structured::build_gbnf_constraint(&mlxcel_tok, "start ::= \"a\"\n", None)
+            .expect_err("a missing root is refused");
+    assert_eq!(err.to_string(), "grammar does not contain a 'root' symbol");
+}
+
+#[test]
+fn a_lazy_grammar_constrains_nothing_until_its_trigger_fires() {
+    use mlxcel::server::grammar::{GrammarTrigger, LazyGate};
+
+    let mlxcel_tok = mlxcel_tokenizer_from_hf(build_byte_level_tokenizer());
+    let gate = LazyGate::new(&[GrammarTrigger::Word("{".to_string())]).expect("gate compiles");
+    let constraint = mlxcel::server::structured::build_gbnf_constraint(
+        &mlxcel_tok,
+        "root ::= \"{a}\"\n",
+        Some(gate),
+    )
+    .expect("lazy grammar compiles");
+
+    let mut guard = constraint.lock().expect("uncontended");
+    let vocab_size = guard.vocab_size();
+    let logits = mlxcel_core::from_slice_f32(&vec![0.0f32; vocab_size], &[1, vocab_size as i32]);
+
+    // Before the trigger, the logits pass through untouched: an eager
+    // constraint would already have masked everything except `{`.
+    assert!(guard.is_gated());
+    let masked = mlxcel::server::structured::apply_structured_mask_to_logits(
+        &mut guard, &logits, vocab_size,
+    )
+    .expect("an un-triggered lazy grammar masks nothing");
+    let values = read_f32_array_to_vec(&masked);
+    assert!(
+        values.iter().all(|v| *v == 0.0),
+        "an un-triggered lazy grammar must leave every logit untouched"
+    );
+
+    // Free-form prose keeps the gate closed.
+    for byte in b"hi " {
+        guard
+            .consume_token(i32::from(*byte))
+            .expect("prose is free");
+    }
+    assert!(guard.is_gated(), "prose must not trigger the grammar");
+
+    // The trigger word activates it, and the replayed `{` has advanced the
+    // grammar, so only `a` is legal next.
+    guard.consume_token(i32::from(b'{')).expect("trigger fires");
+    assert!(!guard.is_gated());
+    let allowed: Vec<usize> = guard
+        .compute_mask()
+        .expect("mask available once triggered")
+        .iter()
+        .enumerate()
+        .filter(|(_, ok)| **ok)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        allowed,
+        vec![b'a' as usize],
+        "after the trigger the grammar constrains the very next token"
     );
 }

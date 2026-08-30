@@ -90,6 +90,16 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "default_dry_allowed_length",
     "default_dry_penalty_last_n",
     "default_dry_sequence_breakers",
+    "default_grammar",
+    "default_mirostat",
+    "default_mirostat_tau",
+    "default_mirostat_eta",
+    "default_dynatemp_range",
+    "default_dynatemp_exponent",
+    "default_adaptive_target",
+    "default_adaptive_decay",
+    "default_adaptive_p_named",
+    "default_logit_bias",
     "draft_model_path",
     "num_draft_tokens",
     "draft_kind",
@@ -385,7 +395,7 @@ fn mutable_metadata(name: &'static str) -> (KnobKind, Option<Vec<&'static str>>,
         "default_dry_sequence_breakers" => (
             KnobKind::Array,
             None,
-            "Resolved token ids that break DRY sequences.",
+            "b10621 DRY sequence-breaker strings; breaker token data is derived from them per request.",
         ),
         "lang_bias_config" => (
             KnobKind::ObjectOrNull,
@@ -439,7 +449,17 @@ fn read_only_reason(field: &str) -> &'static str {
         | "default_xtc_probability"
         | "default_xtc_threshold"
         | "default_ignore_eos"
-        | "default_stop_sequences" => UNSUPPORTED_LIVE_REASON,
+        | "default_stop_sequences"
+        | "default_grammar"
+        | "default_mirostat"
+        | "default_mirostat_tau"
+        | "default_mirostat_eta"
+        | "default_dynatemp_range"
+        | "default_dynatemp_exponent"
+        | "default_adaptive_target"
+        | "default_adaptive_decay"
+        | "default_adaptive_p_named"
+        | "default_logit_bias" => UNSUPPORTED_LIVE_REASON,
         "gcp"
         | "api_keys"
         | "api_prefix"
@@ -504,6 +524,30 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
             "redacted": true,
         }),
         "api_prefix" => json!(config.api_prefix),
+        // #1485 sampling and grammar defaults: resolved at startup and
+        // honoured on every request, but read from the frozen config rather
+        // than the live snapshot, so the management API reports them
+        // read-only.
+        "default_grammar" => config
+            .default_grammar
+            .as_ref()
+            .and_then(|g| g.gbnf.clone())
+            .map_or(Value::Null, Value::String),
+        "default_mirostat" => json!(config.default_mirostat),
+        "default_mirostat_tau" => json!(config.default_mirostat_tau),
+        "default_mirostat_eta" => json!(config.default_mirostat_eta),
+        "default_dynatemp_range" => json!(config.default_dynatemp_range),
+        "default_dynatemp_exponent" => json!(config.default_dynatemp_exponent),
+        "default_adaptive_target" => json!(config.default_adaptive_target),
+        "default_adaptive_decay" => json!(config.default_adaptive_decay),
+        "default_adaptive_p_named" => json!(config.default_adaptive_p_named),
+        "default_logit_bias" => json!(
+            config
+                .default_logit_bias
+                .iter()
+                .map(|&(id, bias)| json!([id, bias]))
+                .collect::<Vec<_>>()
+        ),
         "sse_ping_interval" => config
             .sse_ping_interval
             .map(|value| json!(value.as_secs()))
@@ -625,10 +669,12 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "no_batch"
         | "enable_vlm_prefix_cache"
         | "context_shift"
-        | "model_is_gemma4_family" => KnobKind::Bool,
+        | "model_is_gemma4_family"
+        | "default_adaptive_p_named" => KnobKind::Bool,
         "context_size"
         | "n_parallel"
         | "n_keep"
+        | "default_mirostat"
         | "num_draft_tokens"
         | "max_batch_size"
         | "max_queue_depth"
@@ -645,7 +691,8 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "model_tags"
         | "prefill_peers"
         | "decode_peers"
-        | "default_stop_sequences" => KnobKind::Array,
+        | "default_stop_sequences"
+        | "default_logit_bias" => KnobKind::Array,
         "sse_ping_interval"
         | "embd_normalize"
         | "draft_block_size"
@@ -656,7 +703,13 @@ fn read_only_kind(field: &str) -> KnobKind {
         "default_typical_p"
         | "default_top_n_sigma"
         | "default_xtc_probability"
-        | "default_xtc_threshold" => KnobKind::Float,
+        | "default_xtc_threshold"
+        | "default_mirostat_tau"
+        | "default_mirostat_eta"
+        | "default_dynatemp_range"
+        | "default_dynatemp_exponent"
+        | "default_adaptive_target"
+        | "default_adaptive_decay" => KnobKind::Float,
         "api_keys" | "lora_adapters" | "lora_runtime" => KnobKind::Object,
         "reasoning_budget_message"
         | "model_alias"
@@ -665,7 +718,8 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "draft_kind"
         | "embedding_model_path"
         | "reranker_model_path"
-        | "serving_bind" => KnobKind::StrOrNull,
+        | "serving_bind"
+        | "default_grammar" => KnobKind::StrOrNull,
         _ => KnobKind::Str,
     }
 }
@@ -789,11 +843,19 @@ fn as_i32(name: &str, value: &Value) -> Result<i32, String> {
     i32::try_from(raw).map_err(|_| format!("{name} is outside the i32 range"))
 }
 
-fn i32_values(name: &str, value: &Value) -> Result<Vec<i32>, String> {
+fn string_values(name: &str, value: &Value) -> Result<Vec<String>, String> {
     let array = value
         .as_array()
-        .ok_or_else(|| format!("{name} must be an array of integers"))?;
-    array.iter().map(|entry| as_i32(name, entry)).collect()
+        .ok_or_else(|| format!("{name} must be an array of strings"))?;
+    array
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{name} entries must be strings"))
+        })
+        .collect()
 }
 
 fn apply_one(
@@ -884,7 +946,7 @@ fn apply_one(
             next.default_dry_penalty_last_n = as_usize(name, value)?;
         }
         "default_dry_sequence_breakers" => {
-            next.default_dry_sequence_breakers = i32_values(name, value)?;
+            next.default_dry_sequence_breakers = string_values(name, value)?;
         }
         "lang_bias_config" => {
             next.lang_bias_config = if value.is_null() {

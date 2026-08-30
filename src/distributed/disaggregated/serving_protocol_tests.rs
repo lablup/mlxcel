@@ -386,3 +386,69 @@ fn sampling_state_from_an_older_peer_without_typical_p_defaults_to_disabled() {
     assert_eq!(state.typical_p, 1.0);
     assert_eq!(sampling_from_serializable(&state).typical_p, 1.0);
 }
+
+#[test]
+fn sampling_state_from_an_older_peer_without_the_1485_fields_stays_on_the_pre_1485_chain() {
+    // A frame serialized before #1485 carries none of the mirostat /
+    // dynatemp / adaptive-p / min_keep / breaker-head fields; the serde
+    // defaults must resolve every one of them to its DISABLED baseline (the
+    // adaptive target in particular must default to -1.0, because the f32
+    // zero default would be an ACTIVE target).
+    let mut value = serde_json::to_value(sampling_to_serializable(&SamplingConfig::greedy()))
+        .expect("serialize sampling state");
+    let obj = value
+        .as_object_mut()
+        .expect("sampling state serializes as an object");
+    for key in [
+        "mirostat",
+        "mirostat_tau",
+        "mirostat_eta",
+        "dynatemp_range",
+        "dynatemp_exponent",
+        "adaptive_target",
+        "adaptive_decay",
+        "min_keep",
+        "dry_breaker_heads",
+    ] {
+        obj.remove(key);
+    }
+    let state: SerializableSamplingState =
+        serde_json::from_value(value).expect("deserialize legacy sampling state");
+    let config = sampling_from_serializable(&state);
+    assert_eq!(config.effective_mirostat(), 0);
+    assert_eq!(config.effective_dynatemp_range(), 0.0);
+    assert_eq!(config.effective_adaptive_target(), -1.0);
+    assert_eq!(config.effective_min_keep(), 0);
+    assert!(config.dry_breaker_heads.is_empty());
+    assert!(!config.needs_extended_chain());
+    assert!(!config.needs_sampler_feedback_state());
+}
+
+#[test]
+fn sampling_state_round_trips_the_1485_fields() {
+    let mut config = SamplingConfig {
+        temperature: 0.8,
+        mirostat: 2,
+        mirostat_tau: 4.0,
+        mirostat_eta: 0.2,
+        dynatemp_range: 0.5,
+        dynatemp_exponent: 1.7,
+        adaptive_target: 0.3,
+        adaptive_decay: 0.85,
+        min_keep: 3,
+        ..Default::default()
+    };
+    config.dry_breaker_heads =
+        std::sync::Arc::new(std::collections::HashMap::from([(7, vec![vec![8, 9]])]));
+    let state = sampling_to_serializable(&config);
+    let back = sampling_from_serializable(&state);
+    assert_eq!(back.mirostat, 2);
+    assert_eq!(back.mirostat_tau, 4.0);
+    assert_eq!(back.mirostat_eta, 0.2);
+    assert_eq!(back.dynatemp_range, 0.5);
+    assert_eq!(back.dynatemp_exponent, 1.7);
+    assert_eq!(back.adaptive_target, 0.3);
+    assert_eq!(back.adaptive_decay, 0.85);
+    assert_eq!(back.min_keep, 3);
+    assert_eq!(back.dry_breaker_heads.get(&7), Some(&vec![vec![8, 9]]));
+}

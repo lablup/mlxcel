@@ -205,6 +205,10 @@ fn cache_ctx() -> PromptCacheRequestContext {
 fn options() -> ServerGenerateOptions {
     ServerGenerateOptions {
         retention: Default::default(),
+        dry_breaker_strings: None,
+        logit_bias: Vec::new(),
+        logit_bias_texts: Vec::new(),
+        post_sampling_probs: false,
         max_tokens: 1,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
@@ -217,6 +221,7 @@ fn options() -> ServerGenerateOptions {
         reasoning_control: None,
         prompt_cache_ctx: Some(cache_ctx()),
         structured: None,
+        grammar: None,
         image_soft_tokens: None,
     }
 }

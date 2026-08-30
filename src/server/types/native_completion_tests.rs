@@ -40,6 +40,7 @@ fn sample() -> NativeCompletionResponse {
         stopping_word: String::new(),
         tokens_cached: 12,
         timings: NativeTimings::new(0, 5, 61.0, 8, 42.0),
+        completion_probabilities: None,
     }
 }
 
@@ -190,6 +191,7 @@ fn a_streaming_chunk_omits_the_optional_blocks_by_default() {
         tokens_evaluated: 1,
         timings: None,
         prompt_progress: None,
+        completion_probabilities: None,
     };
     let json = serde_json::to_value(&chunk).expect("serializes");
     assert_eq!(
@@ -223,6 +225,7 @@ fn a_streaming_chunk_carries_timings_and_progress_when_requested() {
             processed: 1,
             time_ms: 8,
         }),
+        completion_probabilities: None,
     };
     let json = serde_json::to_value(&chunk).expect("serializes");
     assert!(json["timings"].is_object());

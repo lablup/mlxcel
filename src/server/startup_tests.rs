@@ -1567,3 +1567,28 @@ fn sampler_order_accepts_only_the_fixed_b10621_default() {
         "{err}"
     );
 }
+
+#[test]
+fn sampler_order_accepts_the_adaptive_p_extension_and_reports_it() {
+    use super::check_sampler_order;
+    // #1485: b10621 activates the adaptive-p stage solely through the
+    // sampler list, appending it after the chain wherever it is named, so
+    // the fixed order accepts adaptive_p at any position and the caller
+    // learns it was named.
+    assert!(
+        check_sampler_order(
+            Some("penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature;adaptive_p"),
+            None,
+        )
+        .expect("the extended list is accepted")
+    );
+    assert!(
+        check_sampler_order(None, Some("aedskypmxt")).expect("the char form accepts a anywhere")
+    );
+    assert!(
+        !check_sampler_order(None, None).expect("absent flags name nothing"),
+        "no flag, no adaptive stage"
+    );
+    check_sampler_order(Some("adaptive_p;top_k"), None)
+        .expect_err("adaptive_p does not excuse a reordered remainder");
+}

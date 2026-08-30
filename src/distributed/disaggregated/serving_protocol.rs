@@ -262,6 +262,15 @@ pub fn sampling_to_serializable(config: &SamplingConfig) -> SerializableSampling
         loop_detection: config.loop_detection,
         reasoning_budget: -1,
         thinking_enter_block_on_start: false,
+        mirostat: config.mirostat,
+        mirostat_tau: config.mirostat_tau,
+        mirostat_eta: config.mirostat_eta,
+        dynatemp_range: config.dynatemp_range,
+        dynatemp_exponent: config.dynatemp_exponent,
+        adaptive_target: config.adaptive_target,
+        adaptive_decay: config.adaptive_decay,
+        min_keep: config.min_keep,
+        dry_breaker_heads: (*config.dry_breaker_heads).clone(),
     }
 }
 
@@ -297,6 +306,15 @@ pub fn sampling_from_serializable(state: &SerializableSamplingState) -> Sampling
         stop_token_ids: state.stop_token_ids.clone(),
         token_bias,
         loop_detection: state.loop_detection,
+        mirostat: state.mirostat,
+        mirostat_tau: state.mirostat_tau,
+        mirostat_eta: state.mirostat_eta,
+        dynatemp_range: state.dynatemp_range,
+        dynatemp_exponent: state.dynatemp_exponent,
+        adaptive_target: state.adaptive_target,
+        adaptive_decay: state.adaptive_decay,
+        min_keep: state.min_keep,
+        dry_breaker_heads: std::sync::Arc::new(state.dry_breaker_heads.clone()),
         // XTC is not yet part of the wire frame; the decode node
         // keeps the disabled baseline (`xtc_probability == 0.0`) until this
         // is wired into `SerializableSamplingState` as a follow-up. The

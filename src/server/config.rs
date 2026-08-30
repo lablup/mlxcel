@@ -142,6 +142,25 @@ pub struct ServerGenerateOptions {
     pub priority: RequestPriority,
     /// Log probability configuration; disabled by default (zero overhead).
     pub logprobs: LogprobsConfig,
+    /// b10621 DRY breaker STRINGS in effect for this request (#1485):
+    /// `Some` is the set the scheduler derives the breaker head map from
+    /// against the vocabulary at enqueue time (the request's own strings, or
+    /// the server-wide default set); `None` means the request supplied
+    /// exact-id breakers (the mlxcel-native OpenAI surface) and no string
+    /// derivation runs.
+    pub dry_breaker_strings: Option<Vec<String>>,
+    /// Resolved numeric logit biases (#1485): request `logit_bias` when
+    /// present, else the server-wide `--logit-bias` set. Merged into the
+    /// sequence's token-bias map at enqueue time, before the `ignore_eos`
+    /// EOG suppression, upstream's bias-then-EOG order.
+    pub logit_bias: Vec<(i32, f32)>,
+    /// Text-keyed logit biases (#1485): tokenized (special parsing off) at
+    /// enqueue time; the bias applies to every resulting token.
+    pub logit_bias_texts: Vec<(String, f32)>,
+    /// b10621 `post_sampling_probs` (#1485): the native route's `n_probs`
+    /// report is taken from the post-sampling-chain distribution (linear
+    /// probabilities) instead of the raw-logit log probabilities.
+    pub post_sampling_probs: bool,
     /// per-request thinking-token budget. `None` means "inherit
     /// whatever server default is configured"; `Some(budget)` explicitly sets
     /// a value for this request (including reverting to unbounded via
@@ -219,6 +238,15 @@ pub struct ServerGenerateOptions {
     /// concurrent `POST /lora-adapters` never changes a generation already
     /// in flight.
     pub lora_scales: Option<std::sync::Arc<Vec<f32>>>,
+    /// b10621 grammar surfaces in effect for this request (#1485): the GBNF or
+    /// schema the constraint above was compiled from, plus the lazy-trigger
+    /// declaration.
+    ///
+    /// `structured` is what the scheduler runs; this is what `/props` and the
+    /// response's `generation_settings` report, and the two are built from the
+    /// same resolution so they cannot disagree. `None` when the request asked
+    /// for no constraint, which is every request that predates #1485.
+    pub grammar: Option<std::sync::Arc<crate::server::grammar::GrammarSpec>>,
 
     /// per-request Gemma 4 image soft-token budget.
     ///
@@ -459,7 +487,11 @@ pub struct LiveSettings {
     pub default_dry_base: f32,
     pub default_dry_allowed_length: usize,
     pub default_dry_penalty_last_n: usize,
-    pub default_dry_sequence_breakers: Vec<i32>,
+    /// b10621 DRY sequence-breaker STRINGS (#1485). Live-updatable through
+    /// the runtime-settings surface; the head-token data the sampler compares
+    /// against is derived from these strings per request, at enqueue time,
+    /// where the vocabulary is available.
+    pub default_dry_sequence_breakers: Vec<String>,
     pub lang_bias_config: Option<LangBiasConfig>,
     pub reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
     pub chat_template_kwargs: Option<crate::server::chat_template_kwargs::ChatTemplateKwargs>,
@@ -604,18 +636,55 @@ pub struct ServerConfig {
     pub default_dry_base: f32,
     pub default_dry_allowed_length: usize,
     pub default_dry_penalty_last_n: usize,
-    /// Server-wide DRY sequence breakers, as sampler token IDs, from
-    /// `--dry-sequence-breaker`.
+    /// Server-wide DRY sequence breaker STRINGS, from
+    /// `--dry-sequence-breaker`, following b10621's value domain (#1485):
+    /// when the flag is absent this holds the b10621 default set (`\n`,
+    /// `:`, `"`, `*`); the flag's values replace it, and the `none` sentinel
+    /// leaves it empty. Breaker token data (the head map the sampler
+    /// consumes) is derived from these strings against the vocabulary at
+    /// enqueue time, where the tokenizer lives; a request carrying its own
+    /// `dry_sequence_breakers` field overrides this set wholesale.
+    pub default_dry_sequence_breakers: Vec<String>,
+    /// Server-wide constrained-decoding default from `--grammar`,
+    /// `--grammar-file`, `--json-schema` or `--json-schema-file` (#1485).
     ///
-    /// Resolved in `start_server` rather than in `build_server_config`: the flag
-    /// takes token STRINGS and this takes token IDs, so the conversion needs
-    /// the model's tokenizer, which is not loaded yet when the config is
-    /// built. `build_server_config` therefore leaves this empty and
-    /// `start_server` fills it immediately after `load_tokenizer` returns, via
-    /// `server::dry_breakers::resolve_dry_sequence_breakers` (named in prose
-    /// rather than as an intra-doc link, because this field is public while
-    /// that module is private).
-    pub default_dry_sequence_breakers: Vec<i32>,
+    /// b10621 stores all four in one field and lets the last flag on the
+    /// command line win; the winner is resolved in
+    /// [`crate::cli::grammar_args`] before the config is built. Every request
+    /// that does not carry its own non-empty `grammar` or a `json_schema`
+    /// inherits this, exactly as upstream's request params start from the
+    /// server defaults. `None` when no flag was given.
+    pub default_grammar: Option<crate::server::grammar::GrammarSpec>,
+    /// Server-wide mirostat mode (`--mirostat`, #1485): `0` disabled, `1`
+    /// Mirostat, `2` Mirostat 2.0; validated to that domain at startup.
+    pub default_mirostat: i32,
+    /// Server-wide mirostat target entropy tau (`--mirostat-ent`, #1485).
+    pub default_mirostat_tau: f32,
+    /// Server-wide mirostat learning rate eta (`--mirostat-lr`, #1485).
+    pub default_mirostat_eta: f32,
+    /// Server-wide dynamic-temperature range (`--dynatemp-range`, #1485;
+    /// `0.0` = disabled).
+    pub default_dynatemp_range: f32,
+    /// Server-wide dynamic-temperature exponent (`--dynatemp-exp`, #1485).
+    pub default_dynatemp_exponent: f32,
+    /// Server-wide adaptive-p target (`--adaptive-target`, #1485; negative =
+    /// disabled). Takes effect only when the sampler list names
+    /// `adaptive_p` (see [`ServerConfig::default_adaptive_p_named`]),
+    /// exactly as b10621 activates the sampler solely through
+    /// `params.samplers`.
+    pub default_adaptive_target: f32,
+    /// Server-wide adaptive-p EMA decay (`--adaptive-decay`, #1485),
+    /// clamped to `0.0..=0.99` at startup as upstream clamps it at sampler
+    /// init.
+    pub default_adaptive_decay: f32,
+    /// Whether the server-wide sampler list (`--samplers` /
+    /// `--sampler-seq`) named the `adaptive_p` stage (#1485).
+    pub default_adaptive_p_named: bool,
+    /// Server-wide logit biases from repeated `-l` / `--logit-bias`
+    /// TOKEN(+/-)BIAS values (#1485), applied to every request that does not
+    /// carry its own `logit_bias` field (a request field replaces this set
+    /// wholesale, as b10621's field handler clears and rebuilds the list).
+    pub default_logit_bias: Vec<(i32, f32)>,
     pub draft_model_path: Option<PathBuf>,
     pub num_draft_tokens: usize,
     /// raw `--draft-kind` override string from the CLI / env
@@ -956,7 +1025,17 @@ impl Default for ServerConfig {
             default_dry_base: 1.75,
             default_dry_allowed_length: 2,
             default_dry_penalty_last_n: 64,
-            default_dry_sequence_breakers: Vec::new(),
+            default_dry_sequence_breakers: crate::server::dry_breakers::default_breaker_strings(),
+            default_grammar: None,
+            default_mirostat: 0,
+            default_mirostat_tau: 5.0,
+            default_mirostat_eta: 0.1,
+            default_dynatemp_range: 0.0,
+            default_dynatemp_exponent: 1.0,
+            default_adaptive_target: -1.0,
+            default_adaptive_decay: 0.9,
+            default_adaptive_p_named: false,
+            default_logit_bias: Vec::new(),
             draft_model_path: None,
             num_draft_tokens: 3,
             // default to "auto-detect from drafter config"

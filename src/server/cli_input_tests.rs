@@ -132,6 +132,15 @@ fn sample_input() -> ServerStartupInput {
         dry_allowed_length: 2,
         dry_penalty_last_n: -1,
         dry_sequence_breakers: vec!["\n".to_string()],
+        grammar_source: None,
+        mirostat: 0,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
+        dynatemp_range: 0.0,
+        dynatemp_exponent: 1.0,
+        adaptive_target: -1.0,
+        adaptive_decay: 0.9,
+        logit_bias: Vec::new(),
         verbose: true,
         log_disable: false,
         log_file: Some(PathBuf::from("server.log")),
@@ -236,9 +245,62 @@ fn resolve_compat_toggle_honors_disable_override() {
 }
 
 #[test]
-fn resolve_seed_maps_negative_values_to_random_mode() {
+fn resolve_seed_folds_into_b10621s_uint32_seed_space() {
+    use super::parse_seed_arg;
+    assert_eq!(
+        parse_seed_arg("18446744073709551615").unwrap(),
+        u64::MAX as i128
+    );
+    assert!(
+        parse_seed_arg("18446744073709551616").is_err(),
+        "beyond stoul's domain"
+    );
+    assert_eq!(
+        resolve_seed(parse_seed_arg("-2").unwrap()),
+        Some(4_294_967_294)
+    );
+    // #1485: b10621 parses --seed with std::stoul into a uint32, so every
+    // value wraps modulo 2^32 and only the folded sentinel 0xFFFF_FFFF
+    // (spelled -1, or 4294967295 outright) draws a random seed; -2 is the
+    // DETERMINISTIC seed 4294967294.
     assert_eq!(resolve_seed(-1), None);
     assert_eq!(resolve_seed(7), Some(7));
+    assert_eq!(resolve_seed(-2), Some(4_294_967_294));
+    assert_eq!(resolve_seed(4_294_967_295), None);
+    assert_eq!(resolve_seed(4_294_967_296), Some(0));
+}
+
+#[test]
+fn mirostat_flag_is_validated_to_the_declared_domain() {
+    use super::resolve_mirostat;
+    assert_eq!(resolve_mirostat(0).unwrap(), 0);
+    assert_eq!(resolve_mirostat(2).unwrap(), 2);
+    let err = resolve_mirostat(3).expect_err("b10621 aborts on 3; mlxcel refuses at startup");
+    assert!(err.to_string().contains("--mirostat 3"), "{err}");
+}
+
+#[test]
+fn adaptive_decay_flag_clamps_to_upstreams_domain() {
+    use super::sanitize_adaptive_decay;
+    assert_eq!(sanitize_adaptive_decay(0.5), 0.5);
+    assert_eq!(sanitize_adaptive_decay(1.5), 0.99);
+    assert_eq!(sanitize_adaptive_decay(-0.5), 0.0);
+    assert_eq!(sanitize_adaptive_decay(f32::NAN), 0.9);
+}
+
+#[test]
+fn logit_bias_flag_parses_the_token_sign_bias_form() {
+    use super::parse_logit_bias_flags;
+    let parsed = parse_logit_bias_flags(&[
+        "15043+1".to_string(),
+        "15043-1.5".to_string(),
+        "-5+2".to_string(),
+    ])
+    .expect("the documented forms parse");
+    assert_eq!(parsed, vec![(15043, 1.0), (15043, -1.5), (-5, 2.0)]);
+    let err = parse_logit_bias_flags(&["nonsense".to_string()])
+        .expect_err("a malformed value fails startup by name");
+    assert!(err.to_string().contains("nonsense"), "{err}");
 }
 
 #[test]
@@ -2166,4 +2228,67 @@ fn a_scaled_adapter_under_tensor_parallelism_is_refused() {
         err.to_string().contains("tensor or pipeline parallelism"),
         "unexpected error: {err}"
     );
+}
+
+/// `--grammar` / `--grammar-file` / `--json-schema` / `--json-schema-file`
+/// reach `ServerConfig.default_grammar` (#1485).
+mod grammar_flags {
+    use super::*;
+    use crate::cli::grammar_args::GrammarSourceArg;
+
+    fn config_for(source: GrammarSourceArg) -> crate::server::ServerConfig {
+        let mut input = sample_input();
+        input.grammar_source = Some(source);
+        let startup = input
+            .into_startup_config()
+            .expect("a valid grammar source resolves");
+        crate::server::startup::build_server_config(&startup, Default::default())
+    }
+
+    #[test]
+    fn the_grammar_flag_becomes_the_server_default_grammar() {
+        let config = config_for(GrammarSourceArg::Gbnf("root ::= \"a\"\n".to_string()));
+        let grammar = config
+            .default_grammar
+            .as_ref()
+            .expect("the flag sets a server-wide default");
+        assert_eq!(grammar.gbnf.as_deref(), Some("root ::= \"a\"\n"));
+        assert!(grammar.schema.is_none());
+        assert!(!grammar.lazy);
+    }
+
+    #[test]
+    fn the_json_schema_flag_becomes_the_server_default_grammar() {
+        let config = config_for(GrammarSourceArg::Schema(
+            "{\"type\":\"object\"}".to_string(),
+        ));
+        let grammar = config
+            .default_grammar
+            .as_ref()
+            .expect("the flag sets a server-wide default");
+        assert!(grammar.gbnf.is_none());
+        assert_eq!(
+            grammar.schema.as_ref().and_then(|s| s.get("type")),
+            Some(&serde_json::json!("object"))
+        );
+    }
+
+    #[test]
+    fn no_flag_leaves_the_server_default_unset() {
+        let startup = sample_input()
+            .into_startup_config()
+            .expect("the sample input resolves");
+        let config = crate::server::startup::build_server_config(&startup, Default::default());
+        assert!(config.default_grammar.is_none());
+    }
+
+    #[test]
+    fn a_malformed_json_schema_flag_fails_startup() {
+        let mut input = sample_input();
+        input.grammar_source = Some(GrammarSourceArg::Schema("{not json".to_string()));
+        assert!(
+            input.into_startup_config().is_err(),
+            "b10621 converts a schema inside its argument handler, so a bad one aborts startup"
+        );
+    }
 }

@@ -292,6 +292,41 @@ pub struct SerializableSamplingState {
     #[serde(default = "default_penalty_last_n_full")]
     pub penalty_last_n: i32,
     pub stop_token_ids: Vec<i32>,
+    /// Mirostat mode (#1485). `#[serde(default)]` (`0` disabled) resolves an
+    /// older peer's frame to the pre-#1485 chain.
+    #[serde(default)]
+    pub mirostat: i32,
+    /// Mirostat tau (#1485); default fn for older peers (unused while
+    /// `mirostat == 0`).
+    #[serde(default = "default_mirostat_tau")]
+    pub mirostat_tau: f32,
+    /// Mirostat eta (#1485); default fn for older peers.
+    #[serde(default = "default_mirostat_eta")]
+    pub mirostat_eta: f32,
+    /// Dynamic-temperature range (#1485). The f32 zero default IS the
+    /// disabled baseline.
+    #[serde(default)]
+    pub dynatemp_range: f32,
+    /// Dynamic-temperature exponent (#1485); default fn (`1.0`) for older
+    /// peers (unused while `dynatemp_range <= 0.0`).
+    #[serde(default = "default_dynatemp_exponent")]
+    pub dynatemp_exponent: f32,
+    /// Adaptive-p target (#1485). The default fn (`-1.0`, disabled) keeps an
+    /// older peer's frame off the adaptive path; the f32 zero default would
+    /// be an ACTIVE target.
+    #[serde(default = "default_adaptive_target_disabled")]
+    pub adaptive_target: f32,
+    /// Adaptive-p decay (#1485); default fn (`0.9`) for older peers.
+    #[serde(default = "default_adaptive_decay")]
+    pub adaptive_decay: f32,
+    /// b10621 `min_keep` (#1485). The zero default is the inert baseline.
+    #[serde(default)]
+    pub min_keep: usize,
+    /// DRY breaker head map derived from breaker strings (#1485); empty for
+    /// frames from older peers, whose exact-id breakers ride in
+    /// `dry_sequence_breakers` unchanged.
+    #[serde(default)]
+    pub dry_breaker_heads: std::collections::HashMap<i32, Vec<Vec<i32>>>,
     /// Token-logit biases, encoded as raw IEEE-754 bits so non-finite values
     /// such as negative infinity remain valid JSON.
     #[serde(default)]
@@ -305,6 +340,23 @@ pub struct SerializableSamplingState {
     /// Whether the rendered prompt already entered the thinking block.
     #[serde(default)]
     pub thinking_enter_block_on_start: bool,
+}
+
+/// Defaults for #1485 fields on frames from peers that predate them.
+fn default_mirostat_tau() -> f32 {
+    5.0
+}
+fn default_mirostat_eta() -> f32 {
+    0.1
+}
+fn default_dynatemp_exponent() -> f32 {
+    1.0
+}
+fn default_adaptive_target_disabled() -> f32 {
+    -1.0
+}
+fn default_adaptive_decay() -> f32 {
+    0.9
 }
 
 /// One token-bias entry in the disaggregated sampling wire state.

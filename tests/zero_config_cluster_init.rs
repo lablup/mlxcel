@@ -241,6 +241,10 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
 
     let options = ServerGenerateOptions {
         retention: Default::default(),
+        dry_breaker_strings: None,
+        logit_bias: Vec::new(),
+        logit_bias_texts: Vec::new(),
+        post_sampling_probs: false,
         max_tokens: 8,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
@@ -253,6 +257,7 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
+        grammar: None,
         image_soft_tokens: None,
     };
 

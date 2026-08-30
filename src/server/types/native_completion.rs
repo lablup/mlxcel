@@ -192,6 +192,14 @@ pub struct NativeCompletionResponse {
     /// Prompt tokens present in the KV cache after this request.
     pub tokens_cached: usize,
     pub timings: NativeTimings,
+    /// Per-token probability report (#1485), present only when the request
+    /// set `n_probs` (alias `logprobs`) above zero: one entry per generated
+    /// token, each carrying the token's own probability and its top-N
+    /// alternatives, in b10621's `completion_probabilities` shape
+    /// (`logprob`/`top_logprobs` keys pre-sampling, `prob`/`top_probs` under
+    /// `post_sampling_probs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_probabilities: Option<serde_json::Value>,
 }
 
 /// A non-final streaming frame.
@@ -212,6 +220,11 @@ pub struct NativeCompletionChunk {
     pub timings: Option<NativeTimings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_progress: Option<PromptProgress>,
+    /// This frame's token probability report (#1485), present only under
+    /// `n_probs`: a one-entry array in the same shape as the final object's
+    /// `completion_probabilities`, which is how upstream streams it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_probabilities: Option<serde_json::Value>,
 }
 
 #[cfg(test)]

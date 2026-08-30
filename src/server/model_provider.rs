@@ -1722,6 +1722,13 @@ impl ModelProvider {
         drain_generation_events_with_prefill(response_rx, timeout, callback, on_prefill)
     }
 
+    /// The request-dispatch tokenizer, when one loaded (#1485): the native
+    /// route's `n_probs` report detokenizes token ids into their piece text
+    /// and bytes with it.
+    pub(crate) fn prompt_tokenizer(&self) -> Option<&Arc<crate::tokenizer::MlxcelTokenizer>> {
+        self.prompt_tokenizer.as_ref()
+    }
+
     fn send_generate_request(
         &self,
         prompt: String,

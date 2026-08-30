@@ -655,6 +655,29 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         dry_allowed_length: args.dry_allowed_length,
         dry_penalty_last_n: args.dry_penalty_last_n,
         dry_sequence_breakers: args.dry_sequence_breakers,
+        grammar_source: {
+            // `mlxcel serve` shares the resolution with the standalone server
+            // binary; only the argv offset differs (#1485).
+            use clap::CommandFactory;
+            let mut cmd = crate::Cli::command();
+            mlxcel::cli::grammar_args::resolve_grammar_source(
+                &mut cmd,
+                &std::env::args_os().collect::<Vec<_>>(),
+                2,
+                args.grammar,
+                args.grammar_file,
+                args.json_schema,
+                args.json_schema_file,
+            )
+        },
+        mirostat: args.mirostat,
+        mirostat_tau: args.mirostat_tau,
+        mirostat_eta: args.mirostat_eta,
+        dynatemp_range: args.dynatemp_range,
+        dynatemp_exponent: args.dynatemp_exponent,
+        adaptive_target: args.adaptive_target,
+        adaptive_decay: args.adaptive_decay,
+        logit_bias: args.logit_bias,
         verbose: args.verbose,
         log_disable: args.log_disable,
         log_file: args.log_file,

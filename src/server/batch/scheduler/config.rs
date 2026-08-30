@@ -139,6 +139,8 @@ impl BatchScheduler {
                 crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             )),
             token_bias: TokenBiasMap::default(),
+            dry_vocab_texts: None,
+            dry_breaker_cache: std::collections::HashMap::new(),
             model_output_suppressed,
             xtc_newline_token_ids: Vec::new(),
             reasoning_budget: None,
@@ -632,6 +634,36 @@ impl BatchScheduler {
     /// **Phase 1 limitation**: one policy per batch (scheduler-wide).
     /// Per-sequence overrides via request-body `lang_bias` are reserved for
     /// the B12 follow-up outside this Epic.
+    /// The DRY breaker head map for `strings` (#1485), derived against this
+    /// model's vocabulary (`crate::server::dry_breakers::derive_breaker_heads`)
+    /// and cached per breaker-string set. The decoded vocabulary texts are
+    /// computed once, on the first derivation.
+    pub(crate) fn dry_breaker_heads_for(
+        &mut self,
+        strings: &[String],
+    ) -> std::sync::Arc<std::collections::HashMap<i32, Vec<Vec<i32>>>> {
+        if let Some(cached) = self.dry_breaker_cache.get(strings) {
+            return cached.clone();
+        }
+        if self.dry_vocab_texts.is_none() {
+            self.dry_vocab_texts = Some(std::sync::Arc::new(
+                crate::server::dry_breakers::decode_vocab_texts(&self.tokenizer),
+            ));
+        }
+        let texts = self.dry_vocab_texts.as_ref().expect("filled above").clone();
+        let heads = std::sync::Arc::new(crate::server::dry_breakers::derive_breaker_heads(
+            &self.tokenizer,
+            &texts,
+            strings,
+        ));
+        if self.dry_breaker_cache.len() >= 16 {
+            self.dry_breaker_cache.clear();
+        }
+        self.dry_breaker_cache
+            .insert(strings.to_vec(), heads.clone());
+        heads
+    }
+
     pub fn with_token_bias(mut self, bias: TokenBiasMap) -> Self {
         self.token_bias = bias;
         self

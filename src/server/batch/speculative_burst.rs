@@ -415,6 +415,18 @@ pub(crate) fn should_burst_for_sequence(
         );
         return false;
     }
+    // #1485: mirostat and adaptive-p carry per-sequence feedback state the
+    // speculative acceptance arithmetic (`effective_token_distribution`)
+    // cannot represent, and the extended chain (dynatemp / min_keep) runs
+    // filter arithmetic outside `fused_sample_probs`'s chain; such requests
+    // decode classically.
+    if seq.sampling.effective_mirostat() != 0 || seq.sampling.needs_extended_chain() {
+        tracing::debug!(
+            "speculative burst declined for seq {}: mirostat / dynatemp / adaptive-p / min_keep sampler configured",
+            seq.seq_id,
+        );
+        return false;
+    }
     // Everything else that used to decline here (an adopted prompt-cache
     // prefix, history-dependent penalties, logprobs, thinking budgets) is
     // supported by the burst now; the function doc says what carries each
@@ -2864,6 +2876,13 @@ pub(crate) fn sampling_config_eq(a: &SamplingConfig, b: &SamplingConfig) -> bool
         // window (it runs as a B=1 burst, which threads token history correctly since).
         && !a.needs_token_history()
         && !b.needs_token_history()
+        // #1485: mirostat and adaptive-p carry per-sequence feedback state,
+        // and the extended chain (dynatemp / min_keep) is per-row Rust
+        // arithmetic; none of them can share a batched speculative window.
+        && a.effective_mirostat() == 0
+        && b.effective_mirostat() == 0
+        && !a.needs_extended_chain()
+        && !b.needs_extended_chain()
 }
 
 /// Best-effort diagnostic name for a [`LoadedModel`] variant, used in

@@ -1252,8 +1252,35 @@ impl BatchScheduler {
         // batched fused DECODE path shares one global-RNG draw across the whole
         // `[B, vocab]` batch and is out of scope here (see issue #347).
         seed_rng_if_needed(&seq.sampling);
-        let (first_token_arr, adjusted_logits) =
-            sample_token_optimized(&logits_for_sampling, &seq.sampling, &token_history);
+        let (first_token_arr, adjusted_logits, post_probs) = if seq.logprobs_config.enabled
+            && seq.logprobs_config.source == LogprobSource::PostSampling
+        {
+            // b10621 post_sampling_probs (#1485): one chain pass, one XTC
+            // gate, for both the draw and the report.
+            let (token, adjusted, probs) = sample_token_with_state_and_distribution(
+                &logits_for_sampling,
+                &seq.sampling,
+                &token_history,
+                &mut seq.sampler_state,
+            );
+            (token, adjusted, Some(probs))
+        } else if seq.sampling.needs_sampler_feedback_state() {
+            // #1485: mirostat / adaptive-p carry per-sequence state that the
+            // first sampled token must already update, so the stateful entry
+            // point runs here too (penalty-only rows keep the stateless
+            // rebuild path this call site always used).
+            let (token, adjusted) = sample_token_optimized_with_state(
+                &logits_for_sampling,
+                &seq.sampling,
+                &token_history,
+                &mut seq.sampler_state,
+            );
+            (token, adjusted, None)
+        } else {
+            let (token, adjusted) =
+                sample_token_optimized(&logits_for_sampling, &seq.sampling, &token_history);
+            (token, adjusted, None)
+        };
         // #822: force-evaluate the first sampled token through the fallible
         // boundary. On an MLX throw, fail just this request; the infallible
         // `item_i32` readback below would otherwise re-trigger the same throw
@@ -1297,6 +1324,12 @@ impl BatchScheduler {
         // `<think>\n`, so the first prefill-completion token is already
         // inside the reasoning block when `enter_block_on_start == true`.
         let first_token = Self::apply_thinking_budget(&mut seq.thinking, sampled_first_token);
+
+        // #1485: confirm the emitted first token with the sampler feedback
+        // state (see the parallel comment in `execute_batched_decode`).
+        if let Some(state) = seq.sampler_state.as_mut() {
+            state.accept_token(first_token);
+        }
 
         seq.mark_first_token();
 
@@ -1350,7 +1383,16 @@ impl BatchScheduler {
         let token_lp = if override_fired {
             None
         } else {
-            compute_logprobs(&adjusted_logits, first_token, &seq.logprobs_config)
+            match seq.logprobs_config.source {
+                LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
+                    compute_post_sampling_probs(p, first_token, seq.logprobs_config.top_k)
+                }),
+                LogprobSource::RawModel if seq.logprobs_config.enabled => {
+                    let raw_row = mlxcel_core::slice_last_logits(&logits);
+                    compute_logprobs(&raw_row, first_token, &seq.logprobs_config)
+                }
+                _ => compute_logprobs(&adjusted_logits, first_token, &seq.logprobs_config),
+            }
         };
 
         seq.generated_tokens.push(first_token);

@@ -183,6 +183,26 @@ impl BatchScheduler {
 
         let mut sampling = merge_config_stop_tokens(options.sampling.clone(), &self.config_eos);
 
+        // b10621 logit_bias (#1485): the resolved request-or-server biases
+        // merge into the sequence's token-bias map first, additively
+        // (upstream's logit-bias sampler applies entries additively), with
+        // string keys tokenized against this model's vocabulary exactly as
+        // upstream's `common_tokenize(vocab, text, false)` does. Applied
+        // BEFORE the lang-bias merge below, whose empty-map condition then
+        // treats a biased request as carrying its own policy.
+        if !options.logit_bias.is_empty() || !options.logit_bias_texts.is_empty() {
+            for &(id, bias) in &options.logit_bias {
+                sampling.token_bias.accumulate(id, bias);
+            }
+            for (text, bias) in &options.logit_bias_texts {
+                if let Ok(ids) = self.tokenizer.encode_with_special(text, false, false) {
+                    for id in ids {
+                        sampling.token_bias.accumulate(id as i32, *bias);
+                    }
+                }
+            }
+        }
+
         // Axis B (B8): attach the scheduler-wide token bias to each sequence's
         // sampling config when no per-request override is present. Empty
         // cached bias = bit-exact baseline (the `is_empty()` short-circuit in
@@ -235,6 +255,18 @@ impl BatchScheduler {
         if options.ignore_eos {
             let eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
             sampling.token_bias.suppress_tokens(&eos);
+        }
+
+        // b10621 DRY breaker strings (#1485): derive the head map only when
+        // DRY is active for this request, exactly as upstream builds its
+        // breaker structures only inside an enabled DRY sampler; the scan
+        // costs one vocabulary pass per distinct breaker set and is cached.
+        if sampling.dry_multiplier > 0.0
+            && sampling.dry_penalty_last_n != 0
+            && let Some(strings) = options.dry_breaker_strings.as_ref()
+            && !strings.is_empty()
+        {
+            sampling.dry_breaker_heads = self.dry_breaker_heads_for(strings);
         }
 
         let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();

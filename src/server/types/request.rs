@@ -343,19 +343,25 @@ where
     let Some(value) = Option::<serde_json::Number>::deserialize(deserializer)? else {
         return Ok(None);
     };
-    if let Some(signed) = value.as_i64() {
-        return match signed {
-            -1 => Ok(None),
-            value if value < -1 => Err(serde::de::Error::custom(
-                "seed must be -1 (random) or a non-negative integer",
-            )),
-            value => Ok(Some(value as u64)),
-        };
+    // b10621 reads `seed` into a `uint32_t` with an unchecked cast (#1485),
+    // so every integer folds modulo 2^32 and only the resulting sentinel
+    // `0xFFFF_FFFF` (spelled `-1`) draws a random seed: `-2` is the
+    // DETERMINISTIC seed `4294967294`. The pre-#1485 rejection of values
+    // below `-1` diverged from that; the fold restores upstream's
+    // arithmetic (an `as u32` cast wraps modulo 2^32, congruent with C++'s
+    // conversion for every value JSON can carry in an i64/u64).
+    let folded = if let Some(signed) = value.as_i64() {
+        signed as u32
+    } else if let Some(unsigned) = value.as_u64() {
+        unsigned as u32
+    } else {
+        return Err(serde::de::Error::custom("seed must be an integer"));
+    };
+    if folded == u32::MAX {
+        Ok(None)
+    } else {
+        Ok(Some(u64::from(folded)))
     }
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| serde::de::Error::custom("seed must be an integer"))
 }
 
 /// Message content: either a plain string or multimodal array
@@ -1393,8 +1399,87 @@ pub struct NativeCompletionRequest {
     pub dry_allowed_length: Option<usize>,
     /// DRY lookback window (-1 = full context)
     pub dry_penalty_last_n: Option<usize>,
-    /// DRY sequence breaker token IDs
-    pub dry_sequence_breakers: Option<Vec<i32>>,
+    /// DRY sequence breakers. b10621 value domain (#1485): a non-empty
+    /// array of STRINGS; anything else (an id array, an empty array, a
+    /// non-array) is refused with upstream's own wording. Held raw because
+    /// the route produces that exact diagnostic.
+    #[serde(default)]
+    pub dry_sequence_breakers: Option<serde_json::Value>,
+
+    // #1485 sampling remainder: mirostat, dynamic temperature, adaptive-p,
+    // min_keep, probability reporting, logit_bias, backend_sampling.
+    /// Mirostat mode (`0` disabled, `1` Mirostat, `2` Mirostat 2.0). Values
+    /// outside that domain are refused with a 400 where b10621 would abort
+    /// its own process inside `common_sampler_init`.
+    pub mirostat: Option<i32>,
+    /// Mirostat target entropy tau.
+    pub mirostat_tau: Option<f32>,
+    /// Mirostat learning rate eta.
+    pub mirostat_eta: Option<f32>,
+    /// Dynamic temperature range (`0.0` = disabled; negative values are the
+    /// same disabled state upstream's `delta > 0` gate produces).
+    pub dynatemp_range: Option<f32>,
+    /// Dynamic temperature exponent.
+    pub dynatemp_exponent: Option<f32>,
+    /// Adaptive-p target. b10621 declares a SOFT upper limit of `1.0`
+    /// (values above clamp down); negative disables, and the sampler runs
+    /// only when the request's sampler list names `adaptive_p`.
+    pub adaptive_target: Option<f32>,
+    /// Adaptive-p EMA decay. b10621 declares HARD limits `0.0..=0.99`;
+    /// values outside are refused with a 400.
+    pub adaptive_decay: Option<f32>,
+    /// b10621 `min_keep`: force the truncation samplers to keep at least
+    /// this many candidates. HARD limits `0..=2147483647` (a 400 outside).
+    pub min_keep: Option<i64>,
+    /// b10621 `n_probs` (primary) with the `logprobs` alias: when greater
+    /// than zero, each generated token carries the probabilities of the top
+    /// N tokens, pre-sampling by default and post-chain under
+    /// `post_sampling_probs`.
+    pub n_probs: Option<i64>,
+    /// The `logprobs` alias b10621 declares for `n_probs`; used only when
+    /// `n_probs` itself is absent, upstream's alias order. (A serde alias
+    /// would reject requests carrying both keys, which upstream accepts.)
+    pub logprobs: Option<i64>,
+    /// Return post-sampling-chain probabilities instead of raw-logit
+    /// probabilities in the `n_probs` report.
+    pub post_sampling_probs: Option<bool>,
+    /// b10621 `backend_sampling`: whether to sample on the backend instead
+    /// of the CPU sampler chain. mlxcel's sampler IS the backend graph and
+    /// has no CPU chain to switch to, so the field is accepted and inert in
+    /// both values (`not_applicable` in the compatibility manifest).
+    pub backend_sampling: Option<bool>,
+    /// Token biases: an array of `[token, bias]` pairs or an object mapping
+    /// token (an id, or a string to tokenize) to bias; `false` as a bias
+    /// bans the token. Held raw because both shapes and the string-key
+    /// tokenization are resolved by the route (#1485).
+    #[serde(default)]
+    pub logit_bias: Option<serde_json::Value>,
+
+    // #1485 grammar surfaces: declared so a constrained-decoding request is
+    // refused loudly instead of silently ignored; the GBNF engine itself
+    // stays deferred under issue #1485.
+    /// b10621 `json_schema`: refused with a 400 naming the deferral (the
+    /// OpenAI-shaped routes' `response_format` carries mlxcel's schema
+    /// support).
+    #[serde(default)]
+    pub json_schema: Option<serde_json::Value>,
+    /// b10621 `grammar` (the `json_schema` alias key): a non-empty GBNF
+    /// grammar string is refused with a 400 naming the deferral; the empty
+    /// string is upstream's inert form and passes.
+    #[serde(default)]
+    pub grammar: Option<serde_json::Value>,
+    /// b10621 `grammar_lazy`: `false` is inert and passes; `true` is
+    /// refused with a 400 naming the deferral.
+    #[serde(default)]
+    pub grammar_lazy: Option<bool>,
+    /// b10621 `grammar_triggers`: an empty array is inert and passes; a
+    /// non-empty one is refused with a 400 naming the deferral.
+    #[serde(default)]
+    pub grammar_triggers: Option<serde_json::Value>,
+    /// b10621 `preserved_tokens`: an empty array is inert and passes; a
+    /// non-empty one is refused with a 400 naming the deferral.
+    #[serde(default)]
+    pub preserved_tokens: Option<serde_json::Value>,
 
     // thinking-token budget (Qwen3-family reasoning cap).
     /// Primary / llama.cpp-compatible name for the reasoning-token cap.
@@ -1696,14 +1781,44 @@ mod tests {
     }
 
     #[test]
-    fn seed_values_below_random_sentinel_are_rejected() {
+    fn seed_values_fold_into_b10621s_uint32_seed_space() {
+        // b10621 reads `seed` into a uint32 with an unchecked cast (#1485):
+        // -2 wraps to the DETERMINISTIC seed 4294967294, only the resulting
+        // sentinel 0xFFFF_FFFF (spelled -1, or 4294967295 outright) draws a
+        // random seed, and larger integers wrap modulo 2^32.
+        let seed = |v: serde_json::Value| {
+            serde_json::from_value::<CompletionRequest>(serde_json::json!({
+                "model": "test",
+                "prompt": "hello",
+                "seed": v
+            }))
+            .expect("integer seeds are accepted")
+            .params
+            .seed
+        };
+        assert_eq!(seed(serde_json::json!(-2)), Some(4_294_967_294));
+        assert_eq!(
+            seed(serde_json::json!(-1)),
+            None,
+            "-1 stays the random sentinel"
+        );
+        assert_eq!(
+            seed(serde_json::json!(4_294_967_295_u64)),
+            None,
+            "the folded sentinel itself is random too, as upstream"
+        );
+        assert_eq!(seed(serde_json::json!(4_294_967_296_u64)), Some(0));
+        assert_eq!(seed(serde_json::json!(42)), Some(42));
         let error = serde_json::from_value::<CompletionRequest>(serde_json::json!({
             "model": "test",
             "prompt": "hello",
-            "seed": -2
+            "seed": 1.5
         }))
-        .expect_err("only -1 is the random seed sentinel");
-        assert!(error.to_string().contains("seed must be -1"), "{error}");
+        .expect_err("a fractional seed is not an integer");
+        assert!(
+            error.to_string().contains("seed must be an integer"),
+            "{error}"
+        );
     }
 
     #[test]

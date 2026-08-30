@@ -17,13 +17,20 @@
       "default": "0.90",
       "description": "adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: 0.90)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/cli_input_tests.rs::adaptive_decay_flag_clamps_to_upstreams_domain",
+      "notes": "Clamped into upstream's 0.0..=0.99 domain at startup with a warning, the clamp llama_sampler_init_adaptive_p applies at sampler init (#1485).",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--adaptive-decay"
+        ],
+        "defaults": [
+          "0.9"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -40,13 +47,20 @@
       "default": "-1.00",
       "description": "adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: -1.00) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_adaptive_p_activates_only_through_the_samplers_stage",
+      "notes": "Implemented with b10621's own activation rule (#1485): the sampler runs only when the sampler list (--samplers / --sampler-seq / the samplers field) names the adaptive_p stage AND the target is non-negative; a bare target is inert, exactly as upstream leaves the stage out of its default chain. The transform, EMA state and accept-time update follow llama_sampler_adaptive_p (constants 0.3 / 5.0 / 10.0, EMA seeded at target / (1 - decay)), including leaving the EMA untouched when a post-sample override replaces the drawn token. The arithmetic is pinned by adaptive_p_transform_prefers_tokens_near_the_target and adaptive_p_state_accept_updates_ema_only_on_matching_token in src/lib/mlxcel-core/src/sampling.rs.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--adaptive-target"
+        ],
+        "defaults": [
+          "-1"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -183,15 +197,23 @@
       "default": null,
       "description": "add sequence breaker for DRY sampling, clearing out default breakers ('\\n', ':', '\"', '*') in the process; use \"none\" to not use any sequence breakers",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Spelling accepted, but b10621's default breaker set ('\\n', ':', '\"', '*') is not applied (mlxcel starts with none), the \"none\" sentinel is not recognized, and a breaker that is not exactly one token fails startup. #1436 owns the reconciliation.",
-      "divergence": [],
-      "rationale": null,
+      "test": "src/server/dry_breakers_tests.rs::resolve_breaker_strings_defaults_to_the_b10621_set_when_absent",
+      "notes": "b10621 semantics implemented (#1485): the flag is absent-defaulted to upstream's breaker set (\\n, :, \", *), giving the flag replaces that set, the none sentinel clears it per-value, breaker token data is derived by scanning the vocabulary for tokens whose decoded text carries or ends inside the breaker (get_overlapping_token_sequences, with the 40-byte breaker and 20-token tail caps), and a multi-token breaker no longer fails startup. Two small input-handling conveniences predate #1485, are documented in the flag's help, and are kept deliberately; they are the recorded divergences.",
+      "divergence": [
+        "The four shell escapes \\n, \\t, \\r and \\\\ are interpreted in the flag value (documented since #1103), where b10621 takes the value verbatim; identical argv carrying a backslash therefore configures a different breaker string (#1485).",
+        "The flag value splits on commas (one flag can carry several breakers), so a breaker containing a literal comma must be sent through the request field instead; b10621 reads one breaker per flag occurrence (#1485)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "The escape interpretation exists because the flag's own help has advertised \\n and \\t since #1103 and no shell expands those inside quotes: reading them verbatim would silently turn the documented usage into a two-character breaker. The comma split is a documented mlxcel CLI convenience that existing deployments rely on; both are input-handling conveniences on the operator surface, not sampler semantics, and the derived breaker behavior is upstream's.",
+        "revisit_if": "the flag's input handling is aligned to b10621's verbatim single-value form, for example behind a major-version migration that drops the documented escape and comma conveniences."
+      },
       "mlxcel": {
         "accepted_spellings": [
-          "--dry-sequence-breaker"
+          "--dry-sequence-breaker",
+          "--dry-sequence-breakers"
         ]
       }
     },
@@ -210,13 +232,20 @@
       "default": "1.00",
       "description": "dynamic temperature exponent (default: 1.00)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/lib/mlxcel-core/src/sampling.rs::dynatemp_matches_host_reference_on_peaked_row",
+      "notes": "The exponent mapping normalized entropy into the dynamic-temperature range (#1485); default 1.0 as upstream. Inert while --dynatemp-range is 0.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--dynatemp-exp"
+        ],
+        "defaults": [
+          "1"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -233,13 +262,20 @@
       "default": "0.00, 0.0 = disabled",
       "description": "dynamic temperature range (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/lib/mlxcel-core/src/sampling.rs::dynatemp_matches_host_reference_on_peaked_row",
+      "notes": "b10621's llama_sampler_temp_ext (#1485): a positive range replaces the fixed temperature with an entropy-dependent one in [max(0, temp - range), temp + range], computed per step over the candidates surviving the preceding filters and mapped through norm_entropy ^ exponent. Runs as Rust graph ops on the extended chain (the fused C++ chain has no parameter for it); as upstream, a positive range re-widens even a temperature of 0 into a stochastic draw.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--dynatemp-range"
+        ],
+        "defaults": [
+          "0"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -286,13 +322,23 @@
       "default": null,
       "description": "BNF-like grammar to constrain generations (see samples in grammars/ dir)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
-      "mlxcel": null
+      "test": "src/server/gbnf/tests.rs::a_grammar_larger_than_the_source_cap_is_refused_with_the_limit",
+      "notes": "GBNF constrained decoding implemented in #1485. The grammar is parsed with b10621's own grammar (src/server/gbnf, mirroring llama-grammar.cpp's element model, its repetition desugaring, the multiplicative repetition budget, the silent widening of an oversized maximum, the escape table, the identifier rules, the root-symbol and undefined-rule checks and the left-recursion rejection) and lowered to the llguidance Lark dialect that already drives mlxcel's per-step constrained decoding. Token terminals map exactly: <[id]> and !<...> become llguidance token ranges, and <token-text> is tokenized with add_special=false, parse_special=true and must yield exactly one token, as upstream requires. Every terminal is lowered as a single-code-point class because the llguidance lexer munches maximally, which is what keeps a grammar such as [ab]+ \"b\" matching. Parsing is deferred to the first request exactly as it is upstream (b10621 stores the flag verbatim and parses it in common_sampler_init), so a malformed grammar logs a startup error and refuses each constrained request instead of stopping the server. Resource guards with no upstream analogue: the GBNF source is capped at 256 KiB (the recorded divergence) and the lowered grammar at 4 MiB. The lowered cap is not recorded as a divergence because b10621's own 2000-rule repetition budget already bounds how far a grammar can expand, so a grammar upstream accepts cannot reach it; the source cap has no such upstream bound, which is why it is recorded. The server-wide flag is inherited by every request that does not send its own non-empty grammar or a json_schema, matching upstream, where request params start from the CLI defaults.",
+      "divergence": [
+        "The GBNF source is capped at 262144 bytes and a larger grammar is refused with a diagnostic naming the limit; b10621 has no source-size limit at all, so a large grammar built from many simple non-repeating rules is accepted upstream and refused here (#1485)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "The grammar text arrives over HTTP and the parser holds the whole source, its element lists and the lowered grammar resident, so an unbounded source is an unbounded parser memory and time budget on hostile input. b10621's own guard is the multiplicative repetition budget, which bounds rule EXPANSION and therefore the 4 MiB lowered-grammar cap, but says nothing about source bytes; the source cap is mlxcel's, and it exists because this surface is reachable by any client. It sits far above llama.cpp's own grammars/ samples, so no legitimate grammar is expected to reach it.",
+        "revisit_if": "the parser becomes streaming or incremental so the whole source need not be resident, or a legitimate grammar is found approaching the cap."
+      },
+      "mlxcel": {
+        "accepted_spellings": [
+          "--grammar"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -309,13 +355,23 @@
       "default": null,
       "description": "file to read grammar from",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
-      "mlxcel": null
+      "test": "src/server/gbnf/tests.rs::a_grammar_larger_than_the_source_cap_is_refused_with_the_limit",
+      "notes": "Reads the file at startup and then behaves exactly as --grammar (#1485); a missing file aborts startup, which is upstream's behaviour too because its read_file throws inside the argument handler. See the --grammar entry for the GBNF engine itself. The source cap applies to the file's contents as it does to the flag value, so the same divergence is recorded here.",
+      "divergence": [
+        "The GBNF source is capped at 262144 bytes and a larger grammar is refused with a diagnostic naming the limit; b10621 has no source-size limit at all, so a large grammar built from many simple non-repeating rules is accepted upstream and refused here (#1485)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "The grammar text arrives over HTTP and the parser holds the whole source, its element lists and the lowered grammar resident, so an unbounded source is an unbounded parser memory and time budget on hostile input. b10621's own guard is the multiplicative repetition budget, which bounds rule EXPANSION and therefore the 4 MiB lowered-grammar cap, but says nothing about source bytes; the source cap is mlxcel's, and it exists because this surface is reachable by any client. It sits far above llama.cpp's own grammars/ samples, so no legitimate grammar is expected to reach it.",
+        "revisit_if": "the parser becomes streaming or incremental so the whole source need not be resident, or a legitimate grammar is found approaching the cap."
+      },
+      "mlxcel": {
+        "accepted_spellings": [
+          "--grammar-file"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -360,13 +416,17 @@
       "default": null,
       "description": "JSON schema to constrain generations (https://json-schema.org/), e.g. `{}` for any JSON object For schemas w/ external $refs, use --grammar + example/json_schema_to_grammar.py instead",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/cli_input_tests.rs::grammar_flags::the_json_schema_flag_becomes_the_server_default_grammar",
+      "notes": "Implemented in #1485 on mlxcel's existing llguidance constrained decoding. b10621 converts the schema to GBNF inside the argument handler, so an invalid or unconvertible schema aborts before the server listens; mlxcel reproduces that by parsing the JSON and compiling the schema through llguidance with no tokenizer at flag-resolution time, failing startup on either error. mlxcel constrains with llguidance's own JSON-Schema front end rather than converting to GBNF first, which is the same path response_format already uses; the constrained output conforms to the schema either way.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--json-schema"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -384,13 +444,17 @@
       "default": null,
       "description": "File containing a JSON schema to constrain generations (https://json-schema.org/), e.g. `{}` for any JSON object For schemas w/ external $refs, use --grammar + example/json_schema_to_grammar.py instead",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/cli_input_tests.rs::grammar_flags::the_json_schema_flag_becomes_the_server_default_grammar",
+      "notes": "Implemented in #1485 on mlxcel's existing llguidance constrained decoding. b10621 converts the schema to GBNF inside the argument handler, so an invalid or unconvertible schema aborts before the server listens; mlxcel reproduces that by parsing the JSON and compiling the schema through llguidance with no tokenizer at flag-resolution time, failing startup on either error. mlxcel constrains with llguidance's own JSON-Schema front end rather than converting to GBNF first, which is the same path response_format already uses; the constrained output conforms to the schema either way. The file form reads the schema at startup; a missing file aborts, as upstream's does.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--json-schema-file"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -408,13 +472,17 @@
       "default": null,
       "description": "modifies the likelihood of token appearing in the completion, i.e. `--logit-bias 15043+1` to increase likelihood of token ' Hello', or `--logit-bias 15043-1` to decrease likelihood of token ' Hello'",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/cli_input_tests.rs::logit_bias_flag_parses_the_token_sign_bias_form",
+      "notes": "Repeatable TOKEN_ID(+/-)BIAS values parsed exactly as upstream's stringstream handler reads them (#1485); the resulting pairs apply to every request that does not carry its own logit_bias field, which replaces the set wholesale as upstream's field handler clears and rebuilds it. Applied additively through the shared token-bias map, the same mechanism ignore_eos rides (b10621 merges its EOG biases into the same list).",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--logit-bias"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -461,13 +529,20 @@
       "default": "0, 0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0",
       "description": "use Mirostat sampling. Top K, Nucleus and Locally Typical samplers are ignored if used. (default: 0, 0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/lib/mlxcel-core/src/sampling.rs::mirostat_v2_tiny_mu_selects_the_argmax_and_updates_mu",
+      "notes": "Implemented (#1485) as b10621 implements it: a non-zero mode REPLACES the whole sampler chain (penalties, DRY and every truncation filter are skipped, exactly as common_sampler_init skips its params.samplers list) and the step becomes token-bias -> temperature -> mirostat-select, with the per-sequence surprise target mu carried across steps and updated mu -= eta * (observed_surprise - tau) after every draw. v1 estimates the Zipf exponent from the top 100 sorted probabilities and truncates to the derived k; v2 truncates to the tokens whose surprise is at most mu. The declared domain {0, 1, 2} is enforced with a startup diagnostic (mirostat_flag_is_validated_to_the_declared_domain in src/server/cli_input_tests.rs); b10621 aborts its own process on any other value inside a GGML_ASSERT, so the refusal is the actionable form of the same non-acceptance.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mirostat"
+        ],
+        "defaults": [
+          "0"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -484,13 +559,20 @@
       "default": "5.00",
       "description": "Mirostat target entropy, parameter tau (default: 5.00)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/lib/mlxcel-core/src/sampling.rs::mirostat_v2_tiny_mu_selects_the_argmax_and_updates_mu",
+      "notes": "The tau target entropy of both mirostat versions (#1485); default 5.0 as upstream. Inert while --mirostat is 0.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mirostat-ent"
+        ],
+        "defaults": [
+          "5"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -507,13 +589,20 @@
       "default": "0.10",
       "description": "Mirostat learning rate, parameter eta (default: 0.10)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/lib/mlxcel-core/src/sampling.rs::mirostat_v2_tiny_mu_selects_the_argmax_and_updates_mu",
+      "notes": "The eta learning rate of both mirostat versions (#1485); default 0.1 as upstream. Inert while --mirostat is 0.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mirostat-lr"
+        ],
+        "defaults": [
+          "0.1"
+        ]
+      }
     },
     {
       "kind": "option",
@@ -650,12 +739,18 @@
       "default": "edskypmxt",
       "description": "simplified sequence for samplers that will be used (default: edskypmxt)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
+      "state": "by_design",
       "issue": 1436,
-      "test": "src/server/startup_tests.rs::sampler_order_accepts_only_the_fixed_b10621_default",
-      "notes": "Single-character spelling of --samplers; only the default sequence edskypmxt is accepted (inert), any other sequence fails startup with a diagnostic.",
-      "divergence": [],
-      "rationale": null,
+      "test": "src/server/startup_tests.rs::sampler_order_accepts_the_adaptive_p_extension_and_reports_it",
+      "notes": "Single-character spelling of --samplers; the default sequence edskypmxt is accepted, optionally extended with the a (adaptive_p) character anywhere (#1485), and any other sequence fails startup with a diagnostic.",
+      "divergence": [
+        "Only the fixed b10621 default sequence is accepted (optionally extended with a, #1485); any other sequence fails startup, where b10621 honors an arbitrary one (#1436)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "Same fixed-chain contract as --samplers: mlxcel cannot honor an arbitrary order and refuses rather than silently reordering.",
+        "revisit_if": "mlxcel implements a configurable sampler chain that can honor arbitrary stage subsets and orders."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--sampler-seq",
@@ -678,12 +773,18 @@
       "default": "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature",
       "description": "samplers that will be used for generation in the order, separated by ';' (default: penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
+      "state": "by_design",
       "issue": 1436,
-      "test": "src/server/startup_tests.rs::sampler_order_accepts_only_the_fixed_b10621_default",
-      "notes": "mlxcel's sampler chain order is fixed to exactly b10621's default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature; #1375/#1377 pin the filter positions). The flag accepts precisely that order as an inert configuration and any other order fails startup with the accepted form in the diagnostic, so a reordered chain can never be silently sampled in the wrong order.",
-      "divergence": [],
-      "rationale": null,
+      "test": "src/server/startup_tests.rs::sampler_order_accepts_the_adaptive_p_extension_and_reports_it",
+      "notes": "mlxcel's sampler chain order is fixed to exactly b10621's default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature; #1375/#1377 pin the filter positions). The flag accepts precisely that order, optionally extended with the adaptive_p stage anywhere in the list (#1485; upstream appends that stage after the chain wherever the list names it, so its position carries no ordering information, and naming it is the one non-inert thing the list can do); any other order fails startup with the accepted form in the diagnostic, so a reordered chain can never be silently sampled in the wrong order.",
+      "divergence": [
+        "Only the fixed b10621 default order is accepted (optionally extended with adaptive_p, #1485); any other stage list or order fails startup, where b10621 honors an arbitrary stage subset in an arbitrary order (#1436)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "The chain order is contractual in mlxcel (#1375/#1377 pin every filter's position through the fused dispatch), so an arbitrary requested order cannot be honored; silently sampling in a different order than the operator asked for is the misrepresentation this epic exists to remove, and failing with the accepted form named is the honest alternative.",
+        "revisit_if": "mlxcel implements a configurable sampler chain that can honor arbitrary stage subsets and orders."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--samplers"
@@ -706,13 +807,11 @@
       "default": "-1, use random seed for -1",
       "description": "RNG seed (default: -1, use random seed for -1)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "seed -1 = nondeterministic accepted exactly. The below-minus-one rejection added by #1430 lives on the HTTP field (see field:seed), not on this flag: the flag maps every negative value to the random sentinel.",
-      "divergence": [
-        "Every negative value is treated as the random-seed sentinel; b10621 parses the value with std::stoul, so a value below -1 becomes one specific uint32 seed (#1436)."
-      ],
+      "test": "src/server/cli_input_tests.rs::resolve_seed_folds_into_b10621s_uint32_seed_space",
+      "notes": "Folded into b10621's uint32 seed space (#1485), upstream's std::stoul-then-uint32 arithmetic exactly: every value wraps modulo 2^32, -2 is the DETERMINISTIC seed 4294967294, and only the folded sentinel 0xFFFFFFFF (spelled -1, or 4294967295 outright) draws a random seed. The parser accepts stoul's whole domain (magnitudes up to 2^64 - 1, negatives wrapping) and refuses beyond it, as stoul throws there.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -740,14 +839,18 @@
       "default": "0.80",
       "description": "temperature (default: 0.80)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Both spellings (--temp, --temperature) accepted since #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
+      "test": "src/server/startup_tests.rs::generation_config_sampling_defaults_fill_unset_server_knobs",
+      "notes": "Both spellings (--temp, --temperature) accepted since #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism. #1485 records this as by_design: the checkpoint-default resolution is mlxcel's deliberate mlx-lm-parity behavior. The flag-present behavior matches b10621 (explicit_server_sampling_knobs_override_generation_config in src/server/startup_tests.rs).",
       "divergence": [
-        "With the flag absent the effective server default comes from the checkpoint's generation_config.json rather than the 0.8 clap default; b10621 has no such mechanism (#1436)."
+        "With the flag absent the effective server default for temperature comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults) rather than the clap default; b10621 always uses its compiled default (#1485)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel's core contract is loading mlx-community checkpoints with mlx-lm-parity behavior, and mlx-lm resolves absent sampling knobs from the checkpoint's own generation_config.json; overriding the checkpoint author's declared default with b10621's compiled constant would silently change generation quality for every checkpoint that ships one. An operator who wants the b10621 default passes the flag, which then behaves identically to upstream.",
+        "revisit_if": "the project decides checkpoint generation_config.json defaults should not steer server-wide sampling, for example behind an explicit flag that restores b10621's compiled defaults."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--temp",
@@ -773,14 +876,18 @@
       "default": "40, 0 = disabled",
       "description": "top-k sampling (default: 40, 0 = disabled) (env: LLAMA_ARG_TOP_K)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
+      "test": "src/server/startup_tests.rs::generation_config_sampling_defaults_fill_unset_server_knobs",
+      "notes": "When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism. #1485 records this as by_design: the checkpoint-default resolution is mlxcel's deliberate mlx-lm-parity behavior. The flag-present behavior matches b10621 (explicit_server_sampling_knobs_override_generation_config in src/server/startup_tests.rs).",
       "divergence": [
-        "With the flag absent the effective server default comes from the checkpoint's generation_config.json rather than the 40 clap default; b10621 has no such mechanism (#1436)."
+        "With the flag absent the effective server default for top_k comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults) rather than the clap default; b10621 always uses its compiled default (#1485)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel's core contract is loading mlx-community checkpoints with mlx-lm-parity behavior, and mlx-lm resolves absent sampling knobs from the checkpoint's own generation_config.json; overriding the checkpoint author's declared default with b10621's compiled constant would silently change generation quality for every checkpoint that ships one. An operator who wants the b10621 default passes the flag, which then behaves identically to upstream.",
+        "revisit_if": "the project decides checkpoint generation_config.json defaults should not steer server-wide sampling, for example behind an explicit flag that restores b10621's compiled defaults."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--top-k"
@@ -840,14 +947,18 @@
       "default": "0.95, 1.0 = disabled",
       "description": "top-p sampling (default: 0.95, 1.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Default aligned to 0.95 by #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
+      "test": "src/server/startup_tests.rs::generation_config_sampling_defaults_fill_unset_server_knobs",
+      "notes": "Default aligned to 0.95 by #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism. #1485 records this as by_design: the checkpoint-default resolution is mlxcel's deliberate mlx-lm-parity behavior. The flag-present behavior matches b10621 (explicit_server_sampling_knobs_override_generation_config in src/server/startup_tests.rs).",
       "divergence": [
-        "With the flag absent the effective server default comes from the checkpoint's generation_config.json rather than the 0.95 clap default; b10621 has no such mechanism (#1436)."
+        "With the flag absent the effective server default for top_p comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults) rather than the clap default; b10621 always uses its compiled default (#1485)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel's core contract is loading mlx-community checkpoints with mlx-lm-parity behavior, and mlx-lm resolves absent sampling knobs from the checkpoint's own generation_config.json; overriding the checkpoint author's declared default with b10621's compiled constant would silently change generation quality for every checkpoint that ships one. An operator who wants the b10621 default passes the flag, which then behaves identically to upstream.",
+        "revisit_if": "the project decides checkpoint generation_config.json defaults should not steer server-wide sampling, for example behind an explicit flag that restores b10621's compiled defaults."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--top-p"
@@ -959,13 +1070,15 @@
       "field_type": "num",
       "description": "EMA decay for adaptive sampling; history approximates 1/(1-decay) tokens",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_adaptive_decay_and_min_keep_enforce_upstreams_hard_limits",
+      "notes": "b10621 declares hard schema limits 0.0..=0.99; values outside are refused with a 400, matching upstream's set_hard_limits (#1485).",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "adaptive_decay"
+      }
     },
     {
       "kind": "native_request_field",
@@ -976,13 +1089,15 @@
       "field_type": "num",
       "description": "Adaptive sampling target entropy (valid range 0.0 to 1.0; negative = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_adaptive_p_activates_only_through_the_samplers_stage",
+      "notes": "b10621 declares a soft upper schema limit of 1.0; a larger value clamps down rather than erroring, matching upstream's set_limits (#1485).",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "adaptive_target"
+      }
     },
     {
       "kind": "native_request_field",
@@ -993,13 +1108,15 @@
       "field_type": "bool",
       "description": "Use backend sampling instead of llama.cpp sampling",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_backend_sampling_is_accepted_and_inert_in_both_values",
+      "notes": "b10621's switch between its CPU sampler chain and experimental backend (GPU) sampling. mlxcel's sampler IS the backend graph (the fused MLX chain) and has no CPU sampler chain to switch to, so the concept has no mlxcel equivalent: both values are accepted and inert, the same posture as the --backend-sampling flag (not_applicable under #1445).",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "backend_sampling"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1086,10 +1203,10 @@
       "field_type": "json",
       "description": "Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "VALUE-DOMAIN MISMATCH: mlxcel deserializes an array of token ids, b10621 an array of strings (or \"none\"). #1436 owns the reconciliation.",
+      "test": "src/server/routes/native_completion.rs::native_dry_sequence_breakers_must_be_a_nonempty_string_array",
+      "notes": "b10621's value domain (#1485): a non-empty array of STRINGS, anything else refused with upstream's own wording; the strings replace the server-wide set wholesale and their breaker token data is derived against the vocabulary (heads whose decoded text carries the breaker, tail sequences for breakers ending inside a token), pinned by derive_breaker_heads_builds_tails_for_straddled_breakers in src/server/dry_breakers_tests.rs and the dry_breaker_head tests in src/lib/mlxcel-core/src/sampling.rs.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -1105,13 +1222,15 @@
       "field_type": "num",
       "description": "Dynamic temperature exponent, controls how entropy maps to temperature",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
+      "test": "src/server/routes/native_completion.rs::native_completion_maps_the_1485_sampler_fields",
       "notes": null,
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "dynatemp_exponent"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1122,13 +1241,15 @@
       "field_type": "num",
       "description": "Dynamic temperature range. The final temperature will be in [temperature - range, temperature + range] (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
+      "test": "src/server/routes/native_completion.rs::native_completion_maps_the_1485_sampler_fields",
       "notes": null,
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "dynatemp_range"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1158,13 +1279,15 @@
       "field_type": "bool",
       "description": "Whether to apply grammar constraints lazily, only when triggered (instead of at every step)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::a_lazy_grammar_needs_triggers_only_when_the_triggers_key_is_present",
+      "notes": "Implemented in #1485. A lazy grammar constrains nothing until a trigger fires: no mask is applied at all while the gate is closed, matching llama_sampler_grammar_apply's early return on awaiting_trigger. Upstream's \"no triggers set for lazy grammar\" check lives inside its grammar_triggers field handler, so a bare grammar_lazy: true with no triggers key is accepted here too and simply never triggers.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "grammar_lazy"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1175,13 +1298,22 @@
       "field_type": "json",
       "description": "List of strings or patterns that trigger grammar-constrained generation",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
-      "mlxcel": null
+      "test": "src/server/grammar/tests.rs::a_pattern_trigger_starts_at_the_first_non_empty_capture_group",
+      "notes": "Implemented in #1485 with upstream's trigger semantics: a WORD trigger whose text tokenizes to exactly one token is promoted to a TOKEN trigger and must be listed in preserved_tokens (upstream's own error wording), a multi-token word becomes an escaped regex, PATTERN matches anywhere in the buffered output, PATTERN_FULL is anchored at both ends unless the caller already anchored it, and the constrained text starts at the first non-empty capturing group when the pattern has one. Buffered output from that offset is replayed into the grammar so the constraint sees the text that triggered it.",
+      "divergence": [
+        "Trigger patterns are compiled with fancy-regex, not std::regex in ECMAScript mode, so a pattern only one dialect accepts behaves differently, and a pattern fancy-regex cannot compile is refused with a 400 where b10621 throws std::regex_error at sampler init (#1485).",
+        "When a trigger match starts inside a token, the buffered bytes from that offset are re-tokenized before replay, because llguidance advances the matcher by whole tokens; b10621's code-point grammar replays the partial token piece directly, so a token split can differ (#1485)."
+      ],
+      "rationale": {
+        "kind": "architectural",
+        "reason": "mlxcel's constrained decoding is llguidance, which is token-level and byte-backed rather than code-point-stepped, so a partial token piece has no representation to replay and the equivalent byte range is re-tokenized instead. The regex dialect follows from the same choice of ecosystem: there is no production ECMAScript regex engine in Rust, and fancy-regex is the closest superset of what upstream's trigger patterns use.",
+        "revisit_if": null
+      },
+      "mlxcel": {
+        "field": "grammar_triggers"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1213,13 +1345,22 @@
       "field_type": "json",
       "description": "Set a JSON schema (json_schema) or GBNF grammar string (grammar) for constrained generation. json_schema takes precedence if both are provided",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1485,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
-      "mlxcel": null
+      "test": "src/server/routes/native_completion.rs::grammar_wins_over_json_schema_by_presence_not_by_emptiness",
+      "notes": "Implemented in #1485. Precedence follows b10621's code rather than its own field description: the schema branch is taken only when json_schema is present AND grammar is absent, so {\"grammar\": \"\", \"json_schema\": {...}} resolves to no request grammar and leaves any server default in place, and a non-string grammar is ignored the way upstream's json_value falls back to its empty default. A non-empty grammar string is compiled by the GBNF engine (see --grammar); a json_schema is compiled through llguidance's JSON-Schema front end.",
+      "divergence": [
+        "generation_settings.grammar reports the GBNF the caller supplied and is empty for a json_schema request, where b10621 reports the GBNF its schema converter produced; the constrained output conforms to the schema either way (#1485).",
+        "The GBNF source is capped at 262144 bytes and a larger grammar is refused with a diagnostic naming the limit; b10621 has no source-size limit at all, so a large grammar built from many simple non-repeating rules is accepted upstream and refused here (#1485)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel compiles a JSON schema through llguidance's own JSON-Schema front end, which is a closer match to the schema semantics than a lossy conversion through GBNF would be, and it is the path response_format has used since structured outputs landed. Reproducing b10621's converted grammar text would mean porting json_schema_to_grammar solely so the report can echo it, and reporting mlxcel's own lowered grammar instead would be a different text under upstream's key name. The GBNF source cap is the same guard the --grammar entry records, applied here because the alias carries grammar text on an HTTP request.",
+        "revisit_if": "a b10621 client is found to read generation_settings.grammar to re-derive the schema, which would make the reported text load-bearing rather than informational. The cap itself is revisited under the condition recorded on the --grammar entry."
+      },
+      "mlxcel": {
+        "field": "json_schema"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1230,13 +1371,15 @@
       "field_type": "json",
       "description": "Modify the likelihood of specific tokens. Accepts an array of [token, bias] pairs or an object mapping token to bias. Use false as bias to ban a token",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_logit_bias_parses_both_upstream_shapes_and_false_bans",
+      "notes": "Both upstream shapes (#1485): an array of [token, bias] pairs or an object mapping token to bias; false as a bias bans the token (-inf), true and malformed entries are skipped, string keys are tokenized with special parsing off and the bias applies to every resulting token, and out-of-range numeric ids are dropped at application, each exactly upstream's handler.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "logit_bias"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1247,13 +1390,15 @@
       "field_type": "num",
       "description": "If greater than 0, force samplers to return at least N possible tokens",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/lib/mlxcel-core/src/sampling.rs::top_p_min_keep_forces_floor_in_probability_order",
+      "notes": "Implemented on the Rust extended chain (#1485): top-p, min-p and typical-p each keep at least min_keep candidates in their own keep order, and XTC skips its removal when it would leave fewer survivors, each upstream's per-sampler rule. 0 and 1 are inert (every filter keeps at least one candidate) and stay on the fused path; hard schema limits 0..=2147483647 are enforced with a 400 as upstream's set_hard_limits does.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "min_keep"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1283,13 +1428,15 @@
       "field_type": "num",
       "description": "Enable Mirostat sampling, controlling perplexity during text generation (0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_completion_maps_the_1485_sampler_fields",
+      "notes": "Threaded to the same per-sequence mirostat state the server-wide flags configure (#1485). A mode outside {0, 1, 2} is refused with a 400 (native_mirostat_outside_the_declared_domain_is_refused), the actionable form of the GGML_ASSERT abort b10621 reaches for such values.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "mirostat"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1300,13 +1447,15 @@
       "field_type": "num",
       "description": "Set the Mirostat learning rate, parameter eta",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
+      "test": "src/server/routes/native_completion.rs::native_completion_maps_the_1485_sampler_fields",
       "notes": null,
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "mirostat_eta"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1317,13 +1466,15 @@
       "field_type": "num",
       "description": "Set the Mirostat target entropy, parameter tau",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
+      "test": "src/server/routes/native_completion.rs::native_completion_maps_the_1485_sampler_fields",
       "notes": null,
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "mirostat_tau"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1336,13 +1487,15 @@
       "field_type": "num",
       "description": "If greater than 0, output the probabilities of top N tokens for each generated token",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_n_probs_and_its_logprobs_alias_enable_the_report",
+      "notes": "Per-token completion_probabilities in upstream's shape (#1485): one entry per generated token carrying {id, token, bytes, logprob, top_logprobs}, computed over the RAW model logits (upstream's get_token_probabilities view) with the log fold at serialization, on the non-streaming body, per streamed frame, and on the final streaming frame; the logprobs alias applies only when n_probs itself is absent, upstream's alias order. Non-positive values disable the report.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "n_probs"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1353,13 +1506,15 @@
       "field_type": "bool",
       "description": "Return probabilities of top n_probs tokens after applying the sampling chain",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::native_n_probs_and_its_logprobs_alias_enable_the_report",
+      "notes": "Switches the n_probs report to the post-sampling-chain distribution the draw actually came from (#1485): linear prob / top_probs keys, zero-probability candidates dropped, the report and the draw sharing one chain pass and one XTC gate, upstream's post-sampling arm. The linear values are pinned by post_sampling_probs_reports_linear_probabilities_and_drops_zeros in src/lib/mlxcel-core/src/sampling.rs.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "post_sampling_probs"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1389,13 +1544,15 @@
       "field_type": "json",
       "description": "List of token strings that must not be split during tokenization",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_completion.rs::a_single_token_trigger_word_must_be_a_preserved_token",
+      "notes": "Implemented in #1485. Each entry is tokenized with add_special=false, parse_special=true and kept only when it yields exactly one token, dropping the rest without a diagnostic as upstream does; the resulting set is what a single-token WORD trigger must appear in.",
       "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "preserved_tokens"
+      }
     },
     {
       "kind": "native_request_field",
@@ -1444,12 +1601,18 @@
       "field_type": "json",
       "description": "The order in which samplers are applied. An array of sampler type names, or a single string of sampler chars",
       "discovery": "source-schema-declaration",
-      "state": "not_applicable",
+      "state": "by_design",
       "issue": 1436,
-      "test": "src/server/routes/native_completion.rs::native_samplers_accepts_only_the_default_order",
-      "notes": "The field is declared and accepts b10621's default order in both upstream shapes (array of stage names, character string) as an inert configuration; any other order is refused with a 400 naming the accepted forms, so a reordered chain is never silently sampled in the wrong order.",
-      "divergence": [],
-      "rationale": null,
+      "test": "src/server/routes/native_completion.rs::native_samplers_accepts_the_adaptive_p_extension_only",
+      "notes": "Declared and accepted in both upstream shapes (array of stage names, character string) for the fixed default order, optionally extended with adaptive_p / a (#1485), which activates the adaptive-p stage exactly as it does upstream; any other order is refused with a 400 naming the accepted forms, so a reordered chain is never silently sampled in the wrong order. A present field replaces the server-wide sampler list wholesale, as upstream replaces params.samplers.",
+      "divergence": [
+        "Only the fixed b10621 default order is accepted (optionally extended with adaptive_p, #1485); any other stage list or order is a 400, where b10621 honors an arbitrary stage subset in an arbitrary order (#1436)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "Same fixed-chain contract as --samplers: mlxcel cannot honor an arbitrary order and refuses rather than silently reordering.",
+        "revisit_if": "mlxcel implements a configurable sampler chain that can honor arbitrary stage subsets and orders."
+      },
       "mlxcel": {
         "field": "samplers"
       }
@@ -1463,13 +1626,11 @@
       "field_type": "num",
       "description": "Set the random number generator (RNG) seed (-1 = random)",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1485,
-      "test": null,
-      "notes": "seed: -1 accepted as nondeterministic; below -1 rejected (#1430) where b10621 folds it into its uint32 seed space, so the entry stays deferred with the divergence recorded.",
-      "divergence": [
-        "A seed below -1 is rejected with a 400; b10621 accepts it and folds it into its uint32 seed space (#1436)."
-      ],
+      "test": "src/server/routes/native_completion.rs::native_seed_folds_into_uint32_space",
+      "notes": "Folded into b10621's uint32 seed space (#1485): the pre-#1485 below-minus-one rejection is gone, every JSON integer wraps modulo 2^32 exactly as upstream's unchecked get<uint32_t> cast wraps it, and only the folded 0xFFFFFFFF sentinel draws a random seed.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "field": "seed"

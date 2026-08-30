@@ -376,6 +376,7 @@ fn burst_allowed_when_logprobs_enabled() {
     seq.logprobs_config = LogprobsConfig {
         enabled: true,
         top_k: 5,
+        source: Default::default(),
     };
     assert!(
         should_burst_for_sequence(&dispatch, &seq),
@@ -397,6 +398,7 @@ fn batched_window_rejects_logprobs_enabled_sequences() {
     seq.logprobs_config = LogprobsConfig {
         enabled: true,
         top_k: 5,
+        source: Default::default(),
     };
 
     assert!(
@@ -1107,6 +1109,7 @@ fn drive_mtp_generator_round_loop_threads_logprobs_through_to_emitted_tokens() {
     let logprobs_config = LogprobsConfig {
         enabled: true,
         top_k: 0,
+        source: Default::default(),
     };
     let (emitted, logprobs, _stats) = generator.generate(
         &prompt,

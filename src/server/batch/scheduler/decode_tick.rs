@@ -827,24 +827,42 @@ impl BatchScheduler {
                 // Penalty rows use the incremental per-sequence sampler state
                 // (lazily created); the no-penalty rows that reach this per-row
                 // fallback take the original rebuild-free path unchanged.
-                let (token_arr, adjusted_logits) = {
+                let (token_arr, adjusted_logits, post_probs) = {
                     let seq = match self.active_batch.get_mut(seq_id) {
                         Some(s) => s,
                         None => continue,
                     };
-                    if seq.sampling.needs_token_history() {
-                        sample_token_optimized_with_state(
+                    if seq.logprobs_config.enabled
+                        && seq.logprobs_config.source == LogprobSource::PostSampling
+                    {
+                        // b10621 post_sampling_probs (#1485): the report and
+                        // the draw must come from ONE chain pass sharing one
+                        // XTC gate, so this arm samples with the
+                        // distribution attached.
+                        let (token, adjusted, probs) = sample_token_with_state_and_distribution(
                             &logits_for_sampling,
                             &seq.sampling,
                             &seq.token_history,
                             &mut seq.sampler_state,
-                        )
-                    } else {
-                        sample_token_optimized(
+                        );
+                        (token, adjusted, Some(probs))
+                    } else if seq.sampling.needs_token_history()
+                        || seq.sampling.needs_sampler_feedback_state()
+                    {
+                        let (token, adjusted) = sample_token_optimized_with_state(
                             &logits_for_sampling,
                             &seq.sampling,
                             &seq.token_history,
-                        )
+                            &mut seq.sampler_state,
+                        );
+                        (token, adjusted, None)
+                    } else {
+                        let (token, adjusted) = sample_token_optimized(
+                            &logits_for_sampling,
+                            &seq.sampling,
+                            &seq.token_history,
+                        );
+                        (token, adjusted, None)
                     }
                 };
                 // #822: force-evaluate the sampled token through the fallible
@@ -877,8 +895,31 @@ impl BatchScheduler {
                 // from the token the logits describe, so computing it first
                 // is wasted GPU work on the decode hot path.
                 let final_id = Self::apply_thinking_budget(&mut seq.thinking, sampled);
+                // #1485: confirm the finally-emitted token with the sampler
+                // feedback state. Adaptive-p folds the ORIGINAL probability
+                // of the sampled token into its EMA only when the emitted
+                // token IS the sampled one (a thinking-budget override
+                // leaves the EMA untouched, upstream's accept-time id
+                // check); a no-op for every other config.
+                if let Some(state) = seq.sampler_state.as_mut() {
+                    state.accept_token(final_id);
+                }
                 let lp = if final_id == sampled {
-                    compute_logprobs(&adjusted_logits, sampled, &seq.logprobs_config)
+                    match seq.logprobs_config.source {
+                        // b10621 post_sampling_probs (#1485): linear
+                        // probabilities from the post-chain distribution the
+                        // draw came from.
+                        LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
+                            compute_post_sampling_probs(p, sampled, seq.logprobs_config.top_k)
+                        }),
+                        // b10621 pre-sampling n_probs (#1485): the raw model
+                        // logits, before bias, penalties and the chain.
+                        LogprobSource::RawModel if seq.logprobs_config.enabled => {
+                            let raw_row = mlxcel_core::slice_last_logits(&seq_logits);
+                            compute_logprobs(&raw_row, sampled, &seq.logprobs_config)
+                        }
+                        _ => compute_logprobs(&adjusted_logits, sampled, &seq.logprobs_config),
+                    }
                 } else {
                     // Override fired; token text and logprob metadata must
                     // stay consistent, so drop the logprob for this step.
@@ -1281,17 +1322,37 @@ impl BatchScheduler {
             // Penalty sequences use the incremental per-sequence sampler state
             // (lazily created); a no-penalty sequence takes the original
             // rebuild-free path unchanged.
-            let (token_arr, adjusted_logits) = {
+            let (token_arr, adjusted_logits, post_probs) = {
                 let seq = self.active_batch.get_mut(seq_id).unwrap();
-                if seq.sampling.needs_token_history() {
-                    sample_token_optimized_with_state(
+                if seq.logprobs_config.enabled
+                    && seq.logprobs_config.source == LogprobSource::PostSampling
+                {
+                    // b10621 post_sampling_probs (#1485): one chain pass,
+                    // one XTC gate, for both the draw and the report.
+                    let (token, adjusted, probs) = sample_token_with_state_and_distribution(
                         &logits_for_sampling,
                         &seq.sampling,
                         &seq.token_history,
                         &mut seq.sampler_state,
-                    )
+                    );
+                    (token, adjusted, Some(probs))
+                } else if seq.sampling.needs_token_history()
+                    || seq.sampling.needs_sampler_feedback_state()
+                {
+                    let (token, adjusted) = sample_token_optimized_with_state(
+                        &logits_for_sampling,
+                        &seq.sampling,
+                        &seq.token_history,
+                        &mut seq.sampler_state,
+                    );
+                    (token, adjusted, None)
                 } else {
-                    sample_token_optimized(&logits_for_sampling, &seq.sampling, &seq.token_history)
+                    let (token, adjusted) = sample_token_optimized(
+                        &logits_for_sampling,
+                        &seq.sampling,
+                        &seq.token_history,
+                    );
+                    (token, adjusted, None)
                 }
             };
             // #822: force-evaluate the sampled token through the fallible
@@ -1318,8 +1379,22 @@ impl BatchScheduler {
             // (token text and logprob `token_id` must stay consistent), so
             // computing it up-front wastes GPU time on every override step.
             let final_id = Self::apply_thinking_budget(&mut seq.thinking, sampled);
+            // #1485: confirm the emitted token with the sampler feedback
+            // state (see the parallel comment in `execute_batched_decode`).
+            if let Some(state) = seq.sampler_state.as_mut() {
+                state.accept_token(final_id);
+            }
             let lp = if final_id == sampled {
-                compute_logprobs(&adjusted_logits, sampled, &seq.logprobs_config)
+                match seq.logprobs_config.source {
+                    LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
+                        compute_post_sampling_probs(p, sampled, seq.logprobs_config.top_k)
+                    }),
+                    LogprobSource::RawModel if seq.logprobs_config.enabled => {
+                        let raw_row = mlxcel_core::slice_last_logits(&logits);
+                        compute_logprobs(&raw_row, sampled, &seq.logprobs_config)
+                    }
+                    _ => compute_logprobs(&adjusted_logits, sampled, &seq.logprobs_config),
+                }
             } else {
                 None
             };

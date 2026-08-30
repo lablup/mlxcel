@@ -158,7 +158,7 @@ fn build_server_generate_options_uses_one_patched_live_snapshot() {
     live.default_dry_base = 2.0;
     live.default_dry_allowed_length = 5;
     live.default_dry_penalty_last_n = 37;
-    live.default_dry_sequence_breakers = vec![11, 19];
+    live.default_dry_sequence_breakers = vec!["\n".to_string(), ":".to_string()];
 
     let options =
         build_server_generate_options_with_live(&config, &live, RequestOptionOverrides::default());
@@ -177,7 +177,13 @@ fn build_server_generate_options_uses_one_patched_live_snapshot() {
     assert_eq!(options.sampling.dry_base, 2.0);
     assert_eq!(options.sampling.dry_allowed_length, 5);
     assert_eq!(options.sampling.dry_penalty_last_n, 37);
-    assert_eq!(options.sampling.dry_sequence_breakers, vec![11, 19]);
+    // Since #1485 the server-wide default travels as breaker STRINGS; the
+    // exact-id list carries only an OpenAI-shaped per-request override.
+    assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
+    assert_eq!(
+        options.dry_breaker_strings.as_deref(),
+        Some(["\n".to_string(), ":".to_string()].as_slice())
+    );
     assert_ne!(options.sampling.temperature, config.default_temperature);
 }
 
@@ -213,6 +219,7 @@ fn build_server_generate_options_applies_request_overrides() {
             thinking_enter_block_on_start: true,
             loop_detection_request: None,
             request_carries_loop_amplifier: false,
+            ..Default::default()
         },
     );
 
@@ -250,13 +257,20 @@ fn build_server_generate_options_applies_request_overrides() {
 fn server_dry_sequence_breaker_default_applies_when_the_request_omits_it() {
     let config = ServerConfig {
         default_dry_multiplier: 0.8,
-        default_dry_sequence_breakers: vec![198, 271],
+        default_dry_sequence_breakers: vec!["\n".to_string(), ":".to_string()],
         ..Default::default()
     };
 
     let options = build_server_generate_options(&config, RequestOptionOverrides::default());
 
-    assert_eq!(options.sampling.dry_sequence_breakers, vec![198, 271]);
+    // #1485: the server default is breaker STRINGS now; they ride on the
+    // options for the scheduler's vocabulary-scan derivation, and the
+    // exact-id channel stays empty.
+    assert_eq!(
+        options.dry_breaker_strings,
+        Some(vec!["\n".to_string(), ":".to_string()])
+    );
+    assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
     // The other DRY fields already resolved from the config; assert one of
     // them alongside so the test states the whole fallback, not half of it.
     assert_eq!(options.sampling.dry_multiplier, 0.8);
@@ -268,7 +282,7 @@ fn server_dry_sequence_breaker_default_applies_when_the_request_omits_it() {
 fn request_dry_sequence_breakers_override_the_server_default() {
     let config = ServerConfig {
         default_dry_multiplier: 0.8,
-        default_dry_sequence_breakers: vec![198, 271],
+        default_dry_sequence_breakers: vec!["\n".to_string()],
         ..Default::default()
     };
 
@@ -280,7 +294,11 @@ fn request_dry_sequence_breakers_override_the_server_default() {
         },
     );
 
+    // An exact-id override (the mlxcel-native OpenAI surface) wins outright:
+    // the ids reach the sampler and NO string derivation runs, so the server
+    // default set cannot leak in beside them (#1485).
     assert_eq!(options.sampling.dry_sequence_breakers, vec![13]);
+    assert_eq!(options.dry_breaker_strings, None);
 }
 
 /// The per-request opt-out only works if serde keeps an absent field and an
@@ -300,19 +318,21 @@ fn an_absent_and_an_empty_request_breaker_field_deserialize_differently() {
         "an absent field must stay None so it can inherit the server default"
     );
 
+    // #1485: the native field carries b10621's raw shape so the route can
+    // produce upstream's exact diagnostic; an empty array stays Some (and is
+    // then refused with upstream's wording rather than resolving).
     let empty: NativeCompletionRequest =
         serde_json::from_str(r#"{"prompt": "hi", "dry_sequence_breakers": []}"#)
             .expect("empty array deserializes");
-    assert_eq!(
-        empty.dry_sequence_breakers,
-        Some(Vec::new()),
-        "an explicit empty array must stay Some so it can disable the server default"
-    );
+    assert_eq!(empty.dry_sequence_breakers, Some(serde_json::json!([])));
 
     let populated: NativeCompletionRequest =
-        serde_json::from_str(r#"{"prompt": "hi", "dry_sequence_breakers": [198]}"#)
+        serde_json::from_str(r#"{"prompt": "hi", "dry_sequence_breakers": ["\n"]}"#)
             .expect("populated array deserializes");
-    assert_eq!(populated.dry_sequence_breakers, Some(vec![198]));
+    assert_eq!(
+        populated.dry_sequence_breakers,
+        Some(serde_json::json!(["\n"]))
+    );
 }
 
 /// An explicitly empty request list is an override too, not an absent field:
@@ -322,7 +342,7 @@ fn an_absent_and_an_empty_request_breaker_field_deserialize_differently() {
 fn an_explicitly_empty_request_breaker_list_disables_the_server_default() {
     let config = ServerConfig {
         default_dry_multiplier: 0.8,
-        default_dry_sequence_breakers: vec![198],
+        default_dry_sequence_breakers: vec!["\n".to_string()],
         ..Default::default()
     };
 
@@ -334,7 +354,10 @@ fn an_explicitly_empty_request_breaker_list_disables_the_server_default() {
         },
     );
 
+    // An explicitly empty id override still turns the server default OFF for
+    // the request: no ids reach the sampler AND no string derivation runs.
     assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
+    assert_eq!(options.dry_breaker_strings, None);
 }
 
 #[test]

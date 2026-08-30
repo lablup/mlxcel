@@ -32,7 +32,53 @@ pub(super) fn validate_xla_output_features(logprobs: bool, structured: bool) -> 
     }
     if structured {
         return Err(
-            "the OpenXLA backend does not support structured / JSON-schema output".to_string(),
+            "the OpenXLA backend does not support constrained decoding (JSON-schema or GBNF \
+             grammar output); run the MLX serving path"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The #1485 sampler surfaces (mirostat, dynamic temperature, adaptive-p,
+/// `min_keep`, logit bias, string DRY breakers) exist only on the MLX
+/// serving path: the XLA parity sampler has no feedback state, no extended
+/// filter chain and no token-bias path, so a request that asked for any of
+/// them must fail loudly instead of sampling with different arithmetic than
+/// requested.
+pub(super) fn validate_xla_sampler_surfaces(options: &ServerGenerateOptions) -> Result<(), String> {
+    let sampling = &options.sampling;
+    if sampling.effective_mirostat() != 0 {
+        return Err(
+            "the OpenXLA backend does not support mirostat sampling; run the MLX serving path"
+                .to_string(),
+        );
+    }
+    if sampling.needs_extended_chain() {
+        return Err(
+            "the OpenXLA backend does not support dynamic temperature, adaptive-p, or min_keep; run the MLX serving path"
+                .to_string(),
+        );
+    }
+    // The bias pairs and breaker strings are still on the options at
+    // admission time (the MLX scheduler merges/derives them at its own
+    // enqueue); check them there.
+    if !options.logit_bias.is_empty() || !options.logit_bias_texts.is_empty() {
+        return Err(
+            "the OpenXLA backend does not support logit_bias (no token-bias path); run the MLX serving path"
+                .to_string(),
+        );
+    }
+    if sampling.dry_multiplier > 0.0
+        && sampling.dry_penalty_last_n != 0
+        && options
+            .dry_breaker_strings
+            .as_ref()
+            .is_some_and(|strings| !strings.is_empty())
+    {
+        return Err(
+            "the OpenXLA backend does not support string DRY sequence breakers; run the MLX serving path or send token-id breakers"
+                .to_string(),
         );
     }
     Ok(())
@@ -80,6 +126,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
         if let Err(error) =
             validate_xla_output_features(options.logprobs.enabled, options.structured.is_some())
+                .and_then(|()| validate_xla_sampler_surfaces(&options))
         {
             let _ = response_tx.send(GenerateEvent::Error(error));
             return;

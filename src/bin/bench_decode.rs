@@ -300,6 +300,14 @@ fn sampling_config(model_path: &Path) -> SamplingConfig {
         typical_p: 1.0,
         penalty_last_n: -1,
         stop_token_ids: mlxcel::read_eos_token_ids(model_path),
+        mirostat: 0,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
+        dynatemp_range: 0.0,
+        dynatemp_exponent: 1.0,
+        adaptive_target: -1.0,
+        adaptive_decay: 0.9,
+        min_keep: 0,
     })
 }
 

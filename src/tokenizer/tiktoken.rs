@@ -210,6 +210,18 @@ impl TiktokenTokenizer {
             .or_else(|| self.encoder.get(token.as_bytes()).copied())
     }
 
+    /// The exclusive id bound this wrapper can decode (#1485; see
+    /// `MlxcelTokenizer::vocab_size`).
+    pub fn vocab_size(&self) -> usize {
+        let special_bound = self
+            .special_decoder
+            .keys()
+            .map(|&id| id as usize + 1)
+            .max()
+            .unwrap_or(0);
+        self.decoder.len().max(special_bound)
+    }
+
     /// Raw bytes for one token; see `MlxcelTokenizer::token_piece_bytes`.
     ///
     /// The tiktoken vocabulary is byte sequences by construction, so this is

@@ -107,6 +107,16 @@ pub(crate) fn slot_params_json(options: &ServerGenerateOptions, stream: bool) ->
         "n_probs": options.logprobs.top_k,
         "stop": options.stop_sequences.clone().unwrap_or_default(),
         "timings_per_token": false,
+        // #1485 sampling remainder.
+        "mirostat": sampling.mirostat,
+        "mirostat_tau": sampling.mirostat_tau,
+        "mirostat_eta": sampling.mirostat_eta,
+        "dynatemp_range": sampling.dynatemp_range,
+        "dynatemp_exponent": sampling.dynatemp_exponent,
+        "adaptive_target": sampling.adaptive_target,
+        "adaptive_decay": sampling.adaptive_decay,
+        "min_keep": sampling.min_keep,
+        "post_sampling_probs": options.post_sampling_probs,
     })
 }
 

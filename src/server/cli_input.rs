@@ -208,7 +208,7 @@ pub struct ServerStartupInput {
     pub reverse_prompt: Vec<String>,
     pub samplers: Option<String>,
     pub sampler_seq: Option<String>,
-    pub seed: i64,
+    pub seed: i128,
     pub repeat_last_n: usize,
     pub repeat_penalty: f32,
     pub presence_penalty: f32,
@@ -218,6 +218,21 @@ pub struct ServerStartupInput {
     pub dry_allowed_length: usize,
     pub dry_penalty_last_n: i32,
     pub dry_sequence_breakers: Vec<String>,
+    /// b10621 `--grammar` / `--grammar-file` / `--json-schema` /
+    /// `--json-schema-file` (#1485), already reduced to the one flag that
+    /// appeared last on the command line by
+    /// [`crate::cli::grammar_args::resolve_grammar_source`]. Read and
+    /// validated in [`ServerStartupInput::into_startup_config`], so a bad
+    /// grammar fails startup instead of the first constrained request.
+    pub grammar_source: Option<crate::cli::grammar_args::GrammarSourceArg>,
+    pub mirostat: i32,
+    pub mirostat_tau: f32,
+    pub mirostat_eta: f32,
+    pub dynatemp_range: f32,
+    pub dynatemp_exponent: f32,
+    pub adaptive_target: f32,
+    pub adaptive_decay: f32,
+    pub logit_bias: Vec<String>,
     pub verbose: bool,
     pub log_disable: bool,
     pub log_file: Option<PathBuf>,
@@ -1070,6 +1085,15 @@ impl ServerStartupInput {
             dry_allowed_length: self.dry_allowed_length,
             dry_penalty_last_n: self.dry_penalty_last_n,
             dry_sequence_breakers: self.dry_sequence_breakers,
+            grammar: self.grammar_source.as_ref().map(|s| s.load()).transpose()?,
+            mirostat: resolve_mirostat(self.mirostat)?,
+            mirostat_tau: self.mirostat_tau,
+            mirostat_eta: self.mirostat_eta,
+            dynatemp_range: self.dynatemp_range,
+            dynatemp_exponent: self.dynatemp_exponent,
+            adaptive_target: self.adaptive_target,
+            adaptive_decay: sanitize_adaptive_decay(self.adaptive_decay),
+            logit_bias: parse_logit_bias_flags(&self.logit_bias)?,
             verbose: self.verbose,
             log_disable: self.log_disable,
             log_file: self.log_file,
@@ -1790,9 +1814,108 @@ fn apply_reasoning_template_kwargs(
     Some(merged)
 }
 
-/// Convert the CLI seed sentinel into the runtime representation.
-pub fn resolve_seed(seed: i64) -> Option<u64> {
-    if seed < 0 { None } else { Some(seed as u64) }
+/// Convert the CLI seed into the runtime representation, folding it into
+/// b10621's uint32 seed space (#1485).
+///
+/// b10621 parses `--seed` with `std::stoul` and assigns to a `uint32_t`, so
+/// every value wraps modulo 2^32 and only the sentinel `0xFFFF_FFFF`
+/// (`LLAMA_DEFAULT_SEED`, spelled `-1`) draws a random seed: `--seed -2` is
+/// the DETERMINISTIC seed `4294967294`, and `--seed 4294967295` is random.
+/// The pre-#1485 mlxcel mapping sent every negative value to the random
+/// sentinel instead; this fold restores upstream's arithmetic exactly (an
+/// `as u32` cast wraps modulo 2^32, congruent with `stoul`'s modulo-2^64
+/// wrap for every value an `i64` can spell).
+pub fn resolve_seed(seed: i128) -> Option<u64> {
+    let folded = seed as u32;
+    if folded == u32::MAX {
+        None
+    } else {
+        Some(u64::from(folded))
+    }
+}
+
+/// Parse `--seed` over b10621's whole accepted domain (#1485).
+///
+/// b10621 parses with `std::stoul`, which accepts any integer whose
+/// magnitude fits an unsigned 64-bit value, including negatives (they wrap
+/// in unsigned arithmetic); everything then truncates into uint32 seed
+/// space. An `i128` carries that whole domain, so no value b10621 accepts
+/// is refused here, and anything outside it fails the parse exactly as
+/// `stoul` throws.
+pub fn parse_seed_arg(value: &str) -> Result<i128, String> {
+    let parsed: i128 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("{value:?} is not an integer seed"))?;
+    let bound = u64::MAX as i128;
+    if (-bound..=bound).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(format!("{value:?} is outside the accepted seed range"))
+    }
+}
+
+/// Validate `--mirostat` against b10621's declared domain (#1485).
+///
+/// The help text declares `0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0`;
+/// any other value aborts b10621 inside `common_sampler_init`'s
+/// `GGML_ASSERT`, so failing startup with a diagnostic is the actionable
+/// form of the same refusal.
+pub(super) fn resolve_mirostat(value: i32) -> anyhow::Result<i32> {
+    if (0..=2).contains(&value) {
+        Ok(value)
+    } else {
+        anyhow::bail!(
+            "--mirostat {value} is not supported: valid values are 0 (disabled), 1 (Mirostat) and 2 (Mirostat 2.0)"
+        )
+    }
+}
+
+/// Clamp `--adaptive-decay` into b10621's `0.0..=0.99` domain (#1485), the
+/// clamp upstream's `llama_sampler_init_adaptive_p` applies at sampler init,
+/// with a startup warning when the operator's value was out of range.
+pub(super) fn sanitize_adaptive_decay(value: f32) -> f32 {
+    let clamped = if value.is_finite() {
+        value.clamp(0.0, 0.99)
+    } else {
+        0.9
+    };
+    if clamped != value {
+        tracing::warn!(
+            "--adaptive-decay {value} is outside the valid range 0.0..=0.99; using {clamped}"
+        );
+    }
+    clamped
+}
+
+/// Parse the repeated `-l` / `--logit-bias` TOKEN_ID(+/-)BIAS values
+/// (#1485), b10621's CLI form: a token id, a `+` or `-` sign, and the bias
+/// magnitude, e.g. `15043+1` or `15043-1`.
+pub(super) fn parse_logit_bias_flags(values: &[String]) -> anyhow::Result<Vec<(i32, f32)>> {
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        out.push(parse_one_logit_bias(value).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--logit-bias {value:?} is not in the TOKEN_ID(+/-)BIAS form, e.g. 15043+1 to raise token 15043 or 15043-1 to lower it"
+            )
+        })?);
+    }
+    Ok(out)
+}
+
+fn parse_one_logit_bias(value: &str) -> Option<(i32, f32)> {
+    let trimmed = value.trim();
+    // The token id may itself be signed, so the separating sign is the first
+    // `+`/`-` after position 0.
+    let sep = trimmed
+        .char_indices()
+        .skip(1)
+        .find(|&(_, c)| c == '+' || c == '-')?;
+    let (token_str, rest) = trimmed.split_at(sep.0);
+    let token: i32 = token_str.trim().parse().ok()?;
+    let magnitude: f32 = rest[1..].trim().parse().ok()?;
+    let bias = if sep.1 == '-' { -magnitude } else { magnitude };
+    Some((token, bias))
 }
 
 // ── — prompt cache config resolution ──────────────────────────────
