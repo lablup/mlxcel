@@ -238,20 +238,21 @@ fn eviction_candidates_lru() {
     cfg.max_sequences = 10;
     let mut mgr = PipelineCacheManager::new(cfg).unwrap();
 
-    // Admit sequences; the order of last_accessed is deterministic
-    // since they are created in sequence within the same test.
     for i in 1..=3 {
         let req = CacheAdmissionRequest::new(i, 1);
         mgr.request_admission(&req);
     }
 
-    // Touch sequence 1 to make it most recently used.
-    mgr.allocations.get_mut(&1).unwrap().touch();
+    // Give the untouched allocations one shared timestamp, then make sequence
+    // 1 explicitly newer. Relying on successive `Instant::now()` calls here
+    // makes the test fail when the clock readings tie under load.
+    let stale = Instant::now();
+    for alloc in mgr.allocations.values_mut() {
+        alloc.last_accessed = stale;
+    }
+    mgr.allocations.get_mut(&1).unwrap().last_accessed = stale + std::time::Duration::from_nanos(1);
 
-    let candidates = mgr.select_eviction_candidates();
-    // Seq 2 and 3 were not touched, so they should come before seq 1.
-    // The exact order between 2 and 3 depends on creation time.
-    assert_eq!(*candidates.last().unwrap(), 1);
+    assert_eq!(mgr.select_eviction_candidates(), vec![2, 3, 1]);
 }
 
 #[test]
