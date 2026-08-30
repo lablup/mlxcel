@@ -851,6 +851,192 @@ pub(crate) struct ResumableStreamContext {
     pub(crate) owner: crate::server::stream_session::StreamOwner,
 }
 
+/// Stream one ASR completion as b10621's transcript events (issue #1446).
+///
+/// b10621's transcription route is a translation layer over
+/// `/v1/chat/completions`, so its streamed response is the same generation as
+/// the chat stream with a different envelope: one `transcript.text.delta` per
+/// decoded token, then `transcript.text.done` carrying the whole transcript
+/// and the usage block, then `data: [DONE]`. mlxcel used to run the
+/// non-streaming completion and emit the finished transcript as a single
+/// delta, which matched the frame shapes but not the delivery granularity.
+///
+/// This is deliberately not [`stream_chat_completion`] with a different
+/// serializer. That function owns tool-call accumulation, logprob alignment,
+/// reasoning placement, resumable sessions and completion control, none of
+/// which a transcript event can carry. What the two share is the part that
+/// matters for equality with the non-streaming answer: the same request
+/// preparation, the same generate options, and the same [`StreamFilter`], so
+/// the concatenated deltas are the text `non_stream_chat_completion` would
+/// have returned rather than the raw token stream with the model's structural
+/// and thinking tokens left in.
+pub(crate) async fn stream_asr_completion(
+    state: AppState,
+    live: std::sync::Arc<LiveSettings>,
+    request: ChatCompletionRequest,
+    priority: RequestPriority,
+) -> Response {
+    use super::transcription_compat::{
+        AsrUsage, transcription_delta_event, transcription_done_event,
+    };
+
+    if !state.can_accept_request() {
+        return ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
+            .into_response();
+    }
+
+    let prompt_cache_enabled = state.prompt_cache.is_some();
+    let prepared = match prepare_chat_request_with_cache(
+        &state.chat_template,
+        &request,
+        live.chat_template_kwargs.as_ref(),
+        prompt_cache_enabled,
+        state.should_render_history_boundary_snapshot(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
+        }
+    };
+    let prompt_cache_ctx = build_prompt_cache_request_context(
+        &state,
+        &live,
+        &request,
+        &prepared.image_data,
+        &prepared.audio_data,
+        prepared.history_prompt.as_deref(),
+    );
+    let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
+    // An ASR request carries no tools and no grammar, so the loop-detection
+    // amplifier is off for the same reason it is off for a plain completion.
+    let mut options =
+        build_generate_options_with_live(&request.params, &state.config, &live, false);
+    options.priority = priority;
+    options.prompt_cache_ctx = prompt_cache_ctx;
+    options.image_soft_tokens = prepared.image_soft_tokens;
+    options.thinking_enter_block_on_start = primed_open_thinking;
+
+    let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
+        Ok(reservation) => reservation,
+        Err(err) => return generation_error_to_response(err).into_response(),
+    };
+
+    // A transcript stream is not resumable: b10621 mounts no conversation id
+    // on this route, so there is no session to tee into.
+    let (events, stream, cancelled, keepalive) =
+        sse_channel_resumable(100, state.config.sse_ping_interval, None);
+
+    let skip_chat_parsing = state.config.skip_chat_parsing;
+    let token_events = events.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let slot = state.slots.begin(
+            &prepared.prompt,
+            super::slots::slot_params_json(&options, true),
+            Some(options.max_tokens as i64),
+        );
+        let filter = std::sync::Mutex::new(if primed_open_thinking {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        });
+        // The transcript as the client will have seen it, assembled from the
+        // deltas actually sent so the terminal `done` event cannot disagree
+        // with their concatenation.
+        let transcript = std::sync::Mutex::new(String::new());
+
+        let emit = |text: &str| {
+            if text.is_empty() {
+                return;
+            }
+            if let Ok(mut acc) = transcript.lock() {
+                acc.push_str(text);
+            }
+            let _ = token_events.json(&transcription_delta_event(text));
+        };
+
+        let result = state
+            .model_provider
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+                prepared.prompt,
+                options,
+                prepared.image_data,
+                prepared.audio_data,
+                prepared.videos,
+                prepared.media,
+                queue_reservation,
+                cancelled,
+                |token, _lp_data| {
+                    slot.on_token(&token);
+                    // `--skip-chat-parsing` (#1447) turns every parser off on
+                    // this surface too, so the token goes out verbatim.
+                    if skip_chat_parsing {
+                        emit(&token);
+                        return;
+                    }
+                    // Only `content` is transcript: a reasoning fragment is
+                    // the model's scratchpad, which the non-streaming answer
+                    // does not put in `content` either.
+                    let piece = match filter.lock() {
+                        Ok(mut f) => f.feed(&token).content,
+                        Err(_) => return,
+                    };
+                    if let Some(text) = piece {
+                        emit(&text);
+                    }
+                },
+            );
+
+        // Whatever the filter was still holding for delimiter matching.
+        if !skip_chat_parsing
+            && let Ok(mut f) = filter.lock()
+            && let Some(text) = f.flush().content
+        {
+            drop(f);
+            emit(&text);
+        }
+
+        match result {
+            Ok(r) => {
+                slot.finish(
+                    r.prompt_tokens,
+                    r.cached_tokens,
+                    r.completion_tokens,
+                    &r.text,
+                );
+                state.metrics.record_request(
+                    r.prompt_tokens,
+                    r.completion_tokens,
+                    r.generation_time_ms,
+                );
+                let usage = AsrUsage {
+                    input_tokens: r.prompt_tokens as u32,
+                    output_tokens: r.completion_tokens as u32,
+                    cached_tokens: r.cached_tokens as u32,
+                };
+                let text = transcript
+                    .lock()
+                    .map(|acc| acc.clone())
+                    .unwrap_or_else(|_| r.text.clone());
+                let _ = events.json(&transcription_done_event(&text, usage));
+            }
+            Err(err) => {
+                // The stream is already open, so the failure has to travel as
+                // a frame. Upstream shapes an in-stream failure as an `error`
+                // object on the event stream, before its own terminator.
+                let _ = events.json(&serde_json::json!({
+                    "error": { "message": err.to_string(), "type": "server_error" }
+                }));
+            }
+        }
+        events.done();
+    });
+
+    sse_response(stream, keepalive)
+}
+
 async fn stream_chat_completion(
     state: AppState,
     live: std::sync::Arc<LiveSettings>,

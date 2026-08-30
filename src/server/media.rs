@@ -1090,8 +1090,16 @@ async fn read_audio_input(
     max_payload_bytes: usize,
     cancelled: &dyn AudioAcquisitionCancellation,
 ) -> std::result::Result<Vec<u8>, AudioAcquisitionError> {
-    // Validate format early -- only WAV is supported for now.
-    if input.format != "wav" {
+    // b10621's mtmd audio front-end takes wav, mp3 and flac, so the declared
+    // format is checked against that set rather than against `wav` alone
+    // (#1446). The bytes are the authority on which of the three it actually
+    // is: the decoder sniffs the container and refuses one outside the set
+    // with its own diagnostic, so a mislabelled clip fails on content, not on
+    // a string, exactly as it does upstream.
+    if !matches!(
+        input.format.to_ascii_lowercase().as_str(),
+        "wav" | "wave" | "x-wav" | "mp3" | "mpeg" | "mpga" | "flac"
+    ) {
         return Err(AudioAcquisitionError::UnsupportedFormat {
             clip_index,
             format: input.format.clone(),

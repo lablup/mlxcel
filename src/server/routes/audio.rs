@@ -184,11 +184,40 @@ async fn compat_transcribe(
     let prompt = asr_user_prompt(form.text("prompt"), language.as_deref());
     let streaming = wants_stream(&form);
 
+    // The container the bytes actually are, which is what the decoder will
+    // sniff anyway; naming it on the synthesized chat part keeps the request
+    // the ASR flow builds honest about its own attachment (#1446).
+    let audio_format = crate::audio::preprocessing::container::sniff(&file.bytes)
+        .map_or("wav", |container| container.name())
+        .to_owned();
+
+    if chat_can_transcribe && streaming {
+        // b10621 streams a delta per decoded token, so the streaming ASR
+        // response is its own generation rather than a non-streaming one
+        // re-framed (#1446).
+        let request = build_asr_chat_request(
+            state.display_model_id().to_string(),
+            prompt,
+            base64::engine::general_purpose::STANDARD.encode(&file.bytes),
+            audio_format.clone(),
+            temperature,
+            max_tokens,
+        );
+        return super::chat::stream_asr_completion(
+            state,
+            live,
+            request,
+            crate::server::batch::RequestPriority::default(),
+        )
+        .await;
+    }
+
     let (text, usage) = if chat_can_transcribe {
         let request = build_asr_chat_request(
             state.display_model_id().to_string(),
             prompt,
             base64::engine::general_purpose::STANDARD.encode(&file.bytes),
+            audio_format.clone(),
             temperature,
             max_tokens,
         );
@@ -256,10 +285,10 @@ async fn compat_transcribe(
     if !streaming {
         return Json(done).into_response();
     }
-    // b10621 terminates the ASR stream with `data: [DONE]`, like every other
-    // OpenAI-shaped stream it serves. mlxcel emits the whole transcript in one
-    // delta rather than incrementally; the frame shapes and the terminator are
-    // upstream's, the granularity is not.
+    // The Whisper-worker fallback only ever has the finished transcript: its
+    // STT worker returns one string rather than a token stream, so this shape
+    // still emits a single delta. The chat-model path, which is the only shape
+    // b10621 can express, took the incremental branch above (#1446).
     let body = format!(
         "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
         transcription_delta_event(&text),

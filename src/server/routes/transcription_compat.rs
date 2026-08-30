@@ -344,12 +344,42 @@ pub(crate) fn ensure_clip_within_limits(bytes: &[u8]) -> Result<WavGeometry, Err
             "invalid_request_error",
         ));
     }
-    let geometry = probe_wav(bytes).map_err(|reason| {
-        ErrorResponse::new(
-            format!("failed to read the uploaded audio: {reason}"),
-            "invalid_request_error",
-        )
-    })?;
+    // b10621's mtmd audio front-end takes wav, mp3 and flac, so the geometry
+    // bound below runs against whichever of the three the bytes actually are
+    // (#1446). A compressed container's header is read without decoding, the
+    // same property the WAV probe has, so an amplifying header still costs a
+    // header parse. A container outside the set falls through to the WAV probe
+    // and keeps its `not a RIFF/WAVE file` diagnostic.
+    let geometry = match crate::audio::preprocessing::container::probe_compressed(bytes) {
+        Some(result) => {
+            let compressed = result.map_err(|reason| {
+                ErrorResponse::new(
+                    format!("failed to read the uploaded audio: {reason}"),
+                    "invalid_request_error",
+                )
+            })?;
+            WavGeometry {
+                sample_rate: compressed.sample_rate,
+                channels: compressed.channels,
+                // Not carried by a compressed container and not used by any
+                // caller of this function; the decoder reports the real sample
+                // format.
+                bits_per_sample: 0,
+                data_bytes: bytes.len() as u64,
+                // An MPEG stream without a Xing header declares no length, and
+                // 0.0 is the honest reading of "nothing declared": the bound
+                // below cannot refuse what was never stated, and the decode
+                // loop's own per-clip frame cap is what bounds it.
+                duration_seconds: compressed.duration_seconds.unwrap_or(0.0),
+            }
+        }
+        None => probe_wav(bytes).map_err(|reason| {
+            ErrorResponse::new(
+                format!("failed to read the uploaded audio: {reason}"),
+                "invalid_request_error",
+            )
+        })?,
+    };
     if geometry.sample_rate > MAX_SAMPLE_RATE {
         return Err(ErrorResponse::new(
             format!(
@@ -411,6 +441,7 @@ pub(crate) fn build_asr_chat_request(
     model: String,
     user_prompt: String,
     audio_base64: String,
+    audio_format: String,
     temperature: Option<f32>,
     max_tokens: Option<usize>,
 ) -> req::ChatCompletionRequest {
@@ -428,7 +459,7 @@ pub(crate) fn build_asr_chat_request(
                 req::ContentPart::InputAudio {
                     input_audio: req::InputAudio {
                         data: audio_base64,
-                        format: "wav".to_owned(),
+                        format: audio_format,
                     },
                 },
             ]),

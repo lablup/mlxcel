@@ -177,6 +177,14 @@ rustyline = "14"
 # Image processing (for VLM)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
+# Compressed-audio container decoding for the transcription routes (#1446).
+# llama-server b10621's mtmd audio front-end takes wav, mp3 and flac; mlxcel
+# decodes RIFF/WAVE itself (src/audio/preprocessing_wav.rs) and delegates the
+# two compressed containers here. Pure Rust, no C dependency, MPL-2.0 (allowed
+# by deny.toml). Only the two codecs b10621 accepts are enabled, so the
+# dependency does not drag in aac/alac/isomp4/ogg decoders nobody reaches.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac"] }
+
 # Base64 (for VLM image data URIs in server API)
 base64 = "0.22"
 
