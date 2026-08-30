@@ -435,6 +435,200 @@ async fn prompt_cache_hit_and_per_request_disable_match_a_cold_evaluation() {
     stop_server(&mut server);
 }
 
+/// One raw-prompt arm: `/v1/completions` or native `/completion`.
+///
+/// Returns the decoded text, the per-position token strings where the route
+/// reports them, and how many prompt tokens the cache supplied. `/completion`
+/// reports the latter as `timings.cache_n`; `/v1/completions` reports it as
+/// `usage.prompt_tokens_details.cached_tokens`, which #1473 added along with
+/// the coverage.
+async fn raw_arm(
+    client: &reqwest::Client,
+    base_url: &str,
+    route: &str,
+    prompt: &str,
+    cache_prompt: Option<bool>,
+) -> Option<(String, Vec<String>, u64)> {
+    let native = route == "/completion";
+    let mut body = if native {
+        serde_json::json!({
+            "prompt": prompt,
+            "n_predict": MAX_TOKENS,
+            "temperature": 0.0,
+            "seed": 7,
+        })
+    } else {
+        serde_json::json!({
+            "model": "test",
+            "prompt": prompt,
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0.0,
+            "seed": 7,
+            "logprobs": 5,
+        })
+    };
+    if let Some(value) = cache_prompt {
+        // b10621 puts the field at the request root, and `/v1/completions` has
+        // no such field: the server-wide switch governs there.
+        body["cache_prompt"] = serde_json::Value::Bool(value);
+    }
+
+    let response = client
+        .post(format!("{base_url}{route}"))
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        eprintln!("{route} request failed: {}", response.status());
+        return None;
+    }
+    let json: serde_json::Value = response.json().await.ok()?;
+
+    if native {
+        let text = json["content"].as_str()?.to_string();
+        let cached = json["timings"]["cache_n"].as_u64()?;
+        Some((text, Vec::new(), cached))
+    } else {
+        let text = json["choices"][0]["text"].as_str()?.to_string();
+        let tokens = json["choices"][0]["logprobs"]["tokens"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cached = json["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        Some((text, tokens, cached))
+    }
+}
+
+/// The same cold / hit / opt-out / hit-again contract on the two raw-prompt
+/// routes (#1473).
+///
+/// Before #1473 neither `/v1/completions` nor native `/completion` built a
+/// prompt-cache request context, so both were cold on every request whatever
+/// `--cache-prompt` said, and this test could not have been written. Leaving
+/// the chat-route test passing while the coverage changed would have proved
+/// nothing about the new routes, which is why the gate is extended here rather
+/// than only re-run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires local model weights (qwen3-0.6b-4bit) and the mlxcel-server binary"]
+async fn raw_prompt_routes_hit_the_cache_and_honor_the_per_request_disable() {
+    let model_dir = repo_model_dir(MODEL);
+    if !model_dir.exists() {
+        eprintln!("skipping: {} not present", model_dir.display());
+        return;
+    }
+    let port = reserve_port();
+    let port_s = port.to_string();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut server = spawn_server(&[
+        "-m",
+        model_dir.to_str().expect("utf-8 model path"),
+        "--port",
+        &port_s,
+        "--host",
+        "127.0.0.1",
+        "--cache-prompt",
+        "--parallel",
+        "4",
+        "--no-warmup",
+    ]);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .expect("client");
+
+    if !wait_for_health_soft(&client, &base_url, Duration::from_secs(180)).await {
+        eprintln!("skipping: server never became healthy");
+        stop_server(&mut server);
+        return;
+    }
+
+    for route in ["/completion", "/v1/completions"] {
+        // Each route gets its own prompt, and the discriminator goes at the
+        // FRONT. The two raw-prompt routes deliberately share one cache
+        // bucket (same tokenization, same raw-prompt template signature), and
+        // the store is a strict token-prefix cache, so a discriminator at the
+        // end would let the second route adopt the first route's entry and
+        // report a hit on its own first request.
+        let prompt = format!("Route {route}. {}", prompt_of(6));
+
+        let Some((cold_text, cold_tokens, cold_cached)) =
+            raw_arm(&client, &base_url, route, &prompt, None).await
+        else {
+            eprintln!("skipping: cold {route} request could not be served");
+            stop_server(&mut server);
+            return;
+        };
+        assert!(
+            !cold_text.is_empty(),
+            "{route}: the cold arm decoded nothing"
+        );
+        assert_eq!(
+            cold_cached, 0,
+            "{route}: the first request for this prompt cannot have reused anything"
+        );
+
+        let (hot_text, hot_tokens, hot_cached) = raw_arm(&client, &base_url, route, &prompt, None)
+            .await
+            .unwrap_or_else(|| panic!("{route}: the second request must be served"));
+        assert!(
+            hot_cached > 0,
+            "{route}: the repeated prompt must hit the cache; got {hot_cached}"
+        );
+        assert_eq!(
+            hot_text, cold_text,
+            "{route}: a cache hit changed the generated text, which is a wrong cache rather \
+             than a fast one"
+        );
+        assert_eq!(
+            hot_tokens, cold_tokens,
+            "{route}: a cache hit changed the per-position tokens"
+        );
+
+        // `cache_prompt` is a native-schema field; `/v1/completions` has none,
+        // so the per-request opt-out is asserted where b10621 declares it.
+        if route == "/completion" {
+            let (off_text, _, off_cached) =
+                raw_arm(&client, &base_url, route, &prompt, Some(false))
+                    .await
+                    .unwrap_or_else(|| panic!("{route}: the opt-out request must be served"));
+            assert_eq!(
+                off_cached, 0,
+                "{route}: cache_prompt: false must force a cold prefill, not report a hit"
+            );
+            assert_eq!(
+                off_text, cold_text,
+                "{route}: the opt-out arm must decode what the cold arm decoded"
+            );
+
+            // The store must be untouched by the opt-out, which is the half a
+            // lookup-only opt-out would fail.
+            let (_, _, again_cached) = raw_arm(&client, &base_url, route, &prompt, None)
+                .await
+                .unwrap_or_else(|| panic!("{route}: the fourth request must be served"));
+            assert!(
+                again_cached > 0,
+                "{route}: cache_prompt: false must not disturb what other requests can reuse; \
+                 got {again_cached}"
+            );
+        }
+
+        eprintln!(
+            "{route}: cold cached={cold_cached}, hit cached={hot_cached}, text identical over \
+             {} bytes",
+            cold_text.len()
+        );
+    }
+
+    stop_server(&mut server);
+}
+
 /// Mixed batch widths: three prompts of different lengths served concurrently
 /// must each decode what they decode alone.
 ///

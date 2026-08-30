@@ -437,6 +437,32 @@ impl CompletionChunk {
         prompt_tokens: usize,
         completion_tokens: usize,
     ) -> Self {
+        Self::usage_with_cache(id, model, prompt_tokens, completion_tokens, 0, false)
+    }
+
+    /// The same chunk, reporting what the prompt cache supplied (#1473).
+    ///
+    /// `/v1/completions` gained prompt-cache coverage with #1473, so its
+    /// streaming usage chunk carries the same `prompt_tokens_details` the
+    /// non-streaming response does. With the cache off the field is omitted,
+    /// so a client that predates the coverage sees an unchanged chunk.
+    ///
+    /// Used by: completions.rs (streaming path)
+    pub fn usage_with_cache(
+        id: String,
+        model: String,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        cached_tokens: usize,
+        cache_enabled: bool,
+    ) -> Self {
+        let prompt_tokens_details = if cache_enabled {
+            Some(super::response::PromptTokensDetails {
+                cached_tokens: cached_tokens as u64,
+            })
+        } else {
+            None
+        };
         Self {
             id,
             object: "text_completion".to_string(),
@@ -448,7 +474,7 @@ impl CompletionChunk {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
-                prompt_tokens_details: None,
+                prompt_tokens_details,
             }),
         }
     }

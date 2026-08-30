@@ -329,15 +329,21 @@ async fn non_stream_completion(
         }
     });
 
-    Ok(Json(CompletionResponse::new_with_logprobs(
-        request_id,
-        model_id,
-        result.text,
-        result.prompt_tokens,
-        result.completion_tokens,
-        Some(result.finish_reason),
-        logprobs,
-    )))
+    Ok(Json(
+        CompletionResponse::new_with_logprobs(
+            request_id,
+            model_id,
+            result.text,
+            result.prompt_tokens,
+            result.completion_tokens,
+            Some(result.finish_reason),
+            logprobs,
+        )
+        // #1473: this route now consults the prompt cache, so report what it
+        // supplied. Always present when the cache is on, so a client can tell
+        // "cache on, cold" from "cache off".
+        .with_cached_tokens(result.cached_tokens, state.prompt_cache.is_some()),
+    ))
 }
 
 async fn stream_completion(
@@ -378,6 +384,9 @@ async fn stream_completion(
     // no per-request `cache_prompt` field, so the server-wide switch governs.
     options.prompt_cache_ctx = build_raw_prompt_cache_context(&state, None);
 
+    // #1473: this route now consults the prompt cache, so the streaming usage
+    // chunk reports what it supplied, exactly as the chat stream does.
+    let prompt_cache_enabled = state.prompt_cache.is_some();
     // Extract include_usage before request is moved into the closure
     let include_usage = request
         .stream_options
@@ -511,11 +520,13 @@ async fn stream_completion(
 
         // Send usage chunk if requested (stream_options.include_usage)
         if include_usage && let Ok(ref r) = result {
-            let usage_chunk = CompletionChunk::usage(
+            let usage_chunk = CompletionChunk::usage_with_cache(
                 request_id_clone.clone(),
                 model_id_clone.clone(),
                 r.prompt_tokens,
                 r.completion_tokens,
+                r.cached_tokens,
+                prompt_cache_enabled,
             );
             let _ = finish_events.json(&usage_chunk);
         }
