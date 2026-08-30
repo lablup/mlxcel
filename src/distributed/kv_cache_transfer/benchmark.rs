@@ -109,11 +109,11 @@ impl TransferBenchConfig {
     pub fn total_size_str(&self) -> String {
         let bytes = self.total_bytes();
         if bytes >= 1024 * 1024 * 1024 {
-            format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+            format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
         } else if bytes >= 1024 * 1024 {
-            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+            format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
         } else {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
+            format!("{:.1} KiB", bytes as f64 / 1024.0)
         }
     }
 }
@@ -340,11 +340,11 @@ fn mean_duration(durations: &[Duration]) -> Duration {
 
 fn format_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        format!("{:.1}GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024 * 1024 {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1}MiB", bytes as f64 / (1024.0 * 1024.0))
     } else if bytes >= 1024 {
-        format!("{:.1}KB", bytes as f64 / 1024.0)
+        format!("{:.1}KiB", bytes as f64 / 1024.0)
     } else {
         format!("{bytes}B")
     }

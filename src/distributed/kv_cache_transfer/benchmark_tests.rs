@@ -51,7 +51,7 @@ fn bench_config_total_bytes() {
 fn bench_config_total_size_str() {
     let config = TransferBenchConfig::for_model(32, 8, 128, 2048);
     let size = config.total_size_str();
-    assert!(size.contains("MB") || size.contains("GB"));
+    assert_eq!(size, "256.0 MiB");
 }
 
 // --- generate_synthetic_entries ---
@@ -152,8 +152,8 @@ fn benchmark_result_summary_format() {
 
 #[test]
 fn format_bytes_ranges() {
-    assert!(format_bytes(500).contains("B"));
-    assert!(format_bytes(2048).contains("KB"));
-    assert!(format_bytes(5 * 1024 * 1024).contains("MB"));
-    assert!(format_bytes(2 * 1024 * 1024 * 1024).contains("GB"));
+    assert_eq!(format_bytes(500), "500B");
+    assert_eq!(format_bytes(2048), "2.0KiB");
+    assert_eq!(format_bytes(5 * 1024 * 1024), "5.0MiB");
+    assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0GiB");
 }
