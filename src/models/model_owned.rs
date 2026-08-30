@@ -132,6 +132,20 @@ impl<T> ModelOwnedSequenceState<T> {
         f(&mut internal)
     }
 
+    pub(crate) fn with_existing_sequence_state<R>(
+        &self,
+        seq_id: SequenceId,
+        f: impl FnOnce(&mut [T]) -> R,
+    ) -> Result<R, String> {
+        let mut sequence_state =
+            self.sequences.borrow_mut().remove(&seq_id).ok_or_else(|| {
+                format!("missing model-owned sequence state for sequence {seq_id}")
+            })?;
+        let result = f(&mut sequence_state);
+        self.sequences.borrow_mut().insert(seq_id, sequence_state);
+        Ok(result)
+    }
+
     pub(crate) fn with_batched_sequence_states<R>(
         &self,
         seq_ids: &[SequenceId],
@@ -159,6 +173,11 @@ impl<T> ModelOwnedSequenceState<T> {
 
     pub(crate) fn release_sequence_state(&self, seq_id: SequenceId) {
         self.sequences.borrow_mut().remove(&seq_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_sequence_state(&self, seq_id: SequenceId) -> bool {
+        self.sequences.borrow().contains_key(&seq_id)
     }
 }
 
@@ -321,4 +340,84 @@ where
     }?;
 
     Ok(Some(attn))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelOwnedSequenceState;
+    use mlxcel_core::cache::SequenceId;
+
+    #[test]
+    fn model_owned_sequence_state_preserves_fallback_between_steps() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+
+        state.with_sequence_state(None, |fallback| fallback[0] += 1);
+        state.with_sequence_state(None, |fallback| fallback[0] += 1);
+
+        let value = state.with_sequence_state(None, |fallback| fallback[0]);
+        assert_eq!(value, 2);
+    }
+
+    #[test]
+    fn model_owned_sequence_state_isolates_prepared_sequences() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+        let seq_a = SequenceId::from_raw(1220);
+        let seq_b = SequenceId::from_raw(1221);
+
+        state.prepare_sequence_state(seq_a, vec![10]);
+        state.prepare_sequence_state(seq_b, vec![20]);
+
+        state
+            .with_existing_sequence_state(seq_a, |a| a[0] += 1)
+            .expect("seq_a exists");
+        state
+            .with_existing_sequence_state(seq_b, |b| b[0] += 2)
+            .expect("seq_b exists");
+
+        assert_eq!(
+            state
+                .with_existing_sequence_state(seq_a, |a| a[0])
+                .expect("seq_a still exists"),
+            11
+        );
+        assert_eq!(
+            state
+                .with_existing_sequence_state(seq_b, |b| b[0])
+                .expect("seq_b still exists"),
+            22
+        );
+    }
+
+    #[test]
+    fn model_owned_sequence_state_refuses_missing_sequence_ids() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+        let seq = SequenceId::from_raw(1220);
+
+        let err = state
+            .with_existing_sequence_state(seq, |slot| slot[0])
+            .expect_err("unprepared sequence must fail closed");
+
+        assert!(
+            err.contains("missing model-owned sequence state for sequence seq-1220"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn model_owned_sequence_state_release_drops_prepared_slot() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+        let seq = SequenceId::from_raw(1220);
+
+        state.prepare_sequence_state(seq, vec![1]);
+        assert!(state.has_sequence_state(seq));
+
+        state.release_sequence_state(seq);
+
+        assert!(!state.has_sequence_state(seq));
+        assert!(
+            state
+                .with_existing_sequence_state(seq, |slot| slot[0])
+                .is_err()
+        );
+    }
 }

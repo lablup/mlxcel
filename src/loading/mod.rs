@@ -94,18 +94,61 @@ fn resolve_model_dir(model_path: &Path) -> PathBuf {
 fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
     match config.get("eos_token_id") {
         Some(serde_json::Value::Number(n)) => {
-            if let Some(id) = n.as_i64() {
-                vec![id as i32]
-            } else {
-                Vec::new()
+            if let Some(id) = n.as_i64()
+                && let Ok(id) = i32::try_from(id)
+            {
+                return vec![id];
             }
+            Vec::new()
         }
         Some(serde_json::Value::Array(arr)) => arr
             .iter()
-            .filter_map(|v| v.as_i64().map(|n| n as i32))
+            .filter_map(|v| v.as_i64())
+            .filter_map(|n| i32::try_from(n).ok())
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn tokenizer_eos_token_content(config: &serde_json::Value) -> Option<&str> {
+    match config.get("eos_token")? {
+        serde_json::Value::String(token) => Some(token.as_str()),
+        serde_json::Value::Object(obj) => obj.get("content")?.as_str(),
+        _ => None,
+    }
+}
+
+fn parse_tokenizer_config_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
+    let ids = parse_eos_token_ids(config);
+    if !ids.is_empty() {
+        return ids;
+    }
+
+    let Some(eos_token) = tokenizer_eos_token_content(config) else {
+        return Vec::new();
+    };
+    let Some(decoder) = config
+        .get("added_tokens_decoder")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    decoder
+        .iter()
+        .filter_map(|(id, token)| {
+            let content = match token {
+                serde_json::Value::String(content) => Some(content.as_str()),
+                serde_json::Value::Object(obj) => obj.get("content")?.as_str(),
+                _ => None,
+            }?;
+            if content == eos_token {
+                id.parse::<i32>().ok()
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Sampling and stop-token defaults read from `generation_config.json`.
@@ -377,12 +420,40 @@ pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefa
     parse_generation_config_defaults(&config)
 }
 
-/// Read EOS token IDs from generation_config.json
+/// Read EOS token IDs from the checkpoint sidecars.
 ///
-/// Returns the token IDs from the `eos_token_id` field, which can be either
-/// a single integer or an array of integers. Returns empty vec if not found.
+/// Prefer `generation_config.json` when present, then tokenizer-owned metadata
+/// in `tokenizer_config.json`, then `config.json`. Each `eos_token_id` field
+/// can be either a single integer or an array of integers. Tokenizer configs
+/// that declare only an `eos_token` string are resolved through
+/// `added_tokens_decoder`. Returns an empty vec if not found.
 pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
-    read_generation_config_defaults(model_dir).eos_token_ids
+    let model_dir = resolve_model_dir(model_dir);
+    let generation_ids = read_generation_config_defaults(&model_dir).eos_token_ids;
+    if !generation_ids.is_empty() {
+        return generation_ids;
+    }
+
+    for (file_name, parser) in [
+        (
+            "tokenizer_config.json",
+            parse_tokenizer_config_eos_token_ids as fn(&serde_json::Value) -> Vec<i32>,
+        ),
+        ("config.json", parse_eos_token_ids),
+    ] {
+        let Ok(content) = std::fs::read_to_string(model_dir.join(file_name)) else {
+            continue;
+        };
+        let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let ids = parser(&config);
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+
+    Vec::new()
 }
 
 /// Read the model's context window from `config.json`.
@@ -807,9 +878,10 @@ fn load_model_from_weights(model_path: &Path, weights: &mut WeightMap) -> Result
             weights,
         )?,
         WeightLoadRoute::Special => {
-            try_load_special_model_from_weights(model_type, &config_str, weights)?.ok_or_else(
-                || anyhow::anyhow!("Missing weight loader for model type: {:?}", model_type),
-            )?
+            try_load_special_model_from_weights(model_type, model_path, &config_str, weights)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Missing weight loader for model type: {:?}", model_type)
+                })?
         }
         WeightLoadRoute::ConfigBacked => {
             try_load_config_backed_model_from_weights(model_type, &config_str, weights)?
