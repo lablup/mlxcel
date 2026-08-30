@@ -2524,22 +2524,21 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             config.context_size,
             config.prompt_cache.snapshot_capacity_bytes,
         )
+        && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
     {
-        if rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes {
-            tracing::info!(
-                previous_snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
-                recommended_snapshot_capacity_bytes = rec.capacity_bytes,
-                representative_snapshot_bytes = rec.entry_bytes,
-                representative_tokens = rec.representative_tokens,
-                target_entries = rec.target_entries,
-                kv_bytes_at_representative_tokens = rec.kv_bytes_at_representative_tokens,
-                fixed_state_bytes = rec.fixed_state_bytes,
-                available_ceiling_bytes = rec.available_ceiling_bytes,
-                architecture = %rec.architecture,
-                "Applied model-aware prompt-cache snapshot capacity default"
-            );
-            config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
-        }
+        tracing::info!(
+            previous_snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
+            recommended_snapshot_capacity_bytes = rec.capacity_bytes,
+            representative_snapshot_bytes = rec.entry_bytes,
+            representative_tokens = rec.representative_tokens,
+            target_entries = rec.target_entries,
+            kv_bytes_at_representative_tokens = rec.kv_bytes_at_representative_tokens,
+            fixed_state_bytes = rec.fixed_state_bytes,
+            available_ceiling_bytes = rec.available_ceiling_bytes,
+            architecture = %rec.architecture,
+            "Applied model-aware prompt-cache snapshot capacity default"
+        );
+        config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
     }
 
     // hybrid SSM / linear-attention models cannot use APC because
