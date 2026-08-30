@@ -21,7 +21,10 @@ use mlxcel::video;
 use mlxcel::vision::merge::InputEmbeddings;
 use mlxcel::vision::processors::ImageProcessor;
 use mlxcel::vlm_prompt::ImageTokenBlockAction;
-use mlxcel::vlm_runtime::{VlmPreparationSummary, prepare_and_compute_vlm_embeddings_with_budget};
+use mlxcel::vlm_runtime::{
+    VlmPreparationSummary, compute_qwen_vl_media_embeddings,
+    prepare_and_compute_vlm_embeddings_with_budget, qwen_video_runtime,
+};
 
 use crate::MlxcelTokenizer;
 
@@ -44,12 +47,22 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
     match summary {
         VlmPreparationSummary::QwenVlm {
             image_blocks,
+            video_blocks,
             total_image_tokens,
+            total_video_tokens,
         } => {
-            println!(
-                "Inserted {} Qwen VL image token blocks ({} total image tokens)",
-                image_blocks, total_image_tokens
-            );
+            if video_blocks == 0 {
+                println!(
+                    "Inserted {} Qwen VL image token blocks ({} total image tokens)",
+                    image_blocks, total_image_tokens
+                );
+            } else {
+                println!(
+                    "Inserted {} Qwen VL image block(s) and {} video block(s) ({} image tokens, \
+                     {} video tokens)",
+                    image_blocks, video_blocks, total_image_tokens, total_video_tokens
+                );
+            }
         }
         VlmPreparationSummary::FalconOcr {
             image_blocks,
@@ -443,8 +456,17 @@ pub(crate) fn compute_vlm_embeddings(
                 target_fps,
             );
         }
+        if let Some(qwen) = qwen_video_runtime(model) {
+            return compute_qwen_vl_video_embeddings(
+                qwen,
+                prompt_tokens,
+                image_paths,
+                video_paths,
+                target_fps,
+            );
+        }
         return Err(anyhow::anyhow!(
-            "--video input is currently only supported by Gemma 4 and Kimi-VL VLMs"
+            "--video input is currently only supported by Gemma 4, Kimi-VL, and Qwen-VL VLMs"
         ));
     }
 
@@ -1253,6 +1275,63 @@ fn compute_kimi_vl_video_embeddings(
             total_image_tokens: stats.total_image_tokens,
         });
     }
+
+    Ok(Some(embeddings))
+}
+
+/// Compute video embeddings (and optional companion image embeddings) for the
+/// Qwen-VL family.
+///
+/// Decodes each video via `ffmpeg`, using the Qwen processor's
+/// `processor_config.json` frame bounds, then routes the decoded media through
+/// the same mixed image/video helper used by the server path.
+fn compute_qwen_vl_video_embeddings(
+    qwen: &dyn mlxcel::qwen_vl::QwenVlRuntime,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    video_paths: &[PathBuf],
+    target_fps: f64,
+) -> Result<Option<InputEmbeddings>> {
+    if !video::ffmpeg_available() {
+        return Err(anyhow::anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    let info = qwen.prompt_info();
+    let videos = video::load_videos_with_policy(
+        video_paths,
+        Some(target_fps),
+        None,
+        info.processor.video_sampling_policy(),
+    )
+    .map_err(|err| anyhow::anyhow!("Failed to load Qwen-VL video(s): {}", err))?;
+    let frame_slots: usize = videos.iter().map(Vec::len).sum();
+    println!(
+        "Loaded {} Qwen-VL video(s) ({} total frames after sampling).",
+        videos.len(),
+        frame_slots
+    );
+
+    let images: Vec<image::DynamicImage> = image_paths
+        .iter()
+        .map(|path| {
+            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !images.is_empty() {
+        println!("Loaded {} image(s).", images.len());
+    }
+
+    let (embeddings, stats) =
+        compute_qwen_vl_media_embeddings(qwen, prompt_tokens, &images, &videos, None, None)?;
+    print_preparation_summary(VlmPreparationSummary::QwenVlm {
+        image_blocks: stats.image_blocks,
+        video_blocks: stats.video_blocks,
+        total_image_tokens: stats.total_image_tokens,
+        total_video_tokens: stats.total_video_tokens,
+    });
 
     Ok(Some(embeddings))
 }

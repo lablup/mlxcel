@@ -80,6 +80,53 @@ fn smart_nframes_clamps_to_max_frames() {
 }
 
 #[test]
+fn smart_nframes_policy_rejects_instead_of_clamping_when_requested() {
+    let err = smart_nframes_with_policy(
+        10_000,
+        30.0,
+        Some(60.0),
+        None,
+        FrameSamplingPolicy {
+            min_frames: FPS_MIN_FRAMES,
+            max_frames: FPS_MAX_FRAMES,
+            frame_factor: FRAME_FACTOR,
+            reject_over_max: true,
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        VideoError::SampledFramesTooMany {
+            requested_frames: 10_000,
+            max_frames: FPS_MAX_FRAMES,
+        }
+    ));
+}
+
+#[test]
+fn smart_nframes_policy_uses_caller_frame_factor_for_minimum() {
+    let err = smart_nframes_with_policy(
+        3,
+        30.0,
+        Some(2.0),
+        None,
+        FrameSamplingPolicy {
+            min_frames: 4,
+            max_frames: 16,
+            frame_factor: 4,
+            reject_over_max: true,
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("need at least 4"),
+        "error must use the policy frame factor, got: {err}"
+    );
+}
+
+#[test]
 fn smart_nframes_clamps_to_total_frames() {
     // Total frames < FPS_MAX_FRAMES — output cannot exceed total.
     let n = smart_nframes(20, 30.0, Some(100.0), None).unwrap();

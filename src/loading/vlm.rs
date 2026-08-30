@@ -619,21 +619,48 @@ enum Qwen35VlmVariant {
     Moe,
 }
 
-fn qwen_vl_token_ids(full_config: &Value, defaults: QwenVisionTokenIds) -> QwenVisionTokenIds {
-    QwenVisionTokenIds {
-        image_token_id: full_config
-            .get("image_token_id")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(defaults.image_token_id as i64) as i32,
-        video_token_id: full_config
-            .get("video_token_id")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(defaults.video_token_id as i64) as i32,
-        vision_start_token_id: full_config
-            .get("vision_start_token_id")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(defaults.vision_start_token_id as i64) as i32,
+fn qwen_vl_token_ids(
+    full_config: &Value,
+    defaults: QwenVisionTokenIds,
+) -> anyhow::Result<QwenVisionTokenIds> {
+    Ok(QwenVisionTokenIds {
+        image_token_id: qwen_vl_token_id_or_default(
+            full_config,
+            "image_token_id",
+            defaults.image_token_id,
+        )?,
+        video_token_id: qwen_vl_token_id_or_default(
+            full_config,
+            "video_token_id",
+            defaults.video_token_id,
+        )?,
+        vision_start_token_id: qwen_vl_token_id_or_default(
+            full_config,
+            "vision_start_token_id",
+            defaults.vision_start_token_id,
+        )?,
+    })
+}
+
+fn qwen_vl_token_id_or_default(
+    full_config: &Value,
+    field: &str,
+    default: i32,
+) -> anyhow::Result<i32> {
+    let Some(raw) = full_config.get(field).and_then(|v| v.as_i64()) else {
+        return Ok(default);
+    };
+    let id = i32::try_from(raw).map_err(|_| {
+        anyhow::anyhow!(
+            "Qwen-family config.json has `{field}={raw}`, which does not fit in a 32-bit token id"
+        )
+    })?;
+    if id < 0 {
+        anyhow::bail!(
+            "Qwen-family config.json has `{field}={id}`, but token ids must be non-negative"
+        );
     }
+    Ok(id)
 }
 
 /// `image_token_id` for the Qwen3.5 VLM family, used only when the config
@@ -656,8 +683,8 @@ const QWEN35_VIDEO_TOKEN_ID: i64 = 248057;
 /// Requiring the key turns that into a load-time error.
 ///
 /// `image_token_id` and `video_token_id` keep their defaults: those constants
-/// do match every shipped checkpoint, and both ids are also validated
-/// downstream by the image-token insertion count.
+/// do match every shipped checkpoint, and both ids are still checked against
+/// the checkpoint vocabulary before the model is accepted.
 ///
 /// `vocab_size` bounds all three ids: each is required to be non-negative and
 /// below the checkpoint's own vocabulary. Without this, an out-of-range value
@@ -687,11 +714,19 @@ fn qwen35_vl_token_ids(
 
     let image_token_id = match full_config.get("image_token_id").and_then(|v| v.as_i64()) {
         Some(raw) => qwen35_vl_token_id_in_range("image_token_id", raw, vocab_size)?,
-        None => QWEN35_IMAGE_TOKEN_ID as i32,
+        None => qwen35_vl_token_id_in_range(
+            "image_token_id default",
+            QWEN35_IMAGE_TOKEN_ID,
+            vocab_size,
+        )?,
     };
     let video_token_id = match full_config.get("video_token_id").and_then(|v| v.as_i64()) {
         Some(raw) => qwen35_vl_token_id_in_range("video_token_id", raw, vocab_size)?,
-        None => QWEN35_VIDEO_TOKEN_ID as i32,
+        None => qwen35_vl_token_id_in_range(
+            "video_token_id default",
+            QWEN35_VIDEO_TOKEN_ID,
+            vocab_size,
+        )?,
     };
 
     Ok(QwenVisionTokenIds {
@@ -735,27 +770,45 @@ fn wrap_qwen35_vlm(vlm: vision::Qwen35VLModel, variant: Qwen35VlmVariant) -> Loa
 }
 
 fn qwen_vl_processor<T: QwenVisionConfigExt>(
+    model_path: &Path,
     vision_config: &T,
-) -> vision::processors::qwen2_vl::Qwen2VLProcessor {
-    vision::processors::qwen2_vl::Qwen2VLProcessor::new(
+) -> anyhow::Result<vision::processors::qwen2_vl::Qwen2VLProcessor> {
+    let video_config = qwen_video_processor_config(model_path)?;
+    Ok(vision::processors::qwen2_vl::Qwen2VLProcessor::new(
         vision_config.patch_size(),
         vision_config.temporal_patch_size(),
         vision_config.spatial_merge_size(),
     )
+    .with_video_config(video_config))
 }
 
 fn qwen_vl_processor_with_norm<T: QwenVisionConfigExt>(
+    model_path: &Path,
     vision_config: &T,
     mean: [f32; 3],
     std: [f32; 3],
-) -> vision::processors::qwen2_vl::Qwen2VLProcessor {
-    vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
-        vision_config.patch_size(),
-        vision_config.temporal_patch_size(),
-        vision_config.spatial_merge_size(),
-        mean,
-        std,
+) -> anyhow::Result<vision::processors::qwen2_vl::Qwen2VLProcessor> {
+    let video_config = qwen_video_processor_config(model_path)?;
+    Ok(
+        vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
+            vision_config.patch_size(),
+            vision_config.temporal_patch_size(),
+            vision_config.spatial_merge_size(),
+            mean,
+            std,
+        )
+        .with_video_config(video_config),
     )
+}
+
+fn qwen_video_processor_config(
+    model_path: &Path,
+) -> anyhow::Result<vision::processors::qwen2_vl::QwenVideoProcessorConfig> {
+    let processor_config = read_optional_model_json(model_path, "processor_config.json");
+    vision::processors::qwen2_vl::QwenVideoProcessorConfig::from_processor_config(
+        processor_config.as_ref(),
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 fn rewrite_qwen3_vl_weight_key(key: String, moe_experts: bool) -> String {

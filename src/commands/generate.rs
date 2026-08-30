@@ -809,17 +809,25 @@ fn load_cli_prompt(
 
 /// Number of `<|video|>` content parts to render into the CLI chat prompt.
 ///
-/// Only the encoder-free `gemma4_unified` model expands a real `video_token_id`
-/// placeholder inside the user turn (issue #164); every other family (including
-/// the ViT-backed `gemma4` VLM, which splices video frames after BOS via a
-/// sentinel) keeps `0` so its prompt rendering is byte-for-byte unchanged. On
-/// any detection failure we conservatively return `0`.
+/// Encoder-free `gemma4_unified` and Qwen-VL families expand a real
+/// `video_token_id` placeholder inside the user turn. Other families
+/// (including the ViT-backed `gemma4` VLM, which splices video frames after BOS
+/// via a sentinel) keep `0` so their prompt rendering stays byte-for-byte
+/// unchanged. On any detection failure we conservatively return `0`.
 fn cli_video_content_part_count(model_path: &Path, num_videos: usize) -> usize {
     if num_videos == 0 {
         return 0;
     }
     match mlxcel::models::get_model_type(model_path) {
-        Ok(mlxcel::models::ModelType::Gemma4Unified) => num_videos,
+        Ok(
+            mlxcel::models::ModelType::Gemma4Unified
+            | mlxcel::models::ModelType::Qwen2VL
+            | mlxcel::models::ModelType::Qwen25VL
+            | mlxcel::models::ModelType::Qwen3VL
+            | mlxcel::models::ModelType::Qwen3VLMoe
+            | mlxcel::models::ModelType::Qwen35VLM
+            | mlxcel::models::ModelType::Qwen35MoeVLM,
+        ) => num_videos,
         _ => 0,
     }
 }
