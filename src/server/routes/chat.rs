@@ -416,7 +416,7 @@ pub(crate) async fn non_stream_chat_completion(
         &request,
         state.config.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
-        state.supports_snapshot_reuse(),
+        state.should_render_history_boundary_snapshot(),
     )
     .await
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;
@@ -823,7 +823,7 @@ async fn stream_chat_completion(
         &request,
         state.config.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
-        state.supports_snapshot_reuse(),
+        state.should_render_history_boundary_snapshot(),
     )
     .await;
     let prepared = match prepared {

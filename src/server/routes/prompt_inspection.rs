@@ -95,7 +95,7 @@ async fn render_chat_prompt(
         request,
         state.config.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
-        state.supports_snapshot_reuse(),
+        state.should_render_history_boundary_snapshot(),
     )
     .await
     .map(|prepared| prepared.prompt)
