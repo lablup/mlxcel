@@ -20,6 +20,7 @@
 
 use anyhow::Result;
 use mlxcel_core::weights::WeightMap;
+use std::path::Path;
 
 use crate::LoadedModel;
 use crate::model_metadata;
@@ -104,6 +105,7 @@ pub(crate) fn is_special_weight_model_type(model_type: ModelType) -> bool {
 
 pub(crate) fn try_load_special_model_from_weights(
     model_type: ModelType,
+    model_path: &Path,
     config_str: &str,
     weights: &mut WeightMap,
 ) -> Result<Option<LoadedModel>> {
@@ -206,13 +208,15 @@ pub(crate) fn try_load_special_model_from_weights(
                 models::NemotronNASModel::from_weights,
                 LoadedModel::NemotronNAS
             ),
-            ModelType::RecurrentGemma => load_owned_model_from_config!(
-                config_str,
-                weights,
-                models::recurrent_gemma::GriffinConfig,
-                models::GriffinModel::from_weights,
-                LoadedModel::RecurrentGemma
-            ),
+            ModelType::RecurrentGemma => {
+                let args: models::recurrent_gemma::GriffinConfig =
+                    super::parse_model_config(config_str)?;
+                let owned = copy_weight_map(weights);
+                let mut model = models::GriffinModel::from_weights(args, owned)
+                    .map_err(|err| anyhow::anyhow!("{}", err))?;
+                model.set_eos_token_ids(super::read_eos_token_ids(model_path));
+                LoadedModel::RecurrentGemma(model)
+            }
             _ => unreachable!(
                 "owned-config helper called for non-owned model: {:?}",
                 model_type
@@ -245,8 +249,9 @@ pub(crate) fn try_load_special_model_from_weights(
             let mut owned = copy_weight_map(weights);
             owned = models::KimiLinearModel::sanitize_weights(owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
-            let model = models::KimiLinearModel::from_weights(&owned, &args)
+            let mut model = models::KimiLinearModel::from_weights(&owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
+            model.set_eos_token_ids(super::read_eos_token_ids(model_path));
             LoadedModel::KimiLinear(model)
         }
         SpecialWeightLoaderKind::Longcat => {
@@ -265,8 +270,9 @@ pub(crate) fn try_load_special_model_from_weights(
         }
         SpecialWeightLoaderKind::Rwkv7 => {
             let args: models::rwkv7::Rwkv7Config = super::parse_model_config(config_str)?;
-            let model = models::Rwkv7::from_weights(weights, args)
+            let mut model = models::Rwkv7::from_weights(weights, args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
+            model.set_eos_token_ids(super::read_eos_token_ids(model_path));
             LoadedModel::Rwkv7(model)
         }
     }))

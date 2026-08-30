@@ -18,8 +18,13 @@
 //! quantized per-head projection (issue #958), and the rejection of a
 //! `kv_b_proj` plane that carries `.scales` with no `.biases` (issue #1026).
 
-use super::{KimiLinearConfig, KimiLinearModel, LinearAttnConfig, MultiLinear};
+use super::{
+    KimiDeltaCache, KimiLinearCache, KimiLinearConfig, KimiLinearModel, LinearAttnConfig,
+    MultiLinear,
+};
+use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::weights::WeightMap;
 
 /// Honest 4-bit geometry: `packed_in * 32 == bits * num_groups * group_size`
@@ -128,6 +133,7 @@ fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
         num_expert_group: 1,
         topk_group: 1,
         quantization: None,
+        eos_token_id: Some(serde_json::json!([50, 51])),
     }
 }
 
@@ -337,4 +343,82 @@ fn kimi_linear_multi_linear_infers_its_quantization_mode_from_the_biases_plane()
         .expect("a non-quantized per-head projection must load with an unset pair");
     assert!(!loaded.is_quantized);
     assert_eq!(loaded.mode, "affine");
+}
+
+fn mixed_kimi_caches() -> Vec<KimiLinearCache> {
+    vec![
+        KimiLinearCache::Delta(KimiDeltaCache::new()),
+        KimiLinearCache::MLA(mlxcel_core::layers::KVCache::new()),
+    ]
+}
+
+#[test]
+fn kimi_linear_eos_token_ids_come_from_config_metadata() {
+    let config = mla_config(16);
+
+    assert_eq!(
+        crate::models::parse_optional_eos_token_ids(&config.eos_token_id),
+        vec![50, 51]
+    );
+}
+
+#[test]
+fn kimi_linear_model_owned_sequence_state_preserves_greedy_decode_cache() {
+    let state = ModelOwnedSequenceState::new(mixed_kimi_caches());
+    let seq = SequenceId::from_raw(1220);
+
+    state.prepare_sequence_state(seq, mixed_kimi_caches());
+    state
+        .with_existing_sequence_state(seq, |caches| match &mut caches[0] {
+            KimiLinearCache::Delta(cache) => {
+                cache.q_conv_state =
+                    Some(mlxcel_core::zeros(&[1, 3, 8], mlxcel_core::dtype::FLOAT32));
+                cache.advance(1);
+            }
+            KimiLinearCache::MLA(_) => panic!("expected Delta cache"),
+        })
+        .expect("prepared KimiLinear sequence must exist");
+
+    state
+        .with_existing_sequence_state(seq, |caches| match &mut caches[0] {
+            KimiLinearCache::Delta(cache) => {
+                assert!(
+                    cache.q_conv_state.is_some(),
+                    "decode must see the cache populated by the previous token"
+                );
+                assert_eq!(cache.offset, 1);
+                cache.ssm_state = Some(mlxcel_core::zeros(
+                    &[1, 2, 4, 8],
+                    mlxcel_core::dtype::FLOAT32,
+                ));
+                cache.advance(1);
+            }
+            KimiLinearCache::MLA(_) => panic!("expected Delta cache"),
+        })
+        .expect("prepared KimiLinear sequence must still exist");
+
+    state
+        .with_existing_sequence_state(seq, |caches| match &caches[0] {
+            KimiLinearCache::Delta(cache) => {
+                assert!(
+                    cache.ssm_state.is_some(),
+                    "cache writes must survive across consecutive greedy steps"
+                );
+                assert_eq!(cache.offset, 2);
+            }
+            KimiLinearCache::MLA(_) => panic!("expected Delta cache"),
+        })
+        .expect("prepared KimiLinear sequence must still exist");
+}
+
+#[test]
+fn kimi_linear_model_owned_sequence_state_refuses_missing_sequence_id() {
+    let state = ModelOwnedSequenceState::new(mixed_kimi_caches());
+    let seq = SequenceId::from_raw(1220);
+
+    let err = state
+        .with_existing_sequence_state(seq, |_| {})
+        .expect_err("unprepared KimiLinear sequence must fail closed");
+
+    assert!(err.contains("missing model-owned sequence state"));
 }
