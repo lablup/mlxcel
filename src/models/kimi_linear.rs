@@ -25,6 +25,7 @@
 use crate::models::gated_delta::{gated_delta_update, scaled_fast_rms_norm_no_weight};
 use crate::models::switch_layers::SwitchGLU;
 use crate::models::switch_layers::validate_expert_quantization_params;
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -33,6 +34,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
+
+use super::model_owned::ModelOwnedSequenceState;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +102,8 @@ pub struct KimiLinearConfig {
     #[serde(default = "default_one_usize")]
     pub topk_group: usize,
     pub quantization: Option<Quantization>,
+    #[serde(default)]
+    pub eos_token_id: Option<serde_json::Value>,
 }
 
 fn default_one_usize() -> usize {
@@ -435,6 +440,19 @@ impl KimiLinearCache {
             KimiLinearCache::Delta(d) => d.offset,
         }
     }
+}
+
+fn make_kimi_caches_from_layers(layers: &[KimiDecoderLayer]) -> Vec<KimiLinearCache> {
+    layers
+        .iter()
+        .map(|layer| {
+            if layer.is_linear {
+                KimiLinearCache::Delta(KimiDeltaCache::new())
+            } else {
+                KimiLinearCache::MLA(KVCache::new())
+            }
+        })
+        .collect()
 }
 
 // KimiMLAAttention - Multi-head Latent Attention.
@@ -1083,6 +1101,8 @@ pub struct KimiLinearModel {
     pub tie_word_embeddings: bool,
     _ssm_layer_idx: usize,
     attn_layer_idx: usize,
+    sequence_state: ModelOwnedSequenceState<KimiLinearCache>,
+    eos_token_ids: Vec<i32>,
 }
 
 impl KimiLinearModel {
@@ -1091,12 +1111,18 @@ impl KimiLinearModel {
         input_ids: &MlxArray,
         caches: &mut [KimiLinearCache],
     ) -> UniquePtr<MlxArray> {
+        assert_eq!(
+            caches.len(),
+            self.layers.len(),
+            "KimiLinear cache cardinality must match layer count"
+        );
+
         let mut h = self.embed_tokens.forward(input_ids);
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1];
 
         // Create masks
-        let attn_mask = if l > 1 {
+        let attn_mask = if l > 1 && !caches.is_empty() {
             let offset = caches[self.attn_layer_idx].offset();
             Some(create_causal_mask(l, offset))
         } else {
@@ -1121,16 +1147,7 @@ impl KimiLinearModel {
     }
 
     pub fn make_kimi_caches(&self) -> Vec<KimiLinearCache> {
-        self.layers
-            .iter()
-            .map(|l| {
-                if l.is_linear {
-                    KimiLinearCache::Delta(KimiDeltaCache::new())
-                } else {
-                    KimiLinearCache::MLA(KVCache::new())
-                }
-            })
-            .collect()
+        make_kimi_caches_from_layers(&self.layers)
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, KimiLinearConfig), String> {
@@ -1162,7 +1179,8 @@ impl KimiLinearModel {
         let weights = Self::sanitize_weights(weights, &config)?;
 
         println!("[KimiLinear] Building model...");
-        let model = Self::from_weights(&weights, &config)?;
+        let mut model = Self::from_weights(&weights, &config)?;
+        model.set_eos_token_ids(crate::loading::read_eos_token_ids(model_dir));
 
         println!("[KimiLinear] Model loaded successfully");
         Ok((model, config))
@@ -1437,6 +1455,9 @@ impl KimiLinearModel {
             .find(|i| !config.is_linear_layer(*i))
             .unwrap_or(0);
 
+        let internal_caches = make_kimi_caches_from_layers(&layers);
+        let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
+
         Ok(Self {
             embed_tokens,
             layers,
@@ -1445,7 +1466,36 @@ impl KimiLinearModel {
             tie_word_embeddings: config.tie_word_embeddings,
             _ssm_layer_idx: ssm_layer_idx,
             attn_layer_idx,
+            sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            eos_token_ids,
         })
+    }
+
+    pub(crate) fn set_eos_token_ids(&mut self, eos_token_ids: Vec<i32>) {
+        if !eos_token_ids.is_empty() {
+            self.eos_token_ids = eos_token_ids;
+        }
+    }
+
+    fn forward_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        let seq_len = mlxcel_core::array_shape(input_ids)[1];
+        if seq_id.is_none() && seq_len > 1 {
+            self.sequence_state
+                .replace_internal(self.make_kimi_caches());
+        }
+
+        if let Some(seq_id) = seq_id {
+            self.sequence_state
+                .with_existing_sequence_state(seq_id, |internal| self.forward(input_ids, internal))
+                .unwrap_or_else(|err| panic!("KimiLinear {err}"))
+        } else {
+            self.sequence_state
+                .with_sequence_state(None, |internal| self.forward(input_ids, internal))
+        }
     }
 }
 
@@ -1464,12 +1514,14 @@ impl LanguageModel for KimiLinearModel {
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
-        vec![2] // Default EOS
+        self.eos_token_ids.clone()
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Return dummy KV caches for trait compatibility
-        // KimiLinear uses mixed cache types (MLA KVCache + DeltaCache) internally
+        self.sequence_state
+            .replace_internal(self.make_kimi_caches());
+        // Return dummy KV caches for trait compatibility; KimiLinear keeps
+        // mixed MLA/Delta state in model-owned slots.
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
@@ -1479,9 +1531,35 @@ impl LanguageModel for KimiLinearModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // KimiLinear manages its own mixed caches internally
-        let mut caches = self.make_kimi_caches();
-        self.forward(input_ids, &mut caches)
+        self.forward_for_sequence(input_ids, None)
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.layers.len())
+    }
+
+    fn reset_runtime_state(&self) {
+        self.sequence_state
+            .replace_internal(self.make_kimi_caches());
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.make_kimi_caches());
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence(input_ids, seq_id)
     }
 }
 

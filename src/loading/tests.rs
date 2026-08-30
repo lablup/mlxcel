@@ -150,6 +150,73 @@ fn read_eos_token_ids_reads_generation_config() {
 }
 
 #[test]
+fn read_eos_token_ids_falls_back_to_tokenizer_config_ids() {
+    let model_dir = temp_path("tokenizer_config_eos_id");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("tokenizer_config.json"),
+        r#"{ "eos_token_id": [20, 21] }"#,
+    )
+    .unwrap();
+
+    assert_eq!(read_eos_token_ids(&model_dir), vec![20, 21]);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn read_eos_token_ids_resolves_tokenizer_config_eos_token_content() {
+    let model_dir = temp_path("tokenizer_config_eos_token");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("tokenizer_config.json"),
+        r#"{
+            "eos_token": { "content": "<|end|>" },
+            "added_tokens_decoder": {
+                "30": { "content": "<|pad|>" },
+                "31": { "content": "<|end|>" }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(read_eos_token_ids(&model_dir), vec![31]);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn read_eos_token_ids_prefers_generation_config_over_tokenizer_config() {
+    let model_dir = temp_path("generation_precedence");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("generation_config.json"),
+        r#"{ "eos_token_id": [10, 11] }"#,
+    )
+    .unwrap();
+    fs::write(
+        model_dir.join("tokenizer_config.json"),
+        r#"{ "eos_token_id": [20, 21] }"#,
+    )
+    .unwrap();
+
+    assert_eq!(read_eos_token_ids(&model_dir), vec![10, 11]);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn read_eos_token_ids_falls_back_to_model_config() {
+    let model_dir = temp_path("config_json_eos");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), r#"{ "eos_token_id": 40 }"#).unwrap();
+
+    assert_eq!(read_eos_token_ids(&model_dir), vec![40]);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn resolve_model_dir_uses_parent_for_model_files() {
     let model_dir = temp_path("model_dir");
     fs::create_dir_all(&model_dir).unwrap();

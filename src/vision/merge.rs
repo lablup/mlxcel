@@ -20,7 +20,7 @@
 //! Strategies and current family users:
 //! - `prepare_inputs_for_multimodal()`
 //!   - Gemma3 and PaliGemma-style paths that need additive 4D attention masks
-//! - `merge_llava()`
+//! - `merge_llava()` / `merge_llava_any()`
 //!   - LLaVA/Bunny, Aya Vision, Pixtral/Mistral3, Gemma3n, Qwen-VL,
 //!     Phi3V, Molmo2, and similar token-replacement paths
 //!
@@ -210,6 +210,58 @@ pub fn merge_llava(
     InputEmbeddings {
         inputs_embeds: final_embedding,
         attention_mask_4d: None, // LLaVA uses standard causal masking
+    }
+}
+
+/// Merge vision features into any of several visual placeholder token IDs.
+///
+/// Qwen-VL uses distinct `<|image_pad|>` and `<|video_pad|>` tokens, but the
+/// projected feature tensor is one concatenated media stream in prompt order.
+/// The scatter mask therefore has to be the union of both token IDs; using only
+/// the image token silently leaves video features unmerged.
+pub fn merge_llava_any(
+    visual_token_ids: &[i32],
+    image_features: &MlxArray,
+    inputs_embeds: &MlxArray,
+    input_ids: &MlxArray,
+) -> InputEmbeddings {
+    if visual_token_ids.is_empty() {
+        return InputEmbeddings {
+            inputs_embeds: mlxcel_core::copy(inputs_embeds),
+            attention_mask_4d: None,
+        };
+    }
+
+    let feat_shape = mlxcel_core::array_shape(image_features);
+    let embed_dim = feat_shape[feat_shape.len() - 1];
+    let total_patches = feat_shape
+        .iter()
+        .take(feat_shape.len() - 1)
+        .product::<i32>();
+    let flat_features = mlxcel_core::reshape(image_features, &[total_patches, embed_dim]);
+    let embed_dtype = mlxcel_core::array_dtype(inputs_embeds);
+    let flat_features = mlxcel_core::astype(&flat_features, embed_dtype);
+
+    let mut is_visual = {
+        let token_arr =
+            mlxcel_core::full_f32(&[1], visual_token_ids[0] as f32, mlxcel_core::dtype::INT32);
+        let token_arr = mlxcel_core::astype(&token_arr, mlxcel_core::dtype::INT32);
+        mlxcel_core::equal(input_ids, &token_arr)
+    };
+    for &token_id in &visual_token_ids[1..] {
+        let token_arr = mlxcel_core::full_f32(&[1], token_id as f32, mlxcel_core::dtype::INT32);
+        let token_arr = mlxcel_core::astype(&token_arr, mlxcel_core::dtype::INT32);
+        let mask = mlxcel_core::equal(input_ids, &token_arr);
+        is_visual = mlxcel_core::logical_or(&is_visual, &mask);
+    }
+
+    let visual_mask_expanded = mlxcel_core::expand_dims(&is_visual, -1);
+    let visual_mask_expanded = mlxcel_core::repeat(&visual_mask_expanded, embed_dim, -1);
+    let final_embedding = masked_scatter(inputs_embeds, &visual_mask_expanded, &flat_features);
+
+    InputEmbeddings {
+        inputs_embeds: final_embedding,
+        attention_mask_4d: None,
     }
 }
 

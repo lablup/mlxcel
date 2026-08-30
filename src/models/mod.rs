@@ -60,6 +60,22 @@ pub mod rope_overrides;
 pub mod rope_utils;
 pub mod switch_layers;
 
+pub(crate) fn parse_optional_eos_token_ids(value: &Option<serde_json::Value>) -> Vec<i32> {
+    match value {
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+            .map(|id| vec![id])
+            .unwrap_or_default(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_i64())
+            .filter_map(|id| i32::try_from(id).ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 // Model implementations (mlxcel-core based)
 pub mod afmoe;
 pub mod apertus;

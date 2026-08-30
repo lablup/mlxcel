@@ -2525,15 +2525,15 @@ fn prepare_nemotron_h_nano_omni_audio_embeddings(
 /// (images + video frames) tensor through the same vision tower path that
 /// powers static image inputs.
 ///
-/// Routing-side guarantees (the route layer in `chat.rs` short-circuits
-/// non-Gemma 4 video requests with a 400):
-/// * The model is a `Gemma4VLM` — non-Gemma 4 models never reach this path.
+/// Routing-side guarantees (the route layer in `chat.rs` admits only models
+/// whose startup media support advertises video):
+/// * The model is one of the video-capable VLM families below.
 /// * The video paths have already been canonicalised and validated against
 ///   `MLXCEL_VIDEO_DIR_ALLOWLIST` by [`crate::server::media::extract_chat_video_paths`].
 ///
-/// Defence-in-depth: this function still rejects non-Gemma 4 models with a
-/// clean error so a future caller that bypasses the route guard cannot
-/// silently corrupt a non-VLM run.
+/// Defence-in-depth: this function still rejects non-video models with a clean
+/// error so a future caller that bypasses the route guard cannot silently
+/// corrupt a non-VLM run.
 fn prepare_request_video_embeddings(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
@@ -2561,11 +2561,18 @@ fn prepare_request_video_embeddings(
         return prepare_kimi_vl_video_embeddings(kimi, prompt_tokens, images, videos);
     }
 
+    // Qwen-VL video path (issue #1166): shared image/video patchifier,
+    // prompt-order placeholder expansion, and exact scatter cardinality.
+    if let Some(qwen) = crate::vlm_runtime::qwen_video_runtime(model) {
+        return prepare_qwen_vl_video_embeddings(qwen, prompt_tokens, images, videos);
+    }
+
     let gemma4_vl = match model {
         LoadedModel::Gemma4VLM(model) => model,
         _ => {
             return Err(anyhow!(
-                "video inputs are only supported by Gemma 4 and Kimi-VL VLM models in this build"
+                "video inputs are only supported by Gemma 4, Kimi-VL, and Qwen-VL VLM models in \
+                 this build"
             ));
         }
     };
@@ -2748,6 +2755,75 @@ fn prepare_kimi_vl_video_embeddings(
         prompt_tokens,
         &decoded_images,
         &decoded_videos,
+    )?;
+
+    Ok(Some(embeddings))
+}
+
+/// Resolve `videos` into Qwen-VL video embeddings (issue #1166).
+///
+/// Uses the same fd-backed decode path as Gemma/Kimi and the same shared Qwen
+/// media helper as the CLI. The Qwen processor's `processor_config.json`
+/// controls default FPS and frame bounds; requests that would exceed
+/// `max_frames` are rejected before generation instead of silently clamped.
+fn prepare_qwen_vl_video_embeddings(
+    qwen: &dyn crate::qwen_vl::QwenVlRuntime,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    videos: &[crate::server::media::ResolvedVideo],
+) -> Result<Option<InputEmbeddings>> {
+    use crate::multimodal::video;
+
+    if !video::ffmpeg_available() {
+        return Err(anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    let info = qwen.prompt_info();
+    let policy = info.processor.video_sampling_policy();
+    let limits = video::VideoLimits::from_env();
+    let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
+    for resolved in videos.iter() {
+        let fps = resolved.fps.unwrap_or(info.processor.video_default_fps);
+        let frames = video::load_video_source_with_policy(
+            &resolved.source,
+            Some(fps),
+            None,
+            policy,
+            &limits,
+        )
+        .map_err(|err| {
+            anyhow!(
+                "Failed to load Qwen-VL video {:?}: {}",
+                resolved.source.canonical_path(),
+                err
+            )
+        })?;
+        decoded_videos.push(frames);
+    }
+
+    let total_frames: usize = decoded_videos.iter().map(Vec::len).sum();
+    tracing::info!(
+        "Qwen-VL video request: decoded {} video(s) ({} total frames after sampling)",
+        decoded_videos.len(),
+        total_frames
+    );
+
+    let decoded_images: Vec<image::DynamicImage> = if images.is_empty() {
+        Vec::new()
+    } else {
+        decode_request_images(images)?
+    };
+
+    let (embeddings, _stats) = crate::vlm_runtime::compute_qwen_vl_media_embeddings(
+        qwen,
+        prompt_tokens,
+        &decoded_images,
+        &decoded_videos,
+        None,
+        None,
     )?;
 
     Ok(Some(embeddings))

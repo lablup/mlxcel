@@ -1008,12 +1008,22 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // The ViT-backed Gemma 4 VLM and the encoder-free Gemma 4 Unified model
     // both consume `video_url` content blocks (issue #164). Kimi-VL / Kimi-VL
     // 2.5 (MoonViT 3D) also consume video via the shared Kimi media path
-    // (issue #551). Mirror the dispatch in
+    // (issue #551). Qwen-VL video follows the same Qwen runtime used by CLI
+    // prompt expansion (#1166). Mirror the dispatch in
     // `commands/generate_vlm::compute_vlm_embeddings` and add new variants here
     // when more video-capable models land.
     let video = matches!(
         model_type,
-        ModelType::Gemma4VLM | ModelType::Gemma4Unified | ModelType::KimiVL | ModelType::KimiK25
+        ModelType::Gemma4VLM
+            | ModelType::Gemma4Unified
+            | ModelType::KimiVL
+            | ModelType::KimiK25
+            | ModelType::Qwen2VL
+            | ModelType::Qwen25VL
+            | ModelType::Qwen3VL
+            | ModelType::Qwen3VLMoe
+            | ModelType::Qwen35VLM
+            | ModelType::Qwen35MoeVLM
     );
     if video {
         tracing::info!(
@@ -2572,6 +2582,30 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // and AppState read/write.
     let batch_metrics = Arc::new(BatchMetrics::new());
     let batch_observability = Arc::new(BatchObservability::new());
+
+    if config.prompt_cache.is_enabled()
+        && !config.prompt_cache.snapshot_capacity_bytes_explicit
+        && let Some(rec) = crate::server::prompt_cache::recommend_model_snapshot_capacity(
+            &startup.model_path,
+            config.context_size,
+            config.prompt_cache.snapshot_capacity_bytes,
+        )
+        && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
+    {
+        tracing::info!(
+            previous_snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
+            recommended_snapshot_capacity_bytes = rec.capacity_bytes,
+            representative_snapshot_bytes = rec.entry_bytes,
+            representative_tokens = rec.representative_tokens,
+            target_entries = rec.target_entries,
+            kv_bytes_at_representative_tokens = rec.kv_bytes_at_representative_tokens,
+            fixed_state_bytes = rec.fixed_state_bytes,
+            available_ceiling_bytes = rec.available_ceiling_bytes,
+            architecture = %rec.architecture,
+            "Applied model-aware prompt-cache snapshot capacity default"
+        );
+        config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
+    }
 
     // hybrid SSM / linear-attention models cannot use APC because
     // their recurrent state cannot be reconstructed from a token-prefix hash.

@@ -36,8 +36,8 @@ use std::time::Duration;
 use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
 
 use crate::server::prompt_cache::{
-    ApcConfig, ApcHashAlgo, CacheEntry, MultimodalDigest, PromptCacheConfig, PromptCacheKey,
-    PromptCacheStore,
+    ApcConfig, ApcHashAlgo, CacheEntry, ModelSnapshotEntry, MultimodalDigest, PromptCacheConfig,
+    PromptCacheKey, PromptCacheStore,
 };
 use crate::server::routes::cache::{
     CacheResetResponse, CacheStatsResponse, PagedBlockStats, RejectReasonStats,
@@ -105,6 +105,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         apc_active_entries: 3,
         snapshot_entries: 2,
         snapshot_bytes: 2048,
+        snapshot_bytes_per_entry: 1024,
         snapshot_capacity_bytes: 1024 * 1024,
         snapshot_max_entries: 4096,
         snapshot_hits: 4,
@@ -116,6 +117,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         snapshot_evictions_lru: 1,
         snapshot_evictions_ttl: 0,
         snapshot_supersedes: 3,
+        snapshot_self_evictions: 1,
         snapshot_rejections_oversized: 0,
         paged_block_size: 32,
         paged_blocks_allocated: 100,
@@ -161,7 +163,9 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"total_blocks_stored\":6",
         "\"unique_block_hashes\":5",
         "\"apc_active_entries\":3",
+        "\"snapshot_bytes_per_entry\":1024",
         "\"snapshot_supersedes\":3",
+        "\"snapshot_self_evictions\":1",
         "\"paged_block_size\":32",
         "\"paged_blocks_allocated\":100",
         "\"paged_blocks_live\":80",
@@ -272,6 +276,7 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         apc_active_entries: 0,
         snapshot_entries: 0,
         snapshot_bytes: 0,
+        snapshot_bytes_per_entry: 0,
         snapshot_capacity_bytes: cfg.snapshot_capacity_bytes,
         snapshot_max_entries: cfg.snapshot_max_entries,
         snapshot_hits: 0,
@@ -283,6 +288,7 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         snapshot_evictions_lru: 0,
         snapshot_evictions_ttl: 0,
         snapshot_supersedes: 0,
+        snapshot_self_evictions: 0,
         snapshot_rejections_oversized: 0,
         paged_block_size: 0,
         paged_blocks_allocated: 0,
@@ -318,6 +324,40 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
     // Paged pool defaults to all-zero when no worker reported gauges.
     assert_eq!(resp.paged_block_size, 0);
     assert_eq!(resp.paged_block_budget, 0);
+}
+
+#[test]
+fn build_stats_response_reports_snapshot_bytes_per_entry() {
+    let cfg = PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(3600), 4)
+        .with_snapshot_limits(4096, 64, Duration::from_secs(3600));
+    let store = PromptCacheStore::with_config(cfg.clone());
+    let first: Vec<i32> = (0..16).collect();
+    let second: Vec<i32> = (100..116).collect();
+    store
+        .insert_snapshot(
+            &make_key("m", &first),
+            ModelSnapshotEntry::new_for_test(first.clone(), "mamba", 1024),
+        )
+        .unwrap();
+    store
+        .insert_snapshot(
+            &make_key("m", &second),
+            ModelSnapshotEntry::new_for_test(second.clone(), "mamba", 2048),
+        )
+        .unwrap();
+
+    let resp = super::super::cache::build_stats_response(
+        Some(&store),
+        &cfg,
+        PagedBlockStats::default(),
+        RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
+    );
+
+    assert_eq!(resp.snapshot_entries, 2);
+    assert_eq!(resp.snapshot_bytes, 3072);
+    assert_eq!(resp.snapshot_bytes_per_entry, 1536);
 }
 
 #[test]

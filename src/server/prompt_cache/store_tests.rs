@@ -932,6 +932,58 @@ fn supersede_frees_bytes_before_the_capacity_check() {
 }
 
 #[test]
+fn snapshot_capacity_self_eviction_is_counted_and_warned_once_per_session() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(12_000));
+    let first = tokens(0, 16);
+    let second = tokens(100, 16);
+    let third = tokens(200, 16);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &first),
+            ModelSnapshotEntry::new_for_test(first.clone(), "qwen3-next", 8_000)
+                .with_origin(SnapshotOrigin::Completion),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_millis(2));
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &second),
+            ModelSnapshotEntry::new_for_test(second.clone(), "qwen3-next", 8_000)
+                .with_origin(SnapshotOrigin::Boundary),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 1);
+    assert_eq!(stats.snapshot_evictions_lru, 1);
+    assert_eq!(stats.snapshot_self_evictions, 1);
+
+    thread::sleep(Duration::from_millis(2));
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &third),
+            ModelSnapshotEntry::new_for_test(third.clone(), "qwen3-next", 8_000)
+                .with_origin(SnapshotOrigin::Completion),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_evictions_lru, 2);
+    assert_eq!(stats.snapshot_self_evictions, 2);
+    assert_eq!(
+        store
+            .inner
+            .read()
+            .expect("prompt cache inner lock")
+            .warned_snapshot_self_evictions
+            .len(),
+        1,
+        "operator WARN should be emitted once for the affected session"
+    );
+}
+
+#[test]
 fn idempotent_insert_replaces_existing_entry() {
     let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
     let toks = tokens(0, 16);

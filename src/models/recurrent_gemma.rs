@@ -24,6 +24,7 @@
 // - logits_soft_cap for output softcapping
 // - embeddings_scale_by_sqrt_dim option
 
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
     GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
@@ -33,6 +34,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
+
+use super::model_owned::ModelOwnedSequenceState;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +80,8 @@ pub struct GriffinConfig {
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
+    #[serde(default)]
+    pub eos_token_id: Option<serde_json::Value>,
 }
 
 fn default_rms_norm_eps() -> f32 {
@@ -148,6 +153,19 @@ impl Default for RGLRUCache {
 pub enum GriffinLayerCache {
     Attention(RotatingKVCache),
     Recurrent(RGLRUCache),
+}
+
+fn make_griffin_caches(block_types: &[String], window_size: usize) -> Vec<GriffinLayerCache> {
+    block_types
+        .iter()
+        .map(|t| {
+            if t == "attention" {
+                GriffinLayerCache::Attention(RotatingKVCache::new(window_size as i32))
+            } else {
+                GriffinLayerCache::Recurrent(RGLRUCache::new())
+            }
+        })
+        .collect()
 }
 
 // RNN Scan Operation.
@@ -622,6 +640,11 @@ impl GriffinBackbone {
 
         // Forward through layers
         if let Some(cache_slice) = caches {
+            assert_eq!(
+                cache_slice.len(),
+                self.layers.len(),
+                "RecurrentGemma cache cardinality must match layer count"
+            );
             for (layer, cache) in self.layers.iter().zip(cache_slice.iter_mut()) {
                 h = layer.forward(&h, mask.as_deref(), cache);
             }
@@ -652,6 +675,8 @@ pub struct GriffinModel {
     config: GriffinConfig,
     model: GriffinBackbone,
     lm_head: Option<UnifiedLinear>,
+    sequence_state: ModelOwnedSequenceState<GriffinLayerCache>,
+    eos_token_ids: Vec<i32>,
 }
 
 impl GriffinModel {
@@ -660,19 +685,7 @@ impl GriffinModel {
     }
 
     pub fn make_griffin_caches(&self) -> Vec<GriffinLayerCache> {
-        self.model
-            .block_types
-            .iter()
-            .map(|t| {
-                if t == "attention" {
-                    GriffinLayerCache::Attention(RotatingKVCache::new(
-                        self.config.attention_window_size as i32,
-                    ))
-                } else {
-                    GriffinLayerCache::Recurrent(RGLRUCache::new())
-                }
-            })
-            .collect()
+        make_griffin_caches(&self.model.block_types, self.config.attention_window_size)
     }
 
     pub fn forward_with_caches(
@@ -731,7 +744,8 @@ impl GriffinModel {
 
         // Build model
         println!("[Griffin] Building model...");
-        let model = Self::from_weights(config.clone(), weights)?;
+        let mut model = Self::from_weights(config.clone(), weights)?;
+        model.set_eos_token_ids(crate::loading::read_eos_token_ids(path));
 
         println!("[Griffin] Model loaded successfully");
         Ok((model, config))
@@ -964,6 +978,9 @@ impl GriffinModel {
             None
         };
 
+        let internal_caches = make_griffin_caches(&block_types, config.attention_window_size);
+        let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
+
         let model = GriffinBackbone {
             embed_tokens,
             layers,
@@ -978,7 +995,39 @@ impl GriffinModel {
             config,
             model,
             lm_head,
+            sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            eos_token_ids,
         })
+    }
+
+    pub(crate) fn set_eos_token_ids(&mut self, eos_token_ids: Vec<i32>) {
+        if !eos_token_ids.is_empty() {
+            self.eos_token_ids = eos_token_ids;
+        }
+    }
+
+    fn forward_for_sequence(
+        &self,
+        input: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        let seq_len = mlxcel_core::array_shape(input)[1];
+        if seq_id.is_none() && seq_len > 1 {
+            self.sequence_state
+                .replace_internal(self.make_griffin_caches());
+        }
+
+        if let Some(seq_id) = seq_id {
+            self.sequence_state
+                .with_existing_sequence_state(seq_id, |internal| {
+                    self.forward_with_caches(input, Some(internal))
+                })
+                .unwrap_or_else(|err| panic!("RecurrentGemma {err}"))
+        } else {
+            self.sequence_state.with_sequence_state(None, |internal| {
+                self.forward_with_caches(input, Some(internal))
+            })
+        }
     }
 }
 
@@ -990,13 +1039,15 @@ impl LanguageModel for GriffinModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Note: Griffin uses mixed cache types (KVCache + RGLRUCache)
-        // For LanguageModel trait compatibility, we use internal caching
-        self.forward_with_caches(input, None)
+        // Griffin uses model-owned mixed cache types (KVCache + RGLRUCache);
+        // the trait KVCache slice is only a compatibility placeholder.
+        self.forward_for_sequence(input, None)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Return KV caches for compatibility - actual usage should use make_griffin_caches()
+        self.sequence_state
+            .replace_internal(self.make_griffin_caches());
+        // Return dummy KV caches for compatibility; actual state is model-owned.
         (0..self.config.num_hidden_layers)
             .map(|_| KVCache::new())
             .collect()
@@ -1014,7 +1065,116 @@ impl LanguageModel for GriffinModel {
         false // RecurrentGemma uses internal RGLRUCache state, not compatible with per-sequence KV isolation
     }
 
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.config.num_hidden_layers)
+    }
+
+    fn reset_runtime_state(&self) {
+        self.sequence_state
+            .replace_internal(self.make_griffin_caches());
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.make_griffin_caches());
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence(input_ids, seq_id)
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
-        vec![1] // Gemma EOS token
+        self.eos_token_ids.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GriffinLayerCache, make_griffin_caches};
+    use crate::models::model_owned::ModelOwnedSequenceState;
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::dtype;
+
+    #[test]
+    fn recurrent_gemma_eos_token_ids_come_from_config_metadata() {
+        let config: super::GriffinConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "recurrent_gemma",
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "vocab_size": 32,
+            "eos_token_id": [20, 21]
+        }))
+        .expect("RecurrentGemma config must parse");
+
+        assert_eq!(
+            crate::models::parse_optional_eos_token_ids(&config.eos_token_id),
+            vec![20, 21]
+        );
+    }
+
+    #[test]
+    fn recurrent_gemma_model_owned_sequence_state_preserves_greedy_decode_cache() {
+        let block_types = vec!["recurrent".to_string(), "attention".to_string()];
+        let state = ModelOwnedSequenceState::new(make_griffin_caches(&block_types, 8));
+        let seq = SequenceId::from_raw(1220);
+
+        state.prepare_sequence_state(seq, make_griffin_caches(&block_types, 8));
+        state
+            .with_existing_sequence_state(seq, |caches| match &mut caches[0] {
+                GriffinLayerCache::Recurrent(cache) => {
+                    cache.conv_cache = Some(mlxcel_core::zeros(&[1, 3, 8], dtype::FLOAT32));
+                }
+                GriffinLayerCache::Attention(_) => panic!("expected recurrent cache"),
+            })
+            .expect("prepared RecurrentGemma sequence must exist");
+
+        state
+            .with_existing_sequence_state(seq, |caches| match &mut caches[0] {
+                GriffinLayerCache::Recurrent(cache) => {
+                    assert!(
+                        cache.conv_cache.is_some(),
+                        "decode must see the cache populated by the previous token"
+                    );
+                    cache.state_cache = Some(mlxcel_core::zeros(&[1, 8], dtype::FLOAT32));
+                }
+                GriffinLayerCache::Attention(_) => panic!("expected recurrent cache"),
+            })
+            .expect("prepared RecurrentGemma sequence must still exist");
+
+        state
+            .with_existing_sequence_state(seq, |caches| match &caches[0] {
+                GriffinLayerCache::Recurrent(cache) => assert!(
+                    cache.state_cache.is_some(),
+                    "cache writes must survive across consecutive greedy steps"
+                ),
+                GriffinLayerCache::Attention(_) => panic!("expected recurrent cache"),
+            })
+            .expect("prepared RecurrentGemma sequence must still exist");
+    }
+
+    #[test]
+    fn recurrent_gemma_model_owned_sequence_state_refuses_missing_sequence_id() {
+        let block_types = vec!["recurrent".to_string()];
+        let state = ModelOwnedSequenceState::new(make_griffin_caches(&block_types, 8));
+        let seq = SequenceId::from_raw(1220);
+
+        let err = state
+            .with_existing_sequence_state(seq, |_| {})
+            .expect_err("unprepared RecurrentGemma sequence must fail closed");
+
+        assert!(err.contains("missing model-owned sequence state"));
     }
 }

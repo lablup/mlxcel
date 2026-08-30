@@ -16,12 +16,12 @@
 use super::decode_xla_cli_images;
 use super::{
     CliSamplingFlagState, apply_user_chat_template, apply_vlm_chat_template,
-    build_cli_sampling_config_with_flags, cli_pipeline_requested, estimate_delta_label_and_bytes,
-    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    reject_dflash_drafter_offline, resolve_cli_pipeline_assignments, resolve_cli_prompt,
-    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
-    validate_pipeline_parallel_args, validate_tensor_parallel_args,
-    validate_xla_cli_image_cardinality, validate_xla_output_audio,
+    build_cli_sampling_config_with_flags, cli_pipeline_requested, cli_video_content_part_count,
+    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
+    memory_preflight_ctx_len, reject_dflash_drafter_offline, resolve_cli_pipeline_assignments,
+    resolve_cli_prompt, should_route_offline_mtp, strip_trailing_eos,
+    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
+    validate_tensor_parallel_args, validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use mlxcel_core::cache::KVCacheMode;
@@ -277,7 +277,7 @@ fn apply_user_chat_template_wraps_prompt_as_user_message() {
         "{{ messages[0].role }}: {{ messages[0].content }}".to_string(),
     );
 
-    let rendered = apply_user_chat_template(&processor, "Hello");
+    let rendered = apply_user_chat_template(&processor, "Hello").unwrap();
 
     assert_eq!(rendered, "user: Hello");
 }
@@ -286,7 +286,7 @@ fn apply_user_chat_template_wraps_prompt_as_user_message() {
 fn resolve_cli_prompt_skips_template_when_disabled() {
     let processor = ChatTemplateProcessor::with_template("wrapped".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0, 0, 0);
+    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0, 0, 0).unwrap();
 
     assert_eq!(prompt, "Hello");
 }
@@ -295,9 +295,25 @@ fn resolve_cli_prompt_skips_template_when_disabled() {
 fn resolve_cli_prompt_falls_back_on_template_errors() {
     let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0);
+    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0).unwrap();
 
     assert_eq!(prompt, "Hello");
+}
+
+#[test]
+fn resolve_cli_prompt_returns_template_rejections() {
+    let processor = ChatTemplateProcessor::with_template(
+        "{% if messages[0].content == 'bad' %}{{ raise_exception('unsupported caller value') }}{% endif %}ok"
+            .to_string(),
+    );
+
+    let err = resolve_cli_prompt("bad", false, Some(&processor), 0, 0, 0)
+        .expect_err("template rejection must stop CLI prompt resolution");
+
+    assert_eq!(
+        err.to_string(),
+        "chat template rejected the request: unsupported caller value"
+    );
 }
 
 #[test]
@@ -315,12 +331,27 @@ fn vlm_chat_template_renders_video_content_part_in_user_turn() {
     let processor = ChatTemplateProcessor::with_template(template);
 
     // One video + the question: marker precedes the text within the turn.
-    let prompt = apply_vlm_chat_template(&processor, "Describe this video.", 0, 1, 0);
+    let prompt = apply_vlm_chat_template(&processor, "Describe this video.", 0, 1, 0).unwrap();
     assert_eq!(prompt, "user: <VID>Describe this video.");
 
     // Image + video together render in image-then-video order.
-    let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1, 0);
+    let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1, 0).unwrap();
     assert_eq!(mixed, "user: <IMG><VID>Q");
+}
+
+#[test]
+fn cli_video_content_part_count_enables_qwen_vl_videos() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = serde_json::json!({
+        "model_type": "qwen3_vl",
+        "architectures": ["Qwen3VLForConditionalGeneration"],
+        "text_config": {"model_type": "qwen3_vl"},
+        "vision_config": {"model_type": "qwen3_vl"}
+    });
+    fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+
+    assert_eq!(cli_video_content_part_count(dir.path(), 2), 2);
+    assert_eq!(cli_video_content_part_count(dir.path(), 0), 0);
 }
 
 #[test]
@@ -337,7 +368,7 @@ fn vlm_chat_template_omits_video_when_template_lacks_video_support() {
     assert!(!processor.supports_video_content());
 
     // num_videos > 0 but the template has no video branch: no marker emitted.
-    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 1, 0);
+    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 1, 0).unwrap();
     assert_eq!(prompt, "user: Q");
 }
 
@@ -362,11 +393,11 @@ fn vlm_chat_template_renders_audio_content_part_in_user_turn() {
     // One audio clip + the question: the audio marker follows the text within
     // the user turn, so `expand_gemma4_audio_tokens` wraps it right after the
     // prompt, matching the server splice and the reference frame.
-    let prompt = apply_vlm_chat_template(&processor, "Transcribe this audio.", 0, 0, 1);
+    let prompt = apply_vlm_chat_template(&processor, "Transcribe this audio.", 0, 0, 1).unwrap();
     assert_eq!(prompt, "user: Transcribe this audio.<|audio|>");
 
     // Image + audio together render as image (before text) then text then audio.
-    let mixed = apply_vlm_chat_template(&processor, "Transcribe this audio.", 1, 0, 1);
+    let mixed = apply_vlm_chat_template(&processor, "Transcribe this audio.", 1, 0, 1).unwrap();
     assert_eq!(mixed, "user: <IMG>Transcribe this audio.<|audio|>");
 }
 
@@ -383,7 +414,7 @@ fn vlm_chat_template_omits_audio_when_template_lacks_audio_support() {
     assert!(!processor.supports_audio_content());
 
     // num_audios > 0 but the template has no audio branch: no marker emitted.
-    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 0, 1);
+    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 0, 1).unwrap();
     assert_eq!(prompt, "user: Q");
 }
 
@@ -404,7 +435,7 @@ fn resolve_cli_prompt_routes_audio_through_vlm_template() {
 
     // Audio follows the text within the user turn (issue #797), matching the
     // reference frame and the server audio-after-text splice.
-    let prompt = resolve_cli_prompt("Transcribe.", false, Some(&processor), 0, 0, 1);
+    let prompt = resolve_cli_prompt("Transcribe.", false, Some(&processor), 0, 0, 1).unwrap();
     assert_eq!(prompt, "user: Transcribe.<|audio|>");
 }
 
@@ -419,8 +450,8 @@ fn resolve_cli_prompt_keeps_text_path_for_audio_on_plain_template() {
     );
     assert!(!processor.supports_audio_content());
 
-    let with_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 1);
-    let without_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0);
+    let with_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 1).unwrap();
+    let without_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0).unwrap();
     assert_eq!(with_audio, without_audio);
     assert_eq!(with_audio, "user: Hello");
 }
@@ -466,7 +497,7 @@ fn gemma4_unified_audio_prompt_matches_reference_framing() {
     assert!(processor.supports_audio_content());
 
     const PROMPT: &str = "이 음성을 들리는 그대로 한국어로 받아쓰기 하세요.";
-    let prompt = apply_vlm_chat_template(&processor, PROMPT, 0, 0, 1);
+    let prompt = apply_vlm_chat_template(&processor, PROMPT, 0, 0, 1).unwrap();
 
     // The audio marker lands AFTER the prompt text (issue #797).
     let text_pos = prompt.find("받아쓰기").expect("prompt text present");
@@ -500,7 +531,7 @@ fn gemma4_unified_audio_prompt_matches_reference_framing() {
     // (`expand_gemma4_audio_tokens_for_server`). At the marker level that is the
     // text-only prompt with `<|audio|>` inserted before the user turn's first
     // `<turn|>`. It must equal the CLI audio prompt.
-    let text_only = apply_user_chat_template(&processor, PROMPT);
+    let text_only = apply_user_chat_template(&processor, PROMPT).unwrap();
     let server_equiv = text_only.replacen("<turn|>", "<|audio|><turn|>", 1);
     assert_eq!(
         prompt, server_equiv,

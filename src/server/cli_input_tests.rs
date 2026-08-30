@@ -823,6 +823,10 @@ fn prompt_cache_snapshot_limits_cli_override_defaults() {
         startup.prompt_cache.snapshot_capacity_bytes,
         3 * 1024 * 1024 * 1024
     );
+    assert!(
+        startup.prompt_cache.snapshot_capacity_bytes_explicit,
+        "CLI snapshot capacity must remain authoritative over model-aware startup defaults"
+    );
     assert_eq!(startup.prompt_cache.snapshot_max_entries, 64);
     assert_eq!(startup.prompt_cache.snapshot_ttl.as_secs(), 900);
 }
@@ -837,6 +841,10 @@ fn prompt_cache_snapshot_limits_default_when_unset() {
     assert_eq!(
         startup.prompt_cache.snapshot_capacity_bytes,
         PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES
+    );
+    assert!(
+        !startup.prompt_cache.snapshot_capacity_bytes_explicit,
+        "unset snapshot capacity is eligible for model-aware startup sizing"
     );
     assert_eq!(
         startup.prompt_cache.snapshot_max_entries,

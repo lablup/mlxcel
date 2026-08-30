@@ -404,12 +404,67 @@ impl fmt::Display for ScalingAnalysis {
 // Benchmark execution
 // ---------------------------------------------------------------------------
 
+trait BenchmarkTimer {
+    fn wait(&mut self, duration: Duration);
+
+    fn measure<F>(&mut self, body: F) -> Duration
+    where
+        F: FnOnce(&mut Self);
+}
+
+#[derive(Default)]
+struct RealBenchmarkTimer;
+
+impl BenchmarkTimer for RealBenchmarkTimer {
+    fn wait(&mut self, duration: Duration) {
+        spin_wait(duration);
+    }
+
+    fn measure<F>(&mut self, body: F) -> Duration
+    where
+        F: FnOnce(&mut Self),
+    {
+        let start = Instant::now();
+        body(self);
+        start.elapsed()
+    }
+}
+
+#[derive(Default)]
+struct NominalBenchmarkTimer {
+    elapsed: Duration,
+}
+
+impl BenchmarkTimer for NominalBenchmarkTimer {
+    fn wait(&mut self, duration: Duration) {
+        self.elapsed += duration;
+    }
+
+    fn measure<F>(&mut self, body: F) -> Duration
+    where
+        F: FnOnce(&mut Self),
+    {
+        let start = self.elapsed;
+        body(self);
+        self.elapsed - start
+    }
+}
+
 /// Run a single TP benchmark scenario.
 ///
 /// Simulates TP inference with the given configuration by running scheduler
 /// and executor in lockstep, measuring throughput, latency, and all-reduce
 /// overhead using simulated collectives.
 pub fn run_tp_benchmark(config: &TPBenchmarkConfig, tp_size: usize) -> Result<TPBenchmarkResult> {
+    let mut timer = RealBenchmarkTimer;
+    run_tp_benchmark_with_timer(config, tp_size, &mut timer)
+}
+
+fn run_tp_benchmark_with_timer<T: BenchmarkTimer>(
+    config: &TPBenchmarkConfig,
+    tp_size: usize,
+    timer: &mut T,
+) -> Result<TPBenchmarkResult> {
     config.validate()?;
 
     let batch_size = config.batch_sizes.first().copied().unwrap_or(1);
@@ -434,33 +489,33 @@ pub fn run_tp_benchmark(config: &TPBenchmarkConfig, tp_size: usize) -> Result<TP
 
     // Warmup.
     for _ in 0..config.warmup_steps {
-        spin_wait(total_step_time);
+        timer.wait(total_step_time);
     }
 
     // Measure TTFT: time for the first token (prefill of seq_len tokens).
-    let ttft_start = Instant::now();
     // Prefill simulates processing seq_len tokens through the model.
     let prefill_steps = (seq_len + batch_size - 1) / batch_size.max(1);
-    for _ in 0..prefill_steps {
-        spin_wait(total_step_time);
-    }
-    let ttft = ttft_start.elapsed();
+    let ttft = timer.measure(|timer| {
+        for _ in 0..prefill_steps {
+            timer.wait(total_step_time);
+        }
+    });
 
     // Measure decode steps.
-    let decode_start = Instant::now();
     let mut total_ar_time = Duration::ZERO;
     let mut ar_ops = 0u64;
 
-    for _ in 0..config.decode_steps {
-        spin_wait(compute_per_step);
-        if tp_size > 1 {
-            let ar_start = Instant::now();
-            spin_wait(ar_overhead_per_step);
-            total_ar_time += ar_start.elapsed();
-            ar_ops += 2; // attention all-reduce + FFN all-reduce
+    let decode_time = timer.measure(|timer| {
+        for _ in 0..config.decode_steps {
+            timer.wait(compute_per_step);
+            if tp_size > 1 {
+                total_ar_time += timer.measure(|timer| {
+                    timer.wait(ar_overhead_per_step);
+                });
+                ar_ops += 2; // attention all-reduce + FFN all-reduce
+            }
         }
-    }
-    let decode_time = decode_start.elapsed();
+    });
 
     let total_tokens = batch_size as u64 * config.decode_steps as u64;
     let total_time = ttft + decode_time;
@@ -566,11 +621,30 @@ pub fn run_scaling_analysis(config: &TPBenchmarkConfig) -> Result<ScalingAnalysi
 ///
 /// Tests each combination of model hidden size and TP size, comparing
 /// throughput against the single-device baseline.
+/// Uses nominal simulated durations rather than host wall-clock measurements
+/// so model-size crossover decisions stay deterministic under runner load.
 pub fn run_crossover_analysis(
     base_config: &TPBenchmarkConfig,
     model_hidden_sizes: &[usize],
     tp_sizes: &[usize],
 ) -> Result<CrossoverAnalysis> {
+    run_crossover_analysis_with_timer::<NominalBenchmarkTimer>(
+        base_config,
+        model_hidden_sizes,
+        tp_sizes,
+    )
+}
+
+fn run_crossover_analysis_with_timer<T>(
+    base_config: &TPBenchmarkConfig,
+    model_hidden_sizes: &[usize],
+    tp_sizes: &[usize],
+) -> Result<CrossoverAnalysis>
+where
+    T: BenchmarkTimer + Default,
+{
+    base_config.validate()?;
+
     let mut entries = Vec::new();
 
     for &hidden_size in model_hidden_sizes {
@@ -590,8 +664,11 @@ pub fn run_crossover_analysis(
         config.layer_compute_time = compute_time;
         config.allreduce_time = ar_time;
 
-        // Baseline: tp_size=1.
-        let baseline = run_tp_benchmark(&config, 1)?;
+        // Baseline: tp_size=1. Crossover analysis is a model comparison,
+        // so it uses injected nominal time instead of wall-clock measurements.
+        // The general TP benchmark path still uses `RealBenchmarkTimer`.
+        let mut baseline_timer = T::default();
+        let baseline = run_tp_benchmark_with_timer(&config, 1, &mut baseline_timer)?;
 
         for &tp_size in tp_sizes {
             if tp_size == 1 {
@@ -611,7 +688,8 @@ pub fn run_crossover_analysis(
                 continue;
             }
 
-            let result = run_tp_benchmark(&config, tp_size)?;
+            let mut result_timer = T::default();
+            let result = run_tp_benchmark_with_timer(&config, tp_size, &mut result_timer)?;
             let ideal_throughput = baseline.throughput_tok_per_sec * tp_size as f64;
             let scaling_efficiency = if ideal_throughput > 0.0 {
                 result.throughput_tok_per_sec / ideal_throughput

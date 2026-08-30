@@ -445,10 +445,10 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,
 
-    /// Video file paths for VLMs that support video inputs (e.g. Gemma4
-    /// with video). Pass the flag multiple times for multiple videos:
-    /// `--video clip1.mp4 --video clip2.mp4`. Frame extraction requires
-    /// `ffmpeg` on PATH.
+    /// Video file paths for VLMs that support video inputs (e.g. Gemma4,
+    /// Kimi-VL, and Qwen-VL). Pass the flag multiple times for multiple
+    /// videos: `--video clip1.mp4 --video clip2.mp4`. Frame extraction
+    /// requires `ffmpeg` on PATH.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub(crate) video: Vec<PathBuf>,
 

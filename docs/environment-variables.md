@@ -206,7 +206,7 @@ These variables are applied when the corresponding CLI flag is absent.
 | `MLXCEL_PROMPT_CACHE_MAX_ENTRIES` | unsigned integer | `1024` | `--prompt-cache-max-entries` |
 | `MLXCEL_PROMPT_CACHE_TTL` | unsigned integer seconds | `3600` | `--prompt-cache-ttl` |
 | `MLXCEL_PROMPT_CACHE_MIN_PREFIX` | unsigned integer tokens | `32` | `--prompt-cache-min-prefix` |
-| `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` | unsigned integer bytes | `536870912` | `--prompt-cache-snapshot-capacity-bytes` |
+| `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` | unsigned integer bytes | model-aware, fallback `536870912` | `--prompt-cache-snapshot-capacity-bytes` |
 | `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` | unsigned integer | `4096` | `--prompt-cache-snapshot-max-entries` |
 | `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` | unsigned integer seconds | `7200` | `--prompt-cache-snapshot-ttl` |
 | `MLXCEL_ENABLE_VLM_PREFIX_CACHE` | boolean | `false` | `--enable-vlm-prefix-cache` |
@@ -222,6 +222,20 @@ Automatic Prefix Caching is on by default; pass `--apc-enabled=false` or set
 is then reusable only when it is fully contained in the new request). The
 `APC_*` names mirror the upstream `mlx-vlm` env surface.
 
+When `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` and
+`--prompt-cache-snapshot-capacity-bytes` are both absent, startup may raise the
+512 MiB fallback from the loaded model's `config.json`. The implicit default
+sizes six representative exact-prefix snapshots at `min(context_size, 8192)`
+tokens, including architecture-aware attention KV plus fixed recurrent state
+for hybrid snapshot families, and clamps that raise to one quarter of detected
+available memory. An explicit env/CLI value is never replaced. For Qwen3.8-27B
+4-bit this avoids the old default that could fit only one roughly 500-600 MiB
+snapshot and then LRU-evict the live session chain.
+
+`GET /v1/cache/stats` reports `snapshot_bytes_per_entry` and
+`snapshot_self_evictions` so operators can distinguish healthy same-session
+supersede from capacity thrash.
+
 `MLXCEL_ENABLE_VLM_PREFIX_CACHE` opts same-image multimodal follow-up turns into
 prompt-prefix sharing while leaving text-only prompt-cache behavior unchanged.
 
@@ -229,17 +243,15 @@ The three `SNAPSHOT` variables budget a separate store: whole recurrent-state
 snapshots for SSM and linear-attention families, which cannot share KV blocks
 and are therefore kept as exact-prefix entries. A snapshot's size tracks model
 width rather than prompt length, from a few MiB on a small model to 300 MB or
-more on a 30B-class one, so the 512 MiB default holds many conversations for a
-small model and barely one for a large one. Size it from measurement: serve one
-conversation, read `snapshot_bytes` from `/v1/cache/stats`, and give the store
-two to three times that so concurrent conversations do not evict each other.
-Once a turn's snapshot strictly extends the previous turn's token vector the
-newer one supersedes the older, and `snapshot_entries` settles at one per
-conversation. The current donate path does not meet that condition yet: the
-stored vector ends with generated tokens that the next turn's re-rendered
-prompt does not reproduce, so for now every turn still holds its own entry.
-Budget for the turns you expect, and watch `snapshot_supersedes` on
-`/v1/cache/stats` to see when collapse starts.
+more on a 30B-class one. The implicit model-aware default covers the common
+case, but explicit deployment caps should still be sized from measurement:
+serve one conversation, read `snapshot_bytes_per_entry` from
+`/v1/cache/stats`, and give the store enough headroom for the concurrent
+sessions and boundary/completion producers you expect. Once a turn's snapshot
+strictly extends the previous turn's token vector, the newer one supersedes the
+older within the same producer chain and `snapshot_supersedes` advances. If
+`snapshot_self_evictions` advances instead, capacity pressure is evicting the
+same session that just donated a snapshot and the capacity should be raised.
 
 ## Server audio admission variables
 
@@ -315,6 +327,10 @@ Use CLI flags such as `--cache-type-k`, `--cache-type-v`, `--kv-cache-mode`,
 `--turbo-boundary-v`, and the batch KV quantization flags when possible. The
 variables below are useful for service-level defaults and A/B experiments. See
 [TurboQuant KV cache](turbo-kv-cache.md) for the user-facing mode descriptions.
+For model-state snapshot families, non-FP16 attention KV modes are not silently
+serialized into snapshot entries today: donation logs a named warning and skips
+snapshot reuse until the family has sidecar snapshot support. The requested
+mode remains visible through startup logs and `kv_cache_mode_effective`.
 
 | Variable | Values | Default | Notes |
 |----------|--------|---------|-------|

@@ -59,6 +59,10 @@ pub struct PromptCacheConfig {
     pub apc: ApcConfig,
     /// Byte budget dedicated to exact-prefix recurrent/model-owned snapshots.
     pub snapshot_capacity_bytes: usize,
+    /// Whether [`Self::snapshot_capacity_bytes`] came from an operator flag/env
+    /// or explicit builder call. Startup may raise the compiled-in default with
+    /// a model-aware recommendation, but must not override an operator cap.
+    pub snapshot_capacity_bytes_explicit: bool,
     /// Maximum live exact-prefix snapshot entries.
     pub snapshot_max_entries: usize,
     /// Time-to-live for snapshot entries since their last successful restore.
@@ -195,6 +199,7 @@ impl PromptCacheConfig {
             min_prefix_tokens,
             apc: ApcConfig::default(),
             snapshot_capacity_bytes: Self::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+            snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
         }
@@ -208,6 +213,17 @@ impl PromptCacheConfig {
         self
     }
 
+    /// Builder-style: override exact-prefix snapshot byte capacity.
+    ///
+    /// This marks the value as operator-supplied so startup's model-aware
+    /// default sizing does not replace it.
+    #[must_use]
+    pub fn with_snapshot_capacity_bytes(mut self, capacity_bytes: usize) -> Self {
+        self.snapshot_capacity_bytes = capacity_bytes;
+        self.snapshot_capacity_bytes_explicit = true;
+        self
+    }
+
     /// Builder-style: override exact-prefix snapshot limits.
     #[must_use]
     pub fn with_snapshot_limits(
@@ -217,6 +233,7 @@ impl PromptCacheConfig {
         ttl: Duration,
     ) -> Self {
         self.snapshot_capacity_bytes = capacity_bytes;
+        self.snapshot_capacity_bytes_explicit = true;
         self.snapshot_max_entries = max_entries;
         self.snapshot_ttl = ttl;
         self
@@ -253,6 +270,7 @@ impl Default for PromptCacheConfig {
             min_prefix_tokens: Self::DEFAULT_MIN_PREFIX_TOKENS,
             apc: ApcConfig::default(),
             snapshot_capacity_bytes: Self::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+            snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: Self::DEFAULT_SNAPSHOT_MAX_ENTRIES,
             snapshot_ttl: Duration::from_secs(Self::DEFAULT_SNAPSHOT_TTL_SECONDS),
         }
@@ -305,13 +323,17 @@ pub struct PromptCacheStats {
     /// so capacity tuning can tell deterministic in-session replacement from
     /// genuine budget pressure.
     pub snapshot_supersedes: u64,
+    /// Lifetime count of snapshot inserts whose own session chain immediately
+    /// lost a snapshot to the snapshot LRU cap. A non-zero value means the
+    /// store could not retain one live snapshot per producer chain.
+    pub snapshot_self_evictions: u64,
 }
 
 impl fmt::Display for PromptCacheStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "entries={} bytes={} inserts={} hits={}/{} lru_evict={} ttl_evict={} reject_oversized={} snapshot_entries={} snapshot_bytes={} snapshot_hits={}/{}",
+            "entries={} bytes={} inserts={} hits={}/{} lru_evict={} ttl_evict={} reject_oversized={} snapshot_entries={} snapshot_bytes={} snapshot_hits={}/{} snapshot_self_evict={}",
             self.entries,
             self.bytes,
             self.inserts,
@@ -324,6 +346,7 @@ impl fmt::Display for PromptCacheStats {
             self.snapshot_bytes,
             self.snapshot_hits,
             self.snapshot_lookups,
+            self.snapshot_self_evictions,
         )
     }
 }

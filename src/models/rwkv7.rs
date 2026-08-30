@@ -15,12 +15,15 @@
 // RWKV7: Recurrent neural network with time mixing and channel mixing
 // Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rwkv7.py
 
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
+
+use super::model_owned::ModelOwnedSequenceState;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +50,8 @@ pub struct Rwkv7Config {
     pub tie_word_embeddings: bool,
     #[serde(default)]
     pub quantization: Option<Quantization>,
+    #[serde(default)]
+    pub eos_token_id: Option<serde_json::Value>,
 }
 
 fn default_norm_eps() -> f32 {
@@ -917,29 +922,26 @@ impl Rwkv7Model {
         })
     }
 
-    fn forward(&self, x: &MlxArray, cache: &mut Option<Vec<Rwkv7Cache>>) -> UniquePtr<MlxArray> {
+    fn forward(&self, x: &MlxArray, caches: &mut [Rwkv7Cache]) -> UniquePtr<MlxArray> {
+        assert_eq!(
+            caches.len(),
+            self.layers.len(),
+            "RWKV7 cache cardinality must match layer count"
+        );
+
         let mut h = self.embeddings.forward(x);
 
         let mut v_first: Option<UniquePtr<MlxArray>> = None;
 
-        if let Some(caches) = cache {
-            for (i, layer) in self.layers.iter().enumerate() {
-                let mut layer_cache = Some(&mut caches[i]);
-                let (new_h, new_v_first) = layer.forward(
-                    &h,
-                    v_first.as_ref().map(|v| v.as_ref().unwrap()),
-                    &mut layer_cache,
-                );
-                h = new_h;
-                v_first = Some(new_v_first);
-            }
-        } else {
-            for layer in &self.layers {
-                let (new_h, new_v_first) =
-                    layer.forward(&h, v_first.as_ref().map(|v| v.as_ref().unwrap()), &mut None);
-                h = new_h;
-                v_first = Some(new_v_first);
-            }
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mut layer_cache = Some(cache);
+            let (new_h, new_v_first) = layer.forward(
+                &h,
+                v_first.as_ref().map(|v| v.as_ref().unwrap()),
+                &mut layer_cache,
+            );
+            h = new_h;
+            v_first = Some(new_v_first);
         }
 
         self.norm.forward(&h)
@@ -952,7 +954,8 @@ pub struct Rwkv7 {
     config: Rwkv7Config,
     model: Rwkv7Model,
     lm_head: Option<UnifiedLinear>,
-    rwkv7_cache: Option<Vec<Rwkv7Cache>>,
+    sequence_state: ModelOwnedSequenceState<Rwkv7Cache>,
+    eos_token_ids: Vec<i32>,
 }
 
 impl Rwkv7 {
@@ -970,11 +973,15 @@ impl Rwkv7 {
             None
         };
 
+        let internal_caches = make_rwkv7_cache(config.num_hidden_layers);
+        let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
+
         Ok(Self {
             config,
             model,
             lm_head,
-            rwkv7_cache: None,
+            sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            eos_token_ids,
         })
     }
 
@@ -984,31 +991,43 @@ impl Rwkv7 {
         let config: Rwkv7Config = serde_json::from_str(&config_str)?;
 
         let weights = crate::models::load_text_weights(model_dir, None)?;
-        Ok(Self::from_weights(&weights, config)?)
+        let mut model = Self::from_weights(&weights, config)?;
+        model.set_eos_token_ids(crate::loading::read_eos_token_ids(model_dir));
+        Ok(model)
     }
 
     #[allow(dead_code)]
     fn make_rwkv7_cache(&self) -> Vec<Rwkv7Cache> {
-        (0..self.config.num_hidden_layers)
-            .map(|_| Rwkv7Cache::new())
-            .collect()
+        make_rwkv7_cache(self.config.num_hidden_layers)
     }
-}
 
-impl LanguageModel for Rwkv7 {
-    fn forward(
+    pub(crate) fn set_eos_token_ids(&mut self, eos_token_ids: Vec<i32>) {
+        if !eos_token_ids.is_empty() {
+            self.eos_token_ids = eos_token_ids;
+        }
+    }
+
+    fn forward_for_sequence(
         &self,
         input_ids: &MlxArray,
-        _caches: &mut [mlxcel_core::layers::KVCache],
-        _mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
-        // RWKV7 doesn't use standard KV cache, it uses its own Rwkv7Cache
-        // The standard KVCache parameter is ignored
-        // TODO: Properly integrate RWKV7Cache with the generation framework
+        let seq_len = mlxcel_core::array_shape(input_ids)[1];
+        if seq_id.is_none() && seq_len > 1 {
+            self.sequence_state
+                .replace_internal(self.make_rwkv7_cache());
+        }
 
-        // For now, do stateless forward pass
-        let mut cache: Option<Vec<Rwkv7Cache>> = None;
-        let h = self.model.forward(input_ids, &mut cache);
+        let h = if let Some(seq_id) = seq_id {
+            self.sequence_state
+                .with_existing_sequence_state(seq_id, |internal| {
+                    self.model.forward(input_ids, internal)
+                })
+                .unwrap_or_else(|err| panic!("RWKV7 {err}"))
+        } else {
+            self.sequence_state
+                .with_sequence_state(None, |internal| self.model.forward(input_ids, internal))
+        };
 
         if let Some(ref lm_head) = self.lm_head {
             lm_head.forward(&h)
@@ -1016,10 +1035,26 @@ impl LanguageModel for Rwkv7 {
             self.model.embeddings.as_linear(&h)
         }
     }
+}
 
-    fn make_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
-        // RWKV7 doesn't use standard KV caches, return empty vector
-        Vec::new()
+impl LanguageModel for Rwkv7 {
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        // RWKV7 keeps recurrent state in model-owned per-sequence slots; the
+        // standard KVCache slice is only a scheduler compatibility placeholder.
+        self.forward_for_sequence(input_ids, None)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        self.sequence_state
+            .replace_internal(self.make_rwkv7_cache());
+        (0..self.config.num_hidden_layers)
+            .map(|_| KVCache::new())
+            .collect()
     }
 
     fn num_layers(&self) -> usize {
@@ -1034,15 +1069,48 @@ impl LanguageModel for Rwkv7 {
         false // RWKV7 uses internal RNN-like state, not compatible with per-sequence KV isolation
     }
 
-    fn eos_token_ids(&self) -> Vec<i32> {
-        // Default EOS token ID, should be loaded from tokenizer config
-        vec![0]
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.config.num_hidden_layers)
     }
+
+    fn reset_runtime_state(&self) {
+        self.sequence_state
+            .replace_internal(self.make_rwkv7_cache());
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.make_rwkv7_cache());
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        self.eos_token_ids.clone()
+    }
+}
+
+fn make_rwkv7_cache(num_hidden_layers: usize) -> Vec<Rwkv7Cache> {
+    (0..num_hidden_layers).map(|_| Rwkv7Cache::new()).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Rwkv7Cache;
+    use super::{Rwkv7Cache, make_rwkv7_cache};
+    use crate::models::model_owned::ModelOwnedSequenceState;
+    use mlxcel_core::cache::SequenceId;
     use mlxcel_core::{dtype, generate::ModelStateSnapshot};
 
     #[test]
@@ -1076,5 +1144,72 @@ mod tests {
         assert_eq!(mlxcel_core::array_shape(token_shift), vec![1, 8]);
         assert_eq!(mlxcel_core::array_shape(state), vec![1, 2, 4, 8]);
         assert_eq!(mlxcel_core::array_shape(ffn), vec![1, 8]);
+    }
+
+    #[test]
+    fn rwkv7_eos_token_ids_come_from_config_metadata() {
+        let config: super::Rwkv7Config = serde_json::from_value(serde_json::json!({
+            "model_type": "rwkv7",
+            "vocab_size": 16,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "head_dim": 4,
+            "num_hidden_layers": 1,
+            "a_low_rank_dim": 2,
+            "v_low_rank_dim": 2,
+            "gate_low_rank_dim": 2,
+            "decay_low_rank_dim": 2,
+            "eos_token_id": [10, 11]
+        }))
+        .expect("RWKV7 config must parse");
+
+        assert_eq!(
+            crate::models::parse_optional_eos_token_ids(&config.eos_token_id),
+            vec![10, 11]
+        );
+    }
+
+    #[test]
+    fn rwkv7_model_owned_sequence_state_preserves_greedy_decode_cache() {
+        let state = ModelOwnedSequenceState::new(make_rwkv7_cache(2));
+        let seq = SequenceId::from_raw(1220);
+
+        state.prepare_sequence_state(seq, make_rwkv7_cache(2));
+        state
+            .with_existing_sequence_state(seq, |caches| {
+                caches[0].token_shift_cache = Some(mlxcel_core::zeros(&[1, 8], dtype::FLOAT32));
+            })
+            .expect("prepared RWKV7 sequence must exist");
+
+        state
+            .with_existing_sequence_state(seq, |caches| {
+                assert!(
+                    caches[0].token_shift_cache.is_some(),
+                    "decode must see the cache populated by the previous token"
+                );
+                caches[1].ffn_cache = Some(mlxcel_core::zeros(&[1, 8], dtype::FLOAT32));
+            })
+            .expect("prepared RWKV7 sequence must still exist");
+
+        state
+            .with_existing_sequence_state(seq, |caches| {
+                assert!(
+                    caches[1].ffn_cache.is_some(),
+                    "cache writes must survive across consecutive greedy steps"
+                );
+            })
+            .expect("prepared RWKV7 sequence must still exist");
+    }
+
+    #[test]
+    fn rwkv7_model_owned_sequence_state_refuses_missing_sequence_id() {
+        let state = ModelOwnedSequenceState::new(make_rwkv7_cache(1));
+        let seq = SequenceId::from_raw(1220);
+
+        let err = state
+            .with_existing_sequence_state(seq, |_| {})
+            .expect_err("unprepared RWKV7 sequence must fail closed");
+
+        assert!(err.contains("missing model-owned sequence state"));
     }
 }

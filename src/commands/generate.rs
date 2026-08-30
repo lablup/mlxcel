@@ -41,7 +41,7 @@ use mlxcel::{
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
     select_backend,
-    server::chat_template::{ChatMessage, ChatTemplateProcessor},
+    server::chat_template::{ChatMessage, ChatTemplateProcessor, template_rejection_message},
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
     vlm_runtime::prepared_embedding_refs,
@@ -637,15 +637,27 @@ pub(super) fn validate_muse_glimmer_cli_unsupported_options(
     Ok(())
 }
 
-fn apply_user_chat_template(processor: &ChatTemplateProcessor, user_prompt: &str) -> String {
+fn template_rejection_cli_error(err: &anyhow::Error) -> Option<anyhow::Error> {
+    template_rejection_message(err)
+        .map(|message| anyhow!("chat template rejected the request: {message}"))
+}
+
+fn apply_user_chat_template(
+    processor: &ChatTemplateProcessor,
+    user_prompt: &str,
+) -> Result<String> {
     let messages = [ChatMessage {
         role: "user".to_string(),
         content: user_prompt.to_string(),
     }];
 
-    processor
-        .apply(&messages, None)
-        .unwrap_or_else(|_| user_prompt.to_string())
+    processor.apply(&messages, None).or_else(|err| {
+        if let Some(rejection) = template_rejection_cli_error(&err) {
+            Err(rejection)
+        } else {
+            Ok(user_prompt.to_string())
+        }
+    })
 }
 
 /// Apply chat template with image / video / audio placeholders for VLM models.
@@ -666,7 +678,7 @@ fn apply_vlm_chat_template(
     num_images: usize,
     num_videos: usize,
     num_audios: usize,
-) -> String {
+) -> Result<String> {
     // Only attempt multimodal rendering when the template handles image
     // content items.  Templates that don't (e.g. Vicuna, ChatML) would
     // render the raw JSON list as text, producing garbled output.
@@ -721,9 +733,13 @@ fn apply_vlm_chat_template(
         "content": content_parts,
     }]);
 
-    processor.apply_raw(&messages, None).unwrap_or_else(|_| {
-        // Fallback: text-only template
-        apply_user_chat_template(processor, user_prompt)
+    processor.apply_raw(&messages, None).or_else(|err| {
+        if let Some(rejection) = template_rejection_cli_error(&err) {
+            Err(rejection)
+        } else {
+            // Fallback: text-only template
+            apply_user_chat_template(processor, user_prompt)
+        }
     })
 }
 
@@ -734,13 +750,13 @@ fn resolve_cli_prompt(
     num_images: usize,
     num_videos: usize,
     num_audios: usize,
-) -> String {
+) -> Result<String> {
     if no_chat_template {
-        return user_prompt.to_string();
+        return Ok(user_prompt.to_string());
     }
 
     processor.map_or_else(
-        || user_prompt.to_string(),
+        || Ok(user_prompt.to_string()),
         |processor| {
             // Route an audio-bearing request through the VLM template only when
             // the template actually renders audio content items. This keeps the
@@ -767,7 +783,7 @@ fn load_cli_prompt(
     num_images: usize,
     num_videos: usize,
     num_audios: usize,
-) -> String {
+) -> Result<String> {
     let processor = if no_chat_template {
         None
     } else {
@@ -809,17 +825,25 @@ fn load_cli_prompt(
 
 /// Number of `<|video|>` content parts to render into the CLI chat prompt.
 ///
-/// Only the encoder-free `gemma4_unified` model expands a real `video_token_id`
-/// placeholder inside the user turn (issue #164); every other family (including
-/// the ViT-backed `gemma4` VLM, which splices video frames after BOS via a
-/// sentinel) keeps `0` so its prompt rendering is byte-for-byte unchanged. On
-/// any detection failure we conservatively return `0`.
+/// Encoder-free `gemma4_unified` and Qwen-VL families expand a real
+/// `video_token_id` placeholder inside the user turn. Other families
+/// (including the ViT-backed `gemma4` VLM, which splices video frames after BOS
+/// via a sentinel) keep `0` so their prompt rendering stays byte-for-byte
+/// unchanged. On any detection failure we conservatively return `0`.
 fn cli_video_content_part_count(model_path: &Path, num_videos: usize) -> usize {
     if num_videos == 0 {
         return 0;
     }
     match mlxcel::models::get_model_type(model_path) {
-        Ok(mlxcel::models::ModelType::Gemma4Unified) => num_videos,
+        Ok(
+            mlxcel::models::ModelType::Gemma4Unified
+            | mlxcel::models::ModelType::Qwen2VL
+            | mlxcel::models::ModelType::Qwen25VL
+            | mlxcel::models::ModelType::Qwen3VL
+            | mlxcel::models::ModelType::Qwen3VLMoe
+            | mlxcel::models::ModelType::Qwen35VLM
+            | mlxcel::models::ModelType::Qwen35MoeVLM,
+        ) => num_videos,
         _ => 0,
     }
 }
@@ -2259,7 +2283,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.generation.image.len(),
         cli_video_content_part_count(&args.model.model, args.generation.video.len()),
         usize::from(args.generation.audio.is_some()),
-    );
+    )?;
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
 
     // llama.cpp parity (issue #476): resolve an unlimited `-n -1` into a

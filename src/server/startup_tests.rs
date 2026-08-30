@@ -1275,6 +1275,26 @@ fn detect_model_media_support_recognises_kimi_k25() {
 }
 
 #[test]
+fn detect_model_media_support_recognises_qwen35_vlm_video() {
+    let dir = temp_path("media-qwen35-vlm");
+    let config = serde_json::json!({
+        "model_type": "qwen3_5",
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "text_config": { "model_type": "qwen3_5" },
+        "vision_config": { "model_type": "qwen3_vl" },
+        "video_token_id": 248057
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+
+    let support = detect_model_media_support(&dir);
+    assert!(
+        support.video,
+        "Qwen3.5/Qwen3.8 VLM must enable video_url content blocks, got {support:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn detect_model_media_support_falls_back_for_missing_config() {
     let dir = temp_path("media-missing-config");
     // No config.json → get_model_type fails → fallback yields "no video".

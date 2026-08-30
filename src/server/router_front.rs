@@ -845,7 +845,7 @@ async fn route_chat(
 
     // Render the chat template and reject multimodal requests (the
     // disaggregated path is text-only for pool-backed Fp16 families).
-    let prepared = super::chat_request::prepare_chat_request_with_cache(
+    let prepared = match super::chat_request::prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -853,7 +853,17 @@ async fn route_chat(
         false,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            if super::chat_template::template_rejection_message(&err).is_some() {
+                return Ok(
+                    ErrorResponse::new(err.to_string(), "invalid_request_error").into_response()
+                );
+            }
+            return Err(anyhow::anyhow!("{err}"));
+        }
+    };
 
     if has_declared_media(prepared.media) {
         anyhow::bail!("the disaggregated router supports text-only requests");

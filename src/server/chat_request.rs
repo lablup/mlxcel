@@ -184,16 +184,18 @@ pub(super) fn log_once_sessions() -> &'static Mutex<HashSet<String>> {
 /// it cannot fire on an engine failure the way `ErrorKind::InvalidOperation`
 /// would, and it does not depend on how a template author worded the message.
 ///
-/// The returned error propagates out of [`prepare_chat_request_with_cache`],
-/// which every chat, Responses, and Anthropic route already maps to a 400
-/// before any generation starts, so the streaming routes emit it in place of
-/// the SSE stream rather than mid-stream.
-fn reject_if_template_rejection(err: &anyhow::Error) -> Result<()> {
-    let Some(message) = template_rejection_message(err) else {
-        return Ok(());
+/// The returned error propagates out of [`prepare_chat_request_with_cache`]
+/// with the original render error as its source. That keeps
+/// [`template_rejection_message`] usable at outer route boundaries that need to
+/// distinguish template rejections from generic render failures.
+fn reject_or_return_render_error(err: anyhow::Error) -> Result<anyhow::Error> {
+    let Some(message) = template_rejection_message(&err).map(str::to_string) else {
+        return Ok(err);
     };
     tracing::info!("Chat template rejected the request: {message}");
-    anyhow::bail!("the model's chat template rejected this request: {message}");
+    Err(err.context(format!(
+        "the model's chat template rejected this request: {message}"
+    )))
 }
 
 /// Resolve the chat-template kwargs a request renders with.
@@ -437,8 +439,8 @@ pub(crate) async fn prepare_chat_request_with_cache(
             Err(err) => {
                 // A deliberate template refusal is a client error, not a render
                 // failure: fail the request instead of answering from a
-                // stripped prompt. See `reject_if_template_rejection`.
-                reject_if_template_rejection(&err)?;
+                // stripped prompt. See `reject_or_return_render_error`.
+                let err = reject_or_return_render_error(err)?;
                 tracing::warn!(
                     "Chat template render (raw) failed, using fallback: {:#}",
                     err
@@ -463,7 +465,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
                 // Same split as the raw/multimodal arm above: a template that
                 // refused a caller-supplied value must not degrade to a
                 // fallback prompt.
-                reject_if_template_rejection(&err)?;
+                let err = reject_or_return_render_error(err)?;
                 tracing::warn!("Chat template render failed, using fallback: {:#}", err);
                 // Security (H-1): use pre-stripped messages for the same reason.
                 (render_simple_fallback(&messages), None)
