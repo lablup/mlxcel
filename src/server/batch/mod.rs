@@ -35,6 +35,7 @@ pub(crate) mod mtp_policy;
 pub mod observability;
 mod prefill_cohort;
 mod queue;
+#[path = "scheduler/mod.rs"]
 pub(crate) mod scheduler;
 #[cfg(test)]
 mod scheduler_prompt_cache_tests;
