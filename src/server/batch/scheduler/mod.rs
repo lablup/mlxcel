@@ -399,6 +399,15 @@ pub struct BatchScheduler {
 
     // -- Shutdown flag --
     shutdown_requested: bool,
+    /// b10621 `--sleep-idle-seconds` (#1440): how long the loop waits on an
+    /// empty queue before returning so the worker can free the model. `None`
+    /// disables, which is upstream's default.
+    sleep_idle: Option<std::time::Duration>,
+    /// Set when [`run`](Self::run) returned because that window expired rather
+    /// than because the request channel closed or a shutdown arrived. The
+    /// worker reads it to tell "sleep and wait for the next request" from
+    /// "exit".
+    idle_sleep_due: bool,
 
     /// #822: consecutive MLX eval failures at the decode/prefill FFI boundary.
     /// Bumped whenever a `try_eval` / `try_async_eval` catches an MLX C++ throw

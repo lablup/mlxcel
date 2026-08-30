@@ -190,7 +190,35 @@ impl BatchScheduler {
             .with_forced_message(forced_message)
     }
 
-    /// Run the scheduler loop until shutdown or channel close.
+    /// Whether [`run`](Self::run) returned because b10621's idle-sleep window
+    /// expired (#1440), rather than because the channel closed or a shutdown
+    /// arrived. The worker uses it to decide between parking for the next
+    /// request and exiting.
+    pub(crate) fn idle_sleep_due(&self) -> bool {
+        self.idle_sleep_due
+    }
+
+    /// Admit the request that woke the server from idle sleep (#1440).
+    ///
+    /// The worker takes that request off the channel to know it should reload,
+    /// so it cannot be left for the loop to find; this hands it to the rebuilt
+    /// scheduler before the first tick. Returns `true` when it was a shutdown.
+    pub(crate) fn admit_pending(&mut self, req: ModelRequest) -> bool {
+        self.handle_incoming(req)
+    }
+
+    /// Give the request channel back after [`run`](Self::run) returns,
+    /// consuming the scheduler (#1440).
+    ///
+    /// Dropping everything else is the point: the `LoadedModel` goes with it,
+    /// which is what frees the weights while the server sleeps. The receiver
+    /// outlives it so the worker can block on the next request and rebuild.
+    pub(crate) fn into_request_rx(self) -> mpsc::Receiver<ModelRequest> {
+        self.request_rx
+    }
+
+    /// Run the scheduler loop until shutdown, channel close, or an expired
+    /// idle-sleep window.
     pub fn run(&mut self) {
         install_thread_local_default_stream(self.generation_stream.as_ref());
 
@@ -306,18 +334,41 @@ impl BatchScheduler {
                     self.run_next_prompt_cache_warmup();
                     self.publish_metrics();
                 }
-                BatchSchedulerAction::Idle => match self.request_rx.recv() {
-                    Ok(req) => {
-                        if self.handle_incoming(req) {
+                // b10621 `--sleep-idle-seconds` (#1440): with a window
+                // configured the block is bounded, and its expiry returns from
+                // the loop so the worker can drop this scheduler (freeing the
+                // model) and park on the same channel. Reaching `Idle` already
+                // means no decode batch and no queued prefill, so nothing is
+                // in flight to lose.
+                BatchSchedulerAction::Idle => {
+                    let received = match self.sleep_idle {
+                        Some(window) => self
+                            .request_rx
+                            .recv_timeout(window)
+                            .map_err(|err| matches!(err, mpsc::RecvTimeoutError::Timeout)),
+                        None => self.request_rx.recv().map_err(|_| false),
+                    };
+                    match received {
+                        Ok(req) => {
+                            if self.handle_incoming(req) {
+                                break;
+                            }
+                            self.publish_metrics();
+                        }
+                        Err(true) => {
+                            tracing::info!(
+                                idle_seconds = self.sleep_idle.map(|d| d.as_secs()),
+                                "Idle window expired, entering sleeping state"
+                            );
+                            self.idle_sleep_due = true;
                             break;
                         }
-                        self.publish_metrics();
+                        Err(false) => {
+                            tracing::info!("Request channel closed, scheduler exiting");
+                            break;
+                        }
                     }
-                    Err(_) => {
-                        tracing::info!("Request channel closed, scheduler exiting");
-                        break;
-                    }
-                },
+                }
             }
 
             // 4. Clean up completed sequences

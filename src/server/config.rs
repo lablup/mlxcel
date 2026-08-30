@@ -552,6 +552,11 @@ pub struct ServerConfig {
     /// `--timeout`, which now carries the b10621 HTTP socket read/write
     /// timeout instead; see [`crate::server::transport`].
     pub decode_timeout_seconds: u64,
+    /// b10621 `--sleep-idle-seconds` (#1440): after this many idle seconds the
+    /// serving worker frees the model and sleeps, and the next generation
+    /// request wakes it. Negative disables, which is upstream's default and
+    /// its own disabled sentinel.
+    pub sleep_idle_seconds: i64,
     /// b10621 `--api-prefix` (`LLAMA_ARG_API_PREFIX`). Empty (the default)
     /// mounts every route at the root. A non-empty value is a validated path
     /// with a leading and no trailing slash; `create_app` nests the whole
@@ -1000,6 +1005,7 @@ impl Default for ServerConfig {
             reasoning_budget_message: None,
             api_keys: crate::server::ApiKeys::default(),
             decode_timeout_seconds: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
+            sleep_idle_seconds: -1,
             api_prefix: String::new(),
             sse_ping_interval: Some(std::time::Duration::from_secs(
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,

@@ -81,13 +81,29 @@
       "default": "-1; -1 = disabled",
       "description": "number of seconds of idleness after which the server will sleep (default: -1; -1 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1440,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
-      "mlxcel": null
+      "test": "src/server/batch/scheduler/config.rs::sleep_idle_tests::zero_arms_the_sleep_rather_than_disabling_it",
+      "notes": "Accepted and honored. Upstream's shape (`tools/server/server-context.cpp`): `start_loop(sleep_idle_seconds * 1000)` sleeps the task queue after the idle window, `handle_sleeping_state` calls `destroy()` (context, model, draft model, mtmd), `update_cached_responses` snapshots `/models`, `/props` and `/metrics`, and every route but those three plus `/health` calls `wait_until_no_sleep()`, so a request wakes the server and blocks until `load_model` finishes. Measured on the pinned binary with `--sleep-idle-seconds 3`: `/props.is_sleeping` flips true after the window, `/health` still answers 200, and a `/completion` afterwards takes about 0.9 s and flips it back. mlxcel sleeps the serving WORKER rather than swapping the model provider: `BatchScheduler::run`'s idle arm already blocks on the request channel, so a configured window turns that into a bounded wait whose expiry returns from the loop; the worker then drops the scheduler (which frees the weights with the `LoadedModel` it owns), takes the channel back through `into_request_rx`, clears the prompt-prefix cache (a separate `Arc` whose detached KV blocks would otherwise survive the sleep), parks on the channel, and on the next request reloads and hands that request to the rebuilt scheduler, so waking IS its prefill exactly as upstream's blocking wake is. Reaching the idle arm already means no decode batch and no queued prefill, so nothing in flight is lost. `-1` (upstream's default) and any negative value disable it; `0` arms it, upstream's own `< 0` gate. Measured on a real checkpoint with `--sleep-idle-seconds 5`: is_sleeping goes false, true after the window, and false again 0.39 s after a completion request, with `/health`, `/v1/models` and `/metrics` answering throughout. Accepted as a hidden compatibility argument, like the other b10621-only lifecycle flags.",
+      "divergence": [
+        "More routes are reachable during sleep than upstream's four, and they answer without waking the server: b10621 caches `/props`, `/models` and `/metrics` because its own handlers read the destroyed `ctx_server`, while mlxcel's read `AppState` (config, tokenizer, chat template, metrics handles), none of which the sleep frees. `/tokenize`, `/detokenize`, `/apply-template` and the other prompt-inspection routes therefore answer with `is_sleeping` still true where b10621 would have woken the server to answer them (#1440)."
+      ],
+      "rationale": {
+        "kind": "architectural",
+        "reason": "Upstream's cached-response machinery exists because `get_res_props`, `get_res_models` and its metrics render out of the server context that entering sleep destroys; the four bypass routes are the ones it could make answer without a live context. mlxcel's tokenizer, chat template, slot registry and metrics are owned by `AppState` and outlive the worker, so the same routes answer live and correctly with no snapshot, and so do the prompt-inspection routes upstream has to wake for. There is no snapshot to build and nothing to make those routes wake for: waking exists to restore the model, and none of them reads it.",
+        "revisit_if": null
+      },
+      "mlxcel": {
+        "accepted_spellings": [
+          "--sleep-idle-seconds"
+        ],
+        "env": null,
+        "env_binding": null,
+        "defaults": [
+          "-1"
+        ],
+        "hidden": true
+      }
     },
     {
       "kind": "option",

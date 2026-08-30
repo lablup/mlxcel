@@ -351,6 +351,11 @@ pub struct ModelProvider {
     batch_observability: Arc<BatchObservability>,
     max_queue_depth: usize,
     single_stream_queue_admission: Arc<AtomicBool>,
+    /// b10621 `--sleep-idle-seconds` state (#1440): `true` while the serving
+    /// worker has freed the model and is parked on the request channel. Only
+    /// the batch worker ever sets it; every other worker leaves it `false`,
+    /// which is the truthful answer for a path with no idle-sleep lifecycle.
+    sleeping: Arc<AtomicBool>,
     /// Shared cross-request prompt-prefix KV cache.
     /// `None` when the feature is disabled by config.
     prompt_cache: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
@@ -564,6 +569,9 @@ impl ModelProvider {
                 config.vision_cache_size,
                 config.lang_bias_config.clone(),
                 config.reasoning_budget,
+                // b10621 `--sleep-idle-seconds` (#1440): the serving worker's
+                // idle window, forwarded to the scheduler that owns the loop.
+                config.sleep_idle_seconds,
                 prompt_cache_store,
                 config.kv_cache_mode,
                 config.batch_kv_quant,
@@ -641,6 +649,9 @@ impl ModelProvider {
             batch_observability,
             max_queue_depth: 1,
             single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
+            // This path has no idle-sleep lifecycle, so the flag is truthfully
+            // never set (#1440).
+            sleeping: Arc::new(AtomicBool::new(false)),
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout,
@@ -678,6 +689,9 @@ impl ModelProvider {
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
+        // b10621 `--sleep-idle-seconds` (#1440): shared with the worker, which
+        // sets it while the model is freed.
+        let sleeping = Arc::new(AtomicBool::new(false));
         let worker_model_id = model_id.clone();
         let metrics_clone = batch_metrics.clone();
         let obs_clone = batch_observability.clone();
@@ -708,6 +722,7 @@ impl ModelProvider {
             chat_unavailable,
             max_queue_depth,
             single_stream_queue_admission,
+            sleeping,
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -765,6 +780,9 @@ impl ModelProvider {
             chat_unavailable: Arc::new(AtomicBool::new(false)),
             max_queue_depth: usize::MAX,
             single_stream_queue_admission,
+            // The OpenXLA serve worker has no idle-sleep lifecycle, so the flag
+            // is truthfully never set on this path (#1440).
+            sleeping: Arc::new(AtomicBool::new(false)),
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -851,6 +869,9 @@ impl ModelProvider {
             vision_cache_size,
             lang_bias_config,
             reasoning_budget,
+            // These convenience wrappers predate the b10621 lifecycle flags and
+            // are used by minimal / legacy paths that never sleep (#1440).
+            -1,
             None,
             mlxcel_core::cache::KVCacheMode::Fp16,
             mlxcel_core::cache::BatchKvQuantConfig::default(),
@@ -887,6 +908,8 @@ impl ModelProvider {
         vision_cache_size: usize,
         lang_bias_config: Option<mlxcel_core::lang_analyzer::LangBiasConfig>,
         reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
+        // b10621 `--sleep-idle-seconds` (#1440); negative disables.
+        sleep_idle_seconds: i64,
         prompt_cache_store: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
         kv_cache_mode: mlxcel_core::cache::KVCacheMode,
         batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
@@ -929,6 +952,7 @@ impl ModelProvider {
             vision_cache_size,
             lang_bias_config,
             reasoning_budget,
+            sleep_idle_seconds,
             prompt_cache_store,
             kv_cache_mode,
             batch_kv_quant,
@@ -982,6 +1006,8 @@ impl ModelProvider {
         vision_cache_size: usize,
         lang_bias_config: Option<mlxcel_core::lang_analyzer::LangBiasConfig>,
         reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
+        // b10621 `--sleep-idle-seconds` (#1440); negative disables.
+        sleep_idle_seconds: i64,
         prompt_cache_store: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
         kv_cache_mode: mlxcel_core::cache::KVCacheMode,
         batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
@@ -1014,6 +1040,9 @@ impl ModelProvider {
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
+        // b10621 `--sleep-idle-seconds` (#1440): shared with the worker, which
+        // sets it while the model is freed.
+        let sleeping = Arc::new(AtomicBool::new(false));
         let chat_unavailable = Arc::new(AtomicBool::new(false));
         let chat_unavailable_clone = chat_unavailable.clone();
         let worker_model_id = model_id.clone();
@@ -1041,6 +1070,7 @@ impl ModelProvider {
             vision_cache_size,
             lang_bias_config,
             reasoning_budget,
+            sleep_idle_seconds,
             prompt_cache: prompt_cache_store.clone(),
             kv_cache_mode,
             batch_kv_quant,
@@ -1084,6 +1114,7 @@ impl ModelProvider {
             metrics_clone,
             obs_clone,
             single_stream_queue_admission.clone(),
+            sleeping.clone(),
         );
 
         Ok(Self {
@@ -1097,6 +1128,7 @@ impl ModelProvider {
             max_queue_depth,
             chat_unavailable,
             single_stream_queue_admission,
+            sleeping,
             prompt_cache: prompt_cache_store,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -1130,6 +1162,9 @@ impl ModelProvider {
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
+        // b10621 `--sleep-idle-seconds` (#1440): shared with the worker, which
+        // sets it while the model is freed.
+        let sleeping = Arc::new(AtomicBool::new(false));
         let chat_unavailable = Arc::new(AtomicBool::new(false));
         let chat_unavailable_clone = chat_unavailable.clone();
 
@@ -1160,6 +1195,8 @@ impl ModelProvider {
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             lang_bias_config: None,
             reasoning_budget: None,
+            // The minimal test path never sleeps.
+            sleep_idle_seconds: -1,
             prompt_cache: None,
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
@@ -1192,6 +1229,7 @@ impl ModelProvider {
             metrics_clone,
             obs_clone,
             single_stream_queue_admission.clone(),
+            sleeping.clone(),
         );
 
         Ok(Self {
@@ -1205,6 +1243,7 @@ impl ModelProvider {
             max_queue_depth,
             chat_unavailable,
             single_stream_queue_admission,
+            sleeping,
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -1770,6 +1809,18 @@ impl ModelProvider {
             QueueReservationMode::PreReserved(queue_reservation),
         )?;
         drain_generation_events_with_prefill(response_rx, timeout, callback, on_prefill)
+    }
+
+    /// Whether the serving worker has freed the model and is parked on the
+    /// request channel, b10621's sleeping state (#1440).
+    ///
+    /// `GET /props` reports it as `is_sleeping`, and `/props`, `/models` and
+    /// `/metrics` answer from their snapshots while it holds, which is what
+    /// makes them reachable without waking the server. Every other route wakes
+    /// it by the act of enqueueing, exactly as upstream's `wait_until_no_sleep`
+    /// does.
+    pub fn is_sleeping(&self) -> bool {
+        self.sleeping.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The request-dispatch tokenizer, when one loaded (#1485): the native

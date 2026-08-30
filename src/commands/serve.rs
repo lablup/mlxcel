@@ -572,6 +572,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         timeout_was_set: long_cli_flag_was_set("timeout")
             || std::env::var_os("LLAMA_ARG_TIMEOUT").is_some(),
         decode_timeout: args.decode_timeout,
+        sleep_idle_seconds: args.sleep_idle_seconds,
         decode_timeout_was_set: long_cli_flag_was_set("decode-timeout")
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,

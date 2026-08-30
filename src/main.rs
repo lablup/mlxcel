@@ -1780,6 +1780,17 @@ pub(crate) struct ServeArgs {
     #[arg(long = "settings")]
     settings: bool,
 
+    /// b10621 `--sleep-idle-seconds`: sleep after this many idle seconds,
+    /// freeing the model until the next request wakes it (-1 disables).
+    #[arg(
+        long = "sleep-idle-seconds",
+        value_name = "SECONDS",
+        default_value_t = -1,
+        allow_negative_numbers = true,
+        hide = true
+    )]
+    sleep_idle_seconds: i64,
+
     /// Path to save slot kv cache (default: disabled)
     #[arg(long = "slot-save-path", value_name = "PATH")]
     slot_save_path: Option<PathBuf>,
