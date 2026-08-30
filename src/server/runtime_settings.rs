@@ -65,6 +65,7 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "slot_save_path",
     "model_tags",
     "lora_adapters",
+    "lora_runtime",
     "embd_normalize",
     "embedding_serving_mode",
     "spm_infill",
@@ -522,6 +523,10 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
             .unwrap_or(Value::Null),
         "model_tags" => json!(config.model_tags),
         "lora_adapters" => json!({"count": config.lora_adapters.len()}),
+        // The runtime LoRA set is a shared handle the worker mutates through
+        // POST /lora-adapters, not a startup knob; report only whether
+        // unfused serving is active, never the handle itself (#1439).
+        "lora_runtime" => json!({"unfused": config.lora_runtime.is_some()}),
         "embd_normalize" => config
             .embd_normalize
             .map(|value| json!(value.value()))
@@ -652,7 +657,7 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "default_top_n_sigma"
         | "default_xtc_probability"
         | "default_xtc_threshold" => KnobKind::Float,
-        "api_keys" | "lora_adapters" => KnobKind::Object,
+        "api_keys" | "lora_adapters" | "lora_runtime" => KnobKind::Object,
         "reasoning_budget_message"
         | "model_alias"
         | "slot_save_path"
