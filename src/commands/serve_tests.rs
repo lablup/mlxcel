@@ -189,8 +189,12 @@ fn sample_args() -> crate::ServeArgs {
         apc_num_blocks: None,
         apc_hash: None,
         responses_store_max_entries: 1024,
+        responses_store_max_bytes:
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
         responses_store_ttl_secs: 3600,
         conversation_store_max_entries: 256,
+        conversation_store_max_bytes:
+            mlxcel::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
         conversation_store_ttl_secs: 3600,
         // (A4): keep tests on the baseline path by default.
         #[cfg(feature = "surgery")]

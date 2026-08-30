@@ -472,6 +472,11 @@ pub struct ServerStartupConfig {
     /// and `previous_response_id` return 400. Resolved from
     /// `--responses-store-max-entries` / `LLAMA_ARG_RESPONSES_STORE_MAX_ENTRIES`.
     pub responses_store_max_entries: usize,
+    /// Approximate byte budget for the in-memory response store.
+    /// `0` keeps the store enabled but makes every stored response immediately
+    /// evict itself after insertion. Resolved from
+    /// `--responses-store-max-bytes` / `MLXCEL_RESPONSES_STORE_MAX_BYTES`.
+    pub responses_store_max_bytes: usize,
     /// TTL (seconds) for in-memory response store entries.
     /// `0` disables TTL (entries are evicted only by capacity pressure).
     /// Resolved from `--responses-store-ttl-secs` / `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
@@ -480,6 +485,11 @@ pub struct ServerStartupConfig {
     /// `0` disables the store; requests referencing `conversation` still
     /// succeed but operate as if the transcript is empty.
     pub conversation_store_max_entries: usize,
+    /// Approximate byte budget for the in-memory conversation store.
+    /// `0` keeps the store enabled but makes every transcript immediately
+    /// evict itself after append. Resolved from
+    /// `--conversation-store-max-bytes` / `MLXCEL_CONVERSATION_STORE_MAX_BYTES`.
+    pub conversation_store_max_bytes: usize,
     /// TTL (seconds) for conversation transcripts. `0`
     /// disables TTL.
     pub conversation_store_ttl_secs: u64,
@@ -683,8 +693,11 @@ impl Default for ServerStartupConfig {
             // `--kv-cache-budget none`.
             kv_cache_budget: Some(crate::memory_estimate::PagedBudgetDirective::Auto),
             responses_store_max_entries: 1024,
+            responses_store_max_bytes: super::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
             responses_store_ttl_secs: 3600,
             conversation_store_max_entries: 256,
+            conversation_store_max_bytes:
+                super::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
             conversation_store_ttl_secs: 3600,
             #[cfg(feature = "surgery")]
             surgery_config_path: None,
@@ -2734,6 +2747,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         Some(Arc::new(super::responses_store::ResponsesStore::new(
             super::responses_store::ResponsesStoreConfig {
                 max_entries: startup.responses_store_max_entries,
+                max_bytes: startup.responses_store_max_bytes,
                 ttl,
             },
         )))
@@ -2749,6 +2763,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         Some(Arc::new(super::conversation_store::ConversationStore::new(
             super::conversation_store::ConversationStoreConfig {
                 max_entries: startup.conversation_store_max_entries,
+                max_bytes: startup.conversation_store_max_bytes,
                 ttl,
             },
         )))

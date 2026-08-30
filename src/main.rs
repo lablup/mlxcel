@@ -1513,6 +1513,17 @@ pub(crate) struct ServeArgs {
     )]
     responses_store_max_entries: usize,
 
+    /// Approximate byte budget for the OpenAI `/v1/responses` store.
+    /// `0` keeps response storage enabled but immediately evicts every stored
+    /// response. Also reads `MLXCEL_RESPONSES_STORE_MAX_BYTES`.
+    #[arg(
+        long = "responses-store-max-bytes",
+        env = "MLXCEL_RESPONSES_STORE_MAX_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_store_max_bytes: usize,
+
     /// TTL (seconds) for in-memory Responses-API response
     /// entries. `0` disables TTL, entries are evicted only when the
     /// max-entries cap is hit.
@@ -1537,6 +1548,17 @@ pub(crate) struct ServeArgs {
         value_name = "N"
     )]
     conversation_store_max_entries: usize,
+
+    /// Approximate byte budget for conversation transcripts.
+    /// `0` keeps the conversation store enabled but immediately evicts every
+    /// transcript. Also reads `MLXCEL_CONVERSATION_STORE_MAX_BYTES`.
+    #[arg(
+        long = "conversation-store-max-bytes",
+        env = "MLXCEL_CONVERSATION_STORE_MAX_BYTES",
+        default_value_t = mlxcel::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
+        value_name = "BYTES"
+    )]
+    conversation_store_max_bytes: usize,
 
     /// TTL (seconds) for conversation transcript entries.
     /// `0` disables TTL.

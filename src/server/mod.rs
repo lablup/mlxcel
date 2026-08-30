@@ -66,6 +66,7 @@ pub mod slots_state;
 pub mod speculative_dispatch;
 mod startup;
 mod state;
+mod store_budget;
 pub(crate) mod stream_session;
 mod streaming;
 pub mod streaming_anthropic;

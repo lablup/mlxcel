@@ -521,11 +521,17 @@ pub struct ServerStartupInput {
     /// `--responses-store-max-entries` value (`0` disables
     /// the OpenAI Responses API response store entirely).
     pub responses_store_max_entries: usize,
+    /// `--responses-store-max-bytes` value (`0` immediately evicts stored
+    /// responses while leaving the route surface enabled).
+    pub responses_store_max_bytes: usize,
     /// `--responses-store-ttl-secs` value (`0` disables TTL).
     pub responses_store_ttl_secs: u64,
     /// `--conversation-store-max-entries` value (`0` disables
     /// the OpenAI Responses API conversation transcript store entirely).
     pub conversation_store_max_entries: usize,
+    /// `--conversation-store-max-bytes` value (`0` immediately evicts
+    /// transcripts while leaving the route surface enabled).
+    pub conversation_store_max_bytes: usize,
     /// `--conversation-store-ttl-secs` value (`0` disables TTL).
     pub conversation_store_ttl_secs: u64,
 
@@ -1059,8 +1065,10 @@ impl ServerStartupInput {
             cors_policy,
             // forward the Responses-API store limits.
             responses_store_max_entries: self.responses_store_max_entries,
+            responses_store_max_bytes: self.responses_store_max_bytes,
             responses_store_ttl_secs: self.responses_store_ttl_secs,
             conversation_store_max_entries: self.conversation_store_max_entries,
+            conversation_store_max_bytes: self.conversation_store_max_bytes,
             conversation_store_ttl_secs: self.conversation_store_ttl_secs,
             // (A4): forward the surgery YAML path verbatim.
             // start_server() parses the YAML and installs the pipeline

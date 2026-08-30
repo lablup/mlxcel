@@ -210,6 +210,8 @@ These variables are applied when the corresponding CLI flag is absent.
 | `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` | unsigned integer | `4096` | `--prompt-cache-snapshot-max-entries` |
 | `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` | unsigned integer seconds | `7200` | `--prompt-cache-snapshot-ttl` |
 | `MLXCEL_ENABLE_VLM_PREFIX_CACHE` | boolean | `false` | `--enable-vlm-prefix-cache` |
+| `MLXCEL_RESPONSES_STORE_MAX_BYTES` | unsigned integer bytes | `268435456` | `--responses-store-max-bytes` |
+| `MLXCEL_CONVERSATION_STORE_MAX_BYTES` | unsigned integer bytes | `67108864` | `--conversation-store-max-bytes` |
 | `APC_ENABLED` | boolean | `true` | `--apc-enabled` |
 | `APC_BLOCK_SIZE` | unsigned integer tokens | `16` | `--apc-block-size` |
 | `APC_NUM_BLOCKS` | unsigned integer | derived from max entries | `--apc-num-blocks` |
@@ -238,6 +240,12 @@ supersede from capacity thrash.
 
 `MLXCEL_ENABLE_VLM_PREFIX_CACHE` opts same-image multimodal follow-up turns into
 prompt-prefix sharing while leaving text-only prompt-cache behavior unchanged.
+
+`MLXCEL_RESPONSES_STORE_MAX_BYTES` and
+`MLXCEL_CONVERSATION_STORE_MAX_BYTES` bound the approximate retained JSON bytes
+for `/v1/responses` response history and conversation transcripts. The entry
+count and TTL limits still apply. A value of `0` leaves the route surface
+enabled but makes newly stored entries immediately evict themselves.
 
 The three `SNAPSHOT` variables budget a separate store: whole recurrent-state
 snapshots for SSM and linear-attention families, which cannot share KV blocks
