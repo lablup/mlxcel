@@ -411,6 +411,7 @@ pub(crate) fn build_asr_chat_request(
     model: String,
     user_prompt: String,
     audio_base64: String,
+    audio_format: String,
     temperature: Option<f32>,
     max_tokens: Option<usize>,
 ) -> req::ChatCompletionRequest {
@@ -428,7 +429,7 @@ pub(crate) fn build_asr_chat_request(
                 req::ContentPart::InputAudio {
                     input_audio: req::InputAudio {
                         data: audio_base64,
-                        format: "wav".to_owned(),
+                        format: audio_format,
                     },
                 },
             ]),

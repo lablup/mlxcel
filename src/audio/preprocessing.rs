@@ -25,6 +25,8 @@ use std::path::Path;
 
 use thiserror::Error;
 
+#[path = "preprocessing_container.rs"]
+pub(crate) mod container;
 #[path = "preprocessing_policy.rs"]
 mod policy;
 #[path = "preprocessing_resample.rs"]
@@ -35,7 +37,7 @@ pub(crate) mod wav;
 pub use policy::{
     AudioFamilyPolicy, AudioPlaceholderPolicy, AudioPolicySource, AudioResamplingPolicy,
 };
-use wav::{decode_wav, duration_micros, estimate_frames, inspect_wav, resample, resampled_shape};
+use wav::{duration_micros, estimate_frames, resample, resampled_shape};
 
 /// Point at which cancellation was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,7 +278,10 @@ pub fn preprocess_wav_refs(
             preflight_encoded_bytes,
             policy.max_encoded_bytes_per_request,
         )?;
-        let spec = inspect_wav(input.bytes, index, policy, cancelled)?;
+        // b10621 takes wav, mp3 and flac; the container is sniffed from the
+        // bytes and every limit below is checked against the declared
+        // geometry before any decode allocates for it (#1446).
+        let spec = container::inspect(input.bytes, index, policy, cancelled)?;
         let source_duration = duration_micros(spec.frames, spec.sample_rate)?;
         preflight_source_samples = checked_add(
             preflight_source_samples,
@@ -371,7 +376,7 @@ pub fn preprocess_wav_refs(
     let mut estimated_frames = 0usize;
     let mut effective_tokens = 0usize;
     for (index, input) in encoded.iter().enumerate() {
-        let native = decode_wav(input.bytes, index, policy, cancelled)?;
+        let native = container::decode(input.bytes, index, policy, cancelled)?;
         let duration_micros = duration_micros(native.frames, native.sample_rate)?;
         total_source_samples = total_source_samples.checked_add(native.frames).ok_or(
             AudioPreprocessError::Overflow {
@@ -491,8 +496,10 @@ fn enforce_limit(
 
 /// Compatibility decoder used by legacy audio families.
 ///
-/// This keeps one WAV parser/downmixer while preserving the historical native
-/// sample-rate return type. New family integrations should use a loaded
+/// This keeps one parser/downmixer while preserving the historical native
+/// sample-rate return type. It accepts b10621's whole container set (wav, mp3
+/// and flac, #1446), so the Whisper worker's own path takes the same clips the
+/// chat-model path does. New family integrations should use a loaded
 /// [`AudioFamilyPolicy`] and [`preprocess_wav_batch`] instead.
 pub(crate) fn decode_wav_native_compat(
     bytes: &[u8],
@@ -536,7 +543,7 @@ pub(crate) fn decode_wav_native_compat(
             maximum: policy.max_encoded_bytes_per_clip,
         });
     }
-    let native = decode_wav(bytes, 0, policy, &NeverCancel)?;
+    let native = container::decode(bytes, 0, policy, &NeverCancel)?;
     Ok((native.samples, native.sample_rate))
 }
 

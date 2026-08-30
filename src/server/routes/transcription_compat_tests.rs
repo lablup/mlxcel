@@ -309,11 +309,16 @@ fn the_synthesized_chat_request_carries_the_prompt_and_the_clip() {
         "gemma3n-e2b-4bit".into(),
         "Transcribe audio to text (language: ko)".into(),
         "QUJD".into(),
+        "wav".into(),
         Some(0.25),
         Some(128),
     );
     assert_eq!(request.model, "gemma3n-e2b-4bit");
-    assert!(!request.stream, "the chat dispatch is always non-streaming");
+    assert!(
+        !request.stream,
+        "the chat dispatch never sets `stream`: a streamed transcription takes \
+         `stream_asr_completion`, which drives the generation itself (#1446)"
+    );
     assert_eq!(request.params.temperature, Some(0.25));
     assert_eq!(request.params.max_tokens, Some(128));
     assert_eq!(request.messages.len(), 1);
