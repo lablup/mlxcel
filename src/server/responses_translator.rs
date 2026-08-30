@@ -241,7 +241,7 @@ pub fn responses_request_to_chat(
         prompt_cache_key: request.prompt_cache_key.clone(),
         cache_prompt: None,
         user,
-        reasoning_effort: None,
+        reasoning_effort: request.reasoning.as_ref().and_then(|r| r.effort.clone()),
         extra_body_fields: serde_json::Map::new(),
         response_format,
         params: sampling,
@@ -686,9 +686,12 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::server::chat_request::resolve_effective_kwargs;
+    use crate::server::chat_template::ChatTemplateProcessor;
     use crate::server::types::request::SamplingParams;
     use crate::server::types::responses_request::{
-        ConversationRef, ResponseInput, ResponseTextConfig, ResponseTextFormat,
+        ConversationRef, ResponseInput, ResponseReasoningConfig, ResponseTextConfig,
+        ResponseTextFormat,
     };
 
     fn make_request(input: ResponseInput) -> CreateResponseRequest {
@@ -777,6 +780,51 @@ mod tests {
             Role::User
         ));
         assert_eq!(translated.chat_request.messages[0].content.text(), "hello");
+    }
+
+    #[test]
+    fn responses_reasoning_effort_reaches_chat_request() {
+        let mut req = make_request(ResponseInput::Text("think".to_string()));
+        req.reasoning = Some(ResponseReasoningConfig {
+            effort: Some("high".to_string()),
+            summary: Some("auto".to_string()),
+        });
+
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        assert_eq!(
+            translated.chat_request.reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn responses_reasoning_effort_none_disables_thinking() {
+        let mut req = make_request(ResponseInput::Text("answer directly".to_string()));
+        req.reasoning = Some(ResponseReasoningConfig {
+            effort: Some("none".to_string()),
+            summary: None,
+        });
+
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        let processor = ChatTemplateProcessor::with_template(
+            "{% if enable_thinking %}<think>{% endif %}".to_string(),
+        );
+        let merged_extra_body = translated.chat_request.merged_extra_body();
+        let resolved = resolve_effective_kwargs(
+            &processor,
+            &translated.chat_request,
+            None,
+            &merged_extra_body,
+        );
+
+        assert_eq!(
+            resolved
+                .get("enable_thinking")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(resolved.get("reasoning_effort").is_none());
+        assert!(resolved.get("reasoning_strength").is_none());
     }
 
     #[test]
@@ -1039,7 +1087,11 @@ mod tests {
 
     #[test]
     fn outbound_build_includes_output_text_aggregator() {
-        let req = make_request(ResponseInput::Text("hi".to_string()));
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.reasoning = Some(ResponseReasoningConfig {
+            effort: Some("low".to_string()),
+            summary: None,
+        });
         let ctx = OutboundContext {
             response_id: "resp_test".to_string(),
             model_id: "m".to_string(),
@@ -1068,6 +1120,11 @@ mod tests {
                 .as_ref()
                 .map(|d| d.cached_tokens),
             Some(1)
+        );
+        assert_eq!(
+            resp.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+            Some("low"),
+            "reasoning effort must remain echoed unchanged"
         );
     }
 }

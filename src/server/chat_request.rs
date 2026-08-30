@@ -187,8 +187,11 @@ fn reject_if_template_rejection(err: &anyhow::Error) -> Result<()> {
 /// 1. Per-request `chat_template_kwargs` (top-level, then nested/flattened
 ///    `extra_body.chat_template_kwargs`, then the DashScope/OpenAI-SDK
 ///    `preserve_thinking` alias); see [`extract_request_kwargs`].
-/// 2. Per-request top-level `reasoning_effort` (OpenAI-standard field), mapped
-///    onto the `reasoning_effort` kwarg by [`map_reasoning_effort_kwarg`].
+/// 2. Per-request reasoning controls, resolved from `reasoning_effort` or the
+///    compatible `reasoning` shapes and mapped by
+///    [`map_reasoning_control_kwargs`]. They fill `enable_thinking` and the
+///    template's `reasoning_effort` / `reasoning_strength` level key only when
+///    the explicit per-request kwargs did not already set that key.
 /// 3. Server-default `--chat-template-kwargs` / `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`.
 ///
 /// Steps 1 and 2 are both per-request, so they are resolved into the
@@ -214,54 +217,73 @@ pub(crate) fn resolve_effective_kwargs(
         request.chat_template_kwargs.as_ref(),
         merged_extra_body.as_ref(),
     );
-    map_reasoning_effort_kwarg(processor, request, &mut per_request_kwargs);
+    map_reasoning_control_kwargs(processor, request, &mut per_request_kwargs);
     merge_server_and_request(server_default_kwargs, &per_request_kwargs)
 }
 
-/// Map the OpenAI-standard top-level `reasoning_effort` request field onto the
-/// `reasoning_effort` chat-template kwarg (issue #1164).
+/// Map portable request reasoning controls onto chat-template kwargs.
 ///
 /// Three guards, each deliberate:
 ///
-/// * **An explicit `chat_template_kwargs.reasoning_effort` wins.** The kwarg is
-///   the checkpoint-specific channel and the caller who reached for it knows
-///   the template's vocabulary; the OpenAI field is the portable, lower-
-///   precedence one.
-/// * **The template must mention the name.** Templates that never read
-///   `reasoning_effort` do not silently acquire a kwarg, mirroring how
-///   `supports_image_content` and friends gate on template content. This also
-///   means the field cannot start failing requests on a checkpoint that never
-///   looked at it.
+/// * **An explicit per-request kwarg wins per key.** Derived
+///   `enable_thinking`, `reasoning_effort`, and `reasoning_strength` values
+///   only fill missing keys. The checkpoint-specific channel therefore keeps
+///   precedence over the portable request field.
+/// * **The template must mention the level name.** Enabled effort is mapped to
+///   `reasoning_effort` when that identifier is present, otherwise to
+///   `reasoning_strength` when that alias is present. Templates that read
+///   neither do not silently acquire a level kwarg.
 /// * **No value translation.** OpenAI's vocabulary is
 ///   `{minimal, low, medium, high}` and Qwen3.8's is `{xhigh, medium, low}`, so
 ///   `high` is valid OpenAI and invalid Qwen3.8 while `xhigh` is the reverse.
 ///   Remapping `high` to `xhigh` would silently change the model's reasoning
 ///   budget to something the caller did not ask for. The value goes through
 ///   verbatim, the template decides, and a refusal surfaces as a 400 carrying
-///   the template's own message and its accepted set. Same reasoning as
+///   the template's own message and its accepted set. Disabled values never
+///   become a level kwarg because templates commonly reject them. Same
+///   reasoning as
 ///   `resolve_drafter_kind`'s refusal to guess a drafter
 ///   (`src/lib/mlxcel-core/src/drafter/mod.rs`).
-fn map_reasoning_effort_kwarg(
+fn map_reasoning_control_kwargs(
     processor: &ChatTemplateProcessor,
     request: &ChatCompletionRequest,
     per_request_kwargs: &mut ChatTemplateKwargs,
 ) {
-    const KEY: &str = "reasoning_effort";
+    const ENABLE_THINKING: &str = "enable_thinking";
+    const REASONING_EFFORT: &str = "reasoning_effort";
+    const REASONING_STRENGTH: &str = "reasoning_strength";
 
-    let Some(effort) = request.resolve_reasoning_effort() else {
+    let Some(control) = request.resolve_reasoning_control() else {
         return;
     };
-    if per_request_kwargs.as_map().contains_key(KEY) {
+
+    if !per_request_kwargs.as_map().contains_key(ENABLE_THINKING) {
+        per_request_kwargs.set(ENABLE_THINKING, serde_json::Value::Bool(control.enabled));
+    }
+
+    if !control.enabled {
         return;
     }
-    if !processor.template_mentions(KEY) {
+    let Some(effort) = control.effort else {
+        return;
+    };
+
+    let target = if processor.template_mentions(REASONING_EFFORT) {
+        REASONING_EFFORT
+    } else if processor.template_mentions(REASONING_STRENGTH) {
+        REASONING_STRENGTH
+    } else {
         tracing::debug!(
-            "request set reasoning_effort but the loaded chat template does not \
-             reference it; leaving the request unchanged"
+            "request set a reasoning effort but the loaded chat template does not \
+             reference reasoning_effort or reasoning_strength; omitting the level kwarg"
         );
         return;
+    };
+
+    if per_request_kwargs.as_map().contains_key(target) {
+        return;
     }
-    per_request_kwargs.set(KEY, serde_json::Value::String(effort.to_string()));
+    per_request_kwargs.set(target, serde_json::Value::String(effort));
 }
 
 /// Legacy wrapper preserved for tests and any callers outside the hot

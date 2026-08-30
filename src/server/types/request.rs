@@ -716,6 +716,20 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
+/// Effort spellings that disable template-level reasoning.
+///
+/// Matching applies `trim().to_ascii_lowercase()` before comparing.
+pub const DISABLED_REASONING_EFFORTS: [&str; 5] = ["none", "off", "disabled", "false", "0"];
+
+/// Resolved reasoning behavior for one chat-template render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningControl {
+    /// Whether the template should enable its thinking path.
+    pub enabled: bool,
+    /// The caller's raw effort spelling, when one was supplied.
+    pub effort: Option<String>,
+}
+
 /// Chat completion request (POST /v1/chat/completions)
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -815,16 +829,14 @@ pub struct ChatCompletionRequest {
 
     /// OpenAI-standard reasoning-effort hint.
     ///
-    /// Forwarded to the chat template as a `reasoning_effort` Jinja kwarg by
-    /// [`crate::server::chat_request::resolve_effective_kwargs`], but only when
-    /// the loaded template actually reads that name and only when the request
-    /// did not already set `chat_template_kwargs.reasoning_effort` (which wins).
-    /// The value is passed through verbatim: OpenAI's vocabulary
-    /// (`minimal` / `low` / `medium` / `high`) and a checkpoint's vocabulary do
-    /// not always agree, and translating between them would silently change the
-    /// model's reasoning budget on the caller's behalf. A template that refuses
-    /// the value raises, and the request fails with a 400 naming the set the
-    /// template accepts.
+    /// Resolved into `enable_thinking` plus the level key used by the loaded
+    /// chat template in
+    /// [`crate::server::chat_request::resolve_effective_kwargs`]. Enabled
+    /// values are forwarded verbatim as `reasoning_effort`, or as
+    /// `reasoning_strength` when that is the template's supported spelling.
+    /// Disabled values (`none`, `off`, `disabled`, `false`, and `0`) set
+    /// `enable_thinking=false` and are never forwarded as a level. Explicit
+    /// `chat_template_kwargs` entries retain per-key precedence.
     ///
     /// Resolved through the same three-tier chain as [`Self::resolve_user`]:
     /// this field, then the flattened OpenAI-SDK `extra_body`, then a nested
@@ -1042,6 +1054,30 @@ impl ChatCompletionRequest {
         None
     }
 
+    /// Resolve the portable reasoning controls carried by this request.
+    ///
+    /// The existing top-level/flattened/nested [`Self::reasoning_effort`]
+    /// chain has first priority. If it is absent, a `reasoning` key from the
+    /// flattened OpenAI-SDK fields and then nested `extra_body` may supply
+    /// either `{"effort": "..."}` or a boolean. Effort strings retain their
+    /// original spelling for the template; only the enabled/disabled decision
+    /// uses a trimmed, lowercase copy.
+    pub fn resolve_reasoning_control(&self) -> Option<ReasoningControl> {
+        if let Some(effort) = self.resolve_reasoning_effort() {
+            return Some(reasoning_control_from_effort(effort));
+        }
+
+        self.extra_body_fields
+            .get("reasoning")
+            .and_then(reasoning_control_from_value)
+            .or_else(|| {
+                self.extra_body
+                    .as_ref()
+                    .and_then(|body| body.get("reasoning"))
+                    .and_then(reasoning_control_from_value)
+            })
+    }
+
     /// Convert messages to a prompt string using a simple format
     pub fn to_prompt(&self) -> String {
         let mut prompt = String::new();
@@ -1107,6 +1143,30 @@ impl ChatCompletionRequest {
             .flat_map(|m| m.content.video_urls())
             .collect()
     }
+}
+
+fn reasoning_control_from_effort(effort: &str) -> ReasoningControl {
+    let normalized = effort.trim().to_ascii_lowercase();
+    ReasoningControl {
+        enabled: !DISABLED_REASONING_EFFORTS.contains(&normalized.as_str()),
+        effort: Some(effort.to_string()),
+    }
+}
+
+fn reasoning_control_from_value(value: &serde_json::Value) -> Option<ReasoningControl> {
+    if let Some(enabled) = value.as_bool() {
+        return Some(ReasoningControl {
+            enabled,
+            effort: None,
+        });
+    }
+
+    let effort = value
+        .as_object()?
+        .get("effort")?
+        .as_str()
+        .filter(|effort| !effort.is_empty())?;
+    Some(reasoning_control_from_effort(effort))
 }
 
 /// Native llama-server completion request (POST /completion)
