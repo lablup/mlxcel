@@ -103,7 +103,13 @@ fn a_positive_cache_reuse_is_refused_with_what_is_missing() {
     assert!(err.contains("--cache-reuse 256"), "{err}");
     // The message has to name the missing operation, not just say "no".
     assert!(err.contains("re-bas"), "{err}");
-    assert!(err.contains("#1473"), "{err}");
+    // The classification is permanent (#1473), so the message must state that
+    // rather than sending an operator to an issue that is now closed.
+    assert!(err.contains("permanent classification"), "{err}");
+    assert!(
+        !err.contains('#'),
+        "the diagnostic must not point at an issue: {err}"
+    );
 }
 
 #[test]

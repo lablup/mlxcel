@@ -32,6 +32,7 @@ use crate::test_support::env_lock::env_lock;
 fn sample_input() -> ServerStartupInput {
     ServerStartupInput {
         context_compat: Default::default(),
+        slot_compat: Default::default(),
         chat_compat: Default::default(),
         reasoning_alias_field: Default::default(),
         model_path: PathBuf::from("models/foo"),

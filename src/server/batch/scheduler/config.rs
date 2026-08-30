@@ -106,7 +106,15 @@ impl BatchScheduler {
             enable_preemption,
             preemption_policy,
             chunked_prefill_seq: None,
-            mixed_step_enabled: mixed_step_enabled(),
+            // A one-wide decode batch has nothing to mix a prefill into, and
+            // that is also exactly b10621's `--no-cont-batching` gate:
+            // upstream adds pending prompts to the batch only when
+            // `params_base.cont_batching || batch.size() == 0`
+            // (server-context.cpp). `--no-cont-batching` resolves to
+            // `--max-batch-size 1` here, so anding the two makes the flag stop
+            // prefill/decode interleaving outright rather than only pinning
+            // the decode width, which is what upstream's `-nocb` does (#1473).
+            mixed_step_enabled: mixed_step_enabled() && max_batch_size > 1,
             // #1011: resolve the env override / shipped default now;
             // `with_prefill_grant_interval` overrides this later with an
             // explicit CLI value when one was passed.

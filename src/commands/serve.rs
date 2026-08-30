@@ -758,6 +758,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
         context_compat: args.context_compat.clone(),
+        slot_compat: args.slot_compat.clone(),
         infill: args.infill.clone(),
         embedding_compat: args.embedding_compat.clone(),
     })

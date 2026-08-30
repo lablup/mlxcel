@@ -67,13 +67,17 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-Crd", "--spec-draft-cpu-range"),
     ("-ag", "--agent"),
     ("-bs", "--backend-sampling"),
+    ("-cb", "--cont-batching"),
     ("-cl", "--cache-list"),
     ("-cmoe", "--cpu-moe"),
     ("-cmoed", "--spec-draft-cpu-moe"),
+    ("-cms", "--checkpoint-min-step"),
+    ("-cram", "--cache-ram"),
     ("-ctk", "--cache-type-k"),
     ("-ctkd", "--spec-draft-type-k"),
     ("-ctv", "--cache-type-v"),
     ("-ctvd", "--spec-draft-type-v"),
+    ("-ctxcp", "--ctx-checkpoints"),
     ("-dev", "--device"),
     ("-devd", "--spec-draft-device"),
     ("-dio", "--direct-io"),
@@ -91,6 +95,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-hfrd", "--spec-draft-hf"),
     ("-hft", "--hf-token"),
     ("-kvo", "--kv-offload"),
+    ("-kvu", "--kv-unified"),
     ("-lcd", "--lookup-cache-dynamic"),
     ("-lcs", "--lookup-cache-static"),
     ("-lm", "--load-mode"),
@@ -108,6 +113,8 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-ngld", "--spec-draft-ngl"),
     ("-nkvo", "--no-kv-offload"),
     ("-no-ag", "--no-agent"),
+    ("-no-kvu", "--no-kv-unified"),
+    ("-nocb", "--no-cont-batching"),
     ("-np", "--parallel"),
     ("-nr", "--no-repack"),
     ("-ot", "--override-tensor"),
@@ -115,6 +122,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-rea", "--reasoning"),
     ("-sm", "--split-mode"),
     ("-sp", "--special"),
+    ("-sps", "--slot-prompt-similarity"),
     ("-t", "--threads"),
     ("-tb", "--threads-batch"),
     ("-tbd", "--spec-draft-threads-batch"),
@@ -135,11 +143,20 @@ fn long_for(token: &str) -> Option<&'static str> {
 ///
 /// Built from the command itself rather than a hand-written list so the pass
 /// cannot drift from the real surface as flags are added.
+///
+/// The test is `min_values() > 0`, not `takes_values()`. An option declared
+/// `num_args = 0..=1` with a `default_missing_value` (b10621's boolean
+/// spellings: `--cont-batching`, `--kv-unified`, `--cache-idle-slots`,
+/// `--context-shift`, `--cache-prompt`) MAY take a following value but does
+/// not require one, and upstream's short form never passes one. Treating it
+/// as value-taking here would make `-cb -m model` swallow `-m` before clap
+/// ever saw it. Clap itself still accepts `--cont-batching true`, because a
+/// value it does consume is examined by clap rather than by this pass.
 fn value_taking_tokens(cmd: &mut clap::Command) -> HashSet<String> {
     cmd.build();
     let mut tokens = HashSet::new();
     for arg in cmd.get_arguments() {
-        if !arg.get_num_args().is_some_and(|r| r.takes_values()) {
+        if !arg.get_num_args().is_some_and(|r| r.min_values() > 0) {
             continue;
         }
         if let Some(long) = arg.get_long() {

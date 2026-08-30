@@ -33,7 +33,7 @@ use crate::server::chat_request::{
 };
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::prompt_cache::key::{
-    multimodal_digest_from_vecs, resolve_session_key, template_sig,
+    MultimodalDigest, multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options_with_live, chat_carries_loop_amplifier,
@@ -151,6 +151,48 @@ pub(crate) fn build_prompt_cache_request_context(
         session_key,
         mm_digest,
         history_prompt: history_prompt.map(str::to_string),
+        history_prefix_tokens: None,
+    })
+}
+
+/// Cache-key template dimension for the two raw-prompt routes (#1473).
+///
+/// `/v1/completions` and `/completion` take a prompt string that is never run
+/// through the chat template, so there is no template source, kwargs map,
+/// tool list or tool choice to digest. A fixed sentinel keeps them in their
+/// own bucket: a raw prompt that happens to equal a rendered conversation
+/// must not adopt that conversation's KV, because the two would diverge the
+/// moment the template changed underneath them.
+pub(crate) const RAW_PROMPT_TEMPLATE_SIG: &str = "mlxcel:prompt-cache:raw-prompt:v1";
+
+/// Build the prompt-cache context for a raw-prompt route (#1473).
+///
+/// The sibling of [`build_prompt_cache_request_context`] for `/v1/completions`
+/// and native `/completion`. Same contract, and deliberately the same single
+/// seam: returning `None` is the whole implementation of a per-request
+/// opt-out, because the scheduler reaches the store only through this context
+/// for both the prefix lookup and the donate-back, so withholding it forces a
+/// cold prefill AND leaves every entry another request might reuse untouched.
+///
+/// `cache_prompt` is the b10621 per-request field, `None` when the route or
+/// the request did not express one. Raw-prompt routes carry no session key,
+/// no multimodal payload and no history render, so the remaining key
+/// dimensions are the model id and [`RAW_PROMPT_TEMPLATE_SIG`].
+pub(crate) fn build_raw_prompt_cache_context(
+    state: &AppState,
+    cache_prompt: Option<bool>,
+) -> Option<PromptCacheRequestContext> {
+    state.prompt_cache.as_ref()?;
+    if cache_prompt == Some(false) {
+        return None;
+    }
+    Some(PromptCacheRequestContext {
+        model_id: state.display_model_id().to_string(),
+        lora_id: None,
+        template_sig: RAW_PROMPT_TEMPLATE_SIG.to_string(),
+        session_key: resolve_session_key(None, None).to_string(),
+        mm_digest: MultimodalDigest::empty(),
+        history_prompt: None,
         history_prefix_tokens: None,
     })
 }
