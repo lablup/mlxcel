@@ -200,6 +200,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
     adapter_path: Option<PathBuf>,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
+    snapshot_reuse_capable: Arc<AtomicBool>,
     chat_unavailable: Arc<AtomicBool>,
     worker_model_id: String,
     sched_config: WorkerSchedulerConfig,
@@ -312,6 +313,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         tracing::error!("{message}");
                         return;
                     }
+                    snapshot_reuse_capable
+                        .store(model.supports_snapshot_reuse(), Ordering::Release);
                     loaded.store(true, Ordering::Release);
                     (model, tokenizer)
                 }
@@ -934,6 +937,7 @@ pub(crate) fn spawn_legacy_model_worker(
     reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
+    snapshot_reuse_capable: Arc<AtomicBool>,
     chat_unavailable: Arc<AtomicBool>,
     worker_model_id: String,
     batch_metrics: Arc<BatchMetrics>,
@@ -1023,6 +1027,8 @@ pub(crate) fn spawn_legacy_model_worker(
                         tracing::error!("{message}");
                         return;
                     }
+                    snapshot_reuse_capable
+                        .store(model.supports_snapshot_reuse(), Ordering::Release);
                     loaded.store(true, Ordering::Release);
                     (model, tokenizer)
                 }
@@ -1156,6 +1162,7 @@ pub(crate) fn spawn_xla_model_worker(
     b_max: usize,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
+    snapshot_reuse_capable: Arc<AtomicBool>,
     worker_model_id: String,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
@@ -1267,6 +1274,7 @@ pub(crate) fn spawn_xla_model_worker(
                 "OpenXLA model {worker_model_id} loaded in {:.3}s (B_max={b_max}, capacities={capacities:?}, device={device})",
                 load_elapsed.as_secs_f64(),
             );
+            snapshot_reuse_capable.store(false, Ordering::Release);
             loaded.store(true, Ordering::Release);
             worker.serve();
         })

@@ -695,6 +695,12 @@ impl AppState {
     pub fn can_accept_request(&self) -> bool {
         self.batch_metrics.queue_depth() < self.config.max_queue_depth
     }
+
+    /// Whether HTTP request preparation should pay the history-boundary render
+    /// cost for prompt-cache snapshot reuse.
+    pub fn supports_snapshot_reuse(&self) -> bool {
+        self.model_provider.supports_snapshot_reuse()
+    }
 }
 
 #[cfg(test)]

@@ -239,6 +239,7 @@ async fn non_stream_create_response(
         &translated.chat_request,
         state.config.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
+        state.supports_snapshot_reuse(),
     )
     .await;
     let prepared = match prepared {
@@ -370,6 +371,7 @@ async fn stream_create_response(
         &translated.chat_request,
         state.config.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
+        state.supports_snapshot_reuse(),
     )
     .await;
     let prepared = match prepared {
