@@ -320,8 +320,12 @@ pub struct Attention {
     pub scale: f32,
     pub rope_dims: i32,
     pub rope_base: f32,
-    /// Pre-computed llama3-scaled frequencies (None = plain `rope_base` theta).
+    /// Pre-computed llama3- or YaRN-scaled frequencies (None = plain
+    /// `rope_base` theta).
     pub rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// YaRN attention-magnitude multiplier applied to Q and K before the
+    /// rotation (#1472). `1.0` (a skipped multiply) for every other scheme.
+    pub rope_mscale: f32,
 }
 
 impl Attention {
@@ -364,6 +368,16 @@ impl Attention {
         // RoPE AFTER normalization. Use the precomputed llama3-scaled freqs
         // when present, otherwise plain base theta.
         let (q, k) = if let Some(ref freqs) = self.rope_freqs {
+            // YaRN magnitude correction (#1472): a skipped multiply at 1.0
+            // keeps the llama3-table graph unchanged.
+            let (q, k) = if self.rope_mscale != 1.0 {
+                (
+                    mlxcel_core::multiply_scalar(&q, self.rope_mscale),
+                    mlxcel_core::multiply_scalar(&k, self.rope_mscale),
+                )
+            } else {
+                (q, k)
+            };
             let q =
                 mlxcel_core::fast_rope_with_freqs(&q, self.rope_dims, false, 1.0, offset, freqs);
             let k =
@@ -399,6 +413,7 @@ impl Attention {
         args: &ModelArgs,
         prefix: &str,
         rope_freqs: Option<UniquePtr<MlxArray>>,
+        rope_mscale: f32,
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
@@ -439,6 +454,7 @@ impl Attention {
             rope_dims: head_dim,
             rope_base: crate::models::rope_overrides::resolve_base(args.rope_theta),
             rope_freqs,
+            rope_mscale,
         })
     }
 }
@@ -499,11 +515,17 @@ impl TransformerBlock {
         args: &ModelArgs,
         layer_idx: usize,
         rope_freqs: Option<UniquePtr<MlxArray>>,
+        rope_mscale: f32,
     ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
-        let self_attn =
-            Attention::from_weights(weights, args, &format!("{}.self_attn", prefix), rope_freqs)?;
+        let self_attn = Attention::from_weights(
+            weights,
+            args,
+            &format!("{}.self_attn", prefix),
+            rope_freqs,
+            rope_mscale,
+        )?;
         let mlp = MLP::from_weights(weights, args, &format!("{}.mlp", prefix))?;
 
         let attention_norm_weight =
@@ -611,12 +633,18 @@ impl ApertusModel {
 
         // llama3-scaled RoPE frequencies are computed once and shared (copied)
         // into every layer's attention.
-        let rope_freqs = compute_rope_freqs(args);
+        let (rope_freqs, rope_mscale) = compute_rope_freqs(args);
 
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
             let freqs_i = rope_freqs.as_ref().map(|f| mlxcel_core::copy(f));
-            layers.push(TransformerBlock::from_weights(weights, args, i, freqs_i)?);
+            layers.push(TransformerBlock::from_weights(
+                weights,
+                args,
+                i,
+                freqs_i,
+                rope_mscale,
+            )?);
         }
 
         let norm_weight = get_weight_copy(weights, "model.norm.weight")?;
@@ -687,18 +715,22 @@ fn read_scalar(weights: &WeightMap, name: &str) -> Option<f32> {
 /// writes the same value under both keys, and it is the order to keep: a config
 /// where the two disagree should resolve the way mlx-lm resolves it, not the
 /// way this file happened to.
-fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
-    let scaling = args.rope_scaling.as_ref()?;
+fn compute_rope_freqs(args: &ModelArgs) -> (Option<UniquePtr<MlxArray>>, f32) {
+    let Some(scaling) = args.rope_scaling.as_ref() else {
+        return (None, 1.0);
+    };
     let spec = crate::models::rope_utils::RopeScalingSpec::from_lookup(|key| scaling.get(key));
 
     match crate::models::rope_utils::RopeScalingKind::resolve(
         Some(&spec),
         args.head_dim(),
         args.rope_theta,
+        args.max_position_embeddings.map(|n| n as f32),
         &args.model_type,
     ) {
-        crate::models::rope_utils::RopeScalingKind::Llama3 { freqs } => Some(freqs),
-        _ => None,
+        crate::models::rope_utils::RopeScalingKind::Llama3 { freqs } => (Some(freqs), 1.0),
+        crate::models::rope_utils::RopeScalingKind::Yarn { freqs, mscale } => (Some(freqs), mscale),
+        _ => (None, 1.0),
     }
 }
 

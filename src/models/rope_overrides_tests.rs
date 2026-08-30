@@ -68,13 +68,66 @@ fn the_two_scale_spellings_may_agree_but_not_disagree() {
 }
 
 #[test]
-fn yarn_is_refused_at_the_edge_with_a_reason() {
-    let err = RopeRuntimeOverride::from_flags(Some("yarn"), None, None, None)
-        .expect_err("yarn has no representation on this path");
-    assert!(err.contains("not implemented"), "{err}");
-    // Naming the families that DO serve YaRN from their own config is what
-    // stops the message reading as "mlxcel cannot do YaRN at all".
-    assert!(err.contains("DeepSeek"), "{err}");
+fn yarn_resolves_at_the_edge_since_1472() {
+    let over = RopeRuntimeOverride::from_flags(Some("yarn"), Some(4.0), None, None)
+        .expect("yarn is serveable on the shared path since #1472")
+        .expect("an override");
+    assert_eq!(over.scaling_type(), Some(RopeScalingTypeOverride::Yarn));
+
+    // Forcing yarn on a checkpoint that declares nothing builds a yarn spec
+    // whose factor is 1 / freq_scale.
+    let spec = over
+        .apply_to_spec(None)
+        .expect("yarn composes with a bare checkpoint")
+        .expect("a spec");
+    assert_eq!(spec.rope_type(), "yarn");
+    assert_eq!(spec.factor, Some(4.0));
+}
+
+#[test]
+fn forcing_yarn_over_a_declared_yarn_block_keeps_its_band_keys() {
+    let over = RopeRuntimeOverride::from_flags(Some("yarn"), None, None, None)
+        .expect("valid")
+        .expect("an override");
+    let declared = RopeScalingSpec {
+        rope_type: Some("yarn".to_string()),
+        factor: Some(8.0),
+        beta_fast: Some(48.0),
+        original_max_position_embeddings: Some(16384.0),
+        ..RopeScalingSpec::default()
+    };
+    let spec = over
+        .apply_to_spec(Some(&declared))
+        .expect("valid")
+        .expect("a spec");
+    assert_eq!(spec.rope_type(), "yarn");
+    // No --rope-scale given: the checkpoint's own factor survives, which is
+    // b10621's "unspecified rope_freq_scale keeps the model's own".
+    assert_eq!(spec.factor, Some(8.0));
+    assert_eq!(spec.beta_fast, Some(48.0));
+    assert_eq!(spec.original_max_position_embeddings, Some(16384.0));
+}
+
+#[test]
+fn a_bare_scale_over_a_declared_yarn_block_feeds_its_factor() {
+    // b10621 writes rope_freq_scale into the YaRN rotation's factor, so the
+    // compose is well-defined here, unlike the banded llama3 case below.
+    let over = RopeRuntimeOverride::from_flags(None, Some(2.0), None, None)
+        .expect("valid")
+        .expect("an override");
+    let declared = RopeScalingSpec {
+        rope_type: Some("yarn".to_string()),
+        factor: Some(8.0),
+        beta_slow: Some(2.0),
+        ..RopeScalingSpec::default()
+    };
+    let spec = over
+        .apply_to_spec(Some(&declared))
+        .expect("a scale composes with yarn")
+        .expect("a spec");
+    assert_eq!(spec.rope_type(), "yarn");
+    assert_eq!(spec.factor, Some(2.0));
+    assert_eq!(spec.beta_slow, Some(2.0));
 }
 
 #[test]

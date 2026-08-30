@@ -559,7 +559,7 @@ fn a_frequency_table_that_does_not_match_head_dim_is_a_load_error() {
             "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
     )
     .unwrap();
-    let wrong_width = RopeScalingKind::resolve(Some(&spec), 32, args.rope_theta, "llama");
+    let wrong_width = RopeScalingKind::resolve(Some(&spec), 32, args.rope_theta, None, "llama");
 
     let Err(err) = Attention::from_weights_with_rope(
         &weights,
@@ -575,7 +575,8 @@ fn a_frequency_table_that_does_not_match_head_dim_is_a_load_error() {
     );
 
     // The matching width still loads, so the check is a guard and not a wall.
-    let right_width = RopeScalingKind::resolve(Some(&spec), args.head_dim(), args.rope_theta, "l");
+    let right_width =
+        RopeScalingKind::resolve(Some(&spec), args.head_dim(), args.rope_theta, None, "l");
     Attention::from_weights_with_rope(&weights, &args, "model.layers.0.self_attn", &right_width)
         .expect("the table this checkpoint asks for must load");
 }
@@ -911,5 +912,53 @@ fn greedy_decode_is_token_identical_to_the_unfused_baseline() {
          {:?} / {:?}",
         std::env::var("MLXCEL_FUSED_ADD_RMSNORM").ok(),
         std::env::var("MLXCEL_FUSED_ROPE_APPEND").ok()
+    );
+}
+
+#[test]
+fn a_yarn_scaling_block_reaches_the_attention_block_with_its_mscale() {
+    // #1472: a usable yarn block builds a table and carries the temperature
+    // multiplier; both must land on the attention block or the rotation is
+    // served without its magnitude correction.
+    let args = parse_llama_config(
+        r#""rope_scaling": {"rope_type": "yarn", "factor": 8.0,
+            "original_max_position_embeddings": 4096}"#,
+    );
+    let weights = tiny_weights(&args);
+    let attention = Attention::from_weights(&weights, &args, "model.layers.0.self_attn").unwrap();
+    assert!(attention.rope_freqs.is_some(), "yarn builds a table");
+    assert_eq!(attention.rope_scale, 1.0, "yarn rotates at unit scale");
+    let expected = 0.1 * 8.0f32.ln() + 1.0;
+    assert!(
+        (attention.rope_mscale - expected).abs() < 1e-6,
+        "mscale {} != {expected}",
+        attention.rope_mscale
+    );
+}
+
+#[test]
+fn a_yarn_scaling_block_actually_changes_the_logits() {
+    // Position 0 already differs, because the mscale magnitude correction
+    // applies at every position; the frequency change itself needs longer
+    // prompts, which the 64-position prompt in the llama3 sibling test covers.
+    let yarn = parse_llama_config(
+        r#""rope_scaling": {"rope_type": "yarn", "factor": 8.0,
+            "original_max_position_embeddings": 4096}"#,
+    );
+    let plain = parse_llama_config("");
+    let weights = tiny_weights(&yarn);
+
+    let ids: Vec<i32> = (0..64).map(|i| i * 7 % 32).collect();
+    let prompt = mlxcel_core::from_slice_i32(&ids, &[1, 64]);
+    let logits = |args: &ModelArgs| {
+        let model = Llama3Model::from_weights(&weights, args).unwrap();
+        let mut caches = model.make_caches();
+        model.forward(&prompt, &mut caches, None)
+    };
+
+    let gap = max_abs_diff(&logits(&yarn), &logits(&plain));
+    assert!(
+        gap > 1e-3,
+        "a yarn block must change the rotation (gap {gap})"
     );
 }

@@ -39,6 +39,7 @@ use crate::models::qwen3_5::{Qwen35Config, Qwen35Model};
 fn make_test_model_args() -> LlamaModelArgs {
     LlamaModelArgs {
         model_type: "llama".to_string(),
+        max_position_embeddings: None,
         hidden_size: 4,
         num_hidden_layers: 1,
         intermediate_size: 8,
@@ -908,6 +909,7 @@ fn tensor_parallel_llama_matches_full_model_logits() {
 fn local_llama_args_preserves_computed_head_dim_when_config_omits_it() {
     let args = LlamaModelArgs {
         model_type: "llama".to_string(),
+        max_position_embeddings: None,
         hidden_size: 896,
         num_hidden_layers: 1,
         intermediate_size: 4864,

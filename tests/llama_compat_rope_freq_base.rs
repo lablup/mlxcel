@@ -40,6 +40,7 @@ fn llama3_spec() -> RopeScalingSpec {
         low_freq_factor: Some(1.0),
         high_freq_factor: Some(4.0),
         original_max_position_embeddings: Some(8192.0),
+        ..RopeScalingSpec::default()
     }
 }
 
@@ -63,12 +64,14 @@ fn rope_freq_base_replaces_the_checkpoints_rope_theta_in_the_table() {
         Some(&llama3_spec()),
         DIMS,
         500_000.0,
+        None,
         "probe",
     ));
     let before_10k = table(&RopeScalingKind::resolve(
         Some(&llama3_spec()),
         DIMS,
         10_000.0,
+        None,
         "probe",
     ));
     assert_eq!(before_500k.len(), DIMS / 2);
@@ -93,18 +96,21 @@ fn rope_freq_base_replaces_the_checkpoints_rope_theta_in_the_table() {
         Some(&llama3_spec()),
         DIMS,
         500_000.0,
+        None,
         "probe",
     ));
     let after_10k = table(&RopeScalingKind::resolve(
         Some(&llama3_spec()),
         DIMS,
         10_000.0,
+        None,
         "probe",
     ));
     let at_override = table(&RopeScalingKind::resolve(
         Some(&llama3_spec()),
         DIMS,
         OVERRIDE_BASE,
+        None,
         "probe",
     ));
 

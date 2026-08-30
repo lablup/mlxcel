@@ -218,13 +218,29 @@ fn qwen3_rope_scaling_kind_warns_to_plain_table_for_unusable_blocks() {
         Some(serde_json::json!({"rope_type": "linear"})),
         Some(serde_json::json!({"rope_type": "linear", "factor": 0.0})),
         Some(serde_json::json!({"rope_type": "linear", "factor": -8.0})),
-        Some(serde_json::json!({"rope_type": "yarn", "factor": 8.0})),
+        Some(serde_json::json!({"rope_type": "yarn"})),
     ] {
         let args = args_with(block);
         let kind = args.rope_scaling_kind();
         assert_eq!(kind.scale(), 1.0);
         assert!(kind.freqs().is_none());
     }
+}
+
+#[test]
+fn qwen3_rope_scaling_kind_builds_the_yarn_table_since_1472() {
+    let args = args_with(Some(serde_json::json!({
+        "rope_type": "yarn",
+        "factor": 8.0,
+        "original_max_position_embeddings": 32768
+    })));
+    let kind = args.rope_scaling_kind();
+    assert!(kind.freqs().is_some(), "a usable yarn block builds a table");
+    assert_eq!(kind.scale(), 1.0);
+    assert!(
+        kind.attn_scale() > 1.0,
+        "yarn carries its temperature mscale"
+    );
 }
 
 #[test]

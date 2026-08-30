@@ -121,12 +121,12 @@ fn unknown_keys_are_ignored_rather_than_rejected() {
 
 #[test]
 fn default_and_absent_blocks_select_the_plain_table() {
-    let absent = RopeScalingKind::resolve(None, 128, 500_000.0, "llama");
+    let absent = RopeScalingKind::resolve(None, 128, 500_000.0, None, "llama");
     assert!(absent.freqs().is_none());
     assert_eq!(absent.scale(), 1.0);
 
     let declared = spec(r#"{"rope_type": "default"}"#);
-    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, "llama");
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, None, "llama");
     assert!(kind.freqs().is_none());
     assert_eq!(kind.scale(), 1.0);
 }
@@ -134,7 +134,7 @@ fn default_and_absent_blocks_select_the_plain_table() {
 #[test]
 fn linear_divides_positions_by_factor() {
     let declared = spec(r#"{"factor": 4.0, "type": "linear"}"#);
-    let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, "llama");
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, None, "llama");
     // MLX multiplies the position by `scale`, so dividing by `factor` is
     // `scale = 1 / factor`. The frequencies stay base-derived.
     assert_eq!(kind.scale(), 0.25);
@@ -147,7 +147,7 @@ fn llama3_builds_a_half_width_float32_table() {
         r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
             "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
     );
-    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, "llama");
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, None, "llama");
     let freqs = kind.freqs().expect("llama3 must produce a table");
     assert_eq!(mlxcel_core::array_shape(freqs), vec![64]);
     assert_eq!(mlxcel_core::array_dtype(freqs), mlxcel_core::dtype::FLOAT32);
@@ -165,13 +165,12 @@ fn an_unimplemented_scheme_keeps_the_model_loading_on_the_plain_table() {
     // the half that says the model still loads.
     for block in [
         r#"{"factor": 2.0, "rope_type": "dynamic", "type": "dynamic"}"#,
-        r#"{"factor": 40.0, "type": "yarn"}"#,
         r#"{"type": "longrope", "long_factor": [1.0], "short_factor": [1.0]}"#,
         r#"{"type": "su"}"#,
         r#"{"type": "mrope", "mrope_section": [16, 24, 24]}"#,
     ] {
         let declared = spec(block);
-        let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, "qwen2");
+        let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, None, "qwen2");
         assert!(kind.freqs().is_none(), "{block} must not build a table");
         assert_eq!(kind.scale(), 1.0, "{block} must not scale positions");
     }
@@ -182,12 +181,12 @@ fn an_unimplemented_scheme_warns_once_per_model_and_scheme() {
     let model = "qwen3-warning-dedup-test";
     assert!(report_unusable_rope_scaling_once(
         model,
-        "yarn",
+        "longrope",
         "test-only unsupported scheme"
     ));
     assert!(!report_unusable_rope_scaling_once(
         model,
-        "yarn",
+        "longrope",
         "test-only unsupported scheme"
     ));
     assert!(report_unusable_rope_scaling_once(
@@ -197,7 +196,7 @@ fn an_unimplemented_scheme_warns_once_per_model_and_scheme() {
     ));
     assert!(report_unusable_rope_scaling_once(
         "qwen3-moe-warning-dedup-test",
-        "yarn",
+        "longrope",
         "test-only distinct model"
     ));
 }
@@ -215,7 +214,7 @@ fn a_linear_block_with_a_missing_or_unusable_factor_falls_back_to_the_plain_tabl
         r#"{"factor": -2.0, "type": "linear"}"#,
     ] {
         let declared = spec(block);
-        let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, "llama");
+        let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, None, "llama");
         assert_eq!(kind.scale(), 1.0, "{block}");
         assert!(kind.freqs().is_none(), "{block}");
     }
@@ -233,7 +232,7 @@ fn assert_llama3_block_falls_back(block: &str) {
         .unwrap_or_else(|| panic!("{block} must not build a table"));
     assert!(!reason.is_empty(), "{block} must name what is wrong");
 
-    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, "llama-3.1-8b-4bit");
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, None, "llama-3.1-8b-4bit");
     assert!(kind.freqs().is_none(), "{block}");
     assert_eq!(kind.scale(), 1.0, "{block}");
 }
@@ -452,7 +451,7 @@ fn duplicate_hands_out_an_equal_table() {
         r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
             "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
     );
-    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, "llama");
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, None, "llama");
     let copy = kind.duplicate();
 
     let original = to_vec(kind.freqs().expect("llama3 table"));
@@ -463,7 +462,131 @@ fn duplicate_hands_out_an_equal_table() {
         Some(&spec(r#"{"type": "linear", "factor": 4.0}"#)),
         128,
         10_000.0,
+        None,
         "llama",
     );
     assert_eq!(linear.duplicate().scale(), linear.scale());
+}
+
+// The YaRN arm (#1472).
+
+#[test]
+fn a_yarn_block_builds_a_half_width_table_with_the_temperature_mscale() {
+    let declared = spec(
+        r#"{"rope_type": "yarn", "factor": 4.0,
+            "original_max_position_embeddings": 32768}"#,
+    );
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, None, "qwen2");
+    let freqs = kind.freqs().expect("a yarn block builds a table");
+    assert_eq!(mlxcel_core::array_shape(freqs), vec![64]);
+    assert_eq!(kind.scale(), 1.0, "yarn rotates at unit position scale");
+
+    // The default magnitude correction is YaRN's sqrt(t) = 0.1 ln(s) + 1.
+    let expected = 0.1 * 4.0f32.ln() + 1.0;
+    assert!(
+        (kind.attn_scale() - expected).abs() < 1e-6,
+        "attn_scale {} != {expected}",
+        kind.attn_scale()
+    );
+}
+
+#[test]
+fn yarn_interpolates_the_low_band_and_extrapolates_the_high_band() {
+    let factor = 8.0f32;
+    let declared = spec(
+        r#"{"rope_type": "yarn", "factor": 8.0,
+            "original_max_position_embeddings": 4096}"#,
+    );
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, None, "qwen2");
+    let table = to_vec(kind.freqs().expect("table"));
+    let plain: Vec<f32> = (0..64)
+        .map(|i| 10_000.0f32.powf(2.0 * i as f32 / 128.0))
+        .collect();
+
+    // Pair 0 rotates fastest: fully extrapolated, so the divisor is unchanged.
+    assert!(
+        (table[0] - plain[0]).abs() < 1e-6,
+        "{} != {}",
+        table[0],
+        plain[0]
+    );
+    // The slowest pair is fully interpolated: divisor scaled by the factor.
+    let last = table.len() - 1;
+    assert!(
+        (table[last] - plain[last] * factor).abs() / (plain[last] * factor) < 1e-5,
+        "{} != {}",
+        table[last],
+        plain[last] * factor
+    );
+    // The table is monotonically non-decreasing relative to the plain one.
+    for (t, p) in table.iter().zip(&plain) {
+        assert!(*t >= *p * 0.999, "yarn must never speed a rotation up");
+        assert!(
+            *t <= *p * factor * 1.001,
+            "yarn must never exceed full interpolation"
+        );
+    }
+}
+
+#[test]
+fn a_yarn_block_with_deepseek_mscale_keys_uses_the_ratio() {
+    let declared = spec(
+        r#"{"rope_type": "yarn", "factor": 40.0, "mscale": 1.0, "mscale_all_dim": 1.0,
+            "original_max_position_embeddings": 4096}"#,
+    );
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, None, "probe");
+    // mscale == mscale_all_dim makes the ratio exactly 1.0.
+    assert_eq!(kind.attn_scale(), 1.0);
+}
+
+#[test]
+fn a_yarn_block_missing_its_factor_falls_back_to_the_plain_table() {
+    let declared = spec(r#"{"rope_type": "yarn"}"#);
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, None, "probe");
+    assert!(kind.freqs().is_none());
+    assert_eq!(kind.attn_scale(), 1.0);
+}
+
+#[test]
+fn yarn_duplicate_hands_out_an_equal_table_and_mscale() {
+    let declared = spec(
+        r#"{"rope_type": "yarn", "factor": 4.0,
+            "original_max_position_embeddings": 8192}"#,
+    );
+    let kind = RopeScalingKind::resolve(Some(&declared), 64, 500_000.0, None, "probe");
+    let copy = kind.duplicate();
+    assert_eq!(
+        to_vec(kind.freqs().expect("table")),
+        to_vec(copy.freqs().expect("copy"))
+    );
+    assert_eq!(kind.attn_scale(), copy.attn_scale());
+}
+
+#[test]
+fn yarn_orig_ctx_falls_back_to_the_training_context_then_4096() {
+    // The same factor over a longer original context moves the correction band
+    // to higher pair indices, so more of the table stays extrapolated.
+    let block = r#"{"rope_type": "yarn", "factor": 8.0}"#;
+    let short = to_vec(
+        RopeScalingKind::resolve(Some(&spec(block)), 128, 10_000.0, Some(4096.0), "probe")
+            .freqs()
+            .expect("table"),
+    );
+    let long = to_vec(
+        RopeScalingKind::resolve(Some(&spec(block)), 128, 10_000.0, Some(131_072.0), "probe")
+            .freqs()
+            .expect("table"),
+    );
+    assert!(
+        short.iter().zip(&long).any(|(s, l)| (s - l).abs() > 1e-3),
+        "the original context must move the band"
+    );
+    // With no training context supplied, the 4096 default reproduces the
+    // 4096-trained table, which is also upstream YarnRoPE's default.
+    let defaulted = to_vec(
+        RopeScalingKind::resolve(Some(&spec(block)), 128, 10_000.0, None, "probe")
+            .freqs()
+            .expect("table"),
+    );
+    assert_eq!(short, defaulted);
 }

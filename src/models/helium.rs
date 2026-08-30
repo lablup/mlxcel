@@ -419,6 +419,10 @@ impl ModelArgs {
             // makes `None` a decision rather than a placeholder: it selects the
             // plain `base^(2i/d)` table Helium has always rotated with.
             rope_scaling: None,
+            // Forwarded for completeness: with no scaling block it is only
+            // YaRN's original-context fallback, which a scaling-free Helium
+            // never reaches.
+            max_position_embeddings: Some(self.max_position_embeddings),
             quantization: self
                 .quantization
                 .as_ref()

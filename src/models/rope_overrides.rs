@@ -44,15 +44,19 @@
 //! into `rope_utils` starts being accepted without anyone editing a list, and a
 //! family that does not is named in the error.
 //!
-//! # Why YaRN is rejected rather than approximated
+//! # YaRN (#1472)
 //!
 //! [`RopeScalingKind`](crate::models::rope_utils::RopeScalingKind) implements
-//! `default`, `linear` and `llama3` only. A `yarn` request has no
-//! representation here, and the nearest thing (falling back to the unscaled
-//! table) is precisely the silent degradation this module exists to prevent, so
-//! `--rope-scaling yarn` is refused at the CLI edge. The families that do
-//! implement YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it
-//! from their checkpoint's own block and are not on this seam either way.
+//! `default`, `linear`, `llama3` and, since #1472, `yarn`. `--rope-scaling
+//! yarn` forces the YaRN table on the shared path, and the five `--yarn-*`
+//! knobs ([`YarnKnobs`]) tune whatever YaRN rotation ends up in force, whether
+//! forced by the flag or declared by the checkpoint's own block; with a
+//! non-YaRN rotation in force they are inert, exactly as they are in b10621
+//! (`llama_context` reads them only under `LLAMA_ROPE_SCALING_TYPE_YARN`).
+//! The families that implement YaRN outside this seam (DeepSeek V2/V3.2/V4,
+//! gpt-oss, Mellum, TeleChat3) build it from their checkpoint's own block; an
+//! override installed against one of them still refuses to serve through
+//! [`verify_applied`] rather than being ignored.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -71,8 +75,8 @@ pub enum RopeScalingTypeOverride {
     None,
     /// `LLAMA_ROPE_SCALING_TYPE_LINEAR`: divide positions by a factor.
     Linear,
-    /// `LLAMA_ROPE_SCALING_TYPE_YARN`: parsed, then refused. See the module
-    /// documentation.
+    /// `LLAMA_ROPE_SCALING_TYPE_YARN`: force the YaRN table on the shared
+    /// RoPE path (#1472). See the module documentation.
     Yarn,
 }
 
@@ -112,6 +116,85 @@ pub struct RopeRuntimeOverride {
     scaling_type: Option<RopeScalingTypeOverride>,
     freq_base: Option<f32>,
     freq_scale: Option<f32>,
+    yarn: YarnKnobs,
+}
+
+/// The five llama-server b10621 `--yarn-*` runtime knobs (#1472).
+///
+/// `None` is the b10621 sentinel (`-1.0`, and `0` for the original context),
+/// meaning "use the values the model was trained with". The knobs tune a YaRN
+/// rotation wherever one is in force, whether `--rope-scaling yarn` forced it
+/// or the checkpoint's own `rope_scaling` block declared it, and are inert
+/// against any other rotation, exactly as they are upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct YarnKnobs {
+    /// `--yarn-orig-ctx`: the original (pre-extension) context length.
+    pub orig_ctx: Option<i64>,
+    /// `--yarn-ext-factor`: extrapolation mix factor (`0.0` = full
+    /// interpolation).
+    pub ext_factor: Option<f32>,
+    /// `--yarn-attn-factor`: attention magnitude. Participates only when the
+    /// resolved extrapolation mix is `0`, which is b10621's own resolution
+    /// order (`llama-context.cpp` recomputes the factor whenever the mix is
+    /// non-zero).
+    pub attn_factor: Option<f32>,
+    /// `--yarn-beta-fast`: low correction rotation count (default 32).
+    pub beta_fast: Option<f32>,
+    /// `--yarn-beta-slow`: high correction rotation count (default 1).
+    pub beta_slow: Option<f32>,
+}
+
+impl YarnKnobs {
+    /// Whether any knob was given at a non-sentinel value.
+    pub fn any_set(&self) -> bool {
+        self.orig_ctx.is_some()
+            || self.ext_factor.is_some()
+            || self.attn_factor.is_some()
+            || self.beta_fast.is_some()
+            || self.beta_slow.is_some()
+    }
+
+    /// Screen the knob values a table could not be built from.
+    ///
+    /// The startup error names the flag and the value, in the same shape the
+    /// RoPE scalar screening uses.
+    fn validate(&self) -> Result<(), String> {
+        if let Some(value) = self.orig_ctx
+            && value < 0
+        {
+            return Err(format!(
+                "--yarn-orig-ctx {value} is negative; pass the model's original context length, \
+                 or 0 to use the value the model was trained with"
+            ));
+        }
+        for (flag, value, min_exclusive) in [
+            ("--yarn-ext-factor", self.ext_factor, false),
+            ("--yarn-attn-factor", self.attn_factor, true),
+            ("--yarn-beta-fast", self.beta_fast, true),
+            ("--yarn-beta-slow", self.beta_slow, true),
+        ] {
+            if let Some(value) = value {
+                let ok = value.is_finite()
+                    && if min_exclusive {
+                        value > 0.0
+                    } else {
+                        value >= 0.0
+                    };
+                if !ok {
+                    return Err(format!(
+                        "{flag} {value} is not a {} finite number; a YaRN parameter outside its \
+                         domain produces a frequency table that decodes wrongly without an error",
+                        if min_exclusive {
+                            "positive"
+                        } else {
+                            "non-negative"
+                        }
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl RopeRuntimeOverride {
@@ -130,19 +213,26 @@ impl RopeRuntimeOverride {
         freq_scale: Option<f32>,
         freq_base: Option<f32>,
     ) -> Result<Option<Self>, String> {
+        Self::from_flags_with_yarn(
+            scaling,
+            rope_scale,
+            freq_scale,
+            freq_base,
+            YarnKnobs::default(),
+        )
+    }
+
+    /// [`Self::from_flags`] with the five b10621 `--yarn-*` knobs (#1472).
+    pub fn from_flags_with_yarn(
+        scaling: Option<&str>,
+        rope_scale: Option<f32>,
+        freq_scale: Option<f32>,
+        freq_base: Option<f32>,
+        yarn: YarnKnobs,
+    ) -> Result<Option<Self>, String> {
         let scaling_type = scaling.map(RopeScalingTypeOverride::parse).transpose()?;
 
-        if let Some(RopeScalingTypeOverride::Yarn) = scaling_type {
-            return Err(
-                "--rope-scaling yarn is not implemented: mlxcel's shared RoPE path serves \
-                 \"default\", \"linear\" and \"llama3\" frequency tables only, and applying a \
-                 YaRN request as any of those would change the rotation without saying so. \
-                 Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, \
-                 Mellum, TeleChat3) still load and rotate with it; only the runtime override \
-                 is refused. Tracked by #1472."
-                    .to_string(),
-            );
-        }
+        yarn.validate()?;
 
         for (flag, value) in [
             ("--rope-scale", rope_scale),
@@ -178,7 +268,11 @@ impl RopeRuntimeOverride {
             (None, b) => b,
         };
 
-        if scaling_type.is_none() && resolved_freq_scale.is_none() && freq_base.is_none() {
+        if scaling_type.is_none()
+            && resolved_freq_scale.is_none()
+            && freq_base.is_none()
+            && !yarn.any_set()
+        {
             return Ok(None);
         }
 
@@ -186,6 +280,7 @@ impl RopeRuntimeOverride {
             scaling_type,
             freq_base,
             freq_scale: resolved_freq_scale,
+            yarn,
         }))
     }
 
@@ -204,6 +299,11 @@ impl RopeRuntimeOverride {
         self.freq_scale
     }
 
+    /// The five `--yarn-*` knobs carried by this override (#1472).
+    pub fn yarn_knobs(&self) -> &YarnKnobs {
+        &self.yarn
+    }
+
     /// A one-line description for the startup banner and error messages.
     pub fn describe(&self) -> String {
         let mut parts = Vec::new();
@@ -215,6 +315,21 @@ impl RopeRuntimeOverride {
         }
         if let Some(base) = self.freq_base {
             parts.push(format!("--rope-freq-base {base}"));
+        }
+        if let Some(n) = self.yarn.orig_ctx {
+            parts.push(format!("--yarn-orig-ctx {n}"));
+        }
+        if let Some(v) = self.yarn.ext_factor {
+            parts.push(format!("--yarn-ext-factor {v}"));
+        }
+        if let Some(v) = self.yarn.attn_factor {
+            parts.push(format!("--yarn-attn-factor {v}"));
+        }
+        if let Some(v) = self.yarn.beta_slow {
+            parts.push(format!("--yarn-beta-slow {v}"));
+        }
+        if let Some(v) = self.yarn.beta_fast {
+            parts.push(format!("--yarn-beta-fast {v}"));
         }
         parts.join(" ")
     }
@@ -235,10 +350,13 @@ impl RopeRuntimeOverride {
     /// | not given | absent | the checkpoint's block, untouched |
     ///
     /// The one case with no defensible answer is a scale applied on top of a
-    /// scheme that is not linear, `llama3` above all: b10621 would multiply its
-    /// own `rope_freq_scale` into a YaRN or NTK rotation, mlxcel's `llama3`
-    /// table has no such multiplier, and composing them by dropping one half
-    /// silently changes the rotation. That returns `Err`, which
+    /// scheme that is neither linear nor YaRN, `llama3` above all: b10621
+    /// would multiply its own `rope_freq_scale` into an NTK or banded
+    /// rotation, mlxcel's `llama3` table has no such multiplier, and composing
+    /// them by dropping one half silently changes the rotation. (A declared
+    /// YaRN block composes: the scale replaces its factor, which is where
+    /// b10621 writes `rope_freq_scale` for a YaRN model.) That returns `Err`,
+    /// which
     /// [`crate::models::rope_utils::RopeScalingKind::resolve`] turns into a
     /// recorded rejection and startup turns into a refusal to serve.
     pub fn apply_to_spec(
@@ -250,7 +368,24 @@ impl RopeRuntimeOverride {
         match self.scaling_type {
             Some(RopeScalingTypeOverride::None) => Ok(None),
             Some(RopeScalingTypeOverride::Yarn) => {
-                Err("--rope-scaling yarn is not implemented on this RoPE path".to_string())
+                // Force the YaRN table (#1472). The factor is
+                // `1 / --rope-freq-scale` when a scale was requested,
+                // otherwise the checkpoint's own factor when its block already
+                // declares YaRN (whose band and mscale keys are carried
+                // through), otherwise `1.0`, which is b10621's resolution: an
+                // unspecified `rope_freq_scale` keeps the model's own.
+                let mut spec = if declared_type.as_deref() == Some("yarn") {
+                    declared.cloned().unwrap_or_default()
+                } else {
+                    RopeScalingSpec::default()
+                };
+                spec.rope_type = Some("yarn".to_string());
+                if let Some(freq_scale) = self.freq_scale {
+                    spec.factor = Some(1.0 / freq_scale);
+                } else if spec.factor.is_none() {
+                    spec.factor = Some(1.0);
+                }
+                Ok(Some(spec))
             }
             Some(RopeScalingTypeOverride::Linear) => Ok(Some(RopeScalingSpec {
                 rope_type: Some("linear".to_string()),
@@ -268,6 +403,14 @@ impl RopeRuntimeOverride {
                         factor: Some(1.0 / freq_scale),
                         ..RopeScalingSpec::default()
                     })),
+                    // A scale over a checkpoint-declared YaRN rotation feeds
+                    // the rotation's own factor, which is where b10621 writes
+                    // `rope_freq_scale` for a YaRN model.
+                    Some("yarn") => {
+                        let mut spec = declared.cloned().unwrap_or_default();
+                        spec.factor = Some(1.0 / freq_scale);
+                        Ok(Some(spec))
+                    }
                     Some(other) => Err(format!(
                         "the checkpoint declares rope_scaling type \"{other}\" and the request \
                          asks for a frequency scale of {freq_scale} without naming a scheme. \
@@ -336,6 +479,17 @@ pub fn install(override_value: Option<RopeRuntimeOverride>) -> Result<(), String
 /// The installed override, if the process has one.
 pub fn installed() -> Option<&'static RopeRuntimeOverride> {
     INSTALLED.get().and_then(|slot| slot.as_ref())
+}
+
+/// The installed `--yarn-*` knobs, when an override carrying any is installed.
+///
+/// Consulted by the YaRN table builder in [`crate::models::rope_utils`], so
+/// the knobs reach a YaRN rotation whether the operator forced it
+/// (`--rope-scaling yarn`) or the checkpoint's own block declared it, which is
+/// b10621's behavior. With no YaRN rotation in force nothing ever reads them,
+/// which is also b10621's behavior.
+pub(crate) fn installed_yarn_knobs() -> Option<&'static YarnKnobs> {
+    installed().map(|over| &over.yarn).filter(|k| k.any_set())
 }
 
 /// How many RoPE seams have consumed the installed override.
