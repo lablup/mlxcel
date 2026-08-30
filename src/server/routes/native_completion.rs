@@ -751,7 +751,16 @@ fn build_native_options(
     state: &AppState,
     live: &LiveSettings,
 ) -> ServerGenerateOptions {
-    build_native_generate_options_with_live(&state.config, live, request, requested_n_predict)
+    let mut options =
+        build_native_generate_options_with_live(&state.config, live, request, requested_n_predict);
+    // b10621 `--cache-prompt` / `cache_prompt` coverage (#1473): this route
+    // used to build no prompt-cache request context at all, so it never looked
+    // a prefix up and never donated one back, whatever the flag said. The
+    // per-request field opts one request out of both halves by withholding the
+    // context, which is the same mechanism the chat routes use.
+    options.prompt_cache_ctx =
+        super::chat::build_raw_prompt_cache_context(state, request.cache_prompt);
+    options
 }
 
 #[allow(dead_code)]

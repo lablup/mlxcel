@@ -26,7 +26,7 @@ static CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 struct ScopedEnv(Vec<(&'static str, Option<OsString>)>);
 
 impl ScopedEnv {
-    fn set(values: &[(&'static str, &'static str)]) -> Self {
+    fn set(values: &[(&'static str, &str)]) -> Self {
         let saved = values
             .iter()
             .map(|(key, _)| (*key, std::env::var_os(key)))
@@ -631,6 +631,13 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // See the sibling test in `src/bin/mlx_server.rs`: `LLAMA_ARG_LOG_FILE` is
+    // set process-wide here and `--log-file` is bound to it through clap, so a
+    // relative path leaves a zero-byte artifact in the repository root when
+    // another test in this binary builds a logging configuration during the
+    // guard's lifetime.
+    let log_file = std::env::temp_dir().join("mlxcel-canonical-llama-env.log");
+    let log_file_arg = log_file.to_string_lossy().into_owned();
     let _env = ScopedEnv::set(&[
         ("LLAMA_ARG_BATCH", "111"),
         ("LLAMA_ARG_BATCH_SIZE", "999"),
@@ -638,7 +645,7 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
         ("LLAMA_ARG_UBATCH_SIZE", "999"),
         ("LLAMA_ARG_SPEC_DRAFT_MODEL", "models/canonical-draft"),
         ("LLAMA_ARG_MODEL_DRAFT", "models/legacy-draft"),
-        ("LLAMA_ARG_LOG_FILE", "canonical.log"),
+        ("LLAMA_ARG_LOG_FILE", log_file_arg.as_str()),
         ("LLAMA_LOG_FILE", "legacy.log"),
         ("LLAMA_ARG_CHAT_TEMPLATE", "{{ messages }}"),
         ("LLAMA_ARG_CHAT_TEMPLATE_FILE", "canonical.jinja"),
@@ -663,10 +670,7 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
         args.draft_model.as_deref(),
         Some(std::path::Path::new("models/canonical-draft"))
     );
-    assert_eq!(
-        args.log_file.as_deref(),
-        Some(std::path::Path::new("canonical.log"))
-    );
+    assert_eq!(args.log_file.as_deref(), Some(log_file.as_path()));
     assert_eq!(args.chat_template.as_deref(), Some("{{ messages }}"));
     assert_eq!(
         args.chat_template_file.as_deref(),

@@ -36,6 +36,7 @@ pub mod logging_compat_args;
 pub mod max_tokens;
 pub mod multimodal_compat_args;
 pub mod rope_args;
+pub mod slot_args;
 pub mod spec_compat_args;
 pub mod speculative_args;
 pub mod turbo_args;

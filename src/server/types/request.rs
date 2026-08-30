@@ -1261,6 +1261,15 @@ pub struct NativeCompletionRequest {
     pub verbose: Option<bool>,
     /// Return the raw generated token ids in the `tokens` field.
     pub return_tokens: Option<bool>,
+    /// llama-server b10621 `cache_prompt`: reuse the KV prefix a previous
+    /// request left in the prompt cache, and donate this request's own prefix
+    /// back (#1473). Upstream's default is enabled, so absent means "follow
+    /// the server-wide `--cache-prompt` / `--no-cache-prompt`"; `false` opts
+    /// this one request out of both the lookup and the donate-back. `true`
+    /// asserts the default and cannot re-enable the cache against a
+    /// server-wide disable, which is the same rule the chat-shaped routes
+    /// apply.
+    pub cache_prompt: Option<bool>,
     /// Number of leading prompt tokens retained across a context shift
     /// (#1472). `-1` retains the whole initial prompt; absent falls back to
     /// the server's `--keep`. Read only when `--context-shift` is enabled.

@@ -419,6 +419,25 @@ impl CompletionResponse {
             },
         }
     }
+
+    /// Populate `usage.prompt_tokens_details.cached_tokens`, exactly as
+    /// [`ChatCompletionResponse::with_cached_tokens`] does (#1473).
+    ///
+    /// `/v1/completions` gained prompt-cache coverage with #1473, and a cache
+    /// that is only faster is a cache a client cannot verify: with the cache
+    /// enabled the field is always set, so zero means "on, cold" rather than
+    /// "off".
+    ///
+    /// Used by: completions.rs (both the streaming and non-streaming paths)
+    #[must_use]
+    pub fn with_cached_tokens(mut self, cached_tokens: usize, cache_enabled: bool) -> Self {
+        if cache_enabled {
+            self.usage.prompt_tokens_details = Some(PromptTokensDetails {
+                cached_tokens: cached_tokens as u64,
+            });
+        }
+        self
+    }
 }
 
 /// Error response

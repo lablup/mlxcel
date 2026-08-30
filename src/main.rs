@@ -24,6 +24,7 @@ use mlxcel::cli::context_args::ContextCompatArgs;
 use mlxcel::cli::ggml_compat_args::GgmlCompatArgs;
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
+use mlxcel::cli::slot_args::SlotCompatArgs;
 use mlxcel::cli::spec_compat_args::SpecCompatArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
@@ -2282,6 +2283,13 @@ pub(crate) struct ServeArgs {
     /// both server binaries accept the same llama-server b10621 command line.
     #[command(flatten)]
     pub(crate) context_compat: ContextCompatArgs,
+
+    /// Slot-state and context-checkpoint flag group (`--cache-idle-slots`,
+    /// `--slot-prompt-similarity`, `--kv-unified`, `--ctx-checkpoints`,
+    /// `--checkpoint-min-step`). Defined once in `mlxcel::cli::slot_args` so
+    /// both server binaries refuse the same command lines with one message.
+    #[command(flatten)]
+    pub(crate) slot_compat: SlotCompatArgs,
 
     /// Fill-in-the-middle flag group (`--spm-infill`). Defined once in
     /// `mlxcel::cli::infill_args` so both server binaries accept the same

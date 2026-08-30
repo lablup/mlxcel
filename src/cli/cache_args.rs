@@ -201,8 +201,12 @@ impl CacheCompatArgs {
              cached KV set and re-basing the rotary positions of everything after it, and no \
              operation in this tree rewrites a cached key's rotation. Accepting the number and \
              continuing would leave the cache behaving exactly as it does at 0 while the \
-             operator believed otherwise. Pass --cache-reuse 0, or drop the flag, for the \
-             upstream default. Tracked by #1473."
+             operator believed otherwise. This is a permanent classification, not a pending \
+             task: every cache operation in this tree preserves the write-time rotation of a \
+             stored key, and re-basing one would need a rotation primitive threaded with each \
+             layer's RoPE descriptor plus a dequantize-rotate-requantize pass for the \
+             quantized and paged backends. Pass --cache-reuse 0, or drop the flag, for the \
+             upstream default."
         ))
     }
 

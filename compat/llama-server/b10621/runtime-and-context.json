@@ -52,15 +52,22 @@
       "default": "enabled, requires cache-ram",
       "description": "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram) (env: LLAMA_ARG_CACHE_IDLE_SLOTS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": null,
-      "notes": "Not accepted. It depends on both a per-slot retained prompt and --cache-ram-backed saving of it; mlxcel has neither the slot state nor the on-new-task save point.",
+      "test": "src/cli/slot_args_tests.rs",
+      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: no per-slot retained prompt exists to save when a slot goes idle: reuse is a process-wide radix trie over token prefixes that every request consults regardless of which sequence last held the tokens, and it already survives a slot going idle, which is the effect the flag buys upstream. The inert value (--no-cache-idle-slots, or a falsy LLAMA_ARG_CACHE_IDLE_SLOTS) is accepted; a request for the behavior is refused at startup with a diagnostic naming what is missing.",
       "divergence": [
-        "no flag: there is no per-slot retained prompt to save on a new task or clear on unified KV"
+        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
       ],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cache-idle-slots",
+          "--no-cache-idle-slots"
+        ],
+        "env": "LLAMA_ARG_CACHE_IDLE_SLOTS",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -79,14 +86,11 @@
       "default": "enabled",
       "description": "whether to enable prompt caching (default: enabled) (env: LLAMA_ARG_CACHE_PROMPT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1473,
       "test": "tests/prompt_cache_compat_e2e.rs",
-      "notes": "Accepted on both binaries with the b10621 spellings and the LLAMA_ARG_CACHE_PROMPT binding, defaulting to enabled as upstream does, and it really does turn the prompt-prefix KV cache on and off. It is not `supported` because the cache it controls does not cover the same surface: mlxcel looks up and donates prompt prefixes only on the chat-shaped routes (/v1/chat/completions, /v1/messages, /v1/responses), so a client on /v1/completions or /completion is never cached whatever this flag says. Per-request `cache_prompt` is honored on those same chat routes; see the field:cache_prompt entry.",
-      "divergence": [
-        "the prompt cache it controls covers the chat-shaped routes only; /v1/completions and /completion are never cached whatever the flag says",
-        "--cache-prompt cannot re-enable the cache over mlxcel's own --no-prompt-cache; between two explicit operator statements the disable wins"
-      ],
+      "notes": "Spelling, env binding and upstream's enabled default, and since #1473 the same prompt-prefix cache on every text route: /v1/completions and native /completion build a raw-prompt cache request context (build_raw_prompt_cache_context) through the same seam the chat-shaped routes use, keyed on the model id and a raw-prompt template signature so a raw prompt never adopts a chat-rendered prefix. mlxcel also ships its own --no-prompt-cache, and between two explicit operator disables the disable wins; that interaction is invisible to a b10621 client, which has no such flag, so it is recorded here rather than as a divergence.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -113,19 +117,18 @@
       "default": "8192, -1 - no limit, 0 - disable",
       "description": "set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391) (env: LLAMA_ARG_CACHE_RAM)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1473,
-      "test": "src/cli/cache_args_tests.rs",
-      "notes": "Accepted with its LLAMA_ARG_CACHE_RAM binding and read in MiB with upstream's sentinels (-1 = no limit, 0 = disable), setting the same byte budget as mlxcel's own --prompt-cache-capacity-bytes. That flag wins when both are given, matching how --prefill-chunk-size wins over --batch-size: the native spelling is the more specific request. The unset default differs and the budget covers the chat-route prompt cache only.",
+      "test": "src/cli/cache_args_tests.rs::cache_ram_is_read_in_mebibytes",
+      "notes": "Aliased onto --prompt-cache-capacity-bytes: the value is read in MiB with upstream's -1 (no limit) and 0 (disable) sentinels and converted to the same byte budget, and --prompt-cache-capacity-bytes wins when both are given. A requested value is therefore honored exactly; what differs is the unset default, which stays at mlxcel's own 2048 MiB because changing a memory default is a deployment decision deliberately not made inside a compatibility issue (#1473). Since #1473 the budget bounds the cache on every text route, not just the chat-shaped ones, and -cram rewrites through the argv pre-pass.",
       "divergence": [
-        "the unset default is 2048 MiB (mlxcel's --prompt-cache-capacity-bytes default); b10621 defaults to 8192",
-        "the budget bounds the chat-route prompt-prefix cache; /v1/completions and /completion hold no cached prefixes to bound",
-        "-cram is not accepted: a single-dash multi-character alias has no clap representation"
+        "the unset default is 2048 MiB (mlxcel's --prompt-cache-capacity-bytes default); b10621 defaults to 8192"
       ],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
-          "--cache-ram"
+          "--cache-ram",
+          "--prompt-cache-capacity-bytes"
         ],
         "env": "LLAMA_ARG_CACHE_RAM",
         "env_binding": "clap"
@@ -146,10 +149,10 @@
       "default": "0",
       "description": "min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: 0) [(card)](https://ggml.ai/f0.png) (env: LLAMA_ARG_CACHE_REUSE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": "src/cli/cache_args_tests.rs",
-      "notes": "The flag is now accepted with its LLAMA_ARG_CACHE_REUSE binding rather than the environment variable being validated inside the prompt-cache enable fallback, so a command-line value beats the environment the way every other option does. `0`, upstream's default, is accepted and inert. Any positive value is refused at startup with a diagnostic naming the missing operation: mlxcel's prompt cache reuses a strict token prefix, and reusing a chunk that is not a prefix means deleting a span from the middle of a cached KV set and re-basing the rotary positions of everything after it. Nothing in this tree rewrites a cached key's rotation (`KVCache::trim_front_keep_sink` advances live_start and leaves offset alone; `gather_positions` and `gather_within_tail` compact survivors without re-rotating them), so the capability is absent rather than merely unwired.",
+      "test": "src/cli/cache_args_tests.rs::a_positive_cache_reuse_is_refused_with_what_is_missing",
+      "notes": "Upstream's default of 0 is accepted; a positive minimum chunk size is refused at startup with a diagnostic naming the missing operation. The classification is permanent, decided in #1473 against the cache invariant rather than deferred: a key written at monotonic position p is rotated at p at write time and never re-rotated, and every operation preserves that (trim_front_keep_sink advances live_start instead of decrementing offset; gather_positions and gather_within_tail compact surviving slots without re-rotating them). KV-shift chunk reuse renumbers the tail of a cached span, so it needs a rotation primitive threaded with each layer's RoPE descriptor, a dequantize-rotate-requantize pass for Int8, sidecar rebuilds the Turbo modes already decline for a head trim, and a second implementation against the paged block table. The strict-prefix radix cache covers the common shared-prefix case that motivates the flag upstream.",
       "divergence": [
         "a positive minimum chunk size is refused at startup instead of enabling KV-shift reuse; only the upstream default of 0 is accepted",
         "no KV operation re-bases the rotary positions of a cached span, so chunk reuse cannot be expressed at all"
@@ -179,16 +182,21 @@
       "default": "8192, 0 = no minimum",
       "description": "minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum) (env: LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": null,
-      "notes": "Not accepted. The spacing applies between successive context checkpoints, and mlxcel creates none; its single history-boundary snapshot is taken at the prompt/generation boundary rather than at a token interval.",
+      "test": "src/cli/slot_args_tests.rs",
+      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: There are no successive context checkpoints for a minimum spacing to separate; see --ctx-checkpoints. 0 is accepted as the explicit no-minimum spelling and any other value, including upstream's default of 8192, is refused at startup with a diagnostic naming the absent ring. -cms rewrites through the argv pre-pass.",
       "divergence": [
-        "no flag: there are no successive context checkpoints for a minimum spacing to separate",
-        "-cms is not accepted either"
+        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
       ],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--checkpoint-min-step"
+        ],
+        "env": "LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -209,14 +217,11 @@
       "default": "enabled",
       "description": "whether to enable continuous batching (a.k.a dynamic batching) (default: enabled) (env: LLAMA_ARG_CONT_BATCHING)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1473,
-      "test": "src/cli/cache_args_tests.rs",
-      "notes": "No longer accepted-and-ignored. Both long spellings are visible on both binaries with the LLAMA_ARG_CONT_BATCHING binding and the upstream default of enabled, and --no-cont-batching now has an effect: it pins the decode width to one sequence (--max-batch-size 1). That is deliberately not mlxcel's --no-batch, which swaps the batch scheduler for a sequential worker and takes the prompt cache and speculative decoding out with it; upstream's -nocb keeps the slots and stops them interleaving.",
-      "divergence": [
-        "-cb and -nocb are not accepted: a single-dash multi-character alias has no clap representation",
-        "disabling pins the decode width to one sequence but leaves chunked prefill, the prompt cache and speculative decoding in place, where llama.cpp's slot loop stops interleaving outright"
-      ],
+      "test": "src/cli/cache_args_tests.rs::no_cont_batching_pins_the_decode_width",
+      "notes": "Spelling, env binding and upstream's enabled default, with -cb and -nocb rewritten by the argv pre-pass since #1473. --no-cont-batching resolves to --max-batch-size 1, and the scheduler now ands its mixed-step gate with max_batch_size > 1, so disabling stops prefill/decode interleaving outright rather than only pinning the decode width. That is upstream's own gate: b10621 adds pending prompts to the batch only when `params_base.cont_batching || batch.size() == 0` (server-context.cpp), which leaves its slots, prompt cache and speculative decoding in place exactly as mlxcel does.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -365,16 +370,22 @@
       "default": "32",
       "description": "max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293) (env: LLAMA_ARG_CTX_CHECKPOINTS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": null,
-      "notes": "Not accepted. mlxcel captures at most one history-boundary snapshot per sequence (`capture_history_boundary_snapshot`), not a ring of N per-slot context checkpoints, so a maximum count has nothing to bound.",
+      "test": "src/cli/slot_args_tests.rs",
+      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: mlxcel captures at most one snapshot per sequence, at the prompt/generation boundary (capture_history_boundary_snapshot), and has no ring of per-slot context checkpoints to size. 0 is accepted as the explicit disable; any other value, including upstream's default of 32, is refused at startup with a diagnostic. --swa-checkpoints is accepted as the same spelling and -ctxcp rewrites through the argv pre-pass.",
       "divergence": [
-        "no flag: at most one history-boundary snapshot is captured per sequence, not a ring of per-slot context checkpoints",
-        "-ctxcp and --swa-checkpoints are not accepted either"
+        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
       ],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ctx-checkpoints",
+          "--swa-checkpoints"
+        ],
+        "env": "LLAMA_ARG_CTX_CHECKPOINTS",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -455,15 +466,22 @@
       "default": "enabled if number of slots is auto",
       "description": "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto) (env: LLAMA_ARG_KV_UNIFIED)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": null,
-      "notes": "Not accepted. mlxcel allocates KV per sequence through its cache pool and has no single shared buffer to switch to, so there is no topology for this to select.",
+      "test": "src/cli/slot_args_tests.rs",
+      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: KV is allocated per sequence through the scheduler's cache pool, which divides --ctx-size into per-slot shares; there is no unified shared buffer to switch to. --no-kv-unified (and -no-kvu) is accepted as the inert spelling of mlxcel's only layout, and a request for the unified buffer is refused at startup with a diagnostic that points at --parallel 1 for the whole-context case. See the --parallel entry, whose by_design divergence is the auto default's other half.",
       "divergence": [
-        "no flag: KV is allocated per sequence and there is no unified shared buffer to switch to"
+        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
       ],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--kv-unified",
+          "--no-kv-unified"
+        ],
+        "env": "LLAMA_ARG_KV_UNIFIED",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -481,14 +499,18 @@
       "default": "-1, -1 = auto",
       "description": "number of server slots (default: -1, -1 = auto) (env: LLAMA_ARG_N_PARALLEL)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1473,
-      "test": "src/bin/mlx_server.rs",
-      "notes": "Spelling, env, -np (argv pre-pass) and since #1472 the full b10621 value domain: the default is -1 (auto) and auto resolves to 4 slots, which is upstream's own auto resolution (server-context.cpp: \"n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\"). What remains is the second half of that upstream line: auto also switches b10621 to one unified KV buffer shared by the slots, letting a single request use the whole context, where mlxcel keeps per-slot context shares (ctx_size / slots). That is the --kv-unified surface, owned by #1473, and this entry follows it.",
+      "test": "src/bin/mlx_server.rs::a_negative_parallel_resolves_to_the_automatic_slot_count",
+      "notes": "Spelling, env, -np and b10621's whole value domain: the default is -1 (auto) and auto resolves to 4 slots, which is upstream's own auto resolution (server-context.cpp: \"n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\"). What differs permanently is the second half of that upstream line. Upstream's auto also switches to one unified KV buffer shared by the slots, so a default-config single request can use the whole context; mlxcel's scheduler owns a cache pool that allocates KV per sequence and divides --ctx-size into per-slot shares, and --kv-unified is not_applicable for the same reason. An operator who wants one request to have the whole context passes --parallel 1, which is the same allocation upstream's unified buffer gives that request.",
       "divergence": [
-        "b10621's auto default also enables a unified KV buffer shared by the slots, so a default-config single request may use the whole context; mlxcel keeps per-slot context shares (see --kv-unified, #1473)"
+        "b10621's auto default also enables a unified KV buffer shared by the slots, so a default-config single request may use the whole context; mlxcel keeps per-slot context shares (see --kv-unified)"
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "The KV layout is a property of the scheduler cache pool, which allocates and reclaims per sequence so a slot can be freed and reused independently; a shared buffer would make one sequence's footprint depend on its neighbours' liveness. The slot count itself matches upstream exactly, and --parallel 1 reproduces the whole-context allocation upstream's unified buffer gives a single request.",
+        "revisit_if": "the paged cache pool gains a cross-sequence context budget, so an idle slot's unused share can be lent to an active sequence without breaking per-sequence reclamation"
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--parallel",
@@ -669,16 +691,21 @@
       "default": "0.10, 0.0 = disabled",
       "description": "how much the prompt of a request must match the prompt of a slot in order to use that slot (default: 0.10, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": null,
-      "notes": "Not accepted. The threshold selects which slot's retained prompt a request may take over, and mlxcel has no per-slot retained prompt: /slots is synthesized from the active count and queue depth, and reuse goes through a process-wide radix trie over token prefixes that is consulted for every request regardless of which sequence last held them. Accepting the flag inert (upstream's default is 0.10, not 0, so a script passing the default would have to be honored) would claim a slot-selection policy that does not exist.",
+      "test": "src/cli/slot_args_tests.rs",
+      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: mlxcel's slots hold no prompt to compare a request against: they are a per-request registry over a scheduler whose reuse is a process-wide prefix trie, consulted identically whichever slot serves the request. Upstream's own default is 0.10, so an explicitly passed default is refused rather than silently honored as a slot-selection policy that does not exist; 0 is accepted as the explicit disable.",
       "divergence": [
-        "no flag: reuse is a process-wide prefix trie, not a scan of what each slot is holding, so there is no slot prompt for a similarity threshold to compare against",
-        "slots are presentation-only (synthesized in /slots from the active count and queue depth) and hold no prompt state"
+        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
       ],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--slot-prompt-similarity"
+        ],
+        "env": null,
+        "env_binding": null
+      }
     },
     {
       "kind": "option",
@@ -898,16 +925,15 @@
       "field_type": "bool",
       "description": "Re-use KV cache from a previous request if possible. This way the common prefix does not have to be re-processed, only the suffix that differs between the requests",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1473,
-      "test": "src/server/chat_request_tests.rs",
-      "notes": "Honored on the chat-shaped routes, where mlxcel's prompt cache actually operates: `cache_prompt: false` withholds the request's cache context, which is the single handle the scheduler reaches the store through for both the prefix lookup and the donate-back, so the request is prefilled cold AND leaves every entry another request might reuse untouched. It reaches the server at the request root, through the flattened OpenAI-SDK extra_body, or nested inside extra_body. It is not accepted on native /completion, whose NativeCompletionRequest has no prompt-cache context to withhold, so the manifest records no claim there and the field stays unaccepted on that surface.",
-      "divergence": [
-        "accepted on the chat-shaped routes only; native /completion neither declares the field nor caches prompts, so a client sending it there is silently unaffected",
-        "true asserts the default and cannot re-enable the cache for one request against a server-wide disable"
-      ],
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Honored on every route the prompt cache now covers, including native /completion since #1473, where the field is declared on NativeCompletionRequest and false withholds the cache request context, which skips both the prefix lookup and the donate-back. true asserts upstream's default and, as upstream, does not re-enable the cache for one request against a server-wide disable.",
+      "divergence": [],
       "rationale": null,
-      "mlxcel": null
+      "mlxcel": {
+        "field": "cache_prompt"
+      }
     },
     {
       "kind": "native_request_field",
@@ -918,10 +944,10 @@
       "field_type": "num",
       "description": "Min chunk size to attempt reusing from the cache via KV shifting. See --cache-reuse arg",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1473,
-      "test": null,
-      "notes": "Not accepted, for the same reason as --cache-reuse: there is no KV operation that re-bases the rotary positions of a cached span, so a per-request minimum chunk size has nothing to tune. The server-wide flag reports that at startup; a request field would have to report it per request, which is worse than not accepting it.",
+      "test": "src/server/llama_compat_tests.rs::manifest_native_field_claims_match_native_completion_request",
+      "notes": "Follows --cache-reuse, which is not_applicable permanently (#1473): a per-request minimum chunk size has nothing to tune when no KV operation re-bases a cached span's rotary positions. The field stays undeclared on NativeCompletionRequest, and the named conformance test asserts that absence in both directions, so declaring it later forces this entry to flip in the same change.",
       "divergence": [
         "the field is not accepted: KV-shift chunk reuse does not exist, so a per-request threshold has nothing to tune"
       ],

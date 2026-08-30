@@ -571,6 +571,13 @@ pub struct ServerStartupInput {
     /// Resolved (and refused, for `--swa-full`) by
     /// [`ServerStartupInput::into_startup_config`].
     pub context_compat: crate::cli::context_args::ContextCompatArgs,
+    /// llama-server b10621 slot-state and context-checkpoint flags
+    /// (`--cache-idle-slots`, `--slot-prompt-similarity`, `--kv-unified`,
+    /// `--ctx-checkpoints`, `--checkpoint-min-step`), straight off the shared
+    /// clap group (#1473). Every one of them is `not_applicable`: the inert
+    /// value is accepted and a request for the behavior is refused by
+    /// [`ServerStartupInput::into_startup_config`].
+    pub slot_compat: crate::cli::slot_args::SlotCompatArgs,
     /// llama-server b10621 RoPE / YaRN runtime overrides, straight off the
     /// shared clap group. Resolved (and refused, when unserveable) by
     /// [`ServerStartupInput::into_startup_config`] so both server binaries
@@ -685,6 +692,13 @@ impl ServerStartupInput {
         // with one message.
         let context_compat = self
             .context_compat
+            .resolve()
+            .map_err(|message| anyhow::anyhow!("{message}"))?;
+        // b10621's slot-state and checkpoint spellings (#1473). Resolved here
+        // so a request for per-slot prompt retention, slot-similarity
+        // selection, a unified KV buffer or a checkpoint ring fails the
+        // command line on both binaries with one message.
+        self.slot_compat
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // `--no-cache-prompt` and mlxcel's `--no-prompt-cache` are two

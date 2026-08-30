@@ -24,6 +24,7 @@ use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
 use mlxcel::cli::logging_compat_args::LoggingCompatArgs;
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
+use mlxcel::cli::slot_args::SlotCompatArgs;
 use mlxcel::cli::spec_compat_args::SpecCompatArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
@@ -1594,6 +1595,13 @@ struct ServerArgs {
     #[command(flatten)]
     context_compat: ContextCompatArgs,
 
+    /// Slot-state and context-checkpoint flag group (`--cache-idle-slots`,
+    /// `--slot-prompt-similarity`, `--kv-unified`, `--ctx-checkpoints`,
+    /// `--checkpoint-min-step`). Defined once in `mlxcel::cli::slot_args` so
+    /// both server binaries refuse the same command lines with one message.
+    #[command(flatten)]
+    slot_compat: SlotCompatArgs,
+
     /// Fill-in-the-middle flag group (`--spm-infill`). Defined once in
     /// `mlxcel::cli::infill_args` so both server binaries accept the same
     /// llama-server b10621 command line.
@@ -2547,6 +2555,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
         context_compat: args.context_compat.clone(),
+        slot_compat: args.slot_compat.clone(),
         infill: args.infill.clone(),
         embedding_compat: args.embedding_compat.clone(),
     })
@@ -2565,7 +2574,7 @@ mod tests {
     struct ScopedEnv(Vec<(&'static str, Option<OsString>)>);
 
     impl ScopedEnv {
-        fn set(values: &[(&'static str, &'static str)]) -> Self {
+        fn set(values: &[(&'static str, &str)]) -> Self {
             let saved = values
                 .iter()
                 .map(|(key, _)| (*key, std::env::var_os(key)))
@@ -2820,6 +2829,16 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `LLAMA_ARG_LOG_FILE` is set process-wide for the length of this
+        // test, and `--log-file` is bound to it through clap on both binaries.
+        // Any other test in this binary that builds a logging configuration
+        // while the guard is live therefore opens the path, and a relative one
+        // lands in the repository root: running the suite used to leave a
+        // zero-byte `canonical.log` behind in the working tree. An absolute
+        // temporary path keeps the parsing assertion intact and the artifact
+        // out of the tree.
+        let log_file = std::env::temp_dir().join("mlxcel-canonical-llama-env.log");
+        let log_file_arg = log_file.to_string_lossy().into_owned();
         let _env = ScopedEnv::set(&[
             ("LLAMA_ARG_BATCH", "111"),
             ("LLAMA_ARG_BATCH_SIZE", "999"),
@@ -2827,7 +2846,7 @@ mod tests {
             ("LLAMA_ARG_UBATCH_SIZE", "999"),
             ("LLAMA_ARG_SPEC_DRAFT_MODEL", "models/canonical-draft"),
             ("LLAMA_ARG_MODEL_DRAFT", "models/legacy-draft"),
-            ("LLAMA_ARG_LOG_FILE", "canonical.log"),
+            ("LLAMA_ARG_LOG_FILE", log_file_arg.as_str()),
             ("LLAMA_LOG_FILE", "legacy.log"),
             ("LLAMA_ARG_CHAT_TEMPLATE", "{{ messages }}"),
             ("LLAMA_ARG_CHAT_TEMPLATE_FILE", "canonical.jinja"),
@@ -2848,7 +2867,7 @@ mod tests {
             args.model_draft.as_deref(),
             Some(Path::new("models/canonical-draft"))
         );
-        assert_eq!(args.log_file.as_deref(), Some(Path::new("canonical.log")));
+        assert_eq!(args.log_file.as_deref(), Some(log_file.as_path()));
         assert_eq!(args.chat_template.as_deref(), Some("{{ messages }}"));
         assert_eq!(
             args.chat_template_file.as_deref(),
