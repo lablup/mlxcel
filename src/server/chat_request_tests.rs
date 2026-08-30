@@ -218,6 +218,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         None,
         false,
         false,
+        true,
     )
     .await
     .err()
@@ -233,6 +234,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         None,
         false,
         false,
+        true,
     )
     .await
     .err()
@@ -248,6 +250,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         None,
         false,
         false,
+        true,
     )
     .await
     .expect("valid request after a rejection must still prepare");
@@ -1677,10 +1680,11 @@ async fn prompt_cache_on_defaults_preserve_thinking_to_true() {
     // flipped to true internally.
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
-            .await
-            .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor, &request, None, /* cache */ true, false, true,
+    )
+    .await
+    .unwrap();
 
     assert!(
         prepared.prompt.contains("<think>"),
@@ -1704,10 +1708,11 @@ async fn prompt_cache_on_respects_explicit_false_override() {
     request.chat_template_kwargs = Some(kw);
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
-            .await
-            .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor, &request, None, /* cache */ true, false, true,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !prepared.prompt.contains("<think>"),
@@ -1732,10 +1737,11 @@ async fn prompt_cache_on_respects_explicit_false_via_extra_body() {
     request.extra_body = Some(extra);
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
-    let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
-            .await
-            .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor, &request, None, /* cache */ true, false, true,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !prepared.prompt.contains("<think>"),
@@ -1773,6 +1779,7 @@ async fn prompt_cache_on_respects_server_default_false() {
         Some(&server_default),
         /* cache */ true,
         false,
+        true,
     )
     .await
     .unwrap();
@@ -1815,10 +1822,11 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     let processor = ChatTemplateProcessor::with_template(dump_template());
 
     // First call should add our session id.
-    let _ =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
-            .await
-            .unwrap();
+    let _ = prepare_chat_request_with_cache(
+        &processor, &request, None, /* cache */ true, false, true,
+    )
+    .await
+    .unwrap();
     {
         let set = log_once_sessions().lock().expect("log-once mutex");
         assert!(
@@ -1831,10 +1839,11 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     // Second call with the same session id must not grow the set at all
     // (the HashSet::insert call returns false, which is the dedup signal
     // the production code relies on to skip the log).
-    let _ =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
-            .await
-            .unwrap();
+    let _ = prepare_chat_request_with_cache(
+        &processor, &request, None, /* cache */ true, false, true,
+    )
+    .await
+    .unwrap();
     {
         let set = log_once_sessions().lock().expect("log-once mutex");
         // The set may have been concurrently modified by parallel tests
@@ -1867,13 +1876,13 @@ async fn preserve_thinking_defaulting_logs_per_distinct_session() {
 
     let mut req_a = three_turn_request_with_think_blocks();
     req_a.prompt_cache_key = Some(uniq_a.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true, false)
+    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true, false, true)
         .await
         .unwrap();
 
     let mut req_b = three_turn_request_with_think_blocks();
     req_b.prompt_cache_key = Some(uniq_b.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true, false)
+    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true, false, true)
         .await
         .unwrap();
 
@@ -2514,14 +2523,26 @@ async fn history_render_is_a_prefix_of_the_next_turns_prompt() {
     messages_t3.push(text_message(Role::User, "q3"));
 
     reset_history_boundary_render_attempts_for_test();
-    let prep_t2 =
-        prepare_chat_request_with_cache(&processor, &cached_request(messages_t2), None, true, true)
-            .await
-            .unwrap();
-    let prep_t3 =
-        prepare_chat_request_with_cache(&processor, &cached_request(messages_t3), None, true, true)
-            .await
-            .unwrap();
+    let prep_t2 = prepare_chat_request_with_cache(
+        &processor,
+        &cached_request(messages_t2),
+        None,
+        true,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+    let prep_t3 = prepare_chat_request_with_cache(
+        &processor,
+        &cached_request(messages_t3),
+        None,
+        true,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         history_boundary_render_attempts_for_test(),
         2,
@@ -2565,7 +2586,7 @@ async fn history_render_is_absent_when_the_model_cannot_reuse_snapshots() {
     let request = cached_request(vec![text_message(Role::User, "q1")]);
     reset_history_boundary_render_attempts_for_test();
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, false)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, false, true)
         .await
         .unwrap();
     assert_eq!(
@@ -2589,7 +2610,7 @@ async fn history_render_is_absent_when_the_prompt_cache_is_off() {
     let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, false, true)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, false, true, true)
         .await
         .unwrap();
     assert!(
@@ -2606,7 +2627,7 @@ async fn history_render_is_absent_when_the_template_render_falls_back() {
     let processor = ChatTemplateProcessor::with_template(broken_template());
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true, true)
         .await
         .unwrap();
     assert!(prepared.history_prompt.is_none());
@@ -2634,7 +2655,7 @@ async fn history_render_is_absent_for_multimodal_requests() {
         tool_calls: None,
     }]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true, true)
         .await
         .unwrap();
     assert!(prepared.history_prompt.is_none());
@@ -2753,4 +2774,190 @@ fn clip_warmup_target_keeps_only_what_any_next_turn_reproduces() {
     assert_eq!(clip_warmup_target(&[1, 2, 3], &[9, 9, 9]), None);
     assert_eq!(clip_warmup_target(&[], &probe), None);
     assert_eq!(clip_warmup_target(&target, &[]), None);
+}
+
+// ---------------------------------------------------------------------------
+// b10621 `--prefill-assistant` (#1470)
+// ---------------------------------------------------------------------------
+
+/// A template shaped like the Qwen family: each message is a delimited turn,
+/// and `add_generation_prompt` opens an assistant turn the model continues.
+fn prefill_processor() -> ChatTemplateProcessor {
+    ChatTemplateProcessor::with_template(
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}\
+         {% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+            .to_string(),
+    )
+}
+
+fn prefill_request() -> ChatCompletionRequest {
+    request_with_messages(vec![
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("Finish this: the capital of".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text(" France is".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        },
+    ])
+}
+
+#[tokio::test]
+async fn a_trailing_assistant_message_is_continued_when_prefill_is_on() {
+    let prepared = prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &prefill_request(),
+        None,
+        false,
+        false,
+        true,
+    )
+    .await
+    .expect("render succeeds");
+    // The continuation text ends the prompt with no closing turn marker, so
+    // the model continues the sentence instead of answering it.
+    assert!(
+        prepared
+            .prompt
+            .ends_with("<|im_start|>assistant\n France is"),
+        "unexpected prompt: {:?}",
+        prepared.prompt
+    );
+    assert_eq!(prepared.assistant_prefill.as_deref(), Some(" France is"));
+}
+
+#[tokio::test]
+async fn no_prefill_assistant_answers_the_trailing_message_instead() {
+    let prepared = prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &prefill_request(),
+        None,
+        false,
+        false,
+        false,
+    )
+    .await
+    .expect("render succeeds");
+    // The assistant message is a completed turn and a fresh one is opened.
+    assert!(
+        prepared
+            .prompt
+            .ends_with(" France is<|im_end|>\n<|im_start|>assistant\n"),
+        "unexpected prompt: {:?}",
+        prepared.prompt
+    );
+    assert_eq!(prepared.assistant_prefill, None);
+}
+
+#[tokio::test]
+async fn the_two_renderings_differ_and_are_not_reachable_from_each_other() {
+    let on = prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &prefill_request(),
+        None,
+        false,
+        false,
+        true,
+    )
+    .await
+    .expect("render succeeds");
+    let off = prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &prefill_request(),
+        None,
+        false,
+        false,
+        false,
+    )
+    .await
+    .expect("render succeeds");
+    assert_ne!(on.prompt, off.prompt);
+    // The continued form is a strict PREFIX of the answered one: the flag
+    // decides whether the trailing assistant message is closed and a fresh
+    // turn opened. That is exactly why the two need different prompt-cache
+    // buckets rather than sharing one: an exact-prefix boundary snapshot
+    // recorded under one rendering would otherwise be adopted by the other,
+    // which continues from a different point in the same string.
+    assert!(
+        off.prompt.starts_with(&on.prompt),
+        "off={:?} on={:?}",
+        off.prompt,
+        on.prompt
+    );
+    assert!(
+        off.prompt.len() > on.prompt.len(),
+        "the answered form adds the closing turn and a fresh generation prompt"
+    );
+}
+
+#[tokio::test]
+async fn a_request_with_no_trailing_assistant_message_is_unaffected_by_the_flag() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Text("hello".to_string()),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+        reasoning: None,
+    }]);
+    let on =
+        prepare_chat_request_with_cache(&prefill_processor(), &request, None, false, false, true)
+            .await
+            .expect("render succeeds");
+    let off =
+        prepare_chat_request_with_cache(&prefill_processor(), &request, None, false, false, false)
+            .await
+            .expect("render succeeds");
+    assert_eq!(on.prompt, off.prompt);
+    assert_eq!(on.assistant_prefill, None);
+}
+
+#[tokio::test]
+async fn two_trailing_assistant_messages_are_refused_with_upstreams_wording() {
+    let assistant = |text: &str| Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(text.to_string()),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+        reasoning: None,
+    };
+    let request = request_with_messages(vec![
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("go".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        },
+        assistant("one"),
+        assistant("two"),
+    ]);
+    let err = match prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &request,
+        None,
+        false,
+        false,
+        true,
+    )
+    .await
+    {
+        Ok(_) => panic!("two trailing assistant messages are an error"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err.to_string(),
+        "Cannot have 2 or more assistant messages at the end of the list."
+    );
 }
