@@ -71,6 +71,7 @@ const BATCH_COSINE_TOLERANCE: f32 = 1e-3;
 fn tiny_args(num_layers: usize) -> ModelArgs {
     ModelArgs {
         model_type: "llama_bidirec".to_string(),
+        max_position_embeddings: None,
         hidden_size: HIDDEN,
         num_hidden_layers: num_layers,
         intermediate_size: INTERMEDIATE,

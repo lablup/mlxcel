@@ -55,6 +55,45 @@ pub struct SentencePieceTokenizer {
 }
 
 impl MlxcelTokenizer {
+    /// The BOS token id this tokenizer prepends when encoding with special
+    /// tokens, or `None` when it prepends none (#1472).
+    ///
+    /// Used by the batch scheduler's context-retention arithmetic, which
+    /// mirrors b10621's `if (add_bos_token) n_keep += 1` so "keep N prompt
+    /// tokens" keeps N tokens of the operator's prompt and the BOS on top.
+    ///
+    /// The HuggingFace backend detects the prefix empirically rather than
+    /// from configuration: the id, if any, that both an empty and a
+    /// non-empty encoding start with is the prepended special. A
+    /// post-processor that only appends (an EOS-only template) yields
+    /// different first ids and correctly resolves to `None`.
+    pub fn bos_token_id(&self) -> Option<u32> {
+        match self {
+            Self::SentencePiece(sp) => {
+                if sp.add_bos {
+                    sp.bos_id
+                } else {
+                    None
+                }
+            }
+            Self::HuggingFace(tokenizer) => {
+                let first_of = |text: &str| {
+                    tokenizer
+                        .encode(text, true)
+                        .ok()
+                        .and_then(|encoding| encoding.get_ids().first().copied())
+                };
+                match (first_of(""), first_of("a")) {
+                    (Some(empty_first), Some(probe_first)) if empty_first == probe_first => {
+                        Some(empty_first)
+                    }
+                    _ => None,
+                }
+            }
+            Self::Tiktoken(_) => None,
+        }
+    }
+
     /// Create a stub tokenizer for unit tests.
     ///
     /// The stub returns empty/identity results; it exists so that types like

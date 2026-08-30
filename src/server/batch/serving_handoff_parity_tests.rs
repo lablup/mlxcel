@@ -153,6 +153,7 @@ fn make_request(
     let prompt_tokens = PROMPT_TOKENS.to_vec();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        retention: Default::default(),
         seq_id,
         state: SequenceState::Queued,
         prompt_tokens,

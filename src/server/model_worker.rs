@@ -124,6 +124,10 @@ pub(crate) struct WorkerSchedulerConfig {
     /// window and bypass this cap. `None` (the default) preserves the
     /// legacy unbounded behaviour.
     pub max_kv_size: Option<usize>,
+    /// context-retention policy at the KV bound (#1472, b10621
+    /// `--context-shift` / `--keep`). Default: shifting disabled, which makes
+    /// the bound a hard stop rather than a silent trim.
+    pub context_retention: crate::server::batch::ContextRetentionPolicy,
     /// paged KV pool block-budget directive (epic #116 #122 b3,
     /// `--kv-cache-budget`).
     ///
@@ -632,6 +636,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             .with_batch_kv_quant(sched_config.batch_kv_quant)
             // cap plain KVCache growth to --max-kv-size when set.
             .with_max_kv_size(sched_config.max_kv_size)
+            // b10621 context-retention policy (#1472).
+            .with_context_retention(sched_config.context_retention)
             // install the resolved paged KV block budget (epic #116 #122 b3).
             .with_paged_block_budget(paged_block_budget)
             // install the resolved paged KV slab size (#899).

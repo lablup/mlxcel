@@ -50,6 +50,7 @@ fn llama3_spec() -> RopeScalingSpec {
         low_freq_factor: Some(1.0),
         high_freq_factor: Some(4.0),
         original_max_position_embeddings: Some(8192.0),
+        ..RopeScalingSpec::default()
     }
 }
 
@@ -64,7 +65,7 @@ fn rope_scaling_none_replaces_the_checkpoints_banded_table_and_is_verified() {
         rope_overrides::installed().is_none(),
         "this binary must start with no override installed"
     );
-    let declared = RopeScalingKind::resolve(Some(&llama3_spec()), DIMS, BASE, "probe");
+    let declared = RopeScalingKind::resolve(Some(&llama3_spec()), DIMS, BASE, None, "probe");
     assert!(
         declared.freqs().is_some(),
         "a llama3 block builds a frequency table when nothing overrides it"
@@ -107,7 +108,7 @@ fn rope_scaling_none_replaces_the_checkpoints_banded_table_and_is_verified() {
 
     // 4. The seam consumes it, and the rotation changes: the banded table is
     //    gone and the plain `base^(2i/d)` rotation is back.
-    let overridden = RopeScalingKind::resolve(Some(&llama3_spec()), DIMS, BASE, "probe");
+    let overridden = RopeScalingKind::resolve(Some(&llama3_spec()), DIMS, BASE, None, "probe");
     assert!(
         overridden.freqs().is_none(),
         "--rope-scaling none must drop the checkpoint's llama3 table"

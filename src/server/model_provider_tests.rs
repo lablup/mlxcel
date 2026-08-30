@@ -48,6 +48,7 @@ fn sample_result() -> GenerationResult {
 
 fn sample_options() -> crate::server::ServerGenerateOptions {
     crate::server::ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens: 1,
         sampling: SamplingConfig::default(),
         stop_sequences: None,

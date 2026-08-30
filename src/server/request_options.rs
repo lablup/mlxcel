@@ -335,6 +335,7 @@ pub(crate) fn build_server_generate_options_with_live(
     };
 
     ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens: resolve_server_max_tokens_with_live(config, live, overrides.max_tokens),
         sampling,
         stop_sequences,
@@ -372,6 +373,11 @@ pub(crate) fn build_server_generate_options_with_live(
 /// default is the cap; that default comes from the checkpoint context window
 /// for the `-n -1` sentinel, with 4096 as the final fallback. An omitted
 /// request budget keeps the configured server default unchanged.
+///
+/// Under `--context-shift` (#1472) the per-slot window no longer caps an
+/// explicit budget: shifting exists for generation past the window
+/// (b10621's "context shift on infinite text generation"), and the KV bound
+/// is enforced by the shift itself rather than by shrinking the request.
 #[allow(dead_code)]
 pub(crate) fn resolve_server_max_tokens(config: &ServerConfig, requested: Option<usize>) -> usize {
     resolve_server_max_tokens_with_live(config, &config.live_settings(), requested)
@@ -386,6 +392,9 @@ pub(crate) fn resolve_server_max_tokens_with_live(
     let Some(requested) = requested else {
         return live.default_max_tokens;
     };
+    if config.context_shift {
+        return requested;
+    }
     let cap = if config.context_size > 0 {
         config.context_size
     } else {

@@ -59,6 +59,12 @@ pub struct ModelArgs {
     #[serde(default)]
     pub rope_scaling: Option<RopeScaling>,
 
+    /// Training context length, YaRN's fallback original context when neither
+    /// `--yarn-orig-ctx` nor the block names one (#1472). Not read anywhere
+    /// else on this path.
+    #[serde(default)]
+    pub max_position_embeddings: Option<usize>,
+
     #[serde(default)]
     pub quantization: Option<Quantization>,
 
@@ -206,6 +212,7 @@ impl ModelArgs {
             self.rope_scaling.as_ref(),
             self.head_dim(),
             self.rope_theta,
+            self.max_position_embeddings.map(|n| n as f32),
             self.model_label(),
         )
     }
@@ -344,13 +351,17 @@ pub struct Attention {
     /// a `rope_scaling` block of type `linear`, where it is `1 / factor`.
     pub rope_scale: f32,
     /// The precomputed frequency table for a `rope_scaling` block that needs
-    /// one, currently only type `llama3` (#1355).
+    /// one, type `llama3` (#1355) or `yarn` (#1472).
     ///
     /// `None` restores the plain `base^(2i/d)` frequencies MLX derives from
     /// [`Self::rope_base`], which is what every checkpoint on this path used
     /// before the block was read. When it is `Some`, `rope_base` is unused: MLX
     /// takes either a base or a table, never both.
     pub rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// YaRN attention-magnitude multiplier applied to Q and K before the
+    /// rotation (#1472). `1.0` (a skipped multiply, so the pre-YaRN graph is
+    /// byte-identical) for every scheme but `yarn`.
+    pub rope_mscale: f32,
 }
 
 impl Attention {
@@ -384,24 +395,38 @@ impl Attention {
         offset: i32,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         match self.rope_freqs.as_ref() {
-            Some(freqs) => (
-                mlxcel_core::fast_rope_with_freqs(
-                    q,
-                    self.rope_dims,
-                    self.rope_traditional,
-                    self.rope_scale,
-                    offset,
-                    freqs,
-                ),
-                mlxcel_core::fast_rope_with_freqs(
-                    k,
-                    self.rope_dims,
-                    self.rope_traditional,
-                    self.rope_scale,
-                    offset,
-                    freqs,
-                ),
-            ),
+            Some(freqs) => {
+                // YaRN magnitude correction (#1472): Q and K are scaled by
+                // `rope_mscale` before the rotation so attention scores carry
+                // mscale^2, matching upstream YarnRoPE. At 1.0 the multiply is
+                // skipped and the llama3-table graph is byte-identical.
+                let (q_scaled, k_scaled);
+                let (q, k): (&MlxArray, &MlxArray) = if self.rope_mscale != 1.0 {
+                    q_scaled = mlxcel_core::multiply_scalar(q, self.rope_mscale);
+                    k_scaled = mlxcel_core::multiply_scalar(k, self.rope_mscale);
+                    (&q_scaled, &k_scaled)
+                } else {
+                    (q, k)
+                };
+                (
+                    mlxcel_core::fast_rope_with_freqs(
+                        q,
+                        self.rope_dims,
+                        self.rope_traditional,
+                        self.rope_scale,
+                        offset,
+                        freqs,
+                    ),
+                    mlxcel_core::fast_rope_with_freqs(
+                        k,
+                        self.rope_dims,
+                        self.rope_traditional,
+                        self.rope_scale,
+                        offset,
+                        freqs,
+                    ),
+                )
+            }
             None => (
                 mlxcel_core::fast_rope(
                     q,
@@ -437,24 +462,37 @@ impl Attention {
         offsets: &[i32],
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         match self.rope_freqs.as_ref() {
-            Some(freqs) => (
-                mlxcel_core::fast_rope_batched_with_freqs(
-                    q,
-                    self.rope_dims,
-                    self.rope_traditional,
-                    self.rope_scale,
-                    offsets,
-                    freqs,
-                ),
-                mlxcel_core::fast_rope_batched_with_freqs(
-                    k,
-                    self.rope_dims,
-                    self.rope_traditional,
-                    self.rope_scale,
-                    offsets,
-                    freqs,
-                ),
-            ),
+            Some(freqs) => {
+                // Same YaRN magnitude correction as `apply_rope` (#1472); the
+                // two routes must scale identically or a sequence would decode
+                // differently depending on how it was scheduled.
+                let (q_scaled, k_scaled);
+                let (q, k): (&MlxArray, &MlxArray) = if self.rope_mscale != 1.0 {
+                    q_scaled = mlxcel_core::multiply_scalar(q, self.rope_mscale);
+                    k_scaled = mlxcel_core::multiply_scalar(k, self.rope_mscale);
+                    (&q_scaled, &k_scaled)
+                } else {
+                    (q, k)
+                };
+                (
+                    mlxcel_core::fast_rope_batched_with_freqs(
+                        q,
+                        self.rope_dims,
+                        self.rope_traditional,
+                        self.rope_scale,
+                        offsets,
+                        freqs,
+                    ),
+                    mlxcel_core::fast_rope_batched_with_freqs(
+                        k,
+                        self.rope_dims,
+                        self.rope_traditional,
+                        self.rope_scale,
+                        offsets,
+                        freqs,
+                    ),
+                )
+            }
             None => (
                 mlxcel_core::fast_rope_batched(
                     q,
@@ -1012,8 +1050,9 @@ impl Attention {
 
         let rope = rope.duplicate();
         let rope_scale = rope.scale();
+        let rope_mscale = rope.attn_scale();
         let rope_freqs = match rope {
-            RopeScalingKind::Llama3 { freqs } => Some(freqs),
+            RopeScalingKind::Llama3 { freqs } | RopeScalingKind::Yarn { freqs, .. } => Some(freqs),
             _ => None,
         };
 
@@ -1072,6 +1111,7 @@ impl Attention {
             rope_traditional: args.rope_traditional,
             rope_scale,
             rope_freqs,
+            rope_mscale,
         })
     }
 }

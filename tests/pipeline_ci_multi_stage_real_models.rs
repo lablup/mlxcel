@@ -249,6 +249,7 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
     wait_for_loaded(&remote_provider);
 
     let options = ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens: 8,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,
