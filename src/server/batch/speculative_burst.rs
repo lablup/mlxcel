@@ -1885,7 +1885,9 @@ pub(crate) fn apply_burst_thinking_budget(
     }
     let final_token = match thinking.decide_override(token) {
         ThinkingDecision::NoOverride => token,
-        ThinkingDecision::ForceClose(close_id) => close_id,
+        // The `--reasoning-budget-message` run is forced token by token ahead
+        // of the close tag, exactly as the close tag itself is (#1470).
+        ThinkingDecision::ForceClose(id) | ThinkingDecision::ForceMessage(id) => id,
     };
     thinking.observe(final_token);
     (final_token, final_token != token)
@@ -2043,7 +2045,17 @@ pub(crate) fn stream_burst_tokens(
             // Same stop-string enforcement as the classic decode path
             // (issue #1466): a speculative request must not outrun its own
             // stop strings just because its tokens arrive several at a time.
-            if seq.stream_decoded_text(new_text, lp).is_some() {
+            if seq
+                .stream_decoded_text(new_text, Some(final_token), lp)
+                .is_some()
+            {
+                stream.done = true;
+                return true;
+            }
+            // A b10621 generation bound ends the burst too (#1477); a
+            // speculative request must not outrun its own bounds any more than
+            // it may outrun its stop strings.
+            if seq.bound_stopped() {
                 stream.done = true;
                 return true;
             }
@@ -2075,7 +2087,9 @@ pub(crate) fn finalize_burst_stream(
         FinishReason::StopSequence
     } else if stream.hit_eos {
         FinishReason::Stop
-    } else if seq.generated_tokens.len() >= stream.max_tokens {
+    // A fired b10621 generation bound is a `limit` finish, ranked below a
+    // string stop and an EOS exactly as on the classic path (#1477).
+    } else if seq.bound_stopped() || seq.generated_tokens.len() >= stream.max_tokens {
         FinishReason::Length
     } else {
         // The drafter / round loop bailed early without hitting EOS or

@@ -205,7 +205,11 @@ if run_case rationale-on-supported "$dir" 1; then
   assert_contains rationale-on-supported "non-null rationale"
 fi
 
-dir="$(make_case rationale-on-deferred routes 'POST /completion' \
+# The fixture has to be an entry that is actually `deferred`, and the set
+# shrinks as the epic closes: `POST /completion` served here until #1477 made
+# it `by_design`, at which point the case silently started passing a legal
+# manifest. `--sleep-idle-seconds` (#1440) is the last one.
+dir="$(make_case rationale-on-deferred observability-and-slots '--sleep-idle-seconds' \
   'entry["rationale"] = {"kind": "policy", "reason": "r", "revisit_if": "c"}')"
 if run_case rationale-on-deferred "$dir" 1; then
   assert_contains rationale-on-deferred "non-null rationale"

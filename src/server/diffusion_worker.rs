@@ -42,7 +42,9 @@ use crate::models::llada2_moe::{Llada2FinishReason, Llada2GenerateOptions};
 use crate::models::{DiffusionGemmaModel, Llada2MoeModel};
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::{StreamingDecodeState, decode_request_images};
-use crate::server::model_provider::{GenerateEvent, GenerationResult, ModelRequest, StopKind};
+use crate::server::model_provider::{
+    GenerateEvent, GenerationResult, ModelRequest, StopKind, TokenMeta,
+};
 use crate::tokenizer::MlxcelTokenizer;
 
 /// Serve-level diffusion knobs resolved once on the worker thread from the
@@ -369,7 +371,9 @@ fn serve_streaming_request<G>(
     let result = {
         let mut on_token = |token_id: i32| -> bool {
             if let Some(text) = decode_state.on_token(token_id, tokenizer)
-                && response_tx.send(GenerateEvent::Token(text)).is_err()
+                && response_tx
+                    .send(GenerateEvent::Token(text, TokenMeta::default()))
+                    .is_err()
             {
                 return false;
             }
@@ -383,7 +387,7 @@ fn serve_streaming_request<G>(
             // Forward the incremental detokenizer's held tail as one final token
             // event before Done so streaming clients receive it (issue #633).
             if let Some(tail) = decode_state.flush(tokenizer) {
-                let _ = response_tx.send(GenerateEvent::Token(tail));
+                let _ = response_tx.send(GenerateEvent::Token(tail, TokenMeta::default()));
             }
             let mut gen_result: GenerationResult = decode_state.finish_with_cache(
                 start,

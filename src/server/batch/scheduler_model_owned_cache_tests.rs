@@ -204,6 +204,9 @@ fn cache_ctx() -> PromptCacheRequestContext {
 
 fn options() -> ServerGenerateOptions {
     ServerGenerateOptions {
+        n_indent: 0,
+        t_max_predict_ms: None,
+        reasoning_budget_message: None,
         retention: Default::default(),
         dry_breaker_strings: None,
         logit_bias: Vec::new(),
@@ -256,8 +259,8 @@ fn run_to_completion(sched: &mut BatchScheduler, rx: &mpsc::Receiver<GenerateEve
     }
     loop {
         match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(GenerateEvent::Token(_))
-            | Ok(GenerateEvent::TokenWithLogprobs(_, _))
+            Ok(GenerateEvent::Token(_, _))
+            | Ok(GenerateEvent::TokenWithLogprobs(_, _, _))
             | Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(_)) => return,
             Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),

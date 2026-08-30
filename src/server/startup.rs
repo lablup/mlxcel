@@ -885,6 +885,13 @@ fn sanitize_top_n_sigma_default(value: f32) -> f32 {
 pub(super) const B10621_DEFAULT_SAMPLERS: &str =
     "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature";
 
+/// The stage names of [`B10621_DEFAULT_SAMPLERS`], for the `generation_settings`
+/// report (#1477). Splitting the same constant is what keeps the reported chain
+/// and the accepted chain from drifting apart.
+pub(crate) fn b10621_default_sampler_names() -> impl Iterator<Item = &'static str> {
+    B10621_DEFAULT_SAMPLERS.split(';')
+}
+
 /// b10621's single-character spelling of the same default chain
 /// (`--sampler-seq`). The `adaptive_p` stage is the character `a` (#1485).
 pub(super) const B10621_DEFAULT_SAMPLER_SEQ: &str = "edskypmxt";
@@ -1717,6 +1724,10 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
     model_provider.generate(
         "Hello".to_string(),
         ServerGenerateOptions {
+            // Inert: the generation bounds are native-route fields (#1477).
+            n_indent: 0,
+            t_max_predict_ms: None,
+            reasoning_budget_message: None,
             retention: Default::default(),
             max_tokens: 1,
             sampling: SamplingConfig::greedy(),
@@ -2965,12 +2976,6 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             "--no-prefill-assistant: a trailing assistant message is answered with a fresh turn \
              rather than continued. Assistant prefill is on by default since #1470, matching \
              llama-server"
-        );
-    }
-    if config.reasoning_budget_message.is_some() {
-        tracing::warn!(
-            "--reasoning-budget-message is accepted but not yet injected before the \
-             end-of-thinking tag; the reasoning budget still ends the block without it"
         );
     }
 

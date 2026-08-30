@@ -452,6 +452,15 @@ pub(crate) fn build_server_generate_options_with_live(
         max_tokens: resolve_server_max_tokens_with_live(config, live, overrides.max_tokens),
         sampling,
         stop_sequences,
+        // b10621's two per-request generation bounds are native-route fields
+        // (#1477); every other surface leaves them inert and the native route
+        // sets them on the built options.
+        n_indent: 0,
+        t_max_predict_ms: None,
+        // b10621 `--reasoning-budget-message` (#1470): a server-wide setting
+        // delivered per request, as `ignore_eos` is. The scheduler tokenizes
+        // it against the model's vocabulary.
+        reasoning_budget_message: config.reasoning_budget_message.clone(),
         dry_breaker_strings,
         logit_bias,
         logit_bias_texts: overrides.logit_bias_texts,

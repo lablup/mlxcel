@@ -877,6 +877,8 @@ async fn route_chat(
     // inside an open thinking block (enable_thinking=true templates), so the
     // model's first emitted tokens route to `reasoning_content`.
     let primed_open_thinking = super::routes::chat::is_prompt_primed_open_thinking(&prompt);
+    // The family the prompt primed, for the #1470 delimiter echo below.
+    let primed_close_marker = super::routes::chat::primed_open_thinking_close_marker(&prompt);
     let stream_filter = if primed_open_thinking {
         StreamFilter::new_primed_open_thinking()
     } else {
@@ -934,7 +936,22 @@ async fn route_chat(
         tokio::spawn(async move {
             let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_initial(&request_id_str2, &model))));
 
+            // #1470: the same thinking-delimiter echo the single-node route
+            // runs, so a disaggregated `--reasoning-format none` stream carries
+            // the tags too. A `Mutex` rather than a `RefCell` because the
+            // spawned future must stay `Send`.
+            let thinking_echo = std::sync::Mutex::new(
+                super::routes::chat::ThinkingDelimiterEcho::new(primed_close_marker),
+            );
             let emit_filtered = |emit: FilterOutput| {
+                let (echo_open, echo_close) = if reasoning_format.keeps_thoughts_in_content() {
+                    match thinking_echo.lock() {
+                        Ok(mut echo) => (echo.open(&emit), echo.close(&emit)),
+                        Err(_) => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
                 if let Some(reasoning) = emit.reasoning
                     && !reasoning.is_empty()
                 {
@@ -949,12 +966,30 @@ async fn route_chat(
                         ))));
                     }
                     if reasoning_format.keeps_thoughts_in_content() {
+                        let mut text = String::with_capacity(reasoning.len() + 24);
+                        if let Some(open) = echo_open {
+                            text.push_str(open);
+                        }
+                        text.push_str(&reasoning);
                         let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
                             &request_id_str2,
                             &model,
-                            &reasoning,
+                            &text,
                         ))));
                     }
+                } else if let Some(open) = echo_open {
+                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
+                        &request_id_str2,
+                        &model,
+                        open,
+                    ))));
+                }
+                if let Some(close) = echo_close {
+                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
+                        &request_id_str2,
+                        &model,
+                        close,
+                    ))));
                 }
                 if let Some(content) = emit.content
                     && !content.is_empty()
@@ -987,6 +1022,8 @@ async fn route_chat(
                             reasoning: None,
                             suppressed_positions: 0,
                             consumed_positions: 1,
+                            thinking_open: None,
+                            thinking_close: None,
                         });
                     } else {
                         emit_filtered(filter.feed(text));
@@ -1100,6 +1137,8 @@ async fn route_chat(
                             reasoning: None,
                             suppressed_positions: 0,
                             consumed_positions: 1,
+                            thinking_open: None,
+                            thinking_close: None,
                         });
                     } else {
                         absorb(filter.feed(text));

@@ -865,6 +865,71 @@ struct StreamCallbackState {
     /// Per-`feed()` logprob buffer, drained in lockstep with the filter's
     /// consumed/suppressed positions. Only used when logprobs are enabled.
     lp_buffer: std::collections::VecDeque<Option<TokenLogprobData>>,
+    /// Thinking-delimiter echo for `--reasoning-format none` /
+    /// `deepseek-legacy` (#1470).
+    thinking_echo: ThinkingDelimiterEcho,
+}
+
+/// Re-emits the literal thinking delimiters into `delta.content` under
+/// `--reasoning-format none` and `deepseek-legacy` (#1470).
+///
+/// Both placements keep the thoughts in `message.content` **with their tags**,
+/// and the non-streaming path rebuilds `{open}{thoughts}{close}{answer}` from
+/// the raw text. The streaming path has no raw text: [`StreamFilter`] consumes
+/// a delimiter as it matches it, and a generation prompt that primed the block
+/// open means no open marker is ever generated at all. This carries the two
+/// halves of that problem: the marker the filter reports for the delimiters it
+/// did match, and the family resolved from the primed close marker for the
+/// open it will never see.
+pub(crate) struct ThinkingDelimiterEcho {
+    /// The canonical open marker to synthesize before the first reasoning
+    /// fragment when the prompt primed the block open; `None` when it did not,
+    /// in which case the model generates its own open marker and the filter
+    /// reports it.
+    primed_open: Option<&'static str>,
+    /// Whether an open marker has already reached `delta.content`, so a second
+    /// `<think>` inside one generation cannot double it.
+    opened: bool,
+}
+
+impl ThinkingDelimiterEcho {
+    /// `primed_close` is [`primed_open_thinking_close_marker`] for this
+    /// request's prompt.
+    pub(crate) fn new(primed_close: Option<&'static str>) -> Self {
+        Self {
+            primed_open: primed_close
+                .and_then(tool_calls::thinking_marker_pair_for_close)
+                .map(|(open, _)| open),
+            opened: false,
+        }
+    }
+
+    /// The open marker to write ahead of this call's reasoning text, if any.
+    pub(crate) fn open(&mut self, emit: &FilterOutput) -> Option<&'static str> {
+        if self.opened {
+            return None;
+        }
+        if let Some(open) = emit.thinking_open {
+            self.opened = true;
+            return Some(open);
+        }
+        // Primed case: the block was opened by the prompt, so the first
+        // reasoning fragment is where the marker belongs.
+        if emit.reasoning.is_some()
+            && let Some(open) = self.primed_open
+        {
+            self.opened = true;
+            return Some(open);
+        }
+        None
+    }
+
+    /// The close marker to write after this call's reasoning text, if any.
+    /// Independent of there being reasoning text: a close marker can arrive on
+    /// its own fragment.
+    pub(crate) fn close(&self, emit: &FilterOutput) -> Option<&'static str> {
+        emit.thinking_close
+    }
 }
 
 /// Resumable-stream request context (#1444): the `X-Conversation-Id` value,
@@ -1127,6 +1192,11 @@ async fn stream_chat_completion(
         && !crate::server::prompt_cache::boundary_snapshot_disabled()
         && !tool_calls::should_parse_tool_calls(&request);
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
+    // The family whose block the prompt primed open, for the #1470 delimiter
+    // echo: with the open marker in the prompt rather than the generation, the
+    // streamed content has to synthesize it, exactly as the non-streaming
+    // `content_with_thinking_block` does from the close marker in the raw text.
+    let primed_close_marker = primed_open_thinking_close_marker(&prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
     let amplified = chat_carries_loop_amplifier(&request);
@@ -1317,6 +1387,7 @@ async fn stream_chat_completion(
                 StreamFilter::new()
             },
             lp_buffer: std::collections::VecDeque::new(),
+            thinking_echo: ThinkingDelimiterEcho::new(primed_close_marker),
         }));
         let cb_state_for_callback = cb_state.clone();
 
@@ -1373,6 +1444,8 @@ async fn stream_chat_completion(
                                 reasoning: None,
                                 suppressed_positions: 0,
                                 consumed_positions: 1,
+                                thinking_open: None,
+                                thinking_close: None,
                             }
                         } else {
                             cb.stream_filter.feed(&token)
@@ -1402,6 +1475,19 @@ async fn stream_chat_completion(
                         // decision: `deepseek` / `auto` route them to
                         // `delta.reasoning_content` only, `deepseek-legacy` to
                         // both, and `none` to `delta.content` only.
+                        // #1470: under `none` / `deepseek-legacy` the thoughts
+                        // reach `delta.content` WITH their literal delimiters,
+                        // so the concatenated stream equals the non-streaming
+                        // `message.content` byte for byte. Resolved before the
+                        // reasoning text is moved, and outside the
+                        // non-empty-reasoning guard, because a close marker can
+                        // arrive on a fragment that carries no reasoning.
+                        let (echo_open, echo_close) =
+                            if reasoning_format.keeps_thoughts_in_content() {
+                                (cb.thinking_echo.open(&emit), cb.thinking_echo.close(&emit))
+                            } else {
+                                (None, None)
+                            };
                         if let Some(reasoning_text) = emit.reasoning
                             && !reasoning_text.is_empty()
                         {
@@ -1416,13 +1502,35 @@ async fn stream_chat_completion(
                                 );
                             }
                             if reasoning_format.keeps_thoughts_in_content() {
+                                let mut text = String::with_capacity(reasoning_text.len() + 24);
+                                if let Some(open) = echo_open {
+                                    text.push_str(open);
+                                }
+                                text.push_str(&reasoning_text);
                                 pending.push(ChatCompletionChunk::content_with_logprobs(
                                     request_id_inner.clone(),
                                     model_id_inner.clone(),
-                                    reasoning_text,
+                                    text,
                                     None,
                                 ));
                             }
+                        } else if let Some(open) = echo_open {
+                            // An open marker whose fragment carried no thoughts
+                            // yet still belongs in the stream.
+                            pending.push(ChatCompletionChunk::content_with_logprobs(
+                                request_id_inner.clone(),
+                                model_id_inner.clone(),
+                                open.to_string(),
+                                None,
+                            ));
+                        }
+                        if let Some(close) = echo_close {
+                            pending.push(ChatCompletionChunk::content_with_logprobs(
+                                request_id_inner.clone(),
+                                model_id_inner.clone(),
+                                close.to_string(),
+                                None,
+                            ));
                         }
 
                         if let Some(text) = emit.content
@@ -2550,6 +2658,147 @@ mod reasoning_format_route_tests {
                 "{format} reasoning_content"
             );
         }
+    }
+
+    /// Drive a whole generation through the streaming filter one fragment at a
+    /// time and rebuild what a `--reasoning-format none` client would see in
+    /// `delta.content`, the way the route builds it (#1470).
+    fn streamed_content(raw: &str, fragments: usize, primed_close: Option<&'static str>) -> String {
+        use crate::server::tool_calls::stream_filter::StreamFilter;
+        let mut filter = if primed_close.is_some() {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        };
+        let mut echo = super::ThinkingDelimiterEcho::new(primed_close);
+        let mut out = String::new();
+        let step = raw.len().div_ceil(fragments.max(1));
+        let mut start = 0;
+        let mut pieces: Vec<&str> = Vec::new();
+        while start < raw.len() {
+            let mut end = (start + step).min(raw.len());
+            while end < raw.len() && !raw.is_char_boundary(end) {
+                end += 1;
+            }
+            pieces.push(&raw[start..end]);
+            start = end;
+        }
+        for piece in pieces {
+            let emit = filter.feed(piece);
+            let open = echo.open(&emit);
+            let close = echo.close(&emit);
+            match emit.reasoning.as_deref() {
+                Some(reasoning) if !reasoning.is_empty() => {
+                    if let Some(open) = open {
+                        out.push_str(open);
+                    }
+                    out.push_str(reasoning);
+                }
+                _ => {
+                    if let Some(open) = open {
+                        out.push_str(open);
+                    }
+                }
+            }
+            if let Some(close) = close {
+                out.push_str(close);
+            }
+            if let Some(content) = emit.content.as_deref() {
+                out.push_str(content);
+            }
+        }
+        let emit = filter.flush();
+        if let Some(reasoning) = emit.reasoning.as_deref() {
+            out.push_str(reasoning);
+        }
+        if let Some(content) = emit.content.as_deref() {
+            out.push_str(content);
+        }
+        out
+    }
+
+    /// The `--reasoning-format none` stream carries the thinking delimiters,
+    /// byte-identically to the non-streaming `message.content` (#1470).
+    ///
+    /// Before #1470 the `StreamFilter` consumed each delimiter as it matched
+    /// it, so `delta.content` carried the thoughts without their tags, which is
+    /// the very thing `none` asks for.
+    #[test]
+    fn a_streamed_none_response_carries_the_thinking_delimiters() {
+        let (_, with_thoughts) = content_forms(RAW);
+        for fragments in 1..=RAW.len().min(12) {
+            assert_eq!(
+                streamed_content(RAW, fragments, None),
+                with_thoughts,
+                "fragments = {fragments}"
+            );
+        }
+    }
+
+    /// The whitespace a model emits between its close marker and its answer is
+    /// part of what `--reasoning-format none` keeps, and the streamed form
+    /// passes it through verbatim, so the rebuilt non-streaming form has to
+    /// carry it too (#1470).
+    ///
+    /// Caught by real-checkpoint validation: Qwen3 answering `</think>\n\n2
+    /// plus 2 equals 4.` streamed 608 bytes against a 606-byte
+    /// `message.content`, the two newlines the parser's trim had removed.
+    #[test]
+    fn the_gap_between_the_close_marker_and_the_answer_survives() {
+        const GAPPED: &str = "<think>Let me count.</think>\n\nThe answer is 42.";
+        let (answer, with_thoughts) = content_forms(GAPPED);
+        assert_eq!(
+            answer, "The answer is 42.",
+            "the answer itself stays trimmed"
+        );
+        assert_eq!(with_thoughts, GAPPED, "byte-exact against the generation");
+        for fragments in 1..=10 {
+            assert_eq!(
+                streamed_content(GAPPED, fragments, None),
+                with_thoughts,
+                "fragments = {fragments}"
+            );
+        }
+    }
+
+    /// The Gemma 4 family streams its own canonical pair, not the literal
+    /// `<|channel>thought` opener the filter consumes (#1470).
+    #[test]
+    fn a_streamed_gemma_channel_block_carries_the_canonical_markers() {
+        const GEMMA: &str = "<|channel>thinking<channel|>the answer";
+        let (_, with_thoughts) = content_forms(GEMMA);
+        for fragments in 1..=6 {
+            assert_eq!(
+                streamed_content(GEMMA, fragments, None),
+                with_thoughts,
+                "fragments = {fragments}"
+            );
+        }
+    }
+
+    /// A prompt-primed block never generates its open marker, so the stream
+    /// synthesizes it, exactly as `content_with_thinking_block` does from the
+    /// close marker present in the raw text (#1470).
+    #[test]
+    fn a_primed_block_synthesizes_its_open_marker_in_the_stream() {
+        const PRIMED: &str = "Let me count.</think>The answer is 42.";
+        let answer = clean_structural_tokens(PRIMED);
+        let reasoning = super::extract_reasoning_content(PRIMED, true);
+        let with_thoughts = content_with_thinking_block(PRIMED, &answer, reasoning.as_deref());
+        for fragments in 1..=8 {
+            assert_eq!(
+                streamed_content(PRIMED, fragments, Some("</think>")),
+                with_thoughts,
+                "fragments = {fragments}"
+            );
+        }
+    }
+
+    /// Text with no thinking block gains no delimiters (#1470).
+    #[test]
+    fn a_streamed_plain_response_gains_no_delimiters() {
+        const PLAIN: &str = "just an answer";
+        assert_eq!(streamed_content(PLAIN, 3, None), PLAIN);
     }
 
     #[test]

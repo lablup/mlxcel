@@ -60,7 +60,7 @@ use super::xla_preprocess::ImagePreprocessStage;
 use crate::server::ServerGenerateOptions;
 use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
-use crate::server::model_provider::{GenerateEvent, ModelRequest};
+use crate::server::model_provider::{GenerateEvent, ModelRequest, TokenMeta};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -424,11 +424,15 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         if state.stop.is_active() {
                             let chunk = state.stop.push(&piece);
                             if !chunk.emit.is_empty() {
-                                let _ = state.response_tx.send(GenerateEvent::Token(chunk.emit));
+                                let _ = state
+                                    .response_tx
+                                    .send(GenerateEvent::Token(chunk.emit, TokenMeta::default()));
                             }
                             chunk.matched.is_some().then(|| state.stop.emitted_len())
                         } else {
-                            let _ = state.response_tx.send(GenerateEvent::Token(piece));
+                            let _ = state
+                                .response_tx
+                                .send(GenerateEvent::Token(piece, TokenMeta::default()));
                             None
                         }
                     };
@@ -462,14 +466,16 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         // one, so it is real output and must be streamed first.
                         let tail = stop.flush();
                         if !tail.is_empty() {
-                            let _ = response_tx.send(GenerateEvent::Token(tail));
+                            let _ =
+                                response_tx.send(GenerateEvent::Token(tail, TokenMeta::default()));
                         }
                         // Then release any tail the incremental detokenizer held
                         // back (a final token carrying complete text plus a
                         // trailing incomplete UTF-8 byte). It is the last output,
                         // so it follows the stop-matcher tail (issue #633).
                         if let Some(detok_tail) = detok.flush(&self.tokenizer) {
-                            let _ = response_tx.send(GenerateEvent::Token(detok_tail));
+                            let _ = response_tx
+                                .send(GenerateEvent::Token(detok_tail, TokenMeta::default()));
                         }
                         let mut result = detok.finish(start, prompt_token_count, max_tokens);
                         // The engine knows the authoritative reason; prefer it over

@@ -153,6 +153,7 @@ fn make_request(
     let prompt_tokens = PROMPT_TOKENS.to_vec();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id,
         state: SequenceState::Queued,
@@ -411,7 +412,9 @@ fn collect_text(rx: &mpsc::Receiver<GenerateEvent>) -> String {
     let mut text = String::new();
     while let Ok(event) = rx.try_recv() {
         match event {
-            GenerateEvent::Token(t) | GenerateEvent::TokenWithLogprobs(t, _) => text.push_str(&t),
+            GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
+                text.push_str(&t)
+            }
             GenerateEvent::Done(_) | GenerateEvent::Prefill(_) => {}
             GenerateEvent::Error(e) => panic!("unexpected generation error event: {e}"),
         }

@@ -42,7 +42,7 @@ use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::{
     ErrorResponse, NativeCompletionChunk, NativeCompletionRequest, NativeCompletionResponse,
-    NativeTimings, StopType, select_response_fields,
+    NativeTimings, PromptProgress, StopType, select_response_fields,
 };
 use crate::server::{AppState, LiveSettings, ServerConfig, ServerGenerateOptions};
 
@@ -335,7 +335,9 @@ async fn non_stream_native_completion(
         &options_snapshot,
         NativeOutcome {
             content: result.text,
-            tokens: Vec::new(),
+            // b10621 `return_tokens` (#1477): the raw sampled ids, or an empty
+            // array when the field is absent or false.
+            tokens: native_returned_tokens(&request, result.generated_token_ids),
             tokens_predicted: result.completion_tokens,
             tokens_evaluated: result.prompt_tokens,
             cached_tokens: result.cached_tokens,
@@ -499,7 +501,15 @@ fn build_native_response(
         model: state.display_model_id().to_string(),
         tokens_predicted: outcome.tokens_predicted,
         tokens_evaluated: outcome.tokens_evaluated,
-        generation_settings: native_generation_settings(request, options),
+        generation_settings: native_generation_settings(
+            &state.config,
+            state
+                .model_provider
+                .prompt_tokenizer()
+                .map(std::sync::Arc::as_ref),
+            request,
+            options,
+        ),
         prompt: request.prompt.clone(),
         // Set exactly when the generation stopped at the per-slot context
         // bound with context shifting disabled (#1472), which is when b10621
@@ -549,11 +559,15 @@ fn build_native_response(
 /// is omitted rather than reported with an invented value, which would be a
 /// worse answer than its absence.
 fn native_generation_settings(
+    config: &ServerConfig,
+    tokenizer: Option<&crate::tokenizer::MlxcelTokenizer>,
     request: &NativeCompletionRequest,
     options: &ServerGenerateOptions,
 ) -> serde_json::Value {
     let sampling = &options.sampling;
-    serde_json::json!({
+    // Built in two halves: `serde_json::json!` hits its recursion limit around
+    // forty keys, and b10621's block has forty-nine.
+    let mut settings = serde_json::json!({
         // The random sentinel reports as b10621's uint32 LLAMA_DEFAULT_SEED
         // now that the seed domain folds into uint32 space (#1485).
         "seed": sampling.seed.unwrap_or(u64::from(u32::MAX)),
@@ -614,7 +628,125 @@ fn native_generation_settings(
             .as_ref()
             .map(|g| g.preserved.clone())
             .unwrap_or_default(),
-    })
+    });
+    // #1477 remainder. Each of these is a value mlxcel genuinely resolves and
+    // acts on, so the omit-rather-than-invent policy (recorded on GET /props)
+    // no longer applies to it.
+    let rest = serde_json::json!({
+        "samplers": native_samplers_report(options),
+        "timings_per_token": request.timings_per_token.unwrap_or(false),
+        "logit_bias": native_logit_bias_report(tokenizer, options),
+        "lora": native_lora_report(config, options),
+        // The native route is a raw-prompt endpoint with no chat template and
+        // no chat parsing, which is upstream's state on this route too: it
+        // reports the "Content-only" format and an empty generation prompt
+        // there whatever the model's template is.
+        "chat_format": "Content-only",
+        "generation_prompt": "",
+        "reasoning_format": native_reasoning_format_report(config),
+        // Upstream computes this as `stream && reasoning_format ==
+        // deepseek-legacy` and no parser reads the result (settled in #1470
+        // against the full b10621 tree), so it is reported, not acted on.
+        "reasoning_in_content": request.stream.unwrap_or(false)
+            && matches!(
+                config.reasoning_format,
+                crate::server::ReasoningFormat::DeepSeekLegacy
+            ),
+    });
+    if let (Some(target), Some(extra)) = (settings.as_object_mut(), rest.as_object()) {
+        for (key, value) in extra {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    settings
+}
+
+/// The sampler chain this request runs, in b10621's `samplers` shape (#1477).
+///
+/// mlxcel's chain order is fixed to upstream's default and a request naming a
+/// different order is refused rather than silently reordered
+/// (`field:samplers`, by_design), so the reported list is that order plus the
+/// `adaptive_p` stage when the request armed it. Upstream echoes the list it
+/// was given verbatim and would therefore place `adaptive_p` wherever the
+/// client wrote it; mlxcel reports its canonical position, which is the same
+/// normalization the fixed chain already applies.
+fn native_samplers_report(options: &ServerGenerateOptions) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> =
+        crate::server::startup::b10621_default_sampler_names().collect();
+    if options.sampling.adaptive_target >= 0.0 {
+        names.push("adaptive_p");
+    }
+    names
+}
+
+/// The resolved token biases in b10621's `[{token, bias}]` shape (#1477).
+///
+/// Upstream tokenizes a string-keyed bias at schema time and reports the
+/// resulting ids, so mlxcel resolves its own text-keyed biases through the
+/// request-dispatch tokenizer with the same `common_tokenize(vocab, text,
+/// false)` settings the scheduler uses, rather than reporting the numeric
+/// half alone. Without a tokenizer only the numeric half can be named, which
+/// is the honest answer for a backend that pre-tokenizes elsewhere.
+fn native_logit_bias_report(
+    tokenizer: Option<&crate::tokenizer::MlxcelTokenizer>,
+    options: &ServerGenerateOptions,
+) -> serde_json::Value {
+    let mut out: Vec<serde_json::Value> = options
+        .logit_bias
+        .iter()
+        .map(|&(token, bias)| serde_json::json!({"bias": bias, "token": token}))
+        .collect();
+    if !options.logit_bias_texts.is_empty()
+        && let Some(tokenizer) = tokenizer
+    {
+        for (text, bias) in &options.logit_bias_texts {
+            if let Ok(ids) = tokenizer.encode_with_special(text, false, false) {
+                for id in ids {
+                    out.push(serde_json::json!({"bias": bias, "token": id as i32}));
+                }
+            }
+        }
+    }
+    serde_json::Value::Array(out)
+}
+
+/// The adapter scales in force for this request, in b10621's `[{id, scale}]`
+/// shape (#1477).
+///
+/// `id` is the adapter's index in the server's `--lora` list, which is the
+/// same identifier `GET /lora-adapters` and the request's own `lora` field
+/// use (#1439). The per-request snapshot wins when the runtime path resolved
+/// one; otherwise the server-wide configuration is reported.
+fn native_lora_report(config: &ServerConfig, options: &ServerGenerateOptions) -> serde_json::Value {
+    let scales: Vec<f32> = match options.lora_scales.as_deref() {
+        Some(snapshot) => snapshot.clone(),
+        None => config
+            .lora_adapters
+            .iter()
+            .map(|spec| spec.reported_scale())
+            .collect(),
+    };
+    serde_json::Value::Array(
+        scales
+            .iter()
+            .enumerate()
+            .map(|(id, scale)| serde_json::json!({"id": id, "scale": scale}))
+            .collect(),
+    )
+}
+
+/// `--reasoning-format` as b10621 reports it (#1477).
+///
+/// Upstream resolves `auto` before it echoes the value: the pinned binary
+/// started with the default reports `deepseek`. mlxcel's `auto` behaves as
+/// `deepseek` for every family it supports (the `--reasoning-format` entry
+/// records why), so reporting the resolved name rather than the literal flag
+/// is both what upstream does and what mlxcel acts on.
+fn native_reasoning_format_report(config: &ServerConfig) -> &'static str {
+    match config.reasoning_format {
+        crate::server::ReasoningFormat::Auto => "deepseek",
+        other => other.as_str(),
+    }
 }
 
 /// `grammar_triggers` in b10621's own reporting shape: `{type, value}` plus a
@@ -728,6 +860,11 @@ async fn stream_native_completion(
     let stream_n_probs = native_n_probs(&request);
     let stream_post_sampling = request.post_sampling_probs.unwrap_or(false);
     let stream_tokenizer = state.model_provider.prompt_tokenizer().cloned();
+    // b10621 emits `prompt_progress` frames only for a streaming request that
+    // asked for them (#1477); its own gate is `params.stream &&
+    // params.return_progress`, and this arm is the streaming one.
+    let want_progress = request.return_progress.unwrap_or(false);
+    let progress_events = events.clone();
 
     tokio::task::spawn_blocking(move || {
         // Slot accounting (#1440): ties this request to a numbered slot for
@@ -757,10 +894,16 @@ async fn stream_native_completion(
                 queue_reservation,
                 cancelled,
                 &live,
-                |token, lp| {
+                |token, meta, lp| {
                     slot.on_token(&token);
-                    let n =
+                    let fallback =
                         emitted_for_tokens.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    // b10621 reports the slot's generated-token count, not the
+                    // number of frames it has sent: a piece held back by the
+                    // stop matcher or by an incomplete UTF-8 sequence still
+                    // advances it (#1477). The frame counter is the fallback
+                    // for a backend that reports no count.
+                    let n = meta.decoded.unwrap_or(fallback);
                     let snapshot = prefill_for_tokens
                         .lock()
                         .map(|guard| *guard)
@@ -771,9 +914,17 @@ async fn stream_native_completion(
                     let chunk = NativeCompletionChunk {
                         index: 0,
                         content: token.to_string(),
-                        tokens: Vec::new(),
+                        // Upstream fills the per-frame array with the single id
+                        // that produced the frame, unconditionally: it is NOT
+                        // gated on `return_tokens`, which governs the
+                        // non-streaming array only (measured on the pinned
+                        // binary, #1477).
+                        tokens: meta.token_id.map(|id| vec![id]).unwrap_or_default(),
                         stop: false,
-                        id_slot: slot.id_slot(),
+                        // Upstream's `send_partial_response` never stamps a slot
+                        // id, so every partial frame carries the -1 sentinel and
+                        // only the final frame names the slot (#1477).
+                        id_slot: -1,
                         tokens_predicted: n,
                         tokens_evaluated: snapshot.stats.prompt_tokens,
                         timings: timings_per_token.then(|| {
@@ -801,6 +952,38 @@ async fn stream_native_completion(
                     let _ = token_events.json(&chunk);
                 },
                 |stats| {
+                    // b10621 `return_progress` (#1477): every observation
+                    // becomes a `prompt_progress` frame with empty content,
+                    // ahead of the first content frame. Without the field the
+                    // observations are internal bookkeeping only, exactly as
+                    // upstream gates them on `stream && return_progress`.
+                    if want_progress {
+                        let frame = NativeCompletionChunk {
+                            index: 0,
+                            content: String::new(),
+                            // Upstream builds the frame from a default-
+                            // constructed token, so its `tokens` array is the
+                            // one-element `[0]` rather than empty; measured on
+                            // the pinned binary.
+                            tokens: vec![0],
+                            stop: false,
+                            id_slot: -1,
+                            tokens_predicted: 0,
+                            tokens_evaluated: stats.prompt_tokens,
+                            timings: None,
+                            prompt_progress: Some(PromptProgress {
+                                total: stats.prompt_tokens,
+                                cache: stats.cached_tokens,
+                                processed: stats.processed,
+                                time_ms: stats.prompt_ms,
+                            }),
+                            completion_probabilities: None,
+                        };
+                        let _ = progress_events.json(&frame);
+                    }
+                    if !stats.first_token {
+                        return;
+                    }
                     slot.on_prefill(stats.prompt_tokens, stats.cached_tokens);
                     if let Ok(mut guard) = prefill_sink.lock() {
                         *guard = StreamPrefill::observed(stats);
@@ -827,6 +1010,9 @@ async fn stream_native_completion(
                     &options_snapshot,
                     NativeOutcome {
                         content: String::new(),
+                        // Upstream's final frame in stream mode carries neither
+                        // content nor ids: both were already sent on the
+                        // per-token frames (#1477).
                         tokens: Vec::new(),
                         tokens_predicted: result.completion_tokens,
                         tokens_evaluated: result.prompt_tokens,
@@ -1016,36 +1202,40 @@ fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option
                 .to_string(),
         );
     }
-    if request.n_indent.is_some_and(|n| n != 0) {
-        return refuse(
-            "n_indent is not supported on /completion; mlxcel has no minimum-indentation \
-             stop rule for fill-in-the-middle completions"
-                .to_string(),
-        );
+    // b10621 declares HARD limits 0..=2147483647 on n_indent, so a negative
+    // value is refused rather than clamped (#1477).
+    if let Some(n) = request.n_indent
+        && !(0..=i64::from(i32::MAX)).contains(&n)
+    {
+        return refuse(format!(
+            "n_indent: Value must be between 0 <= value <= 2147483647, but got {n}"
+        ));
     }
-    if request.t_max_predict_ms.is_some_and(|t| t > 0) {
-        return refuse(
-            "t_max_predict_ms is not supported per request; bound a stalled decode with the \
-             server-wide --decode-timeout / MLXCEL_DECODE_TIMEOUT instead"
-                .to_string(),
-        );
-    }
-    if request.return_progress.unwrap_or(false) {
-        return refuse(
-            "return_progress is not supported on /completion; the mlxcel scheduler emits no \
-             prompt-processing progress events on this path"
-                .to_string(),
-        );
-    }
-    if request.return_tokens.unwrap_or(false) {
-        return refuse(
-            "return_tokens is not supported on /completion; mlxcel's streaming decoder emits \
-             detokenized text and does not surface the raw token ids on this path. Use POST \
-             /tokenize on the returned content"
-                .to_string(),
-        );
+    // b10621 declares HARD limits -1..=INT64_MAX on t_max_predict_ms; only -1
+    // and 0 disable it, and anything below -1 is refused.
+    if let Some(ms) = request.t_max_predict_ms
+        && ms < -1
+    {
+        return refuse(format!(
+            "t_max_predict_ms: Value must be between -1 <= value <= 9223372036854775807, but got {ms}"
+        ));
     }
     None
+}
+
+/// The top-level `tokens` array of a non-streaming native response (#1477).
+///
+/// b10621 accumulates the sampled ids only when `return_tokens` is set and
+/// returns an empty array otherwise, so the field is a projection rather than
+/// an extra generation cost. The matched token of a string stop sequence is
+/// included even though its text is excluded from `content`, which is why the
+/// ids come from the scheduler rather than from re-tokenizing the answer.
+fn native_returned_tokens(request: &NativeCompletionRequest, ids: Vec<i32>) -> Vec<i32> {
+    if request.return_tokens.unwrap_or(false) {
+        ids
+    } else {
+        Vec::new()
+    }
 }
 
 fn build_native_options(
@@ -1224,6 +1414,14 @@ fn build_native_generate_options_with_live(
         n_keep: Some(request.n_keep.unwrap_or(config.n_keep)),
         n_discard: request.n_discard,
     };
+    // b10621 `n_indent` / `t_max_predict_ms` (#1477): the two per-request
+    // generation bounds, resolved to the scheduler's inert forms. Both value
+    // domains were checked before the request was admitted.
+    options.n_indent = request.n_indent.unwrap_or(0).max(0) as usize;
+    options.t_max_predict_ms = request
+        .t_max_predict_ms
+        .filter(|&ms| ms > 0)
+        .map(|ms| ms as u64);
     // Per-request adapter scales (#1439): the request's own `lora` field
     // replaces the server-default snapshot the options builder took, for this
     // request's forwards only. Resolved in this funnel rather than at the
@@ -1458,7 +1656,8 @@ mod tests {
     fn native_generation_settings_echo_typical_p() {
         let request = native_request(r#"{"prompt":"hi","typical_p":0.5}"#);
         let options = build_native_generate_options(&ServerConfig::default(), &request, None);
-        let settings = native_generation_settings(&request, &options);
+        let settings =
+            native_generation_settings(&ServerConfig::default(), None, &request, &options);
         assert_eq!(settings["typical_p"], 0.5);
     }
 
@@ -1893,7 +2092,8 @@ mod tests {
             r#"{"prompt":"hi","mirostat":1,"dynatemp_range":0.5,"min_keep":2,"n_probs":3,"dry_sequence_breakers":["x"]}"#,
         );
         let options = build_native_generate_options(&ServerConfig::default(), &request, None);
-        let settings = native_generation_settings(&request, &options);
+        let settings =
+            native_generation_settings(&ServerConfig::default(), None, &request, &options);
         assert_eq!(settings["mirostat"], 1);
         assert_eq!(settings["dynatemp_range"], 0.5);
         assert_eq!(settings["min_keep"], 2);

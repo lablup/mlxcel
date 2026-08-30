@@ -27,6 +27,10 @@
 //! - [`BatchScheduler`] -- core iteration-level scheduler.
 
 mod active;
+/// b10621's per-request generation bounds (`n_indent`, `t_max_predict_ms`),
+/// issue #1477: stop rules that end a healthy request and report
+/// `stop_type: "limit"`.
+pub(crate) mod generation_bounds;
 /// Adaptive MTP enable/decline policy (issue #333): profiles the first few
 /// B=1 MTP burst requests of a (target, drafter, hardware) pairing and settles
 /// to a data-driven verdict, overriding the static per-hardware gate while

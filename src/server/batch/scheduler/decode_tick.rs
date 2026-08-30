@@ -982,7 +982,7 @@ impl BatchScheduler {
             // could still become a stop string is held back, and a completed
             // stop string ends the sequence with the match excluded.
             let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
-                Some(new_text) => seq.stream_decoded_text(new_text, token_lp),
+                Some(new_text) => seq.stream_decoded_text(new_text, Some(token_val), token_lp),
                 None => None,
             };
 
@@ -990,6 +990,20 @@ impl BatchScheduler {
                 && let Err(err) = seq
                     .state
                     .transition_to(SequenceState::Finished(FinishReason::StopSequence))
+            {
+                tracing::error!("State transition error: {err}");
+            }
+
+            // b10621's `n_indent` / `t_max_predict_ms` end a healthy request
+            // with `stop_type: "limit"` (#1477). Guarded on the sequence not
+            // already being finished, so a string stop that landed on the same
+            // piece keeps its own classification: upstream evaluates the stop
+            // strings first and stops feeding tokens there.
+            if !seq.state.is_finished()
+                && seq.bound_stopped()
+                && let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
             {
                 tracing::error!("State transition error: {err}");
             }
@@ -1160,7 +1174,7 @@ impl BatchScheduler {
             // so it must honor them or a request would silently change behavior
             // depending on which decode kernel the batch happened to take.
             let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
-                Some(new_text) => seq.stream_decoded_text(new_text, None),
+                Some(new_text) => seq.stream_decoded_text(new_text, Some(token_val), None),
                 None => None,
             };
 
@@ -1168,6 +1182,20 @@ impl BatchScheduler {
                 && let Err(err) = seq
                     .state
                     .transition_to(SequenceState::Finished(FinishReason::StopSequence))
+            {
+                tracing::error!("State transition error: {err}");
+            }
+
+            // b10621's `n_indent` / `t_max_predict_ms` end a healthy request
+            // with `stop_type: "limit"` (#1477). Guarded on the sequence not
+            // already being finished, so a string stop that landed on the same
+            // piece keeps its own classification: upstream evaluates the stop
+            // strings first and stops feeding tokens there.
+            if !seq.state.is_finished()
+                && seq.bound_stopped()
+                && let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
             {
                 tracing::error!("State transition error: {err}");
             }
@@ -1444,7 +1472,7 @@ impl BatchScheduler {
 
         // Stop-string enforcement for the single-step decode path (issue #1466).
         let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
-            Some(new_text) => seq.stream_decoded_text(new_text, token_lp),
+            Some(new_text) => seq.stream_decoded_text(new_text, Some(token_val), token_lp),
             None => None,
         };
 

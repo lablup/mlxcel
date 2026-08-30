@@ -316,6 +316,19 @@ pub struct ThinkingState {
     /// active even when no budget is configured, which is upstream's
     /// "create the budget sampler on demand" semantics.
     pub force_end: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// b10621 `--reasoning-budget-message` (#1470), tokenized against this
+    /// model's vocabulary. Upstream composes the forced run as
+    /// `message_tokens + end_tag_tokens` and its budget sampler forces that
+    /// whole sequence token by token, so the message is emitted on the
+    /// exhausted-budget path AND on the runtime `reasoning_end` path, which
+    /// enter the same forcing state. Empty (or `None`) forces the close token
+    /// alone, which is the pre-#1470 behavior.
+    forced_message: Option<std::sync::Arc<Vec<i32>>>,
+    /// How many of [`forced_message`](Self::forced_message) have been emitted.
+    /// Advanced by [`observe`](Self::observe) when the token it sees is the one
+    /// [`decide_override`](Self::decide_override) forced, so the cursor cannot
+    /// run ahead of what the client received.
+    forced_message_cursor: usize,
 }
 
 impl ThinkingState {
@@ -336,7 +349,20 @@ impl ThinkingState {
             budget,
             enter_block_on_start,
             force_end: None,
+            forced_message: None,
+            forced_message_cursor: 0,
         }
+    }
+
+    /// Attach the tokenized `--reasoning-budget-message` (#1470).
+    ///
+    /// An empty run is stored as `None`, so the forcing path stays exactly the
+    /// pre-#1470 single close token when the flag was not passed or tokenized
+    /// to nothing.
+    #[must_use]
+    pub fn with_forced_message(mut self, tokens: Option<std::sync::Arc<Vec<i32>>>) -> Self {
+        self.forced_message = tokens.filter(|run| !run.is_empty());
+        self
     }
 
     /// Attach the runtime force-end flag armed by the request's
@@ -362,6 +388,8 @@ impl ThinkingState {
             budget: None,
             enter_block_on_start: false,
             force_end: None,
+            forced_message: None,
+            forced_message_cursor: 0,
         }
     }
 
@@ -412,7 +440,7 @@ impl ThinkingState {
                 if self.enter_block_on_start
                     && (forced || self.budget.is_some_and(|b| b.cap() == 0))
                 {
-                    return ThinkingDecision::ForceClose(ids.close);
+                    return self.forcing_decision(ids.close);
                 }
                 // Otherwise wait until we detect `<think>` open; no override
                 // yet. (Budget=0 without a primed template still waits for
@@ -426,10 +454,59 @@ impl ThinkingState {
                     return ThinkingDecision::NoOverride;
                 }
                 if forced || self.budget.is_some_and(|b| self.in_block_count >= b.cap()) {
-                    ThinkingDecision::ForceClose(ids.close)
+                    self.forcing_decision(ids.close)
                 } else {
                     ThinkingDecision::NoOverride
                 }
+            }
+        }
+    }
+
+    /// The token to force at this step: the next unemitted
+    /// `--reasoning-budget-message` token, or the close tag once the message
+    /// has been emitted in full (#1470).
+    ///
+    /// Upstream forces `message_tokens + end_tag_tokens` as one run, so the
+    /// message lands immediately before the tag and nowhere else.
+    fn forcing_decision(&self, close: i32) -> ThinkingDecision {
+        match self.next_forced_message_token() {
+            Some(token) => ThinkingDecision::ForceMessage(token),
+            None => ThinkingDecision::ForceClose(close),
+        }
+    }
+
+    /// The next message token to emit, or `None` when the run is finished, no
+    /// message was configured, or no force is due at this step.
+    ///
+    /// The force-due half matters: without it a model that happens to sample
+    /// the message's first token while still inside its budget would advance
+    /// the cursor and lose a token of its own reasoning.
+    fn next_forced_message_token(&self) -> Option<i32> {
+        if !self.forcing_due() {
+            return None;
+        }
+        self.forced_message
+            .as_ref()
+            .and_then(|run| run.get(self.forced_message_cursor))
+            .copied()
+    }
+
+    /// Whether the close tag is being forced at this step: the budget is
+    /// exhausted, or a runtime `reasoning_end` is armed. Mirrors the conditions
+    /// [`decide_override`](Self::decide_override) forces on, so the cursor
+    /// advances exactly when a message token was emitted.
+    fn forcing_due(&self) -> bool {
+        if self.token_ids.is_none() || (self.budget.is_none() && self.force_end.is_none()) {
+            return false;
+        }
+        let forced = self.force_end_requested();
+        match self.phase {
+            ThinkingPhase::Closed => false,
+            ThinkingPhase::Pending => {
+                self.enter_block_on_start && (forced || self.budget.is_some_and(|b| b.cap() == 0))
+            }
+            ThinkingPhase::InBlock => {
+                forced || self.budget.is_some_and(|b| self.in_block_count >= b.cap())
             }
         }
     }
@@ -441,6 +518,19 @@ impl ThinkingState {
     pub fn observe(&mut self, final_token: i32) {
         let Some(ids) = self.token_ids else { return };
         if self.budget.is_none() && self.force_end.is_none() {
+            return;
+        }
+        // A forced message token is bookkeeping for the forcing run, not
+        // reasoning content: it must advance the cursor and nothing else, or
+        // the run would repeat its first token forever (#1470). Matching by
+        // value is exact, because the caller emits precisely the token
+        // `decide_override` returned.
+        if self.next_forced_message_token() == Some(final_token) {
+            self.forced_message_cursor += 1;
+            // The block is still open; the close tag follows the run.
+            if self.phase == ThinkingPhase::Pending {
+                self.phase = ThinkingPhase::InBlock;
+            }
             return;
         }
         match self.phase {
@@ -478,6 +568,11 @@ pub enum ThinkingDecision {
     NoOverride,
     /// Replace the sampled token with the given `</think>` token id.
     ForceClose(i32),
+    /// Replace the sampled token with the next token of the configured
+    /// `--reasoning-budget-message` (#1470). The run is emitted immediately
+    /// before [`ForceClose`](Self::ForceClose), which follows it, so the
+    /// caller substitutes this id exactly as it substitutes the close tag.
+    ForceMessage(i32),
 }
 
 #[cfg(test)]
@@ -646,6 +741,124 @@ mod tests {
 
         // After the close the request continues as ordinary content.
         assert_eq!(s.decide_override(52), ThinkingDecision::NoOverride);
+    }
+
+    // -- #1470 `--reasoning-budget-message` injection --
+
+    /// The tokenized message, standing in for `--reasoning-budget-message`.
+    fn message() -> Option<std::sync::Arc<Vec<i32>>> {
+        Some(std::sync::Arc::new(vec![301, 302]))
+    }
+
+    /// Drive the applier the decode loop uses: force what `decide_override`
+    /// says, then `observe` exactly that token.
+    fn step(state: &mut ThinkingState, sampled: i32) -> i32 {
+        let final_token = match state.decide_override(sampled) {
+            ThinkingDecision::NoOverride => sampled,
+            ThinkingDecision::ForceClose(id) | ThinkingDecision::ForceMessage(id) => id,
+        };
+        state.observe(final_token);
+        final_token
+    }
+
+    #[test]
+    fn an_exhausted_budget_emits_the_message_then_the_close_tag() {
+        let mut s = ThinkingState::new(
+            Some(ids()),
+            Some(ThinkingBudget::from_raw_i32(2).unwrap().unwrap()),
+            false,
+        )
+        .with_forced_message(message());
+        assert_eq!(step(&mut s, 100), 100, "the model opens the block");
+        assert_eq!(step(&mut s, 50), 50, "in-block token 1 of 2");
+        assert_eq!(step(&mut s, 51), 51, "in-block token 2 of 2");
+        // Budget exhausted: the message run comes first, the close tag last,
+        // which is upstream's `message_tokens + end_tag_tokens` order.
+        assert_eq!(step(&mut s, 52), 301);
+        assert_eq!(step(&mut s, 53), 302);
+        assert_eq!(step(&mut s, 54), 200);
+        assert!(matches!(s.phase, ThinkingPhase::Closed));
+        // Past the close the request is ordinary content again.
+        assert_eq!(step(&mut s, 55), 55);
+    }
+
+    #[test]
+    fn a_runtime_force_end_emits_the_message_too() {
+        // Upstream enters the same FORCING state for a runtime `reasoning_end`
+        // as for an exhausted budget, so the message is emitted on both paths.
+        let flag = force_flag();
+        let mut s = ThinkingState::new(Some(ids()), None, false)
+            .with_force_end(Some(flag.clone()))
+            .with_forced_message(message());
+        assert_eq!(step(&mut s, 100), 100);
+        assert_eq!(step(&mut s, 50), 50);
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(step(&mut s, 51), 301);
+        assert_eq!(step(&mut s, 52), 302);
+        assert_eq!(step(&mut s, 53), 200);
+        assert!(matches!(s.phase, ThinkingPhase::Closed));
+    }
+
+    #[test]
+    fn the_message_is_emitted_on_the_primed_template_path() {
+        let mut s = ThinkingState::new(Some(ids()), Some(ThinkingBudget::ImmediateClose), true)
+            .with_forced_message(message());
+        assert_eq!(step(&mut s, 42), 301);
+        assert_eq!(step(&mut s, 43), 302);
+        assert_eq!(step(&mut s, 44), 200);
+        assert!(matches!(s.phase, ThinkingPhase::Closed));
+    }
+
+    #[test]
+    fn no_message_keeps_the_pre_1470_single_close_token() {
+        let mut s = ThinkingState::new(Some(ids()), Some(ThinkingBudget::ImmediateClose), true);
+        assert_eq!(step(&mut s, 42), 200);
+        assert!(matches!(s.phase, ThinkingPhase::Closed));
+    }
+
+    #[test]
+    fn an_empty_message_is_stored_as_none() {
+        let s = ThinkingState::new(Some(ids()), Some(ThinkingBudget::ImmediateClose), true)
+            .with_forced_message(Some(std::sync::Arc::new(Vec::new())));
+        assert_eq!(s.decide_override(42), ThinkingDecision::ForceClose(200));
+    }
+
+    #[test]
+    fn a_sampled_token_equal_to_the_message_head_does_not_advance_the_cursor() {
+        // The cursor advances on the token `decide_override` forced, and a
+        // force is only due once the budget is exhausted. Without that gate a
+        // model that happened to sample 301 inside its budget would lose a
+        // token of its own reasoning to the injection run.
+        let mut s = ThinkingState::new(
+            Some(ids()),
+            Some(ThinkingBudget::from_raw_i32(3).unwrap().unwrap()),
+            false,
+        )
+        .with_forced_message(message());
+        assert_eq!(step(&mut s, 100), 100, "open");
+        assert_eq!(step(&mut s, 301), 301, "the model's own token, kept");
+        assert_eq!(step(&mut s, 50), 50);
+        assert_eq!(step(&mut s, 51), 51);
+        // Budget exhausted now: the whole message still runs from its head.
+        assert_eq!(step(&mut s, 52), 301);
+        assert_eq!(step(&mut s, 53), 302);
+        assert_eq!(step(&mut s, 54), 200);
+    }
+
+    #[test]
+    fn a_natural_close_never_injects_the_message() {
+        // The message belongs to the forced end only: a model that closes its
+        // own block within budget must not have text inserted into it.
+        let mut s = ThinkingState::new(
+            Some(ids()),
+            Some(ThinkingBudget::from_raw_i32(8).unwrap().unwrap()),
+            false,
+        )
+        .with_forced_message(message());
+        assert_eq!(step(&mut s, 100), 100);
+        assert_eq!(step(&mut s, 50), 50);
+        assert_eq!(step(&mut s, 200), 200);
+        assert!(matches!(s.phase, ThinkingPhase::Closed));
     }
 
     #[test]

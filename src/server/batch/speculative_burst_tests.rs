@@ -105,6 +105,7 @@ fn make_test_sequence() -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
 
     let seq = SequenceInfo {
+        bounds: Default::default(),
         retention: Default::default(),
         seq_id: SequenceId::from_raw(42),
         state: SequenceState::Queued,

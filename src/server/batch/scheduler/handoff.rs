@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::server::batch::generation_bounds::GenerationBounds;
 
 impl BatchScheduler {
     pub(super) fn release_sequence_caches(&mut self, seq_id: SequenceId) {
@@ -110,6 +111,13 @@ impl BatchScheduler {
     pub(super) fn begin_prefill(seq: &mut SequenceInfo) -> Result<(), String> {
         seq.state.transition_to(SequenceState::Prefilling)?;
         seq.prefill_start = Some(Instant::now());
+        // b10621 opens a `return_progress` stream with one frame stating what
+        // the cache already supplied, before any forward runs (#1477). Emitted
+        // here because this is the single transition into prefill every
+        // dispatch takes -- full, chunked, and the padded batched cohort -- and
+        // because the state transition above makes it once per sequence: a
+        // second call cannot reach this line.
+        seq.report_prefill_progress(seq.already_cached_tokens);
         seed_rng_if_needed(&seq.sampling);
         Ok(())
     }
@@ -355,6 +363,10 @@ impl BatchScheduler {
             // Disaggregated handoffs carry no snapshot; the scheduler
             // resolves the server default at application time (#1439).
             lora_scales: None,
+            // The handoff wire format carries neither generation bound, so a
+            // disaggregated request is served without them rather than with a
+            // guessed value (#1477).
+            bounds: GenerationBounds::default(),
             priority: RequestPriority::default(),
             logprobs_config: mlxcel_core::sampling::LogprobsConfig::default(),
             vlm_embeddings: None,
@@ -470,6 +482,10 @@ impl BatchScheduler {
             // Disaggregated handoffs carry no snapshot; the scheduler
             // resolves the server default at application time (#1439).
             lora_scales: None,
+            // The handoff wire format carries neither generation bound, so a
+            // disaggregated request is served without them rather than with a
+            // guessed value (#1477).
+            bounds: GenerationBounds::default(),
             priority: RequestPriority::default(),
             logprobs_config: mlxcel_core::sampling::LogprobsConfig::default(),
             vlm_embeddings: None,

@@ -240,6 +240,9 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
     wait_for_loaded(&remote_provider);
 
     let options = ServerGenerateOptions {
+        n_indent: 0,
+        t_max_predict_ms: None,
+        reasoning_budget_message: None,
         retention: Default::default(),
         dry_breaker_strings: None,
         logit_bias: Vec::new(),

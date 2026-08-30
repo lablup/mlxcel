@@ -97,6 +97,7 @@ impl BatchScheduler {
             active_batch: ActiveBatch::new(max_batch_size),
             model,
             tokenizer,
+            forced_reasoning_message: std::cell::RefCell::new(None),
             lora_runtime: None,
             lora_applied: None,
             generation_stream,
