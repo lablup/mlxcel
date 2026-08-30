@@ -1134,6 +1134,17 @@ fn persist_response(
 mod tests {
     use super::*;
     use crate::server::types::ChatCompletionRequest;
+    use crate::server::types::responses_request::INPUT_IMAGE_FILE_ID_UNSUPPORTED;
+
+    #[test]
+    fn invalid_input_part_maps_to_named_400_response() {
+        let response = translate_error_to_response(ResponsesTranslateError::InvalidInputPart(
+            INPUT_IMAGE_FILE_ID_UNSUPPORTED.to_string(),
+        ));
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.message, INPUT_IMAGE_FILE_ID_UNSUPPORTED);
+    }
 
     #[test]
     fn split_reasoning_inline_block_separates_content() {
