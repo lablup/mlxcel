@@ -57,7 +57,12 @@ struct ResolvedDistributedStartup {
 pub const MIN_PARALLEL_CONTEXT_SIZE: usize = 512;
 
 /// Startup configuration for the server (shared between `mlxcel serve` and `mlxcel-server`).
-#[derive(Debug)]
+///
+/// `Clone` exists for router mode (#1438): the pool clones this per model,
+/// swaps in the model's own path and preset overlay, and re-runs
+/// [`build_server_config`] so per-model presets resolve exactly like CLI
+/// flags.
+#[derive(Debug, Clone)]
 pub struct ServerStartupConfig {
     // llama-server b10621 chat-template / reasoning / parsing settings
     // (issue #1447).
@@ -158,6 +163,11 @@ pub struct ServerStartupConfig {
     pub models_preset: Option<PathBuf>,
     /// `--tags`: comma-separated informational model tags (#1438).
     pub tags: Option<String>,
+    /// `--model-store-root`: mlxcel model-store root override (#1438's
+    /// replacement spelling for the pre-router `--models-dir` meaning). In
+    /// router mode this store is the b10621 cache source: its snapshots are
+    /// listed as removable models and `POST /models` downloads into it.
+    pub model_store_root: Option<PathBuf>,
 
     /// `--spm-infill`: the Suffix/Prefix/Middle ordering for `POST /infill`
     /// (#1442). Forwarded to [`super::config::ServerConfig::spm_infill`].
@@ -584,6 +594,7 @@ impl Default for ServerStartupConfig {
             models_autoload: true,
             models_preset: None,
             tags: None,
+            model_store_root: None,
             spm_infill: false,
             embd_normalize: None,
             embedding_serving_mode: crate::server::config::EmbeddingServingMode::Any,
@@ -2105,23 +2116,27 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
 
-    // b10621 `--models-preset` names an INI file of per-model presets.
-    // mlxcel has no preset translation yet; accepting the file and ignoring
-    // it would silently serve un-preset models, so it fails loudly (#1438).
-    if let Some(preset) = startup.models_preset.as_ref() {
-        anyhow::bail!(
-            "--models-preset {} is accepted but not implemented yet: mlxcel cannot translate \
-             llama-server INI presets into per-model configuration. Start the router with \
-             --models-dir alone, or configure models through the router's own CLI defaults \
-             (#1438 tracks preset support)",
-            preset.display()
-        );
+    // b10621 router mode: no model argument plus `--models-dir` or
+    // `--models-preset` serves the model-management surface instead of
+    // loading one checkpoint (#1438). Preset files are parsed and applied
+    // per model inside the router startup; a parse error or untranslatable
+    // key fails startup there.
+    if startup.model_path.as_os_str().is_empty()
+        && (startup.router_models_dir.is_some() || startup.models_preset.is_some())
+    {
+        return crate::server::router_server::run_router_server(startup).await;
     }
 
-    // b10621 router mode: no model argument plus `--models-dir` serves the
-    // model-management surface instead of loading one checkpoint (#1438).
-    if startup.router_models_dir.is_some() && startup.model_path.as_os_str().is_empty() {
-        return crate::server::router_server::run_router_server(startup).await;
+    // Outside router mode `--models-preset` steers nothing; accepting and
+    // ignoring it would be the silent-ignore failure epic #1431 exists to
+    // remove, so it fails loudly (#1438).
+    if let Some(preset) = startup.models_preset.as_ref() {
+        anyhow::bail!(
+            "--models-preset {} applies to the b10621 router server and cannot be combined \
+             with a model argument. Drop the model argument to start the router (optionally \
+             with --models-dir), or remove --models-preset",
+            preset.display()
+        );
     }
 
     // A sampler-order flag that asks for anything but the fixed b10621

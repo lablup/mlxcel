@@ -120,12 +120,13 @@
       "default": "disabled",
       "description": "path to INI file containing model presets for the router server (default: disabled) (env: LLAMA_ARG_MODELS_PRESET)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1438,
-      "test": "src/server/startup.rs",
-      "notes": "Accepted on both binaries with the b10621 spelling and env binding, and refused at startup with a diagnostic: mlxcel cannot yet translate llama-server INI presets into per-model configuration, and loading un-preset models while the operator believes presets apply would be the silent-ignore failure epic #1431 exists to remove.",
+      "test": "src/server/router_presets_tests.rs",
+      "notes": "Implemented since #1438's cache-source PR: the INI file is parsed with upstream's grammar ([name] sections, [*] global preset cascaded under every model, ; and # comments, version key skipped, unknown keys a startup error), keys accept both the long-option spelling without dashes and the LLAMA_ARG_* environment spelling, and each section overlays a clone of the router's own startup config which is re-resolved through the same pipeline as the CLI, so preset keys and CLI flags cannot drift (explicitly-given router CLI flags win over preset values, upstream's own overlay order). Sections define models via model= (checkpoint directory) or hf-repo= (a cache snapshot), or overlay configuration onto a discovered model; the preset-only load-on-startup, stop-timeout, and dedup-cache-models options parse, with load-on-startup and dedup-cache-models honored and stop-timeout inert (in-process unload needs no force-kill escalation). Translated keys: model, hf-repo, alias, tags, ctx-size, parallel, temp, top-k, top-p, min-p, seed, n-predict.",
       "divergence": [
-        "Any configured preset file fails startup with the migration diagnostic; b10621 loads INI presets and applies them per model (#1438)."
+        "Keys outside the translated set fail startup with a diagnostic naming the key and section; b10621 can apply any server option per model. The refusal is the epic's no-silent-ignore rule, and the translated set grows with mlxcel's per-model configurability (#1438).",
+        "A preset hf-repo= must already be a cache snapshot at startup; b10621 downloads a preset's hf-repo on demand when the model loads (#1438)."
       ],
       "rationale": null,
       "mlxcel": {
@@ -173,13 +174,11 @@
       "source": "tools/server/server.cpp",
       "condition": "router-mode",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1438,
-      "test": "src/server/router_server_tests.rs",
-      "notes": "Mounted with upstream's reachable refusal surface for a models-dir pool: a missing name answers 400 \"model must be a non-empty string\", an unknown one 500 \"model name=X is not found\", and a discovered one 500 \"model name=X is not removable (not from cache)\", which is exactly what b10621 answers for its models_dir-sourced entries.",
-      "divergence": [
-        "No cache source exists, so no model is ever removable; b10621 can delete cache-sourced models from disk (#1438)."
-      ],
+      "test": "src/server/router_server_tests.rs::delete_models_removes_a_cache_entry_from_disk",
+      "notes": "Implemented since #1438's cache-source PR: a cache-sourced model is removed from disk (an in-flight download is cancelled first, a loaded instance unloaded first), the entry leaves the list, and the SSE stream carries model_remove. The refusal surface matches upstream exactly: a missing name answers 400 \"model must be a non-empty string\", an unknown one 500 \"model name=X is not found\", and a models-dir or preset entry 500 \"model name=X is not removable (not from cache)\". Deletion is containment-checked against the store root (the same sanitized <owner>/<name> composition and re-assertion the mlxcel rm verb uses), so an HTTP-supplied name can never delete outside the cache.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "route": "DELETE /models"
@@ -193,14 +192,18 @@
       "source": "tools/server/server.cpp",
       "condition": "router-mode",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1438,
-      "test": "src/server/router_models_tests.rs",
-      "notes": "Router mode serves the SSE stream with b10621's event envelope ({\"model\", \"event\"[, \"data\"]}) for models_reload, model_status on load begin, and status_change on load/unload transitions.",
+      "test": "src/server/router_models_tests.rs::a_download_emits_the_b10621_event_sequence_and_lands_in_the_cache",
+      "notes": "Router mode serves the SSE stream with b10621's event envelope ({\"model\", \"event\"[, \"data\"]}) and, since #1438's cache-source PR, the full event vocabulary: models_reload, model_status on load begin, status_change on load/unload transitions, download_progress with per-url {done, total} while POST /models fetches into the cache, download_finished / download_failed at each download's end, and model_remove when DELETE /models removes a cache entry.",
       "divergence": [
-        "The event vocabulary is the in-process subset: download_progress / download_finished / download_failed and model_remove never occur (no cache downloads, no removable models), and status_change payloads carry status and failed only, without a child's info/progress blocks (#1438)."
+        "status_change payloads carry no child exit_code and no child /props-derived info block for loaded models: router mode serves models in-process, so there is no child process to exit or to report loading facts over a pipe. Download progress info is served; the child-lifecycle payload fields have no in-process referent (#1438)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "architectural",
+        "reason": "The in-process pool is the same architectural property already argued on --models-dir: models are served inside mlxcel-server rather than as child llama-server processes, so a process exit code and a child's self-reported loading info do not exist to be forwarded. Fabricating an exit_code for a load that never had a process would be less honest than omitting the field.",
+        "revisit_if": null
+      },
       "mlxcel": {
         "route": "GET /models/sse"
       }
@@ -213,14 +216,18 @@
       "source": "tools/server/server.cpp",
       "condition": "router-mode",
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1438,
-      "test": "src/server/router_server_tests.rs",
-      "notes": "Mounted with upstream's validation surface: a missing name answers 400 \"model must be a non-empty string\" and an existing one 400 \"model 'X' already exists\".",
+      "test": "src/server/router_server_tests.rs::post_models_expands_bare_names_to_the_default_org",
+      "notes": "Implemented since #1438's cache-source PR: the name is validated (non-empty, well-formed repo id, synchronous metadata probe against the hub, exactly upstream's validate-then-download order), an existing name answers 400 \"model 'X' already exists\", a missing one 400 \"model must be a non-empty string\", and a valid new one answers {\"success\": true} while a background task downloads the MLX snapshot into the model cache (the mlxcel store that --model-store-root / MLXCEL_MODELS_DIR / MLXCEL_CACHE_DIR resolve). The transient entry is listed with status \"downloading\" and per-url progress, the SSE stream carries download_progress / download_finished / download_failed, and a finished snapshot lists as a removable cache entry.",
       "divergence": [
-        "A new model name answers a 500 diagnostic instead of starting a HuggingFace download into the cache; mlxcel's router has no cache source yet (#1438)."
+        "A bare, owner-less model name expands to mlxcel's default organization (mlx-community/<name>) before validation and download, the same expansion -m <name> and mlxcel download apply, so the cache entry lists under the expanded repo id where b10621 lists the verbatim name (#1438)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel's model-reference domain is uniform across every surface that accepts a repo id (-m, mlxcel download, the store layout, and POST /models): a bare name means <default-org>/<name> everywhere, and the store's <owner>/<name> layout has exactly one spelling for each snapshot. Accepting a verbatim owner-less id on this one route would create cache entries the rest of mlxcel cannot name. Pinned by post_models_expands_bare_names_to_the_default_org in src/server/router_server_tests.rs.",
+        "revisit_if": "mlxcel's model-reference resolution stops expanding bare names, or the store gains a verbatim-id layout addressable by the other surfaces."
+      },
       "mlxcel": {
         "route": "POST /models"
       }

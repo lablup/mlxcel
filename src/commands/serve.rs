@@ -612,6 +612,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         models_autoload: args.models_autoload,
         models_preset: args.models_preset.clone(),
         tags: args.tags.clone(),
+        model_store_root: args.model_store_root.clone(),
         metrics: args.metrics,
         warmup: args.warmup,
         no_warmup: args._no_warmup,

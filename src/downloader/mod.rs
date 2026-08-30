@@ -534,6 +534,7 @@ fn file_url(endpoint: &str, repo_id: &str, revision: &str, filename: &str) -> St
 ///
 /// Writes to a sibling tempfile first, then atomically renames to `dest`.
 /// On error, the tempfile is removed and both progress bars are abandoned.
+#[allow(clippy::too_many_arguments)]
 async fn stream_file(
     client: &reqwest::Client,
     url: &str,
@@ -541,6 +542,8 @@ async fn stream_file(
     filename: &str,
     file_pb: &indicatif::ProgressBar,
     aggregate_pb: &indicatif::ProgressBar,
+    expected_size: u64,
+    hooks: &DownloadHooks,
 ) -> Result<u64> {
     let tmp_name = format!(
         ".mlxcel-partial.{}.{}",
@@ -552,7 +555,18 @@ async fn stream_file(
     );
     let tmp = dest.with_file_name(tmp_name);
 
-    let result = stream_to_tempfile(client, url, &tmp, dest, filename, file_pb, aggregate_pb).await;
+    let result = stream_to_tempfile(
+        client,
+        url,
+        &tmp,
+        dest,
+        filename,
+        file_pb,
+        aggregate_pb,
+        expected_size,
+        hooks,
+    )
+    .await;
     if result.is_err() {
         // Best-effort cleanup — ignore errors from remove_file (file may not
         // exist yet if `File::create` itself failed). The original error from
@@ -610,6 +624,7 @@ async fn open_tempfile_no_symlink(tmp: &Path) -> Result<tokio::fs::File> {
 /// Inner implementation of [`stream_file`]: stream bytes into `tmp`, then
 /// atomically rename to `dest`. Callers are responsible for cleaning up `tmp`
 /// on error.
+#[allow(clippy::too_many_arguments)]
 async fn stream_to_tempfile(
     client: &reqwest::Client,
     url: &str,
@@ -618,6 +633,8 @@ async fn stream_to_tempfile(
     filename: &str,
     file_pb: &indicatif::ProgressBar,
     aggregate_pb: &indicatif::ProgressBar,
+    expected_size: u64,
+    hooks: &DownloadHooks,
 ) -> Result<u64> {
     // Open the tempfile FIRST so that an adversary cannot pre-stage a symlink
     // at `tmp` between the HTTP response and the actual write. `O_NOFOLLOW`
@@ -641,10 +658,16 @@ async fn stream_to_tempfile(
         ));
     }
 
+    // Prefer the response's own Content-Length over the HEAD-pass estimate:
+    // it reflects the entity actually being served.
+    let total_size = response.content_length().unwrap_or(expected_size);
+
     let mut stream = response.bytes_stream();
     let mut bytes_written: u64 = 0;
 
     while let Some(chunk) = stream.next().await {
+        check_cancelled(hooks)
+            .with_context(|| format!("Cancelled while downloading {filename}"))?;
         let chunk = chunk.with_context(|| format!("Stream error while downloading {filename}"))?;
         out.write_all(&chunk)
             .await
@@ -653,6 +676,9 @@ async fn stream_to_tempfile(
         bytes_written += chunk_len;
         file_pb.inc(chunk_len);
         aggregate_pb.inc(chunk_len);
+        if let Some(progress) = &hooks.progress {
+            progress(url, bytes_written, total_size);
+        }
     }
 
     out.flush()
@@ -713,6 +739,85 @@ pub fn ensure_online(what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Programmatic observation and control of one [`download_repo_with_hooks`]
+/// run (issue #1438).
+///
+/// The CLI download surface reports progress through indicatif bars on
+/// stderr; the router server's `POST /models` flow instead forwards progress
+/// into its `GET /models/sse` event stream and needs to cancel an in-flight
+/// download when `DELETE /models` removes the model. Both needs are optional
+/// observations of the same download loop, so they ride along as hooks rather
+/// than forking the implementation.
+#[derive(Clone, Default)]
+pub struct DownloadHooks {
+    /// Called as bytes arrive for each file: `(url, downloaded, total)`.
+    /// `total` is `0` when the size is unknown. Files already present on disk
+    /// report one terminal call with `downloaded == total`. Called from the
+    /// download worker thread; keep it fast and non-blocking.
+    pub progress: Option<std::sync::Arc<dyn Fn(&str, u64, u64) + Send + Sync>>,
+    /// Cooperative cancellation flag, checked between streamed chunks and
+    /// between files. When it becomes `true`, the download aborts with an
+    /// error wrapping [`DownloadCancelled`], leaving no partial tempfiles
+    /// behind (completed files stay, exactly like any other mid-run failure).
+    pub cancel: Option<std::sync::Arc<AtomicBool>>,
+}
+
+impl std::fmt::Debug for DownloadHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadHooks")
+            .field("progress", &self.progress.is_some())
+            .field("cancel", &self.cancel.is_some())
+            .finish()
+    }
+}
+
+/// Marker error produced when a [`DownloadHooks::cancel`] flag aborts a
+/// download. Callers distinguish cancellation from genuine failures with
+/// `err.chain().any(|c| c.is::<DownloadCancelled>())` (the marker may sit
+/// below added context) rather than by matching message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadCancelled;
+
+impl std::fmt::Display for DownloadCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "download cancelled")
+    }
+}
+
+impl std::error::Error for DownloadCancelled {}
+
+/// True when `err`'s chain contains the [`DownloadCancelled`] marker.
+#[must_use]
+pub fn is_download_cancelled(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<DownloadCancelled>())
+}
+
+fn check_cancelled(hooks: &DownloadHooks) -> Result<()> {
+    if let Some(cancel) = &hooks.cancel
+        && cancel.load(Ordering::Relaxed)
+    {
+        return Err(anyhow::Error::new(DownloadCancelled));
+    }
+    Ok(())
+}
+
+/// Probe that `repo_id` names a reachable HuggingFace model repository
+/// (issue #1438). Resolves the ambient token, builds the API client, and
+/// fetches the repository manifest without downloading any file. The router
+/// server's `POST /models` validates a requested name with this before
+/// starting the background download, mirroring b10621's synchronous metadata
+/// fetch in its own handler. Blocking: call from a blocking-capable thread.
+pub fn probe_repo(repo_id: &str, revision: Option<&str>) -> Result<()> {
+    ensure_online(&format!("the repository manifest for '{repo_id}'"))?;
+    let token = resolve_token(None);
+    let api = build_api(token)?;
+    let repo = build_repo_handle(repo_id, revision);
+    api.repo(repo)
+        .info()
+        .map(|_| ())
+        .map_err(|err| map_hf_error(err, repo_id, revision, None))
+}
+
 /// Download a HuggingFace model repository snapshot into a local directory.
 ///
 /// On success, every allow-listed file from the upstream repository is present
@@ -724,6 +829,12 @@ pub fn ensure_online(what: &str) -> Result<()> {
 /// invalid repo id, missing authentication on a gated repo, missing revision,
 /// network failure, and on-disk I/O errors.
 pub fn download_repo(opts: DownloadOptions) -> Result<()> {
+    download_repo_with_hooks(opts, DownloadHooks::default())
+}
+
+/// [`download_repo`] with progress observation and cooperative cancellation
+/// (issue #1438). See [`DownloadHooks`].
+pub fn download_repo_with_hooks(opts: DownloadOptions, hooks: DownloadHooks) -> Result<()> {
     // Offline mode forbids every snapshot fetch (issue #1434). The resolver
     // already reports a cache miss with a repo-specific diagnostic before
     // reaching here; this is the backstop for any other caller, including
@@ -741,17 +852,17 @@ pub fn download_repo(opts: DownloadOptions) -> Result<()> {
     if tokio::runtime::Handle::try_current().is_ok() {
         let handle = std::thread::Builder::new()
             .name("mlxcel-download".to_string())
-            .spawn(move || download_repo_blocking(opts))
+            .spawn(move || download_repo_blocking(opts, hooks))
             .context("Failed to spawn the download worker thread")?;
         return match handle.join() {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         };
     }
-    download_repo_blocking(opts)
+    download_repo_blocking(opts, hooks)
 }
 
-fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
+fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result<()> {
     // Issue #171: expand a bare, prefix-less model name (e.g. `Qwen3-4B-4bit`)
     // to `<default-org>/<name>` BEFORE anything is derived from `opts.repo_id` —
     // the HF-cache reuse probe below, the store destination
@@ -931,7 +1042,11 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
     // rate limit. Sizes are best-effort: if a HEAD fails we fall back to 0
     // (indeterminate bar). We skip the HEAD pass entirely when progress bars
     // are suppressed.
-    let size_map: std::collections::HashMap<String, u64> = if show_bars {
+    // The HEAD-request size pass also runs when a progress hook is installed
+    // (issue #1438): the router's SSE `download_progress` events carry
+    // per-file totals, which come from nowhere else.
+    let size_map: std::collections::HashMap<String, u64> = if show_bars || hooks.progress.is_some()
+    {
         rt.block_on(async {
             let client_ref = &client;
             let endpoint_ref = &endpoint;
@@ -972,6 +1087,7 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
     let mut total_bytes: u64 = 0;
 
     for (idx, filename) in wanted.iter().enumerate() {
+        check_cancelled(&hooks)?;
         let dest = local_dir.join(filename);
 
         // Defense in depth: even if a malicious sibling slipped through the
@@ -1005,6 +1121,10 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
             // instead we advance it by the expected file size to keep the total
             // accurate.
             let cached_size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            if let Some(progress) = &hooks.progress {
+                let url = file_url(&endpoint, &opts.repo_id, revision, filename);
+                progress(&url, cached_size, cached_size);
+            }
             println!("[{}/{total}] cached: {filename}", idx + 1,);
             // Advance aggregate bar by the cached file size so total progress
             // reflects what is on disk, not just what was downloaded this session.
@@ -1031,6 +1151,8 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
             filename,
             &file_pb,
             &aggregate_pb,
+            file_size,
+            &hooks,
         ));
 
         match result {
