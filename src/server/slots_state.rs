@@ -162,7 +162,18 @@ impl SlotRegistry {
                 String::new()
             },
         };
-        handle.try_bind();
+        // Deliberately NOT bound here (#1440). Binding at route entry gave a
+        // slot to a request that was still waiting in the scheduler queue,
+        // which under saturation left a request that WAS decoding with no slot
+        // for its whole life: measured with `--parallel 2` and five concurrent
+        // streams, one request emitted all forty-one frames with
+        // `id_slot: -1`, which b10621 never does because its task waits for a
+        // slot before it starts. The handle binds on its first real progress
+        // signal instead (`on_prefill` / `on_token` reach `try_bind` through
+        // `update`), so a slot is held only by a request the worker is
+        // actually serving. The slot count and the scheduler's decode width
+        // are both `--parallel`, so a request that is decoding always finds
+        // one free.
         handle
     }
 

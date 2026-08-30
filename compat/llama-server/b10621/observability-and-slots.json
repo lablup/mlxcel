@@ -104,14 +104,18 @@
       "default": "disabled",
       "description": "path to save slot kv cache (default: disabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1440,
       "test": "src/server/routes/slots_tests.rs",
       "notes": "Accepted on both binaries and gating POST /slots/:id_slot exactly as b10621 does (#1440). Deferred, not supported, because the persisted state is the slot's token stream plus model/tokenizer identity rather than the KV cache the flag's help text names; see the POST /slots/:id_slot entry for the recorded divergence.",
       "divergence": [
         "The save file carries the slot's token stream and identity, not its KV cache; a restore therefore re-prefills (or adopts from the server's own prompt cache) on the next request instead of reading KV state from disk (#1440)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "What a save file has to survive decides what it can contain. mlxcel KV lives in MLX device arrays whose layout is chosen at startup from the cache mode, the quantization scheme and the paged block size, so a KV image would bind the file to the exact configuration that wrote it and refuse to restore under any other, while the token stream restores under all of them and rebuilds the identical KV by prefilling. The restored tokens are also what the prompt cache keys on, so a second restore of the same slot is served from cache rather than re-prefilled. The immediate 503 on a busy slot is the same kind of choice: upstream holds the client while the slot drains for an unbounded time, and answering now lets a caller decide whether to wait.",
+        "revisit_if": "a KV serialization format that is portable across cache mode, quantization and paged block size exists (the #125 paged block transfer is the nearest thing in tree and is same-process), or the slot routes grow a bounded wait with an explicit deadline, at which point deferring a busy-slot action becomes expressible without an open-ended hold."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--slot-save-path"
@@ -185,12 +189,12 @@
       "test": "src/server/routes/props_tests.rs",
       "notes": "Since #1440 the route is mounted unconditionally like b10621 and reports the full upstream key set: default_generation_settings as {params, n_ctx}, total_slots, model identity (alias/ftype/path), modalities, media_marker, the three endpoint toggles, ui and ui_settings, chat_template and chat_template_caps (the nine jinja::caps keys), bos/eos tokens, build_info, is_sleeping and cors_proxy_enabled, plus mlxcel extension keys (kv_cache_mode, kv_bits, speculative, geometry, capabilities) that b10621 clients ignore. The params key-set omission and the null media_marker are permanent by_design: the reported keys are exactly the settings mlxcel resolves.",
       "divergence": [
-        "default_generation_settings.params reports the resolved defaults mlxcel actually acts on under upstream's key names; b10621 task_params keys with no mlxcel analogue (mirostat family, dynatemp, n_keep/n_discard, min_keep, samplers, chat_format, reasoning placement, speculative.types, lora) are omitted rather than invented, the #1441 generation_settings precedent (#1440).",
+        "default_generation_settings.params reports the resolved defaults mlxcel actually acts on under upstream's key names; b10621 task_params keys with no mlxcel analogue (mirostat family, dynatemp, min_keep, samplers, chat_format, reasoning placement, speculative.types, lora) are omitted rather than invented, the #1441 generation_settings precedent (#1440).",
         "media_marker is null: mlxcel takes media as content parts and has no textual marker where b10621 reports mtmd's <__media__> (#1440)."
       ],
       "rationale": {
         "kind": "policy",
-        "reason": "Reporting a task_params key mlxcel does not act on would tell an operator a setting steers generation when it steers nothing, the silent-ignore misrepresentation epic #1431 exists to remove: keys with no mlxcel analogue are omitted rather than invented (pinned by params_reports_exactly_the_documented_key_set), and media_marker is null because media arrives as content parts and no textual marker exists to report.",
+        "reason": "Reporting a task_params key mlxcel does not act on would tell an operator a setting steers generation when it steers nothing, the silent-ignore misrepresentation epic #1431 exists to remove: keys with no mlxcel analogue are omitted rather than invented (pinned by params_reports_exactly_the_documented_key_set), and media_marker is null because media arrives as content parts and no textual marker exists to report. The policy is self-correcting, as #1472 showed: n_keep and n_discard gained a real analogue there and are reported now rather than omitted.",
         "revisit_if": "mlxcel growing an analogue for an omitted key moves that key into the reported set on its own; the omission policy itself would be revisited only if a b10621 client is found to require the omitted keys to be present rather than truthful."
       },
       "mlxcel": {
@@ -205,15 +209,18 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1440,
-      "test": "src/server/routes/slots_tests.rs",
-      "notes": "Since #1440 the response is b10621's slot-object shape from a real per-request slot registry: id, n_ctx, speculative, is_processing, and for a slot that has carried a task its id_task, n_prompt_tokens, n_prompt_tokens_processed, n_prompt_tokens_cache, params, and the next_token progress block, with prompt/generated redacted unless LLAMA_SERVER_SLOTS_DEBUG is set, exactly upstream's slots_debug gate. fail_on_no_slot answers the 503 no-slot envelope. Stays deferred for the queue-admission divergence, which has no recorded permanence decision or pinning test yet; the params key-set omission follows the same omitted-rather-than-invented policy GET /props records as by_design.",
+      "test": "src/server/slots_state_tests.rs::a_queued_request_does_not_hold_a_slot_away_from_a_serving_one",
+      "notes": "The response is b10621's slot-object shape from a real per-request slot registry: id, n_ctx, speculative, is_processing, and for a slot that has carried a task its id_task, n_prompt_tokens, n_prompt_tokens_processed, n_prompt_tokens_cache, params, and the next_token progress block, with prompt/generated redacted unless LLAMA_SERVER_SLOTS_DEBUG is set, exactly upstream's slots_debug gate. fail_on_no_slot answers the 503 no-slot envelope. The queue-admission divergence recorded here through #1499 is fixed rather than argued: the registry used to bind a slot at route entry, so a request still waiting in the scheduler queue held one away from a request the worker was serving, and with --parallel 2 and five concurrent streams one request emitted all forty-one of its frames with id_slot -1. A handle now binds on its first progress signal, so a slot is held only by a request being served; re-measured, all five requests carry a real slot on every frame. What remains is the params key subset, which follows GET /props's omitted-rather-than-invented policy.",
       "divergence": [
-        "The slot params block reports the settings mlxcel actually resolves; b10621 task_params keys with no mlxcel analogue are omitted rather than invented, the same divergence GET /props records (#1440).",
-        "A request admitted while every slot is busy runs from the scheduler queue without a slot number and binds a slot when one frees; b10621 defers the whole task until a slot is assigned (#1440)."
+        "The slot params block reports the settings mlxcel actually resolves; b10621 task_params keys with no mlxcel analogue are omitted rather than invented, the same policy GET /props records (#1440)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "A slot params block that echoed a b10621 key mlxcel does not act on would tell an operator the slot is honoring a setting it ignores, which is the silent-ignore misrepresentation epic #1431 exists to remove. The block is built from the same resolved options the scheduler runs, so it can only report what is real.",
+        "revisit_if": "mlxcel grows an analogue for an omitted key, which moves that key into the reported set on its own; the omission policy itself would be revisited only if a b10621 client is found to require the omitted keys to be present rather than truthful."
+      },
       "mlxcel": {
         "route": "GET /slots"
       }
@@ -244,7 +251,7 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1440,
       "test": "src/server/routes/slots_tests.rs",
       "notes": "Save, restore and erase are served behind --slot-save-path with b10621's response schemas (n_saved/n_written, n_restored/n_read, n_erased, timings), its stoi slot-id parsing, its Invalid slot ID / Invalid action / Invalid filename refusals with fs_validate_filename ported rule for rule, atomic writes, canonical-path confinement that refuses symlink escapes, and model/tokenizer identity binding on restore (#1440).",
@@ -252,7 +259,11 @@
         "The save file carries the slot's token stream plus model/tokenizer identity, not its KV cache; restore rehydrates tokens and the next request re-prefills (or adopts from the server's own prompt cache) instead of reading KV state from disk (#1440).",
         "An action addressed to a slot that is processing answers 503 unavailable_error; b10621 defers the action until the slot frees and then performs it (#1440)."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "What a save file has to survive decides what it can contain. mlxcel KV lives in MLX device arrays whose layout is chosen at startup from the cache mode, the quantization scheme and the paged block size, so a KV image would bind the file to the exact configuration that wrote it and refuse to restore under any other, while the token stream restores under all of them and rebuilds the identical KV by prefilling. The restored tokens are also what the prompt cache keys on, so a second restore of the same slot is served from cache rather than re-prefilled. The immediate 503 on a busy slot is the same kind of choice: upstream holds the client while the slot drains for an unbounded time, and answering now lets a caller decide whether to wait.",
+        "revisit_if": "a KV serialization format that is portable across cache mode, quantization and paged block size exists (the #125 paged block transfer is the nearest thing in tree and is same-process), or the slot routes grow a bounded wait with an explicit deadline, at which point deferring a busy-slot action becomes expressible without an open-ended hold."
+      },
       "mlxcel": {
         "route": "POST /slots/:id_slot"
       }

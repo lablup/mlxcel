@@ -75,6 +75,13 @@ fn default_generation_settings_with_live(
         // operator typed, because the IDs are what the sampler compares
         // against and what a per-request `dry_sequence_breakers` overrides.
         "dry_sequence_breakers": live.default_dry_sequence_breakers,
+        // b10621 context retention (#1472 gave these a real analogue, so
+        // #1440's omission policy no longer applies to them): `n_keep` is the
+        // server-wide `--keep` a request's own `n_keep` falls back to, and
+        // `n_discard` is upstream's per-request default, which mlxcel does not
+        // make server-settable and therefore always reports as upstream's 0.
+        "n_keep": config.n_keep,
+        "n_discard": 0,
     })
 }
 

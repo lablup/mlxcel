@@ -157,6 +157,8 @@ fn params_reports_exactly_the_documented_key_set() {
             "ignore_eos",
             "max_tokens",
             "min_p",
+            "n_discard",
+            "n_keep",
             "n_predict",
             "presence_penalty",
             "repeat_last_n",
