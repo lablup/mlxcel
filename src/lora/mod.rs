@@ -23,6 +23,7 @@
 mod config;
 mod loader;
 pub mod multi;
+pub mod runtime;
 
 pub use config::{AdapterConfig, LoRAParameters};
 pub use loader::{
@@ -30,3 +31,6 @@ pub use loader::{
     fuse_lora_weights_into,
 };
 pub use multi::LoraAdapterSpec;
+pub use runtime::{
+    RuntimeLoraAdapter, RuntimeLoraSet, finish_runtime_staging, stage_runtime_adapters,
+};

@@ -6547,6 +6547,7 @@ mod quant_scheme_tests {
             bits: 4,
             mode: "nvfp4".to_string(),
             global_scale,
+            runtime_loras: Vec::new(),
         }
     }
 

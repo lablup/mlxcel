@@ -106,6 +106,9 @@ impl BatchScheduler {
             let head_max_tokens = seq.max_tokens;
             let head_sampling = seq.sampling.clone();
             let head_lane = seq.priority;
+            // b10621 `can_batch_with` also requires equal adapter sets
+            // (#1439): only same-snapshot rows may share the window.
+            let head_lora = seq.lora_scales.clone();
             // Reserve one slot for the head itself.
             let max_extra = max_batch_size.saturating_sub(1);
             let dispatch = &self.speculative_dispatch;
@@ -113,6 +116,7 @@ impl BatchScheduler {
                 self.prefill_queue
                     .drain_matching_window(head_lane, max_extra, |candidate| {
                         (allow_ragged || candidate.prompt_tokens.len() == head_prompt_len)
+                        && candidate.lora_scales == head_lora
                         && candidate.max_tokens == head_max_tokens
                         && crate::server::batch::speculative_burst::sampling_config_eq(
                             &candidate.sampling,

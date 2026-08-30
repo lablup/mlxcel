@@ -238,6 +238,10 @@ impl BatchScheduler {
         // token via finish_prefill exactly like a single-node chunked prefill.
         // The handoff path is text-only, so the VLM-embeddings full-prefill
         // exemption in execute_prefill's dispatch cannot apply.
+        // Handoff prefills carry no snapshot of their own; run them under the
+        // server default, which is what the requesting node's own admission
+        // would have snapshotted (#1439).
+        self.ensure_lora_applied(None);
         if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
             self.start_chunked_prefill(seq);
             while self.chunked_prefill_seq.is_some() {
@@ -348,6 +352,9 @@ impl BatchScheduler {
             sampling,
             max_tokens,
             eos_token_ids: self.config_eos.clone(),
+            // Disaggregated handoffs carry no snapshot; the scheduler
+            // resolves the server default at application time (#1439).
+            lora_scales: None,
             priority: RequestPriority::default(),
             logprobs_config: mlxcel_core::sampling::LogprobsConfig::default(),
             vlm_embeddings: None,
@@ -460,6 +467,9 @@ impl BatchScheduler {
             sampling,
             max_tokens,
             eos_token_ids: self.config_eos.clone(),
+            // Disaggregated handoffs carry no snapshot; the scheduler
+            // resolves the server default at application time (#1439).
+            lora_scales: None,
             priority: RequestPriority::default(),
             logprobs_config: mlxcel_core::sampling::LogprobsConfig::default(),
             vlm_embeddings: None,
@@ -486,6 +496,13 @@ impl BatchScheduler {
             structured: None,
         };
 
+        if !self.lora_compatible_with_active(seq.lora_scales.as_ref()) {
+            self.release_sequence_caches(seq_id);
+            anyhow::bail!(
+                "handoff decode admission failed: the active batch runs a different LoRA \
+                 adapter configuration"
+            );
+        }
         if self.active_batch.add(seq).is_err() {
             // No room in the active batch: release the restored KV so the rejected
             // handoff does not leak a sequence or its pool blocks.

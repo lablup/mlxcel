@@ -54,6 +54,7 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         stop_sequences: None,
         ignore_eos: false,
         priority: crate::server::batch::RequestPriority::default(),
+        lora_scales: None,
         logprobs: LogprobsConfig {
             enabled: false,
             top_k: 0,

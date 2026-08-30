@@ -144,8 +144,49 @@ fn main() -> Result<()> {
 
     let text = std::fs::read_to_string(text_file)
         .with_context(|| format!("reading corpus {text_file}"))?;
-    let (model, tokenizer) = mlxcel::load_model(std::path::Path::new(model_dir))
-        .with_context(|| format!("loading model {model_dir}"))?;
+    // LoRA arms (#1439): `MLXCEL_TRACE_LORA=PATH:SCALE[,PATH:SCALE...]`
+    // loads adapters, and `MLXCEL_TRACE_LORA_MODE` selects `fused`
+    // (baked into the weights at load) or `runtime` (unfused terms, the
+    // serving default). The runtime arm at scale 0.0 must be byte-identical
+    // to a bare run, which is the control the unfused path gates on.
+    let lora_env = std::env::var("MLXCEL_TRACE_LORA").ok();
+    let (model, tokenizer) = if let Some(spec_str) = lora_env.as_deref() {
+        let specs = mlxcel::lora::multi::parse_lora_flags(None, Some(spec_str), false)
+            .map_err(|e| anyhow::anyhow!("MLXCEL_TRACE_LORA: {e}"))?;
+        let mode = std::env::var("MLXCEL_TRACE_LORA_MODE").unwrap_or_else(|_| "runtime".into());
+        println!("# lora\t{spec_str}\tmode\t{mode}");
+        match mode.as_str() {
+            "fused" => {
+                mlxcel::load_model_with_adapter_specs(std::path::Path::new(model_dir), &specs, None)
+                    .with_context(|| format!("loading model {model_dir} with fused adapters"))?
+            }
+            "runtime" => {
+                let set = mlxcel::lora::RuntimeLoraSet::from_specs(&specs)?;
+                mlxcel::load_model_with_adapter_specs(
+                    std::path::Path::new(model_dir),
+                    &specs,
+                    Some(&set),
+                )
+                .with_context(|| format!("loading model {model_dir} with runtime adapters"))?
+            }
+            // The adapter-route base: same load path as the two arms above
+            // (raw weights, no sanitize differences), zero adapters. This is
+            // the reference the runtime scale-0 arm must be byte-identical
+            // to; the plain `load_model` route differs from the adapter
+            // route in weight dtype handling, which is load-route variance,
+            // not an adapter effect.
+            "none" => {
+                mlxcel::load_model_with_adapter_specs(std::path::Path::new(model_dir), &[], None)
+                    .with_context(|| format!("loading model {model_dir} on the adapter route"))?
+            }
+            other => {
+                anyhow::bail!("MLXCEL_TRACE_LORA_MODE must be fused|runtime|none, found {other}")
+            }
+        }
+    } else {
+        mlxcel::load_model(std::path::Path::new(model_dir))
+            .with_context(|| format!("loading model {model_dir}"))?
+    };
 
     let ids: Vec<i32> = tokenizer
         .encode(text.as_str(), false)

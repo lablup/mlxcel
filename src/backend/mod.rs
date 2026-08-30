@@ -234,9 +234,12 @@ impl Backend {
         &self,
         model_path: &Path,
         specs: &[crate::lora::LoraAdapterSpec],
+        runtime: Option<&crate::lora::RuntimeLoraSet>,
     ) -> Result<(LoadedModel, MlxcelTokenizer)> {
         match self {
-            Backend::Mlx(_) => crate::loading::load_model_with_adapter_specs(model_path, specs),
+            Backend::Mlx(_) => {
+                crate::loading::load_model_with_adapter_specs(model_path, specs, runtime)
+            }
             #[cfg(feature = "experimental-backend")]
             Backend::Experimental(_) => {
                 anyhow::bail!("multi-adapter LoRA is not supported on the experimental backend")

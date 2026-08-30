@@ -97,6 +97,8 @@ impl BatchScheduler {
             active_batch: ActiveBatch::new(max_batch_size),
             model,
             tokenizer,
+            lora_runtime: None,
+            lora_applied: None,
             generation_stream,
             request_rx,
             batch_metrics,
@@ -597,6 +599,17 @@ impl BatchScheduler {
     /// [`crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE`].
     pub fn with_vision_cache_size(mut self, max_size: usize) -> Self {
         self.vision_caches = Rc::new(ModelVisionCaches::new(max_size));
+        self
+    }
+
+    /// Attach the runtime-LoRA serving state (#1439). The scheduler applies
+    /// each executing group's scale snapshot to the shared handles before its
+    /// forwards, mirroring b10621's once-per-batch `common_set_adapter_lora`.
+    pub fn with_lora_runtime(
+        mut self,
+        lora_runtime: Option<Arc<crate::lora::RuntimeLoraSet>>,
+    ) -> Self {
+        self.lora_runtime = lora_runtime;
         self
     }
 

@@ -182,6 +182,17 @@ impl PrefillQueue {
             .map(|seq| seq.prompt_tokens.len())
     }
 
+    /// Peek at the runtime-LoRA snapshot of the next sequence that
+    /// [`Self::dequeue`] would return, without removing it (#1439). `None`
+    /// when the queue is empty; `Some(None)` for a head with no snapshot.
+    pub fn peek_lora_scales(&self) -> Option<Option<std::sync::Arc<Vec<f32>>>> {
+        self.high
+            .front()
+            .or_else(|| self.normal.front())
+            .or_else(|| self.low.front())
+            .map(|seq| seq.lora_scales.clone())
+    }
+
     /// Peek at the priority of the next sequence that would be dequeued.
     pub fn peek_priority(&self) -> Option<RequestPriority> {
         if !self.high.is_empty() {
@@ -296,6 +307,7 @@ mod tests {
             max_tokens: 100,
             eos_token_ids: vec![2],
             priority,
+            lora_scales: None,
             logprobs_config: Default::default(),
             vlm_embeddings: None,
             images: Vec::new(),

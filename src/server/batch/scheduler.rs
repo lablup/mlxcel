@@ -373,6 +373,10 @@ impl BatchScheduler {
             // installed a job or reported the tick as consumed.
             return;
         };
+        // Apply the slice owner's runtime-LoRA snapshot before its round's
+        // forwards (#1439).
+        let slice_lora = job.seq.lora_scales.clone();
+        self.ensure_lora_applied(slice_lora.as_ref());
         let _span = tracing::info_span!(
             "speculative_slice_round",
             seq_id = %job.seq.seq_id,

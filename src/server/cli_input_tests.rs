@@ -40,6 +40,7 @@ fn sample_input() -> ServerStartupInput {
         lora: None,
         lora_scaled: None,
         lora_init_without_apply: false,
+        lora_fuse: false,
         model_alias: Some("alias".to_string()),
         host: "127.0.0.1".to_string(),
         port: 8080,

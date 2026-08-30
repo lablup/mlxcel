@@ -51,6 +51,10 @@ pub struct QuantizedWeight {
     /// mathematically exact: `y = x @ (W * s2)^T = (x @ W^T) * s2`. `None`
     /// means no sidecar (affine, mxfp4, mxfp8, or a folded/dense repack).
     pub global_scale: Option<UniquePtr<MlxArray>>,
+    /// Runtime (unfused) LoRA terms attached at construction (issue #1439).
+    /// Applied by [`UnifiedLinear::forward`] after the quantized matmul;
+    /// empty for every layer the loader staged no adapter for.
+    pub runtime_loras: Vec<crate::runtime_lora::RuntimeLoraTerm>,
 }
 
 impl QuantizedWeight {
@@ -70,6 +74,7 @@ impl QuantizedWeight {
             bits,
             mode: "affine".to_string(),
             global_scale: None,
+            runtime_loras: Vec::new(),
         }
     }
 
@@ -109,6 +114,7 @@ impl QuantizedWeight {
             bits,
             mode,
             global_scale: None,
+            runtime_loras: Vec::new(),
         })
     }
 
@@ -162,6 +168,10 @@ impl QuantizedWeight {
             bits: self.bits,
             mode: self.mode.clone(),
             global_scale: self.global_scale.as_ref().map(|g| ffi::copy(g)),
+            // Runtime-LoRA terms are deliberately not carried over: the
+            // shared-handle consumers (drafter lm_head binding) serve the
+            // base projection.
+            runtime_loras: Vec::new(),
         }
     }
 }
@@ -985,6 +995,11 @@ pub struct Linear {
     /// Runtime LoRA adapters (applied on-the-fly, not fused into weight).
     loras: Vec<LoRAWeights>,
     active_lora: std::cell::Cell<Option<usize>>,
+    /// Unfused server-managed LoRA terms (issue #1439), claimed from the
+    /// loader's staging at construction. Independent of the named-adapter
+    /// mechanism above (Phi4MM modes): every term with a non-zero shared
+    /// scale applies on each forward.
+    runtime_loras: Vec<crate::runtime_lora::RuntimeLoraTerm>,
 }
 
 impl Linear {
@@ -995,6 +1010,7 @@ impl Linear {
             bias,
             loras: Vec::new(),
             active_lora: std::cell::Cell::new(None),
+            runtime_loras: Vec::new(),
         }
     }
 
@@ -1011,11 +1027,15 @@ impl Linear {
         let bias_name = format!("{}.bias", prefix);
         let bias = weights.get(&bias_name).map(|w| ffi::copy(w));
 
+        // Unfused LoRA terms staged for this layer (issue #1439).
+        let runtime_loras = crate::runtime_lora::claim(prefix);
+
         Ok(Self {
             weight,
             bias,
             loras: Vec::new(),
             active_lora: std::cell::Cell::new(None),
+            runtime_loras,
         })
     }
 
@@ -1108,10 +1128,26 @@ impl Linear {
             result = ffi::add(&result, &scaled);
         }
 
+        // Unfused server-managed LoRA terms (issue #1439): every term with a
+        // non-zero shared scale contributes; at scale zero nothing is added
+        // and the base graph is untouched (byte-identical control).
+        if !self.runtime_loras.is_empty() {
+            result = crate::runtime_lora::apply_terms(&self.runtime_loras, x, result);
+        }
+
         match &self.bias {
             Some(b) => ffi::add(&result, b),
             None => result,
         }
+    }
+
+    /// Whether any unfused server-managed LoRA term currently applies
+    /// (issue #1439). Fused single-kernel paths that read this layer's
+    /// weight directly consult it to fall back to the composable graph, the
+    /// only place the terms can be added.
+    #[must_use]
+    pub fn has_active_runtime_lora(&self) -> bool {
+        crate::runtime_lora::any_active(&self.runtime_loras)
     }
 
     /// Produce an independent handle that shares the same underlying MLX
@@ -1126,6 +1162,7 @@ impl Linear {
             bias: self.bias.as_ref().map(|b| ffi::copy(b)),
             loras: Vec::new(),
             active_lora: std::cell::Cell::new(None),
+            runtime_loras: Vec::new(),
         }
     }
 }
@@ -1975,6 +2012,9 @@ impl UnifiedLinear {
             let global_scale_name = format!("{}.global_scale", prefix);
             let global_scale = weights.get(&global_scale_name).map(|w| ffi::copy(w));
 
+            // Unfused LoRA terms staged for this layer (issue #1439).
+            let runtime_loras = crate::runtime_lora::claim(prefix);
+
             let qweight = QuantizedWeight {
                 weight,
                 scales,
@@ -1983,6 +2023,7 @@ impl UnifiedLinear {
                 bits: effective_bits,
                 mode: mode.to_string(),
                 global_scale,
+                runtime_loras,
             };
 
             let bias_name = format!("{}.bias", prefix);
@@ -1998,8 +2039,32 @@ impl UnifiedLinear {
         }
     }
 
+    /// Whether any unfused server-managed LoRA term currently applies to
+    /// this layer (issue #1439).
+    #[must_use]
+    pub fn has_active_runtime_lora(&self) -> bool {
+        match self {
+            Self::Quantized { weight, .. } => {
+                crate::runtime_lora::any_active(&weight.runtime_loras)
+            }
+            Self::Regular(linear) => linear.has_active_runtime_lora(),
+        }
+    }
+
     pub fn as_quantized_weight(&self) -> Option<&QuantizedWeight> {
         match self {
+            // A layer with an active runtime-LoRA term must not be consumed
+            // through its packed weight: every caller of this accessor feeds
+            // a fused kernel that cannot add the low-rank term, so refusing
+            // here routes those callers onto their composable fallback where
+            // `forward` applies the terms (issue #1439). With every scale at
+            // zero the accessor answers as before, which is what keeps the
+            // scale-zero configuration byte-identical to the base model.
+            UnifiedLinear::Quantized { weight, .. }
+                if crate::runtime_lora::any_active(&weight.runtime_loras) =>
+            {
+                None
+            }
             UnifiedLinear::Quantized { weight, .. } => Some(weight),
             UnifiedLinear::Regular(_) => None,
         }
@@ -2025,6 +2090,21 @@ impl UnifiedLinear {
 
     /// Forward pass
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let y = self.forward_inner(x);
+        // Unfused LoRA terms on a quantized base (issue #1439). The Regular
+        // variant applies its own terms inside `Linear::forward`, so only
+        // the quantized arm adds them here. With every scale at zero the
+        // terms add nothing and `y` is the untouched base computation.
+        match self {
+            Self::Quantized { weight, .. } if !weight.runtime_loras.is_empty() => {
+                crate::runtime_lora::apply_terms(&weight.runtime_loras, x, y)
+            }
+            _ => y,
+        }
+    }
+
+    /// The base projection, before any runtime-LoRA term.
+    fn forward_inner(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         match self {
             Self::Quantized { weight, bias } => {
                 // Native-NVFP4 global-scale path (issue #693): the per-tensor
@@ -2141,9 +2221,17 @@ impl UnifiedLinear {
     }
 
     /// Get a reference to the inner QuantizedWeight (if quantized)
-    /// Used by compiled MLP operations that need direct access to weight/scales/biases
+    /// Used by compiled MLP operations that need direct access to weight/scales/biases.
+    /// Answers `None` while a runtime-LoRA term is active (issue #1439): the
+    /// compiled consumers cannot add the low-rank term, so they must take
+    /// their composable fallback, where `forward` applies it.
     pub fn quantized_weight(&self) -> Option<&QuantizedWeight> {
         match self {
+            Self::Quantized { weight, .. }
+                if crate::runtime_lora::any_active(&weight.runtime_loras) =>
+            {
+                None
+            }
             Self::Quantized { weight, .. } => Some(weight),
             Self::Regular(_) => None,
         }
@@ -2172,6 +2260,11 @@ impl UnifiedLinear {
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
     )> {
+        // An active runtime-LoRA term needs the composable path, where
+        // `forward` adds it before the caller's own RoPE (issue #1439).
+        if self.has_active_runtime_lora() {
+            return None;
+        }
         match self {
             Self::Quantized { weight, .. } => {
                 let mut q = cxx::UniquePtr::null();
@@ -2369,6 +2462,14 @@ fn describe_qkv_plane(packed: QkvPackedWidths, layout: Option<QkvPackedWidths>) 
 /// fused projection kernels that need one packed weight; those return `None`
 /// for a split layer exactly as they already do for a dense one, and the caller
 /// falls back to its graph path.
+// The size imbalance between the two variants is the point of the enum, not an
+// oversight: `Split` holds three of exactly what `Fused` holds one of, so the
+// difference tracks `UnifiedLinear`'s own size and boxing the fields would only
+// move it behind a pointer. One value exists per attention layer, built once at
+// load, so the few hundred bytes are not worth an indirection on every
+// projection. (#1439 pushed `UnifiedLinear` past the lint's 200-byte threshold
+// by attaching runtime-LoRA terms to it.)
+#[allow(clippy::large_enum_variant)]
 pub enum QkvProjection {
     /// One `[q_dim | k_dim | v_dim, hidden_dim]` weight, the common case.
     Fused(UnifiedLinear),
@@ -2474,6 +2575,13 @@ pub struct FusedQKVLinear {
     pub n_heads: i32,
     pub n_kv_heads: i32,
     pub head_dim: i32,
+    /// Runtime (unfused) LoRA terms for the q/k/v projections (issue #1439),
+    /// populated only for the fused representation; the split representation's
+    /// planes carry their own terms inside their [`UnifiedLinear`]s, and a
+    /// pre-concatenated checkpoint's terms live in the fused plane's layer.
+    lora_q: Vec<crate::runtime_lora::RuntimeLoraTerm>,
+    lora_k: Vec<crate::runtime_lora::RuntimeLoraTerm>,
+    lora_v: Vec<crate::runtime_lora::RuntimeLoraTerm>,
 }
 
 impl FusedQKVLinear {
@@ -2630,6 +2738,11 @@ impl FusedQKVLinear {
                     n_heads,
                     n_kv_heads,
                     head_dim,
+                    // The planes claimed their own terms in
+                    // `UnifiedLinear::from_weights_with_mode`.
+                    lora_q: Vec::new(),
+                    lora_k: Vec::new(),
+                    lora_v: Vec::new(),
                 });
             }
 
@@ -2706,6 +2819,9 @@ impl FusedQKVLinear {
                 // Fused QKV is never a native-NVFP4 global-scale target: the
                 // ModelOpt NVFP4 Gemma 4 checkpoints leave attention dense.
                 global_scale: None,
+                // Per-projection runtime-LoRA terms live on the enclosing
+                // FusedQKVLinear (lora_q/k/v), not on the concatenated plane.
+                runtime_loras: Vec::new(),
             };
             UnifiedLinear::Quantized {
                 weight: qweight,
@@ -2757,11 +2873,21 @@ impl FusedQKVLinear {
             UnifiedLinear::Regular(Linear::new(qkv_weight, bias))
         };
 
+        // The fused representation concatenated the raw planes, so the
+        // per-projection prefixes never went through a per-plane constructor;
+        // claim their staged runtime-LoRA terms here (issue #1439).
+        let lora_q = crate::runtime_lora::claim(&q_prefix);
+        let lora_k = crate::runtime_lora::claim(&k_prefix);
+        let lora_v = crate::runtime_lora::claim(&v_prefix);
+
         Ok(Self {
             qkv_proj: QkvProjection::Fused(qkv_proj),
             n_heads,
             n_kv_heads,
             head_dim,
+            lora_q,
+            lora_k,
+            lora_v,
         })
     }
 
@@ -2786,6 +2912,11 @@ impl FusedQKVLinear {
             n_heads,
             n_kv_heads,
             head_dim,
+            // A pre-concatenated checkpoint's adapter targets `qkv_proj`
+            // itself; the claim happened in `UnifiedLinear::from_weights`.
+            lora_q: Vec::new(),
+            lora_k: Vec::new(),
+            lora_v: Vec::new(),
         })
     }
 
@@ -2802,6 +2933,12 @@ impl FusedQKVLinear {
     /// [`Self::forward_split_norm_rope_quantized`], and the Llama3 fused
     /// causal-prefill launcher in the consuming crate.
     pub fn fused_quantized_weight(&self) -> Option<&QuantizedWeight> {
+        // Every caller feeds a fused kernel that cannot add a runtime-LoRA
+        // term; refuse while one is active so those callers take their
+        // composable fallback, where `forward` applies the terms (#1439).
+        if self.fused_repr_lora_active() {
+            return None;
+        }
         self.qkv_proj.fused()?.as_quantized_weight()
     }
 
@@ -2823,7 +2960,25 @@ impl FusedQKVLinear {
     ) {
         let q_size = self.n_heads * self.head_dim;
         let kv_size = self.n_kv_heads * self.head_dim;
-        self.qkv_proj.project_split(x, q_size, kv_size)
+        let (q, k, v) = self.qkv_proj.project_split(x, q_size, kv_size);
+        // Fused-representation runtime-LoRA terms (issue #1439): the split
+        // representation's planes already applied theirs inside their own
+        // `UnifiedLinear::forward`.
+        let q = crate::runtime_lora::apply_terms(&self.lora_q, x, q);
+        let k = crate::runtime_lora::apply_terms(&self.lora_k, x, k);
+        let v = crate::runtime_lora::apply_terms(&self.lora_v, x, v);
+        (q, k, v)
+    }
+
+    /// Whether any fused-representation runtime-LoRA term is active
+    /// (issue #1439). The fused-kernel launchers below fall back to the
+    /// composable graph while this is true, the only place the low-rank
+    /// terms can be added before RoPE; at scale zero every launcher answers
+    /// exactly as before, keeping the base model byte-identical.
+    fn fused_repr_lora_active(&self) -> bool {
+        crate::runtime_lora::any_active(&self.lora_q)
+            || crate::runtime_lora::any_active(&self.lora_k)
+            || crate::runtime_lora::any_active(&self.lora_v)
     }
 
     /// Concatenated QKV projection followed by the fused q/k RoPE +
@@ -2867,6 +3022,14 @@ impl FusedQKVLinear {
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
     )> {
+        // This kernel ropes q/k inside; a fused-representation runtime-LoRA
+        // term must be added before RoPE, which only the composable graph can
+        // do, so fall back while one is active (#1439). Split-representation
+        // terms are already inside `project_concat`'s plane forwards and need
+        // no fallback.
+        if self.fused_repr_lora_active() {
+            return None;
+        }
         if !fused_rope_append_enabled() || !fused_rope_append_backend_available() {
             return None;
         }
@@ -3780,6 +3943,14 @@ pub fn compiled_swiglu_mlp(
     up_proj: &UnifiedLinear,
     down_proj: &UnifiedLinear,
 ) -> Option<crate::UniquePtr<MlxArray>> {
+    // An active runtime-LoRA term on any projection needs the composable
+    // per-linear path, where `forward` adds it (issue #1439).
+    if gate_proj.has_active_runtime_lora()
+        || up_proj.has_active_runtime_lora()
+        || down_proj.has_active_runtime_lora()
+    {
+        return None;
+    }
     if let (Some(gate_qw), Some(up_qw), Some(down_qw)) = (
         gate_proj.quantized_weight(),
         up_proj.quantized_weight(),
@@ -6723,6 +6894,9 @@ mod tests {
             .expect("plane loads standalone")
         };
         FusedQKVLinear {
+            lora_q: Vec::new(),
+            lora_k: Vec::new(),
+            lora_v: Vec::new(),
             qkv_proj: QkvProjection::Split {
                 q: plane("q"),
                 k: plane("k"),
@@ -7623,6 +7797,9 @@ mod tests {
         let biases = ffi::quantize_weights_biases(&w, group_size, bits);
         let qweight = QuantizedWeight::new(weight, scales, biases, group_size, bits);
         FusedQKVLinear {
+            lora_q: Vec::new(),
+            lora_k: Vec::new(),
+            lora_v: Vec::new(),
             qkv_proj: QkvProjection::Fused(UnifiedLinear::new(qweight, None)),
             n_heads,
             n_kv_heads,

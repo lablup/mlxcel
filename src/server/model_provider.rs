@@ -451,6 +451,15 @@ impl ModelProvider {
         }
 
         if config.no_batch {
+            // The legacy sequential worker predates multi-adapter and
+            // runtime LoRA (#1439) and would silently serve base weights;
+            // refuse rather than pretend.
+            if !config.lora_adapters.is_empty() {
+                anyhow::bail!(
+                    "--no-batch bypasses the batch scheduler, which owns --lora / --lora-scaled \
+                     serving. Drop --no-batch, or fuse a single adapter through --adapter"
+                );
+            }
             let mut provider = Self::new_with_legacy_worker(
                 model_path,
                 adapter_path,
@@ -488,6 +497,7 @@ impl ModelProvider {
                 model_path,
                 adapter_path,
                 config.lora_adapters.clone(),
+                config.lora_runtime.clone(),
                 config.max_batch_size,
                 config.max_queue_depth,
                 config.prefill_chunk_size,
@@ -850,6 +860,7 @@ impl ModelProvider {
             model_path,
             adapter_path,
             Vec::new(),
+            None,
             max_batch_size,
             max_queue_depth,
             prefill_chunk_size,
@@ -905,6 +916,8 @@ impl ModelProvider {
         // b10621 multi-adapter LoRA specification (#1439); empty keeps the
         // single `adapter_path` (or no-adapter) load byte-identical.
         lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
+        // Runtime (unfused) LoRA serving state (#1439); `None` fuses at load.
+        lora_runtime: Option<Arc<crate::lora::RuntimeLoraSet>>,
         max_batch_size: usize,
         max_queue_depth: usize,
         prefill_chunk_size: usize,
@@ -958,6 +971,7 @@ impl ModelProvider {
 
         let sched_config = model_worker::WorkerSchedulerConfig {
             lora_adapters,
+            lora_runtime,
             max_batch_size,
             max_queue_depth,
             prefill_chunk_size,
@@ -1081,6 +1095,7 @@ impl ModelProvider {
             // #1011: chunking is off on this path, so no prefill can ever park
             // and the fairness grant is unreachable; keep the default.
             lora_adapters: Vec::new(),
+            lora_runtime: None,
             prefill_grant_interval: None,
             enable_preemption: false,
             preemption_policy: crate::server::config::PreemptionPolicy::default(),

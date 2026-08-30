@@ -204,6 +204,30 @@ pub(crate) fn batched_window_admits(
     count.saturating_add(1).saturating_mul(new_max) <= max_tokens
 }
 
+/// Whether a batched-prefill window whose head carries the runtime-LoRA scale
+/// snapshot `head` may admit a row carrying `next` (issue #1439).
+///
+/// b10621's `can_batch_with` requires an equal adapter set, and mlxcel's
+/// unfused path runs a padded batched forward under one set of shared scale
+/// handles, so two snapshots in one window would serve both rows under
+/// whichever was written last. `partitioned` is false when the server has no
+/// runtime-LoRA state, where every row is trivially compatible and the
+/// comparison is skipped entirely.
+pub(crate) fn batched_window_admits_lora(
+    partitioned: bool,
+    head: Option<&std::sync::Arc<Vec<f32>>>,
+    next: Option<&std::sync::Arc<Vec<f32>>>,
+) -> bool {
+    if !partitioned {
+        return true;
+    }
+    match (head, next) {
+        (Some(a), Some(b)) => **a == **b,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Return how many leading rows of `prompt_lens` (in dequeue order) a batched
 /// prefill window may drain under the row-count cap `max_rows` and the
 /// padded-token budget `max_tokens` (0 = uncapped). Always returns at least 1
@@ -611,5 +635,66 @@ mod tests {
         assert_eq!(default_batched_prefill_token_budget(0, 4), 4096);
         assert_eq!(default_batched_prefill_token_budget(256, 8), 4096);
         assert_eq!(default_batched_prefill_token_budget(512, 1), 1024);
+    }
+
+    // ── Runtime-LoRA window partitioning (#1439) ────────────────────────────
+
+    fn snap(values: &[f32]) -> std::sync::Arc<Vec<f32>> {
+        std::sync::Arc::new(values.to_vec())
+    }
+
+    /// Without runtime-LoRA state every row is compatible, so the comparison
+    /// never runs and the pre-#1439 window behavior is unchanged.
+    #[test]
+    fn unpartitioned_window_admits_every_snapshot() {
+        assert!(batched_window_admits_lora(false, None, Some(&snap(&[1.0]))));
+        assert!(batched_window_admits_lora(
+            false,
+            Some(&snap(&[1.0])),
+            Some(&snap(&[0.0]))
+        ));
+    }
+
+    /// Equal snapshots share a padded forward; distinct ones must not, which is
+    /// what keeps two concurrent requests naming different adapter sets from
+    /// leaking into each other.
+    #[test]
+    fn partitioned_window_admits_only_an_equal_snapshot() {
+        assert!(batched_window_admits_lora(
+            true,
+            Some(&snap(&[1.0, 0.5])),
+            Some(&snap(&[1.0, 0.5]))
+        ));
+        assert!(!batched_window_admits_lora(
+            true,
+            Some(&snap(&[1.0, 0.5])),
+            Some(&snap(&[0.5, 1.0]))
+        ));
+        assert!(!batched_window_admits_lora(
+            true,
+            Some(&snap(&[0.0])),
+            Some(&snap(&[1.0]))
+        ));
+    }
+
+    /// Equality is by value, not by `Arc` identity: two requests that
+    /// snapshotted the same server default at different moments hold different
+    /// allocations and must still batch together.
+    #[test]
+    fn partitioned_window_compares_snapshots_by_value_not_identity() {
+        let a = snap(&[0.25, 0.75]);
+        let b = snap(&[0.25, 0.75]);
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+        assert!(batched_window_admits_lora(true, Some(&a), Some(&b)));
+    }
+
+    /// A missing snapshot is its own class: a row admitted without one (a
+    /// disaggregated handoff) resolves the server default at application time,
+    /// which is not necessarily what the head snapshotted.
+    #[test]
+    fn partitioned_window_separates_a_missing_snapshot_from_a_present_one() {
+        assert!(batched_window_admits_lora(true, None, None));
+        assert!(!batched_window_admits_lora(true, None, Some(&snap(&[1.0]))));
+        assert!(!batched_window_admits_lora(true, Some(&snap(&[1.0])), None));
     }
 }

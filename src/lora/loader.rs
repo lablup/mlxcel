@@ -29,7 +29,7 @@ use std::path::Path;
 use super::config::AdapterConfig;
 
 /// Load adapter weights from a safetensors file
-fn load_adapter_weights(adapter_path: &Path) -> Result<WeightMap> {
+pub(crate) fn load_adapter_weights(adapter_path: &Path) -> Result<WeightMap> {
     let weights_path = adapter_path.join("adapters.safetensors");
 
     // Try adapters.safetensors first, then adapter_model.safetensors (HuggingFace format)
@@ -350,7 +350,7 @@ fn reject_conv1d_layout_fusion(base_weights: &WeightMap, adapter_layers: &[&str]
 }
 
 /// Find the base weight name that corresponds to a LoRA layer name
-fn find_base_weight_name(lora_name: &str, base_weights: &WeightMap) -> Result<String> {
+pub(crate) fn find_base_weight_name(lora_name: &str, base_weights: &WeightMap) -> Result<String> {
     // Common patterns to try:
     // 1. Direct match with .weight suffix
     // 2. Replace specific LoRA naming conventions

@@ -55,6 +55,10 @@ pub(crate) struct WorkerSchedulerConfig {
     /// worker loads through `load_model_with_adapter_specs` instead of the
     /// single `adapter_path`.
     pub lora_adapters: Vec<crate::lora::LoraAdapterSpec>,
+    /// Runtime (unfused) LoRA serving state (#1439); the worker passes it to
+    /// the load (staging the per-layer terms) and to the scheduler (per-batch
+    /// scale application).
+    pub lora_runtime: Option<Arc<crate::lora::RuntimeLoraSet>>,
     pub max_batch_size: usize,
     pub max_queue_depth: usize,
     pub prefill_chunk_size: usize,
@@ -264,7 +268,11 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     "Loading {} LoRA adapter(s) from --lora/--lora-scaled",
                     sched_config.lora_adapters.len()
                 );
-                backend.load_model_with_adapter_specs(&model_path, &sched_config.lora_adapters)
+                backend.load_model_with_adapter_specs(
+                    &model_path,
+                    &sched_config.lora_adapters,
+                    sched_config.lora_runtime.as_deref(),
+                )
             } else if let Some(adapter) = adapter_path {
                 tracing::info!("Loading LoRA adapter from {:?}", adapter);
                 backend.load_model_with_adapter(&model_path, &adapter)
@@ -623,6 +631,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 sched_config.decode_storage_backend,
             )
             .with_vision_cache_size(sched_config.vision_cache_size)
+            // per-batch runtime-LoRA scale application (#1439).
+            .with_lora_runtime(sched_config.lora_runtime.clone())
             // cap the batched-prefill transient to --max-batch-prefill-tokens (#715).
             .with_max_batch_prefill_tokens(sched_config.max_batch_prefill_tokens)
             // bound a parked chunked prefill's wait behind a live decode batch

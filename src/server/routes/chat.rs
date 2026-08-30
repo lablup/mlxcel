@@ -146,7 +146,15 @@ pub(crate) fn build_prompt_cache_request_context(
     let mm_digest = multimodal_digest_from_vecs(image_data, audio_data);
     Some(PromptCacheRequestContext {
         model_id: state.display_model_id().to_string(),
-        lora_id: None,
+        // Key cache entries by the effective adapter scales (#1439) so a
+        // POST /lora-adapters swap can never resurrect KV computed under a
+        // different configuration. Chat requests always carry the server
+        // default (the native `lora` field exists on /completion only).
+        lora_id: state
+            .config
+            .lora_runtime
+            .as_ref()
+            .map(|set| crate::lora::RuntimeLoraSet::scales_digest(&set.server_scales())),
         template_sig: template_signature,
         session_key,
         mm_digest,

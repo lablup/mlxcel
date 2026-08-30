@@ -821,12 +821,27 @@ pub fn load_model_with_adapter(
 pub fn load_model_with_adapter_specs(
     model_path: &Path,
     specs: &[lora::LoraAdapterSpec],
+    runtime: Option<&lora::RuntimeLoraSet>,
 ) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
     let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+    if let Some(set) = runtime {
+        // Unfused runtime path (#1439): stage per-layer terms for the model
+        // construction below to claim; the base weights stay untouched, so
+        // scale zero serves the base model byte-identically and the serving
+        // layer can change scales afterwards.
+        lora::stage_runtime_adapters(&weights, set)?;
+        let model = load_model_from_weights(model_path, &mut weights);
+        // Report and clear whatever construction did not claim, on the error
+        // path too, so a failed load cannot leak terms into the next one.
+        lora::finish_runtime_staging();
+        let model = model?;
+        let tokenizer = tokenizer::load_tokenizer(model_path)?;
+        return Ok((model, tokenizer));
+    }
     for spec in specs {
         if !spec.apply {
             // Validate without applying: the configuration must parse so a
