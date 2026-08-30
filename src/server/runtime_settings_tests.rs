@@ -59,9 +59,9 @@ fn rejection_reason<'a>(result: &'a ApplyResult, name: &str) -> &'a str {
 }
 
 #[test]
-fn server_config_schema_classifies_all_91_fields() {
+fn server_config_schema_classifies_all_93_fields() {
     let declared = declared_server_config_fields();
-    assert_eq!(declared.len(), 91, "ServerConfig field count changed");
+    assert_eq!(declared.len(), 93, "ServerConfig field count changed");
     assert_eq!(
         declared.as_slice(),
         CLASSIFIED_SERVER_CONFIG_FIELDS,
@@ -69,7 +69,7 @@ fn server_config_schema_classifies_all_91_fields() {
     );
 
     let specs = schema(&ServerConfig::default());
-    assert_eq!(specs.len(), 91);
+    assert_eq!(specs.len(), 93);
     let expected_names: Vec<_> = CLASSIFIED_SERVER_CONFIG_FIELDS
         .iter()
         .copied()
@@ -79,7 +79,7 @@ fn server_config_schema_classifies_all_91_fields() {
     assert_eq!(actual_names, expected_names);
     assert_eq!(
         actual_names.iter().copied().collect::<BTreeSet<_>>().len(),
-        91,
+        93,
         "every management API name must be unique"
     );
 
