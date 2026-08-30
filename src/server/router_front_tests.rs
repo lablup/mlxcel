@@ -32,7 +32,7 @@ use tower::ServiceExt;
 
 use crate::distributed::tcp_transport::TcpTransportConfig;
 
-async fn router_test_state() -> Arc<RouterState> {
+async fn router_test_state_with_template(template: &str) -> Arc<RouterState> {
     let transport = Arc::new(
         TcpTransport::bind(TcpTransportConfig {
             bind_address: "127.0.0.1:0".to_string(),
@@ -52,13 +52,18 @@ async fn router_test_state() -> Arc<RouterState> {
             Arc::new(config),
             transport,
             reply_to,
-            Arc::new(ChatTemplateProcessor::with_template(
-                "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
-            )),
+            Arc::new(ChatTemplateProcessor::with_template(template.to_string())),
             Arc::new(MlxcelTokenizer::stub()),
         )
         .expect("build router test state"),
     )
+}
+
+async fn router_test_state() -> Arc<RouterState> {
+    router_test_state_with_template(
+        "{% for message in messages %}{{ message.content }}{% endfor %}",
+    )
+    .await
 }
 
 async fn post_router_json(path: &str, body: Value) -> Response {
@@ -77,11 +82,31 @@ async fn post_router_json(path: &str, body: Value) -> Response {
         .expect("router response")
 }
 
-async fn error_message(response: Response) -> String {
+async fn post_router_json_with_state(state: Arc<RouterState>, path: &str, body: Value) -> Response {
+    create_router_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("serialize request"),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("router response")
+}
+
+async fn error_body(response: Response) -> Value {
     let bytes = to_bytes(response.into_body(), 64 * 1024)
         .await
         .expect("read response body");
-    let body: Value = serde_json::from_slice(&bytes).expect("JSON error response");
+    serde_json::from_slice(&bytes).expect("JSON error response")
+}
+
+async fn error_message(response: Response) -> String {
+    let body = error_body(response).await;
     body["error"]["message"]
         .as_str()
         .expect("error message")
@@ -147,6 +172,25 @@ async fn router_chat_rejects_invalid_tool_choice_before_rendering() {
     assert_eq!(
         error_message(response).await,
         "Invalid tool_choice value: 'sometimes'. Must be 'auto', 'none', 'required', or a function object."
+    );
+}
+
+#[tokio::test]
+async fn router_chat_maps_template_rejection_to_bad_request() {
+    let state = router_test_state_with_template(
+        "{% if reasoning_effort not in ['low', 'medium'] %}{{ raise_exception('Unexpected reasoning effort ' ~ reasoning_effort) }}{% endif %}ok",
+    )
+    .await;
+    let mut body = chat_request();
+    body["reasoning_effort"] = json!("high");
+
+    let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(response).await;
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        body["error"]["message"],
+        "the model's chat template rejected this request: Unexpected reasoning effort high"
     );
 }
 
