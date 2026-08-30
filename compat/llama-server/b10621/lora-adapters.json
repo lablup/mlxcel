@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "lora-adapters",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "test": "src/lora/multi.rs",
       "notes": "Comma-separated adapter paths load at scale 1.0 in listed order and fuse into the base weights at model load (#1439); fusion adds deltas, so multi-adapter results are order-independent while logs and failure attribution stay deterministic. The mlxcel-native --adapter spelling remains an alias. Runtime swappability is the POST /lora-adapters entry's business.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--lora"
@@ -50,6 +51,7 @@
       "divergence": [
         "The loaded-but-unapplied adapters can never be applied afterwards: POST /lora-adapters refuses the scale change where b10621 activates them at runtime (#1439)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--lora-init-without-apply"
@@ -79,6 +81,7 @@
       "test": "src/lora/multi.rs",
       "notes": "Comma-separated FNAME:SCALE pairs (split on the last colon so absolute paths keep their separators) fuse with the user scale multiplied into the adapter's own alpha/r, exactly as upstream multiplies its per-adapter scale. A non-numeric, NaN, or infinite scale fails startup: fusing a non-finite delta would poison every weight the adapter touches (#1439).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--lora-scaled"
@@ -98,6 +101,7 @@
       "test": "src/server/routes/lora_adapters_tests.rs",
       "notes": "Reports every configured adapter in b10621's entry shape: id, path, scale (0.0 for a loaded-but-not-applied adapter, upstream's --lora-init-without-apply report), task_name and prompt_prefix (empty: b10621 reads them from GGUF adapter metadata, which MLX adapter directories do not carry; upstream reports empty strings for adapters without that metadata too). The alora invocation keys appear only for alora adapters upstream, and no MLX adapter is one.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /lora-adapters"
       }
@@ -117,6 +121,7 @@
       "divergence": [
         "A request that changes any adapter scale is refused with a diagnostic naming --lora-scaled and a restart; b10621 applies the new scales at runtime. mlxcel fuses adapters into the weights at load, so a runtime swap requires the unfused-LoRA forward path this entry stays deferred for (#1439)."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /lora-adapters"
       }
@@ -137,6 +142,7 @@
       "divergence": [
         "Per-request adapter selection cannot change the served weights: any non-inert value is refused where b10621 swaps the slot's adapter set for that request (#1439)."
       ],
+      "rationale": null,
       "mlxcel": {
         "field": "lora"
       }

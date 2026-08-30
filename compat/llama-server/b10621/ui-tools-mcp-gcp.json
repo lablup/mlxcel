@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "ui-tools-mcp-gcp",
   "entries": [
     {
@@ -28,6 +28,7 @@
       "divergence": [
         "b10621 with the flag turns on server tools and the CORS proxy; mlxcel rejects it at startup."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--agent",
@@ -64,6 +65,7 @@
       "divergence": [
         "b10621 spawns the configured MCP servers; mlxcel rejects the flag at startup."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mcp-servers-config"
@@ -95,6 +97,7 @@
       "divergence": [
         "b10621 spawns the configured MCP servers; mlxcel rejects the flag at startup."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mcp-servers-json"
@@ -126,6 +129,7 @@
       "divergence": [
         "b10621 serves the named directory at /; mlxcel rejects the flag at startup."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--path"
@@ -157,6 +161,7 @@
       "divergence": [
         "b10621 executes the named tools server-side for its UI; mlxcel rejects the flag at startup and /tools always answers the disabled 403."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--tools"
@@ -188,6 +193,7 @@
       "divergence": [
         "b10621 runs its tools in the named runtime; mlxcel rejects the flag at startup."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--tools-runtime"
@@ -225,6 +231,7 @@
       "divergence": [
         "b10621 serves its embedded web UI at / by default; mlxcel has none, --ui/--webui fail startup, and / answers the health check."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ui",
@@ -265,6 +272,7 @@
       "divergence": [
         "b10621 applies the JSON to its web UI; mlxcel rejects the flag at startup because no UI exists."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ui-config",
@@ -299,6 +307,7 @@
       "divergence": [
         "b10621 applies the file to its web UI; mlxcel rejects the flag at startup because no UI exists."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ui-config-file",
@@ -337,6 +346,7 @@
       "divergence": [
         "b10621 with the flag proxies arbitrary URLs through /cors-proxy; mlxcel rejects the flag at startup and the route always answers the disabled 403."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ui-mcp-proxy",
@@ -366,6 +376,7 @@
       "test": "src/server/gcp_compat_tests.rs::health_alias_mounts_at_a_custom_path_and_skips_collisions",
       "notes": "Implemented (#1456): with AIP_MODE=PREDICTION and AIP_HEALTH_ROUTE set, the value (leading slash ensured) is mounted as a GET alias of the health handler. As in b10621 the alias is not in the public endpoint set, so with API keys configured it requires a key. An alias naming an already-registered path is skipped: upstream registers a duplicate httplib handler that never matches, so the observable behavior (the existing route answers) is identical.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "GET ${AIP_HEALTH_ROUTE}"
       }
@@ -385,6 +396,7 @@
       "divergence": [
         "b10621 answers the web UI at /; mlxcel answers the health check there."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -402,6 +414,7 @@
       "divergence": [
         "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /cors-proxy"
       }
@@ -421,6 +434,7 @@
       "divergence": [
         "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /tools"
       }
@@ -438,6 +452,7 @@
       "test": "src/server/gcp_compat_tests.rs::predict_fans_out_and_returns_predictions_in_request_order",
       "notes": "Implemented (#1456): with AIP_MODE=PREDICTION, the predict route (default /predict, leading slash ensured, startup refused on collision with a registered route) fans the instances array (cap 128, upstream's envelope 400s verbatim) out over the camelCase alias of every registered route, built from the same route inventory the router mounts, with direct registered paths accepted too. @requestFormat is stripped, a client stream field is forced false with a warning, per-instance failures become an error object in that slot, and predictions return in request order. Each instance dispatches through the composed router in-process, so authentication, validation, and queue admission apply exactly as on a direct call; AIP_HTTP_PORT (default 8080) overrides --port with upstream's warning. Two internals differ without changing any response: instance concurrency is bounded to 8 at a time (upstream launches all at once, order is preserved either way), and alias collisions such as completions (/completions vs /v1/completions) resolve deterministically to the /v1 route in registration order, where upstream's iteration over an unordered map leaves its winner unspecified.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST ${AIP_PREDICT_ROUTE:-/predict}"
       }
@@ -457,6 +472,7 @@
       "divergence": [
         "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /cors-proxy"
       }
@@ -476,6 +492,7 @@
       "divergence": [
         "The enabling flags are refused at startup, so the route always answers the disabled 403; a b10621 server started with the feature on serves the real endpoint."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /tools"
       }

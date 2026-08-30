@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "authentication",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "test": "src/server/auth_route_tests.rs",
       "notes": "Repeatable, and each occurrence is split with b10621's own parse_csv_row rules: quoted fields may contain commas, a doubled quote inside one is literal, and whitespace is NOT trimmed, so --api-key \"a, b\" configures 'a' and ' b'. Verified against the pinned binary: ' cli-two' authenticates and 'cli-two' does not. Empty fields are dropped. LLAMA_API_KEY is honored at runtime (env_fallback_api_keys, src/server/cli_input.rs) rather than as a clap env attribute, because upstream's handler appends and the variable therefore ADDS a key rather than being replaced by a CLI one (a server started with LLAMA_API_KEY, LLAMA_ARG_API_KEY_FILE and --api-key accepts every key from all three); clap's env attribute uses the environment only when the flag is absent, so it cannot express that. Upstream additionally prints a generic \"will be overwritten by command line argument\" warning that does not describe what its appending handler does; mlxcel does not reproduce the misleading line. A configuration that names key sources but yields no key fails startup rather than silently disabling authentication on a server the operator meant to protect.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--api-key"
@@ -51,6 +52,7 @@
       "test": "src/server/auth_route_tests.rs",
       "notes": "Repeatable, one key per line, appending to the same set as --api-key. A line is kept when it is non-empty and its first character is not '#', with no trimming, so an indented hash is a key and trailing whitespace is part of one, exactly as upstream's getline loop does; verified against the pinned binary, where '  # indented is a key' authenticates. A CRLF file therefore leaves a carriage return on every key on both servers, and startup warns when it sees one. An unreadable file fails startup as upstream's throw does. LLAMA_ARG_API_KEY_FILE is honored at runtime for the same additive reason as LLAMA_API_KEY.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--api-key-file"

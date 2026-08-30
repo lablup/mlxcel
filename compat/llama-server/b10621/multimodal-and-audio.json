@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "multimodal-and-audio",
   "entries": [
     {
@@ -24,6 +24,7 @@
       "divergence": [
         "Applies to the dynamic-resolution preprocessing path only (every family that resizes through `vision::processors::qwen2_vl`); a checkpoint whose preprocessor has no per-image pixel bound refuses to serve with a diagnostic instead of encoding at its own geometry, where b10621 accepts the flag against a wider set of architectures."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--image-max-tokens"
@@ -55,6 +56,7 @@
       "divergence": [
         "Applies to the dynamic-resolution preprocessing path only (every family that resizes through `vision::processors::qwen2_vl`); a checkpoint whose preprocessor has no per-image pixel bound refuses to serve with a diagnostic instead of encoding at its own geometry, where b10621 accepts the flag against a wider set of architectures."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--image-min-tokens"
@@ -88,6 +90,7 @@
         "A path carrying a percent escape for `.`, `/`, `\\` or NUL is refused outright rather than being treated as a literal filename, so an encoding-based traversal cannot depend on a future decoder being added.",
         "A resolved path that is not a regular file is refused; upstream opens whatever the path names."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--media-path"
@@ -117,6 +120,7 @@
       "divergence": [
         "Rejected at startup instead of loading a separate multimodal projector; an MLX VLM checkpoint carries its projector inside its own snapshot, so there is no GGUF artifact to attach."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj"
@@ -153,6 +157,7 @@
         "The checkpoint's vision and audio weights are still loaded and resident under `--no-mmproj`; upstream never loads the projector, so the two processes differ in memory footprint even though both refuse the same requests.",
         "The refusal keeps b10621's `<kind> input is not supported` clause but replaces its `you may need to provide the mmproj` hint, which has no meaning for an integrated MLX checkpoint."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj-auto",
@@ -191,6 +196,7 @@
       "divergence": [
         "Every value is rejected at startup; mlxcel has no GGML device list and places the whole checkpoint on one MLX device."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj-device"
@@ -224,6 +230,7 @@
       "divergence": [
         "`--no-mmproj-offload` is rejected; mlxcel cannot run the vision or audio tower on the host."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj-offload",
@@ -261,6 +268,7 @@
       "divergence": [
         "Rejected at startup instead of downloading a separate multimodal projector; mlxcel resolves one MLX snapshot by repository identifier and has no second artifact to fetch."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj-url"
@@ -292,6 +300,7 @@
       "divergence": [
         "Only b10621's own default of 1024 is accepted; mlxcel has no image-token encode batch for another value to size."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mtmd-batch-max-tokens"
@@ -318,6 +327,7 @@
         "A streamed response arrives as one `transcript.text.delta` frame carrying the whole transcript, then the `transcript.text.done` frame and `data: [DONE]`; b10621 emits a delta per decoded token, so the frame shapes and the terminator match but the delivery granularity does not.",
         "On the mlxcel-only Whisper-server shape the `usage` block reports zeros, because the STT worker has no prompt or decoded token counts, and the `prompt` field steers nothing; both are honored on the chat-model path, which is the only shape b10621 can express."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /audio/transcriptions"
       }
@@ -339,6 +349,7 @@
         "A streamed response arrives as one `transcript.text.delta` frame carrying the whole transcript, then the `transcript.text.done` frame and `data: [DONE]`; b10621 emits a delta per decoded token, so the frame shapes and the terminator match but the delivery granularity does not.",
         "On the mlxcel-only Whisper-server shape the `usage` block reports zeros, because the STT worker has no prompt or decoded token counts, and the `prompt` field steers nothing; both are honored on the chat-model path, which is the only shape b10621 can express."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/audio/transcriptions"
       }

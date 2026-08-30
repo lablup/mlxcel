@@ -19,7 +19,7 @@ machine-readable inventory of the frozen llama-server ``b10621`` surface:
 every ``--help`` entry, long-option spelling, environment variable, registered
 HTTP route, and native ``/completion`` request field, each carrying one
 compatibility-policy state (``supported`` / ``aliased`` / ``not_applicable``
-/ ``deferred``, per epic #1431).
+/ ``deferred`` / ``by_design``, per epic #1431 and #1499).
 
 This script is the out-of-band regeneration tool. It is NOT run in CI (CI
 validates the checked-in manifest offline via
@@ -52,8 +52,8 @@ Behavior
 --------
 Facts (spellings, sections, env vars, defaults, descriptions, routes,
 schema fields) are re-extracted wholesale. Policy fields (``state``,
-``issue``, ``test``, ``notes``, ``divergence``, ``mlxcel``, and any other
-non-fact key) are preserved from the existing shard files, keyed by entry id,
+``issue``, ``test``, ``notes``, ``divergence``, ``rationale``, ``mlxcel``,
+and any other non-fact key) are preserved from the existing shard files, keyed by entry id,
 and each entry is written back to the shard file it currently lives in, with
 its policy keys normalized to the canonical ``NEW_POLICY`` order and any
 policy key the entry is missing backfilled from that skeleton. Entries that
@@ -93,8 +93,10 @@ from typing import BinaryIO
 # `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`:
 # 2 when pin.json's `shards` field changed from a bare name list to a mapping
 # of shard name to its owning-issue set, 3 when every entry gained the
-# structured `divergence` list (both issue #1443 follow-ups).
-MANIFEST_SCHEMA_VERSION = 3
+# structured `divergence` list (both issue #1443 follow-ups), 4 when every
+# entry gained the `rationale` object and `by_design` joined the state
+# vocabulary (#1499).
+MANIFEST_SCHEMA_VERSION = 4
 
 PINNED_TAG = "b10621"
 PINNED_BUILD = 10621
@@ -149,6 +151,13 @@ NEW_POLICY = {
     # mlxcel differs from b10621 for this entry. Non-empty forbids
     # `state: "supported"`; see the validator.
     "divergence": [],
+    # The permanence argument of a `by_design` entry ({kind, reason,
+    # revisit_if}); null on every other state. Positioned between
+    # `divergence` and `mlxcel` to match the validator's
+    # `ENTRY_POLICY_KEYS` byte for byte: this skeleton fixes canonical key
+    # order on regeneration, so a different position here would churn every
+    # entry on the next run.
+    "rationale": None,
     "mlxcel": None,
 }
 

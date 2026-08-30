@@ -159,6 +159,81 @@ dir="$(make_case valid-test-pointer routes 'POST /rerank' \
   'entry["test"] = "src/server/llama_compat_tests.rs::manifest_route_claims_match_the_mounted_router"')"
 run_case valid-test-pointer "$dir" 0
 
+# ── by_design (#1499) ───────────────────────────────────────────────────────
+# The fifth state is also a way to stop trying, so every obligation that
+# forces "permanent" to be argued per entry gets a case proving the validator
+# actually rejects its absence.
+
+# A by_design entry with no divergence does not differ from b10621, so it is
+# `supported`, and the message must say so.
+dir="$(make_case by-design-with-empty-divergence routes 'POST /infill' \
+  'entry["divergence"] = []')"
+if run_case by-design-with-empty-divergence "$dir" 1; then
+  assert_contains by-design-with-empty-divergence "by_design entry with an empty divergence"
+  assert_contains by-design-with-empty-divergence "'supported'"
+fi
+
+# A policy choice without a revisit condition is indistinguishable from an
+# impossibility, which is what kind 'architectural' is for.
+dir="$(make_case policy-without-revisit routes 'POST /infill' \
+  'entry["rationale"]["revisit_if"] = None')"
+if run_case policy-without-revisit "$dir" 1; then
+  assert_contains policy-without-revisit "requires a non-empty revisit_if"
+fi
+
+# The inverse: an architectural impossibility carrying a revisit condition is
+# really a policy choice, and the two must not be recordable interchangeably.
+dir="$(make_case architectural-with-revisit embeddings-and-rerank --pooling \
+  'entry["rationale"]["revisit_if"] = "someday"')"
+if run_case architectural-with-revisit "$dir" 1; then
+  assert_contains architectural-with-revisit "requires revisit_if null"
+fi
+
+# A typo'd rationale key must fail rather than silently record an argument
+# nothing reads, the same hazard the mlxcel claim-key allowlist closes.
+dir="$(make_case unknown-rationale-key routes 'POST /infill' \
+  'entry["rationale"]["reviist_if"] = "typo"')"
+if run_case unknown-rationale-key "$dir" 1; then
+  assert_contains unknown-rationale-key "unknown key(s) ['reviist_if']"
+fi
+
+# `rationale` argues a by_design permanence claim and must be null on every
+# other state, on `supported` and `deferred` alike.
+dir="$(make_case rationale-on-supported sampling-and-grammar --min-p \
+  'entry["rationale"] = {"kind": "policy", "reason": "r", "revisit_if": "c"}')"
+if run_case rationale-on-supported "$dir" 1; then
+  assert_contains rationale-on-supported "non-null rationale"
+fi
+
+dir="$(make_case rationale-on-deferred routes 'POST /completion' \
+  'entry["rationale"] = {"kind": "policy", "reason": "r", "revisit_if": "c"}')"
+if run_case rationale-on-deferred "$dir" 1; then
+  assert_contains rationale-on-deferred "non-null rationale"
+fi
+
+# "Permanent" without a pinning test is an assertion, not an argument.
+dir="$(make_case by-design-without-test routes 'POST /infill' \
+  'entry["test"] = None')"
+if run_case by-design-without-test "$dir" 1; then
+  assert_contains by-design-without-test "must name the test that pins"
+fi
+
+# The shard-owner check is state-independent: a by_design entry keeping its
+# `issue` for provenance still needs that issue in its shard's owner set.
+dir="$(make_case by-design-foreign-issue routes 'POST /infill' \
+  'entry["issue"] = 999999')"
+if run_case by-design-foreign-issue "$dir" 1; then
+  assert_contains by-design-foreign-issue "is not an owner of shard"
+fi
+
+# The positive control: a well-formed by_design entry constructed from a
+# supported one passes, so none of the rules above degrades into one that
+# rejects every by_design entry. (The untouched control at the top already
+# covers the eleven real by_design entries.)
+dir="$(make_case well-formed-by-design sampling-and-grammar --min-p \
+  'entry["state"] = "by_design"; entry["divergence"] = ["mlxcel rounds the value; b10621 does not."]; entry["rationale"] = {"kind": "policy", "reason": "the rounding is deliberate", "revisit_if": "upstream changes its own rounding"}')"
+run_case well-formed-by-design "$dir" 0
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures case(s) failed" >&2
   exit 1

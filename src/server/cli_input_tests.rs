@@ -230,6 +230,26 @@ fn resolve_seed_maps_negative_values_to_random_mode() {
     assert_eq!(resolve_seed(7), Some(7));
 }
 
+/// The #1438 migration guard, recorded as a `by_design` divergence on the
+/// manifest's `--models-dir` entry: the flag now selects b10621 router-mode
+/// model discovery and can no longer double as the mlxcel model-store root,
+/// so combining it with a model argument fails startup with the map to
+/// `--model-store-root`, where b10621 accepts the flag as inert outside
+/// router mode. Honoring either meaning silently would change behavior under
+/// an operator's feet.
+#[test]
+fn models_dir_with_a_model_argument_fails_startup_with_the_migration_map() {
+    let mut input = sample_input();
+    input.router_models_dir = Some(PathBuf::from("models"));
+    let err = input
+        .into_startup_config()
+        .expect_err("--models-dir plus a model argument must fail startup");
+    let message = err.to_string();
+    assert!(message.contains("--models-dir"), "{message}");
+    assert!(message.contains("--model-store-root"), "{message}");
+    assert!(message.contains("MLXCEL_MODELS_DIR"), "{message}");
+}
+
 #[test]
 fn into_startup_config_normalizes_edge_only_flags() {
     let mut input = sample_input();

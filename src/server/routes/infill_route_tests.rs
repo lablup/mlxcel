@@ -192,6 +192,31 @@ async fn the_completion_half_of_the_body_is_still_honored() {
 }
 
 #[tokio::test]
+async fn the_whole_fim_context_is_served_without_batch_truncation() {
+    // b10621 truncates the FIM context to its prefill batch: with the default
+    // `n_batch` of 2048 it keeps only the last 3*(n_batch/4) = 1536 prefix
+    // tokens and the first (n_batch/4) - (2 + prompt) suffix tokens. mlxcel
+    // serves the whole prefix and suffix, consistent with its policy
+    // everywhere else of clamping an over-long request rather than dropping
+    // prompt text. This is the `by_design` divergence recorded on the
+    // manifest's `POST /infill` entry, so the prefix here must be longer than
+    // upstream's keep-window for the test to distinguish the two behaviors.
+    let prefix = "a".repeat(2000);
+    let suffix = "b".repeat(600);
+    let (status, body) = post(
+        app_with(fim_tokenizer(), false),
+        serde_json::json!({"input_prefix": prefix, "input_suffix": suffix, "n_predict": 4}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["prompt"],
+        serde_json::Value::String(format!("<PRE>{prefix}<SUF>{suffix}<MID>")),
+        "the served prompt must carry the whole FIM context, untruncated"
+    );
+}
+
+#[tokio::test]
 async fn a_marker_in_the_prefix_is_refused_with_an_actionable_diagnostic() {
     let (status, body) = post(
         app_with(fim_tokenizer(), false),

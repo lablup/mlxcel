@@ -247,12 +247,18 @@ jobs:
     # needs no toolchain and runs in seconds. Validates the checked-in
     # llama-server b10621 compatibility manifest (compat/llama-server/b10621/,
     # issue #1443, epic #1431): pinned counts (249 help entries, 323 long
-    # spellings, 134 LLAMA_* env vars), one policy state per entry, issue links
-    # on deferred entries, test ids on non-supported entries, the entry key
-    # allowlist, the rule that a non-empty `divergence` forbids `supported`,
-    # and canonical serialization. --check-issues-open additionally asserts
-    # every issue a deferred entry links is still open, so closing a chain
-    # issue without flipping its manifest entries fails here. The second step
+    # spellings, 134 LLAMA_* env vars), one policy state per entry (five
+    # states since #1499: supported / aliased / not_applicable / deferred /
+    # by_design), issue links on deferred entries, test ids on non-supported
+    # entries, the entry key allowlist, the rule that a non-empty
+    # `divergence` forbids `supported`, the by_design obligations (non-empty
+    # divergence, notes, a resolving test pointer, and a well-formed
+    # `rationale` whose policy kind must state its revisit condition, with
+    # `rationale` null on every other state), and canonical serialization.
+    # --check-issues-open additionally asserts every issue a deferred entry
+    # links is still open, so closing a chain issue without flipping its
+    # manifest entries fails here; by_design entries never feed that check,
+    # because a permanent, tested divergence has no issue left to keep open. The second step
     # is the validator's own negative coverage: it mutates a throwaway copy of
     # the manifest and asserts the gate rejects it. The binary-facing half of the
     # gate (option spellings, env bindings, defaults against both server
