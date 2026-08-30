@@ -18,6 +18,7 @@ use super::{build_startup_input, serve_preflight_batch, serve_preflight_ctx_len}
 
 fn sample_args() -> crate::ServeArgs {
     crate::ServeArgs {
+        context_compat: Default::default(),
         // `--help` / `--usage` is a clap `ArgAction::Help` argument declared by
         // hand on `ServeArgs` (#1448); it never carries a parsed value.
         help: None,

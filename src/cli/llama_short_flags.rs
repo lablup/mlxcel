@@ -108,6 +108,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-ngld", "--spec-draft-ngl"),
     ("-nkvo", "--no-kv-offload"),
     ("-no-ag", "--no-agent"),
+    ("-np", "--parallel"),
     ("-nr", "--no-repack"),
     ("-ot", "--override-tensor"),
     ("-otd", "--spec-draft-override-tensor"),
@@ -119,6 +120,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("-tbd", "--spec-draft-threads-batch"),
     ("-td", "--spec-draft-threads"),
     ("-ts", "--tensor-split"),
+    ("-ub", "--ubatch-size"),
 ];
 
 /// The long spelling `token` maps onto, if any.

@@ -379,6 +379,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         .expect("schema compiles");
 
     let options = mlxcel::server::ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens: 128,
         sampling: mlxcel::SamplingConfig::greedy(),
         stop_sequences: None,

@@ -119,6 +119,46 @@ pub enum SequenceState {
     Finished(FinishReason),
 }
 
+/// Server-wide context-retention policy (b10621 `--context-shift` /
+/// `--keep`, #1472).
+///
+/// `context_shift` off (the default, upstream's too) makes the resolved KV
+/// bound a hard stop: an over-long prompt is refused at admission and a
+/// generation that reaches the bound finishes with `truncated: true` and
+/// `stop_type: "limit"`. On, the scheduler makes room by discarding tokens
+/// after a retained prefix instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextRetentionPolicy {
+    /// Whether the scheduler may shift (front-discard) a bounded sequence's
+    /// context rather than stopping it.
+    pub context_shift: bool,
+    /// Default retained leading tokens on a shift (`-1` = the whole initial
+    /// prompt), overridable per request as `n_keep`.
+    pub n_keep: i64,
+}
+
+/// Per-sequence resolved context-retention state (#1472).
+///
+/// Resolved once at enqueue, when the prompt length is known, so the `-1` =
+/// keep-the-whole-prompt form and the BOS accounting are already folded in by
+/// the time a trim runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SequenceRetention {
+    /// Leading tokens retained across a context shift, mirroring b10621's
+    /// slot arithmetic: the request's `n_keep` (falling back to the server's
+    /// `--keep`), with `-1` resolved to the prompt length and one token added
+    /// when the tokenizer prepends BOS. Clamped to `bound - 4` at trim time,
+    /// as upstream clamps to `n_ctx - 4`.
+    pub keep: i64,
+    /// Tokens past `keep` to discard per shift; `0` (upstream's default)
+    /// resolves to half of the non-retained window at trim time.
+    pub discard: i64,
+    /// Set when generation stopped because the next token would not fit the
+    /// KV bound with shifting disabled. Reported as `truncated: true` with
+    /// `stop_type: "limit"`, b10621's stop-at-the-bound shape.
+    pub context_exhausted: bool,
+}
+
 /// Why a sequence finished generating.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -216,6 +256,9 @@ impl SequenceState {
 pub struct SequenceInfo {
     /// Unique identifier assigned by the `CachePool`.
     pub seq_id: SequenceId,
+    /// Resolved context-retention state for this sequence (#1472). See
+    /// [`SequenceRetention`].
+    pub retention: SequenceRetention,
     /// Current lifecycle state.
     pub state: SequenceState,
 
@@ -484,7 +527,7 @@ impl SequenceInfo {
             StreamingDecodeState::new(tokenizer, &[]),
         );
         let prompt_len = self.prompt_tokens.len();
-        match self.stop_matcher.matched() {
+        let mut result = match self.stop_matcher.matched() {
             Some(word) => state.finish_stopped_by_word(
                 word.to_string(),
                 self.stop_matcher.emitted_len(),
@@ -496,7 +539,21 @@ impl SequenceInfo {
             None => {
                 state.finish_with_cache(self.created_at, prompt_len, self.max_tokens, cached_tokens)
             }
+        };
+        // A context-bound stop (#1472) presents as b10621 presents it: the
+        // OpenAI string is "length" and the native pair is `stop_type:
+        // "limit"` with `truncated: true`, which the finish helpers cannot
+        // derive because the token count sits below `max_tokens`.
+        if self.retention.context_exhausted
+            && !matches!(
+                result.stop_kind,
+                crate::server::model_provider::StopKind::Word(_)
+            )
+        {
+            result.stop_kind = crate::server::model_provider::StopKind::ContextExhausted;
+            result.finish_reason = "length".to_string();
         }
+        result
     }
 }
 

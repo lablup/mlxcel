@@ -20,6 +20,7 @@ mod commands;
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::chat_compat_args::ChatCompatArgs;
+use mlxcel::cli::context_args::ContextCompatArgs;
 use mlxcel::cli::ggml_compat_args::GgmlCompatArgs;
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
@@ -1188,8 +1189,10 @@ pub(crate) struct ServeArgs {
     #[arg(long = "api-key-file", value_name = "FNAME")]
     api_key_file: Vec<PathBuf>,
 
-    /// Number of parallel request slots that share --ctx-size (default: 4)
+    /// Number of parallel request slots that share --ctx-size (default: -1, -1 = auto)
     ///
+    /// b10621's `-1` (the default) lets the server choose; the automatic
+    /// count resolves to 4 slots, which is also what upstream's auto picks.
     /// Sets the maximum concurrent decode batch for multi-client serving:
     /// batched decode amortizes the per-step weight reads across the batch,
     /// raising aggregate throughput and keeping time-to-first-token low under
@@ -1204,9 +1207,10 @@ pub(crate) struct ServeArgs {
         long,
         visible_alias = "parallel",
         env = "LLAMA_ARG_N_PARALLEL",
-        default_value_t = 4
+        default_value_t = -1,
+        allow_hyphen_values = true
     )]
-    n_parallel: usize,
+    n_parallel: i64,
 
     /// Total context budget shared across parallel slots (0 = use model default)
     #[arg(long, env = "LLAMA_ARG_CTX_SIZE", default_value_t = 0)]
@@ -2250,6 +2254,12 @@ pub(crate) struct ServeArgs {
     /// server binaries accept the same llama-server b10621 command line.
     #[command(flatten)]
     pub(crate) cache_compat: CacheCompatArgs,
+
+    /// Context-retention flag group (`--context-shift`, `--no-context-shift`,
+    /// `--keep`, `--swa-full`). Defined once in `mlxcel::cli::context_args` so
+    /// both server binaries accept the same llama-server b10621 command line.
+    #[command(flatten)]
+    pub(crate) context_compat: ContextCompatArgs,
 
     /// Fill-in-the-middle flag group (`--spm-infill`). Defined once in
     /// `mlxcel::cli::infill_args` so both server binaries accept the same

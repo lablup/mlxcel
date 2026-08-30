@@ -204,6 +204,7 @@ fn cache_ctx() -> PromptCacheRequestContext {
 
 fn options() -> ServerGenerateOptions {
     ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens: 1,
         sampling: SamplingConfig::greedy(),
         stop_sequences: None,

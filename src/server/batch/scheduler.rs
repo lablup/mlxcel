@@ -88,7 +88,8 @@ use super::prefill_cohort::{
 };
 use super::queue::PrefillQueue;
 use super::sequence::{
-    BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
+    BatchSchedulerAction, ContextRetentionPolicy, FinishReason, RequestPriority, SequenceInfo,
+    SequenceRetention, SequenceState,
 };
 use super::stop_matcher::StopMatcher;
 use super::tick_policy::{
@@ -127,14 +128,6 @@ fn build_handoff_thinking_state(
     }
     Ok(state)
 }
-
-/// Number of leading tokens pinned as an attention sink when `--max-kv-size`
-/// front-trims a dense `KVCache` (issue #718). A transformer dumps its excess
-/// attention onto the first few tokens; dropping them along with the rest of
-/// the old window collapses decode into degenerate repetition. Mirrors
-/// upstream mlx-lm `RotatingKVCache(max_size=max_kv_size, keep=4)`
-/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py#L37).
-const MAX_KV_SIZE_SINK_KEEP: i32 = 4;
 
 /// Environment override for the #715 batched-prefill token budget.
 const MAX_BATCH_PREFILL_TOKENS_ENV: &str = "MLXCEL_MAX_BATCH_PREFILL_TOKENS";
@@ -449,9 +442,12 @@ pub struct BatchScheduler {
     /// chunk (full prefill, chunked prefill start, chunked prefill
     /// continuation) and every decode step,
     /// [`KVCache::trim_front_keep_sink`] is invoked on each cache whose
-    /// `live_len()` exceeds `N`, pinning a small leading attention-sink
-    /// prefix (`MAX_KV_SIZE_SINK_KEEP`) and dropping the excess tokens
-    /// that follow it rather than the oldest tokens overall. **Crucially,
+    /// `live_len()` exceeds `N`, pinning the sequence's resolved retained
+    /// prefix (b10621 `--keep` / `n_keep`, #1472; a fixed 4-token attention
+    /// sink before that, issue #718) and dropping tokens past it rather than
+    /// the oldest tokens overall. Since #1472 the trim runs only under
+    /// `--context-shift`; the default enforces the bound by refusing or
+    /// stopping instead. **Crucially,
     /// the cache's monotonic `offset` is never decremented**,
     /// `trim_front_keep_sink` advances `live_start` so RoPE relative
     /// positions stay correct (see [`KVCache::trim_front_keep_sink`] for
@@ -470,6 +466,14 @@ pub struct BatchScheduler {
     /// `--kv-quant-scheme=turboquant --max-kv-size=M` is flagged even
     /// when the legacy `--kv-cache-mode` flag is left at FP16.
     max_kv_size: Option<usize>,
+
+    /// Context-retention policy at the KV bound (#1472, b10621
+    /// `--context-shift` / `--keep`). With `context_shift` off (the default),
+    /// [`Self::enforce_max_kv_size_for`] never trims: an over-long prompt is
+    /// refused at admission and a decode that reaches the bound stops with
+    /// `truncated: true`. With it on, the trim retains each sequence's
+    /// resolved `keep` prefix and discards its resolved `discard` depth.
+    context_retention: ContextRetentionPolicy,
 
     /// Experimental VLM prompt-prefix cache sharing toggle (#124 step c,
     /// `--enable-vlm-prefix-cache`).
@@ -1206,6 +1210,7 @@ impl BatchScheduler {
             .map_err(|e| anyhow::anyhow!("prefill-role handoff: allocate sequence: {e}"))?;
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
         let seq = SequenceInfo {
+            retention: Default::default(),
             seq_id,
             state: SequenceState::Queued,
             prompt_tokens,
@@ -1317,6 +1322,7 @@ impl BatchScheduler {
         let prefill_offset = prompt_tokens.len();
 
         let seq = SequenceInfo {
+            retention: Default::default(),
             seq_id,
             state: SequenceState::Decoding,
             prompt_tokens,
@@ -1511,6 +1517,7 @@ impl BatchScheduler {
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
             max_kv_size: None,
+            context_retention: ContextRetentionPolicy::default(),
             // multimodal prefix-cache sharing stays off until the operator
             // opts in via `with_vlm_prefix_cache` (#124 step c).
             enable_vlm_prefix_cache: false,
@@ -1690,6 +1697,19 @@ impl BatchScheduler {
     /// Returns the configured maximum KV cache size (for tests).
     pub fn max_kv_size(&self) -> Option<usize> {
         self.max_kv_size
+    }
+
+    /// Install the context-retention policy (#1472, b10621 `--context-shift`
+    /// / `--keep`). Default: shifting disabled, retain 0, which is upstream's
+    /// default and makes the KV bound a hard stop.
+    pub fn with_context_retention(mut self, policy: ContextRetentionPolicy) -> Self {
+        self.context_retention = policy;
+        self
+    }
+
+    /// The configured context-retention policy (for tests).
+    pub fn context_retention(&self) -> ContextRetentionPolicy {
+        self.context_retention
     }
 
     /// Enable experimental VLM prompt-prefix cache sharing (#124 step c,
@@ -3628,18 +3648,69 @@ impl BatchScheduler {
         }
     }
 
-    /// Enforce the `--max-kv-size` cap on a sequence's KV caches.
+    /// Resolve a request's context-retention state against the server policy
+    /// (#1472), mirroring b10621's slot arithmetic (`server-context.cpp`):
+    /// the request's `n_keep` (falling back to `--keep`), `-1` resolved to
+    /// the whole prompt, plus one for a tokenizer-prepended BOS.
+    fn resolve_sequence_retention(
+        &self,
+        options: &crate::server::ServerGenerateOptions,
+        prompt_tokens: &[i32],
+    ) -> SequenceRetention {
+        // The BOS check is by content rather than by tokenizer config: the
+        // sequence's token ids are what the KV window actually holds.
+        let bos_prepended = self
+            .tokenizer
+            .bos_token_id()
+            .is_some_and(|bos| prompt_tokens.first() == Some(&(bos as i32)));
+        resolve_retention_values(
+            self.context_retention,
+            options.retention,
+            prompt_tokens.len(),
+            bos_prepended,
+        )
+    }
+
+    /// Whether a bounded sequence must stop now because its next token would
+    /// not fit the KV window with context shifting disabled (#1472).
     ///
-    /// Trims `live_len(cache) - max_kv_size` tokens from every plain
-    /// `KVCache` layer whose live window exceeds the configured bound,
-    /// pinning a small leading attention-sink prefix
-    /// (`MAX_KV_SIZE_SINK_KEEP`) and dropping the excess tokens that
-    /// follow it rather than the oldest tokens overall (issue #718). Turbo-mode
-    /// caches return `0` from `KVCache::trim_front_keep_sink` (safe no-op,
-    /// see [`KVCache::trim_front_keep_sink`] for the per-mode support
-    /// matrix). Sliding-window models manage their own internal
-    /// `RotatingKVCache` and are never stored in the pool's
-    /// `Vec<KVCache>`, so they are unaffected.
+    /// Token-count based (`prompt + generated + 1 >= bound`), mirroring
+    /// upstream's `slot.prompt.n_tokens() + 1 >= slot.n_ctx`: with shifting
+    /// disabled nothing ever trims, so the token count IS the live KV window,
+    /// including for the paged and Turbo cache modes whose trim operation is
+    /// a recorded no-op. VLM sequences are exempt, as upstream exempts
+    /// multimodal from the context machinery (their KV length is the
+    /// embedding count, not the text token count).
+    fn context_bound_stop_due(
+        seq: &SequenceInfo,
+        max_kv_size: Option<usize>,
+        context_shift: bool,
+    ) -> bool {
+        !context_shift
+            && seq.vlm_embeddings.is_none()
+            && max_kv_size
+                .is_some_and(|max| seq.prompt_tokens.len() + seq.generated_tokens.len() + 1 >= max)
+    }
+
+    /// Enforce the resolved KV bound on a sequence's caches by context
+    /// shifting (#1472, b10621 `--context-shift`).
+    ///
+    /// With shifting disabled (the default, upstream's too) this is a no-op:
+    /// admission refuses an over-long prompt and the decode loop stops a
+    /// sequence before its next token would overflow, so nothing here needs
+    /// trimming. With it enabled, every plain `KVCache` layer whose live
+    /// window exceeds the bound is front-trimmed keeping the sequence's
+    /// resolved `keep` prefix (clamped to `bound - 4`, upstream's
+    /// `n_ctx - 4` margin) and discarding `max(excess, resolved discard)`
+    /// tokens past it, where the resolved discard is the request's
+    /// `n_discard` or half of the non-retained window (upstream's `0`
+    /// default). Discarding at least the excess is what keeps the cap an
+    /// invariant when a prefill chunk overshoots it.
+    ///
+    /// Turbo-mode caches return `0` from `KVCache::trim_front_keep_sink`
+    /// (safe no-op, see its per-mode support matrix). Sliding-window models
+    /// manage their own internal `RotatingKVCache` and are never stored in
+    /// the pool's `Vec<KVCache>`, so they are unaffected.
     ///
     /// ** H1**: `max_kv_size` has already been validated to fit
     /// in `i32` by [`crate::server::cli_input::resolve_max_kv_size`], so
@@ -3654,10 +3725,16 @@ impl BatchScheduler {
     /// [`Self::execute_full_prefill`], [`Self::start_chunked_prefill`],
     /// [`Self::continue_chunked_prefill`], [`Self::decode_single_step`],
     /// and [`Self::execute_batched_decode`].
-    fn enforce_max_kv_size_for(&mut self, seq_id: SequenceId) {
+    fn enforce_max_kv_size_for(&mut self, seq_id: SequenceId, retention: SequenceRetention) {
         let Some(max) = self.max_kv_size else {
             return;
         };
+        if !self.context_retention.context_shift {
+            // The bound is enforced by refusal and by the decode-loop stop
+            // (`truncated: true`), never by a silent trim; see the method
+            // docs and `docs/llama-server-compat.md`'s migration note.
+            return;
+        }
         // Defensive: even though `resolve_max_kv_size` already clamps this
         // to `i32::MAX` at startup, a future caller that bypasses the CLI
         // validation could still construct an out-of-range scheduler. Use
@@ -3674,10 +3751,13 @@ impl BatchScheduler {
         let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
             return;
         };
-        // Pin a small attention-sink prefix so the trimmed window keeps the
-        // leading tokens the model attends to (issue #718). Never large enough
-        // to leave no room for the recent window under the configured cap.
-        let sink_keep = MAX_KV_SIZE_SINK_KEEP.min(max_i32 - 1).max(0);
+        // The retained prefix, clamped so a shift always has room to free:
+        // upstream's `n_keep = std::min(slot.n_ctx - 4, n_keep)`.
+        let keep = i32::try_from(retention.keep.clamp(0, i64::from(max_i32 - 4).max(0)))
+            .unwrap_or(0)
+            .max(0);
+        let requested_discard =
+            i32::try_from(retention.discard.clamp(0, i64::from(i32::MAX))).unwrap_or(i32::MAX);
         for cache in caches {
             // `live_len() = offset - live_start`. We trim against the live
             // window length (what attention sees), not the monotonic
@@ -3686,11 +3766,11 @@ impl BatchScheduler {
             // `checked_sub` so a future arithmetic regression cannot
             // silently wrap into a negative trim depth that produces a
             // 4-billion-element slice and crashes Metal.
-            if let Some(excess) = live_len.checked_sub(max_i32)
-                && excess > 0
-            {
-                cache.trim_front_keep_sink(excess, sink_keep);
-            }
+            let Some(excess) = live_len.checked_sub(max_i32).filter(|excess| *excess > 0) else {
+                continue;
+            };
+            let trim = context_shift_trim_depth(live_len, excess, keep, requested_discard);
+            cache.trim_front_keep_sink(trim, keep);
         }
     }
 
@@ -3907,6 +3987,28 @@ impl BatchScheduler {
             let _ = response_tx.send(GenerateEvent::Error(
                 "Empty prompt: request has no input tokens to process".to_string(),
             ));
+            return;
+        }
+
+        // b10621 context admission (#1472): a prompt that does not fit the
+        // per-slot KV bound is refused with upstream's own wording
+        // (server-context.cpp, ERROR_TYPE_EXCEED_CONTEXT_SIZE), whether or
+        // not context shifting is enabled; the shift only handles growth
+        // DURING decode. Before #1472 such a prompt was silently
+        // front-trimmed. VLM requests are exempt for the same reason upstream
+        // disables the context machinery under multimodal: their KV length is
+        // the embedding count, not the text token count.
+        if let Some(max) = self.max_kv_size
+            && images.is_empty()
+            && audio.is_empty()
+            && videos.is_empty()
+            && prompt_tokens.len() >= max
+        {
+            let _ = response_tx.send(GenerateEvent::Error(format!(
+                "request ({} tokens) exceeds the available context size ({max} tokens), try \
+                 increasing it",
+                prompt_tokens.len()
+            )));
             return;
         }
 
@@ -4182,7 +4284,10 @@ impl BatchScheduler {
                 prefill_start_offset
             };
 
+        let retention = self.resolve_sequence_retention(&options, &prompt_tokens);
+
         let seq = SequenceInfo {
+            retention,
             seq_id,
             state: SequenceState::Queued,
             prompt_tokens,
@@ -6300,7 +6405,7 @@ impl BatchScheduler {
         // prompt can overshoot the cap during a single forward pass; without
         // this trim the first decode step would start with a too-wide live
         // window. With no cap configured this is a cheap early-return.
-        self.enforce_max_kv_size_for(seq.seq_id);
+        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         mlxcel_core::clear_memory_cache();
         // `prefill_offset` is a cursor into `prompt_tokens`, so it must
@@ -6462,7 +6567,7 @@ impl BatchScheduler {
         // 4096` would otherwise see the cap engage only after the entire
         // prefill completes — defeating the memory-bound the operator
         // configured. With no cap configured this is a cheap early-return.
-        self.enforce_max_kv_size_for(seq.seq_id);
+        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         mlxcel_core::clear_memory_cache();
         seq.prefill_offset = end;
@@ -6633,7 +6738,7 @@ impl BatchScheduler {
         // continuation chunk so a multi-chunk prefill stays bounded across
         // all chunks, not just at the very end. Cheap early-return when no
         // cap is configured.
-        self.enforce_max_kv_size_for(seq.seq_id);
+        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
 
         seq.prefill_offset = end;
 
@@ -6847,7 +6952,7 @@ impl BatchScheduler {
             None => None,
         };
 
-        let prefill_finish_reason = if prefill_stop_word.is_some() {
+        let mut prefill_finish_reason = if prefill_stop_word.is_some() {
             Some(FinishReason::StopSequence)
         } else if structured_stopped {
             Some(FinishReason::Stop)
@@ -6856,6 +6961,19 @@ impl BatchScheduler {
         } else {
             None
         };
+        // b10621 context guard (#1472): a prompt admitted just under the KV
+        // bound can leave no room for a second token; stop here with
+        // `truncated: true` rather than overflowing on the first decode step.
+        if prefill_finish_reason.is_none()
+            && Self::context_bound_stop_due(
+                &seq,
+                self.max_kv_size,
+                self.context_retention.context_shift,
+            )
+        {
+            seq.retention.context_exhausted = true;
+            prefill_finish_reason = Some(FinishReason::Length);
+        }
         if let Some(finish_reason) = prefill_finish_reason {
             if let Err(err) = seq
                 .state
@@ -7594,7 +7712,12 @@ impl BatchScheduler {
         // Sliding-window (model-internal RotatingKVCache) and Turbo-quantized
         // caches are unaffected (trim_front returns 0 for Turbo modes).
         for &seq_id in seq_ids {
-            self.enforce_max_kv_size_for(seq_id);
+            let retention = self
+                .active_batch
+                .get(seq_id)
+                .map(|seq| seq.retention)
+                .unwrap_or_default();
+            self.enforce_max_kv_size_for(seq_id, retention);
         }
 
         let mut last_tokens: Vec<i32> = Vec::with_capacity(b);
@@ -7853,6 +7976,26 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
+            // b10621 context guard (#1472): with context shifting disabled, a
+            // bounded sequence stops before its next token would overflow the
+            // KV window, reported as `truncated: true` with `stop_type:
+            // "limit"` rather than silently discarding old tokens.
+            if !seq.state.is_finished()
+                && Self::context_bound_stop_due(
+                    seq,
+                    self.max_kv_size,
+                    self.context_retention.context_shift,
+                )
+            {
+                seq.retention.context_exhausted = true;
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+            }
+
             // Loop / repetition guard (issue #432): end early when the raw
             // generated stream collapses into a short repeated pattern. Skip if
             // the length limit already finished this sequence; the detector is
@@ -7999,6 +8142,26 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
+            // b10621 context guard (#1472): with context shifting disabled, a
+            // bounded sequence stops before its next token would overflow the
+            // KV window, reported as `truncated: true` with `stop_type:
+            // "limit"` rather than silently discarding old tokens.
+            if !seq.state.is_finished()
+                && Self::context_bound_stop_due(
+                    seq,
+                    self.max_kv_size,
+                    self.context_retention.context_shift,
+                )
+            {
+                seq.retention.context_exhausted = true;
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Length))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+            }
+
             // Loop / repetition guard (issue #432): end early when the raw
             // generated stream collapses into a short repeated pattern. Skip if
             // the length limit already finished this sequence; the detector is
@@ -8061,7 +8224,12 @@ impl BatchScheduler {
         // each decode forward pass. Sliding-window layers are managed by the
         // model and bypass this pool path; Turbo-quantized caches silently skip
         // the trim (KVCache::trim_front returns 0 for Turbo modes).
-        self.enforce_max_kv_size_for(seq_id);
+        let retention = self
+            .active_batch
+            .get(seq_id)
+            .map(|seq| seq.retention)
+            .unwrap_or_default();
+        self.enforce_max_kv_size_for(seq_id, retention);
 
         let input = mlxcel_core::from_slice_i32(&[last_token], &[1, 1]);
         let logits = {
@@ -8231,6 +8399,23 @@ impl BatchScheduler {
                 .transition_to(SequenceState::Finished(FinishReason::Length))
         {
             tracing::error!("State transition error: {err}");
+        }
+
+        // b10621 context guard (#1472): see the batched-loop twin above.
+        if !seq.state.is_finished()
+            && Self::context_bound_stop_due(
+                seq,
+                self.max_kv_size,
+                self.context_retention.context_shift,
+            )
+        {
+            seq.retention.context_exhausted = true;
+            if let Err(err) = seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::Length))
+            {
+                tracing::error!("State transition error: {err}");
+            }
         }
 
         // Loop / repetition guard (issue #432): end early when the raw
@@ -8488,3 +8673,52 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+/// Resolve a request's context-retention values against the server policy
+/// (#1472), pure so the arithmetic is unit-testable without a scheduler.
+///
+/// Mirrors b10621's slot shift setup (`server-context.cpp`): the request's
+/// `n_keep` falls back to the server-wide `--keep`, `-1` resolves to the
+/// whole prompt, and one token is added on top when the tokenizer prepended a
+/// BOS (`if (add_bos_token) n_keep += 1`), so "keep N prompt tokens" keeps N
+/// tokens of the operator's prompt.
+fn resolve_retention_values(
+    policy: ContextRetentionPolicy,
+    request: crate::server::config::RetentionOverride,
+    prompt_len: usize,
+    bos_prepended: bool,
+) -> SequenceRetention {
+    let requested = request.n_keep.unwrap_or(policy.n_keep);
+    let mut keep: i64 = if requested < 0 {
+        prompt_len as i64
+    } else {
+        requested
+    };
+    if bos_prepended {
+        keep += 1;
+    }
+    SequenceRetention {
+        keep,
+        discard: request.n_discard.unwrap_or(0).max(0),
+        context_exhausted: false,
+    }
+}
+
+/// How many tokens a context shift discards (#1472), pure for unit testing.
+///
+/// `excess` is how far the live window overshot the bound (chunked prefill
+/// can overshoot by a whole chunk). The requested depth (`n_discard`, or half
+/// of the non-retained window at upstream's `0` default) is raised to at
+/// least the excess so the bound is restored, and capped at `n_left - 1` so a
+/// token always remains to decode from; `keep` is already clamped to
+/// `bound - 4` by the caller, which keeps `n_left > excess` and the two
+/// bounds compatible.
+fn context_shift_trim_depth(live_len: i32, excess: i32, keep: i32, requested_discard: i32) -> i32 {
+    let n_left = live_len - keep;
+    let discard = if requested_discard > 0 {
+        requested_discard
+    } else {
+        n_left / 2
+    };
+    discard.max(excess).min((n_left - 1).max(excess))
+}

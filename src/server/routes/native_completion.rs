@@ -118,6 +118,13 @@ pub(crate) async fn serve_native_completion(
         return ErrorResponse::new(err, "invalid_request_error").into_response();
     }
 
+    // b10621 `n_keep` / `n_discard` (#1472): validated against upstream's
+    // schema floors before anything runs; the resolved values ride the
+    // generation options into the scheduler's context-retention state.
+    if let Err(err) = request.validate_retention() {
+        return ErrorResponse::new(err, "invalid_request_error").into_response();
+    }
+
     // validate thinking_budget_tokens early (semantics match
     // /v1/chat/completions but the cap is checked against n_predict).
     let effective_n_predict =
@@ -325,7 +332,10 @@ fn build_native_response(
 ) -> NativeCompletionResponse {
     let (stop_type, stopping_word) = match outcome.stop_kind {
         StopKind::Word(word) => (StopType::Word, word.clone()),
-        StopKind::Limit => (StopType::Limit, String::new()),
+        // A context-bound stop (#1472) is upstream's STOP_TYPE_LIMIT too; it
+        // is separated from `Limit` only so `truncated` below can tell the
+        // two apart.
+        StopKind::Limit | StopKind::ContextExhausted => (StopType::Limit, String::new()),
         StopKind::Eos => (StopType::Eos, String::new()),
     };
     NativeCompletionResponse {
@@ -340,9 +350,11 @@ fn build_native_response(
         tokens_evaluated: outcome.tokens_evaluated,
         generation_settings: native_generation_settings(request, options),
         prompt: request.prompt.clone(),
-        // The server clamps an over-long request rather than truncating the
-        // prompt, so no request reaches here with a dropped prefix.
-        truncated: false,
+        // Set exactly when the generation stopped at the per-slot context
+        // bound with context shifting disabled (#1472), which is when b10621
+        // sets it; an over-long prompt never reaches here (it is refused at
+        // admission), so a dropped-prefix truncation cannot occur.
+        truncated: matches!(outcome.stop_kind, StopKind::ContextExhausted),
         stop_type,
         stopping_word,
         tokens_cached: outcome.cached_tokens,
@@ -390,6 +402,10 @@ fn native_generation_settings(
         "stop": options.stop_sequences.clone().unwrap_or_default(),
         "max_tokens": options.max_tokens,
         "n_predict": options.max_tokens,
+        // The resolved context-retention pair (#1472): the request's value,
+        // or the server-wide `--keep` / half-window default it fell back to.
+        "n_keep": options.retention.n_keep.unwrap_or(0),
+        "n_discard": options.retention.n_discard.unwrap_or(0),
         "stream": request.stream.unwrap_or(false),
     })
 }
@@ -758,7 +774,7 @@ fn build_native_generate_options_with_live(
     request: &NativeCompletionRequest,
     requested_n_predict: Option<usize>,
 ) -> ServerGenerateOptions {
-    build_server_generate_options_with_live(
+    let mut options = build_server_generate_options_with_live(
         config,
         live,
         RequestOptionOverrides {
@@ -837,7 +853,15 @@ fn build_native_generate_options_with_live(
             // does, and remains the way to enable detection on this endpoint.
             request_carries_loop_amplifier: false,
         },
-    )
+    );
+    // b10621 `n_keep` / `n_discard` (#1472): the per-request retention
+    // overrides, with `n_keep` resolved against the server-wide `--keep` here
+    // so the echoed generation settings report the effective value.
+    options.retention = crate::server::config::RetentionOverride {
+        n_keep: Some(request.n_keep.unwrap_or(config.n_keep)),
+        n_discard: request.n_discard,
+    };
+    options
 }
 
 #[cfg(test)]

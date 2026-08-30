@@ -71,6 +71,7 @@ fn make_sequence(
     let prompt_tokens: Vec<i32> = Vec::new();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        retention: Default::default(),
         seq_id: SequenceId::from_raw(1),
         state: SequenceState::Decoding,
         prompt_tokens,

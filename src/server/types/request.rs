@@ -1261,6 +1261,13 @@ pub struct NativeCompletionRequest {
     pub verbose: Option<bool>,
     /// Return the raw generated token ids in the `tokens` field.
     pub return_tokens: Option<bool>,
+    /// Number of leading prompt tokens retained across a context shift
+    /// (#1472). `-1` retains the whole initial prompt; absent falls back to
+    /// the server's `--keep`. Read only when `--context-shift` is enabled.
+    pub n_keep: Option<i64>,
+    /// Tokens past the retained prefix each context shift discards (#1472).
+    /// `0`, upstream's default, resolves to half of the non-retained window.
+    pub n_discard: Option<i64>,
     /// Whether to stream the response
     pub stream: Option<bool>,
     /// Per-request override for the SSE comment ping interval, in seconds
@@ -1427,6 +1434,32 @@ impl NativeCompletionRequest {
             Some(-1) => Ok(Some(usize::MAX)),
             Some(value) => Ok(Some(value as usize)),
         }
+    }
+
+    /// Validate the b10621 context-retention fields (#1472).
+    ///
+    /// Upstream's schema floors: `n_keep >= -1` (`-1` = retain the whole
+    /// initial prompt) and `n_discard >= 0` (`0` = discard half of the
+    /// non-retained window). The diagnostics keep upstream's field-error
+    /// shape, as `resolve_n_predict` does.
+    pub fn validate_retention(&self) -> Result<(), String> {
+        if let Some(value) = self.n_keep
+            && !(-1..=i64::from(i32::MAX)).contains(&value)
+        {
+            return Err(format!(
+                "Field 'n_keep': Value must be between -1 <= value <= {}, but got {value}",
+                i32::MAX
+            ));
+        }
+        if let Some(value) = self.n_discard
+            && !(0..=i64::from(i32::MAX)).contains(&value)
+        {
+            return Err(format!(
+                "Field 'n_discard': Value must be between 0 <= value <= {}, but got {value}",
+                i32::MAX
+            ));
+        }
+        Ok(())
     }
 
     /// The `response_fields` projection paths, or an empty list.

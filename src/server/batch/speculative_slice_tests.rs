@@ -262,6 +262,7 @@ fn make_slice_sequence_with_id(
     let prompt_tokens = vec![1, 2, 3];
     let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
+        retention: Default::default(),
         seq_id: SequenceId::from_raw(raw_id),
         state: SequenceState::Prefilling,
         prompt_tokens,

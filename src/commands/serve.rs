@@ -52,8 +52,10 @@ use mlxcel_core::cache::KVCacheMode;
 /// sizes its own HTTP thread pool from the same flag. Everything below runs
 /// inside that runtime, so the process has exactly one.
 pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
-    let workers =
-        mlxcel::server::transport::resolve_http_threads(args.threads_http, args.n_parallel);
+    let workers = mlxcel::server::transport::resolve_http_threads(
+        args.threads_http,
+        mlxcel::server::resolve_n_parallel(args.n_parallel).unwrap_or(4),
+    );
     let runtime = mlxcel::server::transport::build_http_runtime(workers)
         .context("failed to build the HTTP runtime; check --threads-http")?;
     runtime.block_on(run_serve_async(args))
@@ -368,7 +370,9 @@ fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
     let mut ctx_len = if args.ctx_size > 0 {
         resolve_parallel_context_size(
             args.ctx_size,
-            args.n_parallel,
+            // Preflight sizing only; an out-of-domain value is refused for
+            // real at `build_startup_input`.
+            mlxcel::server::resolve_n_parallel(args.n_parallel).unwrap_or(4),
             args.max_batch_size,
             args.no_batch,
         ) as u64
@@ -385,7 +389,10 @@ fn serve_preflight_batch(args: &crate::ServeArgs) -> u64 {
     if args.no_batch {
         return 1;
     }
-    let active_sequences = args.max_batch_size.unwrap_or(args.n_parallel).max(1);
+    let active_sequences = args
+        .max_batch_size
+        .unwrap_or_else(|| mlxcel::server::resolve_n_parallel(args.n_parallel).unwrap_or(4))
+        .max(1);
     u64::try_from(active_sequences).unwrap_or(u64::MAX)
 }
 
@@ -551,7 +558,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         port: args.port,
         api_keys: args.api_key,
         api_key_files: args.api_key_file,
-        n_parallel: args.n_parallel,
+        n_parallel: mlxcel::server::resolve_n_parallel(args.n_parallel)
+            .map_err(|message| anyhow::anyhow!("{message}"))?,
         ctx_size: args.ctx_size,
         n_predict: args.n_predict,
         // HTTP transport (#1432). `timeout` is now the socket read/write
@@ -748,6 +756,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         diffusion_threshold: args.diffusion.diffusion_threshold,
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
+        context_compat: args.context_compat.clone(),
         infill: args.infill.clone(),
         embedding_compat: args.embedding_compat.clone(),
     })

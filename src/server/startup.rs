@@ -461,6 +461,17 @@ pub struct ServerStartupConfig {
     /// semantics.
     pub max_kv_size: Option<usize>,
 
+    /// Whether the scheduler may shift (front-discard) a sequence's context
+    /// to make room at the KV bound (#1472). b10621's default is off: an
+    /// over-long request fails and a generation that reaches the bound stops
+    /// with `truncated: true` instead of silently discarding old tokens.
+    pub context_shift: bool,
+
+    /// Server-wide default for the retained leading tokens on a context
+    /// shift (`--keep`; `-1` = the whole initial prompt). Overridable per
+    /// request as `n_keep` on the native `/completion` route.
+    pub n_keep: i64,
+
     /// Paged KV pool block-budget directive (`--kv-cache-budget`). See the
     /// corresponding field on [`crate::server::ServerConfig`] for full
     /// semantics. `None` (the default) keeps the pool unbounded.
@@ -678,6 +689,8 @@ impl Default for ServerStartupConfig {
             kv_cache_mode_notices: Vec::new(),
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
+            context_shift: false,
+            n_keep: 0,
             // Serving-throughput default guard (#628): `auto` paged KV budget
             // pairs with the batched-decode default. Disable with
             // `--kv-cache-budget none`.
@@ -1439,6 +1452,11 @@ pub(super) fn build_server_config(
         // policy to plain `KVCache` instances. `None` means no explicit
         // context or max-KV bound was configured.
         max_kv_size,
+        // b10621 context-retention policy (#1472): whether the bound above is
+        // enforced by shifting or by stopping, and the default retained
+        // prefix when it shifts.
+        context_shift: startup.context_shift,
+        n_keep: startup.n_keep,
         // forward the paged KV block-budget directive verbatim; the worker
         // resolves it to a concrete block count once the model is loaded.
         kv_cache_budget: startup.kv_cache_budget,
@@ -1580,6 +1598,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
     model_provider.generate(
         "Hello".to_string(),
         ServerGenerateOptions {
+            retention: Default::default(),
             max_tokens: 1,
             sampling: SamplingConfig::greedy(),
             stop_sequences: None,

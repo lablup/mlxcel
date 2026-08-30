@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
 use mlxcel::cli::chat_compat_args::ChatCompatArgs;
+use mlxcel::cli::context_args::ContextCompatArgs;
 use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
 use mlxcel::cli::logging_compat_args::LoggingCompatArgs;
 use mlxcel::cli::multimodal_compat_args::MultimodalCompatArgs;
@@ -421,8 +422,10 @@ struct ServerArgs {
     )]
     predict: i32,
 
-    /// Number of parallel request slots that share --ctx-size (default: 4)
+    /// Number of parallel request slots that share --ctx-size (default: -1, -1 = auto)
     ///
+    /// b10621's `-1` (the default) lets the server choose; the automatic
+    /// count resolves to 4 slots, which is also what upstream's auto picks.
     /// Sets the maximum concurrent decode batch for multi-client serving:
     /// batched decode amortizes the per-step weight reads across the batch,
     /// raising aggregate throughput and keeping time-to-first-token low under
@@ -437,9 +440,10 @@ struct ServerArgs {
         long = "parallel",
         visible_alias = "n-parallel",
         env = "LLAMA_ARG_N_PARALLEL",
-        default_value_t = 4
+        default_value_t = -1,
+        allow_hyphen_values = true
     )]
-    parallel: usize,
+    parallel: i64,
 
     /// API key for authentication; multiple keys can be given as a
     /// comma-separated list
@@ -1562,6 +1566,12 @@ struct ServerArgs {
     #[command(flatten)]
     cache_compat: CacheCompatArgs,
 
+    /// Context-retention flag group (`--context-shift`, `--no-context-shift`,
+    /// `--keep`, `--swa-full`). Defined once in `mlxcel::cli::context_args` so
+    /// both server binaries accept the same llama-server b10621 command line.
+    #[command(flatten)]
+    context_compat: ContextCompatArgs,
+
     /// Fill-in-the-middle flag group (`--spm-infill`). Defined once in
     /// `mlxcel::cli::infill_args` so both server binaries accept the same
     /// llama-server b10621 command line.
@@ -1913,7 +1923,7 @@ fn main() -> anyhow::Result<()> {
     // "workers are still parked" argument.
     let workers = mlxcel::server::transport::resolve_http_threads(
         cli.server.threads_http,
-        cli.server.parallel,
+        mlxcel::server::resolve_n_parallel(cli.server.parallel).unwrap_or(4),
     );
     let runtime = mlxcel::server::transport::build_http_runtime(workers)
         .context("failed to build the HTTP runtime; check --threads-http")?;
@@ -2319,7 +2329,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         port: args.port,
         api_keys: args.api_key,
         api_key_files: args.api_key_file,
-        n_parallel: args.parallel,
+        n_parallel: mlxcel::server::resolve_n_parallel(args.parallel)
+            .map_err(|message| anyhow::anyhow!("{message}"))?,
         ctx_size: args.ctx_size,
         n_predict: args.predict,
         // HTTP transport (#1432). `timeout` is now the socket read/write
@@ -2512,6 +2523,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         diffusion_threshold: args.diffusion_threshold,
         rope: args.rope.clone(),
         cache_compat: args.cache_compat.clone(),
+        context_compat: args.context_compat.clone(),
         infill: args.infill.clone(),
         embedding_compat: args.embedding_compat.clone(),
     })
@@ -2879,7 +2891,15 @@ mod tests {
     fn serving_throughput_defaults_are_on_out_of_the_box() {
         // #628: shipped defaults enable multi-client batching machinery.
         let args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
-        assert_eq!(args.parallel, 4, "batched decode should default to 4 slots");
+        assert_eq!(
+            args.parallel, -1,
+            "b10621's -1 (auto) is the shipped default (#1472)"
+        );
+        assert_eq!(
+            mlxcel::server::resolve_n_parallel(args.parallel).expect("auto resolves"),
+            4,
+            "auto resolves to 4 slots, matching upstream's auto and the #628 default"
+        );
         assert_eq!(
             args.max_batch_prefill, 4,
             "batched prefill should default to 4"
@@ -3346,23 +3366,26 @@ mod tests {
     }
 
     #[test]
-    fn a_negative_parallel_reaches_the_value_parser_not_the_argv_parser() {
-        // b10621 documents a negative in `--parallel`'s help text while
-        // mlxcel's field is `usize`. Command-wide `allow_negative_numbers`
-        // makes `-1` a candidate value here, so the type parser is what must
-        // reject it, with a message that names the option and the value.
-        let err = Cli::try_parse_from(["mlxcel-server", "--parallel", "-1"])
-            .expect_err("--parallel is usize and must reject a negative slot count");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-        let text = err.to_string();
-        assert!(
-            text.contains("--parallel") && text.contains("-1"),
-            "the --parallel rejection must name the option and the value, got: {text}"
+    fn a_negative_parallel_resolves_to_the_automatic_slot_count() {
+        // Since #1472 `--parallel` carries b10621's whole value domain: `-1`
+        // (the default) is auto and resolves to 4 slots, matching upstream's
+        // own auto; other negatives and zero are refused at resolution with a
+        // message naming the option, the value, and the auto form.
+        let args = parse_server_args(&["mlxcel-server", "--parallel", "-1"]);
+        assert_eq!(args.parallel, -1);
+        assert_eq!(
+            mlxcel::server::resolve_n_parallel(args.parallel).expect("auto resolves"),
+            4
         );
-        assert!(
-            !text.contains("unexpected argument"),
-            "--parallel -1 must no longer be an argv-parser error, got: {text}"
-        );
+
+        for bad in [0, -2] {
+            let err = mlxcel::server::resolve_n_parallel(bad)
+                .expect_err("only -1 and positive counts are in domain");
+            assert!(
+                err.contains("--parallel") && err.contains(&bad.to_string()),
+                "the rejection must name the option and the value, got: {err}"
+            );
+        }
     }
 
     #[test]

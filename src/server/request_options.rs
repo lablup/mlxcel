@@ -335,6 +335,7 @@ pub(crate) fn build_server_generate_options_with_live(
     };
 
     ServerGenerateOptions {
+        retention: Default::default(),
         max_tokens: resolve_server_max_tokens_with_live(config, live, overrides.max_tokens),
         sampling,
         stop_sequences,
