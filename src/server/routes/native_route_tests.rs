@@ -225,10 +225,6 @@ async fn unsupported_native_fields_are_refused_with_a_diagnostic() {
             serde_json::json!({"prompt": "hi", "return_progress": true}),
         ),
         (
-            "verbose",
-            serde_json::json!({"prompt": "hi", "verbose": true}),
-        ),
-        (
             "return_tokens",
             serde_json::json!({"prompt": "hi", "return_tokens": true}),
         ),
@@ -245,6 +241,92 @@ async fn unsupported_native_fields_are_refused_with_a_diagnostic() {
             "the diagnostic must name {field}, got {message:?}"
         );
     }
+}
+
+/// `tokens_cached` is b10621's SLOT cache occupancy after the request, not
+/// what the prefix cache supplied for it (#1477).
+///
+/// Six independent measurements against the pinned binary agree on
+/// `tokens_evaluated + tokens_predicted - 1`: 5+8-1=12 on a limit stop,
+/// 5+1-1=5 on the `n_predict: 0` prompt-only case (upstream still answers it
+/// with `tokens_predicted: 1`), 8+24-1=31 and 11+40-1=50 on longer runs,
+/// 5+200-1=204, and 15+4-1=18 on a fully cache-hit request, where the figure
+/// is unchanged by the hit. `timings.cache_n` stays the cache-supplied count,
+/// which is the different quantity `prompt_n` is derived from, so this test
+/// pins both at once.
+#[tokio::test]
+async fn tokens_cached_reports_the_upstream_slot_occupancy_formula() {
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello there", "n_predict": 4}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let evaluated = body["tokens_evaluated"].as_u64().expect("tokens_evaluated");
+    let predicted = body["tokens_predicted"].as_u64().expect("tokens_predicted");
+    let cached = body["tokens_cached"].as_u64().expect("tokens_cached");
+    assert_eq!(
+        cached,
+        (evaluated + predicted).saturating_sub(1),
+        "tokens_cached must be tokens_evaluated + tokens_predicted - 1 (saturating), got \
+         {cached} from {evaluated} + {predicted}"
+    );
+    assert_eq!(
+        body["timings"]["cache_n"].as_u64(),
+        Some(0),
+        "cache_n is the cache-supplied prompt count and is a different quantity"
+    );
+    assert_eq!(
+        body["timings"]["prompt_n"].as_u64(),
+        Some(evaluated),
+        "prompt_n stays tokens_evaluated - cache_n"
+    );
+}
+
+/// b10621 accepts `verbose` on the native route and ignores it (#1477).
+///
+/// Upstream writes its `__verbose` debug block only from the OAI-compat
+/// response builders; the native `/completion` object IS
+/// `to_json_non_oaicompat()`, so the field changes nothing there. Measured
+/// against the pinned binary, the top-level key set with `verbose: true` is
+/// identical to the key set without it. mlxcel used to refuse the field with
+/// a 400, which was the divergence; it now matches upstream by accepting it
+/// and changing nothing.
+#[tokio::test]
+async fn verbose_is_accepted_and_changes_nothing() {
+    let (with_status, with_body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 4, "verbose": true}),
+    )
+    .await;
+    assert_eq!(with_status, StatusCode::OK, "{with_body}");
+    let (without_status, without_body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 4}),
+    )
+    .await;
+    assert_eq!(without_status, StatusCode::OK, "{without_body}");
+
+    let keys = |v: &serde_json::Value| {
+        let mut k: Vec<String> = v
+            .as_object()
+            .expect("the native response is an object")
+            .keys()
+            .cloned()
+            .collect();
+        k.sort();
+        k
+    };
+    assert_eq!(
+        keys(&with_body),
+        keys(&without_body),
+        "verbose must not add or remove a key, as it does not upstream"
+    );
+    assert!(
+        with_body.get("__verbose").is_none(),
+        "the native route has no __verbose block upstream and must not invent one"
+    );
 }
 
 #[tokio::test]

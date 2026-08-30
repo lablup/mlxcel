@@ -171,9 +171,8 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence: the tokens_cached formula and the refused request fields are #1477's remaining work, and the generation_settings omission follows the omitted-rather-than-invented policy GET /props records but cannot lift the entry on its own; the entry stays deferred and is filed under #1477 (moved from #1441 by PR #1478).",
       "divergence": [
-        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1477).",
-        "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1477).",
-        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1477)."
+        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block: 25 of upstream's 49 keys are reported and 24 are absent, all of them owned elsewhere (the sampler stages behind adaptive_target, adaptive_decay, dynatemp_range, dynatemp_exponent, mirostat, mirostat_tau, mirostat_eta, min_keep, n_probs, logit_bias, samplers, grammar, grammar_lazy, grammar_triggers, preserved_tokens, post_sampling_probs and backend_sampling are #1436's, speculative.types is #1433's, and chat_format, reasoning_format, reasoning_in_content, generation_prompt, timings_per_token and lora are surfaces those issues and #1439 own) (#1477).",
+        "`return_tokens`, `return_progress`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored; `verbose` and `tokens_cached` are settled and no longer part of this string (#1477)."
       ],
       "rationale": null,
       "mlxcel": {
@@ -193,9 +192,8 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence: the tokens_cached formula and the refused request fields are #1477's remaining work, and the generation_settings omission follows the omitted-rather-than-invented policy GET /props records but cannot lift the entry on its own; the entry stays deferred and is filed under #1477 (moved from #1441 by PR #1478).",
       "divergence": [
-        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1477).",
-        "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1477).",
-        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1477)."
+        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block: 25 of upstream's 49 keys are reported and 24 are absent, all of them owned elsewhere (the sampler stages behind adaptive_target, adaptive_decay, dynatemp_range, dynatemp_exponent, mirostat, mirostat_tau, mirostat_eta, min_keep, n_probs, logit_bias, samplers, grammar, grammar_lazy, grammar_triggers, preserved_tokens, post_sampling_probs and backend_sampling are #1436's, speculative.types is #1433's, and chat_format, reasoning_format, reasoning_in_content, generation_prompt, timings_per_token and lora are surfaces those issues and #1439 own) (#1477).",
+        "`return_tokens`, `return_progress`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored; `verbose` and `tokens_cached` are settled and no longer part of this string (#1477)."
       ],
       "rationale": null,
       "mlxcel": {
@@ -564,9 +562,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1477,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "No equivalent: mlxcel serves exactly one completion per request, so there is no path that could return b10621's array of results. `n_cmpl` (and its `n` alias) is accepted at 1, the inert value, and any higher value is refused with a 400 naming the field and telling the caller to send one request per completion.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs::unsupported_native_fields_are_refused_with_a_diagnostic",
+      "notes": "Declared and refused above 1 with a diagnostic naming the field. Upstream's schema limit is 1 <= value <= params_base.n_parallel and it REFUSES rather than clamps, so at one slot mlxcel's refusal is the same answer b10621 gives: the pinned binary with -np 1 answers `Field 'n_cmpl': Value must be between 1 <= value <= 1, but got 2`. With more slots upstream returns a JSON array of result objects each carrying its own index, and mlxcel serves one completion per request with no path that returns an array; shipping a partial array shape would be worse than the refusal (#1477).",
+      "divergence": [
+        "above 1 the field is refused; b10621 with more than one slot returns a JSON array of result objects, which mlxcel has no path to produce"
+      ],
       "rationale": null,
       "mlxcel": {
         "field": "n_cmpl"
@@ -583,9 +583,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1477,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "No equivalent: mlxcel has no minimum-indentation stop rule for fill-in-the-middle completions. Accepted at 0, the inert value, and refused with a 400 naming the field otherwise.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs::unsupported_native_fields_are_refused_with_a_diagnostic",
+      "notes": "Declared and refused above 0. Upstream's rule (server-context.cpp): once a newline has been generated, the whitespace run at the last newline is measured each step, and if content follows it and the run is shorter than n_indent the slot stops with STOP_TYPE_LIMIT and the last line is erased from the generated text. Measured on the pinned binary: `def f():\\n    return 1\\n` with n_indent 4 stops after 3 tokens with stop_type limit, and an 8-space body stops at 26 tokens with n_indent 8 against 30 with n_indent 0. mlxcel's only per-request stop machinery is the stop-string matcher on the sequence, and adding an indentation rule means a second per-token stop guard plus the trailing-line erase (#1477).",
+      "divergence": [
+        "the field is refused above 0; b10621 stops the completion when a generated line's indentation falls below it, reported as stop_type limit"
+      ],
       "rationale": null,
       "mlxcel": {
         "field": "n_indent"
@@ -643,9 +645,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1477,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "No equivalent: the mlxcel scheduler emits no prompt-processing progress events on this path, so there is nothing to attach to a stream frame. Accepted at false, the inert value, and refused with a 400 naming the field otherwise.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs::unsupported_native_fields_are_refused_with_a_diagnostic",
+      "notes": "Declared and refused when true. The scheduler emits exactly one GenerateEvent::Prefill per request, at the first stamped token, which supplies total, cache and time_ms but only the terminal processed == total. Re-measured against the pinned binary for #1477: upstream emits one empty-content frame per prefill chunk ahead of the first content frame, and with -b 64 on a 321-token prompt the processed values were 0, 64, 128, 192, 256, 320, 321 against total 321. mlxcel schedules chunked prefill at --prefill-chunk-size, so the shape maps directly; what is missing is a per-chunk progress event and its route mapping (#1477).",
+      "divergence": [
+        "the field is refused when true; b10621 emits one `prompt_progress` frame per prefill chunk ahead of the first content frame"
+      ],
       "rationale": null,
       "mlxcel": {
         "field": "return_progress"
@@ -662,9 +666,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1477,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "No equivalent on this path: mlxcel's streaming decoder emits detokenized text and does not surface the raw token ids to the native route. Accepted at false, the inert value, and refused with a 400 naming the field and pointing at POST /tokenize otherwise.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs::unsupported_native_fields_are_refused_with_a_diagnostic",
+      "notes": "Declared and refused when true. The generated ids exist on the sequence (SequenceInfo::generated_tokens) but nothing carries them out: GenerationResult has no id vector and the native streaming callback is FnMut(String, Option<TokenLogprobData>), whose token_id is populated only when logprobs were requested. Re-measured against the pinned binary for #1477: the non-streaming `tokens` array is gated on the field, while STREAMING frames carry a per-frame `tokens` array unconditionally, with and without it, and the final streaming frame carries `tokens: []` in both cases. Honoring the field therefore means an opt-in id channel for the non-streaming half AND an unconditional per-frame id on the streaming half (#1477).",
+      "divergence": [
+        "the field is refused when true; b10621 fills the top-level `tokens` array with the generated ids, and its streaming frames carry per-frame ids unconditionally"
+      ],
       "rationale": null,
       "mlxcel": {
         "field": "return_tokens"
@@ -738,9 +744,11 @@
       "discovery": "source-schema-declaration",
       "state": "not_applicable",
       "issue": 1477,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "No per-request equivalent: mlxcel bounds a stalled decode with the server-wide --decode-timeout / MLXCEL_DECODE_TIMEOUT watchdog, which cannot be narrowed per request. Accepted at -1 or 0, the inert values, and refused with a 400 naming the field and the alternative otherwise.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs::unsupported_native_fields_are_refused_with_a_diagnostic",
+      "notes": "Declared and refused above 0. Upstream's rule (server-context.cpp): the deadline is checked only when the emitted piece contains a newline, and if t_gen_ms() has passed it the slot stops with STOP_TYPE_LIMIT. Measured on the pinned binary: t_max_predict_ms 50 on an n_predict 200 request stopped at 16 tokens with stop_type limit and truncated false. mlxcel bounds a stalled decode with the server-wide --decode-timeout / MLXCEL_DECODE_TIMEOUT watchdog, which cannot be narrowed per request, and honoring this needs a per-sequence deadline evaluated in the decode loop under upstream's newline condition (#1477).",
+      "divergence": [
+        "the field is refused above 0; b10621 bounds the prediction phase per request from the first token, firing only after a newline has been generated"
+      ],
       "rationale": null,
       "mlxcel": {
         "field": "t_max_predict_ms"
@@ -774,10 +782,10 @@
       "field_type": "bool",
       "description": "Include __verbose field in the response with additional debug information",
       "discovery": "source-schema-declaration",
-      "state": "not_applicable",
+      "state": "supported",
       "issue": 1477,
-      "test": "src/server/routes/native_route_tests.rs",
-      "notes": "No equivalent: mlxcel has no __verbose debug block. Accepted at false, the inert value, and refused with a 400 naming the field and pointing at GET /slots and GET /metrics otherwise.",
+      "test": "src/server/routes/native_route_tests.rs::verbose_is_accepted_and_changes_nothing",
+      "notes": "Accepted and inert, which is exactly what b10621 does on this route. Upstream writes its __verbose debug block only from the OAI-compat response builders (server-task.cpp lines 404, 452, 521 and 1098, each inside a to_json_oaicompat* function); the native completion object IS to_json_non_oaicompat(), so the field changes nothing there. Measured against the pinned binary: the top-level key set of a request with verbose true is identical to the same request without it. Before #1477 mlxcel refused the field with a 400, which was the divergence.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
