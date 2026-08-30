@@ -42,6 +42,7 @@
 //!   `.get()`, …) through minijinja's unknown-method callback.
 
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use minijinja::{Environment, ErrorKind, Value};
@@ -147,6 +148,8 @@ pub fn template_rejection_message(err: &anyhow::Error) -> Option<&str> {
 #[derive(Clone)]
 pub struct ChatTemplateProcessor {
     template: String,
+    compiled_template:
+        Arc<OnceLock<std::result::Result<Environment<'static>, ChatTemplateCompileError>>>,
     bos_token: String,
     eos_token: String,
     add_generation_prompt: bool,
@@ -167,7 +170,44 @@ pub struct ChatTemplateProcessor {
     /// path that constructs a processor without a corresponding tokenizer
     /// (template-string overrides, `Default`, tests).
     default_enable_thinking: bool,
+    #[cfg(test)]
+    template_compile_count: Arc<std::sync::atomic::AtomicUsize>,
 }
+
+#[derive(Debug, Clone)]
+struct ChatTemplateCompileError {
+    kind: ErrorKind,
+    detail: String,
+    name: Option<String>,
+    line: Option<usize>,
+}
+
+impl From<minijinja::Error> for ChatTemplateCompileError {
+    fn from(err: minijinja::Error) -> Self {
+        Self {
+            kind: err.kind(),
+            detail: err.to_string(),
+            name: err.name().map(str::to_string),
+            line: err.line(),
+        }
+    }
+}
+
+impl std::fmt::Display for ChatTemplateCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)?;
+        write!(f, " ({:?}", self.kind)?;
+        if let Some(name) = &self.name {
+            write!(f, ", template {name}")?;
+        }
+        if let Some(line) = self.line {
+            write!(f, ", line {line}")?;
+        }
+        write!(f, ")")
+    }
+}
+
+impl std::error::Error for ChatTemplateCompileError {}
 
 impl ChatTemplateProcessor {
     /// Create a new processor by loading template from tokenizer_config.json or chat_template.jinja
@@ -246,11 +286,14 @@ impl ChatTemplateProcessor {
 
         Ok(Some(Self {
             template: preprocess_template(template),
+            compiled_template: Arc::new(OnceLock::new()),
             bos_token,
             eos_token,
             add_generation_prompt: true,
             supports_tools_cached: None,
             default_enable_thinking: false,
+            #[cfg(test)]
+            template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
     }
 
@@ -258,11 +301,14 @@ impl ChatTemplateProcessor {
     pub fn with_template(template: String) -> Self {
         Self {
             template: preprocess_template(template),
+            compiled_template: Arc::new(OnceLock::new()),
             bos_token: String::new(),
             eos_token: String::new(),
             add_generation_prompt: true,
             supports_tools_cached: None,
             default_enable_thinking: false,
+            #[cfg(test)]
+            template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -306,6 +352,41 @@ impl ChatTemplateProcessor {
     /// Used by: server/prompt_cache/key::template_sig
     pub fn template_source(&self) -> &str {
         &self.template
+    }
+
+    /// Return how many times this processor has compiled its template.
+    ///
+    /// Test-only instrumentation for issue #1235. Keeping the counter on the
+    /// processor avoids global test-order coupling while proving both render
+    /// entry points share the same cached environment.
+    #[cfg(test)]
+    fn template_compile_count(&self) -> usize {
+        self.template_compile_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn compiled_environment(&self) -> Result<&Environment<'static>> {
+        const CHAT_TEMPLATE_NAME: &str = "chat";
+
+        match self.compiled_template.get_or_init(|| {
+            #[cfg(test)]
+            self.template_compile_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            compile_chat_template_environment(CHAT_TEMPLATE_NAME, &self.template)
+                .map_err(ChatTemplateCompileError::from)
+        }) {
+            Ok(env) => Ok(env),
+            Err(err) => {
+                Err(anyhow::Error::new(err.clone()).context("Failed to parse chat template"))
+            }
+        }
+    }
+
+    fn render_template(&self, context: minijinja::Value) -> Result<String> {
+        let tmpl = self.compiled_environment()?.get_template("chat")?;
+        tmpl.render(context)
+            .with_context(|| "Failed to render chat template")
     }
 
     /// Default tool-call output format implied by this template.
@@ -627,14 +708,6 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
-        let mut env = Environment::new();
-        configure_environment(&mut env);
-
-        env.add_template("chat", &self.template)
-            .with_context(|| "Failed to parse chat template")?;
-
-        let tmpl = env.get_template("chat")?;
-
         // Convert serde_json::Value to minijinja::Value
         let messages_val = minijinja::Value::from_serialize(messages);
 
@@ -663,8 +736,7 @@ impl ChatTemplateProcessor {
         // enable_thinking branches faithfully (issue #686), so no post-render
         // Gemma-4 patching is applied. The `enable_thinking` value reaches the
         // template through `build_template_context` above.
-        tmpl.render(context)
-            .with_context(|| "Failed to render chat template")
+        self.render_template(context)
     }
 
     /// Apply the chat template to messages.
@@ -716,14 +788,6 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
-        let mut env = Environment::new();
-        configure_environment(&mut env);
-
-        env.add_template("chat", &self.template)
-            .with_context(|| "Failed to parse chat template")?;
-
-        let tmpl = env.get_template("chat")?;
-
         // Many templates conditionally check variables like `tools`,
         // `enable_thinking`, etc. We must provide them with the right
         // concrete type to avoid undefined/None errors — in particular,
@@ -752,9 +816,18 @@ impl ChatTemplateProcessor {
         // enable_thinking branches faithfully (issue #686), so no post-render
         // Gemma-4 patching is applied. The `enable_thinking` value reaches the
         // template through `build_template_context` above.
-        tmpl.render(context)
-            .with_context(|| "Failed to render chat template")
+        self.render_template(context)
     }
+}
+
+fn compile_chat_template_environment(
+    template_name: &'static str,
+    template: &str,
+) -> std::result::Result<Environment<'static>, minijinja::Error> {
+    let mut env = Environment::new();
+    configure_environment(&mut env);
+    env.add_template_owned(template_name.to_string(), template.to_string())?;
+    Ok(env)
 }
 
 /// Build the minijinja template context merging the standard chat fields with
@@ -1531,6 +1604,7 @@ impl std::fmt::Debug for ChatTemplateProcessor {
             .field("eos_token", &self.eos_token)
             .field("add_generation_prompt", &self.add_generation_prompt)
             .field("supports_tools_cached", &self.supports_tools_cached)
+            .field("compiled_template", &self.compiled_template.get().is_some())
             .finish_non_exhaustive()
     }
 }
@@ -1538,6 +1612,326 @@ impl std::fmt::Debug for ChatTemplateProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fresh_render_context(
+        processor: &ChatTemplateProcessor,
+        messages_val: minijinja::Value,
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+        add_generation_prompt: bool,
+    ) -> Result<String> {
+        let mut env = Environment::new();
+        configure_environment(&mut env);
+
+        env.add_template("chat", &processor.template)
+            .with_context(|| "Failed to parse chat template")?;
+
+        let tmpl = env.get_template("chat")?;
+        let tools_val = match tools {
+            Some(t) => minijinja::Value::from_serialize(t),
+            None => minijinja::Value::from_serialize(Vec::<Tool>::new()),
+        };
+        let context = build_template_context(
+            messages_val,
+            &processor.bos_token,
+            &processor.eos_token,
+            add_generation_prompt,
+            tools_val,
+            kwargs,
+            processor.default_enable_thinking,
+            processor.wants_bare_thinking_alias(),
+            processor.wants_thinking_mode_alias(),
+        );
+
+        tmpl.render(context)
+            .with_context(|| "Failed to render chat template")
+    }
+
+    fn fresh_typed_render(
+        processor: &ChatTemplateProcessor,
+        messages: &[ChatMessage],
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+        add_generation_prompt: bool,
+    ) -> Result<String> {
+        fresh_render_context(
+            processor,
+            minijinja::Value::from_serialize(messages),
+            tools,
+            kwargs,
+            add_generation_prompt,
+        )
+    }
+
+    fn fresh_raw_render(
+        processor: &ChatTemplateProcessor,
+        messages: &serde_json::Value,
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+        add_generation_prompt: bool,
+    ) -> Result<String> {
+        fresh_render_context(
+            processor,
+            minijinja::Value::from_serialize(messages),
+            tools,
+            kwargs,
+            add_generation_prompt,
+        )
+    }
+
+    #[test]
+    fn cached_template_is_shared_by_typed_and_raw_render_paths() {
+        let template = r#"{% for message in messages %}[{{ message.role }}:{{ message.content }}]{% endfor %}{% if add_generation_prompt %}[GEN]{% endif %}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let typed = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
+        let raw = serde_json::json!([{"role": "user", "content": "hello"}]);
+
+        assert_eq!(processor.template_compile_count(), 0);
+
+        let typed_prompt = processor.apply(&typed, None).expect("typed render");
+        let typed_history = processor
+            .apply_history_with_kwargs(&typed, None, &ChatTemplateKwargs::new())
+            .expect("typed history render");
+        let raw_prompt = processor.apply_raw(&raw, None).expect("raw render");
+        let raw_history = processor
+            .apply_raw_history_with_kwargs(&raw, None, &ChatTemplateKwargs::new())
+            .expect("raw history render");
+
+        assert_eq!(typed_prompt, "[user:hello][GEN]");
+        assert_eq!(typed_history, "[user:hello]");
+        assert_eq!(raw_prompt, typed_prompt);
+        assert_eq!(raw_history, typed_history);
+        assert_eq!(
+            processor.template_compile_count(),
+            1,
+            "typed and raw render paths must reuse the same compiled template"
+        );
+    }
+
+    #[test]
+    fn cached_template_render_is_byte_identical_to_fresh_environment_render() {
+        let template = r#"{% if tools %}[TOOLS={{ tools | tojson(sort_keys=true) }}]{% endif %}{% if preserve_thinking %}[KEEP]{% endif %}{% for message in messages %}[{{ message.role }}={{ message.content }}]{% endfor %}{% if add_generation_prompt %}[ASSIST]{% endif %}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let typed = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "be exact".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+            },
+        ];
+        let raw = serde_json::json!([
+            {"role": "system", "content": "be exact"},
+            {"role": "user", "content": "hello"}
+        ]);
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: "lookup".to_string(),
+                description: Some("Look up facts".to_string()),
+                parameters: Some(serde_json::json!({"type": "object"})),
+            },
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"preserve_thinking": true}"#).unwrap();
+
+        assert_eq!(
+            processor
+                .apply_with_kwargs(&typed, Some(&tools), &kwargs)
+                .expect("cached typed render"),
+            fresh_typed_render(&processor, &typed, Some(&tools), &kwargs, true)
+                .expect("fresh typed render")
+        );
+        assert_eq!(
+            processor
+                .apply_history_with_kwargs(&typed, Some(&tools), &kwargs)
+                .expect("cached typed history render"),
+            fresh_typed_render(&processor, &typed, Some(&tools), &kwargs, false)
+                .expect("fresh typed history render")
+        );
+        assert_eq!(
+            processor
+                .apply_raw_with_kwargs(&raw, Some(&tools), &kwargs)
+                .expect("cached raw render"),
+            fresh_raw_render(&processor, &raw, Some(&tools), &kwargs, true)
+                .expect("fresh raw render")
+        );
+        assert_eq!(
+            processor
+                .apply_raw_history_with_kwargs(&raw, Some(&tools), &kwargs)
+                .expect("cached raw history render"),
+            fresh_raw_render(&processor, &raw, Some(&tools), &kwargs, false)
+                .expect("fresh raw history render")
+        );
+        assert_eq!(processor.template_compile_count(), 1);
+    }
+
+    #[test]
+    fn cached_template_is_thread_safe_and_compiles_once_under_concurrent_renders() {
+        let processor = Arc::new(ChatTemplateProcessor::with_template(
+            r#"{% for message in messages %}{{ message.role }}:{{ message.content }};{% endfor %}"#
+                .to_string(),
+        ));
+        let expected = "user:hello;";
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..16 {
+                let processor = Arc::clone(&processor);
+                handles.push(scope.spawn(move || {
+                    processor
+                        .apply(
+                            &[ChatMessage {
+                                role: "user".to_string(),
+                                content: "hello".to_string(),
+                            }],
+                            None,
+                        )
+                        .expect("render")
+                }));
+            }
+            for handle in handles {
+                assert_eq!(handle.join().expect("thread joined"), expected);
+            }
+        });
+
+        assert_eq!(
+            processor.template_compile_count(),
+            1,
+            "concurrent renders must race through OnceLock into one compile"
+        );
+    }
+
+    #[test]
+    fn cached_template_preserves_rejection_sentinel_and_engine_failure_split() {
+        let reject = ChatTemplateProcessor::with_template(
+            "{{ raise_exception('refuse ' ~ messages[0].role) }}".to_string(),
+        );
+        let typed = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
+        let raw = serde_json::json!([{"role": "user", "content": "hello"}]);
+
+        let typed_err = reject
+            .apply(&typed, None)
+            .expect_err("typed render must reject");
+        assert_eq!(
+            template_rejection_message(&typed_err),
+            Some("refuse user"),
+            "typed render must preserve the TemplateRejection source"
+        );
+        let raw_err = reject
+            .apply_raw(&raw, None)
+            .expect_err("raw render must reject");
+        assert_eq!(
+            template_rejection_message(&raw_err),
+            Some("refuse user"),
+            "raw render must preserve the TemplateRejection source"
+        );
+        assert_eq!(reject.template_compile_count(), 1);
+
+        let engine_failure =
+            ChatTemplateProcessor::with_template("{{ missing | no_such_filter }}".to_string());
+        let err = engine_failure
+            .apply(&typed, None)
+            .expect_err("unknown filter is an engine failure");
+        assert!(
+            template_rejection_message(&err).is_none(),
+            "engine-side failures must still be eligible for fallback"
+        );
+        assert_eq!(engine_failure.template_compile_count(), 1);
+    }
+
+    #[test]
+    fn cached_template_parse_failure_is_not_retried_or_misclassified() {
+        let processor = ChatTemplateProcessor::with_template("{% for m in messages %}".to_string());
+        let raw = serde_json::json!([{"role": "user", "content": "hello"}]);
+
+        for _ in 0..2 {
+            let err = processor
+                .apply_raw(&raw, None)
+                .expect_err("malformed template must fail to parse");
+            assert!(
+                template_rejection_message(&err).is_none(),
+                "parse failures must remain engine failures, got: {err:#}"
+            );
+            assert!(
+                format!("{err:#}").contains("Failed to parse chat template"),
+                "parse context must be preserved, got: {err:#}"
+            );
+        }
+
+        assert_eq!(
+            processor.template_compile_count(),
+            1,
+            "a malformed immutable template should not be reparsed after the first failure"
+        );
+    }
+
+    #[test]
+    fn cloned_processor_reuses_the_same_cached_template() {
+        let processor = ChatTemplateProcessor::with_template("{{ messages[0].content }}".into());
+        let cloned = processor.clone();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "shared".to_string(),
+        }];
+
+        assert_eq!(processor.apply(&messages, None).unwrap(), "shared");
+        assert_eq!(cloned.apply(&messages, None).unwrap(), "shared");
+        assert_eq!(
+            processor.template_compile_count(),
+            1,
+            "clone must share the per-template cache instead of starting a second one"
+        );
+        assert_eq!(cloned.template_compile_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "micro-benchmark; run explicitly with --ignored --nocapture"]
+    fn cached_template_performance_smoke_reports_delta() {
+        let template = r#"{% for message in messages %}{% if message.role == 'system' %}<|system|>{{ message.content }}{% elif message.role == 'user' %}<|user|>{{ message.content }}{% else %}<|assistant|>{{ message.content }}{% endif %}{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "be concise".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "summarize the cache change".repeat(8),
+            },
+        ];
+        let kwargs = ChatTemplateKwargs::new();
+        let iterations = 400usize;
+
+        let fresh_start = std::time::Instant::now();
+        let mut fresh_last = String::new();
+        for _ in 0..iterations {
+            fresh_last = fresh_typed_render(&processor, &messages, None, &kwargs, true).unwrap();
+        }
+        let fresh_elapsed = fresh_start.elapsed();
+
+        let cached_start = std::time::Instant::now();
+        let mut cached_last = String::new();
+        for _ in 0..iterations {
+            cached_last = processor
+                .apply_with_kwargs(&messages, None, &kwargs)
+                .expect("cached render");
+        }
+        let cached_elapsed = cached_start.elapsed();
+
+        assert_eq!(cached_last, fresh_last);
+        assert_eq!(processor.template_compile_count(), 1);
+        eprintln!(
+            "chat template cache smoke: iterations={iterations} fresh={fresh_elapsed:?} cached={cached_elapsed:?}"
+        );
+    }
 
     /// A checkpoint that ships no template at all still has to render the
     /// prompt shape its model was trained on.
