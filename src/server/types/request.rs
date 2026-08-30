@@ -1257,7 +1257,14 @@ pub struct NativeCompletionRequest {
     /// Include prompt-processing progress events in stream mode. mlxcel's
     /// scheduler emits no prefill progress events on this path.
     pub return_progress: Option<bool>,
-    /// Include an `__verbose` debug block in the response.
+    /// llama-server b10621 `verbose`, accepted and inert on this route.
+    ///
+    /// Upstream writes its `__verbose` debug block only from the OAI-compat
+    /// response builders (`server-task.cpp`); the native `/completion` object
+    /// IS `to_json_non_oaicompat()`, so `verbose: true` changes nothing there.
+    /// Verified against the pinned binary: the top-level key set with the
+    /// field set is identical to the key set without it. mlxcel therefore
+    /// accepts it and ignores it, which is exactly what upstream does (#1477).
     pub verbose: Option<bool>,
     /// Return the raw generated token ids in the `tokens` field.
     pub return_tokens: Option<bool>,

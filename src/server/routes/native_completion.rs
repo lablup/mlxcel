@@ -357,7 +357,19 @@ fn build_native_response(
         truncated: matches!(outcome.stop_kind, StopKind::ContextExhausted),
         stop_type,
         stopping_word,
-        tokens_cached: outcome.cached_tokens,
+        // b10621 reports the SLOT's cache occupancy after the request, not
+        // what the prefix cache supplied for it (#1477). Six independent
+        // measurements against the pinned binary agree on
+        // `tokens_evaluated + tokens_predicted - 1`, including the
+        // `n_predict: 0` prompt-only case (which upstream still answers with
+        // `tokens_predicted: 1`) and a fully cache-hit request, where the
+        // figure is unchanged by the hit. `timings.cache_n` below stays the
+        // cache-supplied count, which is a different quantity and is what
+        // `prompt_n` is derived from.
+        tokens_cached: outcome
+            .tokens_evaluated
+            .saturating_add(outcome.tokens_predicted)
+            .saturating_sub(1),
         timings: NativeTimings::new(
             outcome.cached_tokens,
             outcome.tokens_evaluated,
@@ -744,13 +756,6 @@ fn reject_unsupported_native_fields(request: &NativeCompletionRequest) -> Option
         return refuse(
             "return_progress is not supported on /completion; the mlxcel scheduler emits no \
              prompt-processing progress events on this path"
-                .to_string(),
-        );
-    }
-    if request.verbose.unwrap_or(false) {
-        return refuse(
-            "verbose is not supported on /completion; mlxcel has no __verbose debug block. \
-             Use GET /slots and GET /metrics for per-request observability"
                 .to_string(),
         );
     }

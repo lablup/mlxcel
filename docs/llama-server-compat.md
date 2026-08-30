@@ -84,7 +84,11 @@ The native completion object carries `index`, `content`, `tokens`, `id_slot`, `s
 
 **A client that was pointing at `/completions` or `/embeddings` and parsing the OpenAI shape must move to `/v1/completions` or `/v1/embeddings`.** Those two paths are unchanged and stay OpenAI compatible.
 
-Native request fields mlxcel has no equivalent for are now refused with a 400 naming the field and the alternative, instead of being accepted and ignored: `n_cmpl` (and its `n` alias) above 1, `n_indent`, `t_max_predict_ms`, `return_progress`, `verbose` and `return_tokens`. Each is still accepted at its inert value, so a client that sends the whole schema at its defaults is not turned away.
+Native request fields mlxcel has no equivalent for are refused with a 400 naming the field and the alternative, instead of being accepted and ignored: `n_cmpl` (and its `n` alias) above 1, `n_indent`, `t_max_predict_ms`, `return_progress` and `return_tokens`. Each is still accepted at its inert value, so a client that sends the whole schema at its defaults is not turned away.
+
+`verbose` left that list in #1477, on evidence rather than on effort: b10621 writes its `__verbose` debug block only from the OAI-compat response builders (`server-task.cpp`), and the native completion object IS `to_json_non_oaicompat()`, so `verbose: true` changes nothing upstream either. Measured against the pinned binary, the top-level key set with the field set is identical to the key set without it. mlxcel now accepts it and ignores it, which is what upstream does; refusing it was the divergence.
+
+`tokens_cached` also changed meaning in #1477 and is a **breaking change for a client that read it as a cache-hit figure**. b10621 reports the slot's cache occupancy after the request, which is `tokens_evaluated + tokens_predicted - 1` (saturating), not what the prefix cache supplied for it. Six measurements against the pinned binary agree, including the `n_predict: 0` prompt-only case, which upstream still answers with `tokens_predicted: 1`, and a fully cache-hit request, where the figure is unchanged by the hit. The cache-supplied count is `timings.cache_n`, which is unchanged and is what `timings.prompt_n` is derived from; a client that wants the hit size should read `cache_n`.
 
 Four more native fields moved from ignored to honored on the same routes, each checked against the pinned binary rather than against the schema's descriptions, which are wrong about two of them:
 
