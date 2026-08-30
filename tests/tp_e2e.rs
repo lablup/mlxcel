@@ -776,22 +776,47 @@ fn e2e_crossover_larger_models_benefit_more() {
 
     let analysis = run_crossover_analysis(&config, &[2048, 8192], &[1, 2]).unwrap();
 
-    // For larger models, TP should provide greater benefit.
-    let small_tp2 = analysis
+    // Crossover analysis is a nominal model comparison, not a wall-clock
+    // benchmark. The harness injects exact simulated durations here so this
+    // assertion verifies the model arithmetic even on loaded CI runners. The
+    // expected efficiencies come from the hidden-size timing model inside
+    // `run_crossover_analysis`: 2048 maps to compute=50us/all-reduce=25us,
+    // and 8192 maps to compute=800us/all-reduce=100us.
+    let small = analysis
         .entries
         .iter()
-        .find(|e| e.model_hidden_size == 2048 && e.tp_size == 2);
-    let large_tp2 = analysis
+        .find(|e| e.model_hidden_size == 2048 && e.tp_size == 2)
+        .expect("2048 hidden-size TP=2 entry should exist");
+    let large = analysis
         .entries
         .iter()
-        .find(|e| e.model_hidden_size == 8192 && e.tp_size == 2);
+        .find(|e| e.model_hidden_size == 8192 && e.tp_size == 2)
+        .expect("8192 hidden-size TP=2 entry should exist");
 
-    if let (Some(small), Some(large)) = (small_tp2, large_tp2) {
-        assert!(
-            large.scaling_efficiency >= small.scaling_efficiency,
-            "larger model should have better TP scaling efficiency"
-        );
-    }
+    let small_expected = 0.5;
+    let large_expected = 0.8;
+    assert!(
+        (small.scaling_efficiency - small_expected).abs() < 1e-12,
+        "small-model scaling efficiency {} should match the injected nominal model {small_expected}",
+        small.scaling_efficiency
+    );
+    assert!(
+        (large.scaling_efficiency - large_expected).abs() < 1e-12,
+        "large-model scaling efficiency {} should match the injected nominal model {large_expected}",
+        large.scaling_efficiency
+    );
+    assert!(
+        large.scaling_efficiency >= small.scaling_efficiency + 0.25,
+        "larger model should have materially better TP scaling efficiency"
+    );
+    assert!(
+        !small.is_beneficial,
+        "2048 hidden-size model should break even, not become beneficial"
+    );
+    assert!(
+        large.is_beneficial,
+        "8192 hidden-size model should be beneficial"
+    );
 }
 
 // ===========================================================================
