@@ -37,12 +37,14 @@
 //! - Per-clip normalization (zero mean, unit std) over valid frames.
 //!
 //! Used by: Nemotron H Nano Omni VLM (audio modality)
-//!
-//! TODO: extract a shared FFT helper with `crate::audio::feature_extractor`.
 
 use std::f64::consts::PI;
 
+use crate::audio::fft::{MAX_REAL_FFT_LEN, real_fft_magnitude};
+
 use super::config::NemotronOmniAudioConfig;
+
+const MAX_NEMOTRON_MEL_BINS: usize = 4096;
 
 /// Output of one extractor invocation.
 #[derive(Debug)]
@@ -79,15 +81,46 @@ pub struct NemotronOmniFeatureExtractor {
 
 impl NemotronOmniFeatureExtractor {
     pub fn new(config: &NemotronOmniAudioConfig) -> Self {
-        let window = build_centered_hann_window(config.win_length, config.n_fft);
-        let mel_filters =
-            slaney_mel_filterbank(config.sampling_rate, config.n_fft, config.num_mel_bins);
+        let defaults = NemotronOmniAudioConfig::default();
+        let sampling_rate = if config.sampling_rate == 0 {
+            defaults.sampling_rate
+        } else {
+            config.sampling_rate
+        };
+        let hop_length = if config.hop_length == 0 || config.hop_length > MAX_REAL_FFT_LEN {
+            defaults.hop_length
+        } else {
+            config.hop_length
+        };
+        let n_fft = if (1..=MAX_REAL_FFT_LEN).contains(&config.n_fft) {
+            config.n_fft
+        } else {
+            defaults.n_fft
+        };
+        let win_length = if (1..=n_fft).contains(&config.win_length) {
+            config.win_length
+        } else {
+            defaults.win_length.min(n_fft)
+        };
+        let num_mel_bins = if (1..=MAX_NEMOTRON_MEL_BINS).contains(&config.num_mel_bins) {
+            config.num_mel_bins
+        } else {
+            defaults.num_mel_bins
+        };
+        let preemphasis = if config.preemphasis.is_finite() {
+            config.preemphasis
+        } else {
+            defaults.preemphasis
+        };
+
+        let window = build_centered_hann_window(win_length, n_fft);
+        let mel_filters = slaney_mel_filterbank(sampling_rate, n_fft, num_mel_bins);
         Self {
-            sampling_rate: config.sampling_rate,
-            hop_length: config.hop_length,
-            n_fft: config.n_fft,
-            num_mel_bins: config.num_mel_bins,
-            preemphasis: config.preemphasis,
+            sampling_rate,
+            hop_length,
+            n_fft,
+            num_mel_bins,
+            preemphasis,
             window,
             mel_filters,
         }
@@ -151,13 +184,12 @@ impl NemotronOmniFeatureExtractor {
             }
             let magnitude = real_fft_magnitude(&fft_buf, num_freq_bins);
             // Power spectrogram = |X|^2.
-            let power: Vec<f64> = magnitude.iter().map(|m| m * m).collect();
             // Mel filterbank: features[mel] = sum_freq filters[mel, freq] * power[freq]
             for mel_idx in 0..self.num_mel_bins {
                 let mut acc = 0.0f64;
                 let row = &self.mel_filters[mel_idx * num_freq_bins..(mel_idx + 1) * num_freq_bins];
-                for (freq_idx, &p) in power.iter().enumerate() {
-                    acc += row[freq_idx] as f64 * p;
+                for (freq_idx, &magnitude) in magnitude.iter().enumerate() {
+                    acc += row[freq_idx] as f64 * magnitude * magnitude;
                 }
                 let log_mel = (acc + mel_floor).ln() as f32;
                 features[frame_idx * self.num_mel_bins + mel_idx] = log_mel;
@@ -349,27 +381,6 @@ fn slaney_mel_to_hz(mel: f64) -> f64 {
     }
 }
 
-/// Naive real-FFT magnitude. `input` must have length `n_fft`. Returns
-/// `num_bins` complex magnitudes.
-///
-/// O(N²) is acceptable here because audio inference is offline and the
-/// per-clip FFT count is small. The Gemma 4 path uses the same approach.
-fn real_fft_magnitude(input: &[f64], num_bins: usize) -> Vec<f64> {
-    let n = input.len();
-    let mut magnitudes = Vec::with_capacity(num_bins);
-    for k in 0..num_bins {
-        let mut re = 0.0f64;
-        let mut im = 0.0f64;
-        for (t, &sample) in input.iter().enumerate() {
-            let angle = -2.0 * PI * k as f64 * t as f64 / n as f64;
-            re += sample * angle.cos();
-            im += sample * angle.sin();
-        }
-        magnitudes.push((re * re + im * im).sqrt());
-    }
-    magnitudes
-}
-
 /// In-place per-clip mean/variance normalization over the valid frame
 /// range. Mirrors upstream's
 /// `mel = ((mel - mean) / (sqrt(variance) + 1e-5)) * mask`.
@@ -512,5 +523,28 @@ mod tests {
         for &m in &mean {
             assert!(m.abs() < 1e-3, "mean {m} not close to zero");
         }
+    }
+
+    #[test]
+    fn malformed_spectrum_config_falls_back_to_bounded_defaults() {
+        let mut cfg = make_config();
+        cfg.sampling_rate = 0;
+        cfg.hop_length = 0;
+        cfg.n_fft = MAX_REAL_FFT_LEN + 1;
+        cfg.win_length = MAX_REAL_FFT_LEN + 1;
+        cfg.num_mel_bins = usize::MAX;
+        cfg.preemphasis = f32::NAN;
+
+        let extractor = NemotronOmniFeatureExtractor::new(&cfg);
+        assert_eq!(extractor.sampling_rate(), 16_000);
+        assert_eq!(extractor.hop_length(), 160);
+        assert_eq!(extractor.n_fft, 512);
+        assert_eq!(extractor.num_mel_bins(), 128);
+        assert_eq!(extractor.preemphasis, 0.97);
+
+        let tone = generate_tone(440.0, 0.1, extractor.sampling_rate());
+        let (features, frames) = extractor.extract_clip(&tone);
+        assert_eq!(features.len(), frames * extractor.num_mel_bins());
+        assert!(features.iter().all(|value| value.is_finite()));
     }
 }
