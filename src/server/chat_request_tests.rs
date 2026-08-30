@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::{
-    build_chat_messages, build_raw_json_messages, prepare_chat_request,
-    prepare_chat_request_with_cache, request_has_effective_input, template_content,
+    build_chat_messages, build_raw_json_messages, history_boundary_render_attempts_for_test,
+    prepare_chat_request, prepare_chat_request_with_cache, request_has_effective_input,
+    reset_history_boundary_render_attempts_for_test, template_content,
 };
 use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::types::request::{InputAudio, ToolCallFunction, ToolCallInMessage, VideoUrl};
@@ -216,6 +217,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         &request_with_image_urls(&[missing]),
         None,
         false,
+        false,
     )
     .await
     .err()
@@ -230,6 +232,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         &request_with_image_urls(&["data:image/png;base64,aGVsbG8=", missing]),
         None,
         false,
+        false,
     )
     .await
     .err()
@@ -243,6 +246,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         &processor,
         &request_with_image_urls(&["data:image/png;base64,aGVsbG8="]),
         None,
+        false,
         false,
     )
     .await
@@ -1674,7 +1678,7 @@ async fn prompt_cache_on_defaults_preserve_thinking_to_true() {
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
             .await
             .unwrap();
 
@@ -1701,7 +1705,7 @@ async fn prompt_cache_on_respects_explicit_false_override() {
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
             .await
             .unwrap();
 
@@ -1729,7 +1733,7 @@ async fn prompt_cache_on_respects_explicit_false_via_extra_body() {
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared =
-        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
             .await
             .unwrap();
 
@@ -1768,6 +1772,7 @@ async fn prompt_cache_on_respects_server_default_false() {
         &request,
         Some(&server_default),
         /* cache */ true,
+        false,
     )
     .await
     .unwrap();
@@ -1810,9 +1815,10 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     let processor = ChatTemplateProcessor::with_template(dump_template());
 
     // First call should add our session id.
-    let _ = prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
-        .await
-        .unwrap();
+    let _ =
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
+            .await
+            .unwrap();
     {
         let set = log_once_sessions().lock().expect("log-once mutex");
         assert!(
@@ -1825,9 +1831,10 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     // Second call with the same session id must not grow the set at all
     // (the HashSet::insert call returns false, which is the dedup signal
     // the production code relies on to skip the log).
-    let _ = prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true)
-        .await
-        .unwrap();
+    let _ =
+        prepare_chat_request_with_cache(&processor, &request, None, /* cache */ true, false)
+            .await
+            .unwrap();
     {
         let set = log_once_sessions().lock().expect("log-once mutex");
         // The set may have been concurrently modified by parallel tests
@@ -1860,13 +1867,13 @@ async fn preserve_thinking_defaulting_logs_per_distinct_session() {
 
     let mut req_a = three_turn_request_with_think_blocks();
     req_a.prompt_cache_key = Some(uniq_a.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true)
+    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true, false)
         .await
         .unwrap();
 
     let mut req_b = three_turn_request_with_think_blocks();
     req_b.prompt_cache_key = Some(uniq_b.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true)
+    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true, false)
         .await
         .unwrap();
 
@@ -2506,14 +2513,20 @@ async fn history_render_is_a_prefix_of_the_next_turns_prompt() {
     messages_t3.push(text_message(Role::Assistant, "<think>think2</think>a2"));
     messages_t3.push(text_message(Role::User, "q3"));
 
+    reset_history_boundary_render_attempts_for_test();
     let prep_t2 =
-        prepare_chat_request_with_cache(&processor, &cached_request(messages_t2), None, true)
+        prepare_chat_request_with_cache(&processor, &cached_request(messages_t2), None, true, true)
             .await
             .unwrap();
     let prep_t3 =
-        prepare_chat_request_with_cache(&processor, &cached_request(messages_t3), None, true)
+        prepare_chat_request_with_cache(&processor, &cached_request(messages_t3), None, true, true)
             .await
             .unwrap();
+    assert_eq!(
+        history_boundary_render_attempts_for_test(),
+        2,
+        "snapshot-capable text requests must perform the history-boundary render"
+    );
 
     let history_t2 = prep_t2
         .history_prompt
@@ -2547,11 +2560,36 @@ async fn history_render_is_a_prefix_of_the_next_turns_prompt() {
 }
 
 #[tokio::test]
+async fn history_render_is_absent_when_the_model_cannot_reuse_snapshots() {
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+    let request = cached_request(vec![text_message(Role::User, "q1")]);
+    reset_history_boundary_render_attempts_for_test();
+
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        history_boundary_render_attempts_for_test(),
+        0,
+        "dense-KV models must not enter the history-boundary render path"
+    );
+    assert!(
+        prepared.history_prompt.is_none(),
+        "dense-KV models must not pay the second history-boundary render"
+    );
+    assert_eq!(
+        history_boundary_render_attempts_for_test(),
+        0,
+        "dense-KV models must not invoke the history-boundary render at all"
+    );
+}
+
+#[tokio::test]
 async fn history_render_is_absent_when_the_prompt_cache_is_off() {
     let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, false)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, false, true)
         .await
         .unwrap();
     assert!(
@@ -2568,7 +2606,7 @@ async fn history_render_is_absent_when_the_template_render_falls_back() {
     let processor = ChatTemplateProcessor::with_template(broken_template());
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true)
         .await
         .unwrap();
     assert!(prepared.history_prompt.is_none());
@@ -2596,7 +2634,7 @@ async fn history_render_is_absent_for_multimodal_requests() {
         tool_calls: None,
     }]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true)
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true)
         .await
         .unwrap();
     assert!(prepared.history_prompt.is_none());

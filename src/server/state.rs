@@ -695,6 +695,17 @@ impl AppState {
     pub fn can_accept_request(&self) -> bool {
         self.batch_metrics.queue_depth() < self.config.max_queue_depth
     }
+
+    /// Whether HTTP request preparation should render a history-boundary
+    /// prompt for snapshot reuse.
+    ///
+    /// Before the worker publishes `loaded=true`, the exact capability is not
+    /// observable yet. Fail open in that short window so a request queued during
+    /// loading cannot miss the first boundary snapshot for a model that needs
+    /// it; after readiness, use the worker-published trait result.
+    pub fn should_render_history_boundary_snapshot(&self) -> bool {
+        !self.model_provider.is_loaded() || self.model_provider.supports_snapshot_reuse()
+    }
 }
 
 #[cfg(test)]

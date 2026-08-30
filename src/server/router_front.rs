@@ -659,6 +659,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         &request,
         state.config.chat_template_kwargs.as_ref(),
         false,
+        false,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;

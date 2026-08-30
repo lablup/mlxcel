@@ -77,15 +77,39 @@ use super::types::request::{
 };
 use super::types::{ChatCompletionRequest, Role};
 
+#[cfg(test)]
+thread_local! {
+    static HISTORY_BOUNDARY_RENDER_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_history_boundary_render_attempts_for_test() {
+    HISTORY_BOUNDARY_RENDER_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn history_boundary_render_attempts_for_test() -> usize {
+    HISTORY_BOUNDARY_RENDER_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn history_boundary_render_attempted() {
+    HISTORY_BOUNDARY_RENDER_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+}
+
+#[cfg(not(test))]
+fn history_boundary_render_attempted() {}
+
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
     /// The same conversation re-rendered with `add_generation_prompt = false`
     /// (issue #1143): the history-boundary form of this request's prompt.
     ///
-    /// `Some` only when the prompt cache is enabled and the request is
-    /// text-only; `None` otherwise, and also `None` when the history render
-    /// failed or did not come out as a text prefix of `prompt` (a template
-    /// that reorders or rewrites history rather than appending to it).
+    /// `Some` only when the prompt cache is enabled, the loaded model supports
+    /// snapshot reuse, and the request is text-only; `None` otherwise, and
+    /// also `None` when the history render failed or did not come out as a text
+    /// prefix of `prompt` (a template that reorders or rewrites history rather
+    /// than appending to it).
     ///
     /// Everything the generation prompt adds beyond this point is exactly the
     /// part that cannot survive to the next turn: thought scaffolds, primed
@@ -299,7 +323,7 @@ pub(crate) async fn prepare_chat_request(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
 ) -> Result<PreparedChatRequest> {
-    prepare_chat_request_with_cache(processor, request, server_default_kwargs, false).await
+    prepare_chat_request_with_cache(processor, request, server_default_kwargs, false, false).await
 }
 
 /// Full variant of [`prepare_chat_request`] with explicit prompt-cache
@@ -319,6 +343,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
     prompt_cache_enabled: bool,
+    snapshot_reuse_capable: bool,
 ) -> Result<PreparedChatRequest> {
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
@@ -358,21 +383,17 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let preserve_thinking = merged_kwargs.preserve_thinking();
 
     // Whether to produce the extra history-boundary render (issue #1143).
-    // Only worth doing when the prompt cache is live, and only sound for
-    // text-only requests: a multimodal prompt's token stream is rewritten by
-    // placeholder expansion after rendering, so a text-level prefix says
-    // nothing about the token-level one. The operator kill switch is checked
-    // here as well as in the scheduler, so disabling the feature really does
-    // remove this render and the tokenization that follows it, rather than
-    // paying for both and discarding the result on the worker thread.
+    // Only worth doing when the prompt cache is live, the loaded model can
+    // reuse model-owned snapshots, and the request is text-only: a multimodal
+    // prompt's token stream is rewritten by placeholder expansion after
+    // rendering, so a text-level prefix says nothing about the token-level one.
+    // The operator kill switch is checked here as well as in the scheduler, so
+    // disabling the feature really does remove this render and the tokenization
+    // that follows it, rather than paying for both and discarding the result on
+    // the worker thread.
     //
-    // Known gap: this cannot yet tell whether the loaded model is one of the
-    // `supports_snapshot_reuse()` families, because that capability lives on
-    // the model behind the worker thread and is not published to the HTTP
-    // layer. On a dense-KV deployment the render and encode below are paid and
-    // then discarded by the scheduler. Tracked separately; the kill switch is
-    // the interim opt-out.
     let render_history_prefix = prompt_cache_enabled
+        && snapshot_reuse_capable
         && !super::prompt_cache::boundary_snapshot_disabled()
         && declared_images == 0
         && declared_audio == 0
@@ -404,6 +425,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
         match processor.apply_raw_with_kwargs(&raw_messages, effective_tools, &merged_kwargs) {
             Ok(rendered) => {
                 let history = render_history_prefix.then(|| {
+                    history_boundary_render_attempted();
                     processor.apply_raw_history_with_kwargs(
                         &raw_messages,
                         effective_tools,
@@ -432,6 +454,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
         match processor.apply_with_kwargs(&messages, effective_tools, &merged_kwargs) {
             Ok(rendered) => {
                 let history = render_history_prefix.then(|| {
+                    history_boundary_render_attempted();
                     processor.apply_history_with_kwargs(&messages, effective_tools, &merged_kwargs)
                 });
                 (rendered, history)

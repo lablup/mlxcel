@@ -258,6 +258,7 @@ pub struct ModelProvider {
     model_id: String,
     created_at: i64,
     loaded: Arc<AtomicBool>,
+    snapshot_reuse_capable: Arc<AtomicBool>,
     chat_unavailable: Arc<AtomicBool>,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
@@ -531,6 +532,7 @@ impl ModelProvider {
             model_id,
             created_at: chrono::Utc::now().timestamp(),
             loaded: Arc::new(AtomicBool::new(false)),
+            snapshot_reuse_capable: Arc::new(AtomicBool::new(false)),
             chat_unavailable,
             batch_metrics,
             batch_observability,
@@ -566,6 +568,8 @@ impl ModelProvider {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let snapshot_reuse_capable = Arc::new(AtomicBool::new(false));
+        let snapshot_reuse_capable_clone = snapshot_reuse_capable.clone();
         let chat_unavailable = Arc::new(AtomicBool::new(false));
         let chat_unavailable_clone = chat_unavailable.clone();
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
@@ -582,6 +586,7 @@ impl ModelProvider {
             reasoning_budget,
             request_rx,
             loaded_clone,
+            snapshot_reuse_capable_clone,
             chat_unavailable_clone,
             worker_model_id,
             metrics_clone,
@@ -594,6 +599,7 @@ impl ModelProvider {
             model_id,
             created_at,
             loaded,
+            snapshot_reuse_capable,
             batch_metrics,
             batch_observability,
             chat_unavailable,
@@ -631,6 +637,7 @@ impl ModelProvider {
         let created_at = chrono::Utc::now().timestamp();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
+        let snapshot_reuse_capable = Arc::new(AtomicBool::new(false));
         let single_stream_queue_admission = Arc::new(AtomicBool::new(false));
 
         let worker_handle = model_worker::spawn_xla_model_worker(
@@ -638,6 +645,7 @@ impl ModelProvider {
             b_max,
             request_rx,
             loaded.clone(),
+            snapshot_reuse_capable.clone(),
             model_id.clone(),
             batch_metrics.clone(),
             batch_observability.clone(),
@@ -648,6 +656,7 @@ impl ModelProvider {
             model_id,
             created_at,
             loaded,
+            snapshot_reuse_capable,
             batch_metrics,
             batch_observability,
             chat_unavailable: Arc::new(AtomicBool::new(false)),
@@ -890,6 +899,8 @@ impl ModelProvider {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let snapshot_reuse_capable = Arc::new(AtomicBool::new(false));
+        let snapshot_reuse_capable_clone = snapshot_reuse_capable.clone();
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
@@ -953,6 +964,7 @@ impl ModelProvider {
             adapter_path,
             request_rx,
             loaded_clone,
+            snapshot_reuse_capable_clone,
             chat_unavailable_clone,
             worker_model_id,
             sched_config,
@@ -966,6 +978,7 @@ impl ModelProvider {
             model_id,
             created_at,
             loaded,
+            snapshot_reuse_capable,
             batch_metrics,
             batch_observability,
             max_queue_depth,
@@ -999,6 +1012,8 @@ impl ModelProvider {
         // Shared loaded flag
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let snapshot_reuse_capable = Arc::new(AtomicBool::new(false));
+        let snapshot_reuse_capable_clone = snapshot_reuse_capable.clone();
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
@@ -1055,6 +1070,7 @@ impl ModelProvider {
             adapter_path,
             request_rx,
             loaded_clone,
+            snapshot_reuse_capable_clone,
             chat_unavailable_clone,
             worker_model_id,
             sched_config,
@@ -1068,6 +1084,7 @@ impl ModelProvider {
             model_id,
             created_at,
             loaded,
+            snapshot_reuse_capable,
             batch_metrics,
             batch_observability,
             max_queue_depth,
@@ -1130,6 +1147,11 @@ impl ModelProvider {
     /// Check if model is loaded and ready for inference
     pub fn is_loaded(&self) -> bool {
         self.loaded.load(Ordering::Acquire)
+    }
+
+    /// Whether the loaded generation model supports model-owned snapshot reuse.
+    pub fn supports_snapshot_reuse(&self) -> bool {
+        self.snapshot_reuse_capable.load(Ordering::Acquire)
     }
 
     /// Whether the generation worker reached a terminal no-chat state.
