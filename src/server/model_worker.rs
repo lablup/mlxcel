@@ -263,6 +263,13 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     adapter_path.as_deref(),
                     &sched_config.tensor_parallel,
                 )
+            } else if let Some(adapter) = adapter_path {
+                // A single unscaled adapter fused at load keeps the
+                // pre-#1439 channel even though it now also appears in
+                // `lora_adapters`, which exists so the inventory route can
+                // report it (#1439).
+                tracing::info!("Loading LoRA adapter from {:?}", adapter);
+                backend.load_model_with_adapter(&model_path, &adapter)
             } else if !sched_config.lora_adapters.is_empty() {
                 tracing::info!(
                     "Loading {} LoRA adapter(s) from --lora/--lora-scaled",
@@ -273,9 +280,6 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     &sched_config.lora_adapters,
                     sched_config.lora_runtime.as_deref(),
                 )
-            } else if let Some(adapter) = adapter_path {
-                tracing::info!("Loading LoRA adapter from {:?}", adapter);
-                backend.load_model_with_adapter(&model_path, &adapter)
             } else {
                 backend.load_model(&model_path)
             };

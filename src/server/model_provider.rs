@@ -453,8 +453,9 @@ impl ModelProvider {
         if config.no_batch {
             // The legacy sequential worker predates multi-adapter and
             // runtime LoRA (#1439) and would silently serve base weights;
-            // refuse rather than pretend.
-            if !config.lora_adapters.is_empty() {
+            // refuse rather than pretend. A single unscaled adapter still
+            // loads here through `adapter_path`, as it always did.
+            if adapter_path.is_none() && !config.lora_adapters.is_empty() {
                 anyhow::bail!(
                     "--no-batch bypasses the batch scheduler, which owns --lora / --lora-scaled \
                      serving. Drop --no-batch, or fuse a single adapter through --adapter"

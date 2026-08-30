@@ -20,7 +20,7 @@
 //! not need to remember llama-server compatibility rules.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mlxcel_core::cache::{BatchKvQuantConfig, DEFAULT_KV_GROUP_SIZE, KvQuantScheme};
 use mlxcel_core::lang_analyzer::LangBiasConfig;
@@ -639,22 +639,31 @@ impl ServerStartupInput {
             && self.adapter_path.is_none()
             && !self.lora_fuse
             && !parallel_load;
+        // The trivial single-adapter fused case still loads through the
+        // pre-#1439 `adapter_path` channel, so that load stays byte-identical
+        // and stays available to the tensor-parallel and legacy sequential
+        // workers, which have no spec-list entry point.
+        let legacy_single = if runtime_lora_mode || self.adapter_path.is_some() {
+            None
+        } else {
+            crate::lora::multi::is_legacy_single(&parsed_lora).map(Path::to_path_buf)
+        };
         let (adapter_path, lora_adapters) = if self.adapter_path.is_some() {
             // Programmatic callers that set adapter_path directly keep it.
             (self.adapter_path.clone(), Vec::new())
-        } else if runtime_lora_mode {
-            // Runtime mode serves every adapter, single ones included,
-            // through the spec list so the shared scale handles exist.
-            (None, parsed_lora)
-        } else if let Some(single) = crate::lora::multi::is_legacy_single(&parsed_lora) {
-            (Some(single.to_path_buf()), Vec::new())
         } else {
-            (None, parsed_lora)
+            // `lora_adapters` is the specification the inventory route and
+            // the per-request `lora` field are resolved against, so it holds
+            // every operator-named adapter whichever channel loads it. A
+            // legacy single adapter used to leave it empty, which made
+            // `GET /lora-adapters` report `[]` for a server started with
+            // `--lora <path>`.
+            (legacy_single.clone(), parsed_lora)
         };
         // Multi-adapter fusion runs on the standard MLX load path only; the
         // tensor-parallel and pipeline loaders take the single-adapter
         // channel. Refusing here beats fusing nothing silently.
-        if !lora_adapters.is_empty() && parallel_load {
+        if legacy_single.is_none() && !lora_adapters.is_empty() && parallel_load {
             anyhow::bail!(
                 "--lora-scaled / multiple --lora adapters are not supported together with \
                  tensor or pipeline parallelism yet; use a single unscaled --lora adapter"
