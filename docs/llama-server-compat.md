@@ -453,7 +453,7 @@ mlxcel's route was served by a dedicated Whisper worker, and that worker is popu
 
 The second row is the only shape b10621 can express, and it was the one that did not work. A `llama-server` deployment that transcribes through its loaded model had no mlxcel equivalent, however closely the multipart field set matched: route-name overlap was not compatibility. That is the design decision #1446 asked for, and it was settled by measurement rather than preference.
 
-**The shared route now dispatches through the loaded chat model, exactly as upstream does.** Posting the clip to `gemma3n-e2b-4bit` returns its transcript. The Whisper worker stays the implementation when no chat model can take audio, which is the Whisper-server shape b10621 cannot express at all, so it adds no divergence in any configuration upstream can reach.
+**The shared route now dispatches through the loaded chat model, exactly as upstream does.** Posting the clip to `gemma3n-e2b-4bit` returns its transcript. The Whisper worker stays the implementation when no chat model can take audio, which is the Whisper-server shape b10621 cannot express at all, so it adds no divergence in any configuration upstream can reach; its own limitations are listed below.
 
 ### What a client sees
 
@@ -476,18 +476,27 @@ Aligned with upstream, each checked against the pinned source rather than the sc
 - The multipart duplicate rules are upstream's: a repeated text field collapses into an array, which upstream's `json_value` then rejects on type and replaces with the default, so a duplicated `prompt` is ignored and a duplicated `response_format` falls back to `json`; a repeated `file` part keeps the last one.
 - Unknown fields are carried and ignored.
 
+### Containers
+
+The accepted set is upstream's: **wav, mp3 and flac**, the three its mtmd audio front-end decodes. The container is identified from the clip's own magic bytes, not from the `format` string the client sends, so a mislabelled clip transcribes here exactly as it does upstream and a container outside the set is refused on content. RIFF/WAVE keeps mlxcel's in-tree reader, so every WAV clip decodes byte-for-byte as it did before; mp3 and flac go through [`symphonia`](https://github.com/pdeljanov/Symphonia) (pure Rust, MPL-2.0), enabled for those two codecs only.
+
 ### Limits
 
-Every bound is applied before a decoder sees the clip: at most 32 multipart parts, 25 MiB per part (matching the route's body limit), and a WAV geometry read from the header rather than from a decode: at most 192 kHz, 8 channels and 600 seconds. A `data` chunk that declares more audio than the file carries is clamped to what is present, so an amplifying header costs a header parse. A malformed or truncated file is a 400 naming the structural problem.
+Every bound is applied before a decoder sees the clip: at most 32 multipart parts, 25 MiB per part (matching the route's body limit), and the geometry read from the container header rather than from a decode: at most 192 kHz, 8 channels and 600 seconds. A `data` chunk that declares more audio than the file carries is clamped to what is present, so an amplifying header costs a header parse. A compressed container states its length in a header orders of magnitude smaller than the samples it expands to, so the per-clip frame budget is re-checked against what the decoder actually produces: a file whose header understates its length stops at the cap instead of growing without bound. A FLAC upload additionally has its metadata-block chain walked before the decoder reads a field from it, because a 12 MiB file carrying a genuine FLAC header and a random body made the probe allocate about 3.9 GiB of resident memory, measured against a same-size control on the same warm server that never reached the probe and grew 8 MiB. That allocation is sized from fields inside the file, so the only place to stop it is ahead of the decoder; with the check in place the same twenty requests grow 2 MiB. A malformed or truncated file is a 400 naming the structural problem, answered in hundredths of a second.
 
-### Still deferred
+### Streaming
 
-Both route entries stay `deferred` against #1446 for two divergences a b10621 client can observe:
+`stream=true` on the chat-model path emits one `transcript.text.delta` per decoded token, then the `transcript.text.done` frame and `data: [DONE]`, which is upstream's granularity as well as its frame shapes. The streamed response drives its own generation rather than re-framing a finished one, so the deltas arrive as the model produces them; their concatenation is the same string the non-streaming response returns in `text`.
 
-- **Container support.** Only RIFF/WAVE is accepted. b10621's mtmd front-end decodes mp3, flac and the rest, so a non-WAV clip is a 400 here and a transcript there.
-- **Stream granularity.** A streamed response arrives as one delta carrying the whole transcript. The frame shapes and the terminator are upstream's; the incremental delivery is not.
+### The Whisper-server shape is an mlxcel extension
 
-A third residue is recorded but cannot be reached from a b10621 command line: on the Whisper-server shape the `usage` counts are zeros, because the STT worker reports no token counts, and `prompt` steers nothing there.
+`mlxcel-server -m models/mlx/whisper-tiny` loads a dedicated STT worker and no chat model, which is a server shape b10621 cannot express at all: it has no speech-to-text model, and its transcription route exists only as a translation layer over a chat model. On that shape three things differ from the chat-model path, and they are limitations of the mlxcel extension rather than b10621 divergences, because there is no upstream behavior to diverge from:
+
+- The `usage` counts report zeros: the STT worker returns a finished string and no token accounting.
+- `prompt` steers nothing, for the same reason.
+- A streamed response is a single delta carrying the whole transcript, because there is no token stream to split.
+
+Everything b10621 can express goes through the chat-model path, where all three are honored.
 
 ## Regeneration
 

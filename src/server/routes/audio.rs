@@ -205,6 +205,7 @@ async fn compat_transcribe(
         );
         return super::chat::stream_asr_completion(
             state,
+            live,
             request,
             crate::server::batch::RequestPriority::default(),
         )

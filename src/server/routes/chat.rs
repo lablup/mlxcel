@@ -872,6 +872,7 @@ pub(crate) struct ResumableStreamContext {
 /// and thinking tokens left in.
 pub(crate) async fn stream_asr_completion(
     state: AppState,
+    live: std::sync::Arc<LiveSettings>,
     request: ChatCompletionRequest,
     priority: RequestPriority,
 ) -> Response {
@@ -888,8 +889,9 @@ pub(crate) async fn stream_asr_completion(
     let prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
-        state.config.chat_template_kwargs.as_ref(),
+        live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
+        state.should_render_history_boundary_snapshot(),
     )
     .await
     {
@@ -900,6 +902,7 @@ pub(crate) async fn stream_asr_completion(
     };
     let prompt_cache_ctx = build_prompt_cache_request_context(
         &state,
+        &live,
         &request,
         &prepared.image_data,
         &prepared.audio_data,
@@ -908,7 +911,8 @@ pub(crate) async fn stream_asr_completion(
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // An ASR request carries no tools and no grammar, so the loop-detection
     // amplifier is off for the same reason it is off for a plain completion.
-    let mut options = build_generate_options(&request.params, &state.config, false);
+    let mut options =
+        build_generate_options_with_live(&request.params, &state.config, &live, false);
     options.priority = priority;
     options.prompt_cache_ctx = prompt_cache_ctx;
     options.image_soft_tokens = prepared.image_soft_tokens;

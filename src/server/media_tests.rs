@@ -109,12 +109,16 @@ async fn audio_acquisition_preserves_order_and_rejects_any_invalid_item() {
     assert!(error.to_string().contains("inline base64"));
 }
 
+/// A container outside b10621's set is typed as unsupported rather than
+/// silently dropped. `mp3` and `flac` joined `wav` in that set with #1446, so
+/// the case has to be a container upstream's mtmd front-end does not take
+/// either; `ogg` is one.
 #[tokio::test]
 async fn unsupported_audio_format_is_typed_instead_of_silently_dropped() {
     let request = build_chat_request(vec![ContentPart::InputAudio {
         input_audio: InputAudio {
             data: "AA==".to_string(),
-            format: "mp3".to_string(),
+            format: "ogg".to_string(),
         },
     }]);
     let error = try_extract_chat_audio_data(&request).await.unwrap_err();
@@ -122,6 +126,25 @@ async fn unsupported_audio_format_is_typed_instead_of_silently_dropped() {
         error,
         super::AudioAcquisitionError::UnsupportedFormat { clip_index: 0, .. }
     ));
+}
+
+/// The containers #1446 added are accepted at the format gate. The bytes here
+/// are not a real clip, so acquisition fails later on content; what matters is
+/// that it is no longer refused on the format string alone.
+#[tokio::test]
+async fn mp3_and_flac_are_accepted_at_the_format_gate() {
+    for format in ["mp3", "mpeg", "flac", "wave"] {
+        let request = build_chat_request(vec![ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "AA==".to_string(),
+                format: format.to_string(),
+            },
+        }]);
+        let outcome = try_extract_chat_audio_data(&request).await;
+        if let Err(super::AudioAcquisitionError::UnsupportedFormat { .. }) = outcome {
+            panic!("{format} must not be refused on its format string (#1446)");
+        }
+    }
 }
 
 #[test]

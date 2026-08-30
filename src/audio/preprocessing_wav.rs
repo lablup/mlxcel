@@ -5,6 +5,7 @@ use super::{
 
 const MAX_WAV_CHUNKS: usize = 256;
 
+#[derive(Debug)]
 pub(super) struct NativeWaveform {
     pub samples: Vec<f32>,
     pub sample_rate: u32,

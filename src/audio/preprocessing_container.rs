@@ -99,6 +99,75 @@ pub(crate) fn sniff(bytes: &[u8]) -> Option<AudioContainer> {
     None
 }
 
+/// The geometry a compressed clip declares, read from its container header
+/// without decoding a single sample (issue #1446).
+///
+/// Exposed for the transcription route, which bounds an upload on sample rate,
+/// channel count and duration before a decoder ever sees it. The route reads a
+/// RIFF/WAVE header itself; this is the same read for the two compressed
+/// containers, so all three go through one geometry check instead of the route
+/// growing a second decoder.
+///
+/// `duration_seconds` is `None` when the container declares no frame count,
+/// which an MPEG stream without a Xing or VBRI header genuinely does not. That
+/// is not a hole: the decode loop caps itself at the per-clip frame budget, so
+/// an undeclared length is bounded where it can actually be measured rather
+/// than guessed at from the header.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CompressedGeometry {
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) duration_seconds: Option<f64>,
+}
+
+/// Read a compressed container's declared geometry, or `None` when `bytes` are
+/// not one of the compressed containers b10621 accepts.
+///
+/// # Errors
+///
+/// Returns a description of the first structural problem, in the shape the
+/// route's existing WAV probe uses.
+#[must_use]
+pub(crate) fn probe_compressed(bytes: &[u8]) -> Option<Result<CompressedGeometry, String>> {
+    let container = match sniff(bytes)? {
+        AudioContainer::Wav => return None,
+        other => other,
+    };
+    if container == AudioContainer::Flac
+        && let Err(e) = validate_flac_header(bytes, 0)
+    {
+        return Some(Err(e.to_string()));
+    }
+    Some(
+        open(probe_prefix(bytes), container, 0)
+            .map_err(|e| e.to_string())
+            .and_then(|(_, params)| {
+                let sample_rate = params.sample_rate.unwrap_or(0);
+                if sample_rate == 0 {
+                    return Err(format!(
+                        "{} stream declares no sample rate",
+                        container.name()
+                    ));
+                }
+                let channels = params
+                    .channels
+                    .map(|c| u16::try_from(c.count()).unwrap_or(u16::MAX))
+                    .unwrap_or(1)
+                    .max(1);
+                let duration_seconds = params
+                    .n_frames
+                    .and_then(|n| u32::try_from(n).ok().map(f64::from).or(Some(n as f64)))
+                    .filter(|n| *n > 0.0)
+                    .map(|frames| frames / f64::from(sample_rate));
+                Ok(CompressedGeometry {
+                    sample_rate,
+                    channels,
+                    duration_seconds,
+                })
+            }),
+    )
+}
+
 /// The geometry a clip declares, read without decoding its samples.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ContainerSpec {
@@ -168,7 +237,10 @@ fn probe(
     container: AudioContainer,
     clip_index: usize,
 ) -> Result<Probed, AudioPreprocessError> {
-    let (_, params) = open(bytes, container, clip_index)?;
+    if container == AudioContainer::Flac {
+        validate_flac_header(bytes, clip_index)?;
+    }
+    let (_, params) = open(probe_prefix(bytes), container, clip_index)?;
     let sample_rate = params
         .sample_rate
         .ok_or_else(|| AudioPreprocessError::Corrupt {
@@ -189,6 +261,104 @@ fn probe(
         sample_rate,
         frames,
     })
+}
+
+/// How much of a clip the geometry probe is allowed to look at.
+///
+/// A container states its geometry in a header, so the probe never needs the
+/// body: FLAC's STREAMINFO is the first metadata block after the four-byte
+/// marker, and an MPEG stream's first frame header sits just past its ID3 tag.
+/// 256 KiB covers both with room for an ID3v2 tag carrying cover art.
+///
+/// The cap is not a tidiness measure. Handing `symphonia`'s probe a 12 MiB
+/// upload whose FLAC header parses but whose body is random bytes cost about
+/// 196 MiB of resident memory per request, measured as 3.9 GiB of growth over
+/// twenty requests against a control of the same size that never reached the
+/// probe and grew 4 MiB. Probing a bounded prefix makes that cost independent
+/// of the upload size, so a malformed container is refused in constant memory
+/// rather than in memory the caller chooses.
+const PROBE_PREFIX_BYTES: usize = 256 * 1024;
+
+/// The prefix the geometry probe reads.
+fn probe_prefix(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(PROBE_PREFIX_BYTES)]
+}
+
+/// Walk a FLAC file's metadata-block chain and refuse one that is not
+/// structurally sound, before `symphonia` reads a single field from it.
+///
+/// This is not redundant with the decoder's own parsing. A 12 MiB upload whose
+/// first 64 bytes are a genuine FLAC header and whose remainder is random
+/// bytes made the probe allocate about 3.9 GiB of resident memory, measured
+/// against a control of the same size and on the same warm server that never
+/// reached the probe and grew 8 MiB, and against an MPEG file of the same
+/// shape that grew 5 MiB. The allocation is sized from fields inside the file,
+/// so the only place to stop it is before the decoder reads them.
+///
+/// The chain is cheap and fully specified: after the `fLaC` marker each block
+/// carries a four-byte header of one last-block flag, a seven-bit type and a
+/// 24-bit length. A sound file's first block is STREAMINFO with length 34, the
+/// chain terminates, and every block lies inside the file. Garbage fails all
+/// three within a few dozen bytes of reading.
+fn validate_flac_header(bytes: &[u8], clip_index: usize) -> Result<(), AudioPreprocessError> {
+    let corrupt = |reason: &str| {
+        Err(AudioPreprocessError::Corrupt {
+            clip_index,
+            reason: format!("flac container is malformed: {reason}"),
+        })
+    };
+    let mut offset = 4usize; // past the `fLaC` marker
+    let mut first = true;
+    loop {
+        let Some(header) = bytes.get(offset..offset + 4) else {
+            return corrupt("metadata block chain runs past the end of the file");
+        };
+        let last = header[0] & 0x80 != 0;
+        let block_type = header[0] & 0x7F;
+        let length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        if first {
+            // STREAMINFO is mandatory, first, and exactly 34 bytes.
+            if block_type != 0 || length != 34 {
+                return corrupt("first metadata block is not a 34-byte STREAMINFO");
+            }
+            let Some(info) = bytes.get(offset + 4..offset + 4 + 34) else {
+                return corrupt("STREAMINFO is truncated");
+            };
+            // Bits 80..100 of STREAMINFO are the sample rate, then three bits
+            // of channel count and five of bits-per-sample, all biased by one.
+            let packed = u64::from_be_bytes([
+                info[10], info[11], info[12], info[13], info[14], info[15], info[16], info[17],
+            ]);
+            let sample_rate = (packed >> 44) as u32;
+            let channels = ((packed >> 41) & 0x7) as u16 + 1;
+            let bits_per_sample = ((packed >> 36) & 0x1F) as u16 + 1;
+            if sample_rate == 0 || sample_rate > 655_350 {
+                return corrupt("STREAMINFO declares an out-of-range sample rate");
+            }
+            if !(1..=8).contains(&channels) {
+                return corrupt("STREAMINFO declares an out-of-range channel count");
+            }
+            if !(4..=32).contains(&bits_per_sample) {
+                return corrupt("STREAMINFO declares an out-of-range sample depth");
+            }
+            first = false;
+        }
+        let Some(next) = offset.checked_add(4).and_then(|o| o.checked_add(length)) else {
+            return corrupt("metadata block length overflows");
+        };
+        if next > bytes.len() {
+            return corrupt("a metadata block extends past the end of the file");
+        }
+        offset = next;
+        if last {
+            return Ok(());
+        }
+        if offset >= PROBE_PREFIX_BYTES {
+            // A sound file's metadata ends long before this; a chain still
+            // walking here is reading its own body as block headers.
+            return corrupt("metadata block chain does not terminate");
+        }
+    }
 }
 
 /// Probe the container and return its reader plus the default track's codec
@@ -296,6 +466,9 @@ fn decode_compressed(
     policy: AudioFamilyPolicy,
     cancelled: &dyn AudioCancellation,
 ) -> Result<NativeWaveform, AudioPreprocessError> {
+    if container == AudioContainer::Flac {
+        validate_flac_header(bytes, clip_index)?;
+    }
     let (mut reader, params) = open(bytes, container, clip_index)?;
     let track_id = reader
         .tracks()
@@ -584,8 +757,7 @@ mod tests {
         let is_duration_limit = |err: &AudioPreprocessError| matches!(err, AudioPreprocessError::Limit { limit, .. } if *limit == "source duration samples");
 
         let err = inspect(FLAC, 0, tiny, &NeverCancel)
-            .err()
-            .expect("a declared length past the cap is refused before decoding");
+            .expect_err("a declared length past the cap is refused before decoding");
         assert!(is_duration_limit(&err), "flac: unexpected error {err}");
 
         // The fixture is encoded with `-write_xing 0`, so this is the
@@ -595,18 +767,69 @@ mod tests {
             "an MPEG stream with no declared length has nothing to check at inspect"
         );
         let err = decode(MP3, 0, tiny, &NeverCancel)
-            .err()
-            .expect("the decode loop's own cap bounds an undeclared length");
+            .expect_err("the decode loop's own cap bounds an undeclared length");
         assert!(is_duration_limit(&err), "mp3: unexpected error {err}");
+    }
+
+    /// A genuine FLAC header followed by a body of random bytes is the shape
+    /// that made the probe allocate about 3.9 GiB, so the structural check has
+    /// to reject it from the metadata chain alone, without the decoder.
+    #[test]
+    fn a_flac_header_with_a_garbage_body_is_refused_structurally() {
+        let mut bomb = FLAC[..64.min(FLAC.len())].to_vec();
+        bomb.extend(std::iter::repeat_n(0xC3u8, 256 * 1024));
+        let err =
+            decode(&bomb, 0, policy(), &NeverCancel).expect_err("a garbage body must be refused");
+        assert!(
+            err.to_string().contains("flac container is malformed"),
+            "the structural check must be what refuses it, not the decoder: {err}"
+        );
+    }
+
+    /// The structural check must not reject the real thing: a sound file's
+    /// metadata chain terminates and every block lies inside it.
+    #[test]
+    fn a_sound_flac_passes_the_structural_check() {
+        assert!(validate_flac_header(FLAC, 0).is_ok());
+    }
+
+    /// Each refusal reason is reachable, so the check cannot silently degrade
+    /// into "accept everything" if a later edit breaks the walk.
+    #[test]
+    fn the_structural_check_names_what_was_wrong() {
+        let cases: [(&str, Vec<u8>); 3] = [
+            // A first block that is not a 34-byte STREAMINFO.
+            ("first metadata block", {
+                let mut v = b"fLaC".to_vec();
+                v.extend([0x04, 0x00, 0x00, 0x22]);
+                v.extend(std::iter::repeat_n(0u8, 34));
+                v
+            }),
+            // A block that claims more bytes than the file holds.
+            ("past the end", {
+                let mut v = FLAC[..42.min(FLAC.len())].to_vec();
+                v.extend([0x04, 0xFF, 0xFF, 0xFF]);
+                v
+            }),
+            // Nothing after the marker at all.
+            ("runs past the end", b"fLaC".to_vec()),
+        ];
+        for (needle, bytes) in cases {
+            let err = validate_flac_header(&bytes, 0)
+                .expect_err(&format!("{needle}: expected a refusal"));
+            assert!(
+                err.to_string().contains(needle),
+                "expected {needle:?} in {err}"
+            );
+        }
     }
 
     /// The WAV path is untouched: bytes that are not any accepted container
     /// keep the WAV reader's own diagnostic, which names what was wrong.
     #[test]
     fn unrecognized_bytes_keep_the_wav_readers_diagnostic() {
-        let err = decode(b"not audio at all, really", 0, policy(), &NeverCancel)
-            .err()
-            .expect("refused");
+        let err =
+            decode(b"not audio at all, really", 0, policy(), &NeverCancel).expect_err("refused");
         assert!(
             err.to_string().contains("RIFF/WAVE"),
             "unexpected diagnostic: {err}"
