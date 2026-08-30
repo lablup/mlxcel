@@ -115,6 +115,8 @@ pub struct ServerStartupConfig {
     // decode watchdog that spelling used to carry.
     pub http_timeout: u64,
     pub decode_timeout: u64,
+    /// b10621 `--sleep-idle-seconds` (#1440); negative disables.
+    pub sleep_idle_seconds: i64,
     /// `--api-prefix`, already validated by
     /// [`crate::server::transport::resolve_api_prefix`]. Empty = no prefix.
     pub api_prefix: String,
@@ -585,6 +587,7 @@ impl Default for ServerStartupConfig {
             n_predict: -1,
             http_timeout: crate::server::transport::DEFAULT_HTTP_TIMEOUT_SECS,
             decode_timeout: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
+            sleep_idle_seconds: -1,
             api_prefix: String::new(),
             sse_ping_interval: Some(std::time::Duration::from_secs(
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
@@ -1449,6 +1452,7 @@ pub(super) fn build_server_config(
         reasoning_budget_message: startup.reasoning_budget_message.clone(),
         api_keys,
         decode_timeout_seconds: startup.decode_timeout,
+        sleep_idle_seconds: startup.sleep_idle_seconds,
         api_prefix: startup.api_prefix.clone(),
         sse_ping_interval: startup.sse_ping_interval,
         model_alias: startup.model_alias.clone(),

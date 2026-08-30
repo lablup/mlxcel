@@ -98,6 +98,8 @@ impl BatchScheduler {
             model,
             tokenizer,
             forced_reasoning_message: std::cell::RefCell::new(None),
+            sleep_idle: None,
+            idle_sleep_due: false,
             lora_runtime: None,
             lora_applied: None,
             generation_stream,
@@ -695,6 +697,14 @@ impl BatchScheduler {
     /// ids once via
     /// [`crate::server::thinking_budget::resolve_thinking_token_ids`] after
     /// the tokenizer is loaded.
+    /// Attach b10621's idle-sleep window (#1440). A negative value is
+    /// upstream's disabled sentinel and leaves the loop blocking forever on an
+    /// empty queue, exactly as it did before the flag existed.
+    pub fn with_sleep_idle_seconds(mut self, seconds: i64) -> Self {
+        self.sleep_idle = resolve_sleep_idle(seconds);
+        self
+    }
+
     pub fn with_reasoning_budget(
         mut self,
         budget: Option<ThinkingBudget>,
@@ -722,5 +732,41 @@ impl BatchScheduler {
     pub fn with_prompt_cache(mut self, store: Option<Arc<PromptCacheStore>>) -> Self {
         self.prompt_cache = store;
         self
+    }
+}
+
+/// b10621's `--sleep-idle-seconds` value domain (#1440).
+///
+/// Upstream disables the sleep with `sleep_idle_seconds < 0` (its default is
+/// `-1`) and arms it at any non-negative value, `0` included, which means
+/// "sleep as soon as the queue empties". `None` here is that disabled state,
+/// and it is what keeps the scheduler's `Idle` arm on the unbounded block it
+/// used before the flag existed.
+pub(crate) fn resolve_sleep_idle(seconds: i64) -> Option<std::time::Duration> {
+    (seconds >= 0).then(|| std::time::Duration::from_secs(seconds as u64))
+}
+
+#[cfg(test)]
+mod sleep_idle_tests {
+    use super::resolve_sleep_idle;
+    use std::time::Duration;
+
+    #[test]
+    fn a_negative_window_is_upstreams_disabled_sentinel() {
+        assert_eq!(resolve_sleep_idle(-1), None, "the b10621 default");
+        assert_eq!(resolve_sleep_idle(-30), None, "any negative disables");
+    }
+
+    #[test]
+    fn zero_arms_the_sleep_rather_than_disabling_it() {
+        // Upstream's gate is `sleep_idle_seconds < 0`, so `0` is a legal
+        // "sleep as soon as the queue empties" and must not fold into None.
+        assert_eq!(resolve_sleep_idle(0), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_positive_window_is_taken_in_seconds() {
+        assert_eq!(resolve_sleep_idle(5), Some(Duration::from_secs(5)));
+        assert_eq!(resolve_sleep_idle(3600), Some(Duration::from_secs(3600)));
     }
 }

@@ -205,12 +205,14 @@ if run_case rationale-on-supported "$dir" 1; then
   assert_contains rationale-on-supported "non-null rationale"
 fi
 
-# The fixture has to be an entry that is actually `deferred`, and the set
-# shrinks as the epic closes: `POST /completion` served here until #1477 made
-# it `by_design`, at which point the case silently started passing a legal
-# manifest. `--sleep-idle-seconds` (#1440) is the last one.
-dir="$(make_case rationale-on-deferred observability-and-slots '--sleep-idle-seconds' \
-  'entry["rationale"] = {"kind": "policy", "reason": "r", "revisit_if": "c"}')"
+# The mutation sets the state itself rather than borrowing whichever entry
+# happens to be `deferred` today. It borrowed one twice and rotted twice: the
+# case pointed at `POST /completion` until #1477 made it `by_design`, then at
+# `--sleep-idle-seconds` until #1440 did the same, and each time the mutation
+# became legal and the case passed while checking nothing. With the epic closed
+# there is no `deferred` entry left to borrow, so it cannot depend on one.
+dir="$(make_case rationale-on-deferred sampling-and-grammar --min-p \
+  'entry["state"] = "deferred"; entry["rationale"] = {"kind": "policy", "reason": "r", "revisit_if": "c"}')"
 if run_case rationale-on-deferred "$dir" 1; then
   assert_contains rationale-on-deferred "non-null rationale"
 fi

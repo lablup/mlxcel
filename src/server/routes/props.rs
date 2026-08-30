@@ -233,9 +233,11 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         "bos_token": special_token_string(tokenizer_config.as_ref(), "bos_token"),
         "eos_token": special_token_string(tokenizer_config.as_ref(), "eos_token"),
         "build_info": concat!("mlxcel-", env!("CARGO_PKG_VERSION")),
-        // mlxcel has no idle-sleep lifecycle yet (`--sleep-idle-seconds` is
-        // deferred under #1440), so the server is truthfully never sleeping.
-        "is_sleeping": false,
+        // b10621 `--sleep-idle-seconds` (#1440): true while the serving worker
+        // has freed the model and is parked on the request channel. Read from
+        // the worker's own flag, so it cannot drift from what the next request
+        // will actually find.
+        "is_sleeping": state.model_provider.is_sleeping(),
         "cors_proxy_enabled": false,
         // -- mlxcel extension keys, resolved-configuration reporting --
         // The effective KV mode, not the requested one: startup has already

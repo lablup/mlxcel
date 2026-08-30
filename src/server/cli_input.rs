@@ -85,6 +85,10 @@ pub struct ServerStartupInput {
     pub timeout_was_set: bool,
     pub decode_timeout: u64,
     pub decode_timeout_was_set: bool,
+    /// b10621 `--sleep-idle-seconds` (#1440): idle seconds before the server
+    /// frees the model and sleeps. `-1` (and any negative) disables, which is
+    /// upstream's default and its own disabled sentinel.
+    pub sleep_idle_seconds: i64,
     /// Raw `--api-prefix`; validated in [`Self::into_startup_config`].
     pub api_prefix: String,
     /// Raw `--sse-ping-interval`; `-1` disables the pings.
@@ -1005,6 +1009,7 @@ impl ServerStartupInput {
             n_predict: self.n_predict,
             http_timeout: self.timeout,
             decode_timeout: self.decode_timeout,
+            sleep_idle_seconds: self.sleep_idle_seconds,
             api_prefix,
             sse_ping_interval,
             threads_http,

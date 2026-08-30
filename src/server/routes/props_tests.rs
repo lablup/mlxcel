@@ -283,6 +283,10 @@ async fn get_props_carries_the_b10621_key_set() {
         vec!["audio", "video", "vision"],
         "modalities carries exactly b10621's three flags"
     );
+    // b10621 `--sleep-idle-seconds` (#1440): reported from the serving worker's
+    // own flag, so it cannot drift from what the next request will find. False
+    // here because the route-test provider never sleeps, and false is also the
+    // truthful answer for a server started without the flag.
     assert_eq!(body["is_sleeping"], false);
     // The `by_design` divergence on the manifest's `GET /props` entry:
     // mlxcel takes media as content parts and has no textual marker, so

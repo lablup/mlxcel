@@ -31,6 +31,7 @@ use crate::test_support::env_lock::env_lock;
 
 fn sample_input() -> ServerStartupInput {
     ServerStartupInput {
+        sleep_idle_seconds: -1,
         context_compat: Default::default(),
         slot_compat: Default::default(),
         chat_compat: Default::default(),

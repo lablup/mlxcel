@@ -52,6 +52,7 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "reasoning_budget_message",
     "api_keys",
     "decode_timeout_seconds",
+    "sleep_idle_seconds",
     "api_prefix",
     "sse_ping_interval",
     "model_alias",
@@ -502,9 +503,11 @@ fn read_only_reason(field: &str) -> &'static str {
         | "n_keep"
         | "kv_cache_budget"
         | "enable_vlm_prefix_cache" => SCHEDULER_REASON,
-        "draft_model_path" | "num_draft_tokens" | "draft_kind" | "draft_block_size" => {
-            WORKER_REASON
-        }
+        // b10621 `--sleep-idle-seconds` (#1440): the serving worker reads the
+        // window when it builds its scheduler, so changing it live would only
+        // take effect on the next wake, which is worse than refusing it.
+        "draft_model_path" | "num_draft_tokens" | "draft_kind" | "draft_block_size"
+        | "sleep_idle_seconds" => WORKER_REASON,
         _ => MODEL_REASON,
     }
 }
@@ -518,6 +521,7 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "skip_chat_parsing" => json!(config.skip_chat_parsing),
         "no_prefill_assistant" => json!(config.no_prefill_assistant),
         "reasoning_budget_message" => json!(config.reasoning_budget_message),
+        "sleep_idle_seconds" => json!(config.sleep_idle_seconds),
         "api_keys" => json!({
             "configured": !config.api_keys.is_empty(),
             "count": config.api_keys.len(),

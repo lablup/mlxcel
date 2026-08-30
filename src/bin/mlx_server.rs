@@ -1066,6 +1066,17 @@ struct ServerArgs {
     #[arg(long = "settings")]
     settings: bool,
 
+    /// b10621 `--sleep-idle-seconds`: sleep after this many idle seconds,
+    /// freeing the model until the next request wakes it (-1 disables).
+    #[arg(
+        long = "sleep-idle-seconds",
+        value_name = "SECONDS",
+        default_value_t = -1,
+        allow_negative_numbers = true,
+        hide = true
+    )]
+    sleep_idle_seconds: i64,
+
     /// Path to save slot kv cache (default: disabled)
     #[arg(long = "slot-save-path", value_name = "PATH")]
     slot_save_path: Option<PathBuf>,
@@ -2441,6 +2452,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         timeout_was_set: long_cli_flag_was_set("timeout")
             || std::env::var_os("LLAMA_ARG_TIMEOUT").is_some(),
         decode_timeout: args.decode_timeout,
+        sleep_idle_seconds: args.sleep_idle_seconds,
         decode_timeout_was_set: long_cli_flag_was_set("decode-timeout")
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,
