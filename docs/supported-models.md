@@ -467,7 +467,9 @@ Some chat templates check a `thinking_mode` string (for example `thinking_mode =
 
 ### `reasoning_effort` and templates that validate their own kwargs
 
-The OpenAI-standard top-level `reasoning_effort` request field is forwarded to the chat template as a `reasoning_effort` Jinja kwarg, but only when the loaded template actually reads that name. Precedence, highest first: an explicit `chat_template_kwargs.reasoning_effort`, then the top-level field (including the flattened and nested `extra_body` spellings the OpenAI SDK produces), then the server-wide `--chat-template-kwargs` default. A checkpoint whose template never mentions `reasoning_effort` is unaffected: no kwarg is injected and the field has no effect, which is the same behavior as before.
+The OpenAI-standard top-level `reasoning_effort` request field resolves both whether thinking is enabled and which level value reaches the loaded chat template. After trimming and lowercasing for comparison, `none`, `off`, `disabled`, `false`, and `0` set `enable_thinking=false` and are not forwarded as a level; every other non-empty value sets `enable_thinking=true` and is forwarded verbatim as `reasoning_effort` when the template reads that name, or as `reasoning_strength` when the template reads that alias (including Muse Glimmer). Templates that read neither level name still receive the derived `enable_thinking` switch but no level kwarg. The same resolver accepts `reasoning: {"effort": "..."}` and boolean `reasoning` values in compatible `extra_body` fields.
+
+Precedence remains per key: an explicit per-request `chat_template_kwargs` entry wins, then the derived request control, then the server-wide `--chat-template-kwargs` default. The portable request therefore cannot overwrite an explicit `enable_thinking`, `reasoning_effort`, or `reasoning_strength`, while unrelated defaults persist.
 
 The value is passed through verbatim. OpenAI's vocabulary is `minimal` / `low` / `medium` / `high`, and a checkpoint's vocabulary need not match: Qwen3.8 accepts `xhigh` / `medium` / `low`, so `high` is valid OpenAI and invalid there while `xhigh` is the reverse. mlxcel does not translate between the two. The value sets the model's reasoning budget, and picking a different budget than the caller asked for is a silent rewrite the caller cannot detect.
 
@@ -475,7 +477,7 @@ A template that refuses the value calls Jinja's `raise_exception`, and that now 
 
 The `400` is specific to a deliberate refusal, not to render failures in general. mlxcel tells the two apart at the type level: `raise_exception` attaches a `TemplateRejection` sentinel as the error's source, so a template that mlxcel genuinely cannot render (an unimplemented filter, a malformed template) still degrades to the plain prompt exactly as it did before. The type is `pub`, so it is nameable outside the crate (`mlxcel::server::chat_template::TemplateRejection`), but its constructor and its field are both private, so nothing outside the render path can construct one and forge a false rejection. The rule applies to any template that validates a caller-supplied value, not just to `reasoning_effort`: templates that reject an `enable_thinking` value, a tool-choice value, or an unsupported role behave the same way.
 
-The Responses API's `reasoning.effort` remains advisory and is not mapped onto the template kwarg. Send `reasoning_effort` on `/v1/chat/completions`, or `chat_template_kwargs` on either surface, to set it.
+The Responses API's `reasoning.effort` feeds this same resolver and remains echoed unchanged on the response object. Its derived controls likewise override server-wide template defaults per key.
 
 ### `tojson` in chat templates behaves like Python `json.dumps`
 

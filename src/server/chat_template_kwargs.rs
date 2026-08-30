@@ -31,12 +31,15 @@
 //!    `extra_body` — secondary DashScope/OpenAI-SDK flat shape. **Only**
 //!    recognized for the `preserve_thinking` key, not a general-purpose
 //!    fallback for other kwargs.
-//! 4. Per-request top-level `reasoning_effort` (OpenAI-standard field), mapped
-//!    onto the `reasoning_effort` key only when the loaded template reads that
-//!    name. Applied by
-//!    [`crate::server::chat_request::resolve_effective_kwargs`], which folds it
-//!    into the per-request map before the server-default merge below, so it
-//!    loses to (1)-(3) and wins over (5)-(6).
+//! 4. Per-request reasoning controls derived from top-level
+//!    `reasoning_effort`, Responses `reasoning.effort`, or compatible
+//!    extra-body `reasoning` shapes. The resolver fills a missing
+//!    `enable_thinking` key and, for enabled effort, fills `reasoning_effort`
+//!    when the template reads that name or `reasoning_strength` when it reads
+//!    the alias. Applied by
+//!    [`crate::server::chat_request::resolve_effective_kwargs`], which folds
+//!    these values into the per-request map before the server-default merge
+//!    below, so they lose to (1)-(3) per key and win over (5)-(6).
 //! 5. Server-wide default from `--chat-template-kwargs` CLI flag.
 //! 6. Server-wide default from `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` env var (CLI
 //!    wins on conflict).

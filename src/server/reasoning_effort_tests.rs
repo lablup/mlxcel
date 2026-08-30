@@ -53,6 +53,18 @@ const QWEN3_8_TEMPLATE_SHA256: &str =
 /// "a checkpoint that ignores the field must be unaffected".
 const PLAIN_TEMPLATE: &str = "{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}";
 
+/// Qwen3-style control surface: the template only reads the boolean switch,
+/// not either effort-level spelling.
+const ENABLE_THINKING_TEMPLATE: &str = "{% for m in messages %}{{ m.content }}{% endfor %}{% if enable_thinking %}<think>\n{% endif %}";
+
+/// Selection probe for templates that happen to mention both level names.
+const BOTH_LEVEL_KEYS_TEMPLATE: &str =
+    "{{ reasoning_effort|default('unset') }}|{{ reasoning_strength|default('unset') }}";
+
+/// The pinned Muse Glimmer fixture whose level knob is `reasoning_strength`.
+const MUSE_GLIMMER_TEMPLATE: &str =
+    include_str!("../../tests/fixtures/muse_glimmer/chat_template.jinja");
+
 /// A template that fails for an *engine* reason rather than a deliberate
 /// refusal: the filter does not exist, so rendering raises
 /// `ErrorKind::UnknownFilter` with no [`super::chat_template::TemplateRejection`]
@@ -155,9 +167,31 @@ async fn prompt_for(
     processor: &ChatTemplateProcessor,
     req: &ChatCompletionRequest,
 ) -> anyhow::Result<String> {
-    prepare_chat_request(processor, req, None)
+    // The request-preparation future is large in debug builds. Keep it on the
+    // heap so the test harness's small worker stack does not become part of
+    // the feature's behavior under test.
+    Box::pin(prepare_chat_request(processor, req, None))
         .await
         .map(|prepared| prepared.prompt)
+}
+
+fn effective_kwargs(
+    processor: &ChatTemplateProcessor,
+    req: &ChatCompletionRequest,
+) -> ChatTemplateKwargs {
+    resolve_effective_kwargs(processor, req, None, &req.merged_extra_body())
+}
+
+fn render_with_effective_kwargs(
+    processor: &ChatTemplateProcessor,
+    req: &ChatCompletionRequest,
+) -> anyhow::Result<String> {
+    let messages = serde_json::to_value(&req.messages).expect("serialize test messages");
+    processor.apply_raw_with_kwargs(
+        &messages,
+        req.tools.as_deref(),
+        &effective_kwargs(processor, req),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +415,222 @@ async fn top_level_reasoning_effort_reaches_the_template() {
     assert_ne!(
         mapped, unset,
         "the top-level field must actually change the prompt"
+    );
+}
+
+#[test]
+fn reasoning_effort_none_sets_enable_thinking_false_and_no_level_kwarg() {
+    let mut processor = ChatTemplateProcessor::with_template(ENABLE_THINKING_TEMPLATE.to_string());
+    processor.set_default_enable_thinking(true);
+
+    let baseline = render_with_effective_kwargs(&processor, &request(user_hi()))
+        .expect("the enabled default must render");
+    assert!(baseline.contains("<think>\n"));
+
+    for effort in ["none", " OFF ", "Disabled", "FALSE", "0"] {
+        let mut req = request(user_hi());
+        req.reasoning_effort = Some(effort.to_string());
+        let resolved = effective_kwargs(&processor, &req);
+        assert_eq!(
+            resolved.get("enable_thinking").and_then(Value::as_bool),
+            Some(false),
+            "`{effort}` must disable thinking"
+        );
+        assert!(
+            resolved.get("reasoning_effort").is_none()
+                && resolved.get("reasoning_strength").is_none(),
+            "`{effort}` must not be forwarded as a level"
+        );
+
+        let prompt = render_with_effective_kwargs(&processor, &req)
+            .unwrap_or_else(|err| panic!("`{effort}` must render: {err:#}"));
+        assert!(
+            !prompt.contains("<think>\n"),
+            "`{effort}` must remove the thinking primer"
+        );
+    }
+}
+
+#[test]
+fn reasoning_effort_low_sets_enable_thinking_true_on_template_without_level_key() {
+    let processor = ChatTemplateProcessor::with_template(ENABLE_THINKING_TEMPLATE.to_string());
+    let mut req = request(user_hi());
+    req.reasoning_effort = Some("low".to_string());
+
+    let resolved = effective_kwargs(&processor, &req);
+    assert_eq!(
+        resolved.get("enable_thinking").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(resolved.get("reasoning_effort").is_none());
+    assert!(resolved.get("reasoning_strength").is_none());
+
+    let prompt =
+        render_with_effective_kwargs(&processor, &req).expect("enabled effort must render");
+    assert!(prompt.contains("<think>\n"));
+}
+
+#[test]
+fn explicit_enable_thinking_kwarg_wins_over_effort_none() {
+    let processor = ChatTemplateProcessor::with_template(ENABLE_THINKING_TEMPLATE.to_string());
+    let mut req = with_kwargs(request(user_hi()), &[("enable_thinking", json!(true))]);
+    req.reasoning_effort = Some("none".to_string());
+
+    let resolved = effective_kwargs(&processor, &req);
+    assert_eq!(
+        resolved.get("enable_thinking").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(resolved.get("reasoning_effort").is_none());
+    assert!(resolved.get("reasoning_strength").is_none());
+
+    let prompt = render_with_effective_kwargs(&processor, &req)
+        .expect("the explicit enable override must render");
+    assert!(prompt.contains("<think>\n"));
+}
+
+#[test]
+fn reasoning_effort_maps_to_reasoning_strength_for_muse_glimmer_template() {
+    let processor = ChatTemplateProcessor::with_template(MUSE_GLIMMER_TEMPLATE.to_string());
+    let mut mapped = with_kwargs(request(user_hi()), &[("current_date", json!("2026-08-11"))]);
+    mapped.reasoning_effort = Some("xhigh".to_string());
+
+    let resolved = effective_kwargs(&processor, &mapped);
+    assert_eq!(
+        resolved.get("reasoning_strength").and_then(Value::as_str),
+        Some("xhigh")
+    );
+    assert!(resolved.get("reasoning_effort").is_none());
+
+    let explicit = with_kwargs(
+        request(user_hi()),
+        &[
+            ("current_date", json!("2026-08-11")),
+            ("reasoning_strength", json!("xhigh")),
+        ],
+    );
+    assert_eq!(
+        render_with_effective_kwargs(&processor, &mapped)
+            .expect("mapped Glimmer effort must render"),
+        render_with_effective_kwargs(&processor, &explicit)
+            .expect("explicit Glimmer strength must render")
+    );
+
+    let mut overridden = with_kwargs(request(user_hi()), &[("reasoning_strength", json!("low"))]);
+    overridden.reasoning_effort = Some("xhigh".to_string());
+    assert_eq!(
+        effective_kwargs(&processor, &overridden)
+            .get("reasoning_strength")
+            .and_then(Value::as_str),
+        Some("low"),
+        "explicit reasoning_strength must win over the portable effort"
+    );
+}
+
+#[test]
+fn reasoning_effort_prefers_reasoning_effort_key_when_template_reads_both() {
+    let processor = ChatTemplateProcessor::with_template(BOTH_LEVEL_KEYS_TEMPLATE.to_string());
+    let mut req = request(user_hi());
+    req.reasoning_effort = Some("low".to_string());
+
+    let resolved = effective_kwargs(&processor, &req);
+    assert_eq!(
+        resolved.get("reasoning_effort").and_then(Value::as_str),
+        Some("low")
+    );
+    assert!(resolved.get("reasoning_strength").is_none());
+}
+
+#[test]
+fn extra_body_reasoning_object_effort_resolves() {
+    let processor = qwen3_8();
+    let expected = render_with_effective_kwargs(
+        &processor,
+        &with_kwargs(request(user_hi()), &[("reasoning_effort", json!("low"))]),
+    )
+    .expect("explicit low effort must render");
+
+    let mut flattened = request(user_hi());
+    flattened.extra_body_fields.insert(
+        "reasoning".to_string(),
+        json!({"effort": "low", "summary": "auto"}),
+    );
+    assert_eq!(
+        render_with_effective_kwargs(&processor, &flattened)
+            .expect("flattened reasoning object must render"),
+        expected
+    );
+
+    let mut nested = request(user_hi());
+    nested.extra_body = Some(Map::from_iter([(
+        "reasoning".to_string(),
+        json!({"effort": "low"}),
+    )]));
+    assert_eq!(
+        render_with_effective_kwargs(&processor, &nested)
+            .expect("nested reasoning object must render"),
+        expected
+    );
+}
+
+#[test]
+fn extra_body_reasoning_bool_false_disables() {
+    let mut processor = ChatTemplateProcessor::with_template(ENABLE_THINKING_TEMPLATE.to_string());
+    processor.set_default_enable_thinking(true);
+
+    for nested in [false, true] {
+        let mut req = request(user_hi());
+        if nested {
+            req.extra_body = Some(Map::from_iter([("reasoning".to_string(), json!(false))]));
+        } else {
+            req.extra_body_fields
+                .insert("reasoning".to_string(), json!(false));
+        }
+
+        let resolved = effective_kwargs(&processor, &req);
+        assert_eq!(
+            resolved.get("enable_thinking").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(resolved.get("reasoning_effort").is_none());
+        assert!(resolved.get("reasoning_strength").is_none());
+        assert!(
+            !render_with_effective_kwargs(&processor, &req)
+                .expect("boolean reasoning control must render")
+                .contains("<think>\n")
+        );
+    }
+}
+
+#[test]
+fn extra_body_reasoning_bool_true_enables_without_a_level() {
+    let processor = ChatTemplateProcessor::with_template(ENABLE_THINKING_TEMPLATE.to_string());
+    let mut req = request(user_hi());
+    req.extra_body_fields
+        .insert("reasoning".to_string(), json!(true));
+
+    let resolved = effective_kwargs(&processor, &req);
+    assert_eq!(
+        resolved.get("enable_thinking").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(resolved.get("reasoning_effort").is_none());
+    assert!(resolved.get("reasoning_strength").is_none());
+}
+
+#[test]
+fn reasoning_effort_source_outranks_extra_body_reasoning() {
+    let processor = ChatTemplateProcessor::with_template(ENABLE_THINKING_TEMPLATE.to_string());
+    let mut req = request(user_hi());
+    req.reasoning_effort = Some("none".to_string());
+    req.extra_body_fields
+        .insert("reasoning".to_string(), json!(true));
+
+    let resolved = effective_kwargs(&processor, &req);
+    assert_eq!(
+        resolved.get("enable_thinking").and_then(Value::as_bool),
+        Some(false),
+        "reasoning_effort must be the first present source"
     );
 }
 
@@ -688,5 +938,10 @@ fn template_sig_separates_two_top_level_efforts() {
         sig_for(&plain, "low"),
         sig_for(&plain, "medium"),
         "a template that ignores reasoning_effort must not fragment its cache"
+    );
+    assert_ne!(
+        sig_for(&plain, "none"),
+        sig_for(&plain, "low"),
+        "disabled and enabled requests render different thinking modes and must not share a bucket"
     );
 }

@@ -73,9 +73,9 @@ pub struct CreateResponseRequest {
     #[serde(default)]
     pub text: Option<ResponseTextConfig>,
 
-    /// Reasoning controls. Phase 1 honours `summary` only when the model's
-    /// thinking-token budget machinery activates; `effort` is recorded
-    /// (echoed back on the response) but otherwise treated as advisory.
+    /// Reasoning controls. `effort` is forwarded through the shared chat
+    /// template resolver and echoed back unchanged; `summary` is honoured only
+    /// when the model's thinking-token budget machinery activates.
     #[serde(default)]
     pub reasoning: Option<ResponseReasoningConfig>,
 
@@ -376,6 +376,8 @@ impl ResponseTextFormat {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseReasoningConfig {
+    /// Portable effort hint forwarded to the loaded template's reasoning
+    /// controls and echoed unchanged on the response object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
