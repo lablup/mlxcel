@@ -27,6 +27,12 @@ fn slots_bind_lowest_free_id_and_release_on_drop() {
     let reg = registry(2, false);
     let a = reg.begin("p1", serde_json::json!({}), Some(8));
     let b = reg.begin("p2", serde_json::json!({}), Some(8));
+    // Since #1440 a handle binds on its first progress signal, not at
+    // creation, so a request still waiting in the scheduler queue does not
+    // hold a slot away from one that is being served.
+    assert_eq!(a.id_slot(), -1);
+    a.on_prefill(4, 0);
+    b.on_prefill(4, 0);
     assert_eq!(a.id_slot(), 0);
     assert_eq!(b.id_slot(), 1);
     assert_eq!(reg.idle_count(), 0);
@@ -34,6 +40,7 @@ fn slots_bind_lowest_free_id_and_release_on_drop() {
     assert_eq!(reg.idle_count(), 1);
     // The freed slot 0 is reused before any higher id.
     let c = reg.begin("p3", serde_json::json!({}), Some(8));
+    c.on_prefill(4, 0);
     assert_eq!(c.id_slot(), 0);
 }
 
@@ -41,6 +48,9 @@ fn slots_bind_lowest_free_id_and_release_on_drop() {
 fn oversubscribed_request_is_unbound_then_binds_on_progress() {
     let reg = registry(1, false);
     let first = reg.begin("p1", serde_json::json!({}), None);
+    // Nothing is bound until a request makes progress (#1440).
+    assert_eq!(first.id_slot(), -1);
+    first.on_token("a");
     assert_eq!(first.id_slot(), 0);
     let second = reg.begin("p2", serde_json::json!({}), None);
     // Every slot busy: the handle reports b10621's no-slot sentinel.
@@ -50,6 +60,37 @@ fn oversubscribed_request_is_unbound_then_binds_on_progress() {
     // a deferred task once one frees.
     second.on_token("x");
     assert_eq!(second.id_slot(), 0);
+}
+
+/// The regression #1440 fixed: a queued request must not hold a slot away
+/// from one the worker is actually serving.
+///
+/// Measured against the pre-fix binary with `--parallel 2` and five
+/// concurrent streams, one request emitted every frame with `id_slot: -1`
+/// because a request still sitting in the scheduler queue had taken the slot
+/// at route entry. b10621 never emits a frame without a slot: its task waits
+/// until one is assigned. Binding on first progress restores that.
+#[test]
+fn a_queued_request_does_not_hold_a_slot_away_from_a_serving_one() {
+    let reg = registry(1, false);
+    let queued = reg.begin(
+        "waiting in the scheduler queue",
+        serde_json::json!({}),
+        None,
+    );
+    let serving = reg.begin("being served right now", serde_json::json!({}), None);
+
+    // The one that reaches the worker first gets the slot, whichever order
+    // the routes ran in.
+    serving.on_prefill(6, 0);
+    assert_eq!(serving.id_slot(), 0);
+    assert_eq!(queued.id_slot(), -1);
+    assert_eq!(reg.idle_count(), 0);
+
+    let slots = reg.slots_json(2048, false, false);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0]["is_processing"], true);
+    assert_eq!(slots[0]["n_prompt_tokens"], 6);
 }
 
 #[test]
@@ -81,6 +122,9 @@ fn task_counters_survive_release_like_task_prev() {
 fn slots_json_matches_b10621_shape_for_idle_and_processing() {
     let reg = registry(2, false);
     let handle = reg.begin("p", serde_json::json!({"temperature": 0.5}), None);
+    // The handle binds on its first progress signal (#1440), which is what
+    // makes the slot report `is_processing`.
+    handle.on_prefill(3, 0);
     let slots = reg.slots_json(4096, true, false);
 
     // Busy slot: b10621 field set, params echoed, no prompt/generated
@@ -133,8 +177,10 @@ fn text_is_not_retained_without_the_debug_or_save_gate() {
 fn id_task_increments_across_requests() {
     let reg = registry(1, false);
     let a = reg.begin("p", serde_json::json!({}), None);
+    a.on_token("x");
     drop(a);
     let b = reg.begin("p", serde_json::json!({}), None);
+    b.on_token("y");
     drop(b);
     let slots = reg.slots_json(1024, false, false);
     assert_eq!(slots[0]["id_task"], 1);
@@ -159,6 +205,9 @@ fn restore_and_erase_manage_the_slot_cache() {
 fn busy_slot_refuses_cache_actions() {
     let reg = registry(1, true);
     let handle = reg.begin("p", serde_json::json!({}), None);
+    // A slot is busy once the request it serves has made progress (#1440);
+    // before that the request is still queued and holds no slot.
+    handle.on_prefill(2, 0);
     assert!(matches!(reg.cache_for_save(0), Some(Err(()))));
     assert!(matches!(reg.install_restored(0, vec![1]), Some(Err(()))));
     assert!(matches!(reg.erase(0), Some(Err(()))));

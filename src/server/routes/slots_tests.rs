@@ -130,6 +130,10 @@ async fn fail_on_no_slot_distinguishes_saturation_from_idle() {
     // Saturated: b10621's 503 "no slot available" envelope, while the plain
     // query still answers 200 with the busy slot visible.
     let handle = state.slots.begin("busy", serde_json::json!({}), None);
+    // Since #1440 a handle binds on its first progress signal rather than at
+    // route entry, so saturation means "every slot is serving a request",
+    // not "every slot has been claimed by a request that may still be queued".
+    handle.on_prefill(4, 0);
     let (status, body) = send(app.clone(), Method::GET, "/slots?fail_on_no_slot=1", "").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], 503);
