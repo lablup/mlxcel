@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "model-source",
   "entries": [
     {
@@ -25,6 +25,7 @@
       "divergence": [
         "A repeated `-a/--alias` keeps only the last occurrence; b10621 inserts each occurrence into its alias set, so repeats accumulate there (upstream itself warns that repeating an argument is deprecated in favour of the comma-separated form)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--alias"
@@ -56,6 +57,7 @@
       "divergence": [
         "Rejected at startup instead of resolving a Docker Hub repository; no MLX equivalent exists."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--docker-repo"
@@ -88,6 +90,7 @@
       "divergence": [
         "Rejected at startup instead of selecting a file inside the repository; MLX loads the whole snapshot."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--hf-file"
@@ -122,6 +125,7 @@
         "The `:<quant>` suffix is rejected rather than selecting a GGUF quantization inside the repository; MLX checkpoints carry their quantization in the repository name.",
         "Resolves an MLX SafeTensors snapshot, so a GGUF repository that b10621 accepts fails to load."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--hf-repo"
@@ -153,6 +157,7 @@
       "divergence": [
         "With HF_TOKEN unset, mlxcel still falls back to HUGGING_FACE_HUB_TOKEN, so a request that b10621 would send anonymously is authenticated."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--hf-token"
@@ -184,6 +189,7 @@
       "divergence": [
         "Value domain differs: b10621 takes a GGUF file, mlxcel takes an MLX safetensors directory or a HuggingFace repo id. A llama-server command line pointing at a .gguf file is rejected at startup with a replacement example instead of loading."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--model"
@@ -215,6 +221,7 @@
       "divergence": [
         "Rejected at startup instead of downloading the URL; mlxcel has no arbitrary-URL model fetch."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--model-url"
@@ -244,6 +251,7 @@
       "test": "tests/llama_model_source_cli.rs::offline_mode_refuses_an_uncached_repo_without_downloading",
       "notes": "Forces use of the cache and prevents network access, as in b10621. Every reuse location is still consulted in the same order (`./models/<name>`, the HuggingFace cache, the mlxcel store); only the download step is removed, and a miss is an error naming the repository, where mlxcel looked, and the `mlxcel download` command that would populate the cache. b10621 carries offline as one `params.offline` boolean consulted at every download site, and mlxcel mirrors that: `downloader::set_offline_mode` is set once per process before any model loads, and every fetch site consults it, so `-m`, `--hf-repo`, `--embedding-model`, `--reranker-model`, `download_repo` itself, the moondream starmie tokenizer fetch reached from inside the loader, and the request-path media fetch all refuse. The flag can only turn network access off, so a caller that does not thread it through cannot re-enable a fetch it forbids. `LLAMA_ARG_OFFLINE` is bound at runtime rather than through clap because b10621 fires a value-less option from the environment only for the truthy set `on`/`enabled`/`true`/`1` (`common_arg_utils::is_truthy`), while clap's boolish env parser accepts a wider vocabulary and errors outside it; `env_fallback_offline` reproduces b10621's set exactly.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--offline"
@@ -278,6 +286,7 @@
       "test": "src/bin/mlx_server.rs::warmup_defaults_to_enabled_and_no_warmup_disables_it",
       "notes": "`--warmup` / `--no-warmup` resolve through `resolve_compat_toggle` on both binaries and gate the startup warmup pass in `server::startup`: with `--no-warmup` no generation runs before the listener binds. b10621 warms up with an empty run and mlxcel with a single-token \"Hello\" that bypasses the prompt cache; both are a throwaway forward pass with no externally observable result beyond startup latency. b10621 binds no environment variable to this option and neither does mlxcel.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--warmup",

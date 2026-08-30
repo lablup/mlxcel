@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "router-models",
   "entries": [
     {
@@ -24,6 +24,7 @@
       "test": "src/server/router_server_tests.rs",
       "notes": "Same spelling pair (--models-autoload / --no-models-autoload), env binding, and enabled default. With autoload off, a request naming an unloaded model answers b10621's 400 \"model is not loaded\"; the per-request ?autoload= query override is honored exactly as upstream's is_autoload reads it (true/1).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--models-autoload",
@@ -51,7 +52,7 @@
       "default": "disabled",
       "description": "directory containing models for the router server (default: disabled) (env: LLAMA_ARG_MODELS_DIR)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1438,
       "test": "src/server/router_server_tests.rs",
       "notes": "Since #1438 the flag carries b10621's router semantics: with no model argument it starts router mode over the directory (in-process model pool, discovery of checkpoint directories, load/unload/SSE routes, autoload, models-max LRU). The pre-#1438 mlxcel meaning (local model-store root) moved to the mlxcel-native --model-store-root / MLXCEL_MODELS_DIR.",
@@ -59,6 +60,11 @@
         "Combining --models-dir with a model argument fails startup with a migration diagnostic naming --model-store-root; b10621 accepts the flag as inert outside router mode. The refusal protects deployments that relied on the flag's pre-#1438 mlxcel store-root meaning (#1438).",
         "Router mode serves models in-process rather than as child llama-server processes, so the model objects' status.args argv list is empty and no child loaded_info keys are merged into GET /models entries (#1438)."
       ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "Combining --models-dir with a model argument is exactly the flag's pre-#1438 mlxcel store-root use, and honoring either meaning silently would change behavior under an operator's feet, so it fails with the map to --model-store-root (pinned by models_dir_with_a_model_argument_fails_startup_with_the_migration_map in src/server/cli_input_tests.rs). The empty status.args argv follows from router mode serving models in-process rather than as child llama-server processes, an architectural property that leaves no child argv to report.",
+        "revisit_if": "the migration guard could be retired in a major release once no supported deployment still reads --models-dir as the store root; the in-process empty argv is architectural and would remain."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--models-dir"
@@ -87,6 +93,7 @@
       "test": "src/server/router_server_tests.rs",
       "notes": "Same spelling, env binding, and default (4, 0 = unlimited). In router mode the cap is enforced with least-recently-used eviction of loaded models when a load would exceed it; a pool whose running entries are all still loading answers 503 instead of thrashing. Validated with two real checkpoints cycling through load, eviction, and reload in the #1438 PR.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--models-max"
@@ -120,6 +127,7 @@
       "divergence": [
         "Any configured preset file fails startup with the migration diagnostic; b10621 loads INI presets and applies them per model (#1438)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--models-preset"
@@ -148,6 +156,7 @@
       "test": "src/server/routes/models_tests.rs",
       "notes": "Comma-separated informational tags, split with the same trim/sort/de-dup rule as --alias and reported in the /v1/models model object's tags array; never used for routing, exactly upstream's contract.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--tags"
@@ -171,6 +180,7 @@
       "divergence": [
         "No cache source exists, so no model is ever removable; b10621 can delete cache-sourced models from disk (#1438)."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "DELETE /models"
       }
@@ -190,6 +200,7 @@
       "divergence": [
         "The event vocabulary is the in-process subset: download_progress / download_finished / download_failed and model_remove never occur (no cache downloads, no removable models), and status_change payloads carry status and failed only, without a child's info/progress blocks (#1438)."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /models/sse"
       }
@@ -209,6 +220,7 @@
       "divergence": [
         "A new model name answers a 500 diagnostic instead of starting a HuggingFace download into the cache; mlxcel's router has no cache source yet (#1438)."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /models"
       }
@@ -226,6 +238,7 @@
       "test": "src/server/router_server_tests.rs",
       "notes": "Router mode: an unknown model answers upstream's 404 \"model is not found\", a running one its 400 \"model is already running\", and a successful begin answers {\"success\": true} while the load proceeds through loading to loaded, observable on GET /models and the SSE stream.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /models/load"
       }
@@ -243,6 +256,7 @@
       "test": "src/server/router_server_tests.rs",
       "notes": "Router mode: an unknown model answers 400 \"model is not found\", a not-running one 400 \"model is not running\", and success answers {\"success\": true}. Unload is graceful by refcount: in-flight requests hold the model's serving state until they finish, then the worker exits and the weights free.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /models/unload"
       }

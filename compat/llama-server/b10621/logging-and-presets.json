@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "logging-and-presets",
   "entries": [
     {
@@ -23,6 +23,7 @@
       "test": "tests/llama_logging_presets.rs::cache_list_reports_the_store_in_b10621s_format",
       "notes": "Lists mlxcel's own model store (the <root>/<owner>/<name> snapshots `crate::downloader::models_root` resolves) in b10621's exact output shape: a `number of models in cache: N` header then `%4zu. %s` per entry, then exit 0. Each entry is the repository id `-m` accepts. The b10621 short spelling `-cl` is accepted through the argv pre-pass in `src/cli/llama_short_flags.rs`, so it is not a clap spelling and is not claimed here.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cache-list"
@@ -49,6 +50,7 @@
       "test": "tests/llama_logging_presets.rs::the_completion_script_is_syntactically_valid_bash",
       "notes": "Prints a source-able bash completion script generated from the live clap surface and exits 0, in b10621's script shape (one completion function, an `opts` list, a `case \"$prev\"` block giving path completion to the file-valued options, then `complete -F`). Only visible arguments and visible aliases reach the script: mlxcel's hidden b10621 compatibility surface and the `--dump-flag-surface` machine interface are deliberately omitted, which upstream has no equivalent of because llama.cpp hides no arguments. `mlxcel-server` registers the script against `mlxcel-server` and `mlxcel serve` against `mlxcel`, where b10621 registers one script against every llama.cpp executable.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--completion-bash"
@@ -77,6 +79,7 @@
       "divergence": [
         "b10621 downloads ggml-org/embeddinggemma-300M-qat-q4_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--embd-gemma-default"
@@ -106,6 +109,7 @@
       "divergence": [
         "b10621 downloads ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fim-qwen-1.5b-default"
@@ -135,6 +139,7 @@
       "divergence": [
         "b10621 downloads ggml-org/Qwen2.5-Coder-14B-Q8_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fim-qwen-14b-spec"
@@ -164,6 +169,7 @@
       "divergence": [
         "b10621 downloads ggml-org/Qwen3-Coder-30B-A3B-Instruct-Q8_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fim-qwen-30b-default"
@@ -193,6 +199,7 @@
       "divergence": [
         "b10621 downloads ggml-org/Qwen2.5-Coder-3B-Q8_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fim-qwen-3b-default"
@@ -222,6 +229,7 @@
       "divergence": [
         "b10621 downloads ggml-org/Qwen2.5-Coder-7B-Q8_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fim-qwen-7b-default"
@@ -251,6 +259,7 @@
       "divergence": [
         "b10621 downloads ggml-org/Qwen2.5-Coder-7B-Q8_0-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fim-qwen-7b-spec"
@@ -280,6 +289,7 @@
       "divergence": [
         "b10621 downloads ggml-org/gpt-oss-120b-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--gpt-oss-120b-default"
@@ -309,6 +319,7 @@
       "divergence": [
         "b10621 downloads ggml-org/gpt-oss-20b-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--gpt-oss-20b-default"
@@ -339,6 +350,7 @@
       "test": "tests/llama_compat_manifest.rs::manifest_option_claims_hold_on_both_server_binaries",
       "notes": "Both binaries print clap-generated help. Since #1448 the b10621 twin spelling `--usage` is accepted too: clap's generated help argument cannot carry an alias through the derive, so both server surfaces declare the option by hand under `disable_help_flag`, first in the struct so it lands before any `next_help_heading` group. `mlxcel serve --usage` and `mlxcel-server --usage` both render help and exit 0.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--help",
@@ -366,6 +378,7 @@
       "test": "src/cli/logging_compat_args_tests.rs::log_colors_accepts_exactly_b10621s_vocabulary",
       "notes": "Values are parsed with b10621's own case-sensitive vocabulary (`common_arg_utils::is_truthy` / `is_falsey` / `is_autoy`), not clap's wider boolish set, and an unrecognized value stops startup. `auto` colors only when the sink is a terminal, so `--log-file` never receives ANSI escapes.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--log-colors"
@@ -397,6 +410,7 @@
       "test": "tests/llama_compat_manifest.rs::manifest_option_claims_hold_on_both_server_binaries",
       "notes": "Wins over every other logging option and installs no subscriber at all, matching b10621's `common_log_pause`. See `src/server/logging.rs` for the destination precedence it heads.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--log-disable"
@@ -426,6 +440,7 @@
       "test": "tests/llama_logging_presets.rs::a_log_file_from_a_real_run_is_created_owner_only",
       "notes": "Since #1448 the file is created `0600` (an existing file is tightened to `0600`), a symlinked destination is refused, and an unusable destination stops startup instead of silently falling back to the terminal. That check runs before the model reference resolves, so it costs no download. Every line is scanned for registered credentials (`--api-key`, `--api-key-file`, `--hf-token`, `HF_TOKEN`, `LLAMA_API_KEY`) and redacted. Destination precedence is `--log-disable`, then `--log-file`, then `LLAMA_ARG_LOG_FILE`, then the mlxcel-native `LLAMA_LOG_FILE`, then stdout.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--log-file"
@@ -456,6 +471,7 @@
       "test": "src/cli/logging_compat_args_tests.rs::the_command_line_beats_the_environment_for_both_bool_pairs",
       "notes": "b10621's prefix is the per-line level tag, verified against the pinned macOS arm64 binary: `--no-log-prefix` drops the `I` / `W` character and keeps the component tag. mlxcel maps the pair onto the tracing formatter's level field, on by default as upstream. The environment binding is resolved at runtime rather than through clap so b10621's `parse_bool_value` vocabulary and the `LLAMA_ARG_NO_LOG_PREFIX` alias both hold; clap's boolish parser accepts a wider set and errors outside it.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--log-prefix",
@@ -488,6 +504,7 @@
       "divergence": [
         "b10621 records every request prompt under the named directory; mlxcel refuses the option at startup and writes no prompt log (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--log-prompts-dir"
@@ -517,6 +534,7 @@
       "test": "src/cli/logging_compat_args_tests.rs::the_llama_arg_no_alias_disables_the_pair",
       "notes": "On by default, as b10621's llama-server is (verified against the pinned macOS arm64 binary). Resolved through the same runtime bool-pair path as `--log-prefix`, so `LLAMA_ARG_NO_LOG_TIMESTAMPS` and b10621's truthiness vocabulary both hold.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--log-timestamps",
@@ -549,6 +567,7 @@
       "divergence": [
         "b10621 enables its n-gram-modulo drafter; mlxcel has no context-only drafter and refuses the flag at startup (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-default"
@@ -579,6 +598,7 @@
       "test": "src/server/logging_tests.rs::the_verbose_flag_beats_rust_log",
       "notes": "Both b10621 spellings are accepted since #1448 (`--log-verbose` is a visible clap alias), and the flag is unconditional as upstream's is: a command-line `--verbose` now beats `RUST_LOG`, where before #1448 `EnvFilter::try_from_default_env` ran first and `RUST_LOG=warn mlxcel-server -v` silently ignored the flag. `--verbose` resolves to the same filter as the top `--verbosity` tier, so it is never less verbose than `--verbosity 5`, mirroring b10621's `verbosity = INT_MAX`.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--verbose",
@@ -612,6 +632,7 @@
       "test": "src/server/logging_tests.rs::the_verbosity_scale_is_monotone_in_b10621s_direction",
       "notes": "Threshold semantics match: messages above the threshold are dropped, so a larger number is always at least as verbose, and the default is b10621's 3. The tiers map onto mlxcel's own levels (0 and 1 error, 2 warn, 3 info, 4 debug, 5 and above trace for mlxcel's targets over debug for dependencies). A command-line value beats `RUST_LOG`; `LLAMA_ARG_LOG_VERBOSITY` does not. See `src/server/logging.rs` for the full precedence. The b10621 short spelling `-lv` is accepted through the argv pre-pass in `src/cli/llama_short_flags.rs`, so it is not a clap spelling and is not claimed here.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--verbosity",
@@ -644,6 +665,7 @@
       "test": "tests/llama_compat_manifest.rs::manifest_option_claims_hold_on_both_server_binaries",
       "notes": "`mlxcel-server --version` always answered this; since #1448 `propagate_version` on the `mlxcel` root command carries it onto the `serve` subcommand too, so the b10621 spelling works on both server surfaces rather than one.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--version"
@@ -672,6 +694,7 @@
       "divergence": [
         "b10621 downloads ggml-org/gemma-3-12b-it-qat-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--vision-gemma-12b-default"
@@ -701,6 +724,7 @@
       "divergence": [
         "b10621 downloads ggml-org/gemma-3-4b-it-qat-GGUF and serves it with the preset's parameter block; mlxcel refuses the flag at startup and names the MLX equivalent instead (#1448)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--vision-gemma-4b-default"

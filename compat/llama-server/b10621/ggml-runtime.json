@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "ggml-runtime",
   "entries": [
     {
@@ -25,6 +25,7 @@
       "divergence": [
         "Always on, where b10621 defaults it off and treats it as experimental; the flag cannot select the CPU sampler because mlxcel has none."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--backend-sampling"
@@ -59,6 +60,7 @@
         "Value domain differs: of b10621's `f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1` only `f16` is accepted; the rest are rejected rather than mapped onto a different quantizer.",
         "mlxcel accepts additional values b10621 does not (`int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4`, `turbo4-delegated`)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cache-type-k"
@@ -91,6 +93,7 @@
         "Value domain differs: of b10621's `f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1` only `f16` is accepted; the rest are rejected rather than mapped onto a different quantizer.",
         "mlxcel accepts additional values b10621 does not (`int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4`, `turbo4-delegated`)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cache-type-v"
@@ -121,6 +124,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no tensor-data validation pass to enable."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--check-tensors"
@@ -151,6 +155,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no CPU thread pool to pin."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-mask"
@@ -181,6 +186,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no CPU thread pool to pin."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-mask-batch"
@@ -211,6 +217,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no CPU expert path to move weights to."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-moe"
@@ -244,6 +251,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no CPU thread pool to pin."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-range"
@@ -274,6 +282,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no CPU thread pool to pin."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-range-batch"
@@ -303,6 +312,7 @@
       "divergence": [
         "Only `0` (b10621's own default) is accepted; mlxcel has no CPU thread pool for another value to configure."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-strict"
@@ -332,6 +342,7 @@
       "divergence": [
         "Only `0` is accepted; mlxcel has no CPU thread pool for another value to configure."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cpu-strict-batch"
@@ -360,6 +371,7 @@
       "test": "tests/llama_ggml_runtime_cli.rs::inert_values_fail_only_for_the_missing_model",
       "notes": "b10621 deprecated this option and its handler is now literally `GGML_UNUSED(params); GGML_UNUSED(value);` plus a deprecation warning, so no value of `--defrag-thold` changes anything upstream. It is therefore inert by construction and every value is accepted; rejecting it would refuse a command line that starts on llama-server. mlxcel's paged KV cache reclaims blocks on release and has no defragmentation pass either, so the two agree. Accepted as a hidden compatibility argument. llama.cpp writes this option with a single dash and several letters, which clap reads as a cluster of one-letter shorts; the argv pre-pass in `src/cli/llama_short_flags.rs` rewrites the exact upstream tokens to the long spelling before clap sees them. The flag-surface dump the manifest gate reads is long-spelling-only, so `accepted_spellings` records the long form; `tests/llama_ggml_runtime_cli.rs::every_b10621_short_spelling_reaches_its_own_option` covers the short ones.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--defrag-thold"
@@ -392,6 +404,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no GGML device list and cannot run without an accelerator."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--device"
@@ -428,6 +441,7 @@
         "`--direct-io` is rejected; mlxcel has no DirectIO read path.",
         "A deprecated loading flag written AFTER `--load-mode` wins upstream (last-wins) but is ignored here, where `--load-mode` is the authority whatever the order; the reverse order agrees."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--direct-io",
@@ -463,6 +477,7 @@
         "Only `off` is accepted; mlxcel never resizes unset arguments.",
         "b10621 defaults this ON, so a command line that passes neither `--fit` nor `--ctx-size` gets an auto-sized context upstream and mlxcel's own default here."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fit"
@@ -495,6 +510,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no automatic context fitting."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fit-ctx"
@@ -527,6 +543,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no automatic context fitting."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--fit-target"
@@ -559,6 +576,7 @@
       "divergence": [
         "`off` is rejected: mlxcel has no unfused attention path to fall back to, so flash attention cannot be turned off."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--flash-attn"
@@ -593,6 +611,7 @@
       "divergence": [
         "A layer budget smaller than the model is rejected; mlxcel has no partial CPU offload, so it cannot honour one."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--gpu-layers",
@@ -629,6 +648,7 @@
       "divergence": [
         "`--no-kv-offload` is rejected; mlxcel cannot hold the KV cache on the host."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--kv-offload",
@@ -662,6 +682,7 @@
       "divergence": [
         "Rejected at startup rather than printing a device list and exiting."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--list-devices"
@@ -693,6 +714,7 @@
         "Only `auto` and `mmap` are accepted; `none`, `mlock`, `mmap+mlock` and `dio` are rejected because mlxcel has no corresponding loading path.",
         "A deprecated loading flag written AFTER `--load-mode` wins upstream (last-wins) but is ignored here, where `--load-mode` is the authority whatever the order; the reverse order agrees."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--load-mode"
@@ -725,6 +747,7 @@
       "divergence": [
         "Only index `0` is accepted; mlxcel does not address a second device from this flag."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--main-gpu"
@@ -757,6 +780,7 @@
         "Rejected at startup; mlxcel cannot pin weights into resident memory.",
         "A deprecated loading flag written AFTER `--load-mode` wins upstream (last-wins) but is ignored here, where `--load-mode` is the authority whatever the order; the reverse order agrees."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mlock"
@@ -792,6 +816,7 @@
         "`--no-mmap` is rejected; mlxcel has no non-mmap loading path.",
         "A deprecated loading flag written AFTER `--load-mode` wins upstream (last-wins) but is ignored here, where `--load-mode` is the authority whatever the order; the reverse order agrees."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--mmap",
@@ -826,6 +851,7 @@
       "divergence": [
         "Only `0` is accepted; mlxcel has no CPU expert path."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--n-cpu-moe"
@@ -857,6 +883,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no host buffer to bypass."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--no-host"
@@ -889,6 +916,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no NUMA-aware placement."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--numa"
@@ -922,6 +950,7 @@
       "divergence": [
         "`--no-op-offload` is rejected; mlxcel has no host tensor-operation path."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--op-offload",
@@ -952,6 +981,7 @@
       "divergence": [
         "Rejected at startup; a SafeTensors checkpoint has no GGUF metadata block to override."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--override-kv"
@@ -982,6 +1012,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no GGML buffer types to assign."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--override-tensor"
@@ -1015,6 +1046,7 @@
       "divergence": [
         "`--perf` is rejected; mlxcel has no libllama timers to enable."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--perf",
@@ -1048,6 +1080,7 @@
       "divergence": [
         "Only `50` (b10621's own default) is accepted; mlxcel has no CPU thread pool for another value to configure."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--poll"
@@ -1077,6 +1110,7 @@
       "divergence": [
         "Only `50` is accepted; mlxcel has no CPU thread pool for another value to configure."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--poll-batch"
@@ -1106,6 +1140,7 @@
       "divergence": [
         "Only `0` (b10621's own default, normal priority) is accepted; mlxcel has no CPU thread pool for another value to configure."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--prio"
@@ -1135,6 +1170,7 @@
       "divergence": [
         "Only `0` is accepted; mlxcel has no CPU thread pool for another value to configure."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--prio-batch"
@@ -1167,6 +1203,7 @@
       "divergence": [
         "Neither position changes anything: mlxcel never repacks, so `--repack` does not enable a repacking pass the way b10621's default does."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--repack",
@@ -1200,6 +1237,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no GGML RPC backend."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--rpc"
@@ -1232,6 +1270,7 @@
       "divergence": [
         "Only `none` is accepted; multi-device execution is configured through mlxcel's own flags."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--split-mode"
@@ -1264,6 +1303,7 @@
       "divergence": [
         "Rejected at startup; mlxcel does not split a model across devices from this flag."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--tensor-split"
@@ -1296,6 +1336,7 @@
       "divergence": [
         "Only a non-positive thread count is accepted; mlxcel has no CPU thread pool for a positive one to size."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--threads"
@@ -1328,6 +1369,7 @@
       "divergence": [
         "Only a non-positive thread count is accepted; mlxcel has no CPU thread pool for a positive one to size."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--threads-batch"

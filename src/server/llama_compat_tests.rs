@@ -59,8 +59,10 @@ use crate::tokenizer::MlxcelTokenizer;
 /// `tests/llama_compat_manifest.rs`; bump all four together. Issue #1443
 /// follow-ups: 2 when pin.json's `shards` field changed from a bare name
 /// list to a mapping of shard name to its owning-issue set, 3 when every
-/// entry gained the structured `divergence` list.
-const MANIFEST_SCHEMA_VERSION: i64 = 3;
+/// entry gained the structured `divergence` list; 4 when every entry gained
+/// the `rationale` object and `by_design` joined the state vocabulary
+/// (#1499).
+const MANIFEST_SCHEMA_VERSION: i64 = 4;
 
 fn manifest_entries() -> Vec<serde_json::Value> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("compat/llama-server/b10621");
@@ -380,7 +382,9 @@ fn manifest_native_field_claims_match_native_completion_request() {
 /// value domain, default, precedence, and externally observable behavior
 /// match", so a non-empty `divergence` contradicts the state outright; the
 /// honest states are `aliased`, `not_applicable` or `deferred`, each with an
-/// owning issue. `scripts/ci/check_llama_compat_manifest.py` is the primary
+/// owning issue, or `by_design` when the difference is permanent and argued
+/// in `rationale` with a test (#1499).
+/// `scripts/ci/check_llama_compat_manifest.py` is the primary
 /// gate and additionally checks the field's shape; this keeps a `cargo test`
 /// run from passing a manifest that gate would reject.
 #[test]
@@ -397,7 +401,7 @@ fn supported_entries_record_no_divergence_from_b10621() {
         }
         assert!(
             divergence.is_empty(),
-            "{id}: state `supported` with {} recorded divergence(s) {divergence:?}.              An entry that differs from b10621 in externally observable behavior              is `aliased`, `not_applicable`, or `deferred` with the owning issue              named.",
+            "{id}: state `supported` with {} recorded divergence(s) {divergence:?}.              An entry that differs from b10621 in externally observable behavior              is `aliased`, `not_applicable`, or `deferred` with the owning issue              named, or `by_design` when the difference is permanent and argued in              `rationale` with a test.",
             divergence.len()
         );
     }

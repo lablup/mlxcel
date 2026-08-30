@@ -53,8 +53,11 @@ const MANIFEST_REL: &str = "compat/llama-server/b10621";
 /// `scripts/compat/extract_b10621_manifest.py`; bump all three together.
 /// Issue #1443 follow-ups: 2 when pin.json's `shards` field changed from a
 /// bare name list to a mapping of shard name to its owning-issue set, 3 when
-/// every entry gained the structured `divergence` list.
-const MANIFEST_SCHEMA_VERSION: i64 = 3;
+/// every entry gained the structured `divergence` list; 4 when every entry
+/// gained the `rationale` object and `by_design` joined the state vocabulary
+/// (#1499). This constant is the MANIFEST schema; the `schema_version: 1`
+/// asserted further down is the unrelated `--dump-flag-surface` dump format.
+const MANIFEST_SCHEMA_VERSION: i64 = 4;
 
 /// b10621's help-entry count, frozen by the pin and re-asserted by
 /// `scripts/ci/check_llama_compat_manifest.py`. Every option entry is either

@@ -129,6 +129,11 @@ async fn the_router_inventory_carries_the_b10621_model_object() {
     assert_eq!(entry["id"], "alpha");
     assert_eq!(entry["owned_by"], "llamacpp");
     assert_eq!(entry["status"]["value"], "unloaded");
+    // The `by_design` divergence on the manifest's `--models-dir` entry:
+    // router mode serves models in-process, not as child llama-server
+    // processes, so there is no child argv to report and `status.args` is
+    // deliberately the empty list where b10621 reports the child's argv.
+    assert_eq!(entry["status"]["args"], serde_json::json!([]));
     assert_eq!(entry["source"], "models_dir");
     assert_eq!(entry["can_remove"], false);
     assert_eq!(

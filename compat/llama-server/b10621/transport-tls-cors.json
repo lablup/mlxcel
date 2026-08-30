@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "transport-tls-cors",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "test": "src/server/api_prefix_tests.rs",
       "notes": "create_app nests the whole route set under the prefix. Matching upstream, the public-endpoint list is compared against the unprefixed paths, so <prefix>/health requires authentication when an API key is configured; startup warns when both are set. mlxcel additionally rejects a prefix that would 404 every route (missing leading slash, trailing slash, empty segment, query or fragment) instead of accepting it silently.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--api-prefix"
@@ -55,6 +56,7 @@
       "test": "src/server/cors_tests.rs",
       "notes": "Both spellings parse; --no-cors-credentials is hidden and resolved against --cors-credentials the same way --slots / --no-slots is. Enabled together with --cors-origins * echoes the request Origin and reports Access-Control-Allow-Credentials: true on a preflight, as upstream does. LLAMA_ARG_CORS_CREDENTIALS is honored at runtime (env_fallback_cors_credentials, src/server/cli_input.rs) rather than as a clap env attribute, because clap resolves a flag's env binding by treating only a truthy value as an occurrence, which would make a falsey value a silent no-op against the enabled-by-default flag.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cors-credentials",
@@ -88,6 +90,7 @@
       "test": "src/server/cors_tests.rs",
       "notes": "Emitted verbatim as Access-Control-Allow-Headers on an OPTIONS preflight and on no other response, matching the upstream pre-routing handler. A value that is not a legal header value fails startup rather than being dropped at request time.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cors-headers"
@@ -119,6 +122,7 @@
       "test": "src/server/cors_tests.rs",
       "notes": "Emitted verbatim as Access-Control-Allow-Methods on an OPTIONS preflight and on no other response, matching the upstream pre-routing handler.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cors-methods"
@@ -150,6 +154,7 @@
       "test": "src/server/cors_tests.rs",
       "notes": "All three upstream value shapes behave identically: * echoes the request Origin while credentials are enabled (and emits the literal * when they are not), the special value localhost reflects an Origin only when its host is localhost / 127.0.0.1 / ::1, and any other value is emitted verbatim. The mlxcel-native --allowed-origins (#244) keeps its per-origin allow-list matching and is mutually exclusive with this flag at the CLI, so exactly one origin rule is ever in force.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cors-origins"
@@ -181,6 +186,7 @@
       "test": "src/server/transport_tests.rs",
       "notes": "TCP binding matches (default 127.0.0.1, env LLAMA_ARG_HOST), and a value ending in .sock now binds a Unix domain socket as b10621 does. The legacy mlxcel spelling (--port 0 with a filesystem path) still selects a socket and logs a deprecation warning pointing at the .sock suffix.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--host"
@@ -212,6 +218,7 @@
       "test": "src/server/transport_tests.rs",
       "notes": "Default 8080 matches. --port 0 binds an ephemeral TCP port and logs the port it received, as upstream's bind_to_any_port does; it only selects a Unix socket when --host is a filesystem path, which is the deprecated mlxcel spelling covered on the --host entry.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--port"
@@ -243,6 +250,7 @@
       "test": "src/server/listen_tests.rs",
       "notes": "Sets SO_REUSEPORT on the listening socket in addition to the unconditional SO_REUSEADDR, matching the upstream set_socket_options callback. On a platform without SO_REUSEPORT the flag warns and is ignored rather than failing startup, which is also what upstream does.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reuse-port"
@@ -271,6 +279,7 @@
       "test": "src/server/transport_tests.rs",
       "notes": "Sets the interval of the SSE comment ping emitted while a stream stays silent, on every SSE surface the server exposes, and a negative value disables the pings as upstream's -1 sentinel does. 0 is rejected with a diagnostic instead of emitting a comment on every scheduler pass. The per-request sse_ping_interval field overrides it.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--sse-ping-interval"
@@ -302,6 +311,7 @@
       "test": "src/server/tls_tests.rs",
       "notes": "Serves HTTPS through rustls when paired with --ssl-key-file. Upstream silently serves plaintext when only one of the pair is set; mlxcel refuses to start instead, because starting in plaintext on the port an operator meant to protect is the failure mode that matters. Unreadable or mismatched PEM material fails at bind time with the flag and path named.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ssl-cert-file"
@@ -330,6 +340,7 @@
       "test": "src/server/tls_tests.rs",
       "notes": "PKCS#8, PKCS#1 and SEC1 PEM keys are accepted, matching what OpenSSL accepts for upstream's httplib::SSLServer. See --ssl-cert-file for the half-configured-pair behavior.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ssl-key-file"
@@ -358,6 +369,7 @@
       "test": "src/server/transport_tests.rs",
       "notes": "Sizes the Tokio runtime that serves HTTP, which is the same role upstream's httplib::ThreadPool plays: inference runs on its own dedicated worker threads on both servers. A value below 1 uses upstream's own automatic formula, max(n_parallel + 4, hardware_concurrency - 1). The runtime is built from this value before any model work, so it applies process-wide.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--threads-http"
@@ -390,6 +402,7 @@
       "test": "src/server/listen_tests.rs",
       "notes": "Resolved semantic collision. --timeout / LLAMA_ARG_TIMEOUT is now the HTTP socket read/write timeout with the b10621 default of 3600s. The deadline is armed per operation and cleared by progress, as the upstream select() deadline is, and the read half is additionally gated to the window in which the server is waiting for request bytes: upstream reads, handles and writes sequentially, while hyper keeps polling the read half during a response, so an ungated deadline would cut off any generation slower than --timeout. See src/server/read_budget.rs. The decode watchdog this spelling used to carry moved to the mlxcel-native --decode-timeout / MLXCEL_DECODE_TIMEOUT with its 600s default unchanged, and a command line that sets --timeout without --decode-timeout logs a migration warning. 0 is passed through rather than reinterpreted as disabled, matching upstream; a negative value is rejected at parse time instead of producing an unusable select() timeout.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--timeout"
@@ -415,6 +428,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "NativeCompletionRequest accepts the field and it overrides the server's --sse-ping-interval for that stream. Upstream's (-1, INT32_MAX) hard limits are enforced at request-parse time for streaming and non-streaming requests alike, so an out-of-domain value is a 400 rather than a silently ignored field.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "sse_ping_interval"
       }

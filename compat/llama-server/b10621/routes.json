@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "routes",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "test": "src/server/infill_tests.rs::spm_infill_swaps_the_two_blocks",
       "notes": "Accepted on both server binaries through the shared `mlxcel::cli::infill_args::InfillArgs` group and honored by POST /infill: the flag moves the suffix block ahead of the prefix block while the middle marker stays last, which is upstream's swap exactly. b10621 declares it value-less with no environment binding, so this definition has none either. `infill_route_tests.rs::spm_infill_changes_the_prompt_the_server_actually_sends` asserts the flag reaches the served prompt rather than only the config.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spm-infill"
@@ -44,6 +45,7 @@
       "test": "src/server/routes/health.rs",
       "notes": "Since #1440 the ready answer is exactly b10621's 200 {\"status\": \"ok\"} and stays 200 under load (slot saturation is GET /slots?fail_on_no_slot business, so liveness probes never restart a busy server), and the not-ready answer is upstream's 503 {\"error\": {\"code\": 503, \"message\": \"Loading model\", \"type\": \"unavailable_error\"}} envelope. The former mlxcel-native rich health payload moved to GET /slots and GET /metrics.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /health"
       }
@@ -61,6 +63,7 @@
       "test": "src/server/routes/models_tests.rs",
       "notes": "Since #1438 the single-model answer carries b10621's two blocks: the OpenAI data array whose entries have id, aliases, tags, object, created, owned_by \"llamacpp\" and the meta facts block (vocab_type, n_vocab, n_ctx, n_ctx_train, n_embd, n_params, size, ftype, derived from config.json and the safetensors headers), and the Ollama-compatible models array with the details block (format \"safetensors\"). In router mode both paths serve the router inventory (status, architecture, source, can_remove), as upstream's get_router_models does. mlxcel's additions are additive: per-entry capabilities routing hints and extra entries for a separately loaded embedder/reranker.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /models"
       }
@@ -78,6 +81,7 @@
       "test": "src/server/routes/health.rs",
       "notes": "Since #1440 the ready answer is exactly b10621's 200 {\"status\": \"ok\"} and stays 200 under load (slot saturation is GET /slots?fail_on_no_slot business, so liveness probes never restart a busy server), and the not-ready answer is upstream's 503 {\"error\": {\"code\": 503, \"message\": \"Loading model\", \"type\": \"unavailable_error\"}} envelope. The former mlxcel-native rich health payload moved to GET /slots and GET /metrics.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /v1/health"
       }
@@ -95,6 +99,7 @@
       "test": "src/server/routes/models_tests.rs",
       "notes": "Since #1438 the single-model answer carries b10621's two blocks: the OpenAI data array whose entries have id, aliases, tags, object, created, owned_by \"llamacpp\" and the meta facts block (vocab_type, n_vocab, n_ctx, n_ctx_train, n_embd, n_params, size, ftype, derived from config.json and the safetensors headers), and the Ollama-compatible models array with the details block (format \"safetensors\"). In router mode both paths serve the router inventory (status, architecture, source, can_remove), as upstream's get_router_models does. mlxcel's additions are additive: per-entry capabilities routing hints and extra entries for a separately loaded embedder/reranker.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "GET /v1/models"
       }
@@ -112,6 +117,7 @@
       "test": "src/server/routes/prompt_inspection_tests.rs::apply_template_answers_the_rendered_prompt",
       "notes": "Renders a chat-completions body through the loaded chat template and answers {\"prompt\": \"...\"} without generating. The render is the same `prepare_chat_request_with_cache` call /v1/chat/completions makes, so messages, tools, reasoning options and chat_template_kwargs are honored and what comes back is the prompt that request would have been served with. The MAX_TOOLS guard runs first, as it does on the generating routes, so an oversized tool array cannot reach Jinja2 through a route that does not generate.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /apply-template"
       }
@@ -129,6 +135,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /chat/completions"
       }
@@ -146,6 +153,7 @@
       "test": "src/server/routes/prompt_inspection_tests.rs::the_chat_input_token_count_matches_the_rendered_prompt",
       "notes": "Answers {\"input_tokens\": N} for a chat-completions body. The count runs the same render and the same encode the generation path runs (encode(prompt, add_special=true)), so it is the number of tokens that request would really have been prefilled with rather than an estimate that can drift from it.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /chat/completions/input_tokens"
       }
@@ -161,12 +169,13 @@
       "state": "deferred",
       "issue": 1477,
       "test": "src/server/routes/native_route_tests.rs",
-      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence; two of them are #1441's and one belongs to #1440, which is why this entry stays deferred and stays filed under #1441.",
+      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence: the tokens_cached formula and the refused request fields are #1477's remaining work, and the generation_settings omission follows the omitted-rather-than-invented policy GET /props records but cannot lift the entry on its own; the entry stays deferred and is filed under #1477 (moved from #1441 by PR #1478).",
       "divergence": [
-        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
-        "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1441).",
-        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
+        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1477).",
+        "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1477).",
+        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1477)."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /completion"
       }
@@ -182,12 +191,13 @@
       "state": "deferred",
       "issue": 1477,
       "test": "src/server/routes/native_route_tests.rs",
-      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence; two of them are #1441's and one belongs to #1440, which is why this entry stays deferred and stays filed under #1441.",
+      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. #1466 closed the stop-sequence half: `stop` now truncates the emitted text, and stop_type reports \"word\" with the matched string in stopping_word, matching the pinned binary on the same request. #1441 then added `response_fields` projection, the `stream_options` block, the whole `n_predict` value domain including `-1` and the verified `0` prompt-only case, and the real prefill figures on every streaming frame, and corrected two `timings` derivations against the binary. The remaining differences are listed in divergence: the tokens_cached formula and the refused request fields are #1477's remaining work, and the generation_settings omission follows the omitted-rather-than-invented policy GET /props records but cannot lift the entry on its own; the entry stays deferred and is filed under #1477 (moved from #1441 by PR #1478).",
       "divergence": [
-        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
-        "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1441).",
-        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
+        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1477).",
+        "`tokens_cached` reports the prompt tokens mlxcel's KV prefix cache supplied for this request, while b10621 reports the slot's cache occupancy after it, which is `tokens_evaluated + tokens_predicted - 1`: a 51-token prompt answered with 4 tokens measured `tokens_cached: 54` on the pinned binary against mlxcel's cache-supplied count (#1477).",
+        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1477)."
       ],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /completions"
       }
@@ -205,6 +215,7 @@
       "test": "src/server/routes/tokenize_tests.rs::detokenize_round_trips_ascii_unicode_and_special_tokens",
       "notes": "Special tokens are rendered rather than skipped, as upstream's `tokens_to_str` does, and an absent or empty `tokens` answers {\"content\": \"\"} rather than failing. Bytes that cannot form a character come back as U+FFFD, which is what upstream emits too because its JSON writer runs with the replacing error handler.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /detokenize"
       }
@@ -222,6 +233,7 @@
       "test": "src/server/routes/embedding_rerank_mode_tests.rs::an_embedding_body_with_neither_input_nor_content_uses_the_upstream_wording",
       "notes": "The native shape (a bare JSON array of {index, embedding} whose embedding is an array OF arrays) landed with #1441 and was verified against a capture of the pinned binary; #1452 closed the rest. The handler accepts upstream's legacy `content` spelling for the input and answers a body carrying neither key with upstream's own \"input\\\" or \\\"content\\\" must be provided\" sentence, reads the per-request `embd_normalize` over the whole b10621 domain, and the 501 body now opens with upstream's \"This server does not support embeddings. Start it with `--embeddings`\" because that flag really is accepted here.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /embedding"
       }
@@ -239,6 +251,7 @@
       "test": "src/server/routes/native_route_tests.rs::the_native_embedding_path_accepts_the_content_spelling",
       "notes": "The native shape (a bare JSON array of {index, embedding} whose embedding is an array OF arrays) landed with #1441 and was verified against a capture of the pinned binary; #1452 closed the rest. The handler accepts upstream's legacy `content` spelling for the input and answers a body carrying neither key with upstream's own \"input\\\" or \\\"content\\\" must be provided\" sentence, reads the per-request `embd_normalize` over the whole b10621 domain, and the 501 body now opens with upstream's \"This server does not support embeddings. Start it with `--embeddings`\" because that flag really is accepted here.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /embeddings"
       }
@@ -251,14 +264,19 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "deferred",
+      "state": "by_design",
       "issue": 1442,
-      "test": "src/server/routes/infill_route_tests.rs::the_served_prompt_carries_the_default_prefix_suffix_middle_ordering",
-      "notes": "Mounted and serving. The capability gate runs first and refuses a model whose vocabulary has no prefix, suffix and middle token with upstream's own wording, over the same spelling list llama-vocab.cpp scans; `input_prefix` and `input_suffix` are required, `input_extra` is validated as an array of {filename, text}, and the assembled prompt follows format_infill's ordering in both the default and --spm-infill forms. Two observable differences remain, recorded below, and they are why this entry is still deferred rather than supported.",
+      "test": "src/server/routes/infill_route_tests.rs",
+      "notes": "Mounted and serving. The capability gate runs first and refuses a model whose vocabulary has no prefix, suffix and middle token with upstream's own wording, over the same spelling list llama-vocab.cpp scans; `input_prefix` and `input_suffix` are required, `input_extra` is validated as an array of {filename, text}, and the assembled prompt follows format_infill's ordering in both the default and --spm-infill forms. Two observable differences remain, recorded below; both are deliberate and permanent, which is what by_design records. The marker refusal is pinned by a_marker_in_the_prefix_is_refused_with_an_actionable_diagnostic and the untruncated FIM context by the_whole_fim_context_is_served_without_batch_truncation.",
       "divergence": [
         "Text in input_prefix, input_suffix, input_extra[].text, input_extra[].filename or prompt that contains one of the model's own FIM marker spellings is refused with a diagnostic; b10621 tokenizes those fields with parse_special off and serves the marker as literal text. mlxcel's generation entry takes a prompt string that is re-tokenized with parsing on, so the marker would otherwise silently restructure the prompt.",
         "The FIM context is not truncated to the prefill batch: b10621 keeps only the last 3*(n_batch/4) prefix tokens and the first (n_batch/4) - (2 + prompt) suffix tokens, while mlxcel serves the whole prefix and suffix, consistent with its policy of clamping an over-long request rather than dropping prompt text."
       ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel's generation entry takes a prompt string that is re-tokenized with special-token parsing on, so a string cannot express 'these characters are not that token'; refusing FIM-marker text beats letting a file the client did not write silently restructure the prompt. Serving the whole FIM context follows mlxcel's policy everywhere else of clamping an over-long request rather than dropping prompt text.",
+        "revisit_if": "mlxcel's generation entry grows a parse_special-off prompt path (which would let marker text be served literally, as b10621 does), or the clamp-rather-than-drop policy for over-long requests is itself revisited."
+      },
       "mlxcel": {
         "route": "POST /infill"
       }
@@ -276,6 +294,7 @@
       "test": "src/server/routes/embedding_rerank_mode_tests.rs::the_jina_envelope_carries_the_object_key",
       "notes": "All four aliases mounted (#1430); #1452 aligned the envelope. The Jina response now carries b10621's top-level \"object\": \"list\", and a request that spells its document list `texts` gets b10621's TEI shape instead: a bare array of {index, score} with `text` echoed under `return_text`. The Cohere `documents` / `return_documents` / `document` spelling mlxcel already served keeps working, and a body carrying both list spellings stays on the Jina envelope. The three shape errors use upstream's own wording. The route is served exactly when the operator asked for reranking; mlxcel spells that request as `--reranking`, `--pooling rank`, `--reranker-model <path>`, or a reranker checkpoint in -m, and the 501 body opens with upstream's \"This server does not support reranking. Start it with `--reranking`\".",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /rerank"
       }
@@ -293,6 +312,7 @@
       "test": "src/server/routes/embedding_rerank_mode_tests.rs::a_texts_request_gets_b10621s_tei_array",
       "notes": "The /reranking spelling of POST /rerank; all four paths reach one handler. See POST /rerank.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /reranking"
       }
@@ -310,6 +330,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /responses"
       }
@@ -327,6 +348,7 @@
       "test": "src/server/routes/prompt_inspection_tests.rs::both_responses_input_token_paths_answer_the_same_count",
       "notes": "Answers {\"input_tokens\": N} for a Responses body. The body is flattened to the chat shape by the same translator /v1/responses uses, including previous_response_id and conversation rehydration, so the count covers the whole conversation the generation call would have prefilled rather than only the new turn.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /responses/input_tokens"
       }
@@ -344,6 +366,7 @@
       "test": "src/server/routes/tokenize_tests.rs::the_pieces_of_a_tokenization_concatenate_back_to_the_input",
       "notes": "All four b10621 switches are honored: `content` accepts the mixed shape (a string, or an array whose elements are strings or already-tokenized ids) and may be absent, in which case the answer is an empty token list rather than an error; `add_special` defaults to false; `parse_special` defaults to true and, when false, stops a special-token spelling written into the text from being recognized as that token; `with_pieces` switches the response to {id, piece} objects whose `piece` is a JSON string for valid UTF-8 and an array of byte values otherwise, so a token carrying part of a multi-byte character reassembles exactly.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /tokenize"
       }
@@ -361,6 +384,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/chat/completions"
       }
@@ -378,6 +402,7 @@
       "test": "src/server/routes/prompt_inspection_tests.rs::both_chat_input_token_paths_answer_the_same_count",
       "notes": "The /v1 spelling of POST /chat/completions/input_tokens; both paths reach one handler.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/chat/completions/input_tokens"
       }
@@ -395,6 +420,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "OpenAI-shaped on both sides.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/completions"
       }
@@ -412,6 +438,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "OpenAI-shaped on both sides.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/embeddings"
       }
@@ -429,6 +456,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Anthropic-messages-compatible on both sides.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/messages"
       }
@@ -446,6 +474,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/messages/count_tokens"
       }
@@ -463,6 +492,7 @@
       "test": "src/server/routes/embedding_rerank_mode_tests.rs::return_documents_still_echoes_under_the_cohere_spelling",
       "notes": "The /v1 spelling of POST /rerank; all four paths reach one handler. See POST /rerank.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/rerank"
       }
@@ -480,6 +510,7 @@
       "test": "src/server/routes/embedding_rerank_mode_tests.rs::the_jina_envelope_carries_the_object_key",
       "notes": "The /v1/reranking spelling of POST /rerank; all four paths reach one handler. See POST /rerank.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/reranking"
       }
@@ -497,6 +528,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/responses"
       }
@@ -514,6 +546,7 @@
       "test": "src/server/routes/prompt_inspection_tests.rs::both_responses_input_token_paths_answer_the_same_count",
       "notes": "The /v1 spelling of POST /responses/input_tokens; both paths reach one handler.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "route": "POST /v1/responses/input_tokens"
       }
@@ -534,6 +567,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "No equivalent: mlxcel serves exactly one completion per request, so there is no path that could return b10621's array of results. `n_cmpl` (and its `n` alias) is accepted at 1, the inert value, and any higher value is refused with a 400 naming the field and telling the caller to send one request per completion.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "n_cmpl"
       }
@@ -552,6 +586,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "No equivalent: mlxcel has no minimum-indentation stop rule for fill-in-the-middle completions. Accepted at 0, the inert value, and refused with a 400 naming the field otherwise.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "n_indent"
       }
@@ -573,6 +608,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Accepted through the b10621 spelling and its `max_tokens` / `max_completion_tokens` aliases, over upstream's whole value domain rather than serde's. The `n_predict: 0` prompt-only case is now verified rather than assumed: the pinned binary emits exactly ONE token for it (not zero, despite the schema description), evaluates the whole prompt and reports `stop_type: \"limit\"`, and mlxcel answers the same one token on the same prompt against a real checkpoint. `-1`, upstream's spelling of \"as many as the context allows\", is accepted and clamped to the effective context window instead of being refused with a 422 as it was before. A value outside `[-1, INT32_MAX]` is refused with upstream's own wording, `Field 'n_predict': Value must be between -1 <= value <= 2147483647, but got -2`. An in-domain value is still silently clamped to the effective per-slot context window, which is what upstream does too.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "n_predict"
       }
@@ -591,6 +627,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Implemented against the pinned binary rather than against the schema's own description, which is wrong about what the binary does. Upstream walks each path through the finished response splitting on `/` and stores the value under the WHOLE path string, so `generation_settings/n_predict` comes back as a root key literally named \"generation_settings/n_predict\"; it does not move `n_predict` to the root the way the description claims. Captured and reproduced: a missing path is omitted without an error, a path that walks into a non-object is omitted, `[\"\"]` selects nothing, a repeated path yields one key, a nested object can be selected whole, the result keeps the order the request listed, and an empty list or a value that is not an array of strings (`\"content\"`, `[\"content\", 5]`, `null`) returns the whole object with a 200 rather than a type error. Applied to the non-streaming body and to the final streaming frame only, which is also where upstream applies it: the per-token frames are unprojected on both sides.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "response_fields"
       }
@@ -609,6 +646,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "No equivalent: the mlxcel scheduler emits no prompt-processing progress events on this path, so there is nothing to attach to a stream frame. Accepted at false, the inert value, and refused with a 400 naming the field otherwise.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "return_progress"
       }
@@ -627,6 +665,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "No equivalent on this path: mlxcel's streaming decoder emits detokenized text and does not surface the raw token ids to the native route. Accepted at false, the inert value, and refused with a 400 naming the field and pointing at POST /tokenize otherwise.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "return_tokens"
       }
@@ -645,6 +684,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "stream"
       }
@@ -663,6 +703,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Declared and type-checked instead of being dropped as an unknown key. Measured on the pinned binary serving a real checkpoint: on the native `/completion` route the block is inert, because the native final frame already carries `tokens_predicted`, `tokens_evaluated` and the whole `timings` object whether or not it is sent, so a request with `{\"include_usage\": true}` and one without it answer byte-identical bodies. A non-object value (`\"stream_options\": \"garbage\"`) is tolerated and ignored on both sides. mlxcel's OpenAI routes honor the same block the way b10621's do, emitting the trailing usage chunk with empty `choices`; that half predates this epic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "stream_options"
       }
@@ -681,6 +722,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "The subfield of the block above, modeled by the nested `NativeStreamOptions` struct so its type is validated rather than the value being read past. A present non-boolean is refused with upstream's own wording, `Field 'include_usage': type must be boolean, but is string`, measured against the pinned binary; absent or `null` resolves to the upstream default of false. The value has no observable effect on `/completion` in either implementation.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "include_usage"
       }
@@ -699,6 +741,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "No per-request equivalent: mlxcel bounds a stalled decode with the server-wide --decode-timeout / MLXCEL_DECODE_TIMEOUT watchdog, which cannot be narrowed per request. Accepted at -1 or 0, the inert values, and refused with a 400 naming the field and the alternative otherwise.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "t_max_predict_ms"
       }
@@ -717,6 +760,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "Accepted and honored: a streaming frame carries the timing block when it is set and omits it otherwise. The per-frame block now reports the real prefill figures rather than zeros. A one-shot prefill snapshot (`GenerateEvent::Prefill`, emitted by the scheduler when the first token is stamped) reaches the streaming route before the first frame, so `cache_n`, `prompt_n`, `prompt_ms` and `tokens_evaluated` carry the same values on every frame that the final frame reports, which is what the pinned binary does. Two derivations inside the block were also corrected against the binary in the same change: `prompt_n` is `tokens_evaluated - cache_n` (a fully cached prefix reports `prompt_n: 1` against `tokens_evaluated: 8` with `cache_n: 7`), and the generation rates divide by `predicted_n - 1` because `predicted_ms` starts at the first token, so `predicted_n: 4` with `predicted_ms: 15.132` reports `predicted_per_token_ms: 5.044`.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "timings_per_token"
       }
@@ -735,6 +779,7 @@
       "test": "src/server/routes/native_route_tests.rs",
       "notes": "No equivalent: mlxcel has no __verbose debug block. Accepted at false, the inert value, and refused with a 400 naming the field and pointing at GET /slots and GET /metrics otherwise.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "verbose"
       }

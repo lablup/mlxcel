@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "speculative",
   "entries": [
     {
@@ -28,6 +28,7 @@
       "divergence": [
         "b10621 aborts startup whenever LLAMA_ARG_DRAFT_MAX is exported (the removed argument's environment handler throws unconditionally); mlxcel honors the variable as a working legacy fallback below the canonical LLAMA_ARG_SPEC_DRAFT_N_MAX and any CLI spelling."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--draft",
@@ -61,6 +62,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Removed upstream: b10621 errors on both spellings with a pointer to --spec-draft-n-min, and mlxcel never accepted them, so the two surfaces agree in rejecting the flag.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -84,6 +86,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::lookup_caches_are_rejected",
       "notes": "Lookup decoding has no mlxcel subsystem; a present path fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--lookup-cache-dynamic"
@@ -112,6 +115,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::lookup_caches_are_rejected",
       "notes": "Lookup decoding has no mlxcel subsystem; a present path fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--lookup-cache-static"
@@ -141,6 +145,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::no_backend_sampling_half_is_rejected",
       "notes": "A --x/--no-x pair upstream with default enabled. The positive spelling is inert (mlxcel's draft sampling always runs as MLX ops on the accelerator); the operator-active --no- half moves draft sampling to a host CPU sampler, which mlxcel cannot reproduce, and fails startup. The environment variable goes through b10621's own bool-pair rules (truthy re-affirms, falsey or the LLAMA_ARG_NO_ alias selects the rejected half, unrecognized values error).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-backend-sampling",
@@ -175,6 +180,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-cpu-mask",
@@ -206,6 +212,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-cpu-mask-batch",
@@ -237,6 +244,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-cpu-moe",
@@ -271,6 +279,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-cpu-range",
@@ -301,6 +310,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-cpu-strict",
@@ -331,6 +341,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-cpu-strict-batch",
@@ -362,6 +373,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-device",
@@ -394,6 +406,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::spec_draft_hf_is_rejected_with_the_model_draft_alternative",
       "notes": "mlxcel does not load GGUF draft checkpoints; a present repo fails startup pointing at --model-draft, which accepts a repo-id and auto-downloads the MLX checkpoint.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-hf",
@@ -427,6 +440,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "The canonical spelling, the --model-draft long alias, and the LLAMA_ARG_SPEC_DRAFT_MODEL binding all resolve to the MTP / DFlash draft checkpoint on both binaries; mlxcel additionally accepts its own --draft-model spelling.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-model",
@@ -461,6 +475,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-n-cpu-moe",
@@ -490,6 +505,7 @@
       "test": "src/bin/mlx_server.rs::spec_draft_spellings_resolve_to_the_draft_controls",
       "notes": "Maps onto mlxcel's draft-token cap (--draft / --draft-max) with the canonical spelling and the LLAMA_ARG_SPEC_DRAFT_N_MAX binding accepted on both binaries. The default differs: b10621 drafts 3 tokens, mlxcel's MTP / DFlash tuning defaults to 16, so the entry is aliased rather than supported.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-n-max",
@@ -521,6 +537,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::draft_sampler_thresholds_accept_only_their_inert_defaults",
       "notes": "MTP / DFlash verify whole draft blocks and have no per-step minimum; the 0 default (no minimum) is inert and accepted, any other value fails startup pointing at --draft-block-size.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-n-min"
@@ -555,6 +572,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::draft_ngl_full_offload_spellings_are_inert_and_partial_offload_is_rejected",
       "notes": "mlxcel keeps every draft layer on the accelerator: auto, all, and the historical negative count are inert full-offload spellings; a non-negative partial offload fails startup.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-ngl",
@@ -589,6 +607,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-override-tensor",
@@ -619,6 +638,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::draft_sampler_thresholds_accept_only_their_inert_defaults",
       "notes": "mlxcel verifies draft tokens against the target distribution instead of thresholding draft probabilities; the 0.00 default (greedy, no threshold) is inert, any other value fails startup.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-p-min",
@@ -651,6 +671,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::draft_sampler_thresholds_accept_only_their_inert_defaults",
       "notes": "mlxcel drafts a single sequence and never tree-splits; the 0.10 default is inert, any other value fails startup.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-p-split",
@@ -683,6 +704,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-poll",
@@ -713,6 +735,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-poll-batch",
@@ -743,6 +766,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-prio",
@@ -773,6 +797,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-prio-batch",
@@ -804,6 +829,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-threads",
@@ -835,6 +861,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ggml_draft_placement_values_are_rejected",
       "notes": "GGML draft-side process knob: mlxcel loads the draft model through MLX on the same accelerator as the target, so there is no GGML draft process to place. Inert values are accepted (hidden); any active value fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-threads-batch",
@@ -866,6 +893,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::draft_kv_cache_types_accept_only_f16",
       "notes": "mlxcel's draft KV cache runs at f16; the f16 default is inert and every GGML quantized cache type fails startup.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-type-k",
@@ -899,6 +927,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::draft_kv_cache_types_accept_only_f16",
       "notes": "mlxcel's draft KV cache runs at f16; the f16 default is inert and every GGML quantized cache type fails startup.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-draft-type-v",
@@ -929,6 +958,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-map-k-min-hits"
@@ -956,6 +986,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-map-k-size-m"
@@ -983,6 +1014,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-map-k-size-n"
@@ -1010,6 +1042,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-map-k4v-min-hits"
@@ -1037,6 +1070,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-map-k4v-size-m"
@@ -1064,6 +1098,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-map-k4v-size-n"
@@ -1091,6 +1126,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Removed upstream (errors with a pointer to the per-mode --spec-ngram-*-min-hits); mlxcel never accepted it, so both surfaces reject it.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1113,6 +1149,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-mod-n-match"
@@ -1140,6 +1177,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-mod-n-max"
@@ -1167,6 +1205,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-mod-n-min"
@@ -1194,6 +1233,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-simple-min-hits"
@@ -1221,6 +1261,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-simple-size-m"
@@ -1248,6 +1289,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::ngram_tuning_knobs_are_inert_while_no_ngram_selector_can_be_chosen",
       "notes": "N-gram tuning knob: only takes effect when --spec-type selects an n-gram mode, and mlxcel rejects every non-none --spec-type, so any value here is inert exactly as it is upstream with the default selector. Accepted (hidden).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-ngram-simple-size-n"
@@ -1275,6 +1317,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Removed upstream (errors with a pointer to the per-mode --spec-ngram-*-size-m); mlxcel never accepted it, so both surfaces reject it.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1297,6 +1340,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Removed upstream (errors with a pointer to the per-mode --spec-ngram-*-size-n); mlxcel never accepted it, so both surfaces reject it.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1319,6 +1363,7 @@
       "test": "src/cli/spec_compat_args_tests.rs::spec_type_resolves_the_translatable_values_and_rejects_the_rest",
       "notes": "b10621's speculation-subsystem selector, translated where the algorithms permit: `none` disables speculation exactly as upstream does (an explicit selector stops the draft-sidecar type inference, so a configured draft model runs no speculation and mlxcel drops it with a warning), `draft-mtp` maps onto --draft-kind mtp and `draft-dflash` onto --draft-kind dflash (conflicts with an explicit --draft-kind fail deterministically). The n-gram modes, draft-simple, draft-eagle3, draft-dspark, and multi-subsystem lists fail startup with per-value diagnostics.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--spec-type"
@@ -1342,6 +1387,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_n_max"
       }
@@ -1360,6 +1406,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_n_min"
       }
@@ -1378,6 +1425,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_ngram_min_hits"
       }
@@ -1396,6 +1444,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_ngram_size_m"
       }
@@ -1414,6 +1463,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_ngram_size_n"
       }
@@ -1432,6 +1482,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_p_min"
       }
@@ -1450,6 +1501,7 @@
       "test": "src/server/routes/native_completion.rs::native_speculative_dotted_fields_are_accepted_and_inert_like_b10621",
       "notes": "b10621 registers this flat dotted key behind a schema block that is compiled out, so upstream accepts and ignores it; mlxcel declares the same key and treats it identically as inert, with the server-wide speculative flags as the real controls. Rejecting it would refuse requests b10621 answers.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "speculative_type"
       }

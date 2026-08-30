@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "chat-templates",
   "entries": [
     {
@@ -25,6 +25,7 @@
         "A built-in template name is refused rather than resolved; mlxcel has no built-in template library and renders the checkpoint's own template instead.",
         "When `--chat-template-file` is also given, the inline template wins here and the collision is logged; b10621 writes both into one field, so whichever came last on the command line wins there."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--chat-template"
@@ -55,6 +56,7 @@
       "divergence": [
         "When `--chat-template` is also given, the inline template wins here and the collision is logged; b10621 writes both into one field, so whichever came last on the command line wins there."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--chat-template-file"
@@ -85,6 +87,7 @@
       "divergence": [
         "When `--chat-template-kwargs` sets the same key, the dedicated flag wins here and the collision is logged; b10621 applies whichever handler ran last on the command line. Upstream itself deprecates setting `enable_thinking` through the kwargs in favour of `--reasoning`, so the two agree whenever the flag came last."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--chat-template-kwargs"
@@ -117,6 +120,7 @@
       "test": "src/cli/chat_compat_args_tests.rs::both_escape_positions_are_inert_because_the_server_has_no_prompt_flag",
       "notes": "b10621's `--escape` processes `\\n`, `\\t` and friends in the prompt-carrying options (`--prompt`, `--in-prefix`, ...), none of which the server exposes: a server prompt arrives as JSON, where escapes are the encoding's business. Both positions are therefore inert and both are accepted. Accepted as a hidden compatibility argument: it is a compatibility surface rather than an mlxcel feature, and mlxcel's own `--chat-template`, `--chat-template-file`, `--chat-template-kwargs` and `--reasoning-budget` stay visible in `--help`. llama.cpp writes this option with a single dash and several letters, which clap reads as a cluster of one-letter shorts; the argv pre-pass in `src/cli/llama_short_flags.rs` rewrites the exact upstream token to the long spelling before clap sees it. The flag-surface dump the manifest gate reads is long-spelling-only, so `accepted_spellings` records the long form; `tests/llama_chat_template_cli.rs::every_b10621_chat_short_spelling_reaches_its_own_option` covers the short one.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--escape",
@@ -149,6 +153,7 @@
       "divergence": [
         "`--no-jinja` is rejected; mlxcel has no non-Jinja formatter to fall back to."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--jinja",
@@ -184,6 +189,7 @@
       "divergence": [
         "b10621 continues a trailing assistant message by default; mlxcel answers it with a fresh turn, whether or not the flag is passed (#1470)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--prefill-assistant",
@@ -218,6 +224,7 @@
       "divergence": [
         "When `--chat-template-kwargs` sets the same key, the dedicated flag wins here and the collision is logged; b10621 applies whichever handler ran last on the command line. Upstream itself deprecates setting `enable_thinking` through the kwargs in favour of `--reasoning`, so the two agree whenever the flag came last."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning"
@@ -247,6 +254,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Same -1/0/N semantics; canonical LLAMA_ARG_THINK_BUDGET honored at runtime (clap binds the flag, the env bridge is code, covered by tests/thinking_budget.rs).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-budget"
@@ -281,6 +289,7 @@
       "divergence": [
         "Accepted and warned about, but not injected: the reasoning budget still ends the thinking block without the message (#1470)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-budget-message"
@@ -312,6 +321,7 @@
       "divergence": [
         "When `--chat-template-kwargs` sets the same key, the dedicated flag wins here and the collision is logged; b10621 applies whichever handler ran last on the command line. Upstream itself deprecates setting `enable_thinking` through the kwargs in favour of `--reasoning`, so the two agree whenever the flag came last."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-effort"
@@ -345,6 +355,7 @@
         "In a STREAMED response under `none` or `deepseek-legacy` the thinking text reaches `delta.content` but its literal `<think>` / `<|channel>` delimiters do not; the non-streaming `message.content` keeps them (#1470).",
         "Whether a streamed `deepseek-legacy` response should carry the thoughts in `delta.content` only, rather than in both fields, is unverified: upstream's `reasoning_in_content` consumer is outside the pinned sources (#1470)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-format"
@@ -378,6 +389,7 @@
       "divergence": [
         "When `--chat-template-kwargs` sets the same key, the dedicated flag wins here and the collision is logged; b10621 applies whichever handler ran last on the command line. Upstream itself deprecates setting `enable_thinking` through the kwargs in favour of `--reasoning`, so the two agree whenever the flag came last."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-preserve",
@@ -411,6 +423,7 @@
       "test": "tests/llama_chat_template_cli.rs::every_b10621_chat_template_spelling_reaches_mlxcels_own_classification",
       "notes": "Forces a pure content parser: everything the model emitted goes to `message.content` verbatim, reasoning and tool-call syntax included, and no `reasoning_content` or `tool_calls` is produced. Honoured on the single-node chat route (streaming and non-streaming) and on the disaggregated router front, which serves the same `/v1/chat/completions`. Tool-call parsing is gated off with it on every path, so a call is never reported twice, once as raw syntax in `content` and once as a tool-call delta. The non-streaming path returns the raw generation before any shaping step, so nothing downstream can re-introduce a parser; the streaming path bypasses the stream filter and synthesizes its pass-through output, which keeps the per-token logprob bookkeeping on one code path (one position in, one emitted, none suppressed). Supersedes `--reasoning-format`, as it does upstream. Its environment variable is bound at runtime so the pair's vocabulary matches b10621's. Accepted as a hidden compatibility argument: it is a compatibility surface rather than an mlxcel feature, and mlxcel's own `--chat-template`, `--chat-template-file`, `--chat-template-kwargs` and `--reasoning-budget` stay visible in `--help`.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--skip-chat-parsing",
@@ -445,6 +458,7 @@
       "divergence": [
         "Rejected at startup; mlxcel has no way to render special tokens in a response."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--special"
@@ -468,6 +482,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `chat_format` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -486,6 +501,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `chat_parser` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -504,6 +520,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `continue_final_message` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -522,6 +539,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel cannot echo the prompt back (#1470)."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -540,6 +558,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `generation_prompt` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -558,6 +577,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `parse_tool_calls` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -578,6 +598,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `reasoning_budget_end_tags` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -596,6 +617,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `reasoning_budget_message` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -614,6 +636,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `reasoning_budget_start_tag` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -630,6 +653,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Accepted as a serde alias of thinking_budget_tokens.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "reasoning_budget_tokens"
       }
@@ -650,6 +674,7 @@
       "divergence": [
         "Not accepted on `POST /completion`; mlxcel's is a raw-prompt endpoint with nothing for `reasoning_format` to configure."
       ],
+      "rationale": null,
       "mlxcel": null
     }
   ]

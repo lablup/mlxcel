@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "runtime-and-context",
   "entries": [
     {
@@ -26,6 +26,7 @@
         "default is 512 (mlxcel's --prefill-chunk-size default); b10621 defaults to 2048",
         "maps onto mlxcel's chunked-prefill chunk size rather than llama.cpp's logical llama_batch, so equal values do not produce equal per-forward token counts"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--batch-size"
@@ -58,6 +59,7 @@
       "divergence": [
         "no flag: there is no per-slot retained prompt to save on a new task or clear on unified KV"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -85,6 +87,7 @@
         "the prompt cache it controls covers the chat-shaped routes only; /v1/completions and /completion are never cached whatever the flag says",
         "--cache-prompt cannot re-enable the cache over mlxcel's own --no-prompt-cache; between two explicit operator statements the disable wins"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cache-prompt",
@@ -119,6 +122,7 @@
         "the budget bounds the chat-route prompt-prefix cache; /v1/completions and /completion hold no cached prefixes to bound",
         "-cram is not accepted: a single-dash multi-character alias has no clap representation"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cache-ram"
@@ -150,6 +154,7 @@
         "a positive minimum chunk size is refused at startup instead of enabling KV-shift reuse; only the upstream default of 0 is accepted",
         "no KV operation re-bases the rotary positions of a cached span, so chunk reuse cannot be expressed at all"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cache-reuse"
@@ -182,6 +187,7 @@
         "no flag: there are no successive context checkpoints for a minimum spacing to separate",
         "-cms is not accepted either"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -211,6 +217,7 @@
         "-cb and -nocb are not accepted: a single-dash multi-character alias has no clap representation",
         "disabling pins the decode width to one sequence but leaves chunked prefill, the prompt cache and speculative decoding in place, where llama.cpp's slot loop stops interleaving outright"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--cont-batching",
@@ -245,6 +252,7 @@
         "no flag: KV front-trimming is unconditional once a context bound exists and cannot be disabled",
         "b10621 defaults context shift to disabled and fails an over-long request; mlxcel shifts silently"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -269,6 +277,7 @@
       "divergence": [
         "b10621 loads the vector and applies it to the model's activations; mlxcel rejects the flag at startup before any weight is read."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--control-vector"
@@ -296,6 +305,7 @@
       "test": "src/cli/ggml_compat_args_tests.rs::control_vector_layer_range_alone_is_inert",
       "notes": "Inert: without vectors the range configures nothing, exactly as upstream, and mlxcel rejects every vector flag, so no configuration where the range matters can be reached. Accepted (hidden) with b10621's two-value START END form.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--control-vector-layer-range"
@@ -325,6 +335,7 @@
       "divergence": [
         "b10621 loads the vector and applies it to the model's activations; mlxcel rejects the flag at startup before any weight is read."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--control-vector-scaled"
@@ -358,6 +369,7 @@
         "no flag: at most one history-boundary snapshot is captured per sequence, not a ring of per-slot context checkpoints",
         "-ctxcp and --swa-checkpoints are not accepted either"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -381,6 +393,7 @@
       "test": "src/server/routes/props_tests.rs",
       "notes": "Same semantics: 0 = derive from the model, and the total is shared across slots (ctx_size / slots) exactly as llama-server splits n_ctx across n_parallel. The resolved per-slot window is now reported as `n_ctx` in /props and logged at startup.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ctx-size"
@@ -415,6 +428,7 @@
         "no flag: the retained prefix is a fixed 4 tokens rather than an operator-settable count",
         "b10621's -1 (retain the whole initial prompt) has no representation"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -443,6 +457,7 @@
       "divergence": [
         "no flag: KV is allocated per sequence and there is no unified shared buffer to switch to"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -469,6 +484,7 @@
         "default is 4 server slots; b10621 defaults to -1 (auto)",
         "-1 is rejected with a value-parser diagnostic rather than resolving to an automatic slot count"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--parallel",
@@ -504,6 +520,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Both spellings (--predict, --n-predict) accepted; default -1 = until EOS/context, matching llama-server per request.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--predict",
@@ -536,6 +553,7 @@
       "test": "tests/llama_compat_rope_freq_base.rs",
       "notes": "Replaces the checkpoint's rope_theta before the model is constructed, and feeds the llama3 band arithmetic as well as the plain rotation, so the frequency table and the stored base cannot drift apart. On Gemma 3 it reaches the global-attention layers only; the sliding layers keep rope_local_base_freq, which is llama.cpp's separate rope_freq_base_train_swa.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--rope-freq-base"
@@ -564,6 +582,7 @@
       "test": "tests/llama_compat_rope_scaling_override.rs",
       "notes": "b10621's `rope_freq_scale = N`. Applied as a linear scheme when the checkpoint names no scheme or names \"default\"/\"linear\", matching the flag's own \"defaults to linear unless specified by the model\". On a checkpoint that declares a banded scheme (llama3) a bare scale is refused: b10621 multiplies its rope_freq_scale into that rotation and mlxcel's llama3 table has no such multiplier, so composing them would change the rotation in a way neither side describes.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--rope-freq-scale"
@@ -592,6 +611,7 @@
       "test": "tests/llama_compat_rope_scaling_override.rs",
       "notes": "b10621's `rope_freq_scale = 1/N`, normalized at the CLI edge so `--rope-scale 8` and `--rope-freq-scale 0.125` are one stored value. Passing both with values that are not reciprocals is refused rather than resolved by precedence, because clap gives mlxcel two independent options where b10621 has one field that the later flag simply overwrites.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--rope-scale"
@@ -620,6 +640,7 @@
       "test": "tests/llama_compat_rope_scaling_override.rs",
       "notes": "Same value domain {none,linear,yarn} and the same LLAMA_ARG_ROPE_SCALING_TYPE binding. `none` and `linear` are applied to the checkpoint's rope_scaling block before the model is constructed, so before any KV cache exists. `yarn` parses and is refused with a diagnostic naming the families that serve YaRN from their own config: mlxcel's shared RoPE path builds \"default\", \"linear\" and \"llama3\" tables only, and b10621 itself documents the flag as \"defaults to linear unless specified by the model\", so a refusal is the only reading that does not change the rotation silently. An override that reaches no RoPE code path refuses to serve rather than starting (models::rope_overrides::verify_applied).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--rope-scaling"
@@ -652,6 +673,7 @@
         "no flag: reuse is a process-wide prefix trie, not a scan of what each slot is holding, so there is no slot prompt for a similarity threshold to compare against",
         "slots are presentation-only (synthesized in /slots from the active count and queue depth) and hold no prompt state"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -676,6 +698,7 @@
       "divergence": [
         "no flag: the SWA window is the checkpoint's and cannot be widened to full size from the server"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -702,6 +725,7 @@
         "the value is not used: mlxcel has no physical micro-batch distinct from the logical prefill chunk on unified memory",
         "default is unset rather than b10621's 512"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ubatch-size"
@@ -733,6 +757,7 @@
         "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
         "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--yarn-attn-factor"
@@ -764,6 +789,7 @@
         "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
         "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--yarn-beta-fast"
@@ -795,6 +821,7 @@
         "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
         "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--yarn-beta-slow"
@@ -826,6 +853,7 @@
         "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (-1.0) is accepted",
         "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--yarn-ext-factor"
@@ -857,6 +885,7 @@
         "non-sentinel values are refused at startup instead of tuning the rotation; only the b10621 sentinel (0) is accepted",
         "mlxcel's shared RoPE path implements default / linear / llama3 frequency tables and has no YaRN arm to receive these parameters"
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--yarn-orig-ctx"
@@ -882,6 +911,7 @@
         "accepted on the chat-shaped routes only; native /completion neither declares the field nor caches prompts, so a client sending it there is silently unaffected",
         "true asserts the default and cannot re-enable the cache for one request against a server-wide disable"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -900,6 +930,7 @@
       "divergence": [
         "the field is not accepted: KV-shift chunk reuse does not exist, so a per-request threshold has nothing to tune"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -919,6 +950,7 @@
         "the field is silently dropped: every trim discards exactly the excess over the KV cap",
         "b10621's 0 = discard half the context default has no equivalent"
       ],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -937,6 +969,7 @@
       "divergence": [
         "the field is silently dropped: retention is a fixed 4-token attention sink, server-wide, not per request"
       ],
+      "rationale": null,
       "mlxcel": null
     }
   ]

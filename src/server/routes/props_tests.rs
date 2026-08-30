@@ -205,6 +205,15 @@ async fn get_props_carries_the_b10621_key_set() {
         "modalities carries exactly b10621's three flags"
     );
     assert_eq!(body["is_sleeping"], false);
+    // The `by_design` divergence on the manifest's `GET /props` entry:
+    // mlxcel takes media as content parts and has no textual marker, so
+    // `media_marker` is deliberately null where b10621 reports mtmd's
+    // `<__media__>`. Null, not absent, and never an invented marker.
+    assert!(
+        body["media_marker"].is_null(),
+        "media_marker must be null: {:?}",
+        body["media_marker"]
+    );
     let caps = body["chat_template_caps"].as_object().expect("caps object");
     assert_eq!(caps.len(), 9, "the nine jinja::caps keys: {caps:?}");
 }

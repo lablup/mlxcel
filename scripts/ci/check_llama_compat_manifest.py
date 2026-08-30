@@ -31,10 +31,11 @@ Enforced here:
   what makes shard ownership machine-checked rather than prose in
   docs/llama-server-compat.md: two concurrent chains editing one file is
   now a gate failure, not just a merge conflict.
-- Every entry carries exactly the fact keys of its kind plus the six
+- Every entry carries exactly the fact keys of its kind plus the seven
   policy keys (``state``, ``issue``, ``test``, ``notes``, ``divergence``,
-  ``mlxcel``), in that order. A misspelled or missing key fails loudly
-  instead of being a silent no-op that nothing downstream ever reads.
+  ``rationale``, ``mlxcel``), in that order. A misspelled or missing key
+  fails loudly instead of being a silent no-op that nothing downstream ever
+  reads.
 - An entry's ``mlxcel`` claim block only carries keys from a known
   allowlist (``accepted_spellings``, ``accepted_on_one_binary_only``,
   ``env``, ``env_binding``, ``env_test``, ``defaults``, ``hidden``,
@@ -58,12 +59,22 @@ Enforced here:
   Duplicate aliases live inside their entry (no spelling appears in two
   entries), so aliases never inflate the feature count.
 - Every entry has exactly one policy state out of ``supported`` /
-  ``aliased`` / ``not_applicable`` / ``deferred``. The extractor's
-  ``unclassified`` marker is rejected, which is what turns a nightly bump
-  into a merge-blocking, reviewable diff.
+  ``aliased`` / ``not_applicable`` / ``deferred`` / ``by_design``. The
+  extractor's ``unclassified`` marker is rejected, which is what turns a
+  nightly bump into a merge-blocking, reviewable diff.
 - ``deferred`` entries carry an issue number (``--check-issues-open``
   additionally asserts each referenced issue is still open via ``gh``; the
   CI job passes it, the offline ``make verify-llama-compat`` does not).
+- ``by_design`` entries are implemented and served, differ from b10621 on
+  purpose, permanently, and must argue that: a non-empty ``divergence``
+  (an entry with none is ``supported``), non-empty ``notes``, a resolving
+  ``test`` pointer, and a well-formed ``rationale`` object whose ``kind``
+  distinguishes an architectural impossibility (``revisit_if`` null) from
+  a policy choice (``revisit_if`` states what would reopen the decision).
+  ``by_design`` deliberately requires no open issue: being closed to
+  further work is the state's meaning, so its entries never feed
+  ``--check-issues-open``. On every other state ``rationale`` must be
+  null.
 - ``not_applicable`` entries carry a diagnostic/documentation test id and
   an explanation.
 - ``aliased`` entries carry an mlxcel mapping and a test id, and the
@@ -97,7 +108,7 @@ from pathlib import Path, PurePosixPath
 REPO = Path(__file__).resolve().parents[2]
 MANIFEST_DIR = REPO / "compat" / "llama-server" / "b10621"
 
-VALID_STATES = {"supported", "aliased", "not_applicable", "deferred"}
+VALID_STATES = {"supported", "aliased", "not_applicable", "deferred", "by_design"}
 KIND_ORDER = {"option": 0, "route": 1, "native_request_field": 2}
 
 # Manifest document schema, independent of the pinned llama.cpp release.
@@ -105,8 +116,10 @@ KIND_ORDER = {"option": 0, "route": 1, "native_request_field": 2}
 # `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`:
 # 2 when pin.json's `shards` field changed from a bare name list to a mapping
 # of shard name to its owning-issue set, 3 when every entry gained the
-# structured `divergence` list (both issue #1443 follow-ups).
-MANIFEST_SCHEMA_VERSION = 3
+# structured `divergence` list (both issue #1443 follow-ups), 4 when every
+# entry gained the `rationale` object and `by_design` joined the state
+# vocabulary (#1499).
+MANIFEST_SCHEMA_VERSION = 4
 
 # Fact keys the extractor owns, per entry kind, in the order it emits them.
 # Mirrors `FACT_KEYS` in `scripts/compat/extract_b10621_manifest.py`.
@@ -137,8 +150,25 @@ ENTRY_FACT_KEYS = {
 }
 
 # Policy keys every entry carries, in the order the extractor writes them.
-# Mirrors `NEW_POLICY` in `scripts/compat/extract_b10621_manifest.py`.
-ENTRY_POLICY_KEYS = ["state", "issue", "test", "notes", "divergence", "mlxcel"]
+# Mirrors `NEW_POLICY` in `scripts/compat/extract_b10621_manifest.py`; the two
+# orders must stay byte-identical, because the extractor's canonical merge is
+# what fixes key order on regeneration and a mismatch would make a manifest
+# that validates once and then churns on every regeneration.
+ENTRY_POLICY_KEYS = [
+    "state",
+    "issue",
+    "test",
+    "notes",
+    "divergence",
+    "rationale",
+    "mlxcel",
+]
+
+# Keys of a `by_design` entry's `rationale` object, all three required. Like
+# `MLXCEL_CLAIM_KEYS`, this is a closed set so a typo'd key fails instead of
+# silently recording an argument nothing reads.
+RATIONALE_KEYS = {"kind", "reason", "revisit_if"}
+RATIONALE_KINDS = {"architectural", "policy"}
 
 # Keys recognized inside an entry's `mlxcel` claim block. A key outside this
 # set is very likely a typo (`accepted_spelling` for `accepted_spellings`,
@@ -269,8 +299,84 @@ def check_divergence(where: str, state: str, e: dict) -> None:
             "in externally observable behavior is 'aliased' (a tested "
             "translation with no loss of requested semantics), "
             "'not_applicable' (no MLX/CUDA equivalent, rejected with a "
-            "diagnostic), or 'deferred' (a linked implementation issue owns "
-            "closing the gap). Pick one and name the owning issue."
+            "diagnostic), 'deferred' (a linked implementation issue owns "
+            "closing the gap), or 'by_design' (the difference is permanent, "
+            "argued in `rationale` and pinned by a test). Pick one and name "
+            "the owning issue."
+        )
+
+
+def check_rationale(where: str, state: str, e: dict) -> None:
+    """``rationale`` argues a ``by_design`` permanence claim, and only that.
+
+    On a ``by_design`` entry it is an object with exactly the keys ``kind``,
+    ``reason`` and ``revisit_if``. ``kind`` is ``"architectural"`` (mlxcel
+    structurally cannot produce b10621's behavior; ``revisit_if`` must be
+    null) or ``"policy"`` (mlxcel could produce it and deliberately does not;
+    ``revisit_if`` must state, non-empty, what would have to change for the
+    decision to be revisited). Keeping the two kinds mechanically
+    distinguishable is the point: an architectural impossibility and a policy
+    choice must not be recordable interchangeably. On every other state
+    ``rationale`` must be null, mirroring the rule that rejects a
+    ``divergence`` misfiled inside the ``mlxcel`` block.
+    """
+    rationale = e.get("rationale")
+    if state != "by_design":
+        if rationale is not None:
+            err(
+                f"{where}: state {state!r} with a non-null rationale. "
+                "`rationale` argues the permanence of a 'by_design' entry; "
+                "on every other state it must be null. If this divergence "
+                "really is permanent, the state is 'by_design'."
+            )
+        return
+    if not isinstance(rationale, dict):
+        err(
+            f"{where}: by_design entry must carry a rationale object "
+            f"{{kind, reason, revisit_if}}, found {rationale!r}"
+        )
+        return
+    unknown = sorted(set(rationale) - RATIONALE_KEYS)
+    missing = sorted(RATIONALE_KEYS - set(rationale))
+    if unknown or missing:
+        parts = []
+        if unknown:
+            parts.append(f"unknown key(s) {unknown}")
+        if missing:
+            parts.append(f"missing key(s) {missing}")
+        err(
+            f"{where}: rationale has {', and '.join(parts)}; it carries "
+            f"exactly {sorted(RATIONALE_KEYS)}"
+        )
+        return
+    kind = rationale.get("kind")
+    if kind not in RATIONALE_KINDS:
+        err(
+            f"{where}: rationale.kind {kind!r} is not one of "
+            f"{sorted(RATIONALE_KINDS)}"
+        )
+        return
+    reason = rationale.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        err(
+            f"{where}: rationale.reason must be a non-empty string naming why "
+            "the divergence is permanent, not merely restating it"
+        )
+    revisit = rationale.get("revisit_if")
+    if kind == "policy":
+        if not isinstance(revisit, str) or not revisit.strip():
+            err(
+                f"{where}: rationale.kind 'policy' requires a non-empty "
+                "revisit_if stating what would have to change for the "
+                "decision to be revisited; a choice with no revisit "
+                "condition is indistinguishable from an impossibility, "
+                "which is kind 'architectural'"
+            )
+    elif revisit is not None:
+        err(
+            f"{where}: rationale.kind 'architectural' requires revisit_if "
+            f"null ({revisit!r} found); an impossibility has no revisit "
+            "condition. If there is one, the kind is 'policy'."
         )
 
 
@@ -285,6 +391,7 @@ def check_entry(shard: str, e: dict) -> None:
     test = e.get("test")
 
     check_divergence(where, state, e)
+    check_rationale(where, state, e)
 
     if isinstance(mlxcel, dict):
         unknown = sorted(set(mlxcel) - MLXCEL_CLAIM_KEYS)
@@ -309,6 +416,24 @@ def check_entry(shard: str, e: dict) -> None:
             err(f"{where}: not_applicable entry must name a diagnostic/documentation test")
         if not e.get("notes"):
             err(f"{where}: not_applicable entry must explain why in notes")
+    if state == "by_design":
+        # The state means: implemented, served, differing from b10621 on
+        # purpose, permanently. Each half of that claim has an obligation, so
+        # "permanent" is argued per entry with a test behind it rather than
+        # asserted to make a checkbox go green.
+        divergence = e.get("divergence")
+        if not (isinstance(divergence, list) and divergence):
+            err(
+                f"{where}: by_design entry with an empty divergence. An entry "
+                "that does not observably differ from b10621 is 'supported'."
+            )
+        if not e.get("notes"):
+            err(f"{where}: by_design entry must explain the behavior in notes")
+        if not test:
+            err(
+                f"{where}: by_design entry must name the test that pins the "
+                "permanent behavior"
+            )
     if state == "aliased":
         if not isinstance(mlxcel, dict) or not mlxcel:
             err(f"{where}: aliased entry must record the mlxcel mapping")

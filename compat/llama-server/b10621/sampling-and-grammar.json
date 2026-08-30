@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "area": "sampling-and-grammar",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -44,6 +45,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -66,6 +68,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "The off-by-one is fixed (#1436): a repeat exactly dry_allowed_length long now receives the base^0 tier, matching upstream's >= comparison. Known corner: at dry_allowed_length 0 the minimum observable match length is 1, so mlxcel's lowest tier is base^1 where upstream's zero-length positions emit base^0.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--dry-allowed-length"
@@ -95,6 +98,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "A value below 1.0 keeps the default on the CLI and falls back to the server default on the HTTP field, both matching b10621 (#1436).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--dry-base"
@@ -124,6 +128,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--dry-multiplier"
@@ -153,6 +158,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Sentinels reconciled (#1436): 0 disables DRY (upstream's sentinel) and negatives are rejected at parse time exactly as b10621's CLI does; a full-history scan is reachable through a window at least the context length. The offline mlxcel generate CLI (not a compat surface) additionally accepts -1 as its explicit full-history spelling.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--dry-penalty-last-n"
@@ -182,6 +188,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling accepted, but b10621's default breaker set ('\\n', ':', '\"', '*') is not applied (mlxcel starts with none), the \"none\" sentinel is not recognized, and a breaker that is not exactly one token fails startup. #1436 owns the reconciliation.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--dry-sequence-breaker"
@@ -208,6 +215,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -230,6 +238,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -252,6 +261,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--frequency-penalty"
@@ -281,6 +291,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -303,6 +314,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -325,6 +337,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Implemented as upstream does on the MLX serving path: a -inf logit bias on every end-of-generation token at enqueue time, so generation runs to the token budget or a stop string. The OpenXLA worker has no token-bias path and rejects an ignore_eos request with a diagnostic; the disaggregated decode-role handoff does not carry token bias (same recorded gap as XTC there).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--ignore-eos"
@@ -352,6 +365,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -375,6 +389,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -398,6 +413,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -420,6 +436,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Default aligned to 0.05 by #1430.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--min-p"
@@ -449,6 +466,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -471,6 +489,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -493,6 +512,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -515,6 +535,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--presence-penalty"
@@ -544,6 +565,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "The window now reaches the sampler (#1436): repetition, frequency, and presence penalties scan exactly the configured recent-token window, 0 disables the stage, and /props reports the resolved value.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--repeat-last-n"
@@ -573,6 +595,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--repeat-penalty"
@@ -603,6 +626,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Repeatable server-wide stop strings with b10621 replace semantics: the CLI list seeds every request's stop set, and a request carrying any effective stop string replaces it wholesale, falling back to the CLI list only when the request supplied none. The -r short form is also registered on both binaries; the conformance dump indexes long spellings only, so the claim lists the long form.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--reverse-prompt"
@@ -631,6 +655,7 @@
       "test": "src/server/startup_tests.rs::sampler_order_accepts_only_the_fixed_b10621_default",
       "notes": "Single-character spelling of --samplers; only the default sequence edskypmxt is accepted (inert), any other sequence fails startup with a diagnostic.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--sampler-seq",
@@ -658,6 +683,7 @@
       "test": "src/server/startup_tests.rs::sampler_order_accepts_only_the_fixed_b10621_default",
       "notes": "mlxcel's sampler chain order is fixed to exactly b10621's default (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature; #1375/#1377 pin the filter positions). The flag accepts precisely that order as an inert configuration and any other order fails startup with the accepted form in the diagnostic, so a reordered chain can never be silently sampled in the wrong order.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--samplers"
@@ -687,6 +713,7 @@
       "divergence": [
         "Every negative value is treated as the random-seed sentinel; b10621 parses the value with std::stoul, so a value below -1 becomes one specific uint32 seed (#1436)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--seed"
@@ -720,6 +747,7 @@
       "divergence": [
         "With the flag absent the effective server default comes from the checkpoint's generation_config.json rather than the 0.8 clap default; b10621 has no such mechanism (#1436)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--temp",
@@ -752,6 +780,7 @@
       "divergence": [
         "With the flag absent the effective server default comes from the checkpoint's generation_config.json rather than the 40 clap default; b10621 has no such mechanism (#1436)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--top-k"
@@ -785,6 +814,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Server-wide default on both binaries; b10621's -1.0 disabled sentinel (and every non-positive or non-finite value) folds to mlxcel's 0.0 disabled form at startup. The filter semantics landed with #1375.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--top-nsigma",
@@ -817,6 +847,7 @@
       "divergence": [
         "With the flag absent the effective server default comes from the checkpoint's generation_config.json rather than the 0.95 clap default; b10621 has no such mechanism (#1436)."
       ],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--top-p"
@@ -848,6 +879,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Server-wide default via --typical / --typical-p on both binaries (mlxcel serve and mlxcel-server), default 1.0 = disabled, matching b10621. Chain position matches b10621 (top_k -> typ_p -> top_p -> min_p): when top_k is active, an idempotent Rust-side top-k mask runs ahead of the typical filter so the typicality statistics come from the renormalized top-k survivors, and the fused chain's own top_k then re-selects the same set. An out-of-range startup value folds to disabled with a warning, mirroring the upstream sampler treating such values as inert.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--typical",
@@ -878,6 +910,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Server-wide default on both binaries; the in-chain XTC semantics landed with #1379.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--xtc-probability"
@@ -907,6 +940,7 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Server-wide default on both binaries; values above 0.5 make XTC inert, matching upstream.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--xtc-threshold"
@@ -930,6 +964,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -946,6 +981,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -962,6 +998,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -978,6 +1015,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Off-by-one fixed (#1436): the base^0 tier now applies at exactly the allowed length.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "dry_allowed_length"
       }
@@ -996,6 +1034,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "A value below 1.0 falls back to the server default, matching the b10621 schema handler (#1436).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "dry_base"
       }
@@ -1014,6 +1053,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "dry_multiplier"
       }
@@ -1032,6 +1072,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "0 disables DRY (b10621 sentinel, #1436); the schema floor of 0 is enforced by the unsigned deserialization and the value is clamped to upstream's INT32_MAX ceiling so a wire value cannot collide with the internal full-history sentinel.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "dry_penalty_last_n"
       }
@@ -1050,6 +1091,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "VALUE-DOMAIN MISMATCH: mlxcel deserializes an array of token ids, b10621 an array of strings (or \"none\"). #1436 owns the reconciliation.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "dry_sequence_breakers"
       }
@@ -1068,6 +1110,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1084,6 +1127,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1100,6 +1144,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Applied over the repeat_last_n window since #1436.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "frequency_penalty"
       }
@@ -1118,6 +1163,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1134,6 +1180,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1150,6 +1197,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Implemented as a -inf end-of-generation bias, matching upstream's EOG logit-bias mechanism, on the MLX serving path; the OpenXLA worker rejects it with a diagnostic instead of silently stopping at EOS.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "ignore_eos"
       }
@@ -1170,6 +1218,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1186,6 +1235,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1202,6 +1252,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1218,6 +1269,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "min_p"
       }
@@ -1236,6 +1288,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1252,6 +1305,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1268,6 +1322,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1286,6 +1341,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1302,6 +1358,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1318,6 +1375,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Applied over the repeat_last_n window since #1436.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "presence_penalty"
       }
@@ -1336,6 +1394,7 @@
       "test": null,
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": null
     },
     {
@@ -1352,6 +1411,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Wired into the shared penalty window (#1436): 0 disables the stage, positives bound the scan; negatives are rejected by the unsigned deserialization, matching the b10621 schema floor of 0.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "repeat_last_n"
       }
@@ -1370,6 +1430,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Applied over the repeat_last_n window since #1436.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "repeat_penalty"
       }
@@ -1388,6 +1449,7 @@
       "test": "src/server/routes/native_completion.rs::native_samplers_accepts_only_the_default_order",
       "notes": "The field is declared and accepts b10621's default order in both upstream shapes (array of stage names, character string) as an inert configuration; any other order is refused with a 400 naming the accepted forms, so a reordered chain is never silently sampled in the wrong order.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "samplers"
       }
@@ -1408,6 +1470,7 @@
       "divergence": [
         "A seed below -1 is rejected with a 400; b10621 accepts it and folds it into its uint32 seed space (#1436)."
       ],
+      "rationale": null,
       "mlxcel": {
         "field": "seed"
       }
@@ -1426,6 +1489,7 @@
       "test": "src/server/batch/stop_sequence_tests.rs::a_stop_string_truncates_the_text_and_excludes_the_match",
       "notes": "Deserialized as scalar or array (#1430), carried to ServerGenerateOptions, and enforced on the shipping MLX serving path since #1466: every decoded piece passes through StopMatcher (src/server/batch/stop_matcher.rs) before it reaches the client, so a match truncates the text, the stop string is excluded, generation ends, and the matched string is reported as stopping_word with stop_type \"word\". Verified against the pinned b10621 binary on Qwen3-0.6B: `stop: [\"5\"]` on `Count: 1 2 3` returns content \" 4 \" with tokens_predicted 4 on both.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "stop"
       }
@@ -1444,6 +1508,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "temperature"
       }
@@ -1462,6 +1527,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "top_k"
       }
@@ -1480,6 +1546,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "b10621 declares the field without limits and treats every value <= 0.0 (default -1.0) as disabled; the route maps those to the explicit 0.0 disabled form, which still overrides the server-wide default.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "top_n_sigma"
       }
@@ -1498,6 +1565,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "top_p"
       }
@@ -1516,6 +1584,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "b10621 declares the field with no schema limits; a present value outside the enabled range (0.0, 1.0) resolves to the explicit disabled form 1.0 and still overrides the server-wide default. Chain position matches b10621: typicality is computed over the renormalized top-k survivors (see the --typical entry).",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "typical_p"
       }
@@ -1534,6 +1603,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "b10621 declares SOFT 0..=1 schema limits: an out-of-range value is clamped into the domain, not rejected; the route clamps identically and in-range values pass to the in-chain XTC filter.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "xtc_probability"
       }
@@ -1552,6 +1622,7 @@
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Same soft 0..=1 clamp as xtc_probability; a threshold above 0.5 is in range and inert, matching upstream.",
       "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "field": "xtc_threshold"
       }
