@@ -57,6 +57,8 @@ pub struct ServerStartupInput {
     /// (issue #1447). `Default` is b10621's own default for every one of them,
     /// so a caller that does not set this behaves exactly as before.
     pub chat_compat: crate::cli::chat_compat_args::ChatCompatResolution,
+    /// Optional Chat Completions alias emitted next to `reasoning_content`.
+    pub reasoning_alias_field: crate::server::ReasoningAliasField,
     pub host: String,
     pub port: u16,
     /// `--api-key` occurrences, raw. Each is split with b10621's CSV rules in
@@ -899,6 +901,7 @@ impl ServerStartupInput {
 
         Ok(ServerStartupConfig {
             reasoning_format: self.chat_compat.reasoning_format,
+            reasoning_alias_field: self.reasoning_alias_field,
             skip_chat_parsing: self.chat_compat.skip_chat_parsing,
             no_prefill_assistant: self.chat_compat.no_prefill_assistant,
             reasoning_budget_message: self.chat_compat.reasoning_budget_message.clone(),

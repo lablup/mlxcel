@@ -552,6 +552,7 @@ pub(crate) async fn non_stream_chat_completion(
     // also what `auto` resolves to here; `none` and `deepseek-legacy` keep the
     // thinking block in `content`.
     let reasoning_format = state.config.reasoning_format;
+    let reasoning_alias_field = state.config.reasoning_alias_field;
 
     // Surface the thinking scratchpad as `reasoning_content`. This is additive:
     // the `content` computation below (strip_unclosed_primed_thinking /
@@ -624,7 +625,10 @@ pub(crate) async fn non_stream_chat_completion(
                         logprobs,
                     )
                     .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-                    .with_reasoning_content(shaped.reasoning_content),
+                    .with_reasoning_content_alias_field(
+                        shaped.reasoning_content,
+                        reasoning_alias_field,
+                    ),
                 ));
             }
         }
@@ -651,7 +655,7 @@ pub(crate) async fn non_stream_chat_completion(
                 logprobs,
             )
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-            .with_reasoning_content(shaped.reasoning_content)
+            .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
             .with_florence2_result(florence2_result),
         ));
     }
@@ -696,7 +700,7 @@ pub(crate) async fn non_stream_chat_completion(
             logprobs,
         )
         .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-        .with_reasoning_content(shaped.reasoning_content)
+        .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
         .with_florence2_result(florence2_result),
     ))
 }
@@ -1013,6 +1017,7 @@ async fn stream_chat_completion(
         // same values without reaching back into the shared state.
         let skip_chat_parsing = state.config.skip_chat_parsing;
         let reasoning_format = state.config.reasoning_format;
+        let reasoning_alias_field = state.config.reasoning_alias_field;
 
         let cb_state = std::sync::Arc::new(std::sync::Mutex::new(StreamCallbackState {
             accumulated: String::new(),
@@ -1111,11 +1116,14 @@ async fn stream_chat_completion(
                             && !reasoning_text.is_empty()
                         {
                             if reasoning_format.emits_reasoning_content() {
-                                pending.push(ChatCompletionChunk::reasoning_content(
-                                    request_id_inner.clone(),
-                                    model_id_inner.clone(),
-                                    reasoning_text.clone(),
-                                ));
+                                pending.push(
+                                    ChatCompletionChunk::reasoning_content_with_alias_field(
+                                        request_id_inner.clone(),
+                                        model_id_inner.clone(),
+                                        reasoning_text.clone(),
+                                        reasoning_alias_field,
+                                    ),
+                                );
                             }
                             if reasoning_format.keeps_thoughts_in_content() {
                                 pending.push(ChatCompletionChunk::content_with_logprobs(
@@ -1187,10 +1195,11 @@ async fn stream_chat_completion(
             && !text.is_empty()
         {
             if reasoning_format.emits_reasoning_content() {
-                let chunk = ChatCompletionChunk::reasoning_content(
+                let chunk = ChatCompletionChunk::reasoning_content_with_alias_field(
                     request_id_clone.clone(),
                     model_id_clone.clone(),
                     text.clone(),
+                    reasoning_alias_field,
                 );
                 let _ = finish_events.json(&chunk);
             }

@@ -17,6 +17,7 @@
 use serde::Serialize;
 
 use super::response::{ChatLogprobs, CompletionLogprobs};
+use crate::server::ReasoningAliasField;
 
 /// Delta content for streaming
 #[derive(Debug, Clone, Serialize)]
@@ -32,6 +33,10 @@ pub struct Delta {
     /// can render a "thinking" status without parsing model-specific markers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// OpenRouter-compatible alias for `reasoning_content`. When enabled,
+    /// both fields carry identical text and are omitted together otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// Tool call deltas for streaming tool call output
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
@@ -110,6 +115,7 @@ impl ChatCompletionChunk {
                     role: Some("assistant".to_string()),
                     content: None,
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -143,6 +149,7 @@ impl ChatCompletionChunk {
                     role: None,
                     content: Some(content),
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -161,6 +168,17 @@ impl ChatCompletionChunk {
     /// parsing model-specific markers themselves. Matches OpenAI's `o1` and
     /// DeepSeek R1 streaming conventions.
     pub fn reasoning_content(id: String, model: String, text: String) -> Self {
+        Self::reasoning_content_with_alias_field(id, model, text, ReasoningAliasField::Reasoning)
+    }
+
+    /// Build a reasoning delta while honoring the configured alias policy.
+    pub fn reasoning_content_with_alias_field(
+        id: String,
+        model: String,
+        text: String,
+        alias_field: ReasoningAliasField,
+    ) -> Self {
+        let reasoning = alias_field.emits_reasoning().then(|| text.clone());
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
@@ -173,6 +191,7 @@ impl ChatCompletionChunk {
                     role: None,
                     content: None,
                     reasoning_content: Some(text),
+                    reasoning,
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -196,6 +215,7 @@ impl ChatCompletionChunk {
                     role: None,
                     content: None,
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: None,
                 },
                 finish_reason: Some(finish_reason),
@@ -225,6 +245,7 @@ impl ChatCompletionChunk {
                     role: None,
                     content: None,
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: Some(vec![ToolCallDelta {
                         index,
                         id: Some(call_id),
@@ -261,6 +282,7 @@ impl ChatCompletionChunk {
                     role: None,
                     content: None,
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: Some(vec![ToolCallDelta {
                         index,
                         id: None,

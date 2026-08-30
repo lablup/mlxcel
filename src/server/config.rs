@@ -357,6 +357,54 @@ impl EmbeddingServingMode {
     }
 }
 
+/// Optional compatibility alias emitted next to `reasoning_content` on Chat
+/// Completions responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningAliasField {
+    /// Emit only the established `reasoning_content` field.
+    None,
+    /// Also emit an identical `reasoning` field.
+    #[default]
+    Reasoning,
+}
+
+impl ReasoningAliasField {
+    /// Whether Chat Completions should duplicate reasoning into `reasoning`.
+    #[must_use]
+    pub const fn emits_reasoning(self) -> bool {
+        matches!(self, Self::Reasoning)
+    }
+
+    /// The CLI spelling for this policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Reasoning => "reasoning",
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningAliasField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReasoningAliasField {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "reasoning" => Ok(Self::Reasoning),
+            other => Err(format!(
+                "unknown reasoning alias field '{other}'; expected one of: none, reasoning"
+            )),
+        }
+    }
+}
+
 /// Server configuration derived from CLI-compatible startup arguments.
 ///
 /// Default values intentionally track `llama-server` behavior where practical
@@ -370,6 +418,9 @@ pub struct ServerConfig {
     /// Where a model's thoughts are reported (b10621 `--reasoning-format` /
     /// `LLAMA_ARG_THINK`, issue #1447).
     pub reasoning_format: crate::server::ReasoningFormat,
+    /// OpenRouter-compatible alias emitted next to `reasoning_content` on
+    /// Chat Completions messages and deltas.
+    pub reasoning_alias_field: ReasoningAliasField,
     /// b10621 `--skip-chat-parsing`: force a pure content parser, so reasoning
     /// and tool calls stay in `message.content`.
     pub skip_chat_parsing: bool,
@@ -771,6 +822,7 @@ impl Default for ServerConfig {
         Self {
             gcp: None,
             reasoning_format: crate::server::ReasoningFormat::default(),
+            reasoning_alias_field: ReasoningAliasField::default(),
             skip_chat_parsing: false,
             no_prefill_assistant: false,
             reasoning_budget_message: None,

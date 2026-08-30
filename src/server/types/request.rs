@@ -563,8 +563,20 @@ where
     Ok(Option::<MessageContent>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+#[derive(Deserialize)]
+struct MessageWire {
+    role: Role,
+    #[serde(default, deserialize_with = "deserialize_message_content")]
+    content: MessageContent,
+    name: Option<String>,
+    tool_call_id: Option<String>,
+    tool_calls: Option<Vec<ToolCallInMessage>>,
+    reasoning: Option<String>,
+    reasoning_content: Option<String>,
+}
+
 /// Chat message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Message {
     pub role: Role,
     /// Message content.
@@ -588,15 +600,37 @@ pub struct Message {
     /// chat templates that render `message.get('reasoning')` (e.g. Gemma 4) so
     /// the model can see its own thinking across turns (issue #362).
     ///
-    /// Accepts both `reasoning` and the OpenAI-compatible `reasoning_content`
-    /// spelling via serde alias. The field is dropped from serialized output
-    /// when absent, keeping existing wire shapes unchanged.
-    #[serde(
-        default,
-        alias = "reasoning_content",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// Accepts `reasoning`, `reasoning_content`, or an equal pair of both
+    /// spellings. The field is dropped from serialized output when absent,
+    /// keeping existing wire shapes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MessageWire::deserialize(deserializer)?;
+        let reasoning = match (wire.reasoning, wire.reasoning_content) {
+            (Some(reasoning), Some(reasoning_content)) if reasoning != reasoning_content => {
+                return Err(serde::de::Error::custom(
+                    "reasoning and reasoning_content must be identical when both are provided",
+                ));
+            }
+            (Some(reasoning), _) | (_, Some(reasoning)) => Some(reasoning),
+            (None, None) => None,
+        };
+        Ok(Self {
+            role: wire.role,
+            content: wire.content,
+            name: wire.name,
+            tool_call_id: wire.tool_call_id,
+            tool_calls: wire.tool_calls,
+            reasoning,
+        })
+    }
 }
 
 /// Sampling parameters shared across endpoints
@@ -1760,6 +1794,23 @@ mod tests {
         )
         .expect("`reasoning_content` alias must deserialize");
         assert_eq!(from_alias.reasoning.as_deref(), Some("alias text"));
+
+        let from_equal_pair: Message = serde_json::from_str(
+            r#"{"role":"assistant","content":"hi","reasoning":"same","reasoning_content":"same"}"#,
+        )
+        .expect("an emitted equal reasoning pair must round-trip");
+        assert_eq!(from_equal_pair.reasoning.as_deref(), Some("same"));
+
+        let conflicting = serde_json::from_str::<Message>(
+            r#"{"role":"assistant","content":"hi","reasoning":"one","reasoning_content":"two"}"#,
+        )
+        .expect_err("conflicting reasoning spellings must be rejected");
+        assert!(
+            conflicting
+                .to_string()
+                .contains("reasoning and reasoning_content must be identical"),
+            "{conflicting}"
+        );
 
         // Absent reasoning leaves the field None while other fields still load.
         let absent: Message =

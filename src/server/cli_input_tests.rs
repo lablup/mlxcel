@@ -31,6 +31,7 @@ use crate::test_support::env_lock::env_lock;
 fn sample_input() -> ServerStartupInput {
     ServerStartupInput {
         chat_compat: Default::default(),
+        reasoning_alias_field: Default::default(),
         model_path: PathBuf::from("models/foo"),
         model_store_root: None,
         adapter_path: Some(PathBuf::from("adapters/bar")),
@@ -269,6 +270,18 @@ fn into_startup_config_normalizes_edge_only_flags() {
         Some(PathBuf::from("models/draft"))
     );
     assert_eq!(startup.log_file, Some(PathBuf::from("server.log")));
+}
+
+#[test]
+fn into_startup_config_propagates_reasoning_alias_field() {
+    let mut input = sample_input();
+    input.reasoning_alias_field = crate::server::ReasoningAliasField::None;
+
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert_eq!(
+        startup.reasoning_alias_field,
+        crate::server::ReasoningAliasField::None
+    );
 }
 
 #[test]

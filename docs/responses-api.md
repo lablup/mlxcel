@@ -164,11 +164,7 @@ surface, not as proof that every echoed field changes runtime behavior.
 
 ## mlxcel extension fields
 
-mlxcel adds a small number of non-OpenAI fields to its response bodies. Each is
-optional and omitted (`skip_serializing_if`) unless the loaded model produces
-it, so standard clients never see a changed wire shape. The convention started
-with `reasoning_content` on chat completions (mirroring vLLM) and now also
-covers:
+mlxcel adds a small number of non-OpenAI fields to its response bodies. Each is optional and omitted (`skip_serializing_if`) unless the loaded model produces it. The convention started with `reasoning_content` on Chat Completions (mirroring vLLM), which now also carries an identical `reasoning` alias by default for OpenRouter-style clients. The alias is limited to Chat Completions and can be disabled with `--reasoning-alias-field none` or `MLXCEL_REASONING_ALIAS_FIELD=none`; Responses API reasoning continues to use its native `response.reasoning_text.delta` events and is unchanged. The extension convention also covers:
 
 - `choices[0].message.florence2_result` on non-streaming
   `POST /v1/chat/completions` (issue #1073): the structured form of a

@@ -46,10 +46,10 @@
 //! same [`StreamFilter`] the single-node chat route uses, so model-specific
 //! structural markers (`<think>`, `<|channel>`, tool-call delimiters, stray
 //! turn tokens) never leak to the client and thinking content is routed to
-//! `delta.reasoning_content`. Tool-call parsing (accumulate-then-parse into
-//! `tool_calls`) is NOT yet supported on the router path: the router emits
-//! `content` and `reasoning_content` only, and the filter suppresses
-//! tool-call delimiter markers.
+//! `delta.reasoning_content` and, by default, an identical `delta.reasoning`
+//! alias. Tool-call parsing (accumulate-then-parse into `tool_calls`) is NOT yet
+//! supported on the router path: the router emits `content` and the configured
+//! reasoning fields, and the filter suppresses tool-call delimiter markers.
 //!
 //! # Multi-node routing, health, and backpressure (issue #201)
 //!
@@ -687,6 +687,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
     // said, and `--skip-chat-parsing` would do nothing at all.
     let skip_chat_parsing = state.config.skip_chat_parsing;
     let reasoning_format = state.config.reasoning_format;
+    let reasoning_alias_field = state.config.reasoning_alias_field;
 
     // Resolve sampling and token budget using the same defaults as the
     // model worker.
@@ -740,6 +741,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                             &request_id_str2,
                             &model,
                             &reasoning,
+                            reasoning_alias_field,
                         ))));
                     }
                     if reasoning_format.keeps_thoughts_in_content() {
@@ -921,6 +923,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             &request.model,
             &content,
             &reasoning,
+            reasoning_alias_field,
             finish_reason,
             prompt_tokens,
             completion_tokens,
@@ -1553,14 +1556,30 @@ fn chat_chunk_content(id: &str, model: &str, text: &str) -> serde_json::Value {
 }
 
 /// Streaming chunk carrying a reasoning (thinking) token.
-fn chat_chunk_reasoning(id: &str, model: &str, text: &str) -> serde_json::Value {
+fn chat_chunk_reasoning(
+    id: &str,
+    model: &str,
+    text: &str,
+    alias_field: crate::server::ReasoningAliasField,
+) -> serde_json::Value {
+    let mut delta = serde_json::Map::new();
+    delta.insert(
+        "reasoning_content".to_string(),
+        serde_json::Value::String(text.to_string()),
+    );
+    if alias_field.emits_reasoning() {
+        delta.insert(
+            "reasoning".to_string(),
+            serde_json::Value::String(text.to_string()),
+        );
+    }
     serde_json::json!({
         "id": id,
         "object": "chat.completion.chunk",
         "model": model,
         "choices": [{
             "index": 0,
-            "delta": {"reasoning_content": text},
+            "delta": delta,
             "finish_reason": null
         }]
     })
@@ -1635,6 +1654,7 @@ fn chat_completion_json(
     model: &str,
     content: &str,
     reasoning: &str,
+    alias_field: crate::server::ReasoningAliasField,
     finish_reason: &str,
     prompt_tokens: usize,
     completion_tokens: usize,
@@ -1642,6 +1662,9 @@ fn chat_completion_json(
     let mut message = serde_json::json!({"role": "assistant", "content": content});
     if !reasoning.is_empty() {
         message["reasoning_content"] = serde_json::Value::String(reasoning.to_string());
+        if alias_field.emits_reasoning() {
+            message["reasoning"] = serde_json::Value::String(reasoning.to_string());
+        }
     }
     serde_json::json!({
         "id": id,

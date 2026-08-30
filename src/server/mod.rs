@@ -105,7 +105,7 @@ pub use cli_input::{
     resolve_compat_toggle, resolve_kv_cache_mode,
 };
 pub use config::{
-    DecodeStorageBackend, PipelineParallelRuntimeConfig, PreemptionPolicy,
+    DecodeStorageBackend, PipelineParallelRuntimeConfig, PreemptionPolicy, ReasoningAliasField,
     RemotePipelineStageConfig, ServerConfig, ServerGenerateOptions,
 };
 pub use cors::{CorsPolicy, OriginPolicy};

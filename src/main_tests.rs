@@ -738,6 +738,51 @@ fn serve_slots_flags_use_last_occurrence() {
 // cannot land silently.
 
 #[test]
+fn serve_reasoning_alias_field_defaults_parses_and_rejects_unknown_values() {
+    let default = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo"])
+        .expect("default serve arguments must parse");
+    let Commands::Serve(default) = default.command else {
+        panic!("expected serve command");
+    };
+    assert_eq!(
+        default.reasoning_alias_field,
+        mlxcel::server::ReasoningAliasField::Reasoning
+    );
+
+    for (value, expected) in [
+        ("reasoning", mlxcel::server::ReasoningAliasField::Reasoning),
+        ("none", mlxcel::server::ReasoningAliasField::None),
+    ] {
+        let parsed = Cli::try_parse_from([
+            "mlxcel",
+            "serve",
+            "-m",
+            "models/foo",
+            "--reasoning-alias-field",
+            value,
+        ])
+        .expect("known reasoning alias field must parse");
+        let Commands::Serve(args) = parsed.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(args.reasoning_alias_field, expected, "{value}");
+    }
+
+    let error = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--reasoning-alias-field",
+        "other",
+    ])
+    .expect_err("unknown reasoning alias field must be rejected");
+    let text = error.to_string();
+    assert!(text.contains("--reasoning-alias-field"), "{text}");
+    assert!(text.contains("none, reasoning"), "{text}");
+}
+
+#[test]
 fn serve_n_parallel_and_parallel_aliases_resolve_identically() {
     let primary = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--n-parallel", "2"])
         .expect("--n-parallel must parse on `mlxcel serve`");

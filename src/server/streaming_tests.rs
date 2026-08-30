@@ -16,6 +16,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use super::{CancellationToken, DONE_MARKER, payload_channel, serialize_json_data};
+use crate::server::ReasoningAliasField;
 use crate::server::types::{ChatCompletionChunk, CompletionChunk};
 
 #[derive(Serialize)]
@@ -120,6 +121,43 @@ fn content_chunk_choice_has_logprobs_field() {
         "logprobs key must be present in each choice"
     );
     assert_eq!(choice["logprobs"], Value::Null);
+}
+
+#[test]
+fn reasoning_chunk_carries_both_reasoning_fields() {
+    let chunk = ChatCompletionChunk::reasoning_content(
+        "chatcmpl-test".to_string(),
+        "model".to_string(),
+        "2 + 2".to_string(),
+    );
+    let json = serde_json::to_value(&chunk).unwrap();
+    let delta = &json["choices"][0]["delta"];
+    assert_eq!(delta["reasoning_content"], "2 + 2");
+    assert_eq!(delta["reasoning"], delta["reasoning_content"]);
+
+    let content = ChatCompletionChunk::content(
+        "chatcmpl-test".to_string(),
+        "model".to_string(),
+        "4".to_string(),
+    );
+    let content_json = serde_json::to_value(&content).unwrap();
+    let content_delta = content_json["choices"][0]["delta"].as_object().unwrap();
+    assert!(!content_delta.contains_key("reasoning_content"));
+    assert!(!content_delta.contains_key("reasoning"));
+}
+
+#[test]
+fn reasoning_chunk_omits_alias_when_disabled() {
+    let chunk = ChatCompletionChunk::reasoning_content_with_alias_field(
+        "chatcmpl-test".to_string(),
+        "model".to_string(),
+        "2 + 2".to_string(),
+        ReasoningAliasField::None,
+    );
+    let json = serde_json::to_value(&chunk).unwrap();
+    let delta = json["choices"][0]["delta"].as_object().unwrap();
+    assert_eq!(delta["reasoning_content"], "2 + 2");
+    assert!(!delta.contains_key("reasoning"));
 }
 
 /// Usage chunks must carry an empty `choices` array and a populated `usage`

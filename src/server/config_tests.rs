@@ -12,8 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DecodeStorageBackend, ServerConfig};
+use super::{DecodeStorageBackend, ReasoningAliasField, ServerConfig};
 use crate::memory_estimate::PagedBudgetDirective;
+
+#[test]
+fn reasoning_alias_field_defaults_to_reasoning_and_parses_both_values() {
+    assert_eq!(
+        ServerConfig::default().reasoning_alias_field,
+        ReasoningAliasField::Reasoning
+    );
+    assert_eq!(
+        "reasoning".parse::<ReasoningAliasField>().unwrap(),
+        ReasoningAliasField::Reasoning
+    );
+    assert_eq!(
+        "none".parse::<ReasoningAliasField>().unwrap(),
+        ReasoningAliasField::None
+    );
+    assert!("other".parse::<ReasoningAliasField>().is_err());
+}
 
 #[test]
 fn server_config_default_matches_llama_server_compatibility_defaults() {

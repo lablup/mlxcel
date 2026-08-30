@@ -68,6 +68,8 @@ pub struct ServerStartupConfig {
     // (issue #1447).
     /// Where a model's thoughts are reported (`--reasoning-format`).
     pub reasoning_format: crate::server::ReasoningFormat,
+    /// Optional Chat Completions alias emitted next to `reasoning_content`.
+    pub reasoning_alias_field: crate::server::ReasoningAliasField,
     /// `--skip-chat-parsing`: every parser off, everything in `content`.
     pub skip_chat_parsing: bool,
     /// `--no-prefill-assistant`: a trailing assistant message is complete.
@@ -520,6 +522,7 @@ impl Default for ServerStartupConfig {
     fn default() -> Self {
         Self {
             reasoning_format: crate::server::ReasoningFormat::default(),
+            reasoning_alias_field: crate::server::ReasoningAliasField::default(),
             skip_chat_parsing: false,
             no_prefill_assistant: false,
             reasoning_budget_message: None,
@@ -1305,6 +1308,7 @@ pub(super) fn build_server_config(
         // resolve (#1456); the builder itself never reads the environment.
         gcp: None,
         reasoning_format: startup.reasoning_format,
+        reasoning_alias_field: startup.reasoning_alias_field,
         skip_chat_parsing: startup.skip_chat_parsing,
         no_prefill_assistant: startup.no_prefill_assistant,
         reasoning_budget_message: startup.reasoning_budget_message.clone(),

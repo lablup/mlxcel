@@ -869,6 +869,8 @@ const DRY_BREAKER_GROUP: &[&str] = &["--dry-sequence-breaker", "--dry-sequence-b
 const DRAFT_MODEL_GROUP: &[&str] = &["--draft-model", "--model-draft"];
 /// Draft-token budget (issue #464, already symmetric before #1109).
 const DRAFT_MAX_GROUP: &[&str] = &["--draft-max", "--draft"];
+/// Chat Completions reasoning alias policy (#1308).
+const REASONING_ALIAS_FIELD_GROUP: &[&str] = &["--reasoning-alias-field"];
 
 /// Every concept whose spellings must be interchangeable across the two
 /// server binaries. Order inside a group is irrelevant: the assertion compares
@@ -898,6 +900,7 @@ const SHARED_SERVER_FLAG_DESCRIPTIONS: &[&[&str]] = &[
     PREDICT_GROUP,
     ADAPTER_GROUP,
     DRY_BREAKER_GROUP,
+    REASONING_ALIAS_FIELD_GROUP,
 ];
 
 /// Long names that legitimately exist on `mlxcel serve` and not on

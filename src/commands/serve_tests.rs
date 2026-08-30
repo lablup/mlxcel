@@ -81,6 +81,7 @@ fn sample_args() -> crate::ServeArgs {
         _no_cors_credentials: false,
         chat_template: Some("{{ prompt }}".to_string()),
         chat_template_file: Some(PathBuf::from("chat.jinja")),
+        reasoning_alias_field: Default::default(),
         slots: true,
         _no_slots: true,
         props: true,

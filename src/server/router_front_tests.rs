@@ -291,7 +291,16 @@ fn authoritative_count_fixes_finish_reason_flip() {
 /// (already-resolved) counts verbatim.
 #[test]
 fn chat_completion_json_includes_usage() {
-    let body = chat_completion_json("chatcmpl-1", "qwen3", "hello", "", "stop", 12, 5);
+    let body = chat_completion_json(
+        "chatcmpl-1",
+        "qwen3",
+        "hello",
+        "",
+        crate::server::ReasoningAliasField::Reasoning,
+        "stop",
+        12,
+        5,
+    );
     assert_eq!(body["usage"]["prompt_tokens"], serde_json::json!(12));
     assert_eq!(body["usage"]["completion_tokens"], serde_json::json!(5));
     assert_eq!(body["usage"]["total_tokens"], serde_json::json!(17));
@@ -306,19 +315,78 @@ fn chat_completion_json_includes_usage() {
         body["choices"][0]["message"]["content"],
         serde_json::json!("hello")
     );
+    let message = body["choices"][0]["message"].as_object().unwrap();
+    assert!(!message.contains_key("reasoning_content"));
+    assert!(!message.contains_key("reasoning"));
 }
 
 /// `reasoning_content` is included on the message only when non-empty; the
 /// `usage` object is present either way.
 #[test]
 fn chat_completion_json_usage_present_with_reasoning() {
-    let body = chat_completion_json("chatcmpl-2", "qwen3", "answer", "thinking...", "stop", 8, 3);
+    let body = chat_completion_json(
+        "chatcmpl-2",
+        "qwen3",
+        "answer",
+        "thinking...",
+        crate::server::ReasoningAliasField::Reasoning,
+        "stop",
+        8,
+        3,
+    );
     assert_eq!(
         body["choices"][0]["message"]["reasoning_content"],
         serde_json::json!("thinking...")
     );
+    assert_eq!(
+        body["choices"][0]["message"]["reasoning"],
+        body["choices"][0]["message"]["reasoning_content"]
+    );
     assert_eq!(body["usage"]["completion_tokens"], serde_json::json!(3));
     assert_eq!(body["usage"]["total_tokens"], serde_json::json!(11));
+}
+
+#[test]
+fn chat_completion_json_omits_reasoning_alias_when_disabled() {
+    let body = chat_completion_json(
+        "chatcmpl-3",
+        "qwen3",
+        "answer",
+        "thinking...",
+        crate::server::ReasoningAliasField::None,
+        "stop",
+        8,
+        3,
+    );
+    let message = body["choices"][0]["message"].as_object().unwrap();
+    assert_eq!(message["reasoning_content"], "thinking...");
+    assert!(!message.contains_key("reasoning"));
+}
+
+#[test]
+fn chat_chunk_reasoning_honors_alias_policy() {
+    let aliased = chat_chunk_reasoning(
+        "chatcmpl-stream",
+        "qwen3",
+        "thinking...",
+        crate::server::ReasoningAliasField::Reasoning,
+    );
+    let aliased_delta = &aliased["choices"][0]["delta"];
+    assert_eq!(aliased_delta["reasoning_content"], "thinking...");
+    assert_eq!(
+        aliased_delta["reasoning"],
+        aliased_delta["reasoning_content"]
+    );
+
+    let unaliased = chat_chunk_reasoning(
+        "chatcmpl-stream",
+        "qwen3",
+        "thinking...",
+        crate::server::ReasoningAliasField::None,
+    );
+    let unaliased_delta = unaliased["choices"][0]["delta"].as_object().unwrap();
+    assert_eq!(unaliased_delta["reasoning_content"], "thinking...");
+    assert!(!unaliased_delta.contains_key("reasoning"));
 }
 
 /// The streaming usage chunk carries an empty `choices` array (per the OpenAI
