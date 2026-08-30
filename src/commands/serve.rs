@@ -529,6 +529,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             .chat_compat
             .resolve()
             .map_err(|e| anyhow::anyhow!("{e}"))?,
+        reasoning_alias_field: args.reasoning_alias_field,
         model_path: match args.model.clone() {
             Some(path) => path,
             // Router mode (#1438): no model argument plus `--models-dir`.

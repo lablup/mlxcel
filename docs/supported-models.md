@@ -420,14 +420,7 @@ default `max_tokens` of 64 to 80 may return an empty `content` with
 `max_tokens` to at least 512 for this family, and higher for multi-sentence
 answers.
 
-The scratchpad is no longer dropped: it is surfaced as `reasoning_content` on
-both streaming responses (`delta.reasoning_content`) and non-streaming responses
-(a `reasoning_content` field on the assistant message, present only when the
-model produced reasoning). This applies to every thinking family, including
-Qwen-style `<think>` models. To turn thinking off, pass
-`chat_template_kwargs={"enable_thinking": false}` per request, or set the server
-default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A
-per-request value always wins over the server default.
+The scratchpad is no longer dropped: Chat Completions surfaces it as `reasoning_content` and, by default, an identical OpenRouter-compatible `reasoning` alias on both streaming deltas and non-streaming assistant messages. Both fields are omitted when the model produces no reasoning. Set `--reasoning-alias-field none` (or `MLXCEL_REASONING_ALIAS_FIELD=none`) to retain only `reasoning_content` when response bytes matter. This applies to every thinking family, including Qwen-style `<think>` models. To turn thinking off rather than only suppress its alias, pass `chat_template_kwargs={"enable_thinking": false}` per request, or set the server default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A per-request value always wins over the server default.
 
 ### CLI reasoning display (`--show-reasoning`)
 

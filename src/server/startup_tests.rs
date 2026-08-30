@@ -103,6 +103,7 @@ fn resolve_chat_template_respects_override_then_file_then_model_metadata() {
 fn build_server_config_applies_normalized_startup_values() {
     let startup = ServerStartupConfig {
         model_alias: Some("alias".to_string()),
+        reasoning_alias_field: crate::server::ReasoningAliasField::None,
         // #1432: two independent controls that used to share the --timeout
         // spelling. The asserts below check each reaches its own consumer.
         http_timeout: 7,
@@ -161,6 +162,10 @@ fn build_server_config_applies_normalized_startup_values() {
         Some(std::time::Duration::from_secs(45))
     );
     assert_eq!(config.model_alias.as_deref(), Some("alias"));
+    assert_eq!(
+        config.reasoning_alias_field,
+        crate::server::ReasoningAliasField::None
+    );
     assert_eq!(config.context_size, 682);
     assert_eq!(config.n_parallel, 3);
     assert!(!config.enable_slots_endpoint);

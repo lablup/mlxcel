@@ -1006,6 +1006,15 @@ struct ServerArgs {
     )]
     chat_template_file: Option<PathBuf>,
 
+    /// Alias emitted next to reasoning_content on Chat Completions responses
+    #[arg(
+        long = "reasoning-alias-field",
+        env = "MLXCEL_REASONING_ALIAS_FIELD",
+        default_value_t = mlxcel::server::ReasoningAliasField::default(),
+        value_name = "none|reasoning"
+    )]
+    reasoning_alias_field: mlxcel::server::ReasoningAliasField,
+
     /// Enable /slots endpoint
     #[arg(long = "slots", default_value_t = true, overrides_with = "_no_slots")]
     slots: bool,
@@ -2294,6 +2303,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 
     Ok(ServerStartupInput {
         chat_compat,
+        reasoning_alias_field: args.reasoning_alias_field,
         model_path,
         adapter_path: None,
         lora: args.lora.clone(),
@@ -2577,6 +2587,43 @@ mod tests {
             "test argv should exercise legacy server-start mode"
         );
         cli.server
+    }
+
+    #[test]
+    fn reasoning_alias_field_defaults_parses_and_rejects_unknown_values() {
+        assert_eq!(
+            parse_server_args(&["mlxcel-server", "-m", "models/foo"]).reasoning_alias_field,
+            mlxcel::server::ReasoningAliasField::Reasoning
+        );
+        for (value, expected) in [
+            ("reasoning", mlxcel::server::ReasoningAliasField::Reasoning),
+            ("none", mlxcel::server::ReasoningAliasField::None),
+        ] {
+            assert_eq!(
+                parse_server_args(&[
+                    "mlxcel-server",
+                    "-m",
+                    "models/foo",
+                    "--reasoning-alias-field",
+                    value,
+                ])
+                .reasoning_alias_field,
+                expected,
+                "{value}"
+            );
+        }
+
+        let error = Cli::try_parse_from([
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--reasoning-alias-field",
+            "other",
+        ])
+        .expect_err("unknown reasoning alias field must be rejected");
+        let text = error.to_string();
+        assert!(text.contains("--reasoning-alias-field"), "{text}");
+        assert!(text.contains("none, reasoning"), "{text}");
     }
 
     // ── llama-server model-source flags (issue #1434) ───────────────

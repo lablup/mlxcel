@@ -1720,6 +1720,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "LLAMA_ARG_CHAT_TEMPLATE_FILE", value_name = "PATH")]
     chat_template_file: Option<PathBuf>,
 
+    /// Alias emitted next to reasoning_content on Chat Completions responses
+    #[arg(
+        long = "reasoning-alias-field",
+        env = "MLXCEL_REASONING_ALIAS_FIELD",
+        default_value_t = mlxcel::server::ReasoningAliasField::default(),
+        value_name = "none|reasoning"
+    )]
+    reasoning_alias_field: mlxcel::server::ReasoningAliasField,
+
     /// Enable /slots endpoint
     #[arg(long = "slots", default_value_t = true, overrides_with = "_no_slots")]
     slots: bool,

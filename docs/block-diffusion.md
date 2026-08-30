@@ -123,7 +123,7 @@ Image input follows the standard OpenAI `image_url` content part format. Request
 The checkpoint is a thinking-channel model. The assistant fills a `reasoning_content` channel before writing the visible reply. A few practical consequences:
 
 - **Give requests enough `max_tokens`.** With a budget of 64 tokens a simple question may produce only reasoning, leaving `content` empty with `finish_reason: "length"`. A budget of 256 produces the full answer for most short prompts.
-- **Reasoning is surfaced on both paths.** Streaming responses carry it as `delta.reasoning_content`; non-streaming `/v1/chat/completions` responses include a `reasoning_content` field on the assistant message (present only when the model produced reasoning, omitted otherwise).
+- **Reasoning is surfaced on both paths.** Streaming responses carry it as `delta.reasoning_content` and an identical `delta.reasoning` alias; non-streaming `/v1/chat/completions` responses include both fields on the assistant message. They are omitted when the model produces no reasoning, and `--reasoning-alias-field none` suppresses only the `reasoning` duplicate.
 - **`/v1/completions` works but raw prompts degrade.** The endpoint accepts un-templated text mechanically, but the model depends on its chat structure, so output quality degrades significantly. Prefer `/v1/chat/completions`.
 - **Cancellation resolution.** A cancelled request is aborted within at most one denoising step, not instantaneously.
 

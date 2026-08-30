@@ -14,6 +14,7 @@
 
 //! OpenAI and llama-server compatible response types
 
+use crate::server::ReasoningAliasField;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -121,6 +122,10 @@ pub struct ChatMessage {
     /// `delta.reasoning_content`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// OpenRouter-compatible alias for `reasoning_content`. When enabled,
+    /// both fields carry identical text and are omitted together otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// Tool calls made by the assistant (present when finish_reason is "tool_calls")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallResponse>>,
@@ -212,6 +217,7 @@ impl ChatCompletionResponse {
                     role: "assistant".to_string(),
                     content: Some(content),
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: None,
                     florence2_result: None,
                 },
@@ -260,6 +266,7 @@ impl ChatCompletionResponse {
                     role: "assistant".to_string(),
                     content: message_content,
                     reasoning_content: None,
+                    reasoning: None,
                     tool_calls: Some(tool_calls),
                     florence2_result: None,
                 },
@@ -303,8 +310,22 @@ impl ChatCompletionResponse {
     ///
     /// Used by: chat.rs (non-streaming path)
     #[must_use]
-    pub fn with_reasoning_content(mut self, reasoning: Option<String>) -> Self {
+    pub fn with_reasoning_content(self, reasoning: Option<String>) -> Self {
+        self.with_reasoning_content_alias_field(reasoning, ReasoningAliasField::Reasoning)
+    }
+
+    /// Attach reasoning while honoring the configured Chat Completions alias policy.
+    #[must_use]
+    pub fn with_reasoning_content_alias_field(
+        mut self,
+        reasoning: Option<String>,
+        alias_field: ReasoningAliasField,
+    ) -> Self {
         if let Some(choice) = self.choices.first_mut() {
+            choice.message.reasoning = alias_field
+                .emits_reasoning()
+                .then(|| reasoning.clone())
+                .flatten();
             choice.message.reasoning_content = reasoning;
         }
         self
@@ -711,6 +732,10 @@ mod tests {
                 .contains_key("reasoning_content"),
             "reasoning_content must be absent when None, got: {message}"
         );
+        assert!(
+            !message.as_object().unwrap().contains_key("reasoning"),
+            "reasoning must be absent when reasoning_content is absent, got: {message}"
+        );
         assert_eq!(message["content"], "the answer");
     }
 
@@ -734,7 +759,32 @@ mod tests {
             message["reasoning_content"],
             "let me think about hash tables"
         );
+        assert_eq!(message["reasoning"], message["reasoning_content"]);
         assert_eq!(message["content"], "the answer");
+    }
+
+    #[test]
+    fn reasoning_alias_field_none_suppresses_alias() {
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            "the answer".to_string(),
+            10,
+            5,
+            Some("stop".to_string()),
+        )
+        .with_reasoning_content_alias_field(
+            Some("private scratchpad".to_string()),
+            ReasoningAliasField::None,
+        );
+
+        let json = serde_json::to_value(&resp).unwrap();
+        let message = &json["choices"][0]["message"];
+        assert_eq!(message["reasoning_content"], "private scratchpad");
+        assert!(
+            !message.as_object().unwrap().contains_key("reasoning"),
+            "the disabled alias must be omitted, got: {message}"
+        );
     }
 
     // -- florence2_result (structured task output, issue #1073) --
