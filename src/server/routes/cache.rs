@@ -165,6 +165,9 @@ pub struct CacheStatsResponse {
     pub snapshot_entries: usize,
     /// Bytes consumed by live snapshot entries.
     pub snapshot_bytes: usize,
+    /// Average bytes per live snapshot entry. This is `0` when there are no
+    /// live snapshots; otherwise it is `snapshot_bytes / snapshot_entries`.
+    pub snapshot_bytes_per_entry: usize,
     /// Configured snapshot byte capacity.
     pub snapshot_capacity_bytes: usize,
     /// Configured maximum snapshot entries.
@@ -195,6 +198,10 @@ pub struct CacheStatsResponse {
     /// per turn while `snapshot_entries` stays flat; that pairing is what
     /// distinguishes healthy chain collapse from budget thrash.
     pub snapshot_supersedes: u64,
+    /// Lifetime snapshot LRU evictions from the same session chain as the
+    /// insert being admitted. This is the cache-stats signal for capacity too
+    /// small to retain a live multi-turn chain.
+    pub snapshot_self_evictions: u64,
     /// Lifetime snapshot insert rejections due to size.
     pub snapshot_rejections_oversized: u64,
 
@@ -388,6 +395,10 @@ pub(crate) fn build_stats_response(
             } else {
                 0.0
             };
+            let snapshot_bytes_per_entry = stats
+                .snapshot_bytes
+                .checked_div(stats.snapshot_entries)
+                .unwrap_or(0);
             CacheStatsResponse {
                 enabled: cfg.is_enabled(),
                 apc_enabled: cfg.apc_enabled(),
@@ -410,6 +421,7 @@ pub(crate) fn build_stats_response(
                 apc_active_entries: apc_stats.apc_active_entries,
                 snapshot_entries: stats.snapshot_entries,
                 snapshot_bytes: stats.snapshot_bytes,
+                snapshot_bytes_per_entry,
                 snapshot_capacity_bytes: cfg.snapshot_capacity_bytes,
                 snapshot_max_entries: cfg.snapshot_max_entries,
                 snapshot_hits: stats.snapshot_hits,
@@ -421,6 +433,7 @@ pub(crate) fn build_stats_response(
                 snapshot_evictions_lru: stats.snapshot_evictions_lru,
                 snapshot_evictions_ttl: stats.snapshot_evictions_ttl,
                 snapshot_supersedes: stats.snapshot_supersedes,
+                snapshot_self_evictions: stats.snapshot_self_evictions,
                 snapshot_rejections_oversized: stats.snapshot_rejections_oversized,
                 // Paged block-pool gauges are store-independent.
                 paged_block_size: paged.block_size,
@@ -470,6 +483,7 @@ pub(crate) fn build_stats_response(
             apc_active_entries: 0,
             snapshot_entries: 0,
             snapshot_bytes: 0,
+            snapshot_bytes_per_entry: 0,
             snapshot_capacity_bytes: cfg.snapshot_capacity_bytes,
             snapshot_max_entries: cfg.snapshot_max_entries,
             snapshot_hits: 0,
@@ -481,6 +495,7 @@ pub(crate) fn build_stats_response(
             snapshot_evictions_lru: 0,
             snapshot_evictions_ttl: 0,
             snapshot_supersedes: 0,
+            snapshot_self_evictions: 0,
             snapshot_rejections_oversized: 0,
             // Paged decode can run with the prompt cache disabled, so these
             // still reflect the live pool even on the `None` branch.
