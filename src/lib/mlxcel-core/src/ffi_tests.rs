@@ -4388,6 +4388,86 @@ fn qmv_multirow_matches_per_row_qmv_bitwise() {
     }
 }
 
+/// [#1539] `qmv` against `qmm` parity across bit widths and group sizes.
+///
+/// #1539 changed which accumulator `qmv` uses below Ampere: at `bits < 8` with
+/// a bf16 element type it accumulated in bf16, which no pre-Ampere part has an
+/// ALU for, and it now accumulates in float there. `qmm_naive` and `qmm_sm80`
+/// accumulate in float at every bit width, so the two kernels should agree to
+/// within summation-order and output-rounding noise on every architecture,
+/// both before and after that change. An `M = 8` matmul takes the qmm path
+/// (`M * B < 8` is false) and a one-row slice of the same input takes qmv, so
+/// this compares the two kernels on identical operands. The `bits = 8` arm is
+/// the control: it already accumulated in float everywhere.
+///
+/// The tolerance is deliberately loose, because it has to hold on sm_80+ as
+/// well, where `bits < 8` still accumulates in bf16. Outputs here have a
+/// standard deviation near `sqrt(k)`, about 23, so `atol` covers the elements
+/// where cancellation leaves `rtol` meaningless and `rtol` covers the rest;
+/// bf16 carries an 8-bit significand, so 2% is a few output ulps.
+#[cfg(feature = "cuda")]
+#[test]
+fn qmv_matches_qmm_across_bits_and_group_sizes() {
+    random_seed(1539);
+    // n % 128 == 0 keeps supports_qmm_sm80 true, so the M = 8 arm takes the
+    // same qmm branch production prefill takes. k is divisible by 32, 64 and
+    // 128 so one shape serves every group size.
+    let n = 256;
+    let k = 512;
+    let rows = 8i32;
+    for &bits in &[4i32, 8] {
+        for &group_size in &[32i32, 64, 128] {
+            let (w, s, b) = random_quantized_weight(n, k, group_size, bits);
+            let x_f32 = unsafe { random_normal(&[rows, k], dtype::FLOAT32, std::ptr::null()) };
+            let x = astype(&x_f32, dtype::BFLOAT16);
+            eval(&x);
+
+            // M = 8: qmm.
+            let qmm_out = unsafe {
+                quantized_matmul(
+                    &x,
+                    &w,
+                    &s,
+                    b.as_ref().unwrap() as *const MlxArray,
+                    true,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&qmm_out);
+            assert_eq!(array_shape(&qmm_out), vec![rows, n]);
+
+            for j in 0..rows {
+                // M = 1: qmv.
+                let xj = slice(&x, &[j, 0], &[j + 1, k]);
+                let qmv_out = unsafe {
+                    quantized_matmul(
+                        &xj,
+                        &w,
+                        &s,
+                        b.as_ref().unwrap() as *const MlxArray,
+                        true,
+                        group_size,
+                        bits,
+                        "affine",
+                    )
+                };
+                let qmm_row = slice(&qmm_out, &[j, 0], &[j + 1, n]);
+                eval(&qmv_out);
+                eval(&qmm_row);
+                let close = allclose(&qmv_out, &qmm_row, 2e-2, 5e-1);
+                eval(&close);
+                assert!(
+                    item_bool(&close),
+                    "row {j} of a {bits}-bit gs{group_size} [{rows}x{k}] matmul: qmv \
+                     disagreed with qmm beyond the tolerance"
+                );
+            }
+        }
+    }
+}
+
 /// `dequantize` must not depend on the memory layout of its inputs.
 ///
 /// Slicing an affine-quantized triplet along a non-contiguous axis (splitting a

@@ -14,8 +14,14 @@
 // Selection: broadcast weights and 2 <= m*l <= W, kill switch
 // MLXCEL_QMV_MULTIROW=0. W is the row-window ceiling, 8 by default and
 // narrowable to [1, 8] via MLXCEL_QMV_MULTIROW_MAX_ROWS (lablup/mlxcel#906) so
-// the autotuner can tune the crossover instead of hardcoding it. Everything
-// else is byte-identical upstream (pin 57c66cac, v0.32.0-1).
+// the autotuner can tune the crossover instead of hardcoding it.
+//
+// Second mlxcel change (lablup/mlxcel#1539): the accumulator type below Ampere.
+// Upstream reads it off the weight bit width, which hands a bf16 checkpoint a
+// bf16 accumulator at bits < 8, and pre-Ampere parts have no bf16 ALU to run it
+// on. `qmv_accumulator` below promotes that case to float behind a
+// `__CUDA_ARCH__ < 800` guard; sm_80 and later are untouched. Everything else is
+// byte-identical upstream (pin 57c66cac, v0.32.0-1).
 
 #include "mlx/backend/cuda/device/cute_dequant.cuh"
 #include "mlx/backend/cuda/kernel_utils.cuh"
@@ -151,6 +157,50 @@ fma_tile(const T* x, const cutlass::Array<T, N>& w_dq, float* out) {
   *out_vec = cutlass::fma(x_f, w_f, *out_vec);
 }
 
+// [mlxcel #1539] Accumulator width for the qmv family.
+//
+// Upstream selects it from the weight bit width alone: float at bits >= 8,
+// otherwise the element type T. That rule assumes T's own ALU is fast, which
+// holds from Ampere on and fails for bfloat16 before it. sm_70 and sm_75 have
+// no bf16 arithmetic unit at all, so a cutlass::bfloat16_t accumulator turns
+// every FMA in the k-loop into convert-to-float, fma, convert-back. Measured
+// on a V100 over identical launch counts, qmv spends 12.84 s on a 4-bit bf16
+// checkpoint against 5.99 s on the 8-bit sibling of that same checkpoint, a
+// 2.14x gap that accounts for 97.6% of the end-to-end decode difference, while
+// qmm_naive (float accumulators at every bit width) moves the other way in the
+// same profile. See docs/benchmark_results/volta-sm70-baseline-2026-08-31.md.
+//
+// So below Ampere bf16 accumulates in float regardless of bit width. The float
+// specializations of dequant_fma and fma_tile above already exist and are
+// exercised by the bits >= 8 path, so this instantiates nothing new.
+//
+// Deliberately not widened to half_t: sm_70 and sm_75 do have a native fp16
+// FMA at twice the fp32 rate, so promoting f16 here would spend throughput to
+// buy precision, which is the opposite trade to the one this makes for bf16.
+// f16 policy below Ampere is #1542's subject, not this one's.
+//
+// __CUDA_ARCH__ rather than a host-side dispatch: qmv is AOT-compiled, the host
+// only takes &qmv_kernel<...> as a function pointer and launches it through
+// add_kernel_node_raw, and the accumulator appears in neither the template
+// signature nor the mangled name. nvcc emits one device pass per entry in
+// MLX_CUDA_ARCHITECTURES, so the guard gives exactly per-architecture behavior
+// inside a fat binary, with nothing for the single host pass to disagree with.
+// Ampere and later keep upstream's rule unchanged.
+template <int bits, typename T>
+struct qmv_accumulator {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  using type = cuda::std::conditional_t<
+      (bits >= 8) || cuda::std::is_same_v<T, cutlass::bfloat16_t>,
+      float,
+      T>;
+#else
+  using type = cuda::std::conditional_t<(bits >= 8), float, T>;
+#endif
+};
+
+template <int bits, typename T>
+using qmv_accumulator_t = typename qmv_accumulator<bits, T>::type;
+
 template <
     int elems_per_thread,
     int group_size,
@@ -188,7 +238,7 @@ __device__ __forceinline__ void qmv_kernel_impl(
   }
 
   // Accumulations of current row.
-  cuda::std::conditional_t<(bits >= 8), float, T> sums[elems_per_thread] = {};
+  qmv_accumulator_t<bits, T> sums[elems_per_thread] = {};
 
   auto dequant_fma_tile = [&](int idx) {
     S scale = scales[idx / group_size];
@@ -283,9 +333,10 @@ __device__ __forceinline__ void qmv_multirow_kernel_impl(
     biases += static_cast<int64_t>(row) * groups_per_row;
   }
 
-  // Per-input-row accumulators, same element type as the stock kernel.
-  cuda::std::conditional_t<(bits >= 8), float, T>
-      sums[max_x_rows][elems_per_thread] = {};
+  // Per-input-row accumulators, same accumulator type the single-row kernel
+  // picks for this (bits, T, architecture), which is what keeps a multirow
+  // launch bit-identical to the per-row launches it replaces (#725).
+  qmv_accumulator_t<bits, T> sums[max_x_rows][elems_per_thread] = {};
 
   auto multirow_tile = [&](int idx) {
     S scale = scales[idx / group_size];
