@@ -490,3 +490,67 @@ fn normalized_e4m3(value: UniquePtr<MlxArray>) -> Result<UniquePtr<MlxArray>, St
     }
     Ok(mlxcel_core::from_bytes(&encoded, &shape, dtype::UINT8))
 }
+
+/// Serde field aliases declared by the Inkling sub-configs, as
+/// `(canonical, alias)`.
+///
+/// Serde treats a field and its alias as the SAME field, so an object carrying
+/// both spellings is a duplicate-field error and the whole config fails to
+/// deserialize, even when the values agree. Published checkpoints disagree on
+/// which spelling they use, so neither can be dropped from the structs:
+///
+/// * `mlx-community/Inkling-Small-mlx-4bit` and
+///   `thinkingmachines/Inkling-Small-NVFP4` ship only the aliases, so those are
+///   load-bearing.
+/// * `inference-optimization/Inkling-0.6B-A0.6B` ships BOTH spellings of all
+///   three pairs, at matching values, and was rejected outright before this
+///   (issue #1549).
+///
+/// Keep this in step with the `#[serde(alias = ...)]` attributes on
+/// [`crate::vision::encoders::inkling_hmlp::InklingVisionConfig`] and
+/// [`crate::audio::inkling_tower::InklingAudioConfig`]. It is a list rather
+/// than a single special case because fixing these one key at a time is how
+/// the second one (`num_channels`) went unnoticed until the first was fixed.
+const ALIASED_FIELDS: &[(&str, &str)] = &[
+    ("text_hidden_size", "decoder_dmodel"),
+    ("num_channels", "n_channels"),
+];
+
+/// Collapse every declared alias pair inside one sub-config object.
+///
+/// Equal values collapse to the canonical spelling. Disagreeing values are an
+/// error rather than a silent pick: the two keys name one quantity, and a
+/// checkpoint that gives them different values is contradicting itself in a way
+/// that would otherwise surface much later as a shape mismatch.
+pub(crate) fn reconcile_text_width_alias(
+    section: &mut serde_json::Value,
+    section_name: &str,
+) -> Result<(), String> {
+    let Some(obj) = section.as_object_mut() else {
+        return Ok(());
+    };
+    for (canonical, alias) in ALIASED_FIELDS {
+        let (Some(c), Some(a)) = (obj.get(*canonical).cloned(), obj.get(*alias).cloned()) else {
+            continue;
+        };
+        if c != a {
+            return Err(format!(
+                "Inkling {section_name} declares {canonical} {c} and {alias} {a}; \
+                 they are the same quantity and must agree"
+            ));
+        }
+        obj.remove(*alias);
+    }
+    Ok(())
+}
+
+/// Apply [`reconcile_text_width_alias`] to every sub-config that carries the
+/// pairs, so both this crate's config entry points see one spelling.
+pub(crate) fn reconcile_text_width_aliases(value: &mut serde_json::Value) -> Result<(), String> {
+    for name in ["vision_config", "audio_config"] {
+        if let Some(section) = value.get_mut(name) {
+            reconcile_text_width_alias(section, name)?;
+        }
+    }
+    Ok(())
+}
