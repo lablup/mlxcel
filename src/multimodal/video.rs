@@ -126,6 +126,79 @@ pub const FPS_MIN_FRAMES: usize = 4;
 /// Upper bound on sampled frame count (mirrors upstream `FPS_MAX_FRAMES`).
 pub const FPS_MAX_FRAMES: usize = 768;
 
+/// Request-wide pair budget used by Inkling's generic video fallback.
+pub const INKLING_MAX_VIDEO_PAIRS: usize = 16;
+
+/// One semantic part of Inkling's timestamped video prompt.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InklingVideoPromptPart {
+    Text(String),
+    Image,
+}
+
+/// Select evenly spaced anchors whose second temporal frame is always the
+/// immediately following sampled frame.
+///
+/// Odd frame counts repeat the final frame first. The reference keeps at
+/// least two pairs even when the request budget is smaller, so a short clip
+/// still exposes motion at the beginning and end of the sampled sequence.
+pub fn pair_adjacent_frames(
+    frames: &[DynamicImage],
+    max_pairs: usize,
+) -> Result<(Vec<usize>, Vec<DynamicImage>, Vec<DynamicImage>), VideoError> {
+    if frames.is_empty() {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: "Inkling video pairing requires at least one decoded frame".into(),
+        });
+    }
+    let mut padded = frames.to_vec();
+    if !padded.len().is_multiple_of(2) {
+        padded.push(
+            padded
+                .last()
+                .expect("non-empty frame list was checked above")
+                .clone(),
+        );
+    }
+    let pair_count = 2.max(max_pairs.min(padded.len() / 2));
+    let last_anchor = padded.len() - 2;
+    let denominator = pair_count.saturating_sub(1).max(1) as f64;
+    let anchors = (0..pair_count)
+        .map(|index| {
+            ((index as f64 * last_anchor as f64 / denominator).round() as usize).min(last_anchor)
+        })
+        .collect::<Vec<_>>();
+    let first = anchors
+        .iter()
+        .map(|&anchor| padded[anchor].clone())
+        .collect();
+    let second = anchors
+        .iter()
+        .map(|&anchor| padded[anchor + 1].clone())
+        .collect();
+    Ok((anchors, first, second))
+}
+
+/// Build the chronological text/image part layout used for Inkling video.
+pub fn timestamped_pair_messages(
+    user_text: &str,
+    timestamps: &[f64],
+) -> Vec<InklingVideoPromptPart> {
+    let mut parts = Vec::with_capacity(timestamps.len().saturating_mul(2).saturating_add(2));
+    parts.push(InklingVideoPromptPart::Text(
+        "Here is a video as a sequence of frames in chronological order.".into(),
+    ));
+    for timestamp in timestamps {
+        parts.push(InklingVideoPromptPart::Text(format!(
+            "frame at t={timestamp:.1}s:"
+        )));
+        parts.push(InklingVideoPromptPart::Image);
+    }
+    parts.push(InklingVideoPromptPart::Text(user_text.to_string()));
+    parts
+}
+
 /// Frame sampling policy for callers that need checkpoint-specific video
 /// bounds. The default preserves the historical Gemma/Kimi behavior: clamp to
 /// the global `[FPS_MIN_FRAMES, FPS_MAX_FRAMES]` window.

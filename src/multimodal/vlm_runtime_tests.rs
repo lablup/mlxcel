@@ -16,10 +16,38 @@ use super::{
     QwenMediaOrdinal, VlmPreparationSummary, expand_gemma3n_audio_tokens,
     expand_gemma4_audio_tokens_for_server, expand_gemma4_unified_video_tokens,
     expand_gemma4_video_tokens, expand_nemotron_h_nano_omni_audio_tokens_for_server,
-    format_molmo_v1_prompt_for_processor, prepared_embedding_refs, qwen_media_order_from_prompt,
-    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings, split_jina_vlm_prompt,
+    format_molmo_v1_prompt_for_processor, insert_inkling_video_prompt, prepared_embedding_refs,
+    qwen_media_order_from_prompt, shift_molmo_v1_image_input_idx_for_bos,
+    should_prepare_vlm_embeddings, split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
+
+#[test]
+fn inkling_video_prompt_orders_stills_timestamps_then_question() {
+    const IMAGE: i32 = 200_054;
+    let mut prompt = vec![1, 7, IMAGE, 8, 9];
+    insert_inkling_video_prompt(&mut prompt, IMAGE, 1, &[0.0, 1.5], |text, add_special| {
+        assert!(!add_special);
+        let token = match text {
+            "Here is a video as a sequence of frames in chronological order.\n" => 101,
+            "frame at t=0.0s:\n" => 102,
+            "frame at t=1.5s:\n" => 103,
+            other => panic!("unexpected Inkling prompt part {other:?}"),
+        };
+        Ok(vec![token])
+    })
+    .unwrap();
+    assert_eq!(prompt, vec![1, IMAGE, 101, 102, IMAGE, 103, IMAGE, 7, 8, 9]);
+}
+
+#[test]
+fn inkling_video_prompt_rejects_untrusted_placeholder_cardinality() {
+    const IMAGE: i32 = 200_054;
+    let mut prompt = vec![1, IMAGE, IMAGE, 9];
+    let error =
+        insert_inkling_video_prompt(&mut prompt, IMAGE, 1, &[0.0], |_, _| Ok(vec![])).unwrap_err();
+    assert!(error.to_string().contains("2 image placeholder(s)"));
+}
 
 #[test]
 fn gemma3n_audio_expands_multiple_placeholders_in_order() {

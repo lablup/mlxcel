@@ -44,6 +44,7 @@ use crate::qwen_vl::{
     insert_qwen_vl_media_tokens, insert_qwen3_omni_image_tokens,
 };
 use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_tokens};
+use crate::vision::InklingVlModel;
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
@@ -68,6 +69,13 @@ const JINA_VLM_BOS_TOKEN_ID: i32 = 151643;
 /// reference `JinaVLMProcessor._interleave_text_and_image_tokens`.
 const JINA_VLM_IMAGE_MARKER: &str = "<|image|>";
 const JINA_VLM_USER_TURN: &str = "User: ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InklingVideoPreparationStats {
+    pub image_blocks: usize,
+    pub video_pairs: usize,
+    pub total_image_tokens: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VlmPreparationSummary {
@@ -312,6 +320,151 @@ fn should_prepare_vlm_embeddings(image_count: usize, is_vlm: bool) -> Result<boo
 
 fn prompt_ids_array(prompt_tokens: &[i32]) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32])
+}
+
+/// Insert Inkling's timestamped frame sequence before the original question.
+///
+/// Existing still-image markers are moved to the front so mixed requests keep
+/// the reference media order: companion stills, video introduction and paired
+/// frames, then the already-rendered user question. A template may emit one
+/// marker per companion image or no markers; every other cardinality is
+/// rejected instead of accidentally treating user-supplied special tokens as
+/// trusted media placeholders.
+fn insert_inkling_video_prompt<E>(
+    prompt_tokens: &mut Vec<i32>,
+    image_token_id: i32,
+    still_image_count: usize,
+    timestamps: &[f64],
+    mut encode: E,
+) -> Result<()>
+where
+    E: FnMut(&str, bool) -> Result<Vec<i32>>,
+{
+    if prompt_tokens.is_empty() {
+        anyhow::bail!("Inkling video prompt cannot be empty");
+    }
+    let placeholder_count = prompt_tokens
+        .iter()
+        .filter(|&&token| token == image_token_id)
+        .count();
+    if placeholder_count != 0 && placeholder_count != still_image_count {
+        anyhow::bail!(
+            "Inkling video prompt contains {placeholder_count} image placeholder(s), but the request has {still_image_count} companion still image(s)"
+        );
+    }
+
+    let mut cleaned = prompt_tokens
+        .iter()
+        .copied()
+        .filter(|&token| token != image_token_id)
+        .collect::<Vec<_>>();
+    let tail = cleaned.split_off(1);
+    let additional_parts = still_image_count
+        .checked_add(timestamps.len().saturating_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("Inkling video prompt capacity overflowed"))?;
+    cleaned.reserve(additional_parts);
+    cleaned.extend(std::iter::repeat_n(image_token_id, still_image_count));
+    for part in crate::video::timestamped_pair_messages("", timestamps) {
+        match part {
+            crate::video::InklingVideoPromptPart::Text(text) if !text.is_empty() => {
+                cleaned.extend(encode(&format!("{text}\n"), false)?);
+            }
+            crate::video::InklingVideoPromptPart::Text(_) => {}
+            crate::video::InklingVideoPromptPart::Image => cleaned.push(image_token_id),
+        }
+    }
+    cleaned.extend(tail);
+    *prompt_tokens = cleaned;
+    Ok(())
+}
+
+/// Prepare Inkling's mixed still-image and adjacent-frame video embeddings.
+///
+/// The first frame of each selected pair is tiled like a normal image. The
+/// matching second frame is tiled separately, then only its temporal slot-0
+/// plane is copied into slot 1 of the final video-tile rows. Consequently
+/// companion stills retain duplicated temporal planes and every selected pair
+/// consumes one image entity in the prompt.
+pub fn compute_inkling_video_embeddings<E>(
+    model: &InklingVlModel,
+    prompt_tokens: &mut Vec<i32>,
+    still_images: &[DynamicImage],
+    frames: &[DynamicImage],
+    sampled_fps: f64,
+    max_pairs: usize,
+    encode: E,
+) -> Result<(InputEmbeddings, InklingVideoPreparationStats)>
+where
+    E: FnMut(&str, bool) -> Result<Vec<i32>>,
+{
+    if !sampled_fps.is_finite() || sampled_fps <= 0.0 {
+        anyhow::bail!("Inkling video FPS must be finite and positive");
+    }
+    let (anchors, first_frames, second_frames) =
+        crate::video::pair_adjacent_frames(frames, max_pairs)?;
+    let timestamps = anchors
+        .iter()
+        .map(|&anchor| anchor as f64 / sampled_fps)
+        .collect::<Vec<_>>();
+    insert_inkling_video_prompt(
+        prompt_tokens,
+        model.image_token_id(),
+        still_images.len(),
+        &timestamps,
+        encode,
+    )?;
+
+    let mut first_entities = Vec::with_capacity(still_images.len() + first_frames.len());
+    first_entities.extend_from_slice(still_images);
+    first_entities.extend(first_frames);
+    let processed = model
+        .preprocess_images(&first_entities)
+        .map_err(anyhow::Error::msg)?;
+    let second = model
+        .preprocess_images(&second_frames)
+        .map_err(anyhow::Error::msg)?;
+    let first_video_counts = &processed.tiles_per_image[still_images.len()..];
+    if first_video_counts != second.tiles_per_image.as_slice() {
+        anyhow::bail!(
+            "Inkling adjacent video frames produced different tile layouts: first={first_video_counts:?}, second={:?}",
+            second.tiles_per_image
+        );
+    }
+    let video_tiles = second
+        .tiles_per_image
+        .iter()
+        .try_fold(0usize, |total, &count| total.checked_add(count))
+        .ok_or_else(|| anyhow::anyhow!("Inkling video tile count overflowed"))?;
+    let video_tiles_i32 = i32::try_from(video_tiles)
+        .map_err(|_| anyhow::anyhow!("Inkling video tile count exceeds the MLX i32 limit"))?;
+    let second_slot0 = mlxcel_core::slice(
+        &second.pixel_values,
+        &[0, 0, 0, 0, 0],
+        &[video_tiles_i32, 1, 40, 40, 3],
+    );
+    let second_slot0 = mlxcel_core::reshape(&second_slot0, &[video_tiles_i32, 40, 40, 3]);
+
+    let stats = expand_inkling_image_tokens(
+        prompt_tokens,
+        model.image_token_id(),
+        &processed.tiles_per_image,
+    )?;
+    let input_ids = prompt_ids_array(prompt_tokens);
+    let embeddings = model
+        .prepare_input_embeddings_with_video_slot1(
+            &input_ids,
+            &processed.pixel_values,
+            &second_slot0,
+        )
+        .map_err(anyhow::Error::msg)?;
+    Ok((
+        embeddings,
+        InklingVideoPreparationStats {
+            image_blocks: stats.image_blocks,
+            video_pairs: anchors.len(),
+            total_image_tokens: stats.total_image_tokens,
+        },
+    ))
 }
 
 /// Pick the first explicit (non-None) cache key from a caller-supplied slice.

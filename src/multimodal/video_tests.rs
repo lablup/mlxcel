@@ -54,6 +54,68 @@ fn is_video_file_rejects_images_and_other_files() {
     assert!(!is_video_file(Path::new("/data/")));
 }
 
+fn indexed_frames(count: usize) -> Vec<DynamicImage> {
+    (0..count)
+        .map(|index| {
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                1,
+                1,
+                image::Rgb([index as u8, 0, 0]),
+            ))
+        })
+        .collect()
+}
+
+fn frame_index(frame: &DynamicImage) -> u8 {
+    frame.to_rgb8().get_pixel(0, 0)[0]
+}
+
+#[test]
+fn pair_adjacent_frames_spacing_and_adjacency() {
+    let frames = indexed_frames(10);
+    let (anchors, first, second) = pair_adjacent_frames(&frames, 4).unwrap();
+    assert_eq!(anchors, vec![0, 3, 5, 8]);
+    assert_eq!(
+        first.iter().map(frame_index).collect::<Vec<_>>(),
+        anchors.iter().map(|&index| index as u8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        second.iter().map(frame_index).collect::<Vec<_>>(),
+        anchors
+            .iter()
+            .map(|&index| index as u8 + 1)
+            .collect::<Vec<_>>()
+    );
+
+    let (odd_anchors, _, odd_second) = pair_adjacent_frames(&indexed_frames(3), 16).unwrap();
+    assert_eq!(odd_anchors, vec![0, 2]);
+    assert_eq!(
+        odd_second.iter().map(frame_index).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    let (minimum_anchors, _, _) = pair_adjacent_frames(&frames, 1).unwrap();
+    assert_eq!(minimum_anchors, vec![0, 8]);
+}
+
+#[test]
+fn timestamped_pair_messages_layout() {
+    let parts = timestamped_pair_messages("Describe the motion.", &[0.0, 1.5]);
+    assert_eq!(
+        parts,
+        vec![
+            InklingVideoPromptPart::Text(
+                "Here is a video as a sequence of frames in chronological order.".into(),
+            ),
+            InklingVideoPromptPart::Text("frame at t=0.0s:".into()),
+            InklingVideoPromptPart::Image,
+            InklingVideoPromptPart::Text("frame at t=1.5s:".into()),
+            InklingVideoPromptPart::Image,
+            InklingVideoPromptPart::Text("Describe the motion.".into()),
+        ]
+    );
+}
+
 // ─── smart_nframes ───────────────────────────────────────────────────────────
 
 #[test]
