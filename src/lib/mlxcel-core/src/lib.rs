@@ -3508,6 +3508,23 @@ mod cuda_arch_tests;
 #[path = "qmm_naive_tile_tests.rs"]
 mod qmm_naive_tile_tests;
 
+// The grouped GEMM CUTLASS architecture tag decision (#1544), enumerated
+// through the C shim in `cpp/grouped_gemm_arch_probe.cpp`. Host code and a pure
+// function of the compute capability major version, so its "sm_80 and later are
+// untouched" claim is settled by enumeration here rather than deferred to an
+// Ampere-or-later host. No GPU and no CUDA toolkit needed.
+#[cfg(test)]
+#[path = "grouped_gemm_arch_tests.rs"]
+mod grouped_gemm_arch_tests;
+
+// Numeric verification of the CUDA grouped GEMM against a dense per-expert
+// reference computed in f64 (#1544), on the expert shapes the MoE checkpoint
+// actually uses and across both of the dispatch's entry points. GPU-only
+// (Metal or CUDA); they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "grouped_gemm_numeric_tests.rs"]
+mod grouped_gemm_numeric_tests;
+
 // Numeric-parity, determinism, and SGY-invariance tests for the fused
 // single-token decode-MoE GeGLU kernel (#886). GPU-only (Metal or CUDA);
 // they skip on CPU-only builds.

@@ -119,6 +119,14 @@ fn main() {
         // and the sm_80+ non-regression claim it carries has to be checkable on
         // a machine with no NVIDIA hardware, so this is not gated on `cuda`.
         .file("cpp/qmm_naive_tile_probe.cpp")
+        // C shim over the grouped GEMM CUTLASS architecture tag selection
+        // (#1544), so `grouped_gemm_arch_tests.rs` can enumerate the shipped
+        // decision on the host. Same reasoning as the selector above: the
+        // decision is a pure function of the compute capability major version,
+        // and its "sm_80 and later are untouched" claim has to be checkable on
+        // a machine with no Ampere-or-later part, so this is not gated on
+        // `cuda`.
+        .file("cpp/grouped_gemm_arch_probe.cpp")
         .include(&mlx_include)
         .include("cpp")
         .include("../mlx-cpp/turbo")
@@ -227,6 +235,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_ext.cpp");
     println!("cargo:rerun-if-changed=cpp/qmm_naive_tile_probe.cpp");
+    println!("cargo:rerun-if-changed=cpp/grouped_gemm_arch_probe.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
     println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches");
