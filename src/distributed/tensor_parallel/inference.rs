@@ -341,6 +341,8 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // LFM2-VL's text backbone is LFM2; TP is refused for VLM-kind models
         // earlier, this keeps the dispatch table total.
         ModelType::Lfm2VL => "lfm2",
+        // Inkling uses model-owned short-convolution state and has no TP port.
+        ModelType::Inkling => "inkling",
         ModelType::Plamo2 => "plamo2",
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",

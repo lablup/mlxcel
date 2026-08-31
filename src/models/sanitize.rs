@@ -124,7 +124,7 @@ fn f8_e4m3_to_f32(bits: u8) -> f32 {
 /// F8_E4M3FN: 1 sign, 4 exponent (bias 7), 3 mantissa, no infinities, largest
 /// finite magnitude 448, NaN = `S.1111.111`. Non-finite and out-of-range inputs
 /// saturate to ±448; NaN maps to the canonical NaN byte.
-fn f32_to_f8_e4m3(x: f32) -> u8 {
+pub(crate) fn f32_to_f8_e4m3(x: f32) -> u8 {
     if x.is_nan() {
         return 0x7F;
     }

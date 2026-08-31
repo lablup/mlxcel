@@ -820,16 +820,12 @@ impl BatchScheduler {
                 self.batch_observability.record_prompt_cache_warmup_skip();
                 return;
             };
-            let logits = self
-                .model
-                .forward_with_sequence_id(&input, Some(seq_id), caches, None);
-            // Last position only, for the same reason the #1143 boundary
-            // segment does it: the full block is a tensor nothing reads.
-            let shape = mlxcel_core::array_shape(&logits);
-            let last = mlxcel_core::slice(
-                &logits,
-                &[0, delta_len - 1, 0],
-                &[shape[0], delta_len, shape[2]],
+            let last = self.model.forward_last_logits_with_sequence_id(
+                &input,
+                Some(seq_id),
+                caches,
+                None,
+                delta.len().saturating_sub(1),
             );
             mlxcel_core::try_eval(&last).map_err(|e| e.to_string())
         };
@@ -987,24 +983,15 @@ impl BatchScheduler {
                 // after and reports it with its own message.
                 None => return Ok(()),
             };
-            let logits =
-                self.model
-                    .forward_with_sequence_id(&input, Some(seq.seq_id), caches, None);
-            // Evaluate only the final position, not the whole
-            // `[1, segment_len, vocab]` block. The segment can be the entire
-            // conversation history, and making the full block the eval OUTPUT
-            // would force it to be materialized and held rather than freed as
-            // an intermediate: at 20k tokens and a 150k vocab that is several
-            // GB of peak for a tensor nothing reads. The last row still depends
-            // on every earlier position through attention and the recurrent
-            // scan, so the forward (and therefore every cache write the
-            // snapshot is about to copy) is computed either way. This mirrors
-            // the slice `execute_full_prefill` takes on its padded branch.
-            let shape = mlxcel_core::array_shape(&logits);
-            let last = mlxcel_core::slice(
-                &logits,
-                &[0, segment_len - 1, 0],
-                &[shape[0], segment_len, shape[2]],
+            // Evaluate only the final position, not the whole vocabulary
+            // projection for every history token. Large-vocabulary models can
+            // slice hidden states before their LM head through this hook.
+            let last = self.model.forward_last_logits_with_sequence_id(
+                &input,
+                Some(seq.seq_id),
+                caches,
+                None,
+                segment.len().saturating_sub(1),
             );
             mlxcel_core::try_eval(&last).map_err(|e| e.to_string())
         };

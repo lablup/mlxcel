@@ -250,6 +250,15 @@ pub fn resolve_thinking_token_ids(
             close: close as i32,
         });
     }
+    if let (Some(open), Some(close)) = (
+        hf.token_to_id("<|content_thinking|>"),
+        hf.token_to_id("<|end_message|>"),
+    ) {
+        return Some(ThinkingTokenIds {
+            open: open as i32,
+            close: close as i32,
+        });
+    }
     // Gemma 4 fallback: the reasoning block is wrapped in
     // `<|channel>thought\n…<channel|>`. We track the outer delimiter pair;
     // the `thought\n` stream between them is ordinary content that
@@ -1179,6 +1188,18 @@ mod tests {
         let hf = tok.hf_tokenizer().unwrap();
         assert_eq!(ids.open as u32, hf.token_to_id("<|channel>").unwrap());
         assert_eq!(ids.close as u32, hf.token_to_id("<channel|>").unwrap());
+    }
+
+    #[test]
+    fn resolve_falls_back_to_inkling_pair() {
+        let tok = mlxcel_from(&["<|content_thinking|>", "<|end_message|>"]);
+        let ids = resolve_thinking_token_ids(&tok).expect("Inkling pair should resolve");
+        let hf = tok.hf_tokenizer().unwrap();
+        assert_eq!(
+            ids.open as u32,
+            hf.token_to_id("<|content_thinking|>").unwrap()
+        );
+        assert_eq!(ids.close as u32, hf.token_to_id("<|end_message|>").unwrap());
     }
 
     #[test]

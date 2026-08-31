@@ -1,0 +1,482 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Inkling text decoder.
+//!
+//! Inkling replaces RoPE with learned banded relative-position logits, adds
+//! four causal short-convolution states to every layer, and combines selected
+//! and shared experts through one logsigmoid-normalized router. Vision, audio,
+//! and MTP tensors belong to separate model wrappers and are ignored here.
+
+mod attention;
+mod mlp;
+mod runtime;
+mod sanitize;
+mod validation;
+mod validation_shapes;
+
+use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::weights::WeightMap;
+use mlxcel_core::{MlxArray, UniquePtr};
+use serde::Deserialize;
+use std::path::Path;
+
+use self::attention::InklingAttention;
+use self::mlp::InklingMlp;
+use self::runtime::InklingLayerCache;
+use super::model_owned::ModelOwnedSequenceState;
+
+const DEFAULT_EOS_TOKEN_ID: i32 = 200_006;
+
+fn d_model_type() -> String {
+    "inkling_mm_model".into()
+}
+fn d_text_model_type() -> String {
+    "inkling".into()
+}
+fn d_hidden() -> usize {
+    6144
+}
+fn d_layers() -> usize {
+    66
+}
+fn d_vocab() -> usize {
+    201_024
+}
+fn d_eps() -> f32 {
+    1e-6
+}
+fn d_true() -> bool {
+    true
+}
+fn d_one() -> f32 {
+    1.0
+}
+fn d_heads() -> usize {
+    64
+}
+fn d_kv_heads() -> usize {
+    8
+}
+fn d_swa_kv_heads() -> usize {
+    16
+}
+fn d_head_dim() -> usize {
+    128
+}
+fn d_window() -> usize {
+    512
+}
+fn d_rel() -> usize {
+    16
+}
+fn d_extent() -> usize {
+    1024
+}
+fn d_log_alpha() -> f32 {
+    0.1
+}
+fn d_kernel() -> usize {
+    4
+}
+fn d_moe_width() -> usize {
+    24_576
+}
+fn d_routed() -> usize {
+    256
+}
+fn d_topk() -> usize {
+    6
+}
+fn d_shared() -> usize {
+    2
+}
+fn d_route_scale() -> f32 {
+    8.0
+}
+fn d_image_token() -> i32 {
+    200_054
+}
+fn d_audio_token() -> i32 {
+    200_053
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InklingTextConfig {
+    #[serde(default = "d_text_model_type")]
+    pub model_type: String,
+    #[serde(default = "d_hidden")]
+    pub hidden_size: usize,
+    #[serde(default = "d_layers")]
+    pub num_hidden_layers: usize,
+    #[serde(default = "d_vocab")]
+    pub vocab_size: usize,
+    #[serde(default)]
+    pub unpadded_vocab_size: Option<usize>,
+    #[serde(default = "d_eps")]
+    pub rms_norm_eps: f32,
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
+    #[serde(default = "d_true")]
+    pub use_embed_norm: bool,
+    #[serde(default = "d_one")]
+    pub logits_mup_width_multiplier: f32,
+    #[serde(default = "d_heads")]
+    pub num_attention_heads: usize,
+    #[serde(default = "d_kv_heads")]
+    pub num_key_value_heads: usize,
+    #[serde(default = "d_head_dim")]
+    pub head_dim: usize,
+    #[serde(default = "d_heads")]
+    pub swa_num_attention_heads: usize,
+    #[serde(default = "d_swa_kv_heads")]
+    pub swa_num_key_value_heads: usize,
+    #[serde(default = "d_head_dim")]
+    pub swa_head_dim: usize,
+    #[serde(default = "d_window")]
+    pub sliding_window_size: usize,
+    #[serde(default)]
+    pub layer_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub local_layer_ids: Option<Vec<usize>>,
+    #[serde(default = "d_rel")]
+    pub d_rel: usize,
+    #[serde(default = "d_extent")]
+    pub rel_extent: usize,
+    #[serde(default)]
+    pub log_scaling_n_floor: Option<usize>,
+    #[serde(default = "d_log_alpha")]
+    pub log_scaling_alpha: f32,
+    #[serde(default = "d_kernel", alias = "conv_kernel_size")]
+    pub sconv_kernel_size: usize,
+    #[serde(default)]
+    pub dense_mlp_idx: usize,
+    #[serde(default)]
+    pub mlp_layer_types: Option<Vec<String>>,
+    #[serde(default = "d_moe_width")]
+    pub intermediate_size: usize,
+    #[serde(default)]
+    pub dense_intermediate_size: Option<usize>,
+    #[serde(default)]
+    pub moe_intermediate_size: Option<usize>,
+    #[serde(default = "d_routed")]
+    pub n_routed_experts: usize,
+    #[serde(default = "d_topk")]
+    pub num_experts_per_tok: usize,
+    #[serde(default = "d_shared")]
+    pub n_shared_experts: usize,
+    #[serde(default = "d_route_scale")]
+    pub route_scale: f32,
+}
+
+impl InklingTextConfig {
+    pub fn layer_is_sliding(&self, i: usize) -> bool {
+        if let Some(types) = &self.layer_types {
+            return types.get(i).is_some_and(|kind| kind == "hybrid_sliding");
+        }
+        if let Some(ids) = &self.local_layer_ids {
+            return ids.contains(&i);
+        }
+        !(i + 1).is_multiple_of(6)
+    }
+
+    pub fn layer_is_dense(&self, i: usize) -> bool {
+        self.mlp_layer_types
+            .as_ref()
+            .map_or(i < self.dense_mlp_idx, |types| {
+                types.get(i).is_some_and(|kind| kind == "dense")
+            })
+    }
+
+    pub fn widths(&self) -> Result<(usize, usize), String> {
+        if let Some(moe) = self.moe_intermediate_size {
+            Ok((self.intermediate_size, moe))
+        } else {
+            self.dense_intermediate_size
+                .map(|dense| (dense, self.intermediate_size))
+                .ok_or_else(|| "Inkling native config requires dense_intermediate_size".into())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InklingConfig {
+    #[serde(default = "d_model_type")]
+    pub model_type: String,
+    pub text_config: InklingTextConfig,
+    #[serde(default = "d_image_token")]
+    pub image_token_id: i32,
+    #[serde(default = "d_audio_token")]
+    pub audio_token_id: i32,
+    #[serde(default = "d_vocab")]
+    pub vocab_size: usize,
+    #[serde(default)]
+    pub eos_token_id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub quantization: Option<serde_json::Value>,
+    #[serde(default)]
+    pub quantization_config: Option<serde_json::Value>,
+}
+
+impl InklingConfig {
+    pub(crate) fn from_json_with_sidecar(path: &Path, raw: &str) -> Result<Self, String> {
+        let raw = super::sanitize_config_json(raw);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config.json: {e}"))?;
+        sanitize::promote_nvfp4_config(path, &mut value)?;
+        serde_json::from_value(value).map_err(|e| format!("Failed to parse Inkling config: {e}"))
+    }
+
+    pub fn eos_token_ids(&self) -> Vec<i32> {
+        let ids = super::parse_optional_eos_token_ids(&self.eos_token_id);
+        if ids.is_empty() {
+            vec![DEFAULT_EOS_TOKEN_ID]
+        } else {
+            ids
+        }
+    }
+
+    pub(crate) fn quantization(&self) -> (i32, i32, &'static str) {
+        let q = self
+            .quantization
+            .as_ref()
+            .or(self.quantization_config.as_ref());
+        let integer = |key: &str, default: i32| match q.and_then(|v| v.get(key)) {
+            Some(value) => value
+                .as_i64()
+                .and_then(|value| i32::try_from(value).ok())
+                .unwrap_or(0),
+            None => default,
+        };
+        let group = integer("group_size", 64);
+        let bits = integer("bits", 4);
+        let mode = q.and_then(|v| v.get("mode")).and_then(|v| v.as_str());
+        (
+            group,
+            bits,
+            if mode == Some("nvfp4") {
+                "nvfp4"
+            } else {
+                "affine"
+            },
+        )
+    }
+}
+
+struct InklingDecoderLayer {
+    attention: InklingAttention,
+    mlp: InklingMlp,
+    input_norm: RMSNorm,
+    post_attention_norm: RMSNorm,
+    attention_conv: attention::InklingShortConv,
+    mlp_conv: attention::InklingShortConv,
+}
+
+impl InklingDecoderLayer {
+    fn from_weights(
+        weights: &WeightMap,
+        config: &InklingConfig,
+        index: usize,
+    ) -> Result<Self, String> {
+        let text = &config.text_config;
+        let prefix = format!("model.layers.{index}");
+        Ok(Self {
+            attention: InklingAttention::from_weights(weights, config, index)?,
+            mlp: InklingMlp::from_weights(weights, config, index)?,
+            input_norm: RMSNorm::new(
+                weight(weights, &format!("{prefix}.input_layernorm.weight"))?,
+                text.rms_norm_eps,
+            ),
+            post_attention_norm: RMSNorm::new(
+                weight(
+                    weights,
+                    &format!("{prefix}.post_attention_layernorm.weight"),
+                )?,
+                text.rms_norm_eps,
+            ),
+            attention_conv: attention::InklingShortConv::from_weights(
+                weights,
+                &format!("{prefix}.attn_sconv.conv.weight"),
+                text.sconv_kernel_size,
+            )?,
+            mlp_conv: attention::InklingShortConv::from_weights(
+                weights,
+                &format!("{prefix}.mlp_sconv.conv.weight"),
+                text.sconv_kernel_size,
+            )?,
+        })
+    }
+
+    fn forward(&self, x: &MlxArray, cache: &mut InklingLayerCache) -> UniquePtr<MlxArray> {
+        let n = self.input_norm.forward(x);
+        let a = self.attention.forward(&n, cache);
+        let h = self.attention_conv.forward(&a, &mut cache.conv[2], Some(x));
+        let n = self.post_attention_norm.forward(&h);
+        let m = self.mlp.forward(&n);
+        self.mlp_conv.forward(&m, &mut cache.conv[3], Some(&h))
+    }
+}
+
+pub struct InklingModel {
+    config: InklingConfig,
+    embed_tokens: UnifiedEmbedding,
+    embed_norm: Option<RMSNorm>,
+    layers: Vec<InklingDecoderLayer>,
+    norm: RMSNorm,
+    lm_head: Option<UnifiedLinear>,
+    eos_token_ids: Vec<i32>,
+    sequence_state: ModelOwnedSequenceState<InklingLayerCache>,
+}
+
+impl InklingModel {
+    pub fn load(model_path: &str) -> Result<(Self, InklingConfig), String> {
+        let path = Path::new(model_path);
+        let raw = std::fs::read_to_string(path.join("config.json"))
+            .map_err(|e| format!("Failed to read config.json: {e}"))?;
+        let config = InklingConfig::from_json_with_sidecar(path, &raw)?;
+        let model = Self::from_weights(config.clone(), super::load_text_weights(path, None)?)?;
+        Ok((model, config))
+    }
+
+    pub fn from_weights(config: InklingConfig, weights: WeightMap) -> Result<Self, String> {
+        validation::validate_config(&config)?;
+        let weights = sanitize::sanitize_weights(weights)?;
+        validation::validate_weight_shapes(&weights, &config)?;
+        let (group, bits, _) = config.quantization();
+        let text = &config.text_config;
+        let embed_tokens =
+            UnifiedEmbedding::from_weights(&weights, "model.embed_tokens", group, bits)?;
+        let embed_norm = text
+            .use_embed_norm
+            .then(|| weight(&weights, "model.embed_norm.weight"))
+            .transpose()?
+            .map(|w| RMSNorm::new(w, text.rms_norm_eps));
+        let mut layers = Vec::with_capacity(text.num_hidden_layers);
+        for i in 0..text.num_hidden_layers {
+            layers.push(InklingDecoderLayer::from_weights(&weights, &config, i)?);
+        }
+        let norm = RMSNorm::new(weight(&weights, "model.norm.weight")?, text.rms_norm_eps);
+        let lm_head = if text.tie_word_embeddings {
+            None
+        } else {
+            Some(UnifiedLinear::from_weights(
+                &weights, "lm_head", group, bits,
+            )?)
+        };
+        let state = (0..text.num_hidden_layers)
+            .map(|_| InklingLayerCache::new())
+            .collect();
+        let eos_token_ids = config.eos_token_ids();
+        Ok(Self {
+            config,
+            embed_tokens,
+            embed_norm,
+            layers,
+            norm,
+            lm_head,
+            eos_token_ids,
+            sequence_state: ModelOwnedSequenceState::new(state),
+        })
+    }
+
+    pub fn input_embeddings(&self, input: &MlxArray) -> UniquePtr<MlxArray> {
+        self.embed_tokens.forward(input)
+    }
+
+    fn make_internal_caches(&self) -> Vec<InklingLayerCache> {
+        (0..self.layers.len())
+            .map(|_| InklingLayerCache::new())
+            .collect()
+    }
+
+    fn hidden_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_norm.as_ref().map_or_else(
+            || mlxcel_core::copy(embeddings),
+            |norm| norm.forward(embeddings),
+        );
+        for (layer, cache) in self.layers.iter().zip(caches) {
+            h = layer.forward(&h, cache);
+        }
+        self.norm.forward(&h)
+    }
+
+    fn project_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+        let h = mlxcel_core::divide_scalar(h, self.config.text_config.logits_mup_width_multiplier);
+        let logits = self
+            .lm_head
+            .as_ref()
+            .map_or_else(|| self.embed_tokens.as_linear(&h), |head| head.forward(&h));
+        let limit = self
+            .config
+            .text_config
+            .unpadded_vocab_size
+            .unwrap_or(self.config.text_config.vocab_size) as i32;
+        if mlxcel_core::array_shape(&logits)[2] > limit {
+            mlxcel_core::utils::slice_axis(&logits, -1, 0, limit)
+        } else {
+            logits
+        }
+    }
+
+    fn forward_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.hidden_embeddings_with_caches(embeddings, caches);
+        self.project_hidden(&hidden)
+    }
+
+    fn forward_last_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.hidden_embeddings_with_caches(embeddings, caches);
+        let shape = mlxcel_core::array_shape(&hidden);
+        let row = mlxcel_core::slice(
+            &hidden,
+            &[0, last_pos as i32, 0],
+            &[shape[0], last_pos as i32 + 1, shape[2]],
+        );
+        self.project_hidden(&row)
+    }
+
+    fn forward_with_caches(
+        &self,
+        input: &MlxArray,
+        caches: &mut [InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let embeddings = self.embed_tokens.forward(input);
+        self.forward_embeddings_with_caches(&embeddings, caches)
+    }
+}
+
+fn weight(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
+    weights
+        .get(name)
+        .map(|w| mlxcel_core::copy(w))
+        .ok_or_else(|| format!("Weight not found: {name}"))
+}
+
+#[cfg(test)]
+#[path = "inkling_tests.rs"]
+mod tests;
+#[cfg(test)]
+mod tiny_tests;

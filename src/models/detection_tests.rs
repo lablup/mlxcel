@@ -63,6 +63,29 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 #[test]
+fn inkling_model_type_aliases_are_detected() {
+    for model_type in ["inkling_mm_model", "inkling"] {
+        let model_dir = temp_path(model_type);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            serde_json::to_vec(&json!({
+                "architectures": ["InklingForConditionalGeneration"],
+                "model_type": model_type,
+                "text_config": {"model_type": "inkling_text"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::detection::get_model_type(&model_dir).unwrap(),
+            ModelType::Inkling
+        );
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
 fn deepseek_v4_model_type_is_detected() {
     let model_dir = temp_path("deepseek_v4");
     fs::create_dir_all(&model_dir).unwrap();

@@ -144,6 +144,9 @@ pub struct FilterOutput {
 fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static str)> {
     match delimiter {
         "<think>" | "</think>" => Some(("<think>", "</think>")),
+        "<|content_thinking|>" | "<|end_message|>" => {
+            Some(("<|content_thinking|>", "<|end_message|>"))
+        }
         "<|channel>thought" | "<|channel>" | "<channel|>" => Some(("<|channel>", "<channel|>")),
         _ => None,
     }
@@ -302,6 +305,12 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // Probe these first to mirror resolve_thinking_token_ids ordering.
     ("</think>", DelimiterAction::ExitThinking),
     ("<think>", DelimiterAction::EnterThinking),
+    // Inkling reasoning span. The same end-message marker closes the
+    // scratchpad before the model opens its answer message.
+    ("<|end_message|>", DelimiterAction::ExitThinking),
+    ("<|content_thinking|>", DelimiterAction::EnterThinking),
+    ("<|message_model|>", DelimiterAction::Strip),
+    ("<|content_text|>", DelimiterAction::Strip),
     // Gemma 4 tool-call delimiters — must precede Hermes `<tool_call>` to avoid
     // a spurious Hermes hit on the Gemma 4 open tag.
     ("<|tool_call>", DelimiterAction::EnterToolCall),
@@ -1023,6 +1032,18 @@ mod tests {
                 .content,
             Some("Here is the answer.".to_string())
         );
+    }
+
+    #[test]
+    fn inkling_thinking_then_answer_wrappers_are_filtered() {
+        let mut filter = StreamFilter::new();
+        let output = filter.feed(
+            "<|content_thinking|>Plan.<|end_message|><|message_model|><|content_text|>Answer.",
+        );
+        assert_eq!(output.reasoning.as_deref(), Some("Plan."));
+        assert_eq!(output.content.as_deref(), Some("Answer."));
+        assert_eq!(output.thinking_open, Some("<|content_thinking|>"));
+        assert_eq!(output.thinking_close, Some("<|end_message|>"));
     }
 
     #[test]

@@ -676,6 +676,24 @@ pub trait LanguageModel {
         self.forward(input_ids, caches, mask)
     }
 
+    /// Sequence-aware counterpart of [`Self::forward_last_logits`].
+    ///
+    /// Server prefills need model-owned state keyed by `seq_id`, but only the
+    /// last real row is sampled. The default preserves the prior behavior by
+    /// forwarding the whole sequence and slicing; large-vocabulary recurrent
+    /// models can override it to slice hidden states before the LM head.
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let logits = self.forward_with_sequence_id(input_ids, seq_id, caches, mask);
+        logits_at_position(&logits, last_pos)
+    }
+
     /// Embedding-prefill forward with optional scheduler sequence identity.
     fn forward_with_embeddings_and_sequence_id(
         &self,
@@ -687,6 +705,27 @@ pub trait LanguageModel {
     ) -> UniquePtr<MlxArray> {
         let _ = seq_id;
         self.forward_with_embeddings(input_ids, input_embeddings, caches, mask)
+    }
+
+    /// Embedding-prefill counterpart of
+    /// [`Self::forward_last_logits_with_sequence_id`].
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let logits = self.forward_with_embeddings_and_sequence_id(
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+        );
+        logits_at_position(&logits, last_pos)
     }
 
     /// Synchronize model-owned sequence storage into the runtime backend state.

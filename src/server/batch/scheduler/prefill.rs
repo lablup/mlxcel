@@ -750,13 +750,16 @@ impl BatchScheduler {
                         // is used only when the caller does not provide one.
                         let effective_mask =
                             caller_mask.or(pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()));
-                        let logits = self.model.forward_with_embeddings_and_sequence_id(
-                            &input,
-                            Some(input_embeds),
-                            Some(seq.seq_id),
-                            caches,
-                            effective_mask,
-                        );
+                        let logits = self
+                            .model
+                            .forward_last_logits_with_embeddings_and_sequence_id(
+                                &input,
+                                Some(input_embeds),
+                                Some(seq.seq_id),
+                                caches,
+                                effective_mask,
+                                actual_len.saturating_sub(1),
+                            );
                         prefill_eval =
                             Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
                         self.model.after_prefill();
@@ -768,34 +771,27 @@ impl BatchScheduler {
                     }
                 }
             } else {
-                self.model.forward_with_sequence_id(
+                self.model.forward_last_logits_with_sequence_id(
                     &input,
                     Some(seq.seq_id),
                     caches,
                     pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+                    actual_len.saturating_sub(1),
                 )
             };
 
-            // Extract logits at the last real token position and trim padding from
-            // KV caches so the decode phase begins with the correct cache offset.
+            // The sequence-aware last-logits hook already extracts the last
+            // real row. Trim padding from KV caches so decode begins at the
+            // correct cache offset.
             if pad_mask_opt.is_some() && effective_tokens.len() > actual_len {
                 let padded_len = effective_tokens.len();
-                let shape = mlxcel_core::array_shape(&raw_logits);
-                let vocab = shape[2];
-                let sliced = mlxcel_core::slice(
-                    &raw_logits,
-                    &[0, actual_len as i32 - 1, 0],
-                    &[shape[0], actual_len as i32, vocab],
-                );
                 // Trim padding positions from all KV caches.
                 let excess = (padded_len - actual_len) as i32;
                 for c in caches.iter_mut() {
                     c.trim(excess);
                 }
-                sliced
-            } else {
-                raw_logits
             }
+            raw_logits
         };
 
         // #822: if the VLM prefill eval threw, fail just this request and, if the
@@ -921,13 +917,16 @@ impl BatchScheduler {
                     Ok((input_embeds, caller_mask)) => {
                         let effective_mask =
                             caller_mask.or(pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()));
-                        let logits = self.model.forward_with_embeddings_and_sequence_id(
-                            &input,
-                            Some(input_embeds),
-                            Some(seq.seq_id),
-                            caches,
-                            effective_mask,
-                        );
+                        let logits = self
+                            .model
+                            .forward_last_logits_with_embeddings_and_sequence_id(
+                                &input,
+                                Some(input_embeds),
+                                Some(seq.seq_id),
+                                caches,
+                                effective_mask,
+                                actual_chunk_len.saturating_sub(1),
+                            );
                         prefill_eval =
                             Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
                         self.model.after_prefill();
@@ -939,11 +938,12 @@ impl BatchScheduler {
                     }
                 }
             } else {
-                let logits = self.model.forward_with_sequence_id(
+                let logits = self.model.forward_last_logits_with_sequence_id(
                     &input,
                     Some(seq.seq_id),
                     caches,
                     pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+                    actual_chunk_len.saturating_sub(1),
                 );
                 prefill_eval = Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
                 logits
@@ -1138,11 +1138,12 @@ impl BatchScheduler {
                 }
             };
 
-            let logits = self.model.forward_with_sequence_id(
+            let logits = self.model.forward_last_logits_with_sequence_id(
                 &input,
                 Some(seq.seq_id),
                 caches,
                 pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+                actual_chunk_len.saturating_sub(1),
             );
 
             // Trim padding positions from KV caches when the chunk was padded.
