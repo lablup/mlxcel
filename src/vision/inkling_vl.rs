@@ -352,9 +352,91 @@ impl LanguageModel for InklingVlModel {
 
 #[cfg(test)]
 mod tests {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
     use mlxcel_core::utils::array_to_vec_f32;
+    use mlxcel_core::weights::WeightMap;
+    use mlxcel_core::{MlxArray, dtype};
 
-    use super::splice_video_slot1;
+    use super::*;
+    use crate::vision::encoders::inkling_hmlp::{InklingVisionConfig, layer_plan};
+
+    fn tiny_vlm() -> InklingVlModel {
+        let text = crate::models::inkling::tiny_model();
+        let vision_config: InklingVisionConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "inkling_vision",
+            "patch_size": 40,
+            "temporal_patch_size": 2,
+            "num_channels": 3,
+            "n_layers": 1,
+            "text_hidden_size": 4,
+            "rms_norm_eps": 1e-6
+        }))
+        .unwrap();
+        let plan = layer_plan(&vision_config).unwrap().remove(0);
+        let mut weights = WeightMap::new();
+        weights.insert(
+            "vision_tower.encoder_layers.0.projection.weight".into(),
+            mlxcel_core::zeros(
+                &[plan.output_dim as i32, plan.input_dim as i32],
+                dtype::FLOAT32,
+            ),
+        );
+        weights.insert(
+            "vision_tower.final_norm.weight".into(),
+            mlxcel_core::ones(&[vision_config.text_hidden_size as i32], dtype::FLOAT32),
+        );
+        let vision_tower =
+            InklingHmlpEncoder::from_weights(&weights, &vision_config, 64, 4).unwrap();
+        InklingVlModel::new(text, vision_tower, InklingImageProcessor::default(), 7)
+    }
+
+    fn arrays_equal(left: &MlxArray, right: &MlxArray) -> bool {
+        let equal = mlxcel_core::allclose(left, right, 0.0, 0.0);
+        mlxcel_core::eval(&equal);
+        mlxcel_core::item_bool(&equal)
+    }
+
+    #[test]
+    fn image_prefill_keeps_hmlp_prepared_embeddings_on_classic_wrapper_path() {
+        let vlm = tiny_vlm();
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 7, 2], &[1, 3]);
+        let pixel_values = mlxcel_core::zeros(&[1, 2, 40, 40, 3], dtype::FLOAT32);
+        let prepared = vlm
+            .prepare_input_embeddings(&input_ids, &pixel_values)
+            .unwrap();
+        assert_eq!(mlxcel_core::array_shape(&prepared.inputs_embeds), [1, 3, 4]);
+        let last_pos = mlxcel_core::array_shape(&prepared.inputs_embeds)[1] as usize - 1;
+
+        let mut wrapper_caches = Vec::new();
+        let wrapper_logits = LanguageModel::forward_last_logits_with_embeddings_and_sequence_id(
+            &vlm,
+            &input_ids,
+            Some(&prepared.inputs_embeds),
+            Some(SequenceId::from_raw(901)),
+            &mut wrapper_caches,
+            None,
+            last_pos,
+        );
+        let direct_logits = vlm.text.forward_last_prepared_embeddings_with_sequence_id(
+            &prepared.inputs_embeds,
+            Some(SequenceId::from_raw(902)),
+            last_pos,
+        );
+
+        assert!(
+            arrays_equal(&wrapper_logits, &direct_logits),
+            "InklingVLM image prefill must feed HMLP-merged prepared embeddings directly \
+             to vlm.text without replacing them with token embeddings or normalizing twice"
+        );
+    }
+
+    #[test]
+    fn vlm_mtp_adapter_is_a_text_backbone_target() {
+        fn assert_mtp_target<T: mlxcel_core::speculative::mtp::target::MtpTarget>() {}
+        let _ =
+            assert_mtp_target::<crate::models::inkling_mtp_target::InklingVLMtpTargetAdapter<'_>>;
+    }
 
     #[test]
     fn slot1_overwrite_touches_only_the_tail() {

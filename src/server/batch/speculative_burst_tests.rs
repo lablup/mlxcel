@@ -212,6 +212,18 @@ fn burst_declined_for_vlm_embeddings() {
 }
 
 #[test]
+fn mtp_burst_declines_raw_images_before_inkling_vlm_adapter_dispatch() {
+    let dispatch = make_mtp_dispatch();
+    let (mut seq, _rx) = make_test_sequence();
+    seq.images.push(b"raw-image-placeholder".to_vec());
+    assert!(
+        !should_burst_for_sequence(&dispatch, &seq),
+        "image-bearing InklingVLM requests must stay on classic HMLP \
+         prepared-embedding prefill instead of entering the text-only MTP adapter"
+    );
+}
+
+#[test]
 fn dflash_burst_allowed_for_vlm_wrapped_text_only_sequence_shape() {
     let dispatch = make_dflash_dispatch();
     let (seq, _rx) = make_test_sequence();
@@ -2011,6 +2023,17 @@ fn mtp_capable_target_names_the_qwen35_family() {
     ] {
         assert!(
             variants.iter().any(|v| v == expected),
+            "mtp_capable_target must accept LoadedModel::{expected}; found {variants:?}"
+        );
+    }
+}
+
+#[test]
+fn mtp_capable_target_names_both_inkling_variants() {
+    let variants = mtp_capable_variants();
+    for expected in ["Inkling", "InklingVLM"] {
+        assert!(
+            variants.iter().any(|variant| variant == expected),
             "mtp_capable_target must accept LoadedModel::{expected}; found {variants:?}"
         );
     }

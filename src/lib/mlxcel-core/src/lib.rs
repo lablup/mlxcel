@@ -3412,6 +3412,8 @@ pub mod speculative;
 // TODO: wrap the existing SpeculativeGenerator in a
 // Drafter-trait adapter so the round-loop drivers can dispatch uniformly.
 pub mod drafter;
+/// Shared Inkling decoder-layer primitives used by the target and native MTP drafter.
+pub mod inkling_layer;
 
 // Generation-time stream selection and installation wrappers.
 // Public so that the server batch scheduler can install its own generation stream.

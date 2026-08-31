@@ -23,16 +23,17 @@ mod attention;
 mod mlp;
 mod runtime;
 mod sanitize;
+mod speculative;
 mod validation;
 mod validation_shapes;
 
+use mlxcel_core::inkling_layer::{InklingDecoderLayer, InklingLayerSpec};
 use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
-use self::attention::InklingAttention;
 use self::mlp::InklingMlp;
 use self::runtime::InklingLayerCache;
 use super::model_owned::ModelOwnedSequenceState;
@@ -208,6 +209,42 @@ impl InklingTextConfig {
                 .ok_or_else(|| "Inkling native config requires dense_intermediate_size".into())
         }
     }
+
+    fn layer_spec(&self, config: &InklingConfig, index: usize) -> Result<InklingLayerSpec, String> {
+        let is_sliding = self.layer_is_sliding(index);
+        let (num_attention_heads, num_key_value_heads, head_dim) = if is_sliding {
+            (
+                self.swa_num_attention_heads,
+                self.swa_num_key_value_heads,
+                self.swa_head_dim,
+            )
+        } else {
+            (
+                self.num_attention_heads,
+                self.num_key_value_heads,
+                self.head_dim,
+            )
+        };
+        let (dense_intermediate_size, _) = self.widths()?;
+        let (quantization_group_size, quantization_bits, _) = config.quantization();
+        Ok(InklingLayerSpec {
+            hidden_size: self.hidden_size,
+            rms_norm_eps: self.rms_norm_eps,
+            is_sliding,
+            num_attention_heads,
+            num_key_value_heads,
+            head_dim,
+            sliding_window_size: self.sliding_window_size,
+            d_rel: self.d_rel,
+            rel_extent: self.rel_extent,
+            log_scaling_n_floor: self.log_scaling_n_floor,
+            log_scaling_alpha: self.log_scaling_alpha,
+            sconv_kernel_size: self.sconv_kernel_size,
+            dense_intermediate_size,
+            quantization_group_size,
+            quantization_bits,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -274,65 +311,11 @@ impl InklingConfig {
     }
 }
 
-struct InklingDecoderLayer {
-    attention: InklingAttention,
-    mlp: InklingMlp,
-    input_norm: RMSNorm,
-    post_attention_norm: RMSNorm,
-    attention_conv: attention::InklingShortConv,
-    mlp_conv: attention::InklingShortConv,
-}
-
-impl InklingDecoderLayer {
-    fn from_weights(
-        weights: &WeightMap,
-        config: &InklingConfig,
-        index: usize,
-    ) -> Result<Self, String> {
-        let text = &config.text_config;
-        let prefix = format!("model.layers.{index}");
-        Ok(Self {
-            attention: InklingAttention::from_weights(weights, config, index)?,
-            mlp: InklingMlp::from_weights(weights, config, index)?,
-            input_norm: RMSNorm::new(
-                weight(weights, &format!("{prefix}.input_layernorm.weight"))?,
-                text.rms_norm_eps,
-            ),
-            post_attention_norm: RMSNorm::new(
-                weight(
-                    weights,
-                    &format!("{prefix}.post_attention_layernorm.weight"),
-                )?,
-                text.rms_norm_eps,
-            ),
-            attention_conv: attention::InklingShortConv::from_weights(
-                weights,
-                &format!("{prefix}.attn_sconv.conv.weight"),
-                text.sconv_kernel_size,
-            )?,
-            mlp_conv: attention::InklingShortConv::from_weights(
-                weights,
-                &format!("{prefix}.mlp_sconv.conv.weight"),
-                text.sconv_kernel_size,
-            )?,
-        })
-    }
-
-    fn forward(&self, x: &MlxArray, cache: &mut InklingLayerCache) -> UniquePtr<MlxArray> {
-        let n = self.input_norm.forward(x);
-        let a = self.attention.forward(&n, cache);
-        let h = self.attention_conv.forward(&a, &mut cache.conv[2], Some(x));
-        let n = self.post_attention_norm.forward(&h);
-        let m = self.mlp.forward(&n);
-        self.mlp_conv.forward(&m, &mut cache.conv[3], Some(&h))
-    }
-}
-
 pub struct InklingModel {
     config: InklingConfig,
     embed_tokens: UnifiedEmbedding,
     embed_norm: Option<RMSNorm>,
-    layers: Vec<InklingDecoderLayer>,
+    layers: Vec<InklingDecoderLayer<InklingMlp>>,
     norm: RMSNorm,
     lm_head: Option<UnifiedLinear>,
     eos_token_ids: Vec<i32>,
@@ -364,7 +347,12 @@ impl InklingModel {
             .map(|w| RMSNorm::new(w, text.rms_norm_eps));
         let mut layers = Vec::with_capacity(text.num_hidden_layers);
         for i in 0..text.num_hidden_layers {
-            layers.push(InklingDecoderLayer::from_weights(&weights, &config, i)?);
+            let prefix = format!("model.layers.{i}");
+            let spec = text.layer_spec(&config, i)?;
+            let mlp = InklingMlp::from_weights(&weights, &config, i)?;
+            layers.push(InklingDecoderLayer::from_weights(
+                &weights, &prefix, &spec, mlp,
+            )?);
         }
         let norm = RMSNorm::new(weight(&weights, "model.norm.weight")?, text.rms_norm_eps);
         let lm_head = if text.tie_word_embeddings {
@@ -416,7 +404,7 @@ impl InklingModel {
             .collect()
     }
 
-    fn hidden_embeddings_with_caches(
+    fn pre_norm_hidden_embeddings_with_caches(
         &self,
         embeddings: &MlxArray,
         caches: &mut [InklingLayerCache],
@@ -437,7 +425,16 @@ impl InklingModel {
         for (layer, cache) in self.layers.iter().zip(caches) {
             h = layer.forward(&h, cache);
         }
-        self.norm.forward(&h)
+        h
+    }
+
+    fn hidden_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.pre_norm_hidden_embeddings_with_caches(embeddings, caches);
+        self.norm.forward(&hidden)
     }
 
     fn project_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
@@ -561,3 +558,5 @@ fn weight(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String
 mod tests;
 #[cfg(test)]
 mod tiny_tests;
+#[cfg(test)]
+pub(crate) use tiny_tests::tiny_model;
