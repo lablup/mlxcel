@@ -86,6 +86,38 @@ fn inkling_model_type_aliases_are_detected() {
 }
 
 #[test]
+fn isolated_inkling_mtp_download_is_not_a_standalone_model() {
+    use std::io::Write;
+
+    let model_dir = temp_path("inkling_mtp_only");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        json!({
+            "model_type": "inkling_mm_model",
+            "text_config": {"model_type": "inkling"},
+            "mtp_config": {"num_nextn_predict_layers": 3}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let name = "model.mtp.layers.0.embed_norm.weight";
+    let mut header =
+        format!("{{\"{name}\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}}}");
+    while !header.len().is_multiple_of(8) {
+        header.push(' ');
+    }
+    let mut file = fs::File::create(model_dir.join("mtp.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header.as_bytes()).unwrap();
+    file.write_all(&1.0_f32.to_le_bytes()).unwrap();
+    let error = super::detection::get_model_type(&model_dir).unwrap_err();
+    assert!(error.to_string().contains("isolated Inkling MTP drafter"));
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn deepseek_v4_model_type_is_detected() {
     let model_dir = temp_path("deepseek_v4");
     fs::create_dir_all(&model_dir).unwrap();

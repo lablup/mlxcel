@@ -1899,10 +1899,12 @@ fn run_offline_mtp(
         }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
+        LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
+        LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         _ => {
             return Err(anyhow!(
                 "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
-                 Unified) and Qwen 3.5 (text or VLM) targets; the loaded target \
+                 Unified), Qwen 3.5 (text or VLM), and Inkling (text or VLM) targets; the loaded target \
                  is not MTP-capable. Omit --draft-kind to use the classic \
                  SpeculativeGenerator with your --draft-model drafter."
             ));
@@ -1988,6 +1990,24 @@ fn run_offline_mtp(
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => drive_offline_mtp(
             mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(vlm, None),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        LoadedModel::Inkling(inkling) => drive_offline_mtp(
+            mlxcel::models::inkling_mtp_target::InklingMtpTargetAdapter::new(inkling, None),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        LoadedModel::InklingVLM(vlm) => drive_offline_mtp(
+            mlxcel::models::inkling_mtp_target::InklingVLMtpTargetAdapter::new(vlm, None),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2566,6 +2586,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             args.generation.fps,
             &tokenizer,
             image_soft_tokens,
+            args.generation.no_chat_template,
         )?;
         print_generation_preamble(&user_prompt)?;
         let generation = run_generation_mode(

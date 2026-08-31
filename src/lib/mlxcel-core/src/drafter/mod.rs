@@ -94,6 +94,8 @@ pub mod dflash;
 /// Concrete Gemma 4 MTP "assistant" drafter implementation. Wired into
 /// [`load_drafter`]'s `Mtp` arm.
 pub mod gemma4_assistant;
+/// Native Inkling chained-MTP head loaded from `model.mtp.layers.*` tensors.
+pub mod inkling_mtp;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
 /// — landed here independently so the layer can
@@ -428,6 +430,13 @@ pub fn peek_qwen35_mtp_configured_block_size(model_path: &Path) -> Option<usize>
     peek.block_size
 }
 
+/// Derive Inkling's default verify width (`num_mtp_layers + 2`) from its
+/// target-shaped config. Inkling deliberately has no drafter-only model_type.
+pub fn peek_inkling_mtp_configured_block_size(model_path: &Path) -> Option<usize> {
+    let config = inkling_mtp::InklingMtpConfig::from_dir(model_path).ok()?;
+    Some(config.block_size())
+}
+
 /// Reconcile the caller's `kind` choice with the drafter's actual
 /// `config.json::model_type`.
 ///
@@ -468,6 +477,18 @@ pub fn resolve_drafter_kind(
     let expected = model_type
         .as_deref()
         .and_then(|mt| drafter_kind_by_model_type().get(mt).copied());
+
+    if kind.is_none()
+        && matches!(model_type.as_deref(), Some("inkling_mm_model" | "inkling"))
+        && inkling_mtp::has_inkling_mtp_tensors(model_path)?
+    {
+        tracing::info!(
+            drafter = %model_path.display(),
+            resolved = %DrafterKind::Mtp,
+            "Auto-detected Inkling MTP from model.mtp.layers.* tensors"
+        );
+        return Ok(DrafterKind::Mtp);
+    }
 
     match (kind, expected) {
         (None, Some(exp)) => {
@@ -1112,6 +1133,10 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             // the pre-existing behavior for hand-rolled Gemma fixtures).
             let model_type = peek_drafter_model_type(path)?;
             match model_type.as_deref() {
+                Some("inkling_mm_model" | "inkling") => {
+                    let model = inkling_mtp::InklingMtpDraftModel::from_path(path)?;
+                    Ok((Box::new(model), resolved))
+                }
                 Some("qwen3_5_mtp") => {
                     let model = qwen3_5_mtp::Qwen35MtpDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))

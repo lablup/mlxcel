@@ -44,13 +44,17 @@ use crate::qwen_vl::{
     insert_qwen_vl_media_tokens, insert_qwen3_omni_image_tokens,
 };
 use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_tokens};
+use crate::vision::InklingVlModel;
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
 use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
-use crate::vlm_prompt::{ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks};
+use crate::vlm_prompt::{
+    ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks,
+    expand_inkling_image_tokens,
+};
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use crate::{LanguageModel, LoadedModel, VlmRuntimeRef};
 
@@ -65,6 +69,58 @@ const JINA_VLM_BOS_TOKEN_ID: i32 = 151643;
 /// reference `JinaVLMProcessor._interleave_text_and_image_tokens`.
 const JINA_VLM_IMAGE_MARKER: &str = "<|image|>";
 const JINA_VLM_USER_TURN: &str = "User: ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InklingVideoPreparationStats {
+    pub image_blocks: usize,
+    pub video_pairs: usize,
+    pub total_image_tokens: usize,
+}
+
+/// Structural special-token ids emitted by the public Inkling chat template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InklingPromptTokenIds {
+    pub message_user: i32,
+    pub content_text: i32,
+    pub content_image: i32,
+    pub end_message: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InklingVideoPromptLayout {
+    /// Explicit CLI `--no-chat-template`: prepend media to one plain question.
+    Plain,
+    /// Insert complete content parts before the final user text part.
+    Structured(InklingPromptTokenIds),
+}
+
+/// Resolve the four structural tokens required to insert complete Inkling
+/// content parts into an already-rendered chat prompt.
+pub fn resolve_inkling_prompt_token_ids(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+) -> Result<InklingPromptTokenIds> {
+    fn resolve(tokenizer: &crate::tokenizer::MlxcelTokenizer, literal: &str) -> Result<i32> {
+        if let Some(tokenizer) = tokenizer.hf_tokenizer()
+            && let Some(token) = tokenizer.token_to_id(literal)
+        {
+            return i32::try_from(token)
+                .map_err(|_| anyhow::anyhow!("Inkling token {literal} exceeds i32"));
+        }
+        let encoded = tokenizer.encode(literal, false)?;
+        if encoded.len() != 1 {
+            anyhow::bail!("Inkling structural token {literal} is not a single tokenizer id");
+        }
+        i32::try_from(encoded[0])
+            .map_err(|_| anyhow::anyhow!("Inkling token {literal} exceeds i32"))
+    }
+
+    Ok(InklingPromptTokenIds {
+        message_user: resolve(tokenizer, "<|message_user|>")?,
+        content_text: resolve(tokenizer, "<|content_text|>")?,
+        content_image: resolve(tokenizer, "<|content_image|>")?,
+        end_message: resolve(tokenizer, "<|end_message|>")?,
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VlmPreparationSummary {
@@ -124,6 +180,10 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         image_tokens: usize,
         total_tokens: usize,
+    },
+    Inkling {
+        image_blocks: usize,
+        total_image_tokens: usize,
     },
     Phi4MM {
         image_slots: usize,
@@ -305,6 +365,231 @@ fn should_prepare_vlm_embeddings(image_count: usize, is_vlm: bool) -> Result<boo
 
 fn prompt_ids_array(prompt_tokens: &[i32]) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32])
+}
+
+/// Insert Inkling's timestamped frame sequence before the original question.
+///
+/// Structured prompts keep existing companion-image parts in place and insert
+/// complete Inkling text/image content parts immediately before the final user
+/// text part. Plain CLI prompts prepend the same semantic order after BOS.
+/// Placeholder and structural-boundary mismatches are rejected instead of
+/// moving media outside the current user turn.
+fn insert_inkling_video_prompt<E>(
+    prompt_tokens: &mut Vec<i32>,
+    image_token_id: i32,
+    still_image_count: usize,
+    timestamps_by_clip: &[Vec<f64>],
+    layout: InklingVideoPromptLayout,
+    mut encode: E,
+) -> Result<()>
+where
+    E: FnMut(&str, bool) -> Result<Vec<i32>>,
+{
+    if prompt_tokens.is_empty() {
+        anyhow::bail!("Inkling video prompt cannot be empty");
+    }
+    let placeholder_count = prompt_tokens
+        .iter()
+        .filter(|&&token| token == image_token_id)
+        .count();
+    let pair_count = timestamps_by_clip.iter().map(Vec::len).sum::<usize>();
+    match layout {
+        InklingVideoPromptLayout::Plain => {
+            if placeholder_count != 0 {
+                anyhow::bail!(
+                    "Plain Inkling video prompt contains {placeholder_count} reserved image placeholder(s)"
+                );
+            }
+            let tail = prompt_tokens.split_off(1);
+            prompt_tokens.extend(std::iter::repeat_n(image_token_id, still_image_count));
+            for timestamps in timestamps_by_clip {
+                for part in crate::video::timestamped_pair_messages("", timestamps) {
+                    match part {
+                        crate::video::InklingVideoPromptPart::Text(text) if !text.is_empty() => {
+                            prompt_tokens.extend(encode(&format!("{text}\n"), false)?);
+                        }
+                        crate::video::InklingVideoPromptPart::Text(_) => {}
+                        crate::video::InklingVideoPromptPart::Image => {
+                            prompt_tokens.push(image_token_id);
+                        }
+                    }
+                }
+            }
+            prompt_tokens.extend(tail);
+        }
+        InklingVideoPromptLayout::Structured(ids) => {
+            if placeholder_count != still_image_count {
+                anyhow::bail!(
+                    "Structured Inkling video prompt contains {placeholder_count} image placeholder(s), but the request has {still_image_count} companion still image(s)"
+                );
+            }
+            let insertion = prompt_tokens
+                .windows(2)
+                .rposition(|window| window == [ids.message_user, ids.content_text])
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Structured Inkling video prompt has no final user text content boundary"
+                    )
+                })?;
+            let current_user_end = prompt_tokens[insertion + 2..]
+                .iter()
+                .position(|&token| token == ids.end_message)
+                .map(|offset| insertion + 2 + offset)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Structured Inkling video prompt has no end marker for the final user text part"
+                    )
+                })?;
+            if prompt_tokens[current_user_end + 1..].contains(&ids.message_user) {
+                anyhow::bail!(
+                    "Structured Inkling video prompt has user content after the final question boundary"
+                );
+            }
+            if prompt_tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| **token == image_token_id)
+                .any(|(index, _)| index >= insertion)
+            {
+                anyhow::bail!(
+                    "Structured Inkling companion image parts must precede the final user question"
+                );
+            }
+
+            let mut inserted = Vec::new();
+            for timestamps in timestamps_by_clip {
+                for part in crate::video::timestamped_pair_messages("", timestamps) {
+                    match part {
+                        crate::video::InklingVideoPromptPart::Text(text) if !text.is_empty() => {
+                            inserted.extend([ids.message_user, ids.content_text]);
+                            inserted.extend(encode(&text, false)?);
+                            inserted.push(ids.end_message);
+                        }
+                        crate::video::InklingVideoPromptPart::Text(_) => {}
+                        crate::video::InklingVideoPromptPart::Image => {
+                            inserted.extend([
+                                ids.message_user,
+                                ids.content_image,
+                                image_token_id,
+                                ids.end_message,
+                            ]);
+                        }
+                    }
+                }
+            }
+            prompt_tokens.splice(insertion..insertion, inserted);
+        }
+    }
+    let expected = still_image_count
+        .checked_add(pair_count)
+        .ok_or_else(|| anyhow::anyhow!("Inkling video placeholder count overflowed"))?;
+    let actual = prompt_tokens
+        .iter()
+        .filter(|&&token| token == image_token_id)
+        .count();
+    if actual != expected {
+        anyhow::bail!(
+            "Inkling video prompt contains {actual} image placeholder(s) after insertion, expected {expected}"
+        );
+    }
+    Ok(())
+}
+
+/// Prepare Inkling's mixed still-image and adjacent-frame video embeddings.
+///
+/// The first frame of each selected pair is tiled like a normal image. The
+/// matching second frame is tiled separately, then only its temporal slot-0
+/// plane is copied into slot 1 of the final video-tile rows. Consequently
+/// companion stills retain duplicated temporal planes and every selected pair
+/// consumes one image entity in the prompt.
+pub fn compute_inkling_video_embeddings<E>(
+    model: &InklingVlModel,
+    prompt_tokens: &mut Vec<i32>,
+    still_images: &[DynamicImage],
+    video_clips: &[crate::video::InklingDecodedVideo],
+    prompt_layout: InklingVideoPromptLayout,
+    encode: E,
+) -> Result<(InputEmbeddings, InklingVideoPreparationStats)>
+where
+    E: FnMut(&str, bool) -> Result<Vec<i32>>,
+{
+    if video_clips.is_empty() {
+        anyhow::bail!("Inkling video preparation requires at least one decoded clip");
+    }
+    let timestamps_by_clip = video_clips
+        .iter()
+        .map(|clip| clip.timestamps.clone())
+        .collect::<Vec<_>>();
+    insert_inkling_video_prompt(
+        prompt_tokens,
+        model.image_token_id(),
+        still_images.len(),
+        &timestamps_by_clip,
+        prompt_layout,
+        encode,
+    )?;
+
+    let video_pair_count = video_clips
+        .iter()
+        .map(|clip| clip.pairs.len())
+        .sum::<usize>();
+    let mut first_entities = Vec::with_capacity(still_images.len() + video_pair_count);
+    first_entities.extend(still_images.iter());
+    let mut second_entities = Vec::with_capacity(video_pair_count);
+    for clip in video_clips {
+        for pair in &clip.pairs {
+            first_entities.push(&clip.frames[pair[0]]);
+            second_entities.push(&clip.frames[pair[1]]);
+        }
+    }
+    let processed = model
+        .preprocess_image_refs(&first_entities)
+        .map_err(anyhow::Error::msg)?;
+    let second = model
+        .preprocess_image_refs(&second_entities)
+        .map_err(anyhow::Error::msg)?;
+    let first_video_counts = &processed.tiles_per_image[still_images.len()..];
+    if first_video_counts != second.tiles_per_image.as_slice() {
+        anyhow::bail!(
+            "Inkling adjacent video frames produced different tile layouts: first={first_video_counts:?}, second={:?}",
+            second.tiles_per_image
+        );
+    }
+    let video_tiles = second
+        .tiles_per_image
+        .iter()
+        .try_fold(0usize, |total, &count| total.checked_add(count))
+        .ok_or_else(|| anyhow::anyhow!("Inkling video tile count overflowed"))?;
+    let video_tiles_i32 = i32::try_from(video_tiles)
+        .map_err(|_| anyhow::anyhow!("Inkling video tile count exceeds the MLX i32 limit"))?;
+    let second_slot0 = mlxcel_core::slice(
+        &second.pixel_values,
+        &[0, 0, 0, 0, 0],
+        &[video_tiles_i32, 1, 40, 40, 3],
+    );
+    let second_slot0 = mlxcel_core::reshape(&second_slot0, &[video_tiles_i32, 40, 40, 3]);
+
+    let stats = expand_inkling_image_tokens(
+        prompt_tokens,
+        model.image_token_id(),
+        &processed.tiles_per_image,
+    )?;
+    let input_ids = prompt_ids_array(prompt_tokens);
+    let embeddings = model
+        .prepare_input_embeddings_with_video_slot1(
+            &input_ids,
+            &processed.pixel_values,
+            &second_slot0,
+        )
+        .map_err(anyhow::Error::msg)?;
+    Ok((
+        embeddings,
+        InklingVideoPreparationStats {
+            image_blocks: stats.image_blocks,
+            video_pairs: video_pair_count,
+            total_image_tokens: stats.total_image_tokens,
+        },
+    ))
 }
 
 /// Pick the first explicit (non-None) cache key from a caller-supplied slice.
@@ -662,6 +947,27 @@ where
     let active_caches = caches.filter(|c| c.enabled());
 
     match runtime {
+        VlmRuntimeRef::Inkling(model) => {
+            let processed = model
+                .preprocess_images(images)
+                .map_err(anyhow::Error::msg)?;
+            let stats = expand_inkling_image_tokens(
+                prompt_tokens,
+                model.image_token_id(),
+                &processed.tiles_per_image,
+            )?;
+            let input_ids = prompt_ids_array(prompt_tokens);
+            let embeddings = model
+                .prepare_input_embeddings(&input_ids, &processed.pixel_values)
+                .map_err(anyhow::Error::msg)?;
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Inkling {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                }),
+            }))
+        }
         VlmRuntimeRef::MuseGlimmer(model) => {
             crate::multimodal::muse_glimmer_runtime::prepare_muse_glimmer_vlm_embeddings(
                 model,

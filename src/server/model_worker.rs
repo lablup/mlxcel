@@ -1527,6 +1527,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
         }
         return prepare_request_video_embeddings(
             model,
+            tokenizer,
             prompt_tokens,
             images,
             videos,
@@ -2634,12 +2635,17 @@ fn prepare_nemotron_h_nano_omni_audio_embeddings(
 /// corrupt a non-VLM run.
 fn prepare_request_video_embeddings(
     model: &LoadedModel,
+    tokenizer: &MlxcelTokenizer,
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
     image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
+
+    if let LoadedModel::InklingVLM(inkling) = model {
+        return prepare_inkling_video_embeddings(inkling, tokenizer, prompt_tokens, images, videos);
+    }
 
     // Encoder-free Gemma 4 Unified routes to its own video path (issue #164):
     // per-frame patches scatter into video_token_id placeholders rather than
@@ -2669,7 +2675,7 @@ fn prepare_request_video_embeddings(
         LoadedModel::Gemma4VLM(model) => model,
         _ => {
             return Err(anyhow!(
-                "video inputs are only supported by Gemma 4, Kimi-VL, and Qwen-VL VLM models in \
+                "video inputs are only supported by Inkling, Gemma 4, Kimi-VL, and Qwen-VL VLM models in \
                  this build"
             ));
         }
@@ -2787,6 +2793,84 @@ fn prepare_request_video_embeddings(
         &processed_videos,
     );
 
+    Ok(Some(embeddings))
+}
+
+/// Resolve server `video_url` inputs into Inkling's adjacent-frame temporal
+/// slots. The fd-backed decode boundary is identical to the other server video
+/// families, so canonical-path validation cannot be raced after admission.
+fn prepare_inkling_video_embeddings(
+    inkling: &crate::vision::InklingVlModel,
+    tokenizer: &MlxcelTokenizer,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    videos: &[crate::server::media::ResolvedVideo],
+) -> Result<Option<InputEmbeddings>> {
+    use crate::multimodal::video;
+
+    if !video::ffmpeg_available() {
+        return Err(anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+
+    let inputs = videos
+        .iter()
+        .map(|resolved| video::InklingVideoInput {
+            source: &resolved.source,
+            target_fps: resolved.fps.unwrap_or(video::DEFAULT_FPS),
+        })
+        .collect::<Vec<_>>();
+    let decoded_videos = video::load_inkling_video_pairs(
+        &inputs,
+        video::INKLING_MAX_VIDEO_PAIRS,
+        &video::VideoLimits::from_env(),
+    )
+    .map_err(|error| anyhow!("Failed to load Inkling video request: {error}"))?;
+    let sampled_frame_count = decoded_videos
+        .iter()
+        .map(|clip| clip.sampled_frame_count)
+        .sum::<usize>();
+    let decoded_frame_count = decoded_videos
+        .iter()
+        .map(|clip| clip.frames.len())
+        .sum::<usize>();
+    tracing::info!(
+        "Inkling video request: planned {} sampled frame(s) and decoded {} unique selected frame(s) across {} clip(s)",
+        sampled_frame_count,
+        decoded_frame_count,
+        videos.len(),
+    );
+    let decoded_images = if images.is_empty() {
+        Vec::new()
+    } else {
+        decode_request_images(images)?
+    };
+    let prompt_layout = crate::vlm_runtime::InklingVideoPromptLayout::Structured(
+        crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
+    );
+    let (embeddings, stats) = crate::vlm_runtime::compute_inkling_video_embeddings(
+        inkling,
+        prompt_tokens,
+        &decoded_images,
+        &decoded_videos,
+        prompt_layout,
+        |text, add_special| {
+            tokenizer.encode(text, add_special).map(|tokens| {
+                tokens
+                    .into_iter()
+                    .map(|token| token as i32)
+                    .collect::<Vec<_>>()
+            })
+        },
+    )?;
+    tracing::info!(
+        video_pairs = stats.video_pairs,
+        media_blocks = stats.image_blocks,
+        image_tokens = stats.total_image_tokens,
+        "Inkling video request prepared"
+    );
     Ok(Some(embeddings))
 }
 

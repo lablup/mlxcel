@@ -17,54 +17,7 @@ use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::InklingModel;
-use crate::models::recurrent_snapshot::{push_i32, push_optional, restore_i32, restore_optional};
-
-pub(crate) struct InklingLayerCache {
-    pub(crate) kv: KVCache,
-    pub(crate) conv: [Option<UniquePtr<MlxArray>>; 4],
-}
-
-impl InklingLayerCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            kv: KVCache::new(),
-            conv: std::array::from_fn(|_| None),
-        }
-    }
-
-    fn snapshot_into(
-        &self,
-        snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
-        prefix: &str,
-    ) {
-        let (keys, values) = self
-            .kv
-            .visible_state()
-            .map_or((None, None), |(keys, values)| (Some(keys), Some(values)));
-        push_optional(snapshot, format!("{prefix}.keys"), &keys);
-        push_optional(snapshot, format!("{prefix}.values"), &values);
-        push_i32(snapshot, format!("{prefix}.offset"), self.kv.offset);
-        for (idx, state) in self.conv.iter().enumerate() {
-            push_optional(snapshot, format!("{prefix}.conv{idx}"), state);
-        }
-    }
-
-    fn restore_from(
-        &mut self,
-        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
-        prefix: &str,
-    ) -> Result<(), String> {
-        let keys = restore_optional(snapshot, format!("{prefix}.keys"));
-        let values = restore_optional(snapshot, format!("{prefix}.values"));
-        let offset = restore_i32(snapshot, format!("{prefix}.offset"))
-            .unwrap_or(snapshot.token_len() as i32);
-        self.kv.restore_fp16_live_window(keys, values, offset)?;
-        for (idx, state) in self.conv.iter_mut().enumerate() {
-            *state = restore_optional(snapshot, format!("{prefix}.conv{idx}"));
-        }
-        Ok(())
-    }
-}
+pub(crate) use mlxcel_core::inkling_layer::InklingLayerCache;
 
 impl LanguageModel for InklingModel {
     fn forward(
@@ -199,6 +152,18 @@ impl LanguageModel for InklingModel {
     }
     fn embed_tokens(&self, input: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.embed_tokens.forward(input))
+    }
+    fn embed_tokens_module(&self) -> Option<mlxcel_core::layers::UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
+    }
+    fn lm_head_module(&self) -> Option<mlxcel_core::layers::UnifiedLinear> {
+        self.lm_head.as_ref().map(|head| head.clone_shared())
+    }
+    fn final_norm_module(&self) -> Option<mlxcel_core::layers::RMSNorm> {
+        Some(mlxcel_core::layers::RMSNorm::new(
+            mlxcel_core::copy(&self.norm.weight),
+            self.norm.eps,
+        ))
     }
     fn supports_snapshot_reuse(&self) -> bool {
         true

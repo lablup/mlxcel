@@ -59,6 +59,12 @@ pub struct ImageTokenBlockStats {
     pub tokens_per_image: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InklingImageTokenStats {
+    pub image_blocks: usize,
+    pub total_image_tokens: usize,
+}
+
 /// Invalid family-neutral image-placeholder layouts.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -76,6 +82,103 @@ pub enum ImageTokenBlockError {
     },
     #[error("image-token expansion capacity overflowed")]
     CapacityOverflow,
+    #[error(
+        "prompt contains {placeholder_count} Inkling image placeholder(s), but {image_count} image(s) require {feature_count} feature token(s)"
+    )]
+    InklingMediaCardinality {
+        placeholder_count: usize,
+        image_count: usize,
+        feature_count: usize,
+    },
+}
+
+/// Expand Inkling's single image marker into the exact tile count per image.
+///
+/// Chat templates emit one `image_token_id` for each image. Plain CLI prompts
+/// emit none, in which case the runs are inserted immediately after the first
+/// token (normally BOS). Already-expanded prompts are accepted only when their
+/// total marker count exactly equals the HMLP feature count.
+pub fn expand_inkling_image_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    image_token_id: i32,
+    tiles_per_image: &[usize],
+) -> Result<InklingImageTokenStats, ImageTokenBlockError> {
+    let image_count = tiles_per_image.len();
+    let feature_count = tiles_per_image.iter().try_fold(0usize, |total, &count| {
+        if count == 0 {
+            None
+        } else {
+            total.checked_add(count)
+        }
+    });
+    let feature_count = feature_count.ok_or(ImageTokenBlockError::CapacityOverflow)?;
+    let placeholder_count = prompt_tokens
+        .iter()
+        .filter(|&&token| token == image_token_id)
+        .count();
+
+    if image_count == 0 {
+        if placeholder_count == 0 {
+            return Ok(InklingImageTokenStats {
+                image_blocks: 0,
+                total_image_tokens: 0,
+            });
+        }
+        return Err(ImageTokenBlockError::InklingMediaCardinality {
+            placeholder_count,
+            image_count,
+            feature_count,
+        });
+    }
+    if prompt_tokens.is_empty() {
+        return Err(ImageTokenBlockError::EmptyPrompt { image_count });
+    }
+    if placeholder_count == feature_count && placeholder_count != image_count {
+        return Ok(InklingImageTokenStats {
+            image_blocks: image_count,
+            total_image_tokens: feature_count,
+        });
+    }
+    if placeholder_count == image_count {
+        let capacity = prompt_tokens
+            .len()
+            .checked_add(feature_count.saturating_sub(image_count))
+            .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+        let mut expanded = Vec::with_capacity(capacity);
+        let mut ordinal = 0usize;
+        for &token in prompt_tokens.iter() {
+            if token == image_token_id {
+                expanded.extend(std::iter::repeat_n(
+                    image_token_id,
+                    tiles_per_image[ordinal],
+                ));
+                ordinal += 1;
+            } else {
+                expanded.push(token);
+            }
+        }
+        *prompt_tokens = expanded;
+    } else if placeholder_count == 0 {
+        let capacity = prompt_tokens
+            .len()
+            .checked_add(feature_count)
+            .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+        let tail = prompt_tokens.split_off(1);
+        prompt_tokens.reserve(capacity - prompt_tokens.len());
+        prompt_tokens.extend(std::iter::repeat_n(image_token_id, feature_count));
+        prompt_tokens.extend(tail);
+    } else {
+        return Err(ImageTokenBlockError::InklingMediaCardinality {
+            placeholder_count,
+            image_count,
+            feature_count,
+        });
+    }
+
+    Ok(InklingImageTokenStats {
+        image_blocks: image_count,
+        total_image_tokens: feature_count,
+    })
 }
 
 /// Invalid Inkling audio-placeholder layouts.

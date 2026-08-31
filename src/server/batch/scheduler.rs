@@ -56,6 +56,8 @@ impl BatchScheduler {
             LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
                 compat_and_bind(drafter, vlm)
             }
+            LoadedModel::Inkling(inkling) => compat_and_bind(drafter, inkling),
+            LoadedModel::InklingVLM(vlm) => compat_and_bind(drafter, &vlm.text),
             // Unreachable per the callers' variant gates; produce a clean
             // per-request error rather than panicking.
             _ => Err(
@@ -295,6 +297,46 @@ impl BatchScheduler {
                     ),
                 )
             }
+            LoadedModel::Inkling(inkling) => {
+                let adapter = crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(
+                    inkling,
+                    Some(seq.seq_id),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(
+                    crate::server::batch::speculative_slice::begin_slice_session(
+                        adapter,
+                        drafter,
+                        seq,
+                        &self.tokenizer,
+                        model_eos,
+                        block_size,
+                        probe_rounds,
+                        prefill_start_offset,
+                        &token_history,
+                    ),
+                )
+            }
+            LoadedModel::InklingVLM(vlm) => {
+                let adapter = crate::models::inkling_mtp_target::InklingVLMtpTargetAdapter::new(
+                    vlm,
+                    Some(seq.seq_id),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(
+                    crate::server::batch::speculative_slice::begin_slice_session(
+                        adapter,
+                        drafter,
+                        seq,
+                        &self.tokenizer,
+                        model_eos,
+                        block_size,
+                        probe_rounds,
+                        prefill_start_offset,
+                        &token_history,
+                    ),
+                )
+            }
             // Defensive arm rather than `unreachable!()` so a future
             // LoadedModel variant admitted by the gate above surfaces as a
             // clean per-request error instead of a worker panic.
@@ -452,6 +494,32 @@ impl BatchScheduler {
                 );
                 true
             }
+            LoadedModel::Inkling(inkling) => {
+                let adapter = crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(
+                    inkling,
+                    Some(job.seq.seq_id),
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                crate::server::batch::speculative_slice::step_slice_session(
+                    adapter,
+                    &mut job,
+                    &self.tokenizer,
+                );
+                true
+            }
+            LoadedModel::InklingVLM(vlm) => {
+                let adapter = crate::models::inkling_mtp_target::InklingVLMtpTargetAdapter::new(
+                    vlm,
+                    Some(job.seq.seq_id),
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                crate::server::batch::speculative_slice::step_slice_session(
+                    adapter,
+                    &mut job,
+                    &self.tokenizer,
+                );
+                true
+            }
             _ => false,
         };
         if !stepped {
@@ -514,6 +582,8 @@ impl BatchScheduler {
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
                 LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => Some(qwen),
                 LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
+                LoadedModel::Inkling(inkling) => Some(inkling),
+                LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
                 _ => None,
             };
             match target_lm {
@@ -560,6 +630,8 @@ impl BatchScheduler {
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
                 LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => Some(qwen),
                 LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
+                LoadedModel::Inkling(inkling) => Some(inkling),
+                LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
                 _ => None,
             };
             match target_lm {

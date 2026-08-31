@@ -54,7 +54,10 @@ Examples:
   mlxcel download meta-llama/Llama-3.1-8B-Instruct --token hf_xxx
 
   # Force re-download even if files are already present:
-  mlxcel download mlx-community/Qwen3-4B-4bit --force")]
+  mlxcel download mlx-community/Qwen3-4B-4bit --force
+
+  # Fetch selected allow-listed files only (repeatable glob patterns):
+  mlxcel download thinkingmachines/Inkling-Small --include config.json mtp.safetensors")]
 pub struct DownloadArgs {
     /// HuggingFace repository id, e.g. `mlx-community/Qwen3-4B-4bit`.
     #[arg(value_name = "REPO_ID")]
@@ -93,6 +96,14 @@ pub struct DownloadArgs {
     /// `HUGGING_FACE_HUB_TOKEN`, then anonymous access.
     #[arg(long, value_name = "TOKEN")]
     pub token: Option<String>,
+
+    /// Download only allow-listed repository files matching these glob patterns.
+    ///
+    /// Multiple values may follow one `--include` and the flag may be repeated.
+    /// Patterns match repository-relative paths and never bypass mlxcel's file
+    /// type or path-safety allow-list.
+    #[arg(long, value_name = "GLOB", num_args = 1.., action = clap::ArgAction::Append)]
+    pub include: Vec<String>,
 
     /// Re-download every file even if it already exists locally.
     #[arg(long, default_value_t = false)]

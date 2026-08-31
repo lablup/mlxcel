@@ -167,6 +167,31 @@ fn resolve_draft_block_size_honors_the_qwen35_mtp_drafters_own_configured_value(
 }
 
 #[test]
+fn resolve_draft_block_size_derives_inkling_default_from_the_mtp_layer_count() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{
+            "text_config": {
+                "hidden_size": 8,
+                "vocab_size": 8,
+                "num_mtp_layers": 8
+            }
+        }"#,
+    )
+    .expect("write config.json");
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Mtp, dir.path()),
+        10
+    );
+    assert_eq!(
+        resolve_draft_block_size(Some(6), DrafterKind::Mtp, dir.path()),
+        6,
+        "an explicit CLI value must override Inkling's n + 2 default"
+    );
+}
+
+#[test]
 fn resolve_draft_block_size_ignores_block_size_from_a_non_qwen35_mtp_drafter() {
     // A Gemma 4 assistant drafter (or any non-`qwen3_5_mtp` model_type)
     // must not have a same-named `block_size` field misread as the hint;

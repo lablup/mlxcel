@@ -21,6 +21,7 @@
 use anyhow::Result;
 use mlxcel_core::drafter::dflash::is_dflash_drafter_config;
 use serde_json::Value;
+use std::io::Read;
 use std::path::Path;
 
 use super::ModelType;
@@ -77,6 +78,91 @@ fn gemma4_has_vision_weights(model_path: &Path) -> bool {
     }
 
     model_path.join("processor_config.json").exists()
+}
+
+fn inkling_dir_is_mtp_only(model_path: &Path) -> bool {
+    let (mut has_mtp, mut has_target) =
+        std::fs::read_to_string(model_path.join("model.safetensors.index.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|index| index.get("weight_map").and_then(Value::as_object).cloned())
+            .map_or((false, false), |weight_map| {
+                let has_mtp = weight_map.keys().any(|key| {
+                    key.starts_with("model.mtp.layers.") || key.starts_with("mtp.layers.")
+                });
+                let has_target = weight_map.keys().any(|key| {
+                    key == "model.llm.embed.weight"
+                        || key == "model.embed_tokens.weight"
+                        || key.starts_with("model.llm.layers.")
+                        || key.starts_with("model.layers.")
+                });
+                (has_mtp, has_target)
+            });
+    if !has_mtp {
+        has_mtp = mlxcel_core::weights::dir_has_tensor_name(model_path, |key| {
+            key.starts_with("model.mtp.layers.") || key.starts_with("mtp.layers.")
+        })
+        .unwrap_or(false);
+    }
+    if !has_target {
+        has_target = mlxcel_core::weights::dir_has_tensor_name(model_path, |key| {
+            key == "model.llm.embed.weight"
+                || key == "model.embed_tokens.weight"
+                || key.starts_with("model.llm.layers.")
+                || key.starts_with("model.layers.")
+        })
+        .unwrap_or(false);
+    }
+    has_mtp && !has_target
+}
+
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = 128 * 1024 * 1024;
+
+fn safetensors_header_has_inkling_vision(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut length = [0_u8; 8];
+    if file.read_exact(&mut length).is_err() {
+        return false;
+    }
+    let length = u64::from_le_bytes(length);
+    if length == 0 || length > MAX_SAFETENSORS_HEADER_BYTES {
+        return false;
+    }
+    let Ok(length) = usize::try_from(length) else {
+        return false;
+    };
+    let mut header = vec![0_u8; length];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&header)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|entries| entries.keys().any(|key| key.starts_with("model.visual.")))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn inkling_has_vision_weights(model_path: &Path) -> bool {
+    let index_path = model_path.join("model.safetensors.index.json");
+    if let Ok(index) = std::fs::read_to_string(index_path)
+        && let Ok(index) = serde_json::from_str::<Value>(&index)
+        && let Some(weights) = index.get("weight_map").and_then(Value::as_object)
+    {
+        return weights.keys().any(|key| key.starts_with("model.visual."));
+    }
+
+    let Ok(entries) = std::fs::read_dir(model_path) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        entry.path().extension().and_then(|value| value.to_str()) == Some("safetensors")
+            && safetensors_header_has_inkling_vision(&entry.path())
+    })
 }
 
 pub(crate) fn detect_text_or_vlm(
@@ -340,6 +426,15 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     // same arm as their canonical lowercase form.
     let model_type = model_type_raw.to_ascii_lowercase();
 
+    if matches!(model_type.as_str(), "inkling_mm_model" | "inkling")
+        && inkling_dir_is_mtp_only(model_path)
+    {
+        return Err(anyhow::anyhow!(
+            "{} is an isolated Inkling MTP drafter checkpoint, not a standalone target model. Pass the full Inkling checkpoint to -m and this directory to --draft-model with --draft-kind mtp.",
+            model_path.display()
+        ));
+    }
+
     match model_type.as_str() {
         "llama" | "mistral" => Ok(ModelType::Llama),
         "llama4" => Ok(detect_text_or_vlm(
@@ -482,7 +577,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "lfm2" => Ok(ModelType::Lfm2),
         "lfm2_vl" | "lfm2-vl" => Ok(ModelType::Lfm2VL),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
-        "inkling_mm_model" | "inkling" => Ok(ModelType::Inkling),
+        "inkling_mm_model" | "inkling" => {
+            if has_vision_config(&v) && inkling_has_vision_weights(model_path) {
+                Ok(ModelType::InklingVLM)
+            } else {
+                Ok(ModelType::Inkling)
+            }
+        }
         "plamo2" => Ok(ModelType::Plamo2),
         "granitemoehybrid" => Ok(ModelType::GraniteMoeHybrid),
         "nemotron_h" => Ok(ModelType::NemotronH),

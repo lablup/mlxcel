@@ -135,6 +135,7 @@ pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
 pub mod inkling;
+pub mod inkling_mtp_target;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
@@ -569,8 +570,9 @@ pub enum ModelType {
     Lfm2Moe,
     Lfm2VL, // LFM2-VL (lfm2_vl): packed-patch SigLIP2 ViT + LFM2 hybrid text
 
-    // Thinking Machines Inkling text backbone
+    // Thinking Machines Inkling text and HMLP vision-language model
     Inkling,
+    InklingVLM,
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
@@ -793,6 +795,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Lfm2Moe,
     ModelType::Lfm2VL,
     ModelType::Inkling,
+    ModelType::InklingVLM,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
     // IBM Granite 4.x hybrid
@@ -1042,6 +1045,10 @@ impl ModelType {
             ModelType::Lfm2VL => ("LFM2-VL (packed-patch ViT + LFM2 hybrid text)", "LFM2"),
             ModelType::Inkling => (
                 "Inkling (relative-bias attention + shared-expert MoE)",
+                "Inkling",
+            ),
+            ModelType::InklingVLM => (
+                "Inkling VLM (HMLP vision + relative-bias MoE text)",
                 "Inkling",
             ),
 
@@ -1363,6 +1370,7 @@ mod metadata_tests {
             Lfm2Moe,
             Lfm2VL,
             Inkling,
+            InklingVLM,
             Plamo2,
             GraniteMoeHybrid,
             KimiLinear,
@@ -1472,6 +1480,9 @@ mod metadata_tests {
 #[cfg(test)]
 #[path = "detection_tests.rs"]
 mod detection_tests;
+#[cfg(test)]
+#[path = "inkling_detection_tests.rs"]
+mod inkling_detection_tests;
 
 #[cfg(test)]
 #[path = "gemma3n_helpers_tests.rs"]

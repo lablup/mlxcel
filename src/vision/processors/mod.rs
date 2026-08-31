@@ -28,6 +28,7 @@ pub mod gemma4;
 pub mod gemma4_unified;
 pub mod hunyuan_vl;
 pub mod idefics2;
+pub mod inkling;
 pub mod internvl;
 pub mod jina_vlm;
 pub mod kimi_vl;
