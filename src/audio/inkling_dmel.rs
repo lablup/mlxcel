@@ -32,7 +32,7 @@ pub const DEFAULT_DMEL_MIN: f32 = -7.0;
 pub const DEFAULT_DMEL_MAX: f32 = 2.0;
 const MAX_GENERIC_DMEL_BINS: usize = 4_096;
 pub const INKLING_MLX_VLM_REFERENCE_REVISION: &str =
-    "Blaizzy/mlx-vlm@0d6805cfb2429d944ab828473066fd771e00aac6";
+    "Blaizzy/mlx-vlm@0d6805bb7ef67998d8aeb655bc1df83854830d56";
 
 fn default_feature_size() -> usize {
     DEFAULT_N_MEL_BINS

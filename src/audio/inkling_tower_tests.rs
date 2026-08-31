@@ -67,6 +67,49 @@ fn tower_sums_channels_then_norms_across_chunks() {
 }
 
 #[test]
+fn request_ceiling_joins_6000_chunks_once_in_order() {
+    let config = tiny_config();
+    let frames = 6_000usize;
+    assert_eq!(config.max_frames_per_chunk, 1);
+    let chunks: Vec<Vec<usize>> = (0..frames)
+        .step_by(config.max_frames_per_chunk)
+        .map(|frame| vec![frame])
+        .collect();
+    let mut calls = 0usize;
+    let mut arity = 0usize;
+    let output = join_chunks(chunks, |chunks| {
+        calls += 1;
+        arity = chunks.len();
+        Ok::<_, String>(chunks.iter().flatten().copied().collect::<Vec<_>>())
+    })
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(calls, 1, "the tower must build one final concatenate node");
+    assert_eq!(
+        arity, 6_000,
+        "all request-ceiling chunks must share that node"
+    );
+    assert_eq!(output, (0..frames).collect::<Vec<_>>());
+}
+
+#[test]
+fn concatenate_many_preserves_256_array_cardinality_and_order() {
+    let chunks: Vec<UniquePtr<MlxArray>> = (0..256)
+        .map(|value| mlxcel_core::from_slice_f32(&[value as f32], &[1]))
+        .collect();
+    let arrays: Vec<&MlxArray> = chunks.iter().map(|chunk| chunk.as_ref().unwrap()).collect();
+    let output = mlxcel_core::concatenate_many(&arrays, 0);
+    mlxcel_core::eval(&output);
+
+    assert_eq!(mlxcel_core::array_shape(&output), [256]);
+    assert_eq!(
+        array_to_vec_f32(&output),
+        (0..256).map(|value| value as f32).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tower_rejects_wrong_shape_and_empty_frames() {
     let config = tiny_config();
     let mut weights = WeightMap::new();
