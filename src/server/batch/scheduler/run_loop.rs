@@ -207,6 +207,19 @@ impl BatchScheduler {
         self.handle_incoming(req)
     }
 
+    /// Clear cross-request cache state before idle sleep tears down the model.
+    ///
+    /// Paged prompt-cache entries must be cleared while this scheduler's
+    /// `CachePool` is still alive: the store can queue their detached block
+    /// pins, but only the pool can release them. Model-owned snapshots and
+    /// dense entries drop during the same clear.
+    pub(crate) fn prepare_idle_sleep(&mut self) {
+        if let Some(store) = self.prompt_cache.as_ref() {
+            store.clear();
+        }
+        self.drain_store_paged_releases();
+    }
+
     /// Give the request channel back after [`run`](Self::run) returns,
     /// consuming the scheduler (#1440).
     ///

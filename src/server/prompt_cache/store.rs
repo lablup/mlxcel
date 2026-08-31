@@ -1372,7 +1372,14 @@ impl PromptCacheStore {
     /// Drop every entry. Primarily for tests and shutdown paths.
     pub fn clear(&self) {
         let mut guard = self.inner.write().expect("prompt cache inner lock");
-        guard.entries.clear();
+        // A paged entry owns block pins that its Drop implementation cannot
+        // return without the scheduler's CachePool. Route every live entry
+        // through the same pending-release queue used by eviction before the
+        // map drops its Arcs (#1431 post-merge idle-sleep audit).
+        let entries = std::mem::take(&mut guard.entries);
+        for slot in entries.into_values() {
+            guard.stash_paged_pins_for_release(&slot.entry);
+        }
         guard.tries.clear();
         guard.snapshots.clear();
         guard.total_bytes = 0;

@@ -1033,6 +1033,47 @@ fn release_detached_paged_reclaims_blocks_to_pool() {
     }
 }
 
+/// Clearing the store for idle sleep must queue every parked paged entry
+/// instead of dropping it with retained block pins. The scheduler drains this
+/// queue before its pool is destroyed.
+#[test]
+fn clear_queues_paged_entries_then_pool_reclaims() {
+    let store = test_store();
+    let model = PagedStub {
+        layout: PagedKvLayout::uniform(1, 4, 128).unwrap(),
+    };
+    let mut pool = CachePool::new(4);
+    let (set, blocks) = mint_paged_set(&mut pool, &model, 6);
+    let tokens: Vec<i32> = (0..16).collect();
+    store
+        .insert(
+            &make_key("m", "s", "tpl", &tokens),
+            CacheEntry::new(tokens.clone(), set),
+        )
+        .expect("insert paged entry");
+
+    store.clear();
+    assert_eq!(store.stats().entries, 0);
+    assert_eq!(store.bytes(), 0);
+    assert!(
+        store.has_pending_paged_releases(),
+        "clear must queue the paged entry's pins"
+    );
+
+    let drained = store.drain_pending_paged_releases();
+    assert_eq!(drained.len(), 1);
+    for paged in drained {
+        pool.release_detached_paged(paged);
+    }
+    for block in blocks {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(block),
+            0,
+            "idle-sleep clear must make every block reusable"
+        );
+    }
+}
+
 /// An LRU-evicted paged entry must hand its block pins to the release queue
 /// (its `Drop` only warns), and draining + releasing them returns the blocks
 /// to the pool. Before the fix the evicted set dropped and leaked its pins.

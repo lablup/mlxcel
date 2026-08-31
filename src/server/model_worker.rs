@@ -738,20 +738,26 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 if !scheduler.idle_sleep_due() {
                     break;
                 }
+                // Clear the cross-request store and return paged KV pins while
+                // the scheduler still owns the CachePool. Dropping a paged
+                // detached set directly cannot update the pool refcounts.
+                scheduler.prepare_idle_sleep();
                 request_rx = scheduler.into_request_rx();
-                // Dropping the scheduler frees the weights, but the prompt-prefix
-                // cache is a separate `Arc` whose detached KV blocks would survive
-                // the sleep and defeat half its purpose. Upstream frees its KV with
-                // the context it destroys, so clear ours here; the store refills on
-                // its own after the reload.
-                if let Some(store) = sched_config.prompt_cache.as_ref() {
-                    store.clear();
-                }
+                // Consuming the scheduler above drops the model and all MLX
+                // arrays it owned. Release those now-unused buffers from MLX's
+                // allocator cache too; otherwise idle sleep retains almost the
+                // entire model allocation and reload only reuses the cache.
+                mlxcel_core::memory::clear_cache();
+                let memory = mlxcel_core::memory::snapshot();
                 sleeping.store(true, Ordering::Release);
                 // `loaded` deliberately stays true: the server is up, just asleep,
                 // and `/health` answers 200 through the sleep exactly as b10621's
                 // does.
-                tracing::info!("Server is entering sleeping state, model freed");
+                tracing::info!(
+                    active_bytes = memory.active_bytes,
+                    cache_bytes = memory.cache_bytes,
+                    "Server is entering sleeping state, model freed"
+                );
                 match request_rx.recv() {
                     Ok(req) => {
                         sleeping.store(false, Ordering::Release);
