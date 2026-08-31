@@ -1306,12 +1306,12 @@ mod tests {
                 let expert = index_values[token * 2 + selected] as usize;
                 let input = &x_values[token * 2..token * 2 + 2];
                 let mut activated = [0.0_f32; 3];
-                for intermediate in 0..3 {
+                for (intermediate, activation) in activated.iter_mut().enumerate() {
                     let base = expert * 6 + intermediate * 2;
                     let gate_value = (gate[base] * input[0] + gate[base + 1] * input[1])
                         * gate_scale_values[expert];
                     let up_value = up[base] * input[0] + up[base + 1] * input[1];
-                    activated[intermediate] = gate_value / (1.0 + (-gate_value).exp()) * up_value;
+                    *activation = gate_value / (1.0 + (-gate_value).exp()) * up_value;
                 }
                 for hidden in 0..2 {
                     let base = expert * 6 + hidden * 3;
