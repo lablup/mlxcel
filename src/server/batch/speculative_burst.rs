@@ -74,6 +74,10 @@
 //!   [`crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter`], paired
 //!   with the `qwen3_5_mtp` drafter (a DIFFERENT drafter family from the
 //!   DFlash bullet below despite targeting the same model family).
+//! - **MTP / Inkling** (issue #1315): [`crate::LoadedModel::Inkling`] and
+//!   [`crate::LoadedModel::InklingVLM`] for text-only requests. The wrapper
+//!   adapter decodes through `vlm.text`; image-bearing requests retain the
+//!   classic HMLP prepared-embedding prefill path through the multimodal gate.
 //! - **DFlash / Qwen 3.5** — [`crate::LoadedModel::Qwen35`],
 //!   [`crate::LoadedModel::Qwen35Moe`], and their Qwen 3.5 VLM-wrapped
 //!   variants for text-only requests. True multimodal requests still
@@ -723,7 +727,7 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             vlm.text_model.mtp_exactness_allows(block_size)
         }
-        LoadedModel::Inkling(_) => true,
+        LoadedModel::Inkling(_) | LoadedModel::InklingVLM(_) => true,
         _ => false,
     }
 }
@@ -1119,10 +1123,12 @@ fn run_mtp_burst(
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
+        LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), or Inkling; \
+                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), or Inkling \
+                 (text or VLM); \
                  falling back to classic decode",
                 model_variant_label(ctx.model),
             );
@@ -1330,6 +1336,25 @@ fn run_mtp_burst(
         LoadedModel::Inkling(inkling) => {
             let adapter = crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(
                 inkling,
+                Some(seq.seq_id),
+            )
+            .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
+        LoadedModel::InklingVLM(vlm) => {
+            let adapter = crate::models::inkling_mtp_target::InklingVLMtpTargetAdapter::new(
+                vlm,
                 Some(seq.seq_id),
             )
             .with_prefill_start_offset(prefill_start_offset);
@@ -2935,6 +2960,8 @@ fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Qwen35VLM(_) => "Qwen35VLM",
         LoadedModel::Qwen35Moe(_) => "Qwen35Moe",
         LoadedModel::Qwen35MoeVLM(_) => "Qwen35MoeVLM",
+        LoadedModel::Inkling(_) => "Inkling",
+        LoadedModel::InklingVLM(_) => "InklingVLM",
         _ => "other",
     }
 }

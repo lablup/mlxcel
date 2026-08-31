@@ -35,7 +35,7 @@ fn conv(channels: i32, kernel: i32, seed: usize) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(&values, &[channels, kernel, 1])
 }
 
-fn tiny_model() -> InklingModel {
+pub(crate) fn tiny_model() -> InklingModel {
     const HIDDEN: i32 = 4;
     const HEADS: i32 = 2;
     const KV_HEADS: i32 = 1;

@@ -1900,10 +1900,11 @@ fn run_offline_mtp(
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
+        LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         _ => {
             return Err(anyhow!(
                 "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
-                 Unified), Qwen 3.5 (text or VLM), and Inkling targets; the loaded target \
+                 Unified), Qwen 3.5 (text or VLM), and Inkling (text or VLM) targets; the loaded target \
                  is not MTP-capable. Omit --draft-kind to use the classic \
                  SpeculativeGenerator with your --draft-model drafter."
             ));
@@ -1998,6 +1999,15 @@ fn run_offline_mtp(
         ),
         LoadedModel::Inkling(inkling) => drive_offline_mtp(
             mlxcel::models::inkling_mtp_target::InklingMtpTargetAdapter::new(inkling, None),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        LoadedModel::InklingVLM(vlm) => drive_offline_mtp(
+            mlxcel::models::inkling_mtp_target::InklingVLMtpTargetAdapter::new(vlm, None),
             drafter,
             prompt_tokens,
             max_tokens,

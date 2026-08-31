@@ -558,3 +558,5 @@ fn weight(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String
 mod tests;
 #[cfg(test)]
 mod tiny_tests;
+#[cfg(test)]
+pub(crate) use tiny_tests::tiny_model;

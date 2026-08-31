@@ -194,3 +194,85 @@ impl MtpTarget for InklingMtpTargetAdapter<'_> {
         self.model.eos_token_ids()
     }
 }
+
+/// MTP target adapter for an Inkling HMLP VLM checkpoint.
+///
+/// The server admits this adapter only for text-only requests. Image-bearing
+/// requests remain on the classic VLM prefill path, where
+/// [`crate::vision::InklingVlModel::prepare_input_embeddings`] builds HMLP
+/// features and the wrapper's prepared-embedding `LanguageModel` entry points
+/// feed them to the decoder without applying input normalization twice. Once
+/// prefill is complete, speculative decode is entirely a text-backbone
+/// operation, so every MTP hook delegates to `vlm.text` through the same
+/// adapter used by a standalone Inkling target.
+pub struct InklingVLMtpTargetAdapter<'a> {
+    inner: InklingMtpTargetAdapter<'a>,
+}
+
+impl<'a> InklingVLMtpTargetAdapter<'a> {
+    pub fn new(vlm: &'a crate::vision::InklingVlModel, seq_id: Option<SequenceId>) -> Self {
+        Self {
+            inner: InklingMtpTargetAdapter::new(&vlm.text, seq_id),
+        }
+    }
+
+    #[must_use]
+    pub fn with_prefill_start_offset(mut self, offset: usize) -> Self {
+        self.inner = self.inner.with_prefill_start_offset(offset);
+        self
+    }
+}
+
+impl MtpTarget for InklingVLMtpTargetAdapter<'_> {
+    fn prefill_and_seed(
+        &self,
+        prompt_tokens: &[i32],
+        sampler: &SamplingConfig,
+        token_history: &[i32],
+        logprobs_config: &LogprobsConfig,
+    ) -> (i32, MtpVerifyOutput, Option<TokenLogprobData>) {
+        self.inner
+            .prefill_and_seed(prompt_tokens, sampler, token_history, logprobs_config)
+    }
+
+    fn embed_token(&self, token_id: i32) -> UniquePtr<MlxArray> {
+        self.inner.embed_token(token_id)
+    }
+
+    fn verify_forward(
+        &self,
+        verify_input: &[i32],
+        sampler: &SamplingConfig,
+        logprobs_config: &LogprobsConfig,
+    ) -> VerifyForwardOutput {
+        self.inner
+            .verify_forward(verify_input, sampler, logprobs_config)
+    }
+
+    fn verify_finalize(
+        &self,
+        accepted: usize,
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> MtpVerifyOutput {
+        self.inner.verify_finalize(accepted, block_size, captured)
+    }
+
+    fn verify_forward_tree(
+        &self,
+        tree: &mlxcel_core::speculative::mtp::tree::DraftTree,
+        sampler: &SamplingConfig,
+        logprobs_config: &LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, TreeVerifyUnsupported> {
+        self.inner
+            .verify_forward_tree(tree, sampler, logprobs_config)
+    }
+
+    fn num_layers(&self) -> usize {
+        self.inner.num_layers()
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        self.inner.eos_token_ids()
+    }
+}

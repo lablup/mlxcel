@@ -16,7 +16,7 @@
 
 PR #1540 adds native B=1 speculative decoding for Inkling's chained multi-token-prediction head. It loads the original `model.mtp.layers.*` tensors, reuses the same Inkling decoder-layer implementation as the target, binds the target embedding, final norm, and LM head, captures pre-norm target hidden states, and restores exact KV plus four-convolution state by snapshot and accepted-prefix replay.
 
-The change also registers offline and server dispatch, derives the default verify width as `num_nextn_predict_layers + 2`, adds a safe selective downloader path for the separate 4.46 GB `mtp.safetensors`, and rejects a head-only directory as a standalone target with an actionable diagnostic. Deterministic tiny-model tests establish chained-forward finiteness, target block-versus-incremental parity, and bitwise continuation equality after partial-accept rollback without claiming results for checkpoints that were not available on the validation host.
+The change also registers offline and server dispatch for both standalone Inkling text targets and the `InklingVLM` variant produced by the public multimodal checkpoint, derives the default verify width as `num_nextn_predict_layers + 2`, adds a safe selective downloader path for the separate 4.46 GB `mtp.safetensors`, and rejects a head-only directory as a standalone target with an actionable diagnostic. Text-only speculative decode on the wrapper uses `vlm.text`; image requests retain classic HMLP prepared-embedding prefill. Deterministic tiny-model tests establish chained-forward finiteness, target block-versus-incremental parity, bitwise continuation equality after partial-accept rollback, wrapper dispatch completeness, and image-prefill preservation without claiming results for checkpoints that were not available on the validation host.
 
 ## 1. Problem Statement
 
@@ -32,7 +32,7 @@ The implementation needed to distinguish real MTP tensors from a config flag, av
 | Drafter | Added validated config fallbacks, raw checkpoint sanitization, chained block execution, target module binding, prompt seed prefill, round snapshots, and accepted-token replay |
 | Target | Added pre-norm hidden capture, exact pre-verify state capture, block verify, snapshot restore, accepted-plus-bonus replay, and B=1 linear-only capability boundaries |
 | Loading | Added index-aware filtered loading and header-only tensor detection that inspect unindexed auxiliary safetensors without opening indexed target shards |
-| Dispatch | Registered Inkling in offline generation, legacy server burst, tick-cooperative slice start/step/park/finalize, drafter binding, and source-scanned coverage tests |
+| Dispatch | Registered both `LoadedModel::Inkling` and `LoadedModel::InklingVLM` in offline generation, legacy server burst, tick-cooperative slice start/step/park/finalize, drafter binding, and source-scanned coverage tests |
 | CLI | Added default `K = n + 2`, explicit override precedence, and repeatable `--include` glob filtering after the downloader's existing safe path/type allow-list |
 | Detection | Required actual MTP tensors for drafter auto-detection and rejected `config.json` plus `mtp.safetensors` as a standalone model directory |
 | Documentation | Added exact selective-download and invocation examples, B=1/tree limits, rollback semantics, and validation limits |
@@ -68,6 +68,8 @@ Correctness, security, performance, and finalizer review produced the following 
 - Replaced an avoidable raw-pointer concatenate with the safe wrapper and documented the remaining attention FFI lifetime invariant.
 - Split the implementation into files below 500 lines and reused target primitives instead of duplicating the decoder.
 - Reconciled the branch with PR #1535 so HMLP image detection/loading and MTP-only detection both remain active.
+- Fixed a post-submission HIGH finding: public checkpoints load as `LoadedModel::InklingVLM`, while the original MTP gates accepted only `LoadedModel::Inkling`. A dedicated wrapper adapter now routes text-only speculative work through `vlm.text` across CLI, legacy burst, cooperative slice start/step, drafter bind/return, and finalization.
+- Kept image-bearing requests outside MTP through the existing multimodal request gate, and added a tiny real HMLP regression proving the classic wrapper forwards merged prepared embeddings directly to `vlm.text` without replacing or renormalizing them.
 
 No unresolved CRITICAL or HIGH correctness, security, or performance findings remained in the focused review.
 
@@ -77,13 +79,15 @@ No unresolved CRITICAL or HIGH correctness, security, or performance findings re
 | --- | --- |
 | `cargo check --lib` | Pass |
 | `cargo test -p mlxcel-core inkling_mtp --lib` | Pass, 7/7 |
-| `cargo test --lib inkling -- --test-threads=1` | Pass, 44/44; combined target, HMLP, detection, and MTP selection |
+| `cargo test --lib inkling -- --test-threads=1` | Pass, 48/48; combined target, HMLP, detection, both-variant MTP dispatch, raw-image classic gate, and prepared-image prefill |
 | `cargo test --lib every_mtp_dispatch_site_covers_every_capable_variant` | Pass |
+| `cargo test --lib burst_declined_for_vlm_embeddings` | Pass; multimodal requests retain classic prefill |
 | `cargo test --lib resolve_draft_block_size_derives_inkling_default_from_the_mtp_layer_count` | Pass |
 | `cargo test --lib isolated_inkling_mtp_download_is_not_a_standalone_model` | Pass |
 | `cargo test --lib include_globs_select_only_safe_allow_list_files` | Pass |
 | `cargo clippy -p mlxcel-core --lib -- -D warnings` | Pass |
 | `cargo clippy --lib -- -D warnings` | Pass |
+| `cargo clippy --lib --tests -- -D warnings` | Pass |
 | `cargo fmt --all -- --check` | Pass |
 | `git diff --check` | Pass |
 
