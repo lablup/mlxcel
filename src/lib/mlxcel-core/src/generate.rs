@@ -485,6 +485,11 @@ pub trait LanguageModel {
         None // default: tied or unsupported
     }
 
+    /// Hand out the target's final RMSNorm to a native MTP drafter.
+    fn final_norm_module(&self) -> Option<crate::layers::RMSNorm> {
+        None
+    }
+
     /// Called once after prefill completes and before decode starts.
     /// Used by models that need to adjust internal state between phases.
     fn after_prefill(&self) {}

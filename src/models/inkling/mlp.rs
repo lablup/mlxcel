@@ -41,11 +41,13 @@ impl InklingMlp {
             )?))
         }
     }
+}
 
-    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+impl mlxcel_core::inkling_layer::InklingFeedForward for InklingMlp {
+    fn forward(&self, input: &MlxArray) -> UniquePtr<MlxArray> {
         match self {
-            Self::Dense(mlp) => mlp.forward(x),
-            Self::Sparse(moe) => moe.forward(x),
+            Self::Dense(mlp) => mlp.forward(input),
+            Self::Sparse(moe) => moe.forward(input),
         }
     }
 }

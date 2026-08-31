@@ -528,6 +528,7 @@ fn download_options(
         // HUGGING_FACE_HUB_TOKEN fallback; `Some` is the explicit
         // `--hf-token` (issue #1434), which outranks both.
         token: token.map(str::to_string),
+        include: Vec::new(),
         force,
     }
 }

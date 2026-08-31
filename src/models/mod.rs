@@ -135,6 +135,7 @@ pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
 pub mod inkling;
+pub mod inkling_mtp_target;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;

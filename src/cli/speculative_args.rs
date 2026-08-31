@@ -229,6 +229,13 @@ pub fn resolve_draft_block_size(
     {
         return n;
     }
+    if kind == DrafterKind::Mtp
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_inkling_mtp_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
     default_block_size_for_kind(kind)
 }
 

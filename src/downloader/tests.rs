@@ -29,6 +29,7 @@ fn args(repo_id: &str) -> DownloadArgs {
         models_dir: None,
         revision: None,
         token: None,
+        include: Vec::new(),
         force: false,
     }
 }
@@ -175,6 +176,7 @@ fn from_args_carries_all_fields() {
         models_dir: Some(PathBuf::from("/tmp/store")),
         revision: Some("v1".to_string()),
         token: Some("hf_xxx".to_string()),
+        include: vec!["config.json".into(), "mtp*.safetensors".into()],
         force: true,
     };
     let opts = DownloadOptions::from_args(&a);
@@ -183,6 +185,7 @@ fn from_args_carries_all_fields() {
     assert_eq!(opts.models_dir, Some(PathBuf::from("/tmp/store")));
     assert_eq!(opts.revision.as_deref(), Some("v1"));
     assert_eq!(opts.token.as_deref(), Some("hf_xxx"));
+    assert_eq!(opts.include, ["config.json", "mtp*.safetensors"]);
     assert!(opts.force);
 }
 
@@ -191,6 +194,21 @@ fn allow_list_includes_safetensors_and_index() {
     assert!(is_wanted_file("model.safetensors"));
     assert!(is_wanted_file("model-00001-of-00002.safetensors"));
     assert!(is_wanted_file("model.safetensors.index.json"));
+}
+
+#[test]
+fn include_globs_select_only_safe_allow_list_files() {
+    let patterns = [
+        glob::Pattern::new("config.json").unwrap(),
+        glob::Pattern::new("mtp*.safetensors").unwrap(),
+    ];
+    assert!(matches_include_patterns("config.json", &patterns));
+    assert!(matches_include_patterns("mtp.safetensors", &patterns));
+    assert!(!matches_include_patterns(
+        "model-00001.safetensors",
+        &patterns
+    ));
+    assert!(!is_wanted_file("../mtp.safetensors"));
 }
 
 #[test]
@@ -537,6 +555,7 @@ fn live_download_smoke_test() {
         models_dir: None,
         revision: None,
         token: None,
+        include: Vec::new(),
         force: true,
     };
     download_repo(opts).expect("live download should succeed");
@@ -1116,6 +1135,7 @@ async fn download_repo_inside_runtime_errors_instead_of_aborting() {
         models_dir: None,
         revision: None,
         token: None,
+        include: Vec::new(),
         force: true,
     };
     let result = download_repo(opts);
