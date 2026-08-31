@@ -242,6 +242,7 @@ macro_rules! for_each_model_registration {
             Lfm2 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Lfm2Moe => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Inkling => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
+            InklingVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Inkling VLM cannot be loaded with LoRA adapters yet") };
             Plamo2 => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             GraniteMoeHybrid => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             NemotronH => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };

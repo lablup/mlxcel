@@ -382,6 +382,22 @@ impl InklingModel {
         self.embed_tokens.forward(input)
     }
 
+    /// Embed token IDs and apply Inkling's input RMS normalization.
+    ///
+    /// Multimodal towers scatter their already text-width features into this
+    /// normalized matrix, so the decoder must subsequently use one of the
+    /// `forward_prepared_*` entry points and must not normalize it again.
+    pub fn normalized_input_embeddings(
+        &self,
+        input: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let embeddings = self.embed_tokens.forward(input);
+        Ok(match &self.embed_norm {
+            Some(norm) => norm.forward(&embeddings),
+            None => embeddings,
+        })
+    }
+
     fn make_internal_caches(&self) -> Vec<InklingLayerCache> {
         (0..self.layers.len())
             .map(|_| InklingLayerCache::new())
@@ -393,10 +409,19 @@ impl InklingModel {
         embeddings: &MlxArray,
         caches: &mut [InklingLayerCache],
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_norm.as_ref().map_or_else(
+        let normalized = self.embed_norm.as_ref().map_or_else(
             || mlxcel_core::copy(embeddings),
             |norm| norm.forward(embeddings),
         );
+        self.hidden_prepared_embeddings_with_caches(&normalized, caches)
+    }
+
+    fn hidden_prepared_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = mlxcel_core::copy(embeddings);
         for (layer, cache) in self.layers.iter().zip(caches) {
             h = layer.forward(&h, cache);
         }
@@ -453,6 +478,62 @@ impl InklingModel {
             &[shape[0], last_pos as i32 + 1, shape[2]],
         );
         self.project_hidden(&row)
+    }
+
+    fn forward_prepared_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.hidden_prepared_embeddings_with_caches(embeddings, caches);
+        self.project_hidden(&hidden)
+    }
+
+    fn forward_last_prepared_embeddings_with_caches(
+        &self,
+        embeddings: &MlxArray,
+        caches: &mut [InklingLayerCache],
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.hidden_prepared_embeddings_with_caches(embeddings, caches);
+        let shape = mlxcel_core::array_shape(&hidden);
+        let row = mlxcel_core::slice(
+            &hidden,
+            &[0, last_pos as i32, 0],
+            &[shape[0], last_pos as i32 + 1, shape[2]],
+        );
+        self.project_hidden(&row)
+    }
+
+    pub fn forward_prepared_embeddings(&self, embeddings: &MlxArray) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_sequence_state(None, |state| {
+            self.forward_prepared_embeddings_with_caches(embeddings, state)
+        })
+    }
+
+    pub fn forward_prepared_embeddings_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |state| self.forward_prepared_embeddings_with_caches(embeddings, state),
+        )
+    }
+
+    pub fn forward_last_prepared_embeddings_with_sequence_id(
+        &self,
+        embeddings: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |state| self.forward_last_prepared_embeddings_with_caches(embeddings, state, last_pos),
+        )
     }
 
     fn forward_with_caches(

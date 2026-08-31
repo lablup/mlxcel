@@ -13,8 +13,52 @@
 // limitations under the License.
 
 use super::{
-    ImageTokenBlockAction, ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks,
+    ImageTokenBlockAction, ImageTokenBlockInfo, ImageTokenBlockStats, InklingImageTokenStats,
+    apply_image_token_blocks, expand_inkling_image_tokens,
 };
+
+#[test]
+fn inkling_expands_one_marker_per_image_to_tile_counts() {
+    let mut tokens = vec![1, 200_054, 20, 200_054, 30];
+    let stats = expand_inkling_image_tokens(&mut tokens, 200_054, &[2, 3]).unwrap();
+    assert_eq!(
+        stats,
+        InklingImageTokenStats {
+            image_blocks: 2,
+            total_image_tokens: 5,
+        }
+    );
+    assert_eq!(
+        tokens,
+        vec![1, 200_054, 200_054, 20, 200_054, 200_054, 200_054, 30]
+    );
+}
+
+#[test]
+fn inkling_inserts_plain_prompt_tokens_after_bos() {
+    let mut tokens = vec![1, 20, 30];
+    expand_inkling_image_tokens(&mut tokens, 200_054, &[2, 1]).unwrap();
+    assert_eq!(tokens, vec![1, 200_054, 200_054, 200_054, 20, 30]);
+}
+
+#[test]
+fn inkling_accepts_exactly_preexpanded_prompt_and_rejects_ambiguous_count() {
+    let mut expanded = vec![1, 200_054, 200_054, 200_054, 20];
+    let unchanged = expanded.clone();
+    expand_inkling_image_tokens(&mut expanded, 200_054, &[2, 1]).unwrap();
+    assert_eq!(expanded, unchanged);
+
+    let mut ambiguous = vec![1, 200_054, 200_054, 20];
+    let error = expand_inkling_image_tokens(&mut ambiguous, 200_054, &[2, 2, 1]).unwrap_err();
+    assert_eq!(
+        error,
+        super::ImageTokenBlockError::InklingMediaCardinality {
+            placeholder_count: 2,
+            image_count: 3,
+            feature_count: 5,
+        }
+    );
+}
 
 #[test]
 fn apply_image_token_blocks_expands_existing_tokens_with_boi_eoi() {

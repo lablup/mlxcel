@@ -155,6 +155,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, image_tokens, total_tokens
             );
         }
+        VlmPreparationSummary::Inkling {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "Inkling: expanded {} image placeholder(s) into {} HMLP tile token(s)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::Phi4MM {
             image_slots,
             total_tokens,
