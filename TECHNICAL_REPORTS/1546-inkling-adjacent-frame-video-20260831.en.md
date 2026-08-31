@@ -2,7 +2,7 @@
 
 **Date**: 2026-08-31
 **Author**: mlxcel maintainers
-**Status**: Completed with deterministic reference validation; real-checkpoint validation remains deferred
+**Status**: In review; all reported HIGH findings addressed with deterministic validation
 **Languages**: Rust, Markdown
 **Risk Level**: High
 
@@ -10,97 +10,116 @@
 
 ## Executive Summary
 
-PR #1546 adds native Inkling video ingestion to the HMLP image shell delivered by PR #1535. It decodes video frames at the existing 2 fps default, chooses at most 16 evenly spaced adjacent pairs across the request, represents each first frame as one normal image entity, and replaces only temporal slot 1 of the resulting video-tile suffix with the matching second frame. CLI `--video` and OpenAI-compatible server `video_url` requests share the same prompt, tiling, splice, and embedding path.
+PR #1546 adds native Inkling video ingestion to the HMLP image shell delivered by PR #1535. CLI `--video` and OpenAI-compatible server `video_url` requests now share one bounded host-preparation path that selects adjacent frame pairs per clip, preserves independent clip chronologies, decodes only selected source frames, and uses the HMLP temporal axis instead of representing both frames as separate image entities.
 
-The implementation follows the public mlx-vlm Inkling graph rather than treating video frames as independent still images. Timestamped prompt parts preserve chronological grounding, companion still images remain before video entities, and fail-closed shape, cardinality, FPS, and placeholder checks prevent media rows from being scattered into the wrong text positions.
+The final design addresses three independent-review HIGH findings. Structured timestamp and image parts are inserted at a validated boundary inside the current user turn rather than after the global BOS token. Multiple videos retain clip boundaries and share one 16-pair request budget without forming cross-clip pairs. Probe-derived frame and pixel budgets are checked before the first decode, and preprocessing borrows compact selected frames without deep-cloning the full sampled sequence. Timestamps use actual selected source indices and source FPS, eliminating drift after the generic 768-frame sampling ceiling.
+
+The branch also normally merges the native Inkling MTP implementation from main commit `092d3dd0`. The combined wrapper preserves HMLP prepared-embedding prefill for image and video requests while exposing the same public text backbone and state lifecycle used by MTP.
 
 ## 1. Problem Statement
 
-Inkling image patches have shape `[N, 2, 40, 40, 3]`. PR #1535 duplicated a still image into both temporal slots, which is correct for images but does not encode motion. A generic video fallback that sends every sampled frame as an independent image doubles the visual token count for the same two-frame evidence and cannot use the HMLP temporal axis learned by the checkpoint.
+Inkling visual inputs have shape `[N, 2, 40, 40, 3]`. Still images duplicate the same pixels into both temporal slots. Video must instead place the first selected frame in slot 0 and the immediately adjacent frame in slot 1 while retaining one prompt image entity and one HMLP feature row per tile.
 
-Native video therefore needs two synchronized representations. The first frame of every selected pair determines the image entity, tile count, prompt placeholder run, and slot 0 pixels. The immediately following sampled frame must use the same tiler and replace slot 1 only for those video tiles. Any non-adjacent pairing, tile-order drift, or incorrect suffix boundary can keep tensor shapes valid while producing double exposures, modifying companion still images, or silently scattering features into the wrong prompt rows.
+A correct host path must also preserve conversation structure and bound untrusted media work. Flattening clips before pairing can join the final frame of one video to the first frame of another and gives later clips the wrong timestamp origin. Decoding every sampled frame before applying a 16-pair cap leaves memory proportional to the input rather than the admitted work. Moving rendered image placeholders after BOS can place media outside the current user turn when system messages or history are present.
+
+These failures can preserve valid tensor shapes while changing chronology, modifying the wrong temporal rows, scattering features into unrelated prompt positions, or exhausting memory before the nominal pair limit takes effect.
 
 ## 2. Change Summary
 
 | Area | Result |
 | --- | --- |
-| Pair selection | Added odd-frame padding, a minimum of two pairs, a request-wide maximum of 16 pairs, evenly spaced rounded anchors, and strict `anchor + 1` companions |
-| Prompting | Added the chronological introduction, one `frame at t=<seconds>s:` text part and image marker per pair, then the original user question |
-| Image processing | Reused the exact Inkling 40x40 tiler independently for first and second frames and verified identical per-pair tile layouts |
-| Temporal splice | Rebuilt only the last video-tile rows as `[first_slot0, second_slot0]` while preserving both temporal planes of preceding still-image rows |
-| Shared runtime | Added one host preparation function used by both CLI and server before the existing HMLP tower and normalized embedding scatter |
-| CLI | Routed Inkling `--video`, including mixed companion `--image` input, through the native pair path |
-| Server | Enabled Inkling `video_url`, retained fd-backed ffmpeg input, decoded optional `image_url` companions with configured limits, and required consistent per-request FPS |
-| Capability detection | Added `InklingVLM` to server video admission with a synthetic indexed-checkpoint regression test |
-| Documentation | Documented video behavior, adjacent-pair semantics, the 16-pair cap, and real-checkpoint validation limits |
+| Clip-local planning | Computes adjacent-pair indices independently per video and never pairs across media boundaries |
+| Request-wide allocation | Gives every admitted clip the reference minimum of two pairs, then distributes remaining capacity round-robin within a 16-pair total; at most eight clips are admitted |
+| Timestamp accuracy | Maps sampled anchors back to actual source-frame indices and divides by probed source FPS, including after the 768-frame sampling ceiling |
+| Resource admission | Probes all clips, then checks at most 32 unique selected frames and 512 MiB of worst-case RGBA storage before the first ffmpeg decode |
+| Selective decode | Decodes only unique selected source indices through the existing fd-safe single-pass extractor and stores compact per-clip pair indices |
+| Prompt safety | Inserts complete Inkling text/image content parts immediately before the final user text part; system messages, history, companion still parts, and generation tails remain in place |
+| Plain CLI mode | Preserves the explicit `--no-chat-template` behavior by prepending media after BOS without pretending that a structured turn exists |
+| Temporal splice | Replaces slot 1 only in the suffix belonging to video tiles; companion still rows retain duplicated temporal planes |
+| Borrowed preprocessing | Processes references to compact decoded frames, avoiding deep image-buffer clones for first- and second-frame lists |
+| MTP integration | Preserves the public `InklingVlModel.text` target and prepared-embedding sequence/last-logit entry points merged from main |
+| Capability and docs | Keeps Inkling server video admission and documents clip, pair, frame, byte, prompt, and checkpoint limits |
 
-## 3. Technical Decisions
+## 3. Architecture and Data Flow
 
-### 3.1 Preserve adjacency and the reference anchor formula
+1. CLI paths become `VideoSource` values and server parts retain their already-admitted fd-backed `ResolvedVideo.source` handles.
+2. Every clip is probed under the existing `VideoLimits`; the requested FPS is validated and the generic sampled-frame count is computed.
+3. A request-wide allocator reserves two pairs per clip and distributes the remaining 16-pair budget without crossing clip boundaries.
+4. Per-clip sampled anchors are mapped through uniform source indices. The compact set of unique source frames, actual anchor timestamps, decoded-frame total, and worst-case decoded bytes are known before decoding starts.
+5. Only those unique indices are decoded. Pair indices refer to the compact per-clip vectors, so repeated short-clip anchors do not duplicate image buffers.
+6. Structured prompts receive complete Inkling content parts before the final current-user text part. Each clip gets its own chronological introduction and timestamps beginning at that clip's source time.
+7. Companion stills and pair-first frames are tiled together. Pair-second frames are tiled through borrowed references, and per-pair tile counts must match.
+8. Only slot 1 of the final video-tile rows is replaced. The shared HMLP tower produces visual features, placeholder runs expand to actual tile counts, and `merge_llava` scatters features into normalized text embeddings.
+9. The combined `InklingVlModel` prepared-embedding entry points forward those embeddings directly into the public text backbone, preserving the MTP-compatible sequence-state lifecycle without normalizing twice.
 
-After duplicating an odd final frame, the pair count is `max(2, min(max_pairs, len / 2))`. Anchor `i` is `min(round(i * (len - 2) / max(n_pairs - 1, 1)), len - 2)`, and its second frame is always `anchor + 1`. This preserves local motion while distributing evidence across the full sampled clip. The minimum of two pairs intentionally permits repeated anchors for a one-frame input, matching the reference rather than inventing a separate short-clip rule.
+## 4. Technical Decisions
 
-The pair budget is request-wide. Multiple CLI paths or server video parts are flattened in declared order before selection, so no request can exceed 16 first-frame image entities. Server parts with different FPS values are rejected because one anchor index cannot be converted to an honest timestamp under multiple time bases.
+### 4.1 Preserve the public adjacent-pair formula within each clip
 
-### 3.2 Treat every pair as one prompt image entity
+For a clip with an odd sampled-frame count, the final frame is conceptually repeated. The pair count is `max(2, min(clip_budget, padded_len / 2))`. Anchor `i` is `min(round(i * (padded_len - 2) / max(pair_count - 1, 1)), padded_len - 2)`, and the second position is `anchor + 1`, clamped only for the conceptual repeated final frame. A one-frame clip therefore produces two identical `[0, 0]` pairs, matching the reference minimum rather than inventing a different short-clip graph.
 
-The prompt contains companion still-image markers first, then the exact introduction `Here is a video as a sequence of frames in chronological order.`, followed by timestamp text and one image marker per pair. The already-rendered user question remains after those additions. Existing template markers are accepted only when there are none or exactly one per companion still; other counts fail instead of consuming a reserved image token that did not come from admitted media.
+The 16-pair limit is request-wide, but the formula is evaluated per clip. Each clip receives two pairs first; remaining pairs are assigned round-robin up to its capacity. This makes the limit deterministic, prevents starvation, and makes eight clips the maximum representable request.
 
-After first-frame preprocessing, each marker expands to that entity's actual tile count. The expanded marker total must still equal the HMLP feature count before `merge_llava` replaces normalized text embeddings. This keeps prompt and feature cardinality coupled to preprocessing rather than to an assumed fixed token count.
+### 4.2 Use source indices as the timestamp authority
 
-### 3.3 Splice the temporal suffix before the tower
+The generic sampler may cap a long input at 768 uniformly spaced frames. Computing time as `sampled_anchor / requested_fps` after that cap can be hundreds of seconds early. The hardened path maps every selected sampled position back to its actual source index and computes `source_index / probed_source_fps`. Each video owns its own mapping and starts an independent chronological prompt sequence.
 
-Companion stills and first frames are preprocessed together, in that order. Second frames are preprocessed separately and their slot-0 plane becomes `[M, 40, 40, 3]`. The model boundary validates the full `[N, 2, 40, 40, 3]` and replacement shapes, keeps `pixel_values[..N-M]` unchanged, takes slot 0 from the final `M` rows, concatenates the replacement as slot 1, and then runs the same HMLP tower as an image request.
+### 4.3 Validate bounded work before decoding
 
-This boundary mirrors the public mlx-vlm `get_input_embeddings` implementation and avoids a second video-specific vision graph. It also leaves PR #1535's prepared-embedding sequence-ID and last-logit lifecycle unchanged, so later audio and MTP work can compose with the public `InklingVlModel.text` wrapper without bypassing visual prefill.
+The loader probes every admitted source and plans all pairs before invoking the frame extractor. It rejects requests over eight clips, 16 pairs, 32 unique selected frames, or 512 MiB of `width * height * 4 * selected_frames` storage. Checked arithmetic converts overflow into an error. Existing duration, resolution, and source limits continue to apply during probing.
 
-### 3.4 Retain server media security properties
+The extractor receives only sorted unique source indices. A per-clip map converts those source indices into compact vector offsets. Runtime preparation then borrows `&DynamicImage` values for first and second entities, so neither the full sampled sequence nor selected frame buffers are cloned to build pair lists.
 
-Server video decoding continues through `ResolvedVideo.source`. On Unix this is the fd-backed handle acquired after allowlist and canonical-path validation, so ffmpeg cannot reopen a swapped path between admission and decode. Companion image bytes use the existing limit-aware decoder. Empty frame sets, non-finite or non-positive FPS, inconsistent multi-video FPS, mismatched adjacent-frame tile layouts, invalid tensor ranks or dimensions, suffix sizes outside `1..=N`, arithmetic overflow, and unmatched image placeholders return errors before vision execution.
+### 4.4 Keep media inside the current user turn
 
-## 4. Review and Hardening
+The public Inkling template emits structural tokens for user messages, text content, image content, and end-of-message boundaries. The runtime resolves those exact tokenizer IDs and finds the final `[message_user, content_text]` boundary. It requires a following end marker, rejects any later user content, requires companion image placeholders to precede the question, and verifies exact placeholder cardinality before and after insertion.
 
-Correctness, security, performance, and finalizer review produced the following hardening before merge:
+For every clip, the runtime inserts complete text and image content parts immediately before that final question. System messages, previous user/model turns, existing companion still-image parts, and the model-generation suffix retain their positions. Explicit CLI `--no-chat-template` requests use a separate plain layout because no trustworthy conversation boundary exists.
 
-- Added deterministic tests for the exact 10-frame anchors `[0, 3, 5, 8]`, odd final-frame duplication, the two-pair minimum, and strict adjacency.
-- Tested that three leading still tiles retain two zero-valued planes while only slot 1 of the final two video rows receives replacement values.
-- Validated second-frame tile counts against the corresponding first-frame suffix before any MLX splice.
-- Rejected untrusted or ambiguous image-marker cardinality before reconstructing the timestamped prompt.
-- Kept the server's fd-backed decode path and configured image limits instead of introducing a path-based shortcut.
-- Required a single FPS time base for multiple server video parts, while retaining the standard 2 fps default and CLI override.
-- Capped first-frame visual entities at 16 request-wide; second frames reuse the same visual token rows rather than adding another marker run.
-- Added an explicit startup capability test using the same indexed visual-weight evidence that distinguishes public Inkling VLM checkpoints from text-only exports.
-- Kept audio, MTP, fused kernels, padded batching, image-feature caching, and broad epic-level verification outside this issue.
+### 4.5 Compose video prefill with the merged MTP wrapper
 
-No unresolved CRITICAL or HIGH correctness, security, or performance findings remained in the reviewed change.
+Main commit `092d3dd0` made `InklingVlModel.text` the speculative target and added prepared-embedding sequence-aware and last-logit forwarding. The video branch adds only borrowed image preprocessing and temporal slot replacement around the existing image embedding preparation. Merge commit `2cade8d1` preserves both contracts and their tests. Image- and video-bearing requests therefore remain on classic HMLP prepared prefill before continuing through the shared text target; the video path does not bypass or re-normalize the merged embeddings.
 
-## 5. Validation
+## 5. Review and Hardening
+
+Independent review reported three HIGH findings, all addressed on the feature branch:
+
+- Prompt insertion now targets a validated current-user boundary. A regression includes a system message, prior user/model history, a companion still-image part, two video clips, the current question, and a generation tail.
+- Pair allocation now preserves clip boundaries and independent timestamp origins while enforcing one request-wide budget.
+- Video admission now caps clips, pairs, selected frames, and decoded bytes before decode; the decoder and processor operate only on compact selected frames without deep clones.
+- Actual selected source indices fix timestamp drift after uniform sampling is capped at 768 frames.
+- Shape, tile-layout, placeholder, FPS, arithmetic, and decoded-frame cardinality mismatches continue to fail before HMLP execution.
+- Server decoding retains the fd-backed source handle established by media admission, avoiding a path reopen race.
+- The normal main merge retains native MTP wrapper dispatch, exact state lifecycle, and prepared-image prefill behavior alongside video slot-1 preparation.
+
+Independent re-review remains required before merge. This report does not treat green focused tests as review clearance.
+
+## 6. Validation
 
 | Gate | Result |
 | --- | --- |
-| `cargo test -p mlxcel inkling --lib` | Pass, 45/45 |
-| `cargo test -p mlxcel pair_adjacent_frames --lib` | Pass, 1/1 |
-| `cargo test -p mlxcel timestamped_pair_messages --lib` | Pass, 1/1 |
-| `cargo test -p mlxcel slot1_overwrite_touches_only_the_tail --lib` | Pass, 1/1 |
-| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | Pass |
-| `cargo check -p mlxcel --lib --features metal,accelerate` | Pass |
-| `cargo check -p mlxcel --bin mlxcel --bin mlxcel-server` | Pass |
-| `cargo fmt --all -- --check` | Pass |
-| `git diff --check` | Pass |
+| `cargo test -p mlxcel inkling --lib` | Pass, 57/57 |
+| `cargo test -p mlxcel-core drafter::inkling_mtp --lib` | Pass, 7/7 |
+| `cargo test -p mlxcel inkling_ --lib` before the main merge | Pass, 28/28 |
+| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | Pass after the main merge |
+| `cargo check -p mlxcel --bin mlxcel --bin mlxcel-server` | Pass after the main merge |
+| `cargo fmt --all -- --check` | Pass after the main merge |
+| `git diff --check` and `git diff --cached --check` | Pass |
 
-The focused tests cover pair spacing and adjacency, single/odd/short frame behavior, chronological prompt part layout, mixed still/video marker order, reserved-token rejection, suffix-only slot replacement, invalid replacement cardinality, Inkling VLM media admission, and the existing image, HMLP, text, cache, sanitizer, reasoning-marker, and chat-template regressions.
+The combined 57-test filter covers the text graph, HMLP image path, clip-local video planning, current-user prompt insertion, temporal suffix replacement, Inkling VLM MTP adapter, prepared-embedding prefill preservation, target verification, and exact KV plus four-convolution state restore/replay. The seven core tests additionally cover MTP config, detection, shard filtering, sanitization, forward shape, and flat snapshot restoration.
 
-The OpenXLA feature gate could not be reproduced locally because this host does not provide `IREE_DIST`; PR CI owns that compile check. Broad workspace tests and all-target clippy remain the epic-level final verification responsibility.
+PR CI remains responsible for the repository's OpenXLA feature compile and broader platform matrix. The host does not provide the real checkpoint artifacts or Apple GPU hardware needed for end-to-end throughput and answer-quality validation.
 
-## 6. Validation Limits and Follow-up
+## 7. Validation Limits and Follow-up
 
-The public Inkling-Small affine MLX checkpoint is approximately 153.5 GB and the native NVFP4 checkpoint is approximately 170.7 GB. Neither checkpoint nor the intended real bouncing-ball fixture was available on the validation host. Real CLI and server video-answer quality, motion-direction accuracy, peak memory, and Apple GPU throughput therefore remain unverified and are not claimed by this report.
+The public Inkling-Small affine MLX checkpoint is approximately 153.5 GB, the native NVFP4 checkpoint is approximately 170.7 GB, and the native MTP shard is approximately 4.5 GB. These artifacts and the intended real bouncing-ball fixture were unavailable on the validation host. Real CLI/server video-answer quality, motion-direction accuracy, peak unified memory, Apple GPU throughput, MTP throughput, and MTP acceptance length are not claimed.
 
-Audio and MTP are independent epic work. The video method is additive and delegates to the same normalized image prefill after the temporal splice; it does not change the public text-wrapper or prepared-embedding contracts those changes use. Future real-checkpoint validation should compare a synthetic adjacent-motion clip against public mlx-vlm at 2 fps and confirm both answer direction and expanded visual-token cardinality.
+Deterministic tests establish host semantics, reference pair indices, temporal row replacement, prompt placement, bounded planning, timestamp mapping, wrapper composition, and state restoration. A future checkpoint-backed validation should compare the same short motion clips against public mlx-vlm at 2 fps, verify expanded visual-token cardinality, and separately measure classic multimodal prefill followed by MTP-capable text decode.
 
 ## References
 
 - Epic #1313, issue #1323, and prerequisite issue #1327
-- PR #1546 and prerequisite PR #1535
-- Public mlx-vlm Inkling `inkling.py`, `vision.py`, image processing, and generic video helper implementation
+- PR #1546, prerequisite PR #1535, and merged MTP PR #1540
+- Main MTP commit `092d3dd0` and feature integration merge `2cade8d1`
+- Public mlx-vlm Inkling `inkling.py`, `vision.py`, image processing, processor, and video helper implementations
 - `docs/supported-models.md`

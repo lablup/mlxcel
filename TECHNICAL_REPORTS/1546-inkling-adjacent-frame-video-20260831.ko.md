@@ -2,7 +2,7 @@
 
 **작성일**: 2026-08-31
 **작성자**: mlxcel maintainers
-**상태**: 결정론적 레퍼런스 검증 완료. 실제 체크포인트 검증은 보류
+**상태**: 리뷰 중. 보고된 HIGH 항목을 모두 수정하고 결정론적 검증 완료
 **언어**: Rust, Markdown
 **위험 수준**: 높음
 
@@ -10,97 +10,116 @@
 
 ## 요약
 
-PR #1546은 PR #1535에서 구현한 HMLP 이미지 shell 위에 Inkling 네이티브 비디오 입력을 추가한다. 기존 기본값인 2 fps로 비디오 프레임을 디코딩하고 요청 전체에서 최대 16개의 균등한 인접 pair를 선택하며, 각 첫 번째 프레임을 일반 이미지 entity 하나로 표현한 뒤 해당 비디오 타일 suffix의 temporal slot 1만 두 번째 프레임으로 교체한다. CLI `--video`와 OpenAI 호환 서버 `video_url` 요청은 동일한 prompt, tiling, splice, embedding 경로를 공유한다.
+PR #1546은 PR #1535의 HMLP 이미지 shell에 Inkling 네이티브 비디오 입력을 추가한다. CLI `--video`와 OpenAI 호환 서버 `video_url`은 이제 하나의 제한된 host 준비 경로를 공유한다. 이 경로는 clip별로 인접 프레임 pair를 선택하고, clip마다 독립된 시간축을 유지하며, 선택한 source frame만 디코딩하고, 두 프레임을 별도 이미지 entity로 만드는 대신 HMLP temporal axis를 사용한다.
 
-구현은 비디오 프레임을 서로 독립적인 still image로 다루지 않고 공개 mlx-vlm Inkling graph를 따른다. Timestamp prompt part는 시간 순서의 grounding을 유지하고, companion still image는 비디오 entity 앞에 남으며, shape·cardinality·FPS·placeholder를 fail-closed 방식으로 검사해 media row가 잘못된 text 위치에 scatter되는 것을 막는다.
+최종 설계는 독립 리뷰에서 보고된 HIGH 세 건을 해결한다. 구조화된 timestamp와 image part는 전역 BOS 뒤가 아니라 검증된 현재 사용자 turn 경계 안에 삽입된다. 여러 비디오는 clip 경계를 유지한 채 하나의 요청 전체 16-pair 예산을 공유하며 clip 사이 pair를 만들지 않는다. Probe로 계산한 frame 및 pixel 예산은 첫 디코딩 전에 검사하고, 전처리는 전체 샘플 시퀀스를 깊은 복사하지 않고 compact selection을 참조한다. Timestamp는 실제 선택한 source index와 source FPS를 사용해 일반 768-frame 샘플링 상한 이후의 drift도 제거한다.
+
+이 브랜치는 main commit `092d3dd0`의 Inkling MTP 구현도 일반 merge로 통합했다. 결합된 wrapper는 image/video 요청의 HMLP prepared-embedding prefill을 유지하면서 MTP가 사용하는 같은 공개 text backbone과 상태 lifecycle을 제공한다.
 
 ## 1. 문제 정의
 
-Inkling 이미지 patch의 shape는 `[N, 2, 40, 40, 3]`이다. PR #1535는 still image를 두 temporal slot에 복제했으며 이는 이미지에는 맞지만 움직임을 표현하지 못한다. 샘플링한 모든 프레임을 독립 이미지로 전달하는 일반 video fallback은 동일한 두 프레임 근거에 visual token을 두 배 사용하고 체크포인트가 학습한 HMLP temporal axis도 활용하지 못한다.
+Inkling visual input shape는 `[N, 2, 40, 40, 3]`이다. Still image는 같은 pixel을 두 temporal slot에 복제한다. Video는 선택한 첫 프레임을 slot 0에, 바로 인접한 프레임을 slot 1에 넣으면서 tile마다 prompt image entity와 HMLP feature row를 하나만 유지해야 한다.
 
-따라서 네이티브 비디오에는 동기화된 두 표현이 필요하다. 선택한 각 pair의 첫 프레임이 image entity, tile 수, prompt placeholder run, slot 0 pixel을 결정한다. 샘플링 결과에서 바로 다음 프레임은 동일한 tiler를 사용하고 해당 비디오 타일의 slot 1만 교체해야 한다. 인접하지 않은 pair, tile 순서 변화, 잘못된 suffix 경계는 tensor shape가 정상인 채로 double exposure를 만들거나 companion still image를 변경하거나 feature를 잘못된 prompt row에 조용히 scatter할 수 있다.
+올바른 host 경로는 대화 구조를 보존하고 신뢰하지 않는 media 작업량도 제한해야 한다. Pairing 전에 clip을 평탄화하면 한 비디오의 마지막 프레임과 다음 비디오의 첫 프레임이 결합될 수 있고, 뒤쪽 clip은 잘못된 timestamp 원점을 사용한다. 16-pair 제한을 적용하기 전에 모든 sampled frame을 디코딩하면 메모리는 허용된 작업량이 아니라 입력 크기에 비례한다. Render된 image placeholder를 BOS 다음으로 옮기면 system message나 history가 있을 때 media가 현재 사용자 turn 밖에 놓일 수 있다.
+
+이러한 오류는 tensor shape가 정상인 상태에서도 시간 순서를 바꾸고, 잘못된 temporal row를 수정하고, 관련 없는 prompt 위치에 feature를 scatter하거나, 명목상의 pair 제한이 적용되기 전에 메모리를 소진할 수 있다.
 
 ## 2. 변경 요약
 
 | 영역 | 결과 |
 | --- | --- |
-| Pair 선택 | 홀수 프레임 padding, 최소 두 pair, 요청 전체 최대 16 pair, 반올림한 균등 anchor, 엄격한 `anchor + 1` companion 추가 |
-| Prompt | 시간 순서 안내문, pair마다 `frame at t=<seconds>s:` text part와 image marker 하나, 그 뒤 원래 사용자 질문을 배치 |
-| 이미지 처리 | 첫 프레임과 두 번째 프레임에 정확한 Inkling 40x40 tiler를 각각 재사용하고 pair별 tile layout 일치 확인 |
-| Temporal splice | 앞선 still-image row의 두 temporal plane은 유지하면서 마지막 video-tile row만 `[first_slot0, second_slot0]`으로 재구성 |
-| 공통 runtime | 기존 HMLP tower와 normalized embedding scatter 전에 CLI와 서버가 함께 쓰는 host 준비 함수 추가 |
-| CLI | Companion `--image`와 함께 쓰는 경우를 포함해 Inkling `--video`를 네이티브 pair 경로로 연결 |
-| 서버 | Inkling `video_url` 활성화, fd 기반 ffmpeg 입력 유지, 설정된 제한으로 선택적 `image_url` companion 디코딩, 요청 내 FPS 일치 강제 |
-| Capability 감지 | 합성 indexed-checkpoint 회귀 테스트와 함께 서버 video admission에 `InklingVLM` 추가 |
-| 문서 | 비디오 동작, 인접 pair 의미론, 16-pair 제한, 실제 체크포인트 검증 한계 문서화 |
+| Clip-local planning | 비디오별로 인접 pair index를 독립 계산하고 media 경계를 넘는 pair를 만들지 않음 |
+| 요청 전체 할당 | 허용한 각 clip에 레퍼런스 최소값인 두 pair를 먼저 주고 남은 capacity를 16-pair 총량 안에서 round-robin으로 배분. 최대 8 clip 허용 |
+| Timestamp 정확도 | 768-frame 샘플링 상한 이후를 포함해 sampled anchor를 실제 source-frame index로 다시 매핑하고 probed source FPS로 나눔 |
+| Resource admission | 모든 clip을 probe한 뒤 첫 ffmpeg decode 전에 고유 선택 frame 최대 32개와 RGBA 최악 기준 512 MiB를 검사 |
+| 선택적 decode | 기존 fd-safe single-pass extractor로 고유 source index만 디코딩하고 compact clip별 pair index를 저장 |
+| Prompt 안전성 | 완전한 Inkling text/image content part를 마지막 사용자 text part 바로 앞에 삽입. System message, history, companion still part, generation tail 위치 유지 |
+| Plain CLI mode | 구조화된 turn이 없는 명시적 `--no-chat-template`에서는 media를 BOS 뒤에 prepend하는 동작을 별도로 유지 |
+| Temporal splice | Video tile에 해당하는 suffix의 slot 1만 교체. Companion still row는 복제 temporal plane 유지 |
+| Borrowed preprocessing | Compact decoded frame 참조를 처리해 first/second frame 목록 생성 시 image buffer deep clone 방지 |
+| MTP 통합 | Main에서 merge된 공개 `InklingVlModel.text` target 및 prepared-embedding sequence/last-logit entry point 유지 |
+| Capability 및 문서 | Inkling 서버 video admission 유지, clip·pair·frame·byte·prompt·checkpoint 제한 문서화 |
 
-## 3. 기술적 선택과 이유
+## 3. 구조와 데이터 흐름
 
-### 3.1 인접성과 레퍼런스 anchor 공식을 유지하기
+1. CLI path는 `VideoSource`가 되고 서버 part는 이미 admission을 통과한 fd 기반 `ResolvedVideo.source` handle을 유지한다.
+2. 모든 clip을 기존 `VideoLimits`로 probe하고 요청 FPS를 검사한 뒤 일반 sampled-frame 수를 계산한다.
+3. 요청 전체 allocator가 clip마다 두 pair를 예약하고 남은 16-pair 예산을 clip 경계를 넘지 않게 배분한다.
+4. Clip별 sampled anchor를 uniform source index에 매핑한다. 첫 decode 전에 compact 고유 source frame 집합, 실제 anchor timestamp, decoded-frame 총량, 최악 decoded byte 수를 알 수 있다.
+5. 고유 index만 디코딩한다. Pair index는 compact clip별 vector를 가리키므로 짧은 clip의 반복 anchor도 image buffer를 복제하지 않는다.
+6. 구조화된 prompt는 완전한 Inkling content part를 현재 사용자의 마지막 text part 앞에 받는다. 각 clip은 독립된 시간 순서 안내문과 해당 clip source time에서 시작하는 timestamp를 갖는다.
+7. Companion still과 pair의 첫 프레임을 함께 tile한다. Pair의 두 번째 프레임은 borrowed reference로 tile하며 pair별 tile 수가 같아야 한다.
+8. 마지막 video-tile row의 slot 1만 교체한다. 공통 HMLP tower가 visual feature를 만들고 placeholder run은 실제 tile 수로 확장되며 `merge_llava`가 normalized text embedding에 feature를 scatter한다.
+9. 결합된 `InklingVlModel`의 prepared-embedding entry point는 해당 embedding을 공개 text backbone으로 직접 전달한다. 따라서 정규화를 중복하지 않으면서 MTP 호환 sequence-state lifecycle을 유지한다.
 
-홀수인 마지막 프레임을 복제한 뒤 pair 수는 `max(2, min(max_pairs, len / 2))`다. Anchor `i`는 `min(round(i * (len - 2) / max(n_pairs - 1, 1)), len - 2)`이며 두 번째 프레임은 항상 `anchor + 1`이다. 이 규칙은 전체 샘플 clip에 근거를 분산하면서 국소적인 움직임을 보존한다. 최소 두 pair 규칙은 한 프레임 입력에서 같은 anchor를 반복할 수 있게 하며 별도의 임의적인 short-clip 규칙을 만들지 않고 레퍼런스를 그대로 따른다.
+## 4. 기술적 선택과 이유
 
-Pair 예산은 요청 전체에 적용한다. 여러 CLI 경로나 서버 video part는 선언 순서로 합친 뒤 선택하므로 한 요청은 첫 프레임 image entity 16개를 넘을 수 없다. 서로 다른 FPS의 서버 part는 거부한다. 여러 시간 기준이 있으면 하나의 anchor index를 올바른 timestamp로 변환할 수 없기 때문이다.
+### 4.1 공개 인접 pair 공식을 clip 내부에서 유지하기
 
-### 3.2 각 pair를 prompt image entity 하나로 취급하기
+Sampled-frame 수가 홀수인 clip은 마지막 프레임을 개념적으로 반복한다. Pair 수는 `max(2, min(clip_budget, padded_len / 2))`다. Anchor `i`는 `min(round(i * (padded_len - 2) / max(pair_count - 1, 1)), padded_len - 2)`이며 두 번째 위치는 `anchor + 1`이다. 개념적으로 반복한 마지막 프레임에서만 실제 frame 범위로 clamp한다. 따라서 한 프레임 clip도 서로 같은 `[0, 0]` pair 두 개를 만들며 별도 short-clip graph를 발명하지 않고 레퍼런스 최소값을 따른다.
 
-Prompt에는 companion still-image marker를 먼저 두고 정확한 안내문 `Here is a video as a sequence of frames in chronological order.`를 추가한 뒤 pair마다 timestamp text와 image marker 하나를 배치한다. 이미 render된 사용자 질문은 그 뒤에 유지된다. 기존 template marker는 하나도 없거나 companion still image마다 정확히 하나일 때만 허용한다. 그 외의 수는 승인된 media에서 나오지 않은 예약 image token을 소비하지 않고 실패한다.
+16-pair 제한은 요청 전체에 적용하지만 공식은 clip마다 계산한다. 각 clip에 두 pair를 먼저 할당하고 나머지를 capacity까지 round-robin으로 배분한다. 이 방식은 결정론적이고 starvation을 막으며 표현 가능한 최대 요청을 8 clip으로 만든다.
 
-첫 프레임을 전처리한 뒤 각 marker는 해당 entity의 실제 tile 수만큼 확장된다. `merge_llava`가 normalized text embedding을 교체하기 전에 확장된 marker 총수가 HMLP feature 수와 계속 일치해야 한다. 이로써 prompt와 feature cardinality가 고정 token 수 가정이 아니라 전처리 결과에 결합된다.
+### 4.2 Source index를 timestamp의 기준으로 사용하기
 
-### 3.3 Tower 실행 전에 temporal suffix를 splice하기
+일반 sampler는 긴 입력을 균등한 768 frame으로 제한할 수 있다. 이 상한 뒤에 `sampled_anchor / requested_fps`로 시간을 계산하면 수백 초 빠른 timestamp가 될 수 있다. 강화한 경로는 선택한 sampled position을 실제 source index로 매핑하고 `source_index / probed_source_fps`를 계산한다. 각 비디오는 자체 mapping을 가지며 독립된 시간 순서 prompt sequence를 시작한다.
 
-Companion still과 첫 프레임을 그 순서대로 함께 전처리한다. 두 번째 프레임은 별도로 전처리하고 그 slot-0 plane을 `[M, 40, 40, 3]`으로 만든다. 모델 경계는 전체 `[N, 2, 40, 40, 3]`과 교체 tensor shape를 검증하고 `pixel_values[..N-M]`을 그대로 유지하며 마지막 `M` row의 slot 0을 취해 교체 tensor를 slot 1로 연결한 뒤 이미지 요청과 같은 HMLP tower를 실행한다.
+### 4.3 Decode 전에 제한된 작업량을 검증하기
 
-이 경계는 공개 mlx-vlm `get_input_embeddings` 구현과 같으며 비디오 전용 vision graph를 하나 더 만들지 않는다. 또한 PR #1535의 prepared-embedding sequence-ID 및 last-logit lifecycle을 바꾸지 않으므로 이후 audio와 MTP 작업이 visual prefill을 우회하지 않고 공개 `InklingVlModel.text` wrapper와 결합할 수 있다.
+Loader는 frame extractor를 호출하기 전에 허용한 모든 source를 probe하고 모든 pair를 계획한다. 8 clip, 16 pair, 고유 선택 frame 32개, `width * height * 4 * selected_frames` 기준 512 MiB를 넘는 요청을 거부한다. Checked arithmetic으로 overflow도 오류로 변환한다. 기존 duration, resolution, source 제한은 probe 단계에서 계속 적용된다.
 
-### 3.4 서버 media 보안 속성을 유지하기
+Extractor에는 정렬한 고유 source index만 전달한다. Clip별 map이 source index를 compact vector offset으로 바꾼다. Runtime 준비는 first/second entity에 `&DynamicImage`를 사용하므로 전체 sampled sequence와 선택 frame buffer 어느 쪽도 pair list 생성을 위해 복제하지 않는다.
 
-서버 비디오 디코딩은 계속 `ResolvedVideo.source`를 사용한다. Unix에서는 allowlist와 canonical path 검증 뒤 얻은 fd 기반 handle이므로 admission과 decode 사이에 경로가 바뀌어도 ffmpeg가 바뀐 파일을 다시 열 수 없다. Companion image byte는 기존의 제한 인지 decoder를 사용한다. 빈 frame set, 유한하지 않거나 양수가 아닌 FPS, 여러 비디오 사이의 FPS 불일치, 인접 프레임 tile layout 불일치, 잘못된 tensor rank나 dimension, `1..=N` 밖의 suffix 크기, 산술 overflow, 맞지 않는 image placeholder는 vision 실행 전에 오류를 반환한다.
+### 4.4 Media를 현재 사용자 turn 안에 유지하기
 
-## 4. 리뷰와 보강
+공개 Inkling template은 user message, text content, image content, end-of-message 경계의 structural token을 출력한다. Runtime은 tokenizer에서 이 정확한 ID를 확인하고 마지막 `[message_user, content_text]` 경계를 찾는다. 이어지는 end marker가 있어야 하며, 뒤에 추가 user content가 있으면 거부하고, companion image placeholder가 질문보다 앞에 있어야 하며, 삽입 전후 placeholder cardinality가 정확해야 한다.
 
-정확성·보안·성능·finalizer 리뷰를 통해 머지 전에 다음을 보강했다.
+각 clip마다 완전한 text/image content part를 마지막 질문 바로 앞에 삽입한다. System message, 이전 user/model turn, 기존 companion still-image part, model-generation suffix는 원래 위치를 유지한다. 명시적 CLI `--no-chat-template` 요청에는 신뢰할 conversation 경계가 없으므로 별도 plain layout을 사용한다.
 
-- 10개 프레임에서 정확한 anchor `[0, 3, 5, 8]`, 홀수 마지막 프레임 복제, 최소 두 pair, 엄격한 인접성을 결정론적 테스트로 고정했다.
-- 앞의 still tile 세 개가 값 0인 두 plane을 유지하고 마지막 video row 두 개의 slot 1만 교체 값을 받는지 검사했다.
-- MLX splice 전에 두 번째 프레임 tile 수와 해당 첫 프레임 suffix를 비교했다.
-- Timestamp prompt를 재구성하기 전에 신뢰할 수 없거나 모호한 image-marker cardinality를 거부했다.
-- Path 기반 지름길을 만들지 않고 서버의 fd 기반 decode 경계와 설정된 이미지 제한을 유지했다.
-- 일반 2 fps 기본값과 CLI override를 유지하면서 여러 서버 video part에는 하나의 FPS 시간 기준을 요구했다.
-- 첫 프레임 visual entity를 요청 전체 16개로 제한했고 두 번째 프레임은 marker run을 추가하지 않고 같은 visual token row를 재사용했다.
-- 공개 Inkling VLM 체크포인트를 text-only export와 구분하는 indexed visual-weight 증거를 사용해 명시적인 startup capability 테스트를 추가했다.
-- Audio, MTP, fused kernel, padded batching, image-feature caching, 넓은 epic-level 검증을 이 이슈의 범위 밖으로 유지했다.
+### 4.5 Video prefill과 merge된 MTP wrapper를 결합하기
 
-리뷰된 변경에 해결되지 않은 CRITICAL 또는 HIGH 정확성·보안·성능 문제는 남지 않았다.
+Main commit `092d3dd0`은 `InklingVlModel.text`를 speculative target으로 사용하고 prepared-embedding의 sequence-aware 및 last-logit forwarding을 추가했다. Video 브랜치는 기존 이미지 embedding 준비 주변에 borrowed image preprocessing과 temporal slot 교체만 추가한다. Merge commit `2cade8d1`은 두 계약과 테스트를 모두 보존한다. 따라서 image/video 요청은 공통 text target으로 이어지기 전에 classic HMLP prepared prefill을 사용하며, video 경로는 merge된 embedding을 우회하거나 다시 정규화하지 않는다.
 
-## 5. 검증
+## 5. 리뷰와 보강
+
+독립 리뷰에서 HIGH 세 건이 보고되었고 feature 브랜치에서 모두 수정했다.
+
+- Prompt 삽입은 검증된 현재 사용자 경계를 대상으로 한다. 회귀 테스트는 system message, 이전 user/model history, companion still-image part, video clip 두 개, 현재 질문, generation tail을 포함한다.
+- Pair 할당은 하나의 요청 전체 예산을 적용하면서 clip 경계와 독립 timestamp 원점을 보존한다.
+- Video admission은 decode 전에 clip, pair, 선택 frame, decoded byte를 제한한다. Decoder와 processor는 deep clone 없이 compact selected frame만 처리한다.
+- 실제 선택한 source index를 사용해 768-frame uniform sampling 상한 이후의 timestamp drift를 수정했다.
+- Shape, tile layout, placeholder, FPS, 산술, decoded-frame cardinality 불일치는 HMLP 실행 전에 계속 실패한다.
+- 서버 decode는 media admission이 확립한 fd 기반 source handle을 유지해 path reopen race를 피한다.
+- Main의 일반 merge 뒤에도 native MTP wrapper dispatch, 정확한 state lifecycle, prepared-image prefill 동작과 video slot-1 준비가 함께 유지된다.
+
+Merge 전에는 독립 재리뷰가 필요하다. 이 보고서는 집중 테스트 통과를 리뷰 승인으로 간주하지 않는다.
+
+## 6. 검증
 
 | 게이트 | 결과 |
 | --- | --- |
-| `cargo test -p mlxcel inkling --lib` | 통과, 45/45 |
-| `cargo test -p mlxcel pair_adjacent_frames --lib` | 통과, 1/1 |
-| `cargo test -p mlxcel timestamped_pair_messages --lib` | 통과, 1/1 |
-| `cargo test -p mlxcel slot1_overwrite_touches_only_the_tail --lib` | 통과, 1/1 |
-| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | 통과 |
-| `cargo check -p mlxcel --lib --features metal,accelerate` | 통과 |
-| `cargo check -p mlxcel --bin mlxcel --bin mlxcel-server` | 통과 |
-| `cargo fmt --all -- --check` | 통과 |
-| `git diff --check` | 통과 |
+| `cargo test -p mlxcel inkling --lib` | 통과, 57/57 |
+| `cargo test -p mlxcel-core drafter::inkling_mtp --lib` | 통과, 7/7 |
+| Main merge 전 `cargo test -p mlxcel inkling_ --lib` | 통과, 28/28 |
+| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | Main merge 후 통과 |
+| `cargo check -p mlxcel --bin mlxcel --bin mlxcel-server` | Main merge 후 통과 |
+| `cargo fmt --all -- --check` | Main merge 후 통과 |
+| `git diff --check` 및 `git diff --cached --check` | 통과 |
 
-집중 테스트는 pair 간격과 인접성, 단일·홀수·짧은 프레임 동작, 시간 순서 prompt part layout, still/video 혼합 marker 순서, 예약 token 거부, suffix 전용 slot 교체, 잘못된 교체 cardinality, Inkling VLM media admission, 기존 이미지·HMLP·텍스트·cache·sanitizer·reasoning marker·chat template 회귀를 포함한다.
+결합된 57-test filter는 text graph, HMLP image 경로, clip-local video planning, 현재 사용자 prompt 삽입, temporal suffix 교체, Inkling VLM MTP adapter, prepared-embedding prefill 보존, target verification, 정확한 KV 및 네 convolution state restore/replay를 포함한다. Core 테스트 7개는 MTP config, detection, shard filtering, sanitization, forward shape, flat snapshot restoration을 추가로 검증한다.
 
-이 호스트에는 `IREE_DIST`가 없어 OpenXLA feature gate를 로컬에서 재현할 수 없었으며 PR CI가 해당 compile 검사를 담당한다. 넓은 workspace test와 all-target clippy는 epic-level 최종 검증 범위로 남긴다.
+Repository의 OpenXLA feature compile과 더 넓은 platform matrix는 PR CI가 담당한다. 이 호스트에는 end-to-end throughput 및 답변 품질 검증에 필요한 실제 checkpoint artifact와 Apple GPU hardware가 없다.
 
-## 6. 검증 한계와 후속 작업
+## 7. 검증 한계와 후속 작업
 
-공개 Inkling-Small affine MLX 체크포인트는 약 153.5 GB, native NVFP4 체크포인트는 약 170.7 GB다. 검증 호스트에는 두 체크포인트와 의도한 실제 bouncing-ball fixture가 없었다. 따라서 CLI와 서버의 실제 비디오 답변 품질, 움직임 방향 정확도, peak memory, Apple GPU 처리량은 확인하지 않았으며 이 보고서도 이를 주장하지 않는다.
+공개 Inkling-Small affine MLX checkpoint는 약 153.5 GB, native NVFP4 checkpoint는 약 170.7 GB, native MTP shard는 약 4.5 GB다. 검증 호스트에는 이 artifact와 의도한 실제 bouncing-ball fixture가 없었다. 실제 CLI/server video 답변 품질, 움직임 방향 정확도, peak unified memory, Apple GPU throughput, MTP throughput, MTP acceptance length는 주장하지 않는다.
 
-Audio와 MTP는 독립적인 epic 작업이다. 비디오 method는 추가형 API이며 temporal splice 뒤 같은 normalized image prefill에 위임한다. 이 작업들이 사용하는 공개 text wrapper와 prepared-embedding 계약은 변경하지 않는다. 이후 실제 체크포인트 검증에서는 2 fps의 합성 인접 움직임 clip을 공개 mlx-vlm 결과와 비교하고 답변 방향과 확장된 visual-token cardinality를 모두 확인해야 한다.
+결정론적 테스트는 host 의미론, reference pair index, temporal row 교체, prompt 위치, 제한된 planning, timestamp mapping, wrapper 결합, state restoration을 검증한다. 이후 checkpoint 기반 검증은 같은 짧은 motion clip을 공개 mlx-vlm의 2 fps 결과와 비교하고 확장된 visual-token cardinality를 확인하며, classic multimodal prefill 뒤의 MTP-capable text decode를 별도로 측정해야 한다.
 
 ## 참고
 
 - 에픽 #1313, 이슈 #1323, 선행 이슈 #1327
-- PR #1546 및 선행 PR #1535
-- 공개 mlx-vlm Inkling `inkling.py`, `vision.py`, 이미지 processing, 일반 video helper 구현
+- PR #1546, 선행 PR #1535, merge된 MTP PR #1540
+- Main MTP commit `092d3dd0` 및 feature 통합 merge `2cade8d1`
+- 공개 mlx-vlm Inkling `inkling.py`, `vision.py`, 이미지 processing, processor, video helper 구현
 - `docs/supported-models.md`
