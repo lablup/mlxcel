@@ -231,6 +231,8 @@ This also **corrects a claim made while this issue was open**, that MoE decode r
 
 Prefer an 8-bit checkpoint over a 4-bit one on Volta wherever it fits in 32 GB. This is a workaround for #1539 rather than a substitute for it: once `qmv` uses float accumulators below Ampere, the 4-bit arm should regain its bandwidth advantage and this guidance should be re-measured and probably reversed.
 
+**Re-measured after #1539 landed, and it no longer holds.** With float accumulators below Ampere the 8-bit arm's advantage falls from 1.886x to 1.074x (66.73 against 71.66 ms/token) while it still reads 1.9x the bytes, so a 4-bit checkpoint now costs about 7% of decode rate and saves 47% of the weight footprint. Prefer 4-bit again unless the 7% matters more than the memory. It did not fully reverse: the residual 7.4% is the dequantization work the 4-bit arm does and the 8-bit arm does not, which the `qmm_naive` control above measures at 5.9% on its own. See `qmv-float-accum-v100-2026-08-31.md`.
+
 ## Three harnesses, and which number each produces
 
 This repository has three ways to get a decode number and on this host they do not agree. The disagreement is not noise, it is whether the fixed cost is inside the measurement.
@@ -329,7 +331,7 @@ To be filled as epic #1536's remaining items land. Each row is a re-run of the m
 
 | Issue | What it changes | Baseline (this document) | After | Delta |
 |---|---|---|---|---|
-| #1539 | `qmv` float accumulators below Ampere at `bits < 8` | dense 4-bit 124.41 ms/tok; `qmv` 12.8366 s at 39,151 inst | | |
+| #1539 | `qmv` float accumulators below Ampere at `bits < 8` | dense 4-bit 124.41 ms/tok; `qmv` 12.8366 s at 39,151 inst | dense 4-bit 71.66 ms/tok; `qmv` 6.5654 s at 39,151 inst | **1.73x** end to end, **1.96x** on `qmv`, which accounts for 99.4% of it. `qwen3.8-27B-4bit` 220.33 -> 117.83 ms/tok (1.87x), its `qmv` roofline attainment 7.27% -> 14.80%. The 8-bit control is unmoved at 66.73 ms/tok. Full record: `qmv-float-accum-v100-2026-08-31.md` |
 | #1541 | `qmm_naive` tile sized from the device shared-memory budget | dense prefill `qmm_naive` 10.0733 s at 329 inst | | |
 | #1542 | f16 activation policy below Ampere | dense 4-bit 124.41 ms/tok; qwen 220.33 ms/tok | | |
 | #1543 | `qmm_sm70`, Volta tensor-core MMA for quantized GEMM | qwen prefill 8.00 tok/s marginal, 2.83% of FP32 peak | | |
