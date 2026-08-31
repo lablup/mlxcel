@@ -373,6 +373,108 @@ where
     Ok(weights)
 }
 
+/// Load a filtered subset while using the safetensors index to skip shards
+/// that cannot contain a retained tensor.
+///
+/// Unlike [`load_weights_from_dir_filtered`], this reads the index's
+/// `weight_map` before opening a shard. An original checkpoint can therefore
+/// expose a small auxiliary head (for example Inkling's `mtp.safetensors`)
+/// without mmap-opening every target-model shard. Directories without an
+/// index retain the ordinary filtered-loader behavior.
+pub fn load_weights_from_dir_index_filtered<P, F>(dir: P, mut keep: F) -> Result<WeightMap, String>
+where
+    P: AsRef<Path>,
+    F: FnMut(&str) -> bool,
+{
+    let dir = dir.as_ref();
+    let index_path = dir.join("model.safetensors.index.json");
+    if !index_path.exists() {
+        return load_weights_from_dir_filtered(dir, keep);
+    }
+
+    let raw = std::fs::read_to_string(&index_path)
+        .map_err(|error| format!("Failed to read {}: {error}", index_path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("Failed to parse {}: {error}", index_path.display()))?;
+    let map = value
+        .get("weight_map")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{}: missing weight_map object", index_path.display()))?;
+
+    let mut indexed = std::collections::BTreeSet::new();
+    let mut selected = std::collections::BTreeSet::new();
+    for (name, shard) in map {
+        let shard = shard
+            .as_str()
+            .ok_or_else(|| format!("{}: shard for {name} is not a string", index_path.display()))?;
+        indexed.insert(shard.to_string());
+        if keep(name) {
+            selected.insert(shard.to_string());
+        }
+    }
+
+    let shard_names: Vec<String> = selected.into_iter().collect();
+    let mut shard_paths = validate_index_shards(dir, &shard_names)?;
+    shard_paths.extend(unindexed_safetensors(dir, &indexed)?);
+    shard_paths.sort();
+    shard_paths.dedup();
+    let mut weights = WeightMap::new();
+    for path in shard_paths {
+        weights.extend(load_safetensors_filtered(path, |name| keep(name))?);
+    }
+    Ok(weights)
+}
+
+/// Inspect safetensors headers for a tensor name without materializing tensor
+/// data. An index narrows the probe to referenced shards first.
+pub fn dir_has_tensor_name<P, F>(dir: P, mut matches: F) -> Result<bool, String>
+where
+    P: AsRef<Path>,
+    F: FnMut(&str) -> bool,
+{
+    let dir = dir.as_ref();
+    let index_path = dir.join("model.safetensors.index.json");
+    let shard_paths = if index_path.exists() {
+        let raw = std::fs::read_to_string(&index_path)
+            .map_err(|error| format!("Failed to read {}: {error}", index_path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| format!("Failed to parse {}: {error}", index_path.display()))?;
+        let map = value
+            .get("weight_map")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| format!("{}: missing weight_map object", index_path.display()))?;
+        let mut indexed = std::collections::BTreeSet::new();
+        let mut selected = std::collections::BTreeSet::new();
+        for (name, shard) in map {
+            let shard = shard.as_str().ok_or_else(|| {
+                format!("{}: shard for {name} is not a string", index_path.display())
+            })?;
+            indexed.insert(shard.to_string());
+            if matches(name) {
+                selected.insert(shard.to_string());
+            }
+        }
+        let mut paths = validate_index_shards(dir, &selected.into_iter().collect::<Vec<_>>())?;
+        paths.extend(unindexed_safetensors(dir, &indexed)?);
+        paths.sort();
+        paths.dedup();
+        paths
+    } else {
+        collect_shard_paths(dir)?
+    };
+    for path in shard_paths {
+        let header = read_safetensors_header(&path)
+            .ok_or_else(|| format!("Failed to read safetensors header from {}", path.display()))?;
+        if header
+            .keys()
+            .any(|name| name != "__metadata__" && matches(name))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Safetensors file names that are never part of a served checkpoint even
 /// when they sit next to real shards: a raw consolidated export kept beside
 /// its sharded twin, and a LoRA adapter delta.
@@ -607,6 +709,24 @@ fn glob_safetensors(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         .collect();
     paths.sort();
     Ok(paths)
+}
+
+/// Return top-level safetensors files that are not referenced by the model
+/// index. Repositories such as Inkling keep a small auxiliary `mtp.safetensors`
+/// beside a target-only index; inspecting these files avoids opening any of the
+/// indexed target shards while still discovering the auxiliary head.
+fn unindexed_safetensors(
+    dir: &Path,
+    indexed: &std::collections::BTreeSet<String>,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(glob_safetensors(dir)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !indexed.contains(name))
+        })
+        .collect())
 }
 
 /// Load weights from a single safetensors file.

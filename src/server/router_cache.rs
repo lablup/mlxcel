@@ -71,6 +71,7 @@ impl RouterDownloader for HfRouterDownloader {
                 models_dir: Some(dest_root.to_path_buf()),
                 revision: None,
                 token: None,
+                include: Vec::new(),
                 force: false,
             },
             hooks,

@@ -201,6 +201,9 @@ pub struct DownloadOptions {
     /// Authentication token override. When `None`, falls back to environment
     /// variables (`HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`).
     pub token: Option<String>,
+    /// Optional repository-relative glob allow-list applied after the built-in
+    /// safe file-type filter. Empty means every built-in-allowed file.
+    pub include: Vec<String>,
     /// Re-download every file even when a complete snapshot is already
     /// present locally.
     pub force: bool,
@@ -215,6 +218,7 @@ impl DownloadOptions {
             models_dir: args.models_dir.clone(),
             revision: args.revision.clone(),
             token: args.token.clone(),
+            include: args.include.clone(),
             force: args.force,
         }
     }
@@ -877,6 +881,14 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
     // line).
     let mut opts = opts;
     opts.repo_id = normalize_repo_id(&opts.repo_id)?;
+    let include_patterns = opts
+        .include
+        .iter()
+        .map(|pattern| {
+            glob::Pattern::new(pattern)
+                .with_context(|| format!("Invalid --include glob pattern {pattern:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // HF-cache read-reuse (issue #93): when the caller did not pin an explicit
     // `--local-dir` and is not forcing a refresh, reuse a complete snapshot
@@ -930,13 +942,21 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
         .iter()
         .map(|s| s.rfilename.clone())
         .filter(|name| is_wanted_file(name))
+        .filter(|name| matches_include_patterns(name, &include_patterns))
         .collect();
 
     if wanted.is_empty() {
         return Err(anyhow!(
-            "Repository '{}' contains no files matching the mlxcel allow-list \
-             (config.json, tokenizer*, *.safetensors, ...). Nothing to download.",
-            opts.repo_id
+            "Repository '{}' contains no files matching the mlxcel allow-list{}.",
+            opts.repo_id,
+            if opts.include.is_empty() {
+                " (config.json, tokenizer*, *.safetensors, ...). Nothing to download".to_string()
+            } else {
+                format!(
+                    " and --include patterns {:?}. Nothing to download",
+                    opts.include
+                )
+            }
         ));
     }
 
@@ -1187,6 +1207,13 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
         local_dir.display(),
     );
     Ok(())
+}
+
+fn matches_include_patterns(name: &str, patterns: &[glob::Pattern]) -> bool {
+    patterns.is_empty()
+        || patterns
+            .iter()
+            .any(|pattern| pattern.matches_path(Path::new(name)))
 }
 
 /// True when every wanted file is present in `local_dir` with non-zero size.

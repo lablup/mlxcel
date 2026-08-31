@@ -723,6 +723,7 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             vlm.text_model.mtp_exactness_allows(block_size)
         }
+        LoadedModel::Inkling(_) => true,
         _ => false,
     }
 }
@@ -1117,10 +1118,11 @@ fn run_mtp_burst(
         }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
+        LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified) or Qwen 3.5 (text or VLM); \
+                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), or Inkling; \
                  falling back to classic decode",
                 model_variant_label(ctx.model),
             );
@@ -1309,6 +1311,25 @@ fn run_mtp_burst(
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
                 vlm,
+                Some(seq.seq_id),
+            )
+            .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
+        LoadedModel::Inkling(inkling) => {
+            let adapter = crate::models::inkling_mtp_target::InklingMtpTargetAdapter::new(
+                inkling,
                 Some(seq.seq_id),
             )
             .with_prefill_start_offset(prefill_start_offset);
