@@ -242,6 +242,7 @@ async fn non_stream_create_response(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await;
     let prepared = match prepared {
@@ -382,6 +383,7 @@ async fn stream_create_response(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await;
     let prepared = match prepared {

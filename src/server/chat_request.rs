@@ -341,6 +341,7 @@ pub(crate) async fn prepare_chat_request(
         false,
         false,
         false,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
 }
@@ -364,6 +365,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     prompt_cache_enabled: bool,
     snapshot_reuse_capable: bool,
     prefill_assistant: bool,
+    thinking_markers: &crate::tokenizer::ThinkingMarkers,
 ) -> Result<PreparedChatRequest> {
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
@@ -570,9 +572,11 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let (prompt, assistant_prefill) = match prefill.as_ref() {
         None => (prompt, None),
         Some(prefill) => {
-            let primed = super::routes::chat::primed_open_thinking_close_marker(&prompt);
-            let continued = super::assistant_prefill::append_to_prompt(&prompt, prefill, primed)
-                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            let primed =
+                super::routes::chat::primed_open_thinking_close_marker(thinking_markers, &prompt);
+            let continued =
+                super::assistant_prefill::append_to_prompt(&prompt, prefill, primed.as_deref())
+                    .map_err(|msg| anyhow::anyhow!("{msg}"))?;
             let echoed = (!prefill.is_reasoning).then(|| prefill.text.clone());
             (continued, echoed)
         }

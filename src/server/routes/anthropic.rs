@@ -222,6 +222,7 @@ async fn non_stream_messages(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await
     {
@@ -378,6 +379,7 @@ async fn stream_messages(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await
     {
@@ -696,6 +698,7 @@ pub async fn anthropic_count_tokens(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await
     {
