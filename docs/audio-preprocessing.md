@@ -6,13 +6,15 @@ see [Audio API](audio-api.md) for that surface.
 
 ## Waveform and policy contract
 
-CLI files and server-resolved WAV bytes use the same strict RIFF/WAVE decoder.
-The decoder accepts PCM16 or float32, rejects empty, malformed, non-finite, or
-out-of-policy input, averages channels to mono, and clamps samples to finite
-`f32` values in `[-1, 1]`. Clip order and one-based placeholder ordinals are
-preserved. The owned result records source rate, channels, sample count,
-duration, encoded bytes, normalized sample count, feature-frame estimate, and
-effective audio-token count separately.
+CLI files and server-resolved audio bytes use one container boundary. WAV, MP3,
+and FLAC are identified from magic bytes rather than a filename or request
+label. WAV keeps the strict in-tree RIFF decoder for PCM16 or float32; MP3 and
+FLAC use the bounded Symphonia path. The boundary rejects empty, malformed,
+non-finite, or out-of-policy input, averages channels to mono, and clamps
+samples to finite `f32` values in `[-1, 1]`. Clip order and one-based
+placeholder ordinals are preserved. The owned result records source rate,
+channels, sample count, duration, encoded bytes, normalized sample count,
+feature-frame estimate, and effective audio-token count separately.
 
 The loaded checkpoint policy is derived from `config.json` plus
 `processor_config.json` or `preprocessor_config.json`. Recognized keys are:
@@ -58,8 +60,10 @@ preflights can reject before allocating beyond the aggregate ceiling. After the
 model family is known, its stricter loaded encoded-byte, duration, sample,
 frame, clip, retained-result, working-memory, and prepared-result limits apply
 before feature allocation. These are request aggregates, not per-clip values
-multiplied by the clip limit. WAV headers and Phi4MM polyphase filter/output
-work are preflighted before decoded or resampled vectors are allocated.
+multiplied by the clip limit. Container headers, compressed decode growth, and
+Phi4MM polyphase filter/output work are bounded before decoded or resampled
+vectors can grow past policy. FLAC metadata blocks are validated before the
+decoder sees attacker-controlled geometry.
 
 Invalid audio is request-fatal rather than silently dropped into a text-only
 request. Image acquisition remains tolerant while resolving individual

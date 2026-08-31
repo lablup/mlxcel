@@ -41,7 +41,7 @@ Both the native MLX key layout and the HuggingFace `WhisperForConditionalGenerat
 
 Loading a Whisper checkpoint occupies the audio slot only; the server does not serve `/v1/chat/completions` or generation requests from that process. Chat and STT are separate server instances.
 
-**Supported audio input.** The `file` part must be a WAV file. Audio is decoded with the shared WAV reader, converted to mono, and resampled to 16 kHz before the log-mel front-end. Other container formats (MP3, FLAC, etc.) are not yet supported; the WAV reader returns an error for non-WAV input and the route returns 400.
+**Supported audio input.** The dedicated Whisper worker currently accepts WAV only. Audio is decoded with the shared WAV reader, converted to mono, and resampled to 16 kHz before the log-mel front-end. MP3 and FLAC are supported by the Phi-4 Multimodal and Gemma 3n chat-model paths described below, but are not converted before they reach the standalone Whisper worker.
 
 **Long audio.** Audio longer than 30 seconds is split into consecutive 30-second windows, each transcribed independently. The results are concatenated in order. Word-level timestamps, segment-level timestamps, and VAD-gated chunking are follow-ups.
 
@@ -116,7 +116,7 @@ With neither, the route answers `501 not_supported_error` with `The current mode
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `file` | file part | yes | Raw WAV audio bytes. Only RIFF/WAVE is decoded; other containers return 400. A repeated `file` part keeps the last one. |
+| `file` | file part | yes | Encoded audio bytes detected from magic bytes. Phi-4 Multimodal and Gemma 3n accept WAV, MP3, and FLAC; the other current chat-audio handlers and standalone Whisper accept WAV only. A repeated `file` part keeps the last one. |
 | `model` | text | no | Carried and ignored, as upstream carries it into the chat body. |
 | `prompt` | text | no | Replaces the ASR prompt. Default: `Transcribe audio to text`. Honored on the chat-model path; the Whisper worker ignores it. |
 | `language` | text | no | Appended to the prompt as `" (language: xx)"`, which is how upstream passes it. |
@@ -127,6 +127,14 @@ With neither, the route answers `501 not_supported_error` with `The current mode
 
 Unknown text fields are carried and ignored. A repeated text field collapses into an array and falls back to that field's default, so a duplicated `prompt` is ignored and a duplicated `response_format` resolves to `json`.
 
+**Container support depends on the selected model path.** The shared waveform
+preprocessor used by Phi-4 Multimodal and Gemma 3n decodes WAV, MP3, and FLAC.
+The current Gemma 4, Gemma 4 Unified, Qwen3-Omni, Nemotron-H Nano Omni, and
+standalone Whisper handlers still call the in-tree WAV reader directly. The
+route sniffs and bounds all three compatible containers before dispatch, but an
+MP3 or FLAC request routed to one of those WAV-only handlers fails during model
+preparation. This is a backend boundary, not a filename rule.
+
 **Success response** (`json`, the default). Note that this is the transcript-event shape llama-server emits, **not** OpenAI's classic `{"text": ...}` object:
 
 ```json
@@ -135,15 +143,15 @@ Unknown text fields are carried and ignored. A repeated text field collapses int
 
 On the Whisper-worker path the `usage` counts are zeros: the worker reports no prompt or decoded token counts.
 
-**Streamed response** (`stream=true`): `text/event-stream` carrying a `{"type":"transcript.text.delta","delta":"..."}` frame, the `done` frame above, and `data: [DONE]`. mlxcel emits the whole transcript in one delta rather than incrementally.
+**Streamed response** (`stream=true`): `text/event-stream` carrying `{"type":"transcript.text.delta","delta":"..."}` frames, the `done` frame above, and `data: [DONE]`. The chat-model path emits one delta per decoded token as generation happens. The standalone Whisper worker has only the finished transcript and therefore emits one delta containing the whole result.
 
-**Limits**, all applied before a decoder sees the clip: at most 32 multipart parts, 25 MiB per part, and a WAV geometry read from the header (at most 192 kHz, 8 channels, 600 seconds). A `data` chunk declaring more audio than the file carries is clamped to what is present.
+**Limits**, all applied before a decoder sees the clip: at most 32 multipart parts, 25 MiB per part, and container geometry read from the WAV, MP3, or FLAC header (at most 192 kHz, 8 channels, 600 seconds). Compressed output is bounded again while decoding, and a WAV `data` chunk declaring more audio than the file carries is clamped to what is present.
 
 **Error responses:**
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Malformed multipart, too many parts, no `file` part (`No input file found for transcription`), a `response_format` other than `json` (`Only 'json' response_format is supported for transcription`), a non-numeric `temperature` or `max_tokens`, or a clip that is not WAV or exceeds a geometry bound. |
+| 400 | Malformed multipart, too many parts, no `file` part (`No input file found for transcription`), a `response_format` other than `json` (`Only 'json' response_format is supported for transcription`), a non-numeric `temperature` or `max_tokens`, an unsupported container, malformed container metadata, or a clip that exceeds a geometry bound. |
 | 413 | Upload body exceeds 25 MiB. |
 | 501 | Neither an audio-capable chat model nor an STT worker is loaded. Body: `{"error":{"type":"not_supported_error","message":"The current model does not support audio input."}}` |
 | 503 | All slots are busy: either the generation batch queue or the bounded audio worker queue (`--audio-queue-depth`) is full. |

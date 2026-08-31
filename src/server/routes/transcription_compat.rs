@@ -67,9 +67,9 @@
 //! # Limits
 //!
 //! Every bound is applied before the clip reaches a model: the multipart part
-//! count, the per-part upload size, and the WAV geometry (sample rate, channel
-//! count, decoded duration) read from the 44-byte header rather than from a
-//! decode. A malformed or truncated header is refused there, so an oversized or
+//! count, the per-part upload size, and the container geometry (sample rate,
+//! channel count, decoded duration) read from headers rather than from a decode.
+//! A malformed or truncated header is refused there, so an oversized or
 //! amplifying upload costs a header parse rather than a decode.
 
 use axum::extract::{Multipart, multipart::Field};
@@ -110,7 +110,7 @@ pub(crate) const MAX_MULTIPART_PARTS: usize = 32;
 /// its own terms rather than only when the whole body overflows.
 pub(crate) const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
-/// Longest clip accepted, read from the WAV header before any decode.
+/// Longest clip accepted, read from the container header before any decode.
 ///
 /// Ten minutes at 16 kHz mono is 19 MB of PCM, inside the upload bound; the
 /// cap exists for the amplifying case, where a header declares hours of audio

@@ -113,7 +113,7 @@ Model store:
   -m/--model accepts either a local path or a HuggingFace owner/name repo-id.
   Repo-ids are resolved exactly like `mlxcel serve -m`: legacy ./models/<name>,
   then the HuggingFace cache, then the mlxcel store, with auto-download on miss.
-  Use --models-dir (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
+  Use --model-store-root (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
   volume; snapshots live at <root>/<owner>/<name> under that root.
 
 Embeddings and Reranking:
@@ -370,7 +370,7 @@ struct ServerArgs {
     /// that revision on a miss. The mlxcel store is not revision-namespaced, so
     /// a repo already present there is not reused for a revision-qualified
     /// request and the request is refused rather than answered with an unknown
-    /// revision; use `--models-dir` to give each revision its own root. Not
+    /// revision; use `--model-store-root` to give each revision its own root. Not
     /// valid when `-m/--model` is an existing local path.
     #[arg(long, value_name = "REV")]
     revision: Option<String>,

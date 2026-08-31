@@ -16,8 +16,8 @@
 //!
 //! The boundary deliberately ends at normalized mono waveforms. Model-specific
 //! mel/Conformer execution remains in each family implementation, while CLI,
-//! HTTP, MLX, and compiler backends can share byte validation, WAV decoding,
-//! downmixing, resampling, clip order, and resource accounting.
+//! HTTP, MLX, and compiler backends can share byte validation, WAV/MP3/FLAC
+//! decoding, downmixing, resampling, clip order, and resource accounting.
 
 use std::io::Read;
 use std::mem::size_of;
@@ -241,7 +241,7 @@ pub fn preprocess_wav_refs(
         });
     }
 
-    // Inspect every RIFF header and enforce aggregate family limits before
+    // Inspect every container header and enforce aggregate family limits before
     // allocating any decoded or resampled waveform. This prevents a request
     // from multiplying a valid per-clip maximum by `max_clips`.
     let mut preflight_encoded_bytes = 0usize;

@@ -1138,7 +1138,7 @@ pub(crate) struct ServeArgs {
     /// that revision on a miss. The mlxcel store is not revision-namespaced, so
     /// a repo already present there is not reused for a revision-qualified
     /// request and the request is refused rather than answered with an unknown
-    /// revision; use `--models-dir` to give each revision its own root. Not
+    /// revision; use `--model-store-root` to give each revision its own root. Not
     /// valid when the model argument is an existing local path.
     #[arg(long, value_name = "REV")]
     revision: Option<String>,

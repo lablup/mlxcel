@@ -539,7 +539,9 @@ Aligned with upstream, each checked against the pinned source rather than the sc
 
 ### Containers
 
-The accepted set is upstream's: **wav, mp3 and flac**, the three its mtmd audio front-end decodes. The container is identified from the clip's own magic bytes, not from the `format` string the client sends, so a mislabelled clip transcribes here exactly as it does upstream and a container outside the set is refused on content. RIFF/WAVE keeps mlxcel's in-tree reader, so every WAV clip decodes byte-for-byte as it did before; mp3 and flac go through [`symphonia`](https://github.com/pdeljanov/Symphonia) (pure Rust, MPL-2.0), enabled for those two codecs only.
+The accepted request-boundary set is upstream's: **wav, mp3 and flac**. The container is identified from the clip's own magic bytes, not from the `format` string the client sends, and a container outside the set is refused on content. RIFF/WAVE keeps mlxcel's in-tree reader, so every WAV clip decodes byte-for-byte as it did before; mp3 and flac go through [`symphonia`](https://github.com/pdeljanov/Symphonia) (pure Rust, MPL-2.0), enabled for those two codecs only.
+
+The compressed decoder is currently wired through the shared waveform preprocessor used by Phi-4 Multimodal and Gemma 3n. Gemma 4, Gemma 4 Unified, Qwen3-Omni, and Nemotron-H Nano Omni still call the WAV reader in their family-local server preparation, so an mp3 or flac request passes route validation but fails when dispatched to one of those checkpoints. This is a remaining model-backend gap relative to b10621's uniform mtmd decoder. The dedicated Whisper extension below is WAV-only as well.
 
 ### Limits
 
@@ -556,8 +558,11 @@ Every bound is applied before a decoder sees the clip: at most 32 multipart part
 - The `usage` counts report zeros: the STT worker returns a finished string and no token accounting.
 - `prompt` steers nothing, for the same reason.
 - A streamed response is a single delta carrying the whole transcript, because there is no token stream to split.
+- The worker accepts WAV only; mp3 and flac are not converted before they reach its in-tree WAV reader.
 
-Everything b10621 can express goes through the chat-model path, where all three are honored.
+Everything b10621 can express goes through the chat-model path, where usage,
+prompt steering, and incremental streaming are honored. Container coverage
+still depends on the loaded family as described above.
 
 ## Regeneration
 
