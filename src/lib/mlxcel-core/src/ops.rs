@@ -27,6 +27,32 @@ use cxx::UniquePtr;
 /// Gemma3n multimodal helpers, Phi3V vision path, assorted shared model code.
 pub fn concatenate(a: &ffi::MlxArray, b: &ffi::MlxArray, axis: i32) -> UniquePtr<ffi::MlxArray> {
     let ptrs: [*const ffi::MlxArray; 2] = [a as *const ffi::MlxArray, b as *const ffi::MlxArray];
+    // SAFETY: both pointers are borrowed from live references and remain valid
+    // for the duration of the FFI call.
+    unsafe { ffi::concatenate(&ptrs, axis) }
+}
+
+/// Safe wrapper to concatenate any non-empty list of arrays along an axis.
+///
+/// Keeping the inputs as references makes their lifetime cover the FFI call
+/// and lets callers build one constant-depth concatenate node instead of a
+/// left-deep chain of binary nodes.
+///
+/// # Panics
+///
+/// Panics when `arrays` is empty because MLX concatenate requires at least one
+/// input array.
+pub fn concatenate_many(arrays: &[&ffi::MlxArray], axis: i32) -> UniquePtr<ffi::MlxArray> {
+    assert!(
+        !arrays.is_empty(),
+        "concatenate_many requires at least one input"
+    );
+    let ptrs: Vec<*const ffi::MlxArray> = arrays
+        .iter()
+        .map(|array| *array as *const ffi::MlxArray)
+        .collect();
+    // SAFETY: every pointer is borrowed from a live reference in `arrays`, so
+    // all pointees remain valid for the full duration of the FFI call.
     unsafe { ffi::concatenate(&ptrs, axis) }
 }
 

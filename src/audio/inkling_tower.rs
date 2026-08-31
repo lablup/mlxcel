@@ -19,6 +19,17 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+fn join_chunks<T, E>(
+    chunks: Vec<T>,
+    concatenate_many: impl FnOnce(&[T]) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    match chunks.len() {
+        0 => Ok(None),
+        1 => Ok(chunks.into_iter().next()),
+        _ => concatenate_many(&chunks).map(Some),
+    }
+}
+
 fn default_model_type() -> String {
     "inkling_audio".into()
 }
@@ -167,8 +178,9 @@ impl InklingAudioTower {
             .collect();
         let offsets = mlxcel_core::from_slice_i32(&offsets, &[self.n_mel_bins as i32]);
         let offsets = mlxcel_core::reshape(&offsets, &[1, self.n_mel_bins as i32]);
-        let mut output: Option<UniquePtr<MlxArray>> = None;
         let total = *frames as usize;
+        let chunk_count = total.div_ceil(self.max_frames_per_chunk);
+        let mut chunks = Vec::with_capacity(chunk_count);
         for start in (0..total).step_by(self.max_frames_per_chunk) {
             let end = (start + self.max_frames_per_chunk).min(total);
             let chunk = mlxcel_core::slice(
@@ -181,12 +193,20 @@ impl InklingAudioTower {
             let summed = mlxcel_core::sum_axis(&embedded, -2, false);
             let normalized = self.norm.forward(&summed);
             mlxcel_core::eval(&normalized);
-            output = Some(match output {
-                Some(previous) => mlxcel_core::concatenate(&previous, &normalized, 0),
-                None => normalized,
-            });
+            chunks.push(normalized);
         }
-        let output = output.ok_or_else(|| "Inkling audio tower produced no chunks".to_string())?;
+        let output = join_chunks(chunks, |chunks| {
+            let arrays: Vec<&MlxArray> = chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .as_ref()
+                        .ok_or_else(|| "Inkling audio tower produced a null chunk".to_string())
+                })
+                .collect::<Result<_, _>>()?;
+            Ok::<_, String>(mlxcel_core::concatenate_many(&arrays, 0))
+        })?
+        .ok_or_else(|| "Inkling audio tower produced no chunks".to_string())?;
         let output_shape = mlxcel_core::array_shape(&output);
         if output_shape != [*frames, self.hidden_size as i32] {
             return Err(format!(

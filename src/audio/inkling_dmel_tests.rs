@@ -12,95 +12,53 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::f64::consts::PI;
-
 use crate::audio::inkling_processor::InklingProcessorConfig;
+
+use serde::Deserialize;
 
 use super::*;
 
-fn deterministic_noise(length: usize) -> Vec<f32> {
-    let mut state = 0x1234_5678u32;
-    (0..length)
-        .map(|_| {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            (state as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32
-        })
-        .collect()
-}
+const NUMPY_FIXTURE_ABSOLUTE_TOLERANCE: f32 = 2e-6;
 
-fn reference_slaney_filters(n_fft: usize, n_mels: usize) -> Vec<f64> {
-    let bins = n_fft / 2 + 1;
-    let maximum_frequency = INKLING_SAMPLE_RATE as f64 / 2.0;
-    let mel_min = hz_to_mel_slaney(0.0);
-    let mel_max = hz_to_mel_slaney(maximum_frequency);
-    let points: Vec<f64> = (0..n_mels + 2)
-        .map(|index| {
-            let mel = mel_min + (mel_max - mel_min) * index as f64 / (n_mels + 1) as f64;
-            mel_to_hz_slaney(mel)
-        })
-        .collect();
-    let mut filters = vec![0.0f64; n_mels * bins];
-    for mel in 0..n_mels {
-        let lower = points[mel];
-        let center = points[mel + 1];
-        let upper = points[mel + 2];
-        let normalization = 2.0 / (upper - lower);
-        for frequency in 0..bins {
-            let hz = frequency as f64 * maximum_frequency / (bins - 1) as f64;
-            filters[mel * bins + frequency] = ((hz - lower) / (center - lower))
-                .min((upper - hz) / (upper - center))
-                .max(0.0)
-                * normalization;
-        }
-    }
-    filters
-}
-
-fn reference_log_mel(clip: &[f32]) -> Vec<f32> {
-    let n_fft = 1_600usize;
-    let hop = 800usize;
-    let left_pad = n_fft - hop;
-    let padded_length = clip.len();
-    let right_pad = (hop - padded_length % hop) % hop;
-    let frames = 1 + (left_pad + padded_length + right_pad - n_fft) / hop;
-    let filters = reference_slaney_filters(n_fft, 80);
-    let mut output = vec![0.0f32; frames * 80];
-    for frame_index in 0..frames {
-        let mut frame = vec![0.0f64; n_fft];
-        for (index, value) in frame.iter_mut().enumerate() {
-            let padded_index = frame_index * hop + index;
-            if padded_index >= left_pad {
-                let source = padded_index - left_pad;
-                if source < clip.len() {
-                    let window = 0.5 - 0.5 * (2.0 * PI * index as f64 / n_fft as f64).cos();
-                    *value = clip[source] as f64 * window;
-                }
-            }
-        }
-        let magnitudes = crate::audio::fft::real_fft_magnitude(&frame, n_fft / 2 + 1);
-        for mel in 0..80 {
-            let mut sum = 0.0f32;
-            for (frequency, magnitude) in magnitudes.iter().enumerate() {
-                sum += (*magnitude as f32).max(1e-10)
-                    * filters[mel * (n_fft / 2 + 1) + frequency] as f32;
-            }
-            output[frame_index * 80 + mel] = sum.max(1e-10).log10();
-        }
-    }
-    output
+#[derive(Debug, Deserialize)]
+struct NumPyLogMelFixture {
+    numpy_version: String,
+    upstream_head_revision: String,
+    upstream_merge_revision: String,
+    waveform: Vec<f32>,
+    shape: Vec<usize>,
+    expected_log_mel: Vec<f32>,
+    absolute_tolerance: f32,
 }
 
 #[test]
-fn log_mel_matches_f64_reference_on_random_noise() {
-    let clip = deterministic_noise(2_401);
+fn log_mel_matches_pinned_numpy_fixture() {
+    let fixture: NumPyLogMelFixture =
+        serde_json::from_str(include_str!("../../tests/fixtures/inkling_dmel_numpy.json")).unwrap();
+    assert_eq!(fixture.numpy_version, "2.3.2");
+    assert_eq!(
+        fixture.upstream_head_revision,
+        "0d6805bb7ef67998d8aeb655bc1df83854830d56"
+    );
+    assert_eq!(
+        fixture.upstream_merge_revision,
+        "67bc41d818ea77908599d21510ea29f352e7a417"
+    );
+    assert_eq!(fixture.shape, [4, 80]);
+    assert_eq!(fixture.waveform.len(), 2_401);
+    assert_eq!(fixture.absolute_tolerance, NUMPY_FIXTURE_ABSOLUTE_TOLERANCE);
+    assert_eq!(
+        fixture.expected_log_mel.len(),
+        fixture.shape.iter().product::<usize>()
+    );
+
     let extractor = InklingFeatureExtractor::new(InklingFeatureExtractorConfig::default()).unwrap();
-    let (actual, mask) = extractor.extract_log_mel(&clip).unwrap();
-    let expected = reference_log_mel(&clip);
-    assert_eq!(actual.len(), 4 * 80);
+    let (actual, mask) = extractor.extract_log_mel(&fixture.waveform).unwrap();
+    assert_eq!(actual.len(), fixture.expected_log_mel.len());
     assert_eq!(mask, vec![true; 4]);
-    for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+    for (index, (&actual, &expected)) in actual.iter().zip(&fixture.expected_log_mel).enumerate() {
         assert!(
-            (actual - expected).abs() <= 2e-6,
+            (actual - expected).abs() <= NUMPY_FIXTURE_ABSOLUTE_TOLERANCE,
             "feature {index}: actual={actual}, expected={expected}"
         );
     }
