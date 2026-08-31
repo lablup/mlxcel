@@ -233,6 +233,33 @@ int32_t gpu_device_count() {
     return count >= 1 ? static_cast<int32_t>(count) : 1;
 }
 
+int32_t gpu_compute_capability(int32_t index) {
+    // `device_info` dispatches on the device type and is defined for every
+    // backend, so this compiles and links unchanged off CUDA. Only the CUDA
+    // backend populates the two capability keys; Metal and the no-gpu stub
+    // return maps without them, which reads as "unknown" here.
+    try {
+        const auto& info = mlx::core::device_info(Device(Device::gpu, index));
+        auto major = info.find("compute_capability_major");
+        auto minor = info.find("compute_capability_minor");
+        if (major == info.end() || minor == info.end()) {
+            return -1;
+        }
+        const auto* major_value = std::get_if<size_t>(&major->second);
+        const auto* minor_value = std::get_if<size_t>(&minor->second);
+        if (major_value == nullptr || minor_value == nullptr) {
+            return -1;
+        }
+        return static_cast<int32_t>(*major_value) * 1000 +
+            static_cast<int32_t>(*minor_value);
+    } catch (const std::exception&) {
+        // A host with no usable device, or an index past the adapter count,
+        // is "unknown", not a crash: the caller degrades to skipping the
+        // architecture check rather than refusing to start.
+        return -1;
+    }
+}
+
 std::unique_ptr<MlxStream> new_stream_on_gpu_index(int32_t index) {
     return std::make_unique<MlxStream>(
         mlx::core::new_stream(Device(Device::gpu, index)));

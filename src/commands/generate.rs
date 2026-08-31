@@ -34,7 +34,7 @@ use mlxcel::{
         resolve_model_shard_plan, shard_config_from_cli, validate_supported_runtime,
     },
     downloader::resolve_model_source_with_override,
-    initialize_runtime,
+    initialize_runtime_checked,
     memory_estimate::{
         MemoryEstimate, QuantHint, estimate_total_memory, format_bytes, format_estimate,
     },
@@ -121,6 +121,14 @@ fn load_generation_model(
     // Metal; reports the real adapter count on a CUDA multi-GPU host, which is
     // what `--tp-size` shards across.
     println!("Detected {} GPU(s).", mlxcel_core::gpu_device_count());
+    // Alongside the count, say what architecture that GPU is and which
+    // architectures this binary carries code for (#1537). On a CUDA host this
+    // is the line that makes "why is the first launch slow" (PTX JIT) and "why
+    // does this archive not run here" answerable from a log alone; it prints
+    // nothing on Metal and CPU-only builds, where there is no capability.
+    if let Some(summary) = mlxcel_core::hardware::cuda_arch_startup_summary() {
+        println!("{summary}");
+    }
     let load_start = Instant::now();
     let shard_config = shard_config_from_cli(
         args.tensor_parallel.tp_size,
@@ -2163,7 +2171,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         .clone()
         .expect("run_generate_once requires a prompt");
 
-    let runtime = initialize_runtime();
+    let runtime = initialize_runtime_checked()?;
     print_runtime_setup(&runtime);
 
     // Axis A weight-load surgery. Parse the

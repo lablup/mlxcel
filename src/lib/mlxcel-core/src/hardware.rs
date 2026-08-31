@@ -20,6 +20,27 @@
 
 use std::sync::OnceLock;
 
+// ── CUDA compute capability ───────────────────────────────────────────────────
+
+// The CUDA side of "what machine is this?" lives in [`crate::cuda_arch`] and is
+// re-exported here so there is a single hardware-facing module to ask, whether
+// the answer comes from `sysctlbyname` on Apple Silicon or from MLX's cached
+// CUDA device attributes. It is a separate file because the architecture-list
+// parser and its coverage rules carry their own unit tests and would otherwise
+// push this module well past the size where it stays readable.
+//
+// Nothing here feeds [`HardwareCapabilities`]: that struct is built by
+// [`detect_hardware`], which runs from [`apply_metal_ops_per_buffer_default`]
+// at the very top of `main`, and probing a CUDA device from there would move
+// device initialisation ahead of the environment defaults that must be set
+// before MLX touches the GPU. The capability probe stays lazy and separate.
+pub use crate::cuda_arch::{
+    ArchCoverage, ArchVariant, CudaArchEntry, CudaArchMismatch, TRACE_ARCH_ENV, arch_list_coverage,
+    compiled_cuda_architectures, cuda_arch_mismatch, cuda_arch_startup_summary,
+    cuda_compute_capability, enforce_cuda_arch_compatibility, entry_coverage,
+    parse_cuda_arch_entry, parse_cuda_arch_list, trace_arch_enabled, trace_arch_once,
+};
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// Apple Silicon chip generation detected at runtime.

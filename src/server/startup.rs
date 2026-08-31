@@ -1842,6 +1842,13 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
     // On Metal this is always 1; on a CUDA multi-GPU host it reports the real
     // adapter count that `--tp-size` can target.
     tracing::info!("Detected {} GPU(s)", mlxcel_core::gpu_device_count());
+    // Same architecture line the CLI prints next to the GPU count (#1537):
+    // running compute capability, the architectures this binary was compiled
+    // for, and whether the device is served by a cubin or by JIT-compiled PTX.
+    // Silent on Metal and CPU-only builds.
+    if let Some(summary) = mlxcel_core::hardware::cuda_arch_startup_summary() {
+        tracing::info!("{summary}");
+    }
     let prefix = startup.api_prefix.as_str();
     tracing::info!("Endpoints:");
     tracing::info!("  POST {prefix}/v1/chat/completions  - OpenAI chat completions");
@@ -2540,9 +2547,20 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             macos_supports_na = hw.macos_supports_na,
             "Hardware capabilities detected"
         );
+        // The CUDA half of the same report (#1537). It is kept out of
+        // `HardwareCapabilities` on purpose: that struct is built at the top of
+        // `main`, before the environment defaults MLX reads are applied, and
+        // probing a CUDA device there would move device initialisation ahead of
+        // them. Emitted as structured fields alongside so a log consumer sees
+        // one hardware record either way.
+        tracing::debug!(
+            compute_capability = ?mlxcel_core::hardware::cuda_compute_capability(),
+            compiled_cuda_architectures = mlxcel_core::hardware::compiled_cuda_architectures(),
+            "CUDA architecture capabilities detected"
+        );
     }
 
-    let runtime = crate::initialize_runtime();
+    let runtime = crate::initialize_runtime_checked()?;
     if let Some(invalid) = runtime.invalid_device_override.as_deref() {
         tracing::warn!(
             value = invalid,

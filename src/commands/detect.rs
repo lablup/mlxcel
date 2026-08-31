@@ -21,7 +21,7 @@
 
 use anyhow::{Result, anyhow};
 
-use mlxcel::initialize_runtime;
+use mlxcel::initialize_runtime_checked;
 use mlxcel::vision::detection::RtDetrV2Predictor;
 
 use crate::DetectArgs;
@@ -48,7 +48,9 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     }
 
     // Initialize the MLX runtime (selects GPU/CPU) before any forward pass.
-    let _runtime = initialize_runtime();
+    // Refuses to start when this build's CUDA architectures do not cover the
+    // host GPU (#1537).
+    let _runtime = initialize_runtime_checked()?;
 
     let predictor = RtDetrV2Predictor::from_pretrained(&args.model, args.threshold)
         .map_err(|e| anyhow!("failed to load RT-DETRv2 model: {e}"))?;

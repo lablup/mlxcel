@@ -90,3 +90,31 @@ fn warns_only_for_cpu_fallback_on_nvidia_host_without_cuda() {
     // Already running on the GPU: nothing to warn about.
     assert!(!should_warn_cpu_only_on_nvidia_host(Gpu, Gpu, false, true));
 }
+
+// ── CUDA architecture refusal (issue #1537) ──────────────────────────────────
+
+#[test]
+fn checked_init_agrees_with_the_architecture_check_on_this_host() {
+    // `initialize_runtime_checked` refuses exactly when the compiled CUDA
+    // architectures do not cover the host GPU. On every supported build that
+    // is never, and the two must not be able to drift apart: a refusal with no
+    // mismatch, or a mismatch that starts anyway, are both bugs.
+    let mismatch = mlxcel_core::hardware::cuda_arch_mismatch();
+    assert_eq!(
+        super::initialize_runtime_checked().is_err(),
+        mismatch.is_some(),
+        "refusal must track cuda_arch_mismatch(), which reported {mismatch:?}"
+    );
+}
+
+#[test]
+fn the_architecture_refusal_only_applies_to_gpu_runs() {
+    // The bypass is deliberate: `MLXCEL_DEVICE=cpu` is the one workaround left
+    // to someone holding an archive built for the wrong architecture, so the
+    // refusal must be reachable only when the GPU was actually requested.
+    assert!(!resolve_runtime_device(Some("cpu")).0.uses_gpu());
+    assert!(resolve_runtime_device(None).0.uses_gpu());
+    assert!(resolve_runtime_device(Some("gpu")).0.uses_gpu());
+    // An unparseable override still resolves to the GPU, so it stays checked.
+    assert!(resolve_runtime_device(Some("tpu")).0.uses_gpu());
+}

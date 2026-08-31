@@ -26,7 +26,7 @@ use mlxcel::embeddings::{
     EmbedOptions, EmbeddingEngine, EmbeddingLoadOptions, EmbeddingVector, ImageInput,
     load_embedding_model_with_options,
 };
-use mlxcel::initialize_runtime;
+use mlxcel::initialize_runtime_checked;
 
 /// Arguments for `mlxcel embed`.
 #[derive(Args, Debug)]
@@ -164,7 +164,9 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
         resolve_model_source_with_override(&args.model, args.models_dir.as_deref(), None)?;
 
     // Initialize the MLX runtime (selects GPU/CPU) before any forward pass.
-    let _runtime = initialize_runtime();
+    // Refuses to start when this build's CUDA architectures do not cover the
+    // host GPU (#1537).
+    let _runtime = initialize_runtime_checked()?;
 
     let loaded = load_embedding_model_with_options(
         &model_dir,

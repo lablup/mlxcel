@@ -43,8 +43,17 @@ fn main() {
     // persistent CUDA PTX cache directory by it (see ensure_persistent_ptx_cache).
     println!("cargo:rustc-env=MLXCEL_MLX_COMMIT={mlx_commit}");
 
+    // Resolve the CUDA architecture list once, before CMake runs, and record it
+    // in the crate so the binary knows what it was compiled for and not only
+    // what it is running on (#1537). Empty off CUDA. `hardware.rs` compares this
+    // against the running device's compute capability at device init, which is
+    // what turns "released x86_64 archive silently fails to load on a V100" into
+    // a named error naming both the device and this list.
+    let cuda_arch = resolve_cuda_architectures();
+    println!("cargo:rustc-env=MLXCEL_CUDA_ARCHITECTURES={cuda_arch}");
+
     // Build MLX using cmake
-    let mlx_dst = build_mlx(&mlx_commit);
+    let mlx_dst = build_mlx(&mlx_commit, &cuda_arch);
     // Verify what actually landed on disk before blessing it. CMake reuses an
     // already-populated _deps/mlx-src rather than re-running FetchContent, so a
     // checkout restored from a CI cache or seeded by hand can disagree with the
@@ -313,7 +322,9 @@ fn mark_mlx_cache_valid(out_dir: &std::path::Path, expected_commit: &str) {
     let _ = std::fs::write(marker, expected_commit);
 }
 
-fn build_mlx(expected_commit: &str) -> PathBuf {
+// `cuda_architectures` is consumed only by the CUDA branch below.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+fn build_mlx(expected_commit: &str, cuda_architectures: &str) -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     purge_stale_mlx_cache(&out_dir, expected_commit);
 
@@ -366,9 +377,11 @@ fn build_mlx(expected_commit: &str) -> PathBuf {
         // branch. Because we always pass MLX_CUDA_ARCHITECTURES explicitly, that
         // branch never runs, so we apply the same rule ourselves here and in
         // detect_cuda_arch. See docs/installation.md (CUDA architecture selection).
-        let cuda_arch = env::var("MLX_CUDA_ARCHITECTURES")
-            .unwrap_or_else(|_| detect_cuda_arch().unwrap_or_else(|| "90a".to_string()));
-        config.define("MLX_CUDA_ARCHITECTURES", &cuda_arch);
+        //
+        // The value is resolved in `main` by `resolve_cuda_architectures` and
+        // passed in, so the list CMake compiles for and the list recorded in
+        // `MLXCEL_CUDA_ARCHITECTURES` are the same string by construction.
+        config.define("MLX_CUDA_ARCHITECTURES", cuda_architectures);
     }
 
     config.build()
@@ -385,6 +398,29 @@ fn cmake_bool_from_env(name: &str) -> Option<&'static str> {
             "Invalid {name} value {:?}. Expected one of: 1/0, on/off, true/false, yes/no.",
             value
         ),
+    }
+}
+
+/// The CUDA architecture list this build compiles MLX device code for.
+///
+/// An explicitly set `MLX_CUDA_ARCHITECTURES` wins verbatim (the documented
+/// escape hatch); otherwise `nvidia-smi` detection decides, and `90a` is the
+/// last resort. That fallback is why the runtime mismatch check exists: on a
+/// host without `nvidia-smi` it produces a binary that cannot run on its own
+/// build machine, and without the check the only symptom is an opaque CUDA
+/// load failure at the first kernel launch.
+///
+/// Empty string on a non-CUDA build, which the runtime reads as "no compiled
+/// architecture list" and skips the check entirely.
+fn resolve_cuda_architectures() -> String {
+    #[cfg(feature = "cuda")]
+    {
+        env::var("MLX_CUDA_ARCHITECTURES")
+            .unwrap_or_else(|_| detect_cuda_arch().unwrap_or_else(|| "90a".to_string()))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        String::new()
     }
 }
 

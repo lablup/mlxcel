@@ -22,7 +22,7 @@ use clap::Args;
 use serde_json::json;
 
 use mlxcel::downloader::resolve_model_source_with_override;
-use mlxcel::initialize_runtime;
+use mlxcel::initialize_runtime_checked;
 use mlxcel::rerank::{ImageInput, RerankItem, RerankLoadOptions, load_reranker_with_options};
 
 /// Arguments for `mlxcel rerank`.
@@ -123,7 +123,9 @@ pub(crate) fn run_rerank(args: RerankArgs) -> Result<()> {
         resolve_model_source_with_override(&args.model, args.models_dir.as_deref(), None)?;
 
     // Initialize the MLX runtime (selects GPU/CPU) before any forward pass.
-    let _runtime = initialize_runtime();
+    // Refuses to start when this build's CUDA architectures do not cover the
+    // host GPU (#1537).
+    let _runtime = initialize_runtime_checked()?;
 
     let loaded = load_reranker_with_options(
         &model_dir,
