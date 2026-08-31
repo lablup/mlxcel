@@ -59,6 +59,13 @@ impl InklingVlModel {
         self.image_processor.preprocess_with_counts(images)
     }
 
+    pub fn preprocess_image_refs(
+        &self,
+        images: &[&DynamicImage],
+    ) -> Result<InklingProcessedImages, String> {
+        self.image_processor.preprocess_refs(images)
+    }
+
     pub fn prepare_input_embeddings(
         &self,
         input_ids: &MlxArray,

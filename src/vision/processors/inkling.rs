@@ -125,12 +125,21 @@ impl InklingImageProcessor {
         &self,
         images: &[DynamicImage],
     ) -> Result<InklingProcessedImages, String> {
+        let images = images.iter().collect::<Vec<_>>();
+        self.preprocess_refs(&images)
+    }
+
+    /// Preprocess borrowed images without cloning their decoded pixel buffers.
+    pub fn preprocess_refs(
+        &self,
+        images: &[&DynamicImage],
+    ) -> Result<InklingProcessedImages, String> {
         if images.is_empty() {
             return Err("Inkling image preprocessing requires at least one image".into());
         }
         let mut tiles_per_image = Vec::with_capacity(images.len());
         let mut values = Vec::new();
-        for image in images {
+        for &image in images {
             let image = self.maybe_resize(image).to_rgb8();
             let height = image.height() as usize;
             let width = image.width() as usize;

@@ -2566,6 +2566,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             args.generation.fps,
             &tokenizer,
             image_soft_tokens,
+            args.generation.no_chat_template,
         )?;
         print_generation_preamble(&user_prompt)?;
         let generation = run_generation_mode(

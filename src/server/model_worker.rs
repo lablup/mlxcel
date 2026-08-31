@@ -2815,46 +2815,47 @@ fn prepare_inkling_video_embeddings(
         ));
     }
 
-    let mut sampled_fps = None;
-    let mut frames = Vec::new();
-    for resolved in videos {
-        let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        if let Some(first_fps) = sampled_fps
-            && f64::abs(first_fps - fps) > f64::EPSILON
-        {
-            return Err(anyhow!(
-                "Inkling video inputs in one request must use the same FPS; got {first_fps} and {fps}"
-            ));
-        }
-        sampled_fps = Some(fps);
-        let decoded =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
-                anyhow!(
-                    "Failed to load Inkling video {:?}: {}",
-                    resolved.source.canonical_path(),
-                    err
-                )
-            })?;
-        frames.extend(decoded);
-    }
-    let sampled_fps = sampled_fps.unwrap_or(video::DEFAULT_FPS);
+    let inputs = videos
+        .iter()
+        .map(|resolved| video::InklingVideoInput {
+            source: &resolved.source,
+            target_fps: resolved.fps.unwrap_or(video::DEFAULT_FPS),
+        })
+        .collect::<Vec<_>>();
+    let decoded_videos = video::load_inkling_video_pairs(
+        &inputs,
+        video::INKLING_MAX_VIDEO_PAIRS,
+        &video::VideoLimits::from_env(),
+    )
+    .map_err(|error| anyhow!("Failed to load Inkling video request: {error}"))?;
+    let sampled_frame_count = decoded_videos
+        .iter()
+        .map(|clip| clip.sampled_frame_count)
+        .sum::<usize>();
+    let decoded_frame_count = decoded_videos
+        .iter()
+        .map(|clip| clip.frames.len())
+        .sum::<usize>();
     tracing::info!(
-        "Inkling video request: decoded {} video(s) ({} total frames after sampling)",
+        "Inkling video request: planned {} sampled frame(s) and decoded {} unique selected frame(s) across {} clip(s)",
+        sampled_frame_count,
+        decoded_frame_count,
         videos.len(),
-        frames.len()
     );
     let decoded_images = if images.is_empty() {
         Vec::new()
     } else {
         decode_request_images(images)?
     };
+    let prompt_layout = crate::vlm_runtime::InklingVideoPromptLayout::Structured(
+        crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
+    );
     let (embeddings, stats) = crate::vlm_runtime::compute_inkling_video_embeddings(
         inkling,
         prompt_tokens,
         &decoded_images,
-        &frames,
-        sampled_fps,
-        video::INKLING_MAX_VIDEO_PAIRS,
+        &decoded_videos,
+        prompt_layout,
         |text, add_special| {
             tokenizer.encode(text, add_special).map(|tokens| {
                 tokens
