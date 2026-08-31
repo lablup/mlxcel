@@ -445,6 +445,7 @@ impl MlxcelTokenizer {
         // ordering: `<think>` before `<longcat_think>`).
         const SINGLE_TOKEN_PAIRS: &[(&str, &str)] = &[
             ("<think>", "</think>"),
+            ("<|content_thinking|>", "<|end_message|>"),
             ("<longcat_think>", "</longcat_think>"),
         ];
         for (start, end) in SINGLE_TOKEN_PAIRS {
@@ -2344,6 +2345,16 @@ mod tests {
         assert_eq!(markers.think_end_tokens.as_ref().map(Vec::len), Some(1));
         // No tool-call markers were threaded through; halves stay None.
         assert!(!markers.has_tool_calling());
+    }
+
+    #[test]
+    fn infer_thinking_markers_recognizes_inkling_pair() {
+        let tok = mlxcel_with_added(&["<|content_thinking|>", "<|end_message|>"]);
+        let markers = tok.infer_thinking_markers();
+        assert_eq!(markers.think_start.as_deref(), Some("<|content_thinking|>"));
+        assert_eq!(markers.think_end.as_deref(), Some("<|end_message|>"));
+        assert_eq!(markers.think_start_tokens.as_ref().map(Vec::len), Some(1));
+        assert_eq!(markers.think_end_tokens.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

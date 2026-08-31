@@ -44,8 +44,18 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-const THINKING_MARKER_PAIRS: [(&str, &str); 2] =
-    [("<think>", "</think>"), ("<|channel>", "<channel|>")];
+const THINKING_MARKER_PAIRS: [(&str, &str); 3] = [
+    ("<think>", "</think>"),
+    ("<|content_thinking|>", "<|end_message|>"),
+    ("<|channel>", "<channel|>"),
+];
+
+fn has_inkling_primed_boundary(text: &str) -> bool {
+    text.find("<|end_message|>").is_some_and(|close| {
+        let answer = &text[close + "<|end_message|>".len()..];
+        answer.contains("<|message_model|>") && answer.contains("<|content_text|>")
+    })
+}
 
 fn strip_thinking(text: &str) -> String {
     let pairs: &[(&str, &str)] = &THINKING_MARKER_PAIRS;
@@ -63,6 +73,7 @@ fn strip_thinking(text: &str) -> String {
     for &(open, close) in pairs {
         if let Some(close_pos) = result.find(close)
             && !result[..close_pos].contains(open)
+            && (open != "<|content_thinking|>" || has_inkling_primed_boundary(&result))
         {
             result = result[close_pos + close.len()..].to_string();
         }
@@ -106,6 +117,9 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|channel>", "")
         .replace("<|tool_call>", "")
         .replace("<tool_call|>", "")
+        .replace("<|message_model|>", "")
+        .replace("<|content_text|>", "")
+        .replace("<|end_message|>", "")
         .trim()
         .to_string()
 }
@@ -140,10 +154,13 @@ pub fn clean_structural_tokens(raw: &str) -> String {
 // Used by: routes/chat (non-streaming path, --reasoning-format)
 #[must_use]
 pub fn thinking_marker_pair(raw: &str) -> Option<(&'static str, &'static str)> {
-    THINKING_MARKER_PAIRS
-        .iter()
-        .copied()
-        .find(|(_, close)| raw.contains(close))
+    THINKING_MARKER_PAIRS.iter().copied().find(|(open, close)| {
+        if *open == "<|content_thinking|>" {
+            raw.contains(open) || has_inkling_primed_boundary(raw)
+        } else {
+            raw.contains(close)
+        }
+    })
 }
 
 /// The canonical marker pair whose CLOSE marker is `close` (#1470).
@@ -717,6 +734,28 @@ mod tests {
         let input = "reasoning text</think>\n\nHello!";
         let result = strip_thinking(input);
         assert_eq!(result, "\n\nHello!");
+    }
+
+    #[test]
+    fn clean_structural_tokens_handles_inkling_thinking_and_answer_wrappers() {
+        let raw = concat!(
+            "<|content_thinking|>Plan.<|end_message|>",
+            "<|message_model|><|content_text|>Answer.<|end_message|>"
+        );
+        assert_eq!(clean_structural_tokens(raw), "Answer.");
+    }
+
+    #[test]
+    fn clean_structural_tokens_handles_primed_inkling_close() {
+        let raw = "Plan from prompt-open scratchpad.<|end_message|><|message_model|><|content_text|>Answer.";
+        assert_eq!(clean_structural_tokens(raw), "Answer.");
+    }
+
+    #[test]
+    fn clean_structural_tokens_preserves_inkling_answer_closed_by_end_message() {
+        let raw = "<|message_model|><|content_text|>Answer.<|end_message|>";
+        assert_eq!(clean_structural_tokens(raw), "Answer.");
+        assert_eq!(thinking_marker_pair(raw), None);
     }
 
     #[test]

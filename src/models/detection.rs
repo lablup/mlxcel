@@ -482,6 +482,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "lfm2" => Ok(ModelType::Lfm2),
         "lfm2_vl" | "lfm2-vl" => Ok(ModelType::Lfm2VL),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
+        "inkling_mm_model" | "inkling" => Ok(ModelType::Inkling),
         "plamo2" => Ok(ModelType::Plamo2),
         "granitemoehybrid" => Ok(ModelType::GraniteMoeHybrid),
         "nemotron_h" => Ok(ModelType::NemotronH),

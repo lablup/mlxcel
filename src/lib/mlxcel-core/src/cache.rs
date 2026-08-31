@@ -2484,6 +2484,72 @@ impl KVCache {
         self.trim_front_keep_sink(n, 0)
     }
 
+    /// Restore an FP16 cache from a materialized live window and its absolute
+    /// end position.
+    ///
+    /// A front-trimmed cache cannot be reconstructed by assigning `keys`,
+    /// `values`, and `offset` alone: the first physical slot represents
+    /// `offset - live_len`, not absolute position zero. Model-owned snapshot
+    /// users with true-distance sliding windows use this helper to restore that
+    /// invariant without exposing `live_start` as mutable public state.
+    pub fn restore_fp16_live_window(
+        &mut self,
+        keys: Option<UniquePtr<MlxArray>>,
+        values: Option<UniquePtr<MlxArray>>,
+        absolute_offset: i32,
+    ) -> Result<(), String> {
+        if self.mode != KVCacheMode::Fp16 {
+            return Err(format!(
+                "restore_fp16_live_window requires an FP16 cache, got {:?}",
+                self.mode
+            ));
+        }
+        if absolute_offset < 0 {
+            return Err(format!(
+                "restore_fp16_live_window requires a non-negative offset, got {absolute_offset}"
+            ));
+        }
+        if keys.is_some() != values.is_some() {
+            return Err("restore_fp16_live_window requires keys and values together".to_string());
+        }
+        let live_len = match keys.as_ref().and_then(|array| array.as_ref()) {
+            Some(array) => {
+                let shape = ffi::array_shape(array);
+                if shape.len() != 4 {
+                    return Err(format!(
+                        "restore_fp16_live_window expected rank-4 keys, got shape {shape:?}"
+                    ));
+                }
+                let values_shape = ffi::array_shape(
+                    values
+                        .as_ref()
+                        .and_then(|array| array.as_ref())
+                        .ok_or_else(|| {
+                            "restore_fp16_live_window requires a value array".to_string()
+                        })?,
+                );
+                if values_shape != shape {
+                    return Err(format!(
+                        "restore_fp16_live_window key/value shape mismatch: {shape:?} vs {values_shape:?}"
+                    ));
+                }
+                shape[2]
+            }
+            None => 0,
+        };
+        if live_len > absolute_offset {
+            return Err(format!(
+                "restore_fp16_live_window live length {live_len} exceeds absolute offset {absolute_offset}"
+            ));
+        }
+
+        self.keys = keys;
+        self.values = values;
+        self.offset = absolute_offset;
+        self.live_start = absolute_offset - live_len;
+        Ok(())
+    }
+
     /// Front-trim that pins the first `keep` tokens as an attention sink.
     ///
     /// A plain front trim (`keep == 0`, what [`Self::trim_front`] forwards)

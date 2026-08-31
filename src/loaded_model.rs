@@ -201,6 +201,7 @@ pub enum LoadedModel {
     FalconH1(models::FalconH1Model),
     Lfm2(models::Lfm2Model),
     Lfm2Moe(models::Lfm2Model),
+    Inkling(models::InklingModel),
     Plamo2(models::Plamo2Model),
     GraniteMoeHybrid(models::GraniteMoeHybridModel),
     NemotronH(models::NemotronHModel),
@@ -363,6 +364,7 @@ macro_rules! delegate_language_model {
             LoadedModel::FalconH1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Lfm2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Lfm2Moe(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Inkling(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Plamo2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GraniteMoeHybrid(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronH(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -417,6 +419,30 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, forward(input_ids, caches, mask))
     }
 
+    fn forward_last_logits(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<mlxcel_core::MlxArray> {
+        delegate_language_model!(self, forward_last_logits(input_ids, caches, mask, last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<mlxcel_core::MlxArray> {
+        delegate_language_model!(
+            self,
+            forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+        )
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &mlxcel_core::MlxArray,
@@ -427,6 +453,28 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(
             self,
             forward_with_embeddings(input_ids, input_embeddings, caches, mask)
+        )
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        input_embeddings: Option<&mlxcel_core::MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<mlxcel_core::MlxArray> {
+        delegate_language_model!(
+            self,
+            forward_last_logits_with_embeddings_and_sequence_id(
+                input_ids,
+                input_embeddings,
+                seq_id,
+                caches,
+                mask,
+                last_pos
+            )
         )
     }
 

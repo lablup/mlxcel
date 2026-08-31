@@ -134,6 +134,7 @@ pub mod helium;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
+pub mod inkling;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
@@ -277,6 +278,7 @@ pub use granitemoehybrid::GraniteMoeHybridModel;
 pub use helium::HeliumModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
+pub use inkling::InklingModel;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
@@ -567,6 +569,9 @@ pub enum ModelType {
     Lfm2Moe,
     Lfm2VL, // LFM2-VL (lfm2_vl): packed-patch SigLIP2 ViT + LFM2 hybrid text
 
+    // Thinking Machines Inkling text backbone
+    Inkling,
+
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
 
@@ -787,6 +792,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Lfm2,
     ModelType::Lfm2Moe,
     ModelType::Lfm2VL,
+    ModelType::Inkling,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
     // IBM Granite 4.x hybrid
@@ -1034,6 +1040,10 @@ impl ModelType {
             ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
             ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
             ModelType::Lfm2VL => ("LFM2-VL (packed-patch ViT + LFM2 hybrid text)", "LFM2"),
+            ModelType::Inkling => (
+                "Inkling (relative-bias attention + shared-expert MoE)",
+                "Inkling",
+            ),
 
             // ----- Preferred Networks -----
             ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
@@ -1352,6 +1362,7 @@ mod metadata_tests {
             Lfm2,
             Lfm2Moe,
             Lfm2VL,
+            Inkling,
             Plamo2,
             GraniteMoeHybrid,
             KimiLinear,

@@ -16,7 +16,7 @@
 //!
 //! Used by: KimiLinear, LongcatFlashNgram, DeepSeekV3, DeepSeekV32, GLM4Moe,
 //!          GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe, PhiMoE,
-//!          OLMoE, etc.
+//!          OLMoE, Inkling, etc.
 //!
 //! SwitchLinear: per-expert 3D matmul (quantized via gather_qmm, regular via gather_mm)
 //! SwitchGLU: SwiGLU MLP routing through SwitchLinear
@@ -784,6 +784,50 @@ impl SwitchGLU {
         }
     }
 
+    /// Run selected experts with optional per-expert gate and output scales.
+    ///
+    /// ModelOpt NVFP4 exports keep a scalar `weight_scale_2` for each expert
+    /// plane outside the native block scales. Inkling needs the W13 scalar on
+    /// the activated intermediate and the product of W13/W2 scalars on the
+    /// expert output. The scaled path deliberately uses the unsorted gather
+    /// form: the selected indices retain their `[tokens, top_k]` layout, which
+    /// lets the sidecars broadcast without building a second permutation.
+    /// Callers with no sidecars stay on [`Self::forward`] and retain its sorted
+    /// large-prefill optimization.
+    pub fn forward_with_expert_scales(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        gate_scale: Option<&MlxArray>,
+        out_scale: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        if gate_scale.is_none() && out_scale.is_none() {
+            return self.forward(x, indices);
+        }
+
+        let x_exp = mlxcel_core::expand_dims(x, -2);
+        let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
+        let mut x_gate = self.gate_proj.forward(&x_exp, indices, false);
+        let x_up = self.up_proj.forward(&x_exp, indices, false);
+        if let Some(scale) = gate_scale {
+            let selected = mlxcel_core::take(scale, indices, 0);
+            let selected = mlxcel_core::expand_dims(&selected, -1);
+            let selected = mlxcel_core::expand_dims(&selected, -1);
+            let selected = mlxcel_core::astype(&selected, mlxcel_core::array_dtype(&x_gate));
+            x_gate = mlxcel_core::multiply(&x_gate, &selected);
+        }
+        let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+        let mut output = self.down_proj.forward(&activated, indices, false);
+        if let Some(scale) = out_scale {
+            let selected = mlxcel_core::take(scale, indices, 0);
+            let selected = mlxcel_core::expand_dims(&selected, -1);
+            let selected = mlxcel_core::expand_dims(&selected, -1);
+            let selected = mlxcel_core::astype(&selected, mlxcel_core::array_dtype(&output));
+            output = mlxcel_core::multiply(&output, &selected);
+        }
+        mlxcel_core::squeeze_axis(&output, -2)
+    }
+
     /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2b).
     ///
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
@@ -893,6 +937,43 @@ impl SwitchGLU {
             bits,
             ["gate_proj", "up_proj", "down_proj"],
         )
+    }
+
+    /// Load a stacked SwiGLU expert plane with an explicit quantization mode.
+    ///
+    /// Most families use affine experts and call [`Self::from_weights`].
+    /// Inkling's ModelOpt export uses native NVFP4 planes without zero-point
+    /// biases, so its loader must pass `"nvfp4"` through to every projection.
+    pub fn from_weights_with_mode(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+        mode: &str,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            gate_proj: SwitchLinear::from_weights_with_mode(
+                weights,
+                &format!("{prefix}.gate_proj"),
+                group_size,
+                bits,
+                mode,
+            )?,
+            up_proj: SwitchLinear::from_weights_with_mode(
+                weights,
+                &format!("{prefix}.up_proj"),
+                group_size,
+                bits,
+                mode,
+            )?,
+            down_proj: SwitchLinear::from_weights_with_mode(
+                weights,
+                &format!("{prefix}.down_proj"),
+                group_size,
+                bits,
+                mode,
+            )?,
+        })
     }
 
     /// Like [`SwitchGLU::from_weights`], but with overridable projection leaf
@@ -1187,6 +1268,63 @@ pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> Un
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expert_scales_broadcast_over_multiple_tokens_and_experts() {
+        let mut weights = WeightMap::new();
+        let gate: Vec<f32> = (0..12).map(|i| (i as f32 + 1.0) / 20.0).collect();
+        let up: Vec<f32> = (0..12).map(|i| (i as f32 + 2.0) / 17.0).collect();
+        let down: Vec<f32> = (0..12).map(|i| (i as f32 - 4.0) / 19.0).collect();
+        weights.insert(
+            "moe.gate_proj.weight".into(),
+            mlxcel_core::from_slice_f32(&gate, &[2, 3, 2]),
+        );
+        weights.insert(
+            "moe.up_proj.weight".into(),
+            mlxcel_core::from_slice_f32(&up, &[2, 3, 2]),
+        );
+        weights.insert(
+            "moe.down_proj.weight".into(),
+            mlxcel_core::from_slice_f32(&down, &[2, 2, 3]),
+        );
+        let moe = SwitchGLU::from_weights_with_mode(&weights, "moe", 64, 4, "affine").unwrap();
+        let x_values = [1.0, -0.5, 0.25, 2.0, -1.5, 0.75];
+        let index_values = [0_u32, 1, 1, 0, 0, 0];
+        let gate_scale_values = [1.0_f32, 1.5];
+        let out_scale_values = [0.75_f32, 2.0];
+        let x = mlxcel_core::from_slice_f32(&x_values, &[3, 2]);
+        let indices = mlxcel_core::from_slice_u32(&index_values, &[3, 2]);
+        let gate_scale = mlxcel_core::from_slice_f32(&gate_scale_values, &[2]);
+        let out_scale = mlxcel_core::from_slice_f32(&out_scale_values, &[2]);
+        let output =
+            moe.forward_with_expert_scales(&x, &indices, Some(&gate_scale), Some(&out_scale));
+        assert_eq!(mlxcel_core::array_shape(&output), [3, 2, 2]);
+
+        let mut expected = Vec::with_capacity(12);
+        for token in 0..3 {
+            for selected in 0..2 {
+                let expert = index_values[token * 2 + selected] as usize;
+                let input = &x_values[token * 2..token * 2 + 2];
+                let mut activated = [0.0_f32; 3];
+                for intermediate in 0..3 {
+                    let base = expert * 6 + intermediate * 2;
+                    let gate_value = (gate[base] * input[0] + gate[base + 1] * input[1])
+                        * gate_scale_values[expert];
+                    let up_value = up[base] * input[0] + up[base + 1] * input[1];
+                    activated[intermediate] = gate_value / (1.0 + (-gate_value).exp()) * up_value;
+                }
+                for hidden in 0..2 {
+                    let base = expert * 6 + hidden * 3;
+                    let value: f32 = (0..3).map(|i| down[base + i] * activated[i]).sum();
+                    expected.push(value * out_scale_values[expert]);
+                }
+            }
+        }
+        let expected = mlxcel_core::from_slice_f32(&expected, &[3, 2, 2]);
+        assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
+            &output, &expected, 1e-5, 1e-5
+        )));
+    }
 
     #[test]
     fn moe_weighted_sum_preserves_bf16_output_dtype() {

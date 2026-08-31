@@ -70,6 +70,7 @@ enum SpecialWeightLoaderKind {
     OwnedConfig,
     NemotronH,
     KimiLinear,
+    Inkling,
     Longcat,
     Rwkv7,
 }
@@ -90,6 +91,7 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
         | ModelType::RecurrentGemma => Some(SpecialWeightLoaderKind::OwnedConfig),
         ModelType::NemotronH => Some(SpecialWeightLoaderKind::NemotronH),
         ModelType::KimiLinear => Some(SpecialWeightLoaderKind::KimiLinear),
+        ModelType::Inkling => Some(SpecialWeightLoaderKind::Inkling),
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => {
             Some(SpecialWeightLoaderKind::Longcat)
         }
@@ -253,6 +255,15 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             model.set_eos_token_ids(super::read_eos_token_ids(model_path));
             LoadedModel::KimiLinear(model)
+        }
+        SpecialWeightLoaderKind::Inkling => {
+            let args =
+                models::inkling::InklingConfig::from_json_with_sidecar(model_path, config_str)
+                    .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let owned = copy_weight_map(weights);
+            let model = models::InklingModel::from_weights(args, owned)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            LoadedModel::Inkling(model)
         }
         SpecialWeightLoaderKind::Longcat => {
             let args: models::longcat_flash_ngram::LongcatFlashNgramConfig =
