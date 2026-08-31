@@ -517,6 +517,28 @@ impl ChatTemplateProcessor {
         self.template.contains("thinking_mode")
     }
 
+    /// The string literal this template gates `thinking_mode` on, or `None`
+    /// when the template never mentions the variable.
+    ///
+    /// #811 hardcoded `"enabled"`, which is one family's convention. The
+    /// DeepSeek-V4 family uses another: alias the variable through `default()`
+    /// and compare the alias against `'thinking'` (issue #819). Injecting the
+    /// wrong sentinel is silent, because a template that does not recognise
+    /// the value simply takes its non-thinking branch, so a caller who asked
+    /// for reasoning gets a normal completion and no error.
+    ///
+    /// Falls back to `"enabled"` whenever the template's gate cannot be read
+    /// unambiguously, which keeps every template that works today working.
+    fn thinking_mode_sentinel(&self) -> Option<String> {
+        if !self.wants_thinking_mode_alias() {
+            return None;
+        }
+        Some(
+            derive_thinking_mode_sentinel(&self.template)
+                .unwrap_or_else(|| DEFAULT_THINKING_MODE_SENTINEL.to_string()),
+        )
+    }
+
     /// Return whether the template uses the `tools` variable, without caching.
     ///
     /// Uses a conservative string-based heuristic so it can be called from
@@ -729,7 +751,7 @@ impl ChatTemplateProcessor {
             kwargs,
             self.default_enable_thinking,
             self.wants_bare_thinking_alias(),
-            self.wants_thinking_mode_alias(),
+            self.thinking_mode_sentinel().as_deref(),
         );
 
         // Render directly: minijinja reproduces the template's own
@@ -809,7 +831,7 @@ impl ChatTemplateProcessor {
             kwargs,
             self.default_enable_thinking,
             self.wants_bare_thinking_alias(),
-            self.wants_thinking_mode_alias(),
+            self.thinking_mode_sentinel().as_deref(),
         );
 
         // Render directly: minijinja reproduces the template's own
@@ -849,13 +871,117 @@ fn compile_chat_template_environment(
 /// the caller already supplied an explicit `thinking` kwarg — that override
 /// always wins.
 ///
-/// When `thinking_mode_alias` is `true` (see
-/// [`ChatTemplateProcessor::wants_thinking_mode_alias`]) and the resolved
-/// `enable_thinking` value is `true`, `thinking_mode: "enabled"` is injected
+/// When `thinking_mode_sentinel` is `Some` (see
+/// [`ChatTemplateProcessor::thinking_mode_sentinel`]) and the resolved
+/// `enable_thinking` value is `true`, that literal is injected as
+/// `thinking_mode`
 /// into the context, unless the caller already supplied an explicit
 /// `thinking_mode` kwarg (that override always wins). Nothing is injected
 /// when thinking is disabled — templates default the variable themselves in
 /// that case (issue #775).
+/// The sentinel #811 established, and the fallback when a template's gate
+/// cannot be read unambiguously (issue #819).
+const DEFAULT_THINKING_MODE_SENTINEL: &str = "enabled";
+
+/// Read a leading single- or double-quoted string literal.
+fn leading_string_literal(s: &str) -> Option<String> {
+    let mut chars = s.chars();
+    let quote = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &s[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+/// Whether `haystack` ends with `ident` as a whole word rather than as the
+/// tail of a longer identifier, so `enable_thinking_mode` does not match
+/// `thinking_mode`.
+fn ends_with_ident(haystack: &str, ident: &str) -> bool {
+    let Some(head) = haystack.strip_suffix(ident) else {
+        return false;
+    };
+    !head
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Derive the literal a template compares `thinking_mode` against.
+///
+/// Handles both known conventions: a direct `thinking_mode == "enabled"`, and
+/// the aliased `{% set mode = thinking_mode|default('chat') %}` followed by
+/// `mode == 'thinking'`. Returns `None` when the gate is absent or ambiguous,
+/// leaving the caller to fall back.
+///
+/// The `default(...)` argument is deliberately not a candidate. It is the
+/// template's OFF value (`'chat'` for DeepSeek-V4), so injecting it would be
+/// worse than injecting nothing.
+fn derive_thinking_mode_sentinel(template: &str) -> Option<String> {
+    // Identifiers carrying the value: the variable, plus any `set` alias of it.
+    let mut idents = vec!["thinking_mode".to_string()];
+    for seg in template.split("set ").skip(1) {
+        let Some((lhs, rhs)) = seg.split_once('=') else {
+            continue;
+        };
+        let name = lhs.trim();
+        if !name.is_empty()
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && rhs.trim_start().starts_with("thinking_mode")
+        {
+            idents.push(name.to_string());
+        }
+    }
+
+    // Literals those identifiers are compared against, on either side of `==`.
+    let mut lits: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut idx = 0usize;
+    while let Some(off) = template[idx..].find("==") {
+        let at = idx + off;
+        let left = template[..at].trim_end();
+        let right = template[at + 2..].trim_start();
+        if idents.iter().any(|i| ends_with_ident(left, i))
+            && let Some(lit) = leading_string_literal(right)
+        {
+            lits.insert(lit);
+        }
+        if let Some(lit) = trailing_string_literal(left)
+            && idents.iter().any(|i| starts_with_ident(right, i))
+        {
+            lits.insert(lit);
+        }
+        idx = at + 2;
+    }
+
+    match lits.len() {
+        1 => lits.into_iter().next(),
+        _ => None,
+    }
+}
+
+/// Read a trailing single- or double-quoted string literal.
+fn trailing_string_literal(s: &str) -> Option<String> {
+    let quote = s.chars().next_back()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let head = &s[..s.len() - quote.len_utf8()];
+    let start = head.rfind(quote)?;
+    Some(head[start + quote.len_utf8()..].to_string())
+}
+
+/// Whether `haystack` starts with `ident` as a whole word.
+fn starts_with_ident(haystack: &str, ident: &str) -> bool {
+    let Some(tail) = haystack.strip_prefix(ident) else {
+        return false;
+    };
+    !tail
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
 fn build_template_context(
     messages: minijinja::Value,
     bos_token: &str,
@@ -865,7 +991,7 @@ fn build_template_context(
     kwargs: &ChatTemplateKwargs,
     default_enable_thinking: bool,
     bare_thinking_alias: bool,
-    thinking_mode_alias: bool,
+    thinking_mode_sentinel: Option<&str>,
 ) -> minijinja::Value {
     // Start with the default context fields.
     let mut ctx: std::collections::BTreeMap<&str, minijinja::Value> =
@@ -952,16 +1078,20 @@ fn build_template_context(
     // Model-aware `thinking_mode` alias (issue #775): templates detected by
     // `wants_thinking_mode_alias` gate reasoning on a `thinking_mode` string
     // variable rather than the boolean `enable_thinking`. When thinking is
-    // enabled, inject `thinking_mode: "enabled"` so those templates actually
+    // enabled, inject the literal the template actually gates on (#819) so
+    // those templates actually
     // take their thinking branch, unless the caller already supplied an
     // explicit `thinking_mode` kwarg (that override always wins). Inject
     // nothing when thinking is disabled — templates default the variable
     // themselves in that case, and there is no well-known "disabled" spelling
     // to standardize on across template families.
-    if thinking_mode_alias && effective_enable_thinking && !owned.contains_key("thinking_mode") {
+    if let Some(sentinel) = thinking_mode_sentinel
+        && effective_enable_thinking
+        && !owned.contains_key("thinking_mode")
+    {
         owned.insert(
             "thinking_mode".to_string(),
-            minijinja::Value::from("enabled"),
+            minijinja::Value::from(sentinel),
         );
     }
 
@@ -1640,7 +1770,7 @@ mod tests {
             kwargs,
             processor.default_enable_thinking,
             processor.wants_bare_thinking_alias(),
-            processor.wants_thinking_mode_alias(),
+            processor.thinking_mode_sentinel().as_deref(),
         );
 
         tmpl.render(context)
@@ -3808,6 +3938,216 @@ TOOL
 
         let dsv32 = ChatTemplateProcessor::with_template(DEEPSEEK_V32_LIKE_TEMPLATE.to_string());
         assert!(!dsv32.wants_thinking_mode_alias());
+    }
+
+    /// The real DeepSeek-V4-flash gate, verbatim in shape: alias the variable
+    /// through `default()`, then compare the alias against `'thinking'`.
+    /// `THINKING_MODE_LIKE_TEMPLATE` above compares `thinking_mode` directly
+    /// against `"enabled"`, which is the convention #811 was written for, so
+    /// it cannot see this one.
+    const DEEPSEEK_V4_LIKE_TEMPLATE: &str = r#"{%- set mode = thinking_mode|default('chat') -%}{%- if mode == 'thinking' -%}<think>{%- else -%}</think>{%- endif -%}{{ messages[0].content }}"#;
+
+    /// The same check against the checkpoint's own `chat_template.jinja`
+    /// rather than a reduction of it, so the inline shape above cannot quietly
+    /// drift from the file it stands in for. Skips when the checkpoint is
+    /// absent.
+    #[test]
+    fn issue_819_real_checkpoint_template_opens_the_thinking_branch() {
+        let path = std::path::Path::new("models/deepseek-v4-flash-4bit/chat_template.jinja");
+        let Ok(template) = std::fs::read_to_string(path) else {
+            eprintln!("Skipping: {} not present", path.display());
+            return;
+        };
+        let processor = ChatTemplateProcessor::with_template(template);
+        assert!(processor.wants_thinking_mode_alias());
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let enabled = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        let explicit =
+            ChatTemplateKwargs::from_json_str(r#"{"thinking_mode": "thinking"}"#).unwrap();
+        let thinking = processor
+            .apply_with_kwargs(&messages, None, &explicit)
+            .unwrap();
+        eprintln!("[819] enable_thinking=true tail: {:?}", tail(&enabled));
+        eprintln!("[819] thinking_mode=thinking tail: {:?}", tail(&thinking));
+
+        assert!(
+            enabled.ends_with("<think>"),
+            "real template with enable_thinking=true must open the thinking \
+             branch (issue #819); got tail {:?}",
+            tail(&enabled)
+        );
+        assert!(
+            thinking.ends_with("<think>"),
+            "an explicit thinking_mode=thinking must also open it; got tail {:?}",
+            tail(&thinking)
+        );
+        assert_eq!(
+            enabled, thinking,
+            "the derived sentinel must reach the same render as the explicit \
+             workaround callers use today"
+        );
+    }
+
+    fn tail(s: &str) -> String {
+        s.chars()
+            .rev()
+            .take(24)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect()
+    }
+
+    /// The derivation must be conservative: anything it cannot read
+    /// unambiguously falls back to `"enabled"`, so every template that worked
+    /// before #819 keeps working. Guessing would be worse than the bug it
+    /// replaces, because a wrong sentinel is silent.
+    #[test]
+    fn thinking_mode_sentinel_falls_back_when_the_gate_is_not_readable() {
+        let sentinel =
+            |t: &str| ChatTemplateProcessor::with_template(t.to_string()).thinking_mode_sentinel();
+
+        // No mention of the variable: no injection at all.
+        assert_eq!(sentinel(r#"{{ messages[0].content }}"#), None);
+
+        // Mentioned but never compared: nothing to derive.
+        assert_eq!(
+            sentinel(r#"{{ thinking_mode }}{{ messages[0].content }}"#).as_deref(),
+            Some("enabled")
+        );
+
+        // Two different gate literals: ambiguous, so do not guess.
+        assert_eq!(
+            sentinel(
+                r#"{% if thinking_mode == 'deep' %}a{% elif thinking_mode == 'light' %}b{% endif %}"#
+            )
+            .as_deref(),
+            Some("enabled")
+        );
+
+        // The #811 convention is untouched.
+        assert_eq!(
+            sentinel(THINKING_MODE_LIKE_TEMPLATE).as_deref(),
+            Some("enabled")
+        );
+
+        // The same literal compared twice is still unambiguous, which is the
+        // real DeepSeek-V4 shape (it gates on 'thinking' in two places).
+        assert_eq!(
+            sentinel(
+                r#"{%- set m = thinking_mode|default('chat') -%}{% if m == 'thinking' %}a{% endif %}{% if m == 'thinking' %}b{% endif %}"#
+            )
+            .as_deref(),
+            Some("thinking")
+        );
+
+        // Reversed comparison order.
+        assert_eq!(
+            sentinel(r#"{% if 'thinking' == thinking_mode %}a{% endif %}"#).as_deref(),
+            Some("thinking")
+        );
+
+        // A longer identifier that merely ends in the variable's name must not
+        // be mistaken for it.
+        assert_eq!(
+            sentinel(r#"{{ thinking_mode }}{% if my_thinking_mode == 'x' %}a{% endif %}"#)
+                .as_deref(),
+            Some("enabled")
+        );
+
+        // The default() argument is the OFF value and must never be chosen;
+        // injecting it would be worse than injecting nothing.
+        assert_eq!(
+            sentinel(r#"{%- set m = thinking_mode|default('chat') -%}{% if m == 'thinking' %}a{% endif %}"#)
+                .as_deref(),
+            Some("thinking")
+        );
+    }
+
+    /// #811's precedence rules survive the change: an explicit kwarg still
+    /// wins over the derived sentinel, and nothing is injected when thinking
+    /// is off.
+    #[test]
+    fn derived_sentinel_keeps_811_precedence() {
+        let processor = ChatTemplateProcessor::with_template(DEEPSEEK_V4_LIKE_TEMPLATE.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+
+        // Explicit kwarg wins, even one the template does not recognise.
+        let kwargs = ChatTemplateKwargs::from_json_str(
+            r#"{"enable_thinking": true, "thinking_mode": "chat"}"#,
+        )
+        .unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.starts_with("</think>"),
+            "an explicit thinking_mode must override the derived one; got: {out:?}"
+        );
+
+        // Thinking off: inject nothing, let the template default itself.
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": false}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+        assert!(
+            out.starts_with("</think>"),
+            "thinking disabled must render the non-thinking branch; got: {out:?}"
+        );
+    }
+
+    /// Issue #819: the sentinel is derived from the template, so the
+    /// DeepSeek-V4 gate opens. Before the fix this rendered the non-thinking
+    /// branch with no error, which is why the bug survived: a caller who asked
+    /// for reasoning simply got a normal completion.
+    #[test]
+    fn issue_819_deepseek_v4_gate_opens_from_a_derived_sentinel() {
+        let processor = ChatTemplateProcessor::with_template(DEEPSEEK_V4_LIKE_TEMPLATE.to_string());
+        assert!(
+            processor.wants_thinking_mode_alias(),
+            "the template references thinking_mode, so the alias must engage"
+        );
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let kwargs = ChatTemplateKwargs::from_json_str(r#"{"enable_thinking": true}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &kwargs)
+            .unwrap();
+
+        assert_eq!(
+            processor.thinking_mode_sentinel().as_deref(),
+            Some("thinking"),
+            "the sentinel must come from the template's own gate, not the \
+             hardcoded \"enabled\""
+        );
+        assert!(
+            out.starts_with("<think>"),
+            "enable_thinking=true must open the thinking branch; got: {out:?}"
+        );
+
+        // The documented workaround, and the behaviour a fix must produce.
+        let explicit =
+            ChatTemplateKwargs::from_json_str(r#"{"thinking_mode": "thinking"}"#).unwrap();
+        let out = processor
+            .apply_with_kwargs(&messages, None, &explicit)
+            .unwrap();
+        assert!(
+            out.starts_with("<think>"),
+            "an explicit thinking_mode=thinking must open the thinking branch; got: {out:?}"
+        );
     }
 
     #[test]
