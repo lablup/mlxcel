@@ -73,6 +73,13 @@ mod ffi {
         /// Number of usable GPUs for the active backend (always >= 1).
         fn gpu_device_count() -> i32;
 
+        /// CUDA compute capability of GPU `index`, packed as
+        /// `major * 1000 + minor`, or `-1` when unknown (Metal, CPU-only,
+        /// or no device at that index). Prefer the safe wrapper
+        /// [`crate::hardware::cuda_compute_capability`], which caches the
+        /// value and unpacks it into `(major, minor)`.
+        fn gpu_compute_capability(index: i32) -> i32;
+
         /// Create a new stream pinned to GPU `index` (0-based, unvalidated).
         fn new_stream_on_gpu_index(index: i32) -> UniquePtr<MlxStream>;
 
@@ -3421,6 +3428,12 @@ pub mod streams;
 
 pub mod dtype;
 
+// CUDA compute capability: the compiled architecture list, the running
+// device's capability, and the coverage predicate over the two (#1537).
+// Re-exported through `hardware` so callers have one place to ask about the
+// machine, whichever backend they are on.
+pub mod cuda_arch;
+
 // Runtime Apple Silicon generation detection.
 // Public so that mlxcel (the main crate) can log hardware info at startup.
 pub mod hardware;
@@ -3476,6 +3489,13 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "ffi_tests.rs"]
 mod ffi_tests;
+
+// CUDA architecture-list parsing and the coverage/mismatch predicate. Pure
+// functions over strings and tuples, so these run on every host including
+// ones with no GPU at all.
+#[cfg(test)]
+#[path = "cuda_arch_tests.rs"]
+mod cuda_arch_tests;
 
 // Numeric-parity, determinism, and SGY-invariance tests for the fused
 // single-token decode-MoE GeGLU kernel (#886). GPU-only (Metal or CUDA);

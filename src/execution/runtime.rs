@@ -81,7 +81,44 @@ pub struct RuntimeSetup {
     pub invalid_device_override: Option<String>,
 }
 
+/// Initialize the runtime, refusing to start when this binary's compiled CUDA
+/// architectures do not cover the GPU in this host (issue #1537).
+///
+/// This is the entry point every binary-facing caller uses. The check runs
+/// before any device state is touched, so an incompatible build reports which
+/// architectures it carries and which one it found, instead of continuing to
+/// the first kernel launch and dying there on a CUDA load error that names
+/// neither. It is inert on Metal, on CPU-only builds, and on any CUDA build
+/// whose architecture list does cover the device, which is every supported
+/// configuration.
+///
+/// `MLXCEL_DEVICE=cpu` bypasses the refusal: a binary that cannot drive this
+/// host's GPU can still run on its CPU, and taking that away would remove the
+/// one workaround available to someone holding the wrong archive.
+///
+/// Tests and other in-process callers that do not own the process exit path
+/// keep using [`initialize_runtime`], which performs the same setup without the
+/// refusal.
+pub fn initialize_runtime_checked() -> Result<RuntimeSetup, mlxcel_core::hardware::CudaArchMismatch>
+{
+    // Trace before the refusal, so `MLXCEL_TRACE_ARCH` still explains an
+    // incompatible build rather than going quiet on the one path where the
+    // architecture picture matters most.
+    mlxcel_core::hardware::trace_arch_once();
+    let (requested_device, _) =
+        resolve_runtime_device(std::env::var(RUNTIME_DEVICE_ENV).ok().as_deref());
+    if requested_device.uses_gpu() {
+        mlxcel_core::hardware::enforce_cuda_arch_compatibility()?;
+    }
+    Ok(initialize_runtime())
+}
+
 pub fn initialize_runtime() -> RuntimeSetup {
+    // Device init is the once-per-process point where the architecture trace
+    // has something to say, so emit it here; it is a no-op unless
+    // `MLXCEL_TRACE_ARCH` is set, and a no-op after the first call.
+    mlxcel_core::hardware::trace_arch_once();
+
     let (requested_device, invalid_device_override) =
         resolve_runtime_device(std::env::var(RUNTIME_DEVICE_ENV).ok().as_deref());
 

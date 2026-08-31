@@ -178,6 +178,21 @@ MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda
 MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
+If the architecture list a binary was built with does not cover the GPU it is
+started on, it refuses to start and says so, naming both the list it carries and
+the compute capability it found, instead of failing later with an opaque CUDA
+load error at the first kernel launch (issue #1537). Two cases produce that: a
+published x86_64 archive, whose matrix starts at `80`, on a pre-Ampere card such
+as a V100; and a source build made on a host where `nvidia-smi` was unavailable,
+which falls back to `90a` and so cannot run on its own build machine. The fix in
+both cases is the rebuild above with `MLX_CUDA_ARCHITECTURES` set to the target
+device. Set `MLXCEL_TRACE_ARCH` (see
+[Environment variables](environment-variables.md)) to print the running
+capability, the compiled list, and whether the device is served by a cubin or by
+JIT-compiled PTX; the same summary appears next to the `Detected N GPU(s)` line
+at startup. `MLXCEL_DEVICE=cpu` bypasses the refusal, so a binary built for the
+wrong architecture can still be run on the CPU while a correct one is built.
+
 The repository release workflow builds two Linux CUDA targets on self-hosted
 runners, each as one fat binary: aarch64 covering GH200 (`90a`), GB200 (`100`),
 and GB10 (`121`) in a single build (`90a;100;121`), and x86_64 covering Ampere

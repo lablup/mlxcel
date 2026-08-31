@@ -105,6 +105,20 @@ void synchronize_thread_local_stream(const MlxThreadLocalStream& tls);
 // CPU-only build clamps to 1. Always returns >= 1.
 int32_t gpu_device_count();
 
+// CUDA compute capability of GPU `index`, packed as `major * 1000 + minor`
+// (7000 for a V100's 7.0, 12001 for GB10's 12.1), or -1 when the value is
+// unknown.
+//
+// Backend-agnostic: it reads MLX's own `device_info` map, whose CUDA backend
+// fills `compute_capability_major` / `compute_capability_minor` from the
+// `cudaDeviceGetAttribute` values it already caches per device. No second CUDA
+// call is issued and no CUDA header is required, so the same symbol links on
+// Metal and CPU-only builds, where those keys are absent and -1 comes back.
+// Reading device properties does not load a cubin, so this stays callable on a
+// binary whose compiled architecture list does not cover the running device,
+// which is exactly the case the mismatch check (#1537) has to report.
+int32_t gpu_compute_capability(int32_t index);
+
 // New stream pinned to GPU `index` (0-based). `index` must be in
 // `[0, gpu_device_count())`; the Rust wrapper validates this before
 // calling, so an out-of-range index here is undefined per MLX.

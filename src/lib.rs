@@ -69,7 +69,9 @@ mod sampling_observability_tests;
 pub use execution::kv_cache_advisor;
 pub use execution::memory_estimate;
 pub use execution::quant_advisor;
-pub use execution::runtime::{RuntimeDevice, RuntimeSetup, initialize_runtime};
+pub use execution::runtime::{
+    RuntimeDevice, RuntimeSetup, initialize_runtime, initialize_runtime_checked,
+};
 pub use execution::sampling;
 pub use mlxcel_core::generate;
 pub use mlxcel_core::generate::{

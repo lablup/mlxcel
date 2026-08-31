@@ -4,7 +4,12 @@
 // transpose=false); (2) split long-prompt quantized matmuls so no CUDA launch
 // exceeds the gridDim.y/z limit of 65535 and no `l = out.size()/(m*n)` int32
 // multiply overflows (see lablup/mlxcel#648); (3) route sorted M==1 GatherQMM
-// (MoE prefill) through dequant + CUTLASS grouped GEMM (lablup/mlxcel#629).
+// (MoE prefill) through dequant + CUTLASS grouped GEMM (lablup/mlxcel#629);
+// (4) report the quantized-matmul path chosen on the first call under
+// MLXCEL_TRACE_ARCH (lablup/mlxcel#1537). The choice between qmm_sm90,
+// qmm_sm80, the naive kernel and qmv is the most architecture-dependent
+// dispatch in decode and MLX exposes no hook for it, so the one-shot trace has
+// to be emitted from the dispatch site itself.
 // Synced to upstream 9a795735. Upstream did not touch
 // mlx/backend/cuda/quantized/ at all between 2c46b953 and 9a795735, so this
 // overlay carries the same delta it did at the previous sync and the call sites
@@ -29,12 +34,41 @@
 #include <nvtx3/nvtx3.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 
 namespace mlx::core {
 
 namespace {
+
+// One-shot report of the quantized-matmul path this build actually takes,
+// gated on MLXCEL_TRACE_ARCH (lablup/mlxcel#1537). Which of qmm_sm90 /
+// qmm_sm80 / qmm_naive is reachable is decided by the compiled architecture
+// list and the running device together (MLX_CUDA_SM90A_ENABLED is defined only
+// when "90a" is in the list, and each supports_* predicate re-checks the
+// device), so this is the observable end of the capability plumbing: the Rust
+// side prints what the binary was compiled for and what it is running on, and
+// this prints which kernel that combination selected. Printed at most once per
+// process, to stderr, and completely inert when the variable is unset.
+void trace_quantized_matmul_path(const char* path, int cc_major, int cc_minor) {
+  // The environment is read once, not per call: this sits on the decode path,
+  // where a quantized matmul runs several times per token, and getenv is a
+  // linear scan of environ. Everything after the first call is one relaxed
+  // load.
+  static const bool enabled = std::getenv("MLXCEL_TRACE_ARCH") != nullptr;
+  static std::atomic<bool> emitted{false};
+  if (!enabled || emitted.exchange(true)) {
+    return;
+  }
+  std::fprintf(
+      stderr,
+      "[mlxcel arch] quantized matmul path on first call: %s (device sm_%d%d)\n",
+      path,
+      cc_major,
+      cc_minor);
+}
 
 // CUDA gridDim.y and gridDim.z are capped at 65535. The quantized-matmul
 // kernels place the row count (m) in grid.y and the batch/gather count (l) in
@@ -225,10 +259,18 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     });
   };
 
+  const int cc_major = encoder.device().compute_capability_major();
+  const int cc_minor = encoder.device().compute_capability_minor();
+  auto trace = [&](const char* path) {
+    trace_quantized_matmul_path(path, cc_major, cc_minor);
+  };
+
   if (can_use_qmm_sm90) {
     if (can_use_qmv && (M == 1 && B == 1 && N <= 16384 && K <= 16384)) {
+      trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
+      trace("qmm_sm90");
       call_qmm_sm90();
     }
     return;
@@ -236,8 +278,10 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   if (can_use_qmm_sm80) {
     if (can_use_qmv && (M * B < 8)) {
+      trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
+      trace("qmm_sm80");
       call_qmm_sm80();
     }
     return;
@@ -245,14 +289,17 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   if (can_use_qmm_naive) {
     if (can_use_qmv && (M * B < 8)) {
+      trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
+      trace("qmm_naive");
       call_qmm_naive();
     }
     return;
   }
 
   if (can_use_qmv) {
+    trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
     call_qmv();
     return;
   }

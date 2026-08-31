@@ -65,7 +65,7 @@ use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
-use mlxcel::{LanguageModel, SamplingConfig, Session, initialize_runtime, select_backend};
+use mlxcel::{LanguageModel, SamplingConfig, Session, initialize_runtime_checked, select_backend};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::sampling::TokenBiasMap;
 
@@ -171,7 +171,7 @@ enum SlashOutcome {
 /// cannot be read, or the terminal line editor cannot be initialized. Per-turn
 /// generation never aborts the loop; a `/clear` or a fresh turn always recovers.
 pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
-    let runtime = initialize_runtime();
+    let runtime = initialize_runtime_checked()?;
     println!("Runtime device: {}", runtime.device);
 
     // Reuse the exact `-m` resolver `generate` / `serve` / `inspect` use, so a
