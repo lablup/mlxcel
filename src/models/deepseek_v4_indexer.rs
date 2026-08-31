@@ -74,15 +74,37 @@ pub(crate) const FLAT_SELECT_ENV: &str = "MLXCEL_V4_FLAT_INDEX";
 
 /// Whether [`DENSE_FALLBACK_ENV`] is set. Read once: this is consulted per
 /// sparse layer per forward, and `env::var_os` is a lock plus an allocation.
+///
+/// Announces itself on stderr the first time it reads as set. A diagnostic
+/// switch that silently does nothing is worse than no switch: an A/B whose
+/// two arms are secretly the same arm produces confident, wrong conclusions.
 pub(crate) fn force_dense_pooled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os(DENSE_FALLBACK_ENV).is_some())
+    *FLAG.get_or_init(|| {
+        let on = std::env::var_os(DENSE_FALLBACK_ENV).is_some();
+        if on {
+            eprintln!(
+                "[deepseek-v4] {DENSE_FALLBACK_ENV} set: sparse layers stay on dense \
+                 pooled attention past index_topk"
+            );
+        }
+        on
+    })
 }
 
-/// Whether [`FLAT_SELECT_ENV`] is set. Read once, as above.
+/// Whether [`FLAT_SELECT_ENV`] is set. Read once, and announced once, as above.
 pub(crate) fn force_flat_select() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os(FLAT_SELECT_ENV).is_some())
+    *FLAG.get_or_init(|| {
+        let on = std::env::var_os(FLAT_SELECT_ENV).is_some();
+        if on {
+            eprintln!(
+                "[deepseek-v4] {FLAT_SELECT_ENV} set: HiSA hierarchy disabled, \
+                 selection uses the flat O(Np) scan"
+            );
+        }
+        on
+    })
 }
 
 /// Whether the two-stage HiSA hierarchy runs, or the flat `O(Np)` scan does.

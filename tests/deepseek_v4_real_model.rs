@@ -325,6 +325,140 @@ fn deepseek_v4_real_model_long_context_engages_hisa_hierarchy() {
     );
 }
 
+/// Measures how decode cost scales with the pooled prefix (#549 criterion 4).
+///
+/// **What this measured, and it is not what #549 predicted.** The criterion
+/// expected per-token decode time to stay roughly flat as the pooled prefix
+/// grows, on the reasoning that the hierarchy scores `nb` block representatives
+/// plus `index_keep * index_block` fine candidates, both independent of `Np`.
+/// Measured on the real checkpoint, decode cost tracks `Np` almost exactly:
+/// pooled rows x1.97 gives ms/token x1.91. Forcing the flat scan with
+/// `MLXCEL_V4_FLAT_INDEX` (switch confirmed active by its stderr notice)
+/// changes nothing, within 0.4% at every length.
+///
+/// The reason is the coarse stage. Scoring is `O(nb + Kb*b)` as claimed, but
+/// the representatives it scores are rebuilt from scratch every step:
+/// `rep = mean(pooled[:usable].reshape(nb, b, hd), axis=2)` reads the entire
+/// pooled prefix. So the hierarchy replaces "score `Np` rows" with
+/// "mean-reduce `Np` rows, then score ~`Kb*b`", and both are `O(Np)` traffic
+/// over the same buffer. The reference has the identical structure, so this is
+/// a property of the algorithm as specified, not a porting defect.
+///
+/// This test therefore REPORTS the scaling rather than gating flatness, which
+/// the port does not have. The assertion only catches a pathological blow-up
+/// (cost growing faster than the prefix itself); the printed numbers are the
+/// evidence. Making it flat needs an incremental representative cache, which
+/// is exact because pooled rows are append-only so a completed block's mean
+/// never changes. That is filed separately.
+#[test]
+#[ignore]
+fn deepseek_v4_real_model_hisa_decode_cost_scaling() {
+    let model_dir = repo_model_dir(MODEL_DIR);
+    if !model_dir.join("config.json").exists() {
+        eprintln!("Skipping: DeepSeek-V4 checkpoint not found");
+        return;
+    }
+
+    let config_str = std::fs::read_to_string(model_dir.join("config.json")).expect("read config");
+    let args: mlxcel::models::deepseek_v4::ModelArgs =
+        serde_json::from_str(&config_str).expect("parse config");
+    let args = args.normalized().expect("validate config");
+    let ratio = *args
+        .compress_ratios
+        .iter()
+        .filter(|r| **r > 0)
+        .min()
+        .expect("sparse layers exist") as usize;
+    let hierarchy_rows = args.index_block * args.index_keep;
+
+    let _runtime = initialize_runtime();
+    let (model, tokenizer) = load_model(&model_dir).expect("load DeepSeek-V4 checkpoint");
+
+    let filler = [
+        "The Nile is the longest river in Africa. ",
+        "Mount Everest rises above the Himalayas. ",
+        "Photosynthesis converts light into chemical energy. ",
+        "Copper conducts electricity better than iron. ",
+        "Honey never spoils when stored properly. ",
+        "Basalt forms when lava cools quickly. ",
+    ];
+    let build = |target: usize| -> Vec<i32> {
+        let mut prompt = String::new();
+        let mut i = 0usize;
+        loop {
+            prompt.push_str(filler[i % filler.len()]);
+            i += 1;
+            if i.is_multiple_of(16) {
+                let ids = tokenizer.encode(&prompt, true).expect("tokenize");
+                if ids.len() >= target {
+                    break;
+                }
+            }
+        }
+        tokenizer
+            .encode(&prompt, true)
+            .expect("tokenize")
+            .iter()
+            .map(|&id| id as i32)
+            .collect()
+    };
+
+    const DECODE_STEPS: usize = 24;
+    let mut measured = Vec::new();
+    // Two lengths inside the hierarchy regime (the second doubles the pooled
+    // prefix), plus one below it for context on where the bands sit.
+    for target in [2200usize, 4400, 8800] {
+        let ids = build(target);
+        let pooled = ids.len() / ratio;
+        let mut generator = CxxGenerator::new(model.num_layers());
+        let start = std::time::Instant::now();
+        let tokens = generator.generate(&model, &ids, DECODE_STEPS, &SamplingConfig::greedy());
+        let elapsed = start.elapsed();
+        assert!(!tokens.is_empty(), "decode must produce tokens at {target}");
+        // Prefill dominates the wall clock, so report both and compare the
+        // per-token figure, which is what the O(Np) claim is about.
+        let per_token_ms = elapsed.as_secs_f64() * 1000.0 / tokens.len() as f64;
+        let path = if pooled >= hierarchy_rows {
+            "hierarchy"
+        } else if pooled > args.index_topk {
+            "flat scan"
+        } else {
+            "dense"
+        };
+        eprintln!(
+            "[deepseek-v4] {:>5} tokens -> {:>5} pooled rows ({:<9}) | {:>3} decoded in {:>7.2}s | {:>7.1} ms/token",
+            ids.len(),
+            pooled,
+            path,
+            tokens.len(),
+            elapsed.as_secs_f64(),
+            per_token_ms
+        );
+        measured.push((ids.len(), pooled, path, per_token_ms));
+    }
+
+    let hier: Vec<_> = measured.iter().filter(|m| m.2 == "hierarchy").collect();
+    assert!(
+        hier.len() >= 2,
+        "need two hierarchy-band points to compare; got {measured:?}"
+    );
+    let (small, large) = (hier[0], hier[hier.len() - 1]);
+    let growth = large.3 / small.3;
+    let pooled_growth = large.1 as f64 / small.1 as f64;
+    eprintln!(
+        "[deepseek-v4] pooled rows x{pooled_growth:.2} -> decode ms/token x{growth:.2} \
+         (O(Np) selection would track the former)"
+    );
+    // Deliberately not a flatness gate: the port is not flat in Np and the doc
+    // comment says why. This only catches a regression that makes decode scale
+    // WORSE than the pooled prefix, which no correct selection path should.
+    assert!(
+        growth < pooled_growth * 1.25,
+        "decode cost grew faster than the pooled prefix (x{growth:.2} vs x{pooled_growth:.2}); \
+         selection should at worst track Np, never outrun it"
+    );
+}
+
 /// Not `#[ignore]`: parsing the real config costs nothing and catches serde
 /// shape drift (e.g. the checkpoint ships BOTH `quantization` and
 /// `quantization_config`, and 44 `compress_ratios` for 43 layers) without
