@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use super::{
-    InklingPromptTokenIds, InklingVideoPromptLayout, QwenMediaOrdinal, VlmPreparationSummary,
-    expand_gemma3n_audio_tokens, expand_gemma4_audio_tokens_for_server,
-    expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
+    InklingAudioPromptLayout, InklingAudioTokenIds, InklingPromptTokenIds,
+    InklingVideoPromptLayout, QwenMediaOrdinal, VlmPreparationSummary, expand_gemma3n_audio_tokens,
+    expand_gemma4_audio_tokens_for_server, expand_gemma4_unified_video_tokens,
+    expand_gemma4_video_tokens, expand_inkling_audio_prompt,
     expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
     insert_inkling_video_prompt, prepared_embedding_refs, qwen_media_order_from_prompt,
     shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings, split_jina_vlm_prompt,
@@ -123,6 +124,94 @@ fn inkling_video_prompt_rejects_untrusted_placeholder_cardinality() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("2 image placeholder(s)"));
+}
+
+#[test]
+fn inkling_audio_wrappers_stay_in_current_user_turn_with_history() {
+    const USER: i32 = 10;
+    const TEXT: i32 = 11;
+    const IMAGE_PART: i32 = 12;
+    const END: i32 = 13;
+    const MODEL: i32 = 14;
+    const AUDIO: i32 = 200_053;
+    let ids = InklingPromptTokenIds {
+        message_user: USER,
+        content_text: TEXT,
+        content_image: IMAGE_PART,
+        end_message: END,
+    };
+    let mut prompt = vec![
+        1, USER, TEXT, 60, END, MODEL, TEXT, 70, END, USER, IMAGE_PART, 200_054, END, USER, TEXT,
+        80, END, MODEL, 99,
+    ];
+    let frames = expand_inkling_audio_prompt(
+        &mut prompt,
+        AUDIO,
+        InklingAudioTokenIds {
+            audio_bos: 20,
+            audio_end: 21,
+        },
+        &[2, 1],
+        InklingAudioPromptLayout::Structured(ids),
+    )
+    .unwrap();
+    assert_eq!(frames, 3);
+    assert_eq!(
+        prompt,
+        vec![
+            1, USER, TEXT, 60, END, MODEL, TEXT, 70, END, USER, IMAGE_PART, 200_054, END, USER,
+            TEXT, 80, 20, AUDIO, AUDIO, 21, 20, AUDIO, 21, END, MODEL, 99,
+        ]
+    );
+}
+
+#[test]
+fn inkling_audio_expands_template_placeholders_without_reordering_parts() {
+    const AUDIO: i32 = 200_053;
+    let ids = InklingPromptTokenIds {
+        message_user: 10,
+        content_text: 11,
+        content_image: 12,
+        end_message: 13,
+    };
+    let mut prompt = vec![1, 10, 11, 50, 20, AUDIO, 21, 13, 14, 99];
+    expand_inkling_audio_prompt(
+        &mut prompt,
+        AUDIO,
+        InklingAudioTokenIds {
+            audio_bos: 20,
+            audio_end: 21,
+        },
+        &[3],
+        InklingAudioPromptLayout::Structured(ids),
+    )
+    .unwrap();
+    assert_eq!(
+        prompt,
+        vec![1, 10, 11, 50, 20, AUDIO, AUDIO, AUDIO, 21, 13, 14, 99]
+    );
+}
+
+#[test]
+fn inkling_ordered_audio_never_synthesizes_a_missing_placeholder() {
+    let mut prompt = vec![1, 10, 11, 50, 13, 14, 99];
+    let error = expand_inkling_audio_prompt(
+        &mut prompt,
+        200_053,
+        InklingAudioTokenIds {
+            audio_bos: 20,
+            audio_end: 21,
+        },
+        &[3],
+        InklingAudioPromptLayout::Ordered,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("lost its required audio placeholders")
+    );
+    assert_eq!(prompt, vec![1, 10, 11, 50, 13, 14, 99]);
 }
 
 #[test]

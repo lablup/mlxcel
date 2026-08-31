@@ -36,6 +36,14 @@ fn conv(channels: i32, kernel: i32, seed: usize) -> UniquePtr<MlxArray> {
 }
 
 pub(crate) fn tiny_model() -> InklingModel {
+    tiny_model_impl(false)
+}
+
+pub(crate) fn tiny_audio_model() -> InklingModel {
+    tiny_model_impl(true)
+}
+
+fn tiny_model_impl(with_audio: bool) -> InklingModel {
     const HIDDEN: i32 = 4;
     const HEADS: i32 = 2;
     const KV_HEADS: i32 = 1;
@@ -44,7 +52,7 @@ pub(crate) fn tiny_model() -> InklingModel {
     const DENSE: i32 = 6;
     const VOCAB: i32 = 8;
     const KERNEL: i32 = 2;
-    let config: InklingConfig = serde_json::from_value(json!({
+    let mut config = json!({
         "vocab_size": VOCAB,
         "text_config": {
             "hidden_size": HIDDEN,
@@ -72,8 +80,18 @@ pub(crate) fn tiny_model() -> InklingModel {
             "num_experts_per_tok": 1,
             "n_shared_experts": 1
         }
-    }))
-    .unwrap();
+    });
+    if with_audio {
+        config["audio_token_id"] = json!(6);
+        config["audio_config"] = json!({
+            "model_type": "inkling_audio",
+            "n_mel_bins": 80,
+            "mel_vocab_size": 16,
+            "text_hidden_size": HIDDEN,
+            "max_frames_per_chunk": 2
+        });
+    }
+    let config: InklingConfig = serde_json::from_value(config).unwrap();
     let mut weights = WeightMap::new();
     weights.insert("model.embed_tokens.weight".into(), matrix(VOCAB, HIDDEN, 1));
     weights.insert(
@@ -85,6 +103,16 @@ pub(crate) fn tiny_model() -> InklingModel {
         mlxcel_core::ones(&[HIDDEN], dtype::FLOAT32),
     );
     weights.insert("lm_head.weight".into(), matrix(VOCAB, HIDDEN, 5));
+    if with_audio {
+        weights.insert(
+            "audio_tower.embed_audio_tokens.weight".into(),
+            matrix(80 * 16, HIDDEN, 13),
+        );
+        weights.insert(
+            "audio_tower.norm.weight".into(),
+            mlxcel_core::ones(&[HIDDEN], dtype::FLOAT32),
+        );
+    }
     for layer in 0..2 {
         let prefix = format!("model.layers.{layer}");
         for name in ["input_layernorm.weight", "post_attention_layernorm.weight"] {

@@ -185,6 +185,9 @@ pub(super) fn validate_config(config: &InklingConfig) -> Result<(), String> {
     let (group, bits, _) = config.quantization();
     mlxcel_core::layers::validate_quantization_params(group, bits)
         .map_err(|e| format!("Inkling quantization: {e}"))?;
+    if let Some(audio) = &config.audio_config {
+        audio.validate(text.hidden_size)?;
+    }
     Ok(())
 }
 
@@ -215,6 +218,21 @@ pub(super) fn validate_weight_shapes(
             group_size,
             bits,
         )?;
+    }
+    if let Some(audio) = &config.audio_config {
+        let audio_vocab = audio
+            .n_mel_bins
+            .checked_mul(audio.mel_vocab_size)
+            .ok_or_else(|| "Inkling audio embedding vocabulary overflowed usize".to_string())?;
+        matrix(
+            weights,
+            "audio_tower.embed_audio_tokens",
+            audio_vocab,
+            text.hidden_size,
+            group_size,
+            bits,
+        )?;
+        vector(weights, "audio_tower.norm.weight", text.hidden_size)?;
     }
     let (dense_width, moe_width) = text.widths()?;
     for index in 0..text.num_hidden_layers {

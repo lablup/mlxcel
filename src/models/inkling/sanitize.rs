@@ -73,6 +73,14 @@ pub(crate) fn sanitize_weights(weights: WeightMap) -> Result<WeightMap, String> 
     let mut out = WeightMap::new();
     let mut experts: BTreeMap<usize, ExpertParts> = BTreeMap::new();
     for (key, value) in weights {
+        if let Some(rest) = key.strip_prefix("model.audio.encoder.") {
+            out.insert(format!("audio_tower.embed_audio_tokens.{rest}"), value);
+            continue;
+        }
+        if key == "model.audio.final_norm.weight" {
+            out.insert("audio_tower.norm.weight".into(), value);
+            continue;
+        }
         if should_drop(&key) {
             continue;
         }

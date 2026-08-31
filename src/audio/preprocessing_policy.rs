@@ -9,6 +9,7 @@ const MICROS_PER_SECOND: u64 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlaceholderPolicy {
     NumberedPerClip,
+    OnePerFrame,
     FixedSoftTokensPerClip(usize),
 }
 
@@ -61,6 +62,47 @@ pub struct AudioFamilyPolicy {
 }
 
 impl AudioFamilyPolicy {
+    /// Pinned host-side limits for Inkling's 20-frame-per-second dMel frontend.
+    ///
+    /// Five minutes produces 6,000 rows. At the released 6,144-wide text
+    /// dimension, the resulting f32 prepared payload is about 141 MiB, keeping
+    /// one request within the common 256 MiB prepared-result budget.
+    #[must_use]
+    pub const fn inkling() -> Self {
+        const MAX_SECONDS: usize = 5 * 60;
+        const MAX_SAMPLES: usize =
+            crate::audio::inkling_dmel::INKLING_SAMPLE_RATE as usize * MAX_SECONDS;
+        const MAX_FRAMES: usize = MAX_SAMPLES / 800;
+        Self {
+            family: "inkling",
+            target_sample_rate: crate::audio::inkling_dmel::INKLING_SAMPLE_RATE,
+            minimum_source_sample_rate: 1,
+            maximum_source_sample_rate: MAX_SOURCE_SAMPLE_RATE,
+            target_channels: 1,
+            dtype: "f32",
+            resampling: AudioResamplingPolicy::Linear,
+            max_duration_seconds: MAX_SECONDS,
+            max_samples_per_clip: MAX_SAMPLES,
+            max_encoded_bytes_per_clip: DEFAULT_MAX_ENCODED_BYTES,
+            max_clips: DEFAULT_MAX_CLIPS,
+            max_encoded_bytes_per_request: DEFAULT_MAX_ENCODED_BYTES,
+            max_source_samples_per_request: MAX_SOURCE_SAMPLE_RATE as usize * MAX_SECONDS,
+            max_normalized_samples_per_request: MAX_SAMPLES,
+            max_source_duration_micros_per_request: MAX_SECONDS as u64 * MICROS_PER_SECOND,
+            frame_length_samples: 1_600,
+            frame_hop_samples: 800,
+            max_frames_per_clip: MAX_FRAMES,
+            max_frames_per_request: MAX_FRAMES,
+            max_waveform_result_bytes_per_request: 32 * 1024 * 1024,
+            max_waveform_working_bytes_per_request: 128 * 1024 * 1024,
+            max_prepared_result_bytes_per_request: 256 * 1024 * 1024,
+            placeholder: AudioPlaceholderPolicy::OnePerFrame,
+            source: AudioPolicySource::PinnedOfficialDefault(
+                crate::audio::inkling_dmel::INKLING_MLX_VLM_REFERENCE_REVISION,
+            ),
+        }
+    }
+
     #[must_use]
     pub const fn phi4mm() -> Self {
         Self {

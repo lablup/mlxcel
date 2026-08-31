@@ -20,6 +20,7 @@ use anyhow::Result;
 use mlxcel_core::weights::WeightMap;
 
 use crate::LoadedModel;
+use crate::audio::inkling_processor::InklingProcessorConfig;
 use crate::models::InklingModel;
 use crate::models::inkling::InklingConfig;
 use crate::vision::InklingVlModel;
@@ -46,8 +47,11 @@ pub(crate) fn load_inkling_vlm(model_path: &Path) -> Result<LoadedModel> {
             config.text_config.hidden_size
         );
     }
-    let processor_config = load_processor_config(model_path)?;
-    let processor = InklingImageProcessor::new(processor_config).map_err(anyhow::Error::msg)?;
+    let image_processor_config = load_processor_config(model_path)?;
+    let processor =
+        InklingImageProcessor::new(image_processor_config).map_err(anyhow::Error::msg)?;
+    let audio_processor =
+        InklingProcessorConfig::from_model_path(model_path).map_err(anyhow::Error::msg)?;
     let weights = normalize_inkling_weights(load_vlm_weights_common(model_path, None)?)?;
     let (group_size, bits, _) = config.quantization();
     let vision = InklingHmlpEncoder::from_weights(&weights, &vision_config, group_size, bits)
@@ -58,6 +62,7 @@ pub(crate) fn load_inkling_vlm(model_path: &Path) -> Result<LoadedModel> {
         text,
         vision,
         processor,
+        audio_processor,
         image_token_id,
     )))
 }

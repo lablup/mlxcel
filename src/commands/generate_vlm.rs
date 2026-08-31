@@ -498,6 +498,21 @@ pub(crate) fn compute_vlm_embeddings(
         ));
     }
 
+    // Inkling dMel accepts audio-only and image+audio requests. The shared
+    // runtime preserves image-first then audio scatter order.
+    if let Some(audio) = audio_path
+        && let LoadedModel::InklingVLM(inkling) = model
+    {
+        return compute_inkling_audio_embeddings(
+            inkling,
+            prompt_tokens,
+            image_paths,
+            audio,
+            tokenizer,
+            no_chat_template,
+        );
+    }
+
     // Phi4MM accepts one audio clip, optionally combined with images.
     if let Some(audio) = audio_path
         && let LoadedModel::Phi4MMVLM(phi4mm) = model
@@ -589,7 +604,7 @@ pub(crate) fn compute_vlm_embeddings(
     if audio_path.is_some() {
         return Err(anyhow::anyhow!(
             "--audio input is not supported for this model family. Currently audio is wired \
-             through Phi4MM, Gemma 3n, Gemma 4, Nemotron H Nano Omni, and Qwen3-Omni MoE VLMs only."
+             through Inkling, Phi4MM, Gemma 3n, Gemma 4, Nemotron H Nano Omni, and Qwen3-Omni MoE VLMs only."
         ));
     }
 
@@ -663,6 +678,73 @@ pub(crate) fn compute_vlm_embeddings(
     } else {
         Ok(None)
     }
+}
+
+/// Compute Inkling dMel embeddings for one CLI WAV, optionally after HMLP
+/// image rows. The host boundary owns decode/downmix/resample and request caps.
+fn compute_inkling_audio_embeddings(
+    inkling: &mlxcel::vision::InklingVlModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    audio_path: &Path,
+    tokenizer: &MlxcelTokenizer,
+    no_chat_template: bool,
+) -> Result<Option<InputEmbeddings>> {
+    if !inkling.supports_audio() {
+        return Err(anyhow::anyhow!(
+            "This Inkling checkpoint was loaded without audio parameters"
+        ));
+    }
+    let started = Instant::now();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let waveform = mlxcel::audio::preprocess_wav_file(
+        audio_path,
+        mlxcel::audio::AudioFamilyPolicy::inkling(),
+        &cancelled,
+    )
+    .map_err(anyhow::Error::msg)?;
+    print_audio_preprocess_summary(&waveform, started);
+    let dmel = mlxcel::multimodal::inkling_audio::prepare_inkling_dmel_input(
+        &waveform,
+        &inkling.audio_processor,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let token_ids = mlxcel::vlm_runtime::resolve_inkling_audio_token_ids(
+        tokenizer,
+        &inkling.audio_processor,
+        inkling.audio_token_id(),
+    )?;
+    let prompt_layout = if no_chat_template {
+        mlxcel::vlm_runtime::InklingAudioPromptLayout::Plain
+    } else {
+        mlxcel::vlm_runtime::InklingAudioPromptLayout::Structured(
+            mlxcel::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
+        )
+    };
+    let images = image_paths
+        .iter()
+        .map(|path| {
+            image::open(path)
+                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {}", path, error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (embeddings, stats) = mlxcel::vlm_runtime::compute_inkling_audio_embeddings(
+        inkling,
+        prompt_tokens,
+        &images,
+        &dmel,
+        token_ids,
+        prompt_layout,
+    )?;
+    println!(
+        "Inkling: prepared {} audio clip(s) as {} dMel token(s) with {} image block(s) / {} HMLP token(s) ({} total prompt tokens)",
+        stats.audio_clips,
+        stats.total_audio_tokens,
+        stats.image_blocks,
+        stats.total_image_tokens,
+        stats.total_tokens,
+    );
+    Ok(Some(embeddings))
 }
 
 /// Compute Phi4MM audio-only or mixed image+audio embeddings. The official

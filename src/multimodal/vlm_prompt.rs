@@ -181,6 +181,112 @@ pub fn expand_inkling_image_tokens(
     })
 }
 
+/// Invalid Inkling audio-placeholder layouts.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum InklingAudioPromptError {
+    #[error("Inkling audio frame counts must be positive")]
+    EmptyAudio,
+    #[error(
+        "prompt contains {placeholder_count} Inkling audio placeholder(s), but {audio_count} audio clip(s) were provided"
+    )]
+    MediaCardinality {
+        placeholder_count: usize,
+        audio_count: usize,
+    },
+    #[error("Inkling audio-token expansion capacity overflowed")]
+    CapacityOverflow,
+    #[error("cannot place Inkling audio into an empty tokenized prompt")]
+    EmptyPrompt,
+}
+
+/// Expand one Inkling audio placeholder per clip to its valid dMel frame count.
+///
+/// Chat templates normally render the full
+/// `audio_bos + audio_placeholder + audio_end` wrapper. The OpenAI-compatible
+/// server flattens `input_audio` parts before tokenization, so when no
+/// placeholder survived the caller supplies a structurally validated insertion
+/// boundary. `None` appends wrappers for an explicit plain-prompt flow.
+pub fn expand_inkling_audio_tokens(
+    prompt_tokens: &mut Vec<i32>,
+    audio_token_id: i32,
+    audio_bos_token_id: i32,
+    audio_end_token_id: i32,
+    valid_frames: &[usize],
+    insertion_index: Option<usize>,
+) -> Result<usize, InklingAudioPromptError> {
+    if valid_frames.is_empty() || valid_frames.contains(&0) {
+        return Err(InklingAudioPromptError::EmptyAudio);
+    }
+    if prompt_tokens.is_empty() {
+        return Err(InklingAudioPromptError::EmptyPrompt);
+    }
+    let placeholders = prompt_tokens
+        .iter()
+        .filter(|token| **token == audio_token_id)
+        .count();
+    let total_frames = valid_frames.iter().try_fold(0usize, |total, frames| {
+        total
+            .checked_add(*frames)
+            .ok_or(InklingAudioPromptError::CapacityOverflow)
+    })?;
+    if placeholders != 0 {
+        if placeholders != valid_frames.len() {
+            return Err(InklingAudioPromptError::MediaCardinality {
+                placeholder_count: placeholders,
+                audio_count: valid_frames.len(),
+            });
+        }
+        let additional = total_frames
+            .checked_sub(placeholders)
+            .ok_or(InklingAudioPromptError::CapacityOverflow)?;
+        let capacity = prompt_tokens
+            .len()
+            .checked_add(additional)
+            .ok_or(InklingAudioPromptError::CapacityOverflow)?;
+        let original = std::mem::take(prompt_tokens);
+        let mut expanded = Vec::with_capacity(capacity);
+        let mut audio_index = 0usize;
+        for token in original {
+            if token == audio_token_id {
+                expanded.extend(std::iter::repeat_n(
+                    audio_token_id,
+                    valid_frames[audio_index],
+                ));
+                audio_index += 1;
+            } else {
+                expanded.push(token);
+            }
+        }
+        *prompt_tokens = expanded;
+        return Ok(total_frames);
+    }
+
+    let wrapper_tokens = valid_frames
+        .len()
+        .checked_mul(2)
+        .ok_or(InklingAudioPromptError::CapacityOverflow)?;
+    let block_len = total_frames
+        .checked_add(wrapper_tokens)
+        .ok_or(InklingAudioPromptError::CapacityOverflow)?;
+    prompt_tokens
+        .len()
+        .checked_add(block_len)
+        .ok_or(InklingAudioPromptError::CapacityOverflow)?;
+    let mut block = Vec::with_capacity(block_len);
+    for frames in valid_frames {
+        block.push(audio_bos_token_id);
+        block.extend(std::iter::repeat_n(audio_token_id, *frames));
+        block.push(audio_end_token_id);
+    }
+    let insertion = insertion_index.unwrap_or(prompt_tokens.len());
+    if insertion > prompt_tokens.len() {
+        return Err(InklingAudioPromptError::CapacityOverflow);
+    }
+    prompt_tokens.splice(insertion..insertion, block);
+    Ok(total_frames)
+}
+
 pub fn apply_image_token_blocks(
     prompt_tokens: &mut Vec<i32>,
     info: ImageTokenBlockInfo,

@@ -53,7 +53,7 @@ use crate::vision::processors::ImageProcessor;
 use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
 use crate::vlm_prompt::{
     ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks,
-    expand_inkling_image_tokens,
+    expand_inkling_audio_tokens, expand_inkling_image_tokens,
 };
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use crate::{LanguageModel, LoadedModel, VlmRuntimeRef};
@@ -77,6 +77,15 @@ pub struct InklingVideoPreparationStats {
     pub total_image_tokens: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InklingAudioPreparationStats {
+    pub image_blocks: usize,
+    pub total_image_tokens: usize,
+    pub audio_clips: usize,
+    pub total_audio_tokens: usize,
+    pub total_tokens: usize,
+}
+
 /// Structural special-token ids emitted by the public Inkling chat template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InklingPromptTokenIds {
@@ -94,31 +103,67 @@ pub enum InklingVideoPromptLayout {
     Structured(InklingPromptTokenIds),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InklingAudioPromptLayout {
+    /// Explicit CLI `--no-chat-template`: append audio to one plain question.
+    Plain,
+    /// Insert audio wrappers before the final current-user end marker.
+    Structured(InklingPromptTokenIds),
+    /// Server prompt whose original message/part positions have already been
+    /// materialized into one audio placeholder per clip.
+    Ordered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InklingAudioTokenIds {
+    pub audio_bos: i32,
+    pub audio_end: i32,
+}
+
+fn resolve_inkling_single_token(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    literal: &str,
+) -> Result<i32> {
+    if let Some(tokenizer) = tokenizer.hf_tokenizer()
+        && let Some(token) = tokenizer.token_to_id(literal)
+    {
+        return i32::try_from(token)
+            .map_err(|_| anyhow::anyhow!("Inkling token {literal} exceeds i32"));
+    }
+    let encoded = tokenizer.encode(literal, false)?;
+    if encoded.len() != 1 {
+        anyhow::bail!("Inkling structural token {literal} is not a single tokenizer id");
+    }
+    i32::try_from(encoded[0]).map_err(|_| anyhow::anyhow!("Inkling token {literal} exceeds i32"))
+}
+
 /// Resolve the four structural tokens required to insert complete Inkling
 /// content parts into an already-rendered chat prompt.
 pub fn resolve_inkling_prompt_token_ids(
     tokenizer: &crate::tokenizer::MlxcelTokenizer,
 ) -> Result<InklingPromptTokenIds> {
-    fn resolve(tokenizer: &crate::tokenizer::MlxcelTokenizer, literal: &str) -> Result<i32> {
-        if let Some(tokenizer) = tokenizer.hf_tokenizer()
-            && let Some(token) = tokenizer.token_to_id(literal)
-        {
-            return i32::try_from(token)
-                .map_err(|_| anyhow::anyhow!("Inkling token {literal} exceeds i32"));
-        }
-        let encoded = tokenizer.encode(literal, false)?;
-        if encoded.len() != 1 {
-            anyhow::bail!("Inkling structural token {literal} is not a single tokenizer id");
-        }
-        i32::try_from(encoded[0])
-            .map_err(|_| anyhow::anyhow!("Inkling token {literal} exceeds i32"))
-    }
-
     Ok(InklingPromptTokenIds {
-        message_user: resolve(tokenizer, "<|message_user|>")?,
-        content_text: resolve(tokenizer, "<|content_text|>")?,
-        content_image: resolve(tokenizer, "<|content_image|>")?,
-        end_message: resolve(tokenizer, "<|end_message|>")?,
+        message_user: resolve_inkling_single_token(tokenizer, "<|message_user|>")?,
+        content_text: resolve_inkling_single_token(tokenizer, "<|content_text|>")?,
+        content_image: resolve_inkling_single_token(tokenizer, "<|content_image|>")?,
+        end_message: resolve_inkling_single_token(tokenizer, "<|end_message|>")?,
+    })
+}
+
+pub fn resolve_inkling_audio_token_ids(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    processor: &crate::audio::inkling_processor::InklingProcessorConfig,
+    expected_audio_token_id: i32,
+) -> Result<InklingAudioTokenIds> {
+    let audio_token = resolve_inkling_single_token(tokenizer, &processor.audio_token)?;
+    if audio_token != expected_audio_token_id {
+        anyhow::bail!(
+            "Inkling processor audio token resolves to {audio_token}, but config.json declares {expected_audio_token_id}"
+        );
+    }
+    Ok(InklingAudioTokenIds {
+        audio_bos: resolve_inkling_single_token(tokenizer, &processor.audio_bos_token)?,
+        audio_end: resolve_inkling_single_token(tokenizer, &processor.audio_end_token)?,
     })
 }
 
@@ -365,6 +410,130 @@ fn should_prepare_vlm_embeddings(image_count: usize, is_vlm: bool) -> Result<boo
 
 fn prompt_ids_array(prompt_tokens: &[i32]) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32])
+}
+
+/// Expand or synthesize Inkling audio wrappers without crossing the current
+/// user boundary in a structured chat prompt.
+pub fn expand_inkling_audio_prompt(
+    prompt_tokens: &mut Vec<i32>,
+    audio_token_id: i32,
+    token_ids: InklingAudioTokenIds,
+    valid_frames: &[usize],
+    layout: InklingAudioPromptLayout,
+) -> Result<usize> {
+    let insertion = if prompt_tokens.contains(&audio_token_id) {
+        None
+    } else {
+        match layout {
+            InklingAudioPromptLayout::Plain => None,
+            InklingAudioPromptLayout::Structured(ids) => {
+                let user_text = prompt_tokens
+                    .windows(2)
+                    .rposition(|window| window == [ids.message_user, ids.content_text])
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Structured Inkling audio prompt has no final user text content boundary"
+                        )
+                    })?;
+                let current_user_end = prompt_tokens[user_text + 2..]
+                    .iter()
+                    .position(|&token| token == ids.end_message)
+                    .map(|offset| user_text + 2 + offset)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Structured Inkling audio prompt has no end marker for the final user text part"
+                        )
+                    })?;
+                if prompt_tokens[current_user_end + 1..].contains(&ids.message_user) {
+                    anyhow::bail!(
+                        "Structured Inkling audio prompt has user content after the final question boundary"
+                    );
+                }
+                Some(current_user_end)
+            }
+            InklingAudioPromptLayout::Ordered => {
+                anyhow::bail!("Ordered Inkling audio prompt lost its required audio placeholders");
+            }
+        }
+    };
+    expand_inkling_audio_tokens(
+        prompt_tokens,
+        audio_token_id,
+        token_ids.audio_bos,
+        token_ids.audio_end,
+        valid_frames,
+        insertion,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+/// Prepare a single Inkling request containing audio and optional images.
+/// Text embeddings are normalized once, HMLP image rows are scattered first,
+/// and the valid compact dMel rows are scattered second.
+pub fn compute_inkling_audio_embeddings(
+    model: &InklingVlModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[DynamicImage],
+    dmel: &crate::multimodal::inkling_audio::InklingDmelInput,
+    token_ids: InklingAudioTokenIds,
+    prompt_layout: InklingAudioPromptLayout,
+) -> Result<(InputEmbeddings, InklingAudioPreparationStats)> {
+    if !model.supports_audio() {
+        anyhow::bail!("This Inkling checkpoint was loaded without an audio tower");
+    }
+    let total_audio_tokens = expand_inkling_audio_prompt(
+        prompt_tokens,
+        model.audio_token_id(),
+        token_ids,
+        &dmel.valid_frames,
+        prompt_layout,
+    )?;
+
+    let (pixel_values, image_blocks, total_image_tokens) = if images.is_empty() {
+        (None, 0, 0)
+    } else {
+        if prompt_layout == InklingAudioPromptLayout::Ordered {
+            let placeholders = prompt_tokens
+                .iter()
+                .filter(|&&token| token == model.image_token_id())
+                .count();
+            if placeholders != images.len() {
+                anyhow::bail!(
+                    "Ordered Inkling prompt contains {placeholders} image placeholder(s), but the request has {} image(s)",
+                    images.len()
+                );
+            }
+        }
+        let processed = model
+            .preprocess_images(images)
+            .map_err(anyhow::Error::msg)?;
+        let stats = expand_inkling_image_tokens(
+            prompt_tokens,
+            model.image_token_id(),
+            &processed.tiles_per_image,
+        )?;
+        (
+            Some(processed.pixel_values),
+            stats.image_blocks,
+            stats.total_image_tokens,
+        )
+    };
+    let shape = dmel.mlx_shape().map_err(anyhow::Error::msg)?;
+    let audio_input_ids = mlxcel_core::from_slice_i32(&dmel.input_ids, &shape);
+    let input_ids = prompt_ids_array(prompt_tokens);
+    let embeddings = model
+        .prepare_input_embeddings_with_audio(&input_ids, pixel_values.as_deref(), &audio_input_ids)
+        .map_err(anyhow::Error::msg)?;
+    Ok((
+        embeddings,
+        InklingAudioPreparationStats {
+            image_blocks,
+            total_image_tokens,
+            audio_clips: dmel.valid_frames.len(),
+            total_audio_tokens,
+            total_tokens: prompt_tokens.len(),
+        },
+    ))
 }
 
 /// Insert Inkling's timestamped frame sequence before the original question.

@@ -94,3 +94,46 @@ fn vision_config_without_visual_weights_stays_text_only() {
     assert_eq!(get_model_type(&path).unwrap(), ModelType::Inkling);
     fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn audio_weights_do_not_hide_or_fabricate_the_vlm_shell() {
+    let path = checkpoint("audio_with_vision", true);
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(path.join("config.json")).unwrap()).unwrap();
+    config["audio_config"] = json!({"model_type": "inkling_audio"});
+    fs::write(
+        path.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        path.join("model.safetensors.index.json"),
+        serde_json::to_vec(&json!({
+            "weight_map": {
+                "model.visual.final_norm.weight": "model-00001-of-00002.safetensors",
+                "model.audio.encoder.weight": "model-00002-of-00002.safetensors"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(get_model_type(&path).unwrap(), ModelType::InklingVLM);
+    fs::remove_dir_all(path).unwrap();
+
+    let path = checkpoint("audio_without_vision", false);
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(path.join("config.json")).unwrap()).unwrap();
+    config["audio_config"] = json!({"model_type": "inkling_audio"});
+    fs::write(
+        path.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        path.join("model.safetensors.index.json"),
+        r#"{"weight_map":{"model.audio.encoder.weight":"model.safetensors"}}"#,
+    )
+    .unwrap();
+    assert_eq!(get_model_type(&path).unwrap(), ModelType::Inkling);
+    fs::remove_dir_all(path).unwrap();
+}

@@ -1452,11 +1452,9 @@ pub(crate) fn prepare_request_vlm_embeddings(
 ) -> Result<Option<InputEmbeddings>> {
     let has_media = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
 
-    if !audio.is_empty() && !model.is_vlm() {
+    if !audio.is_empty() && !model.supports_audio_input() {
         observability.record_audio_feature_rejection();
-        return Err(anyhow!(
-            "Audio input is not supported by the loaded non-VLM model"
-        ));
+        return Err(anyhow!("Audio input is not supported by the loaded model"));
     }
     // Images and videos used to fall through to the text-only branch below, so
     // a request that sent a picture to a text-only checkpoint was answered
@@ -1537,6 +1535,18 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     // Audio-only or audio+images for Gemma4 / Gemma4 Unified
     if !audio.is_empty() {
+        if let Some(embeddings) = prepare_inkling_audio_embeddings(
+            model,
+            tokenizer,
+            prompt,
+            prompt_tokens,
+            images,
+            audio,
+            cancelled,
+            observability,
+        )? {
+            return Ok(Some(embeddings));
+        }
         if let Some(embeddings) = prepare_phi4mm_audio_embeddings(
             model,
             tokenizer,
@@ -1713,6 +1723,94 @@ pub(crate) fn prepare_request_vlm_embeddings(
     }
 
     Ok(None)
+}
+
+/// Process every server `input_audio` clip through Inkling's bounded host WAV
+/// pipeline, compact valid dMel rows, and optional image-first HMLP merge.
+fn prepare_inkling_audio_embeddings(
+    model: &LoadedModel,
+    tokenizer: &MlxcelTokenizer,
+    prompt: &str,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
+) -> Result<Option<InputEmbeddings>> {
+    let inkling = match model {
+        LoadedModel::InklingVLM(model) => model,
+        _ => return Ok(None),
+    };
+    if !inkling.supports_audio() {
+        return Err(audio_feature_error(
+            "This Inkling checkpoint was loaded without audio parameters".to_string(),
+            cancelled,
+            observability,
+        ));
+    }
+    let waveform = preprocess_server_audio(
+        audio_data,
+        crate::audio::AudioFamilyPolicy::inkling(),
+        cancelled,
+        observability,
+    )
+    .map_err(|error| anyhow!("Failed to preprocess Inkling audio: {error}"))?;
+    check_audio_feature_cancelled(cancelled, observability)?;
+    let dmel = crate::multimodal::inkling_audio::prepare_inkling_dmel_input_cancellable(
+        &waveform,
+        &inkling.audio_processor,
+        cancelled,
+    )
+    .map_err(|error| audio_feature_error(error, cancelled, observability))?;
+    check_audio_feature_cancelled(cancelled, observability)?;
+    let token_ids = crate::vlm_runtime::resolve_inkling_audio_token_ids(
+        tokenizer,
+        &inkling.audio_processor,
+        inkling.audio_token_id(),
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    let prompt_ids = crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)
+        .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    *prompt_tokens = tokenize_inkling_ordered_media_prompt(
+        prompt,
+        prompt_ids,
+        token_ids,
+        inkling.image_token_id(),
+        inkling.audio_token_id(),
+        images.len(),
+        audio_data.len(),
+        |text, add_special| {
+            tokenizer
+                .encode(text, add_special)
+                .map(|tokens| tokens.into_iter().map(|token| token as i32).collect())
+                .map_err(|error| anyhow!("Failed to tokenize ordered Inkling prompt: {error}"))
+        },
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    let decoded_images = if images.is_empty() {
+        Vec::new()
+    } else {
+        decode_request_images(images)?
+    };
+    let (embeddings, stats) = crate::vlm_runtime::compute_inkling_audio_embeddings(
+        inkling,
+        prompt_tokens,
+        &decoded_images,
+        &dmel,
+        token_ids,
+        crate::vlm_runtime::InklingAudioPromptLayout::Ordered,
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    tracing::info!(
+        audio_clips = stats.audio_clips,
+        audio_tokens = stats.total_audio_tokens,
+        image_blocks = stats.image_blocks,
+        image_tokens = stats.total_image_tokens,
+        prompt_tokens = stats.total_tokens,
+        "Prepared Inkling mixed-media embeddings"
+    );
+    observability.record_audio_effective_prefill(prompt_tokens.len());
+    Ok(Some(embeddings))
 }
 
 /// Process every request audio clip (and optional images) through the pinned
@@ -1980,6 +2078,157 @@ fn audio_feature_error(
         observability.record_audio_feature_rejection();
     }
     anyhow::Error::msg(error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tokenize_inkling_ordered_media_prompt<E>(
+    prompt: &str,
+    prompt_ids: crate::vlm_runtime::InklingPromptTokenIds,
+    audio_ids: crate::vlm_runtime::InklingAudioTokenIds,
+    image_token_id: i32,
+    audio_token_id: i32,
+    expected_images: usize,
+    expected_audio: usize,
+    mut encode: E,
+) -> Result<Vec<i32>>
+where
+    E: FnMut(&str, bool) -> Result<Vec<i32>>,
+{
+    use crate::server::types::request::{
+        ORDERED_MEDIA_PREFIX, OrderedMediaSegment, parse_ordered_media_segments,
+    };
+
+    if !prompt.contains(ORDERED_MEDIA_PREFIX) {
+        return Err(anyhow!(
+            "rendered Inkling prompt lost ordered media markers for {expected_images} image/{expected_audio} audio inputs"
+        ));
+    }
+    let mut flat_tokens = Vec::new();
+    let mut images = 0usize;
+    let mut audio = 0usize;
+    let mut first_text = true;
+    for segment in parse_ordered_media_segments(prompt).map_err(anyhow::Error::msg)? {
+        match segment {
+            OrderedMediaSegment::Text(text) => {
+                let add_special =
+                    first_text && !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                let encoded = encode(text, add_special)?;
+                if encoded
+                    .iter()
+                    .any(|&token| token == image_token_id || token == audio_token_id)
+                {
+                    return Err(anyhow!(
+                        "Inkling prompt text contains a reserved image/audio placeholder token"
+                    ));
+                }
+                flat_tokens.extend(encoded);
+                first_text = false;
+            }
+            OrderedMediaSegment::Image(_) => {
+                images += 1;
+                flat_tokens.push(image_token_id);
+            }
+            OrderedMediaSegment::Audio(_) => {
+                audio += 1;
+                flat_tokens.push(audio_token_id);
+            }
+        }
+    }
+    if (images, audio) != (expected_images, expected_audio) {
+        return Err(anyhow!(
+            "ordered media cardinality mismatch: prompt has {images} image/{audio} audio markers, request has {expected_images}/{expected_audio}"
+        ));
+    }
+
+    materialize_inkling_media_parts(
+        &flat_tokens,
+        prompt_ids,
+        audio_ids,
+        image_token_id,
+        audio_token_id,
+    )
+}
+
+fn materialize_inkling_media_parts(
+    flat_tokens: &[i32],
+    prompt_ids: crate::vlm_runtime::InklingPromptTokenIds,
+    audio_ids: crate::vlm_runtime::InklingAudioTokenIds,
+    image_token_id: i32,
+    audio_token_id: i32,
+) -> Result<Vec<i32>> {
+    let mut materialized = Vec::with_capacity(flat_tokens.len());
+    let mut index = 0usize;
+    while index < flat_tokens.len() {
+        let starts_user_text = flat_tokens[index] == prompt_ids.message_user
+            && flat_tokens.get(index + 1) == Some(&prompt_ids.content_text);
+        if !starts_user_text {
+            let token = flat_tokens[index];
+            if token == image_token_id || token == audio_token_id {
+                return Err(anyhow!(
+                    "ordered Inkling media marker appeared outside a user text content part"
+                ));
+            }
+            materialized.push(token);
+            index += 1;
+            continue;
+        }
+
+        let content_start = index + 2;
+        let end_offset = flat_tokens[content_start..]
+            .iter()
+            .position(|&token| token == prompt_ids.end_message)
+            .ok_or_else(|| anyhow!("Inkling user text content part has no end marker"))?;
+        let content_end = content_start + end_offset;
+        if flat_tokens[content_start..content_end].contains(&prompt_ids.message_user) {
+            return Err(anyhow!(
+                "Inkling user text content part crosses another user boundary"
+            ));
+        }
+        let content = &flat_tokens[content_start..content_end];
+        let has_media = content
+            .iter()
+            .any(|&token| token == image_token_id || token == audio_token_id);
+        if !has_media {
+            materialized.extend_from_slice(&flat_tokens[index..=content_end]);
+            index = content_end + 1;
+            continue;
+        }
+
+        let mut text_start = 0usize;
+        for (position, &token) in content.iter().enumerate() {
+            if token != image_token_id && token != audio_token_id {
+                continue;
+            }
+            if position > text_start {
+                materialized.extend([prompt_ids.message_user, prompt_ids.content_text]);
+                materialized.extend_from_slice(&content[text_start..position]);
+                materialized.push(prompt_ids.end_message);
+            }
+            materialized.push(prompt_ids.message_user);
+            if token == image_token_id {
+                materialized.extend([
+                    prompt_ids.content_image,
+                    image_token_id,
+                    prompt_ids.end_message,
+                ]);
+            } else {
+                materialized.extend([
+                    audio_ids.audio_bos,
+                    audio_token_id,
+                    audio_ids.audio_end,
+                    prompt_ids.end_message,
+                ]);
+            }
+            text_start = position + 1;
+        }
+        if text_start < content.len() {
+            materialized.extend([prompt_ids.message_user, prompt_ids.content_text]);
+            materialized.extend_from_slice(&content[text_start..]);
+            materialized.push(prompt_ids.end_message);
+        }
+        index = content_end + 1;
+    }
+    Ok(materialized)
 }
 
 fn materialize_phi4mm_ordered_prompt(

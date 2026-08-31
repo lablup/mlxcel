@@ -159,6 +159,21 @@ impl LoadedModel {
         self.vlm_runtime().is_some()
     }
 
+    /// Whether the loaded runtime has a public `input_audio` preparation path.
+    #[must_use]
+    pub fn supports_audio_input(&self) -> bool {
+        match self {
+            Self::InklingVLM(model) => model.supports_audio(),
+            Self::Phi4MMVLM(_)
+            | Self::Gemma3nVLM(_)
+            | Self::Gemma4VLM(_)
+            | Self::Gemma4Unified(_)
+            | Self::NemotronHNanoOmniVLM(_)
+            | Self::Qwen3OmniMoe(_) => true,
+            _ => false,
+        }
+    }
+
     /// Get the vision module if this is a standard `VisionModule`-backed VLM.
     pub fn vision_module(&self) -> Option<&vision::VisionModule> {
         vision_module_from_runtime(self.vlm_runtime()?)
