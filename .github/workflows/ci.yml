@@ -687,10 +687,41 @@ jobs:
           mkdir -p "$CARGO_TARGET"
           echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
 
+      - name: Check whether the toolkit can target sm_70
+        id: toolkit
+        run: |
+          # CUDA 13 removed Volta: nvcc there fails with
+          # `nvcc fatal : Unsupported gpu architecture 'compute_70'` before it
+          # compiles anything. The CUDA runners currently carry 13.x, so this
+          # gate cannot run on them, and a job that simply failed would red-light
+          # every PR touching these paths for a toolkit limitation rather than a
+          # code defect. Probe instead, and skip loudly. The moment a CUDA 12.x
+          # runner joins the fleet this job starts gating for real with no edit.
+          set -euo pipefail
+          NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
+          if [ ! -x "$NVCC" ]; then
+            echo "nvcc not found" >&2
+            exit 1
+          fi
+          VERSION=$("$NVCC" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)
+          if "$NVCC" --list-gpu-arch 2>/dev/null | grep -qx compute_70; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            echo "CUDA $VERSION targets sm_70; gating for real."
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "CUDA $VERSION cannot target sm_70; skipping the sm_70 build." | tee -a "$GITHUB_STEP_SUMMARY"
+            {
+              echo ""
+              echo "**sm_70 gate skipped.** This runner's CUDA toolkit is $VERSION, and CUDA 13 removed Volta (sm_70) support, so nvcc rejects \`compute_70\` outright. Nothing was compiled for Volta and nothing was verified. This is a toolkit limitation, not a passing gate. Building mlxcel for Volta requires a CUDA 12.x toolchain; see the CUDA architecture selection section of docs/installation.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Compile the CUDA feature set for sm_70
+        if: steps.toolkit.outputs.supported == 'true'
         run: cargo check --features cuda --all-targets
 
       - name: Verify the emitted cubins are sm_70
+        if: steps.toolkit.outputs.supported == 'true'
         run: |
           # `cargo check` still runs the build script, so MLX is compiled and
           # archived even though nothing links. Asserting on the archive turns

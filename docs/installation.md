@@ -158,6 +158,9 @@ CUDA_HOME=/opt/cuda cargo build --release --features cuda
 
 ### CUDA architecture selection
 
+> **Volta (sm_70) requires a CUDA 12.x toolchain.** CUDA 13 removed support for Volta, so its `nvcc` rejects `compute_70` outright with `nvcc fatal : Unsupported gpu architecture 'compute_70'` before compiling anything. The published release archives are built against CUDA 13 and therefore contain no sm_70 code at all, and the project's CUDA CI runners carry CUDA 13, so the `cuda-sm70-compile` gate skips there rather than failing. Building for a V100 or any other Volta card means a source build on a host with CUDA 12.x installed. This was verified on CUDA 12.9.41, which compiles sm_70 without complaint.
+
+
 `src/lib/mlxcel-core/build.rs` reads `MLX_CUDA_ARCHITECTURES`. If it is unset,
 the build script tries to detect the compute capability with `nvidia-smi` and
 falls back to `90a` when detection fails. For SM 90 and above it appends CUDA's
