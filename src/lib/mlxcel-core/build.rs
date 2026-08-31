@@ -113,6 +113,12 @@ fn main() {
         // values rather than written through.
         .file("../mlx-cpp/turbo/fused_norm.cpp")
         .file("../mlx-cpp/turbo/fused_rope_append.cpp")
+        // C shim over the `qmm_naive` CTA tile selector (#1541), so
+        // `qmm_naive_tile_tests.rs` can sweep the shipped selection function on
+        // the host. The selector is pure integer arithmetic with no CUDA in it,
+        // and the sm_80+ non-regression claim it carries has to be checkable on
+        // a machine with no NVIDIA hardware, so this is not gated on `cuda`.
+        .file("cpp/qmm_naive_tile_probe.cpp")
         .include(&mlx_include)
         .include("cpp")
         .include("../mlx-cpp/turbo")
@@ -220,6 +226,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_ext.cpp");
+    println!("cargo:rerun-if-changed=cpp/qmm_naive_tile_probe.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
     println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches");

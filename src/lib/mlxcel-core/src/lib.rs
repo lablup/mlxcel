@@ -3499,6 +3499,15 @@ mod ffi_tests;
 #[path = "cuda_arch_tests.rs"]
 mod cuda_arch_tests;
 
+// The `qmm_naive` CTA tile selector (#1541), swept through the C shim in
+// `cpp/qmm_naive_tile_probe.cpp`. The selector is host code and a pure function
+// of (itemsize, m, group_size, shared-memory budget), so its sm_80-and-later
+// non-regression claim is settled by enumeration here rather than deferred to
+// an Ampere-or-later host. No GPU and no CUDA toolkit needed.
+#[cfg(test)]
+#[path = "qmm_naive_tile_tests.rs"]
+mod qmm_naive_tile_tests;
+
 // Numeric-parity, determinism, and SGY-invariance tests for the fused
 // single-token decode-MoE GeGLU kernel (#886). GPU-only (Metal or CUDA);
 // they skip on CPU-only builds.

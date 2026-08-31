@@ -4468,6 +4468,97 @@ fn qmv_matches_qmm_across_bits_and_group_sizes() {
     }
 }
 
+/// [#1541] `qmm_naive` output must not depend on the CTA tile width.
+///
+/// A tile width is a blocking decision: it changes which output columns a CTA
+/// owns and how many CTAs there are, and it changes nothing about the order a
+/// single output element is accumulated in, because `tile_k` and the K loop
+/// are untouched. So the output must be bit-identical, not merely close, and
+/// any difference is a bug in the blocking rather than a rounding effect.
+/// #1541 rewrote the selector that picks that width, and this is the invariant
+/// that makes the width a free parameter for the sweep it ran and for the
+/// `MLXCEL_QMM_NAIVE_TILE_N` override it left behind.
+///
+/// `MLXCEL_QMM_NAIVE_TILE_N` is read on every dispatch precisely so this
+/// comparison can happen inside one process on identical operands. Two runs of
+/// two processes could not distinguish a tile-width effect from any other
+/// per-process nondeterminism, and `cuda_qmm_determinism` records that
+/// quantized prefill on sm_70 is not reproducible across processes.
+///
+/// `group_size = 128` is not decoration: at 16-bit activations the forced
+/// 128-wide tile there needs 49,152 bytes of shared memory, past the ceiling a
+/// launch gets without `cuFuncSetAttribute`. That arm is the only test in this
+/// suite that exercises the dynamic shared-memory opt-in on real hardware, and
+/// it fails at launch if the opt-in is dropped.
+///
+/// `M = 64` keeps this on the qmm path (`M * B < 8` is false) and gives
+/// `tile_m = 64`, the prefill-sized tile. Both arms are forced, on every
+/// architecture: the selector picks one width and this test asks for the other
+/// as well, which is the only way to compare them inside one process.
+#[cfg(feature = "cuda")]
+#[test]
+fn qmm_naive_output_is_identical_across_cta_tile_widths() {
+    let _guard = crate::test_support::env_lock::env_lock();
+    let saved = std::env::var("MLXCEL_QMM_NAIVE_TILE_N").ok();
+
+    random_seed(1541);
+    // n % 128 == 0 so the 128-wide tile divides the output axis exactly and the
+    // two arms differ only in blocking, not in how much predication they do.
+    // k is divisible by 32, 64 and 128 so one shape serves every group size.
+    let n = 256;
+    let k = 512;
+    let rows = 64i32;
+
+    for &bits in &[4i32, 8] {
+        for &group_size in &[32i32, 64, 128] {
+            let (w, s, b) = random_quantized_weight(n, k, group_size, bits);
+            let x_f32 = unsafe { random_normal(&[rows, k], dtype::FLOAT32, std::ptr::null()) };
+            let x = astype(&x_f32, dtype::BFLOAT16);
+            eval(&x);
+
+            let run = |tile_n: i32| -> Vec<u8> {
+                unsafe { std::env::set_var("MLXCEL_QMM_NAIVE_TILE_N", tile_n.to_string()) };
+                let out = unsafe {
+                    quantized_matmul(
+                        &x,
+                        &w,
+                        &s,
+                        b.as_ref().unwrap() as *const MlxArray,
+                        true,
+                        group_size,
+                        bits,
+                        "affine",
+                    )
+                };
+                eval(&out);
+                assert_eq!(array_shape(&out), vec![rows, n]);
+                array_to_raw_bytes(&out)
+            };
+
+            let narrow = run(64);
+            let wide = run(128);
+            assert_eq!(
+                narrow.len(),
+                wide.len(),
+                "{bits}-bit gs{group_size}: output size changed with the tile width"
+            );
+            assert!(
+                narrow == wide,
+                "{bits}-bit gs{group_size} [{rows}x{k}]x[{k}x{n}]: qmm_naive output changed \
+                 between a 64-wide and a 128-wide CTA tile. Tile width is a blocking choice \
+                 and must not reach the result."
+            );
+        }
+    }
+
+    unsafe {
+        match saved {
+            Some(v) => std::env::set_var("MLXCEL_QMM_NAIVE_TILE_N", v),
+            None => std::env::remove_var("MLXCEL_QMM_NAIVE_TILE_N"),
+        }
+    }
+}
+
 /// `dequantize` must not depend on the memory layout of its inputs.
 ///
 /// Slicing an affine-quantized triplet along a non-contiguous axis (splitting a
