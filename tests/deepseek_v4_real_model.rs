@@ -327,29 +327,37 @@ fn deepseek_v4_real_model_long_context_engages_hisa_hierarchy() {
 
 /// Measures how decode cost scales with the pooled prefix (#549 criterion 4).
 ///
-/// **What this measured, and it is not what #549 predicted.** The criterion
-/// expected per-token decode time to stay roughly flat as the pooled prefix
-/// grows, on the reasoning that the hierarchy scores `nb` block representatives
-/// plus `index_keep * index_block` fine candidates, both independent of `Np`.
-/// Measured on the real checkpoint, decode cost tracks `Np` almost exactly:
-/// pooled rows x1.97 gives ms/token x1.91. Forcing the flat scan with
-/// `MLXCEL_V4_FLAT_INDEX` (switch confirmed active by its stderr notice)
-/// changes nothing, within 0.4% at every length.
+/// **This REPORTS; it does not gate.** Two attempts to turn it into a gate both
+/// measured the wrong thing, and the numbers it prints should be read as a
+/// smoke signal, not as evidence about decode scaling.
 ///
-/// The reason is the coarse stage. Scoring is `O(nb + Kb*b)` as claimed, but
-/// the representatives it scores are rebuilt from scratch every step:
-/// `rep = mean(pooled[:usable].reshape(nb, b, hd), axis=2)` reads the entire
-/// pooled prefix. So the hierarchy replaces "score `Np` rows" with
-/// "mean-reduce `Np` rows, then score ~`Kb*b`", and both are `O(Np)` traffic
-/// over the same buffer. The reference has the identical structure, so this is
-/// a property of the algorithm as specified, not a porting defect.
+/// Attempt 1 timed one whole `generate()` and divided by tokens generated. That
+/// includes prefill, which at 8900 tokens is roughly 37 seconds against about 4
+/// seconds of decode, so the figure was prefill cost wearing decode's clothes:
+/// it tracked the prefix because prefill tracks prompt length, and the
+/// `MLXCEL_V4_FLAT_INDEX` arm looked identical because prefill dominated both.
 ///
-/// This test therefore REPORTS the scaling rather than gating flatness, which
-/// the port does not have. The assertion only catches a pathological blow-up
-/// (cost growing faster than the prefix itself); the printed numbers are the
-/// evidence. Making it flat needs an incremental representative cache, which
-/// is exact because pooled rows are append-only so a completed block's mean
-/// never changes. That is filed separately.
+/// Attempt 2 (what the code below still does) times two decode lengths and
+/// subtracts so prefill cancels. It does not cancel: `t_short` and `t_long` are
+/// separate `generate()` calls each paying their own prefill, so any difference
+/// between the two prefills lands whole in the estimate. Prefill for one
+/// identical prompt was measured between 16 and 54 seconds across runs, and the
+/// 4513-token decode figure came out 98.3, 369.5, then 186.4 ms/step on
+/// consecutive runs, giving growth ratios of x1.01, x1.39 and x0.49 (decode
+/// apparently getting faster as context doubled, which is not a thing). A gate
+/// on that fails at random and teaches people to ignore it.
+///
+/// The right tool already exists: `src/bin/bench_decode.rs`
+/// (`mlxcel-bench-decode`) loads the model once, warms up, and measures in a
+/// single process, and its header documents exactly the cold-prefill artifact
+/// attempt 1 fell into. Settling whether the HiSA hierarchy pays for itself
+/// means driving that harness across context lengths with and without
+/// `MLXCEL_V4_FLAT_INDEX` on a quiet machine. See #549.
+///
+/// What this test still earns its place doing: driving real decode at three
+/// context lengths spanning the dense, flat-scan and hierarchy bands, so a
+/// crash or a degenerate output in any band shows up.
+///
 #[test]
 #[ignore]
 fn deepseek_v4_real_model_hisa_decode_cost_scaling() {
@@ -403,21 +411,42 @@ fn deepseek_v4_real_model_hisa_decode_cost_scaling() {
             .collect()
     };
 
-    const DECODE_STEPS: usize = 24;
+    // Two decode lengths per context so prefill cancels: t(long) - t(short)
+    // over the step delta is the per-step decode cost, while a single timed
+    // generate() would be dominated by prefill and would report prompt-length
+    // scaling dressed up as decode scaling.
+    const SHORT_STEPS: usize = 8;
+    const LONG_STEPS: usize = 40;
+    // One untimed warmup: the first generate() of a process pays kernel and
+    // allocator init, which lands entirely in whichever run happens to go
+    // first and can make t(long) - t(short) negative.
+    {
+        let warm = build(512);
+        let mut g = CxxGenerator::new(model.num_layers());
+        let _ = g.generate(&model, &warm, 4, &SamplingConfig::greedy());
+    }
+
     let mut measured = Vec::new();
     // Two lengths inside the hierarchy regime (the second doubles the pooled
     // prefix), plus one below it for context on where the bands sit.
     for target in [2200usize, 4400, 8800] {
         let ids = build(target);
         let pooled = ids.len() / ratio;
-        let mut generator = CxxGenerator::new(model.num_layers());
-        let start = std::time::Instant::now();
-        let tokens = generator.generate(&model, &ids, DECODE_STEPS, &SamplingConfig::greedy());
-        let elapsed = start.elapsed();
-        assert!(!tokens.is_empty(), "decode must produce tokens at {target}");
-        // Prefill dominates the wall clock, so report both and compare the
-        // per-token figure, which is what the O(Np) claim is about.
-        let per_token_ms = elapsed.as_secs_f64() * 1000.0 / tokens.len() as f64;
+        let run = |steps: usize| -> (f64, usize) {
+            let mut generator = CxxGenerator::new(model.num_layers());
+            let start = std::time::Instant::now();
+            let tokens = generator.generate(&model, &ids, steps, &SamplingConfig::greedy());
+            (start.elapsed().as_secs_f64() * 1000.0, tokens.len())
+        };
+        let (t_short, n_short) = run(SHORT_STEPS);
+        let (t_long, n_long) = run(LONG_STEPS);
+        assert!(
+            n_long > n_short,
+            "the long run must decode more tokens than the short one at {target} \
+             (got {n_long} vs {n_short}); an early EOS breaks the subtraction"
+        );
+        let per_token_ms = (t_long - t_short) / (n_long - n_short) as f64;
+        let prefill_ms = t_short - per_token_ms * n_short as f64;
         let path = if pooled >= hierarchy_rows {
             "hierarchy"
         } else if pooled > args.index_topk {
@@ -426,12 +455,11 @@ fn deepseek_v4_real_model_hisa_decode_cost_scaling() {
             "dense"
         };
         eprintln!(
-            "[deepseek-v4] {:>5} tokens -> {:>5} pooled rows ({:<9}) | {:>3} decoded in {:>7.2}s | {:>7.1} ms/token",
+            "[deepseek-v4] {:>5} tokens -> {:>5} pooled rows ({:<9}) | prefill ~{:>8.0} ms | decode {:>6.1} ms/step",
             ids.len(),
             pooled,
             path,
-            tokens.len(),
-            elapsed.as_secs_f64(),
+            prefill_ms,
             per_token_ms
         );
         measured.push((ids.len(), pooled, path, per_token_ms));
@@ -449,14 +477,16 @@ fn deepseek_v4_real_model_hisa_decode_cost_scaling() {
         "[deepseek-v4] pooled rows x{pooled_growth:.2} -> decode ms/token x{growth:.2} \
          (O(Np) selection would track the former)"
     );
-    // Deliberately not a flatness gate: the port is not flat in Np and the doc
-    // comment says why. This only catches a regression that makes decode scale
-    // WORSE than the pooled prefix, which no correct selection path should.
-    assert!(
-        growth < pooled_growth * 1.25,
-        "decode cost grew faster than the pooled prefix (x{growth:.2} vs x{pooled_growth:.2}); \
-         selection should at worst track Np, never outrun it"
-    );
+    // Sanity only. Asserting anything about `growth` would be asserting on a
+    // quantity measured at 4x spread between runs (see the doc comment), so the
+    // only claims made here are ones the noise cannot flip: the arithmetic
+    // produced usable numbers at every band.
+    for (tokens, pooled, path, ms) in &measured {
+        assert!(
+            ms.is_finite(),
+            "{tokens} tokens ({pooled} pooled, {path}): non-finite decode estimate"
+        );
+    }
 }
 
 /// Not `#[ignore]`: parsing the real config costs nothing and catches serde
