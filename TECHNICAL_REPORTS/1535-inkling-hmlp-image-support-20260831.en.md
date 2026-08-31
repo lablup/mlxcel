@@ -67,6 +67,7 @@ Correctness, security, performance, and finalizer review produced the following 
 - Made tile allocation and count arithmetic checked and reported allocation failure.
 - Rejected invalid resize, normalization, and text-width configuration values.
 - Preserved prepared-embedding sequence-ID and last-logits paths for model-owned Inkling caches.
+- Added an explicit CLI preparation-summary arm so all-target and test builds remain exhaustive when the Inkling runtime reports dynamic tile counts.
 - Disabled chunked prefill and left image-feature caching out of scope rather than reusing one-shot visual embeddings under an unsafe cache contract.
 
 No unresolved CRITICAL or HIGH correctness, security, or performance findings remained in the reviewed change.
@@ -77,7 +78,7 @@ No unresolved CRITICAL or HIGH correctness, security, or performance findings re
 | --- | --- |
 | `cargo test --lib inkling --profile test-fast --features metal,accelerate -- --test-threads=1` | Pass, 40/40 |
 | `cargo check --lib --features metal,accelerate` | Pass |
-| `cargo clippy --lib --features metal,accelerate -- -D warnings` | Pass |
+| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | Pass |
 | `cargo fmt --all -- --check` | Pass |
 | `git diff --check` | Pass |
 

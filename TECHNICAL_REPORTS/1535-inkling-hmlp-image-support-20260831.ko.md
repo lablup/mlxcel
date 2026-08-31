@@ -67,6 +67,7 @@ Inkling은 visual scatter 전에 `embed_norm`을 적용한다. 그래서 VLM wra
 - Tile allocation과 count 산술을 checked 연산으로 바꾸고 allocation 실패를 보고했다.
 - 잘못된 resize·정규화·text-width 설정을 거부했다.
 - 모델 소유 Inkling cache를 위해 prepared-embedding sequence-ID 및 last-logits 경로를 유지했다.
+- Inkling 런타임이 동적 tile 수를 보고할 때 all-target 및 test build의 match가 완전하도록 명시적인 CLI preparation-summary arm을 추가했다.
 - 불안전한 cache 계약으로 one-shot visual embedding을 재사용하지 않고 chunked prefill을 비활성화했으며 image feature cache를 범위 밖으로 유지했다.
 
 리뷰된 변경에 해결되지 않은 CRITICAL 또는 HIGH 정확성·보안·성능 문제는 남지 않았다.
@@ -77,7 +78,7 @@ Inkling은 visual scatter 전에 `embed_norm`을 적용한다. 그래서 VLM wra
 | --- | --- |
 | `cargo test --lib inkling --profile test-fast --features metal,accelerate -- --test-threads=1` | 통과, 40/40 |
 | `cargo check --lib --features metal,accelerate` | 통과 |
-| `cargo clippy --lib --features metal,accelerate -- -D warnings` | 통과 |
+| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | 통과 |
 | `cargo fmt --all -- --check` | 통과 |
 | `git diff --check` | 통과 |
 
