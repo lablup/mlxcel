@@ -40,10 +40,13 @@
 #   make verify-clean   # same, after `cargo clean` — use when clippy's
 #                       # per-crate cache may be hiding a regression
 #
-# Note on CUDA gating: CUDA verification stays exclusive to release.yml because
-# it requires a Linux self-hosted runner (currently only the GB10 node used for
-# release builds). Adding a PR-level CUDA gate would double runner cost for
-# limited additional safety on PRs that don't touch CUDA-specific code paths.
+# Note on CUDA gating: running the CUDA test suite stays exclusive to
+# release.yml because it requires a Linux self-hosted runner (currently only the
+# GB10 node used for release builds). Adding a PR-level CUDA *test* gate would
+# double runner cost for limited additional safety on PRs that don't touch
+# CUDA-specific code paths. Compiling CUDA is a different question and three
+# jobs below do it: `xla-compile` and `xla-link` at the shipped sm_121, and
+# `cuda-sm70-compile` at sm_70, each on a narrow path filter.
 
 name: CI
 
@@ -67,6 +70,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       mlx_pin: ${{ steps.filter.outputs.mlx_pin }}
       xla_link: ${{ steps.filter.outputs.xla_link }}
+      cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,6 +103,18 @@ jobs:
               - 'src/lib/mlxcel-xla/csrc/**'
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+            # Everything that can compile differently per CUDA architecture: the
+            # MLX overlays and turbo kernels, the pinned MLX commit, and the
+            # build scripts that hand CMake the architecture list. Rust sources
+            # outside these paths cannot break an arch-conditional compile, so
+            # the sm_70 gate below does not run on every Rust PR. See the
+            # `cuda-sm70-compile` job comment for why sm_70 specifically.
+            cuda_arch:
+              - 'src/lib/mlx-cpp/**'
+              - 'src/lib/mlxcel-core/build.rs'
+              - 'src/lib/mlxcel-core/build_support/**'
+              - 'build.rs'
               - '.github/workflows/ci.yml'
 
   deny:
@@ -606,3 +622,138 @@ jobs:
 
       - name: Link the OpenXLA integration test
         run: cargo test --release --features cuda,xla-iree --test xla_prepared_prefill --no-run
+
+  # ============================================================================
+  # CUDA sm_70 compile (self-hosted GB10)
+  # ============================================================================
+  # Every other CUDA job in this repository compiles for sm_121, and
+  # release.yml ships `80;86;89;90a;100;120` on x86_64 and `90a;100;121` on
+  # aarch64. Nothing below sm_80 is compiled anywhere, so an arch-conditional
+  # break on Volta reaches `main` unnoticed and is found by whoever next builds
+  # from source on one. That is not hypothetical for this repository: epic
+  # #1536 adds `cc < 8` fallbacks to the quantized-matmul overlays precisely
+  # because the sm_80+ paths are wrong there, and every one of those branches
+  # is compiled only when some job asks nvcc for a pre-Ampere target.
+  #
+  # Compile-only, and deliberately so. The realistic failure mode is a
+  # compile-time one: a `__CUDA_ARCH__` guard that does not cover cc 7, a
+  # CUTLASS type that has no pre-Ampere instantiation, a `bf16` intrinsic with
+  # no sm_70 implementation. Catching those needs nvcc pointed at sm_70, not a
+  # Volta card, and no GPU runner is involved here. The runtime half stays
+  # uncovered, and the decision to leave it uncovered is recorded in
+  # `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (issue #1538)
+  # together with what a GPU-backed Volta job would and would not add: there is
+  # no Volta runner, no release artifact targets sm_70, and #1537 already turns
+  # an architecture mismatch into a named startup error instead of an opaque
+  # CUDA load failure.
+  #
+  # Path-filtered on `cuda_arch`, which is narrower than `rust`: a cold MLX
+  # build for a new architecture is measured in tens of minutes, and only the
+  # MLX overlays, the pinned commit and the build scripts can move what nvcc
+  # compiles. Its own persistent target directory, because the architecture
+  # list is part of the build-script fingerprint and sharing a directory with
+  # an sm_121 job would make the two rebuild MLX against each other on every
+  # run.
+  cuda-sm70-compile:
+    name: CUDA sm_70 compile
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.cuda_arch == 'true'
+    runs-on: GB10
+    permissions:
+      contents: read
+    # Same reasoning as `xla-link`: minutes warm, tens of minutes cold, on the
+    # one runner that also serves clippy for every Rust PR and the release
+    # build. Keyed per PR, so PRs never cancel each other.
+    concurrency:
+      group: cuda-sm70-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    timeout-minutes: 120
+    env:
+      # Volta. Plain `70`, not `70a`: architecture-specific suffixes only exist
+      # from sm_90 on, and build.rs forwards this string to CMake verbatim.
+      MLX_CUDA_ARCHITECTURES: "70"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Not shared with any sm_121 job: the architecture list reaches CMake
+          # through the build script, so two jobs at different architectures
+          # sharing one directory would invalidate each other's MLX build every
+          # run and pay a cold nvcc pass each time.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-sm70-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+
+      - name: Check whether the toolkit can target sm_70
+        id: toolkit
+        run: |
+          # CUDA 13 removed Volta: nvcc there fails with
+          # `nvcc fatal : Unsupported gpu architecture 'compute_70'` before it
+          # compiles anything. The CUDA runners currently carry 13.x, so this
+          # gate cannot run on them, and a job that simply failed would red-light
+          # every PR touching these paths for a toolkit limitation rather than a
+          # code defect. Probe instead, and skip loudly. The moment a CUDA 12.x
+          # runner joins the fleet this job starts gating for real with no edit.
+          set -euo pipefail
+          NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
+          if [ ! -x "$NVCC" ]; then
+            echo "nvcc not found" >&2
+            exit 1
+          fi
+          VERSION=$("$NVCC" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)
+          if "$NVCC" --list-gpu-arch 2>/dev/null | grep -qx compute_70; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            echo "CUDA $VERSION targets sm_70; gating for real."
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "CUDA $VERSION cannot target sm_70; skipping the sm_70 build." | tee -a "$GITHUB_STEP_SUMMARY"
+            {
+              echo ""
+              echo "**sm_70 gate skipped.** This runner's CUDA toolkit is $VERSION, and CUDA 13 removed Volta (sm_70) support, so nvcc rejects \`compute_70\` outright. Nothing was compiled for Volta and nothing was verified. This is a toolkit limitation, not a passing gate. Building mlxcel for Volta requires a CUDA 12.x toolchain; see the CUDA architecture selection section of docs/installation.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Compile the CUDA feature set for sm_70
+        if: steps.toolkit.outputs.supported == 'true'
+        run: cargo check --features cuda --all-targets
+
+      - name: Verify the emitted cubins are sm_70
+        if: steps.toolkit.outputs.supported == 'true'
+        run: |
+          # `cargo check` still runs the build script, so MLX is compiled and
+          # archived even though nothing links. Asserting on the archive turns
+          # "the environment variable was set" into "nvcc actually emitted
+          # pre-Ampere code", which is what the job claims to gate. It also
+          # catches the silent trap described in #1538: build.rs auto-detects
+          # the host and falls back to `90a` when it cannot, so a job whose
+          # architecture list failed to reach CMake would otherwise pass here
+          # having compiled nothing for Volta.
+          set -euo pipefail
+          # cuobjdump ships next to nvcc, which the build above already
+          # required, so resolving it from PATH and then from nvcc's directory
+          # covers both a CUDA toolkit on PATH and one reached only through an
+          # absolute nvcc.
+          CUOBJDUMP=$(command -v cuobjdump || true)
+          if [ -z "$CUOBJDUMP" ]; then
+            NVCC=$(command -v nvcc || true)
+            [ -n "$NVCC" ] && CUOBJDUMP="$(dirname "$NVCC")/cuobjdump"
+          fi
+          if [ ! -x "${CUOBJDUMP:-}" ]; then
+            echo "cuobjdump not found; it ships with the CUDA toolkit next to nvcc" >&2
+            exit 1
+          fi
+          LIB=$(find "$CARGO_TARGET_DIR/debug/build" -path '*/out/build/lib/libmlx.a' | head -1)
+          if [ -z "$LIB" ]; then
+            echo "libmlx.a not found under $CARGO_TARGET_DIR/debug/build" >&2
+            exit 1
+          fi
+          echo "archive: $LIB"
+          ARCHES=$("$CUOBJDUMP" --list-elf "$LIB" | grep -oE 'sm_[0-9]+a?' | sort -u)
+          echo "architectures present: $(echo "$ARCHES" | tr '\n' ' ')"
+          if [ "$ARCHES" != "sm_70" ]; then
+            echo "expected sm_70 only, found: $ARCHES" >&2
+            exit 1
+          fi

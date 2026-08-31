@@ -61,8 +61,13 @@ trap 'echo "Interrupted (signal received)" >&2; exit 130' INT TERM
 
 MLXCEL="./target/release/mlxcel"
 MLXCEL_BENCH="./target/release/mlxcel-bench-decode"
-MODELS_DIR="./models"
-BENCHMARKS_DIR="./benchmarks"
+# Overridable so `all` mode can sweep a checkout whose models live under a
+# nested store root (e.g. `./models/mlx-community`), which is what the mlxcel
+# model store produces when it downloads by `owner/name` repo-id. The Makefile's
+# bench targets already take `MODELS_DIR` this way. Default unchanged, so an
+# unset environment reproduces every historical CSV.
+MODELS_DIR="${MODELS_DIR:-./models}"
+BENCHMARKS_DIR="${BENCHMARKS_DIR:-./benchmarks}"
 TEXT_PROMPT="Hello, how are you today?"
 VLM_PROMPT="What is in this image?"
 MAX_TOKENS=100
@@ -161,6 +166,11 @@ detect_hardware_short() {
     *M5_Ultra*)  echo "m5ultra" ;;
     *M5_Max*)    echo "m5max" ;;
     *GB10*)      echo "gb10" ;;
+    # Volta. Without this the fallback below truncates to
+    # `tesla_v100-pcie-32gb`, which reads as a different machine from `gb10` in
+    # the same directory listing. Added with the sm_70 baseline (#1538), the
+    # first non-GB10 CUDA sweep in `benchmarks/`.
+    *V100*)      echo "v100" ;;
     *)           echo "${full}" | tr '[:upper:]' '[:lower:]' | tr ',' '_' | cut -c1-20 ;;
   esac
 }
@@ -313,6 +323,13 @@ Options:
   --help              Show this help
 
 Environment variables:
+  MODELS_DIR                 Root that `all` mode enumerates (default
+                             ./models). Set it to a nested store root such as
+                             ./models/mlx-community when the checkout holds
+                             models under owner/name, as the mlxcel model store
+                             writes them.
+  BENCHMARKS_DIR             Directory the auto-generated CSV path is built in
+                             (default ./benchmarks).
   BENCH_MEM_OVERHEAD_FACTOR  Multiply the safetensors weight-size estimate by
                              this factor before comparing against the 85% memory
                              budget. Default 1.0 (no change). Set to e.g. 1.2
