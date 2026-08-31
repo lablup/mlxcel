@@ -224,6 +224,35 @@ fn mtp_burst_declines_raw_images_before_inkling_vlm_adapter_dispatch() {
 }
 
 #[test]
+fn mtp_burst_declines_raw_audio_before_inkling_vlm_adapter_dispatch() {
+    let dispatch = make_mtp_dispatch();
+    let (mut seq, _rx) = make_test_sequence();
+    seq.audio.push(b"raw-audio-placeholder".to_vec());
+    assert!(
+        !should_burst_for_sequence(&dispatch, &seq),
+        "audio-bearing InklingVLM requests must stay on classic dMel \
+         prepared-embedding prefill instead of entering the text-only MTP adapter"
+    );
+}
+
+#[test]
+fn mtp_burst_declines_prepared_inkling_audio_after_raw_payload_is_consumed() {
+    use crate::vision::merge::InputEmbeddings;
+
+    let dispatch = make_mtp_dispatch();
+    let (mut seq, _rx) = make_test_sequence();
+    seq.vlm_embeddings = Some(InputEmbeddings {
+        inputs_embeds: from_slice_f32(&[0.0, 0.0, 0.0, 0.0], &[1, 1, 4]),
+        attention_mask_4d: None,
+    });
+    seq.audio.clear();
+    assert!(
+        !should_burst_for_sequence(&dispatch, &seq),
+        "prepared Inkling audio must remain on the classic path even after the raw WAV bytes are consumed"
+    );
+}
+
+#[test]
 fn dflash_burst_allowed_for_vlm_wrapped_text_only_sequence_shape() {
     let dispatch = make_dflash_dispatch();
     let (seq, _rx) = make_test_sequence();

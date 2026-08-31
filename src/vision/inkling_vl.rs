@@ -20,6 +20,7 @@ use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::audio::inkling_processor::InklingProcessorConfig;
 use crate::models::InklingModel;
 
 use super::encoders::inkling_hmlp::InklingHmlpEncoder;
@@ -30,6 +31,7 @@ pub struct InklingVlModel {
     pub text: InklingModel,
     pub vision_tower: InklingHmlpEncoder,
     pub image_processor: InklingImageProcessor,
+    pub audio_processor: InklingProcessorConfig,
     image_token_id: i32,
 }
 
@@ -38,18 +40,30 @@ impl InklingVlModel {
         text: InklingModel,
         vision_tower: InklingHmlpEncoder,
         image_processor: InklingImageProcessor,
+        audio_processor: InklingProcessorConfig,
         image_token_id: i32,
     ) -> Self {
         Self {
             text,
             vision_tower,
             image_processor,
+            audio_processor,
             image_token_id,
         }
     }
 
     pub fn image_token_id(&self) -> i32 {
         self.image_token_id
+    }
+
+    #[must_use]
+    pub fn supports_audio(&self) -> bool {
+        self.text.supports_audio()
+    }
+
+    #[must_use]
+    pub fn audio_token_id(&self) -> i32 {
+        self.text.audio_token_id()
     }
 
     pub fn preprocess_images(
@@ -102,6 +116,28 @@ impl InklingVlModel {
             &embeddings,
             input_ids,
         ))
+    }
+
+    /// Prepare normalized text embeddings, scatter image rows first, and
+    /// scatter compact valid dMel rows second.
+    pub fn prepare_input_embeddings_with_audio(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: Option<&MlxArray>,
+        audio_input_ids: &MlxArray,
+    ) -> Result<InputEmbeddings, String> {
+        let image_embeddings = match pixel_values {
+            Some(pixel_values) => self.prepare_input_embeddings(input_ids, pixel_values)?,
+            None => InputEmbeddings {
+                inputs_embeds: self.text.normalized_input_embeddings(input_ids)?,
+                attention_mask_4d: None,
+            },
+        };
+        self.text.merge_audio_embeddings(
+            input_ids,
+            &image_embeddings.inputs_embeds,
+            audio_input_ids,
+        )
     }
 
     /// Prepare Inkling video embeddings after replacing the second temporal
@@ -210,6 +246,10 @@ impl LanguageModel for InklingVlModel {
         let mut ids = LanguageModel::output_suppressed_token_ids(&self.text);
         if !ids.contains(&self.image_token_id) {
             ids.push(self.image_token_id);
+        }
+        let audio_token_id = self.audio_token_id();
+        if self.supports_audio() && !ids.contains(&audio_token_id) {
+            ids.push(audio_token_id);
         }
         ids
     }
@@ -362,7 +402,14 @@ mod tests {
     use crate::vision::encoders::inkling_hmlp::{InklingVisionConfig, layer_plan};
 
     fn tiny_vlm() -> InklingVlModel {
-        let text = crate::models::inkling::tiny_model();
+        tiny_vlm_with_text(crate::models::inkling::tiny_model())
+    }
+
+    fn tiny_audio_vlm() -> InklingVlModel {
+        tiny_vlm_with_text(crate::models::inkling::tiny_audio_model())
+    }
+
+    fn tiny_vlm_with_text(text: InklingModel) -> InklingVlModel {
         let vision_config: InklingVisionConfig = serde_json::from_value(serde_json::json!({
             "model_type": "inkling_vision",
             "patch_size": 40,
@@ -388,7 +435,13 @@ mod tests {
         );
         let vision_tower =
             InklingHmlpEncoder::from_weights(&weights, &vision_config, 64, 4).unwrap();
-        InklingVlModel::new(text, vision_tower, InklingImageProcessor::default(), 7)
+        InklingVlModel::new(
+            text,
+            vision_tower,
+            InklingImageProcessor::default(),
+            InklingProcessorConfig::default(),
+            7,
+        )
     }
 
     fn arrays_equal(left: &MlxArray, right: &MlxArray) -> bool {
@@ -429,6 +482,30 @@ mod tests {
             "InklingVLM image prefill must feed HMLP-merged prepared embeddings directly \
              to vlm.text without replacing them with token embeddings or normalizing twice"
         );
+    }
+
+    #[test]
+    fn mixed_prefill_scatter_order_is_normalized_text_then_image_then_audio() {
+        let vlm = tiny_audio_vlm();
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 7, 6, 2], &[1, 4]);
+        let pixel_values = mlxcel_core::zeros(&[1, 2, 40, 40, 3], dtype::FLOAT32);
+        let audio_ids = mlxcel_core::zeros(&[1, 80], dtype::INT32);
+
+        let image_first = vlm
+            .prepare_input_embeddings(&input_ids, &pixel_values)
+            .unwrap();
+        let expected = vlm
+            .text
+            .merge_audio_embeddings(&input_ids, &image_first.inputs_embeds, &audio_ids)
+            .unwrap();
+        let actual = vlm
+            .prepare_input_embeddings_with_audio(&input_ids, Some(&pixel_values), &audio_ids)
+            .unwrap();
+
+        assert!(arrays_equal(&actual.inputs_embeds, &expected.inputs_embeds));
+        assert!(vlm.supports_audio());
+        assert_eq!(vlm.audio_token_id(), 6);
+        assert!(vlm.output_suppressed_token_ids().contains(&6));
     }
 
     #[test]

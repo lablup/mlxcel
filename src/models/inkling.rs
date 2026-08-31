@@ -393,11 +393,6 @@ impl InklingModel {
         self.embed_tokens.forward(input)
     }
 
-    /// Text embeddings after Inkling's optional embedding RMSNorm.
-    ///
-    /// Image and audio soft tokens are already normalized by their towers, so
-    /// multimodal wrappers merge them into this tensor and then enter the
-    /// decoder without applying `embed_norm` a second time.
     /// Embed token IDs and apply Inkling's input RMS normalization.
     ///
     /// Multimodal towers scatter their already text-width features into this
@@ -643,4 +638,4 @@ mod tests;
 #[cfg(test)]
 mod tiny_tests;
 #[cfg(test)]
-pub(crate) use tiny_tests::tiny_model;
+pub(crate) use tiny_tests::{tiny_audio_model, tiny_model};

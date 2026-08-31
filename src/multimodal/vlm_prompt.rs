@@ -205,16 +205,15 @@ pub enum InklingAudioPromptError {
 /// Chat templates normally render the full
 /// `audio_bos + audio_placeholder + audio_end` wrapper. The OpenAI-compatible
 /// server flattens `input_audio` parts before tokenization, so when no
-/// placeholder survived this helper synthesizes each wrapper immediately
-/// before the last end-of-turn marker (or before the final assistant-priming
-/// token as a conservative fallback).
+/// placeholder survived the caller supplies a structurally validated insertion
+/// boundary. `None` appends wrappers for an explicit plain-prompt flow.
 pub fn expand_inkling_audio_tokens(
     prompt_tokens: &mut Vec<i32>,
     audio_token_id: i32,
     audio_bos_token_id: i32,
     audio_end_token_id: i32,
     valid_frames: &[usize],
-    end_of_turn_token_id: Option<i32>,
+    insertion_index: Option<usize>,
 ) -> Result<usize, InklingAudioPromptError> {
     if valid_frames.is_empty() || valid_frames.contains(&0) {
         return Err(InklingAudioPromptError::EmptyAudio);
@@ -280,13 +279,10 @@ pub fn expand_inkling_audio_tokens(
         block.extend(std::iter::repeat_n(audio_token_id, *frames));
         block.push(audio_end_token_id);
     }
-    let insertion = end_of_turn_token_id
-        .and_then(|token| {
-            prompt_tokens
-                .iter()
-                .rposition(|candidate| *candidate == token)
-        })
-        .unwrap_or_else(|| prompt_tokens.len().saturating_sub(1));
+    let insertion = insertion_index.unwrap_or(prompt_tokens.len());
+    if insertion > prompt_tokens.len() {
+        return Err(InklingAudioPromptError::CapacityOverflow);
+    }
     prompt_tokens.splice(insertion..insertion, block);
     Ok(total_frames)
 }

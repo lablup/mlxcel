@@ -33,9 +33,9 @@ fn inkling_placeholder_expansion_uses_valid_frames() {
 }
 
 #[test]
-fn inkling_server_insertion_synthesizes_wrappers_before_last_turn_end() {
+fn inkling_insertion_synthesizes_wrappers_at_validated_boundary() {
     let mut tokens = vec![1, 9, 50, 9, 2];
-    expand_inkling_audio_tokens(&mut tokens, 7, 6, 8, &[2], Some(9)).unwrap();
+    expand_inkling_audio_tokens(&mut tokens, 7, 6, 8, &[2], Some(3)).unwrap();
     assert_eq!(tokens, vec![1, 9, 50, 6, 7, 7, 8, 9, 2]);
 }
 

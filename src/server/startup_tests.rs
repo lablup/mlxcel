@@ -1286,6 +1286,10 @@ fn detect_model_media_support_recognises_inkling_video() {
         "vision_config": {
             "model_type": "inkling_vision",
             "text_hidden_size": 64
+        },
+        "audio_config": {
+            "model_type": "inkling_audio",
+            "text_hidden_size": 64
         }
     });
     std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
@@ -1301,6 +1305,10 @@ fn detect_model_media_support_recognises_inkling_video() {
     assert!(
         support.video,
         "Inkling VLM must enable video_url content blocks, got {support:?}"
+    );
+    assert!(
+        support.audio,
+        "Inkling VLM must admit input_audio for loaded-tower validation, got {support:?}"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

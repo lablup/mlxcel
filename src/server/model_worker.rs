@@ -1452,11 +1452,9 @@ pub(crate) fn prepare_request_vlm_embeddings(
 ) -> Result<Option<InputEmbeddings>> {
     let has_media = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
 
-    if !audio.is_empty() && !model.is_vlm() {
+    if !audio.is_empty() && !model.supports_audio_input() {
         observability.record_audio_feature_rejection();
-        return Err(anyhow!(
-            "Audio input is not supported by the loaded non-VLM model"
-        ));
+        return Err(anyhow!("Audio input is not supported by the loaded model"));
     }
     // Images and videos used to fall through to the text-only branch below, so
     // a request that sent a picture to a text-only checkpoint was answered
@@ -1537,6 +1535,17 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     // Audio-only or audio+images for Gemma4 / Gemma4 Unified
     if !audio.is_empty() {
+        if let Some(embeddings) = prepare_inkling_audio_embeddings(
+            model,
+            tokenizer,
+            prompt_tokens,
+            images,
+            audio,
+            cancelled,
+            observability,
+        )? {
+            return Ok(Some(embeddings));
+        }
         if let Some(embeddings) = prepare_phi4mm_audio_embeddings(
             model,
             tokenizer,
@@ -1713,6 +1722,78 @@ pub(crate) fn prepare_request_vlm_embeddings(
     }
 
     Ok(None)
+}
+
+/// Process every server `input_audio` clip through Inkling's bounded host WAV
+/// pipeline, compact valid dMel rows, and optional image-first HMLP merge.
+fn prepare_inkling_audio_embeddings(
+    model: &LoadedModel,
+    tokenizer: &MlxcelTokenizer,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
+) -> Result<Option<InputEmbeddings>> {
+    let inkling = match model {
+        LoadedModel::InklingVLM(model) => model,
+        _ => return Ok(None),
+    };
+    if !inkling.supports_audio() {
+        return Err(audio_feature_error(
+            "This Inkling checkpoint was loaded without audio parameters".to_string(),
+            cancelled,
+            observability,
+        ));
+    }
+    let waveform = preprocess_server_audio(
+        audio_data,
+        crate::audio::AudioFamilyPolicy::inkling(),
+        cancelled,
+        observability,
+    )
+    .map_err(|error| anyhow!("Failed to preprocess Inkling audio: {error}"))?;
+    check_audio_feature_cancelled(cancelled, observability)?;
+    let dmel = crate::multimodal::inkling_audio::prepare_inkling_dmel_input(
+        &waveform,
+        &inkling.audio_processor,
+    )
+    .map_err(|error| audio_feature_error(error, cancelled, observability))?;
+    check_audio_feature_cancelled(cancelled, observability)?;
+    let token_ids = crate::vlm_runtime::resolve_inkling_audio_token_ids(
+        tokenizer,
+        &inkling.audio_processor,
+        inkling.audio_token_id(),
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    let prompt_layout = crate::vlm_runtime::InklingAudioPromptLayout::Structured(
+        crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)
+            .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?,
+    );
+    let decoded_images = if images.is_empty() {
+        Vec::new()
+    } else {
+        decode_request_images(images)?
+    };
+    let (embeddings, stats) = crate::vlm_runtime::compute_inkling_audio_embeddings(
+        inkling,
+        prompt_tokens,
+        &decoded_images,
+        &dmel,
+        token_ids,
+        prompt_layout,
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    tracing::info!(
+        audio_clips = stats.audio_clips,
+        audio_tokens = stats.total_audio_tokens,
+        image_blocks = stats.image_blocks,
+        image_tokens = stats.total_image_tokens,
+        prompt_tokens = stats.total_tokens,
+        "Prepared Inkling mixed-media embeddings"
+    );
+    observability.record_audio_effective_prefill(prompt_tokens.len());
+    Ok(Some(embeddings))
 }
 
 /// Process every request audio clip (and optional images) through the pinned
