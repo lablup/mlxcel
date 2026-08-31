@@ -342,7 +342,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // earlier, this keeps the dispatch table total.
         ModelType::Lfm2VL => "lfm2",
         // Inkling uses model-owned short-convolution state and has no TP port.
-        ModelType::Inkling => "inkling",
+        ModelType::Inkling | ModelType::InklingVLM => "inkling",
         ModelType::Plamo2 => "plamo2",
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",
