@@ -32,6 +32,7 @@ pub mod gemma4_unified;
 pub mod glm4v;
 pub mod glm_ocr;
 pub mod hunyuan_vl;
+pub mod inkling_hmlp;
 pub mod internvl;
 pub mod jina_vlm;
 pub mod kimi_vl;

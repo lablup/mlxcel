@@ -50,7 +50,10 @@ use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
 use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
-use crate::vlm_prompt::{ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks};
+use crate::vlm_prompt::{
+    ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks,
+    expand_inkling_image_tokens,
+};
 use crate::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use crate::{LanguageModel, LoadedModel, VlmRuntimeRef};
 
@@ -124,6 +127,10 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         image_tokens: usize,
         total_tokens: usize,
+    },
+    Inkling {
+        image_blocks: usize,
+        total_image_tokens: usize,
     },
     Phi4MM {
         image_slots: usize,
@@ -662,6 +669,27 @@ where
     let active_caches = caches.filter(|c| c.enabled());
 
     match runtime {
+        VlmRuntimeRef::Inkling(model) => {
+            let processed = model
+                .preprocess_images(images)
+                .map_err(anyhow::Error::msg)?;
+            let stats = expand_inkling_image_tokens(
+                prompt_tokens,
+                model.image_token_id(),
+                &processed.tiles_per_image,
+            )?;
+            let input_ids = prompt_ids_array(prompt_tokens);
+            let embeddings = model
+                .prepare_input_embeddings(&input_ids, &processed.pixel_values)
+                .map_err(anyhow::Error::msg)?;
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Inkling {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                }),
+            }))
+        }
         VlmRuntimeRef::MuseGlimmer(model) => {
             crate::multimodal::muse_glimmer_runtime::prepare_muse_glimmer_vlm_embeddings(
                 model,
