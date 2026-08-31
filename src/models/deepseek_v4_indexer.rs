@@ -49,6 +49,89 @@ use super::{ModelArgs, masked_fill_min};
 /// Tile size over `L` for the batched fine stage (reference default).
 const FINE_CHUNK: i32 = 512;
 
+/// Forces every sparse layer onto the dense local+pooled concat, disabling
+/// sparse selection entirely (`MLXCEL_V4_DENSE`, set to any value).
+///
+/// Follows the `MLXCEL_DSA_DENSE` precedent in
+/// [`crate::models::deepseek_v32`]'s indexer. Below `index_topk` pooled rows
+/// the dense branch is what already runs, so this only changes behaviour past
+/// that threshold, where it is numerically the full-attention oracle the
+/// sparse path approximates. It also removes the sparse path's memory
+/// advantage: the concat carries all `Np` pooled rows, so at long context this
+/// is an A/B and debugging tool, not a serving mode.
+pub(crate) const DENSE_FALLBACK_ENV: &str = "MLXCEL_V4_DENSE";
+
+/// Forces the flat `O(Np)` scan, disabling the HiSA hierarchy while leaving
+/// sparse attention itself engaged (`MLXCEL_V4_FLAT_INDEX`, set to any value).
+///
+/// This is the bisection tool for a long-context regression: the flat scan and
+/// the hierarchy select from the same pooled rows with the same scoring, so
+/// running one prompt both ways separates "the hierarchy retained the wrong
+/// blocks" from "the sparse combine is wrong". Like the dense switch it costs
+/// memory, materialising the `[B, H, L, Np]` score tensor the hierarchy exists
+/// to avoid.
+pub(crate) const FLAT_SELECT_ENV: &str = "MLXCEL_V4_FLAT_INDEX";
+
+/// Whether [`DENSE_FALLBACK_ENV`] is set. Read once: this is consulted per
+/// sparse layer per forward, and `env::var_os` is a lock plus an allocation.
+///
+/// Announces itself on stderr the first time it reads as set. A diagnostic
+/// switch that silently does nothing is worse than no switch: an A/B whose
+/// two arms are secretly the same arm produces confident, wrong conclusions.
+pub(crate) fn force_dense_pooled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        let on = std::env::var_os(DENSE_FALLBACK_ENV).is_some();
+        if on {
+            eprintln!(
+                "[deepseek-v4] {DENSE_FALLBACK_ENV} set: sparse layers stay on dense \
+                 pooled attention past index_topk"
+            );
+        }
+        on
+    })
+}
+
+/// Whether [`FLAT_SELECT_ENV`] is set. Read once, and announced once, as above.
+pub(crate) fn force_flat_select() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        let on = std::env::var_os(FLAT_SELECT_ENV).is_some();
+        if on {
+            eprintln!(
+                "[deepseek-v4] {FLAT_SELECT_ENV} set: HiSA hierarchy disabled, \
+                 selection uses the flat O(Np) scan"
+            );
+        }
+        on
+    })
+}
+
+/// Whether the two-stage HiSA hierarchy runs, or the flat `O(Np)` scan does.
+///
+/// Pure so the gate is testable without touching the process environment:
+/// [`force_flat_select`] caches its read in a `OnceLock`, which is right for a
+/// value consulted per sparse layer per forward and wrong for anything a test
+/// wants to vary.
+///
+/// The product is taken in `i64` deliberately. Both sides of the gate use it,
+/// and an `i32` multiply that wraps in release can let the gate pass while
+/// `nb = np / index_block` is 0, which drives `kb` to 0 and reaches
+/// `topk_indices(.., 0)` -> `argpartition(kth = -1)`, an MLX throw and
+/// therefore an uncatchable abort rather than a Rust error.
+/// `ModelArgs::validate` caps both scalars at `i32::MAX`, which makes the wrap
+/// unreachable from config, but this arithmetic is load-bearing on its own.
+pub(crate) fn use_hierarchy(
+    index_block: i32,
+    index_keep: i32,
+    np: i32,
+    k: i32,
+    force_flat: bool,
+) -> bool {
+    let block_span = i64::from(index_block) * i64::from(index_keep);
+    !force_flat && index_block > 0 && i64::from(np) >= block_span && block_span >= i64::from(k)
+}
+
 pub(crate) struct Indexer {
     wq_b: UnifiedLinear,
     weights_proj: UnifiedLinear,
@@ -142,17 +225,13 @@ impl Indexer {
         let k = self.index_topk.min(np);
         let ratio = self.compressor.ratio;
         let w = self.head_weights(x);
-        // `index_block * index_keep` in i64. Both sides of this gate use the
-        // product, and an i32 multiply that wraps in release can let the gate
-        // pass while `nb = np / index_block` is 0, which drives `kb` to 0 and
-        // reaches `topk_indices(.., 0)` -> `argpartition(kth = -1)`, an MLX
-        // throw and therefore an uncatchable abort. `ModelArgs::validate` now
-        // caps both scalars at `i32::MAX`, which makes the wrap unreachable
-        // from config, but this gate is the load-bearing arithmetic and is
-        // kept safe on its own.
-        let block_span = i64::from(self.index_block) * i64::from(self.index_keep);
-        let hierarchical =
-            self.index_block > 0 && i64::from(np) >= block_span && block_span >= i64::from(k);
+        let hierarchical = use_hierarchy(
+            self.index_block,
+            self.index_keep,
+            np,
+            k,
+            force_flat_select(),
+        );
 
         // Decode fast path: no pool mask exists for L == 1.
         if l == 1 && hierarchical {

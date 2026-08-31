@@ -25,8 +25,8 @@ use mlxcel_core::utils::array_to_vec_f32;
 use mlxcel_core::weights::WeightMap;
 
 use super::compress::{PoolingCache, overlap_compress_kv, pool_visible_counts, simple_compress_kv};
-use super::indexer::Indexer;
-use super::moe::{MoEGate, limited_swiglu};
+use super::indexer::{Indexer, use_hierarchy};
+use super::moe::{DeepseekV4MoE, LimitedMlp, MoEGate, limited_swiglu};
 use super::rope::{V4Rope, v4_rope_base_freqs, v4_rope_padded_freqs};
 use super::*;
 
@@ -1693,5 +1693,205 @@ fn eos_token_ids_falls_back_to_default_when_absent_or_empty() {
         args.eos_token_ids(),
         vec![1],
         "an empty eos_token_id list must also fall back to the default"
+    );
+}
+
+/// The hierarchy is specified to ignore the tail rows in `[nb * b, Np)`: they
+/// summarize the newest tokens, which the local sliding window already carries
+/// at full resolution. `hisa_selection_agrees_with_flat_fallback` plants its
+/// score mass inside the retained blocks, so it cannot tell "the tail is
+/// excluded by design" from "the tail happens to be unreachable". This test
+/// makes the single tail row the most attractive candidate in the pool, then
+/// asserts the flat scan takes it (the positive control, without which the
+/// test would pass on a pool the hierarchy could never have reached anyway)
+/// and that neither hierarchical path does.
+#[test]
+fn hisa_selection_never_returns_a_tail_row() {
+    let mut cfg: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+    cfg["index_keep"] = serde_json::json!(6);
+    let args: ModelArgs = serde_json::from_value(cfg).expect("parse");
+    let args = args.normalized().expect("validate");
+    let weights = indexer_fixture(&args);
+    let ix = Indexer::from_weights(&weights, &args, "ix", 4).expect("indexer");
+
+    // block 2 * keep 6 spans 12 rows; Np = 13 leaves exactly one tail row.
+    let (h, d, np, k) = (2, 8, 13, 4);
+    let blk = args.index_block as i32;
+    let usable = (np / blk) * blk;
+    assert_eq!(usable, 12, "fixture must leave a tail row outside nb * b");
+
+    let mut pooled_v = positive((np * d) as usize, 61);
+    for e in pooled_v.iter_mut().skip((usable * d) as usize) {
+        *e *= 8.0;
+    }
+    let pooled = mlxcel_core::from_slice_f32(&pooled_v, &[1, np, d]);
+
+    let q1 = mlxcel_core::from_slice_f32(&positive((h * d) as usize, 62), &[1, h, 1, d]);
+    let w1 = mlxcel_core::from_slice_f32(&positive(h as usize, 63), &[1, 1, h]);
+
+    let flat = selection_rows(&ix.flat_select(&q1, &pooled, &w1, k, None), k as usize);
+    assert!(
+        flat[0].contains(&usable),
+        "positive control failed: the flat scan should rank the dominant tail \
+         row {usable} inside its top-{k}, got {:?}",
+        flat[0]
+    );
+
+    let decode = selection_rows(&ix.hisa_select_decode(&q1, &pooled, &w1, k), k as usize);
+    assert!(
+        decode[0].iter().all(|&i| i < usable),
+        "decode hierarchy returned a tail row (>= {usable}): {:?}",
+        decode[0]
+    );
+
+    let l = 48;
+    let q = mlxcel_core::from_slice_f32(&positive((h * l * d) as usize, 64), &[1, h, l, d]);
+    let w = mlxcel_core::from_slice_f32(&positive((l * h) as usize, 65), &[1, l, h]);
+    let counts = pool_visible_counts(l, 0, 4, np);
+    let batched = selection_rows(
+        &ix.hisa_select_batched(&q, &pooled, &w, k, &counts),
+        k as usize,
+    );
+    for (j, row) in batched.iter().enumerate() {
+        if counts[j] >= k {
+            assert!(
+                row.iter().all(|&i| i < usable),
+                "batched hierarchy returned a tail row (>= {usable}) at query {j}: {row:?}"
+            );
+        }
+    }
+}
+
+/// Issue #550: the routed experts and the shared expert must clamp the SwiGLU
+/// pre-activations identically. Both call `limited_swiglu` today, but that is
+/// a shared call site rather than an enforced contract, and a future refactor
+/// that gives either path its own activation would be silent: unclamped output
+/// stays finite and fluent.
+///
+/// With one routed expert, `num_experts_per_tok == 1` and `norm_topk_prob`,
+/// the router weight is exactly 1 before `routed_scaling_factor`, so the block
+/// reduces to `routed_scaling_factor * expert0(x) + shared(x)`. Giving expert 0
+/// the shared expert's own planes makes that `2.5 * shared(x)` and only if both
+/// paths clamp the same way. The input drives both pre-activations well past
+/// `swiglu_limit`, so dropping the clamp on either side breaks the identity.
+#[test]
+fn routed_and_shared_experts_clamp_swiglu_identically() {
+    const INTER: i32 = 3;
+    let mut cfg: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+    cfg["moe_intermediate_size"] = serde_json::json!(INTER);
+    cfg["n_routed_experts"] = serde_json::json!(1);
+    cfg["num_experts_per_tok"] = serde_json::json!(1);
+    cfg["n_shared_experts"] = serde_json::json!(1);
+    cfg["num_hash_layers"] = serde_json::json!(0);
+    cfg["swiglu_limit"] = serde_json::json!(1.0);
+    let args: ModelArgs = serde_json::from_value(cfg).expect("parse");
+    let args = args.normalized().expect("validate");
+    let hidden = args.hidden_size as i32;
+
+    // All-ones projections: with x = 2, every gate and up pre-activation is
+    // `2 * hidden`, far above swiglu_limit = 1.0, so the clamp is load-bearing.
+    let ones = |n: usize| vec![1.0f32; n];
+    let mut w = WeightMap::new();
+    for (name, shape) in [
+        ("gate_proj", vec![INTER, hidden]),
+        ("up_proj", vec![INTER, hidden]),
+        ("down_proj", vec![hidden, INTER]),
+    ] {
+        let n = shape.iter().product::<i32>() as usize;
+        w.insert(
+            format!("ffn.shared_experts.{name}.weight"),
+            mlxcel_core::from_slice_f32(&ones(n), &shape),
+        );
+        // The routed stack is the same plane with a leading expert axis.
+        let stacked: Vec<i32> = std::iter::once(1).chain(shape.iter().copied()).collect();
+        w.insert(
+            format!("ffn.switch_mlp.{name}.weight"),
+            mlxcel_core::from_slice_f32(&ones(n), &stacked),
+        );
+    }
+    w.insert(
+        "ffn.gate.weight".to_string(),
+        mlxcel_core::from_slice_f32(&vec![0.1f32; hidden as usize], &[1, hidden]),
+    );
+    w.insert(
+        "ffn.gate.e_score_correction_bias".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0], &[1]),
+    );
+
+    let moe = DeepseekV4MoE::from_weights(&w, &args, "ffn", 0).expect("moe");
+    let shared = LimitedMlp::from_weights(&w, &args, "ffn.shared_experts").expect("shared");
+
+    let x = mlxcel_core::from_slice_f32(&vec![2.0f32; hidden as usize], &[1, 1, hidden]);
+    let ids = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&[0.0], &[1, 1]),
+        mlxcel_core::dtype::INT32,
+    );
+
+    let got = array_to_vec_f32(&moe.forward(&x, &ids));
+    let shared_only = array_to_vec_f32(&shared.forward(&x));
+    let scale = 1.0 + args.routed_scaling_factor;
+    assert_eq!(got.len(), shared_only.len());
+    for (i, (g, s)) in got.iter().zip(shared_only.iter()).enumerate() {
+        let want = scale * s;
+        assert!(
+            (g - want).abs() < 1e-4,
+            "channel {i}: routed and shared clamp differently, got {g}, expected \
+             {scale} * {s} = {want}"
+        );
+    }
+    // Guard the guard: an unclamped block would land far from this value, so
+    // the identity above is only meaningful if the clamp actually bound.
+    let unclamped = (2.0f32 * hidden as f32).max(0.0);
+    assert!(
+        unclamped > args.swiglu_limit,
+        "fixture must drive pre-activations past swiglu_limit"
+    );
+}
+
+/// The hierarchy gate, including the `MLXCEL_V4_FLAT_INDEX` override and the
+/// `i64` widening that keeps a large `index_block` from wrapping an `i32` into
+/// a state where `nb` is 0 and `argpartition(kth = -1)` aborts the process.
+#[test]
+fn use_hierarchy_gates_on_size_and_honours_the_flat_override() {
+    // Real-checkpoint shape: block 64 * keep 16 = 1024 pooled rows needed.
+    assert!(
+        !use_hierarchy(64, 16, 1023, 512, false),
+        "one row short of index_block * index_keep must stay on the flat scan"
+    );
+    assert!(
+        use_hierarchy(64, 16, 1024, 512, false),
+        "at index_block * index_keep the hierarchy engages"
+    );
+    // At 2234 tokens and ratio 4 the pooled count is 558, which clears
+    // index_topk (sparse attention runs) but not the hierarchy threshold.
+    assert!(
+        !use_hierarchy(64, 16, 2234 / 4, 512, false),
+        "the 2234-token real-model gate lands on the flat scan, not the hierarchy"
+    );
+    // 4400 tokens at ratio 4 gives 1100 pooled rows, past the threshold.
+    assert!(
+        use_hierarchy(64, 16, 4400 / 4, 512, false),
+        "the long real-model gate must reach the hierarchy"
+    );
+
+    // The override wins over an otherwise-passing gate.
+    assert!(
+        !use_hierarchy(64, 16, 4096, 512, true),
+        "MLXCEL_V4_FLAT_INDEX must force the flat scan"
+    );
+
+    // Disabled hierarchy, and too few fine candidates to fill the top-k.
+    assert!(!use_hierarchy(0, 16, 4096, 512, false));
+    assert!(
+        !use_hierarchy(64, 4, 4096, 512, false),
+        "block_span 256 < k 512 cannot fill the selection"
+    );
+
+    // The wrap guard: index_block * index_keep overflows i32 here. In i32 the
+    // product is negative, so `np >= block_span` would pass while
+    // `nb = np / index_block` is 0.
+    assert!(
+        !use_hierarchy(i32::MAX, 4, 4096, 512, false),
+        "an i32-overflowing block span must not open the gate"
     );
 }
