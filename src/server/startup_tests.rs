@@ -1275,6 +1275,37 @@ fn detect_model_media_support_recognises_kimi_k25() {
 }
 
 #[test]
+fn detect_model_media_support_recognises_inkling_video() {
+    let dir = temp_path("media-inkling-vlm");
+    let config = serde_json::json!({
+        "model_type": "inkling_mm_model",
+        "text_config": {
+            "model_type": "inkling",
+            "hidden_size": 64
+        },
+        "vision_config": {
+            "model_type": "inkling_vision",
+            "text_hidden_size": 64
+        }
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+    let index = serde_json::json!({
+        "metadata": {},
+        "weight_map": {
+            "model.visual.layers.linear_0.weight": "model-00001-of-00001.safetensors"
+        }
+    });
+    std::fs::write(dir.join("model.safetensors.index.json"), index.to_string()).unwrap();
+
+    let support = detect_model_media_support(&dir);
+    assert!(
+        support.video,
+        "Inkling VLM must enable video_url content blocks, got {support:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn detect_model_media_support_recognises_qwen35_vlm_video() {
     let dir = temp_path("media-qwen35-vlm");
     let config = serde_json::json!({

@@ -1133,14 +1133,16 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // The ViT-backed Gemma 4 VLM and the encoder-free Gemma 4 Unified model
     // both consume `video_url` content blocks (issue #164). Kimi-VL / Kimi-VL
     // 2.5 (MoonViT 3D) also consume video via the shared Kimi media path
-    // (issue #551). Qwen-VL video follows the same Qwen runtime used by CLI
-    // prompt expansion (#1166). Mirror the dispatch in
+    // (issue #551). Inkling encodes evenly spaced adjacent frame pairs in its
+    // HMLP temporal planes (#1323). Qwen-VL video follows the same Qwen runtime
+    // used by CLI prompt expansion (#1166). Mirror the dispatch in
     // `commands/generate_vlm::compute_vlm_embeddings` and add new variants here
     // when more video-capable models land.
     let video = matches!(
         model_type,
         ModelType::Gemma4VLM
             | ModelType::Gemma4Unified
+            | ModelType::InklingVLM
             | ModelType::KimiVL
             | ModelType::KimiK25
             | ModelType::Qwen2VL

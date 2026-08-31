@@ -13,13 +13,117 @@
 // limitations under the License.
 
 use super::{
-    QwenMediaOrdinal, VlmPreparationSummary, expand_gemma3n_audio_tokens,
-    expand_gemma4_audio_tokens_for_server, expand_gemma4_unified_video_tokens,
-    expand_gemma4_video_tokens, expand_nemotron_h_nano_omni_audio_tokens_for_server,
-    format_molmo_v1_prompt_for_processor, prepared_embedding_refs, qwen_media_order_from_prompt,
+    InklingPromptTokenIds, InklingVideoPromptLayout, QwenMediaOrdinal, VlmPreparationSummary,
+    expand_gemma3n_audio_tokens, expand_gemma4_audio_tokens_for_server,
+    expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
+    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
+    insert_inkling_video_prompt, prepared_embedding_refs, qwen_media_order_from_prompt,
     shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings, split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
+
+#[test]
+fn inkling_plain_cli_video_prompt_orders_stills_timestamps_then_question() {
+    const IMAGE: i32 = 200_054;
+    let mut prompt = vec![1, 7, 8, 9];
+    insert_inkling_video_prompt(
+        &mut prompt,
+        IMAGE,
+        1,
+        &[vec![0.0, 1.5]],
+        InklingVideoPromptLayout::Plain,
+        |text, add_special| {
+            assert!(!add_special);
+            let token = match text {
+                "Here is a video as a sequence of frames in chronological order.\n" => 101,
+                "frame at t=0.0s:\n" => 102,
+                "frame at t=1.5s:\n" => 103,
+                other => panic!("unexpected Inkling prompt part {other:?}"),
+            };
+            Ok(vec![token])
+        },
+    )
+    .unwrap();
+    assert_eq!(prompt, vec![1, IMAGE, 101, 102, IMAGE, 103, IMAGE, 7, 8, 9]);
+}
+
+#[test]
+fn inkling_server_video_parts_stay_inside_current_user_turn_with_history() {
+    const USER: i32 = 10;
+    const TEXT: i32 = 11;
+    const IMAGE_PART: i32 = 12;
+    const END: i32 = 13;
+    const MODEL: i32 = 14;
+    const SYSTEM: i32 = 15;
+    const IMAGE: i32 = 200_054;
+    let ids = InklingPromptTokenIds {
+        message_user: USER,
+        content_text: TEXT,
+        content_image: IMAGE_PART,
+        end_message: END,
+    };
+    let mut prompt = vec![
+        1, SYSTEM, TEXT, 50, END, USER, TEXT, 60, END, MODEL, TEXT, 70, END, USER, IMAGE_PART,
+        IMAGE, END, USER, TEXT, 80, END, MODEL, 99,
+    ];
+    insert_inkling_video_prompt(
+        &mut prompt,
+        IMAGE,
+        1,
+        &[vec![0.0], vec![0.0, 1.5]],
+        InklingVideoPromptLayout::Structured(ids),
+        |text, add_special| {
+            assert!(!add_special);
+            let token = match text {
+                "Here is a video as a sequence of frames in chronological order." => 101,
+                "frame at t=0.0s:" => 102,
+                "frame at t=1.5s:" => 103,
+                other => panic!("unexpected Inkling prompt part {other:?}"),
+            };
+            Ok(vec![token])
+        },
+    )
+    .unwrap();
+    let current_question = prompt
+        .windows(4)
+        .position(|window| window == [USER, TEXT, 80, END])
+        .unwrap();
+    let first_video_intro = prompt
+        .windows(4)
+        .position(|window| window == [USER, TEXT, 101, END])
+        .unwrap();
+    let history_answer = prompt
+        .windows(4)
+        .position(|window| window == [MODEL, TEXT, 70, END])
+        .unwrap();
+    assert!(history_answer < first_video_intro);
+    assert!(first_video_intro < current_question);
+    assert_eq!(prompt.last(), Some(&99));
+    assert_eq!(prompt.iter().filter(|&&token| token == IMAGE).count(), 4);
+    assert_eq!(prompt.iter().filter(|&&token| token == 101).count(), 2);
+}
+
+#[test]
+fn inkling_video_prompt_rejects_untrusted_placeholder_cardinality() {
+    const IMAGE: i32 = 200_054;
+    let ids = InklingPromptTokenIds {
+        message_user: 10,
+        content_text: 11,
+        content_image: 12,
+        end_message: 13,
+    };
+    let mut prompt = vec![1, 10, 12, IMAGE, 13, 10, 12, IMAGE, 13, 10, 11, 9, 13];
+    let error = insert_inkling_video_prompt(
+        &mut prompt,
+        IMAGE,
+        1,
+        &[vec![0.0]],
+        InklingVideoPromptLayout::Structured(ids),
+        |_, _| Ok(vec![]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("2 image placeholder(s)"));
+}
 
 #[test]
 fn gemma3n_audio_expands_multiple_placeholders_in_order() {

@@ -59,6 +59,13 @@ impl InklingVlModel {
         self.image_processor.preprocess_with_counts(images)
     }
 
+    pub fn preprocess_image_refs(
+        &self,
+        images: &[&DynamicImage],
+    ) -> Result<InklingProcessedImages, String> {
+        self.image_processor.preprocess_refs(images)
+    }
+
     pub fn prepare_input_embeddings(
         &self,
         input_ids: &MlxArray,
@@ -96,6 +103,75 @@ impl InklingVlModel {
             input_ids,
         ))
     }
+
+    /// Prepare Inkling video embeddings after replacing the second temporal
+    /// plane of the final video-tile rows with adjacent-frame pixels.
+    pub fn prepare_input_embeddings_with_video_slot1(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        video_slot1: &MlxArray,
+    ) -> Result<InputEmbeddings, String> {
+        let pixel_values = splice_video_slot1(pixel_values, video_slot1)?;
+        self.prepare_input_embeddings(input_ids, &pixel_values)
+    }
+}
+
+/// Replace temporal slot 1 only for the suffix that belongs to video frames.
+///
+/// `pixel_values` contains companion still-image tiles followed by the first
+/// frame of every selected video pair. `video_slot1` contains the matching
+/// second-frame tiles without a temporal axis. Keeping the prefix untouched is
+/// essential: companion still images continue to use duplicated temporal
+/// planes while only video tiles encode motion.
+pub fn splice_video_slot1(
+    pixel_values: &MlxArray,
+    video_slot1: &MlxArray,
+) -> Result<UniquePtr<MlxArray>, String> {
+    let pixel_shape = mlxcel_core::array_shape(pixel_values);
+    if pixel_shape.len() != 5 || pixel_shape[1..] != [2, 40, 40, 3] {
+        return Err(format!(
+            "Inkling video pixel values must have shape [N, 2, 40, 40, 3], got {pixel_shape:?}"
+        ));
+    }
+    let slot_shape = mlxcel_core::array_shape(video_slot1);
+    if slot_shape.len() != 4 || slot_shape[1..] != [40, 40, 3] {
+        return Err(format!(
+            "Inkling video slot-1 values must have shape [M, 40, 40, 3], got {slot_shape:?}"
+        ));
+    }
+    let total_tiles = usize::try_from(pixel_shape[0])
+        .map_err(|_| "Inkling video tile count is negative".to_string())?;
+    let video_tiles = usize::try_from(slot_shape[0])
+        .map_err(|_| "Inkling video slot-1 tile count is negative".to_string())?;
+    if video_tiles == 0 || video_tiles > total_tiles {
+        return Err(format!(
+            "Inkling video slot-1 tile count {video_tiles} must be in 1..={total_tiles}"
+        ));
+    }
+
+    let suffix_start = i32::try_from(total_tiles - video_tiles)
+        .map_err(|_| "Inkling video suffix offset exceeds the MLX i32 limit".to_string())?;
+    let total_tiles = i32::try_from(total_tiles)
+        .map_err(|_| "Inkling video tile count exceeds the MLX i32 limit".to_string())?;
+    let suffix_slot0 = mlxcel_core::slice(
+        pixel_values,
+        &[suffix_start, 0, 0, 0, 0],
+        &[total_tiles, 1, 40, 40, 3],
+    );
+    let video_slot1 = mlxcel_core::astype(video_slot1, mlxcel_core::array_dtype(pixel_values));
+    let video_slot1 = mlxcel_core::expand_dims(&video_slot1, 1);
+    let suffix = mlxcel_core::concatenate(&suffix_slot0, &video_slot1, 1);
+    if suffix_start == 0 {
+        return Ok(suffix);
+    }
+
+    let prefix = mlxcel_core::slice(
+        pixel_values,
+        &[0, 0, 0, 0, 0],
+        &[suffix_start, 2, 40, 40, 3],
+    );
+    Ok(mlxcel_core::concatenate(&prefix, &suffix, 0))
 }
 
 impl LanguageModel for InklingVlModel {
@@ -278,6 +354,7 @@ impl LanguageModel for InklingVlModel {
 mod tests {
     use mlxcel_core::cache::SequenceId;
     use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::utils::array_to_vec_f32;
     use mlxcel_core::weights::WeightMap;
     use mlxcel_core::{MlxArray, dtype};
 
@@ -359,5 +436,30 @@ mod tests {
         fn assert_mtp_target<T: mlxcel_core::speculative::mtp::target::MtpTarget>() {}
         let _ =
             assert_mtp_target::<crate::models::inkling_mtp_target::InklingVLMtpTargetAdapter<'_>>;
+    }
+
+    #[test]
+    fn slot1_overwrite_touches_only_the_tail() {
+        let pixels = mlxcel_core::zeros(&[5, 2, 40, 40, 3], mlxcel_core::dtype::FLOAT32);
+        let seconds = mlxcel_core::ones(&[2, 40, 40, 3], mlxcel_core::dtype::FLOAT32);
+        let spliced = splice_video_slot1(&pixels, &seconds).unwrap();
+        mlxcel_core::eval(&spliced);
+        let values = array_to_vec_f32(&spliced);
+        let plane = 40 * 40 * 3;
+        for tile in 0..5 {
+            let slot0 = &values[tile * 2 * plane..tile * 2 * plane + plane];
+            let slot1 = &values[tile * 2 * plane + plane..(tile + 1) * 2 * plane];
+            assert!(slot0.iter().all(|&value| value == 0.0));
+            let expected = if tile < 3 { 0.0 } else { 1.0 };
+            assert!(slot1.iter().all(|&value| value == expected));
+        }
+    }
+
+    #[test]
+    fn video_slot1_splice_rejects_non_suffix_cardinality() {
+        let pixels = mlxcel_core::zeros(&[1, 2, 40, 40, 3], mlxcel_core::dtype::FLOAT32);
+        let seconds = mlxcel_core::zeros(&[2, 40, 40, 3], mlxcel_core::dtype::FLOAT32);
+        let error = splice_video_slot1(&pixels, &seconds).err().unwrap();
+        assert!(error.contains("must be in 1..=1"));
     }
 }

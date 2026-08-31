@@ -103,6 +103,7 @@
 //! decoded video. That is how a flag rejection which broke every video path
 //! in the runtime survived in `main`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -125,6 +126,149 @@ pub const FPS_MIN_FRAMES: usize = 4;
 
 /// Upper bound on sampled frame count (mirrors upstream `FPS_MAX_FRAMES`).
 pub const FPS_MAX_FRAMES: usize = 768;
+
+/// Request-wide pair budget used by Inkling's generic video fallback.
+pub const INKLING_MAX_VIDEO_PAIRS: usize = 16;
+
+/// At two mandatory pairs per clip, more than eight clips cannot fit inside
+/// Inkling's request-wide 16-pair budget.
+pub const INKLING_MAX_VIDEO_CLIPS: usize = INKLING_MAX_VIDEO_PAIRS / 2;
+
+/// No more than two unique decoded frames are required per selected pair.
+pub const INKLING_MAX_DECODED_FRAMES: usize = INKLING_MAX_VIDEO_PAIRS * 2;
+
+/// Conservative request-wide cap for decoded frame storage (RGBA worst case).
+pub const INKLING_MAX_DECODED_PIXEL_BYTES: usize = 512 * 1024 * 1024;
+
+/// One semantic part of Inkling's timestamped video prompt.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InklingVideoPromptPart {
+    Text(String),
+    Image,
+}
+
+/// Index plan for one clip's adjacent Inkling frame pairs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdjacentFramePairPlan {
+    pub anchors: Vec<usize>,
+    pub pairs: Vec<[usize; 2]>,
+    pub padded_frame_count: usize,
+}
+
+/// Select evenly spaced sampled-frame indices without cloning image buffers.
+///
+/// Odd frame counts conceptually repeat the final frame. The reference keeps
+/// at least two pairs even when the request budget is smaller, so a one-frame
+/// clip produces two identical `[0, 0]` pairs.
+pub fn pair_adjacent_frame_indices(
+    frame_count: usize,
+    max_pairs: usize,
+) -> Result<AdjacentFramePairPlan, VideoError> {
+    if frame_count == 0 {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: "Inkling video pairing requires at least one decoded frame".into(),
+        });
+    }
+    let padded_frame_count = frame_count + usize::from(!frame_count.is_multiple_of(2));
+    let pair_count = 2.max(max_pairs.min(padded_frame_count / 2));
+    let last_anchor = padded_frame_count - 2;
+    let denominator = pair_count.saturating_sub(1).max(1) as f64;
+    let anchors = (0..pair_count)
+        .map(|index| {
+            ((index as f64 * last_anchor as f64 / denominator).round() as usize).min(last_anchor)
+        })
+        .collect::<Vec<_>>();
+    let pairs = anchors
+        .iter()
+        .map(|&anchor| {
+            [
+                anchor.min(frame_count - 1),
+                (anchor + 1).min(frame_count - 1),
+            ]
+        })
+        .collect();
+    Ok(AdjacentFramePairPlan {
+        anchors,
+        pairs,
+        padded_frame_count,
+    })
+}
+
+/// Distribute one request-wide pair budget across clips without crossing clip
+/// boundaries. Every clip receives the reference minimum of two pairs, then
+/// remaining pairs are assigned round-robin up to each clip's capacity.
+pub fn allocate_inkling_pair_budgets(
+    capacities: &[usize],
+    max_pairs: usize,
+) -> Result<Vec<usize>, VideoError> {
+    if capacities.is_empty() {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: "Inkling video preparation requires at least one clip".into(),
+        });
+    }
+    if capacities.len() > INKLING_MAX_VIDEO_CLIPS || capacities.len().saturating_mul(2) > max_pairs
+    {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: format!(
+                "Inkling accepts at most {} clips within its {max_pairs}-pair request budget",
+                INKLING_MAX_VIDEO_CLIPS
+            ),
+        });
+    }
+    let normalized = capacities
+        .iter()
+        .map(|&capacity| capacity.max(2))
+        .collect::<Vec<_>>();
+    let mut allocated = vec![2; capacities.len()];
+    let mut remaining = max_pairs - allocated.len() * 2;
+    while remaining > 0 {
+        let mut progressed = false;
+        for (budget, &capacity) in allocated.iter_mut().zip(&normalized) {
+            if *budget < capacity {
+                *budget += 1;
+                remaining -= 1;
+                progressed = true;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    Ok(allocated)
+}
+
+fn inkling_decoded_pixel_bytes(width: u32, height: u32, frames: usize) -> Option<usize> {
+    usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(4)?
+        .checked_mul(frames)
+}
+
+/// Build the chronological text/image part layout used for Inkling video.
+pub fn timestamped_pair_messages(
+    user_text: &str,
+    timestamps: &[f64],
+) -> Vec<InklingVideoPromptPart> {
+    let mut parts = Vec::with_capacity(timestamps.len().saturating_mul(2).saturating_add(2));
+    parts.push(InklingVideoPromptPart::Text(
+        "Here is a video as a sequence of frames in chronological order.".into(),
+    ));
+    for timestamp in timestamps {
+        parts.push(InklingVideoPromptPart::Text(format!(
+            "frame at t={timestamp:.1}s:"
+        )));
+        parts.push(InklingVideoPromptPart::Image);
+    }
+    parts.push(InklingVideoPromptPart::Text(user_text.to_string()));
+    parts
+}
 
 /// Frame sampling policy for callers that need checkpoint-specific video
 /// bounds. The default preserves the historical Gemma/Kimi behavior: clamp to
@@ -1125,6 +1269,193 @@ pub fn load_video_source_with_policy(
         return Err(VideoError::EmptyVideo(canonical));
     }
     Ok(frames)
+}
+
+/// One fd-safe source and its requested sampling rate for Inkling video.
+pub struct InklingVideoInput<'a> {
+    pub source: &'a VideoSource,
+    pub target_fps: f64,
+}
+
+/// Selected frame storage and pair indices for one clip.
+///
+/// `frames` contains only unique source frames selected by at least one pair.
+/// Each entry in `pairs` indexes that compact vector, so repeated anchors do
+/// not require deep image clones. `timestamps` uses the actual source frame
+/// index and probed source FPS, avoiding drift when the generic 768-frame
+/// sampling ceiling uniformly resamples a long clip.
+pub struct InklingDecodedVideo {
+    pub frames: Vec<DynamicImage>,
+    pub pairs: Vec<[usize; 2]>,
+    pub timestamps: Vec<f64>,
+    pub sampled_frame_count: usize,
+}
+
+/// Probe, plan, cap, and decode Inkling frame pairs for an entire request.
+///
+/// All sources are probed and the request-wide decoded-frame and pixel-byte
+/// totals are validated before the first ffmpeg decode starts. Pair allocation
+/// remains request-wide, but each clip is planned independently so no pair can
+/// cross a media boundary and every clip restarts its timestamp origin.
+pub fn load_inkling_video_pairs(
+    inputs: &[InklingVideoInput<'_>],
+    max_pairs: usize,
+    limits: &VideoLimits,
+) -> Result<Vec<InklingDecodedVideo>, VideoError> {
+    if inputs.is_empty()
+        || inputs.len() > INKLING_MAX_VIDEO_CLIPS
+        || max_pairs > INKLING_MAX_VIDEO_PAIRS
+        || inputs.len().saturating_mul(2) > max_pairs
+    {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: format!(
+                "Inkling video request must contain 1..={INKLING_MAX_VIDEO_CLIPS} clips within a maximum of {INKLING_MAX_VIDEO_PAIRS} pairs"
+            ),
+        });
+    }
+    if !ffmpeg_available() {
+        return Err(VideoError::FfmpegMissing);
+    }
+
+    let mut metadata = Vec::with_capacity(inputs.len());
+    let mut capacities = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if !input.target_fps.is_finite() || input.target_fps <= 0.0 {
+            return Err(VideoError::Extract {
+                path: input.source.canonical_path().to_path_buf(),
+                message: "Inkling target FPS must be finite and positive".into(),
+            });
+        }
+        let meta = probe_video(input.source, limits)?;
+        let sampled_frame_count = smart_nframes_with_policy(
+            meta.total_frames,
+            meta.fps,
+            Some(input.target_fps),
+            None,
+            FrameSamplingPolicy::default(),
+        )
+        .map_err(|error| match error {
+            VideoError::Extract { message, .. } => VideoError::Extract {
+                path: input.source.canonical_path().to_path_buf(),
+                message,
+            },
+            other => other,
+        })?;
+        let padded = sampled_frame_count + usize::from(!sampled_frame_count.is_multiple_of(2));
+        capacities.push(2.max(padded / 2));
+        metadata.push((meta, sampled_frame_count));
+    }
+    let pair_budgets = allocate_inkling_pair_budgets(&capacities, max_pairs)?;
+
+    struct PlannedClip {
+        unique_source_indices: Vec<usize>,
+        pair_source_indices: Vec<[usize; 2]>,
+        timestamps: Vec<f64>,
+        sampled_frame_count: usize,
+    }
+
+    let mut planned = Vec::with_capacity(inputs.len());
+    let mut request_frame_count = 0usize;
+    let mut request_pixel_bytes = 0usize;
+    for ((meta, sampled_frame_count), &pair_budget) in metadata.iter().zip(&pair_budgets) {
+        let sampled_source_indices = uniform_indices(meta.total_frames, *sampled_frame_count);
+        let pair_plan = pair_adjacent_frame_indices(*sampled_frame_count, pair_budget)?;
+        let pair_source_indices = pair_plan
+            .pairs
+            .iter()
+            .map(|pair| {
+                [
+                    sampled_source_indices[pair[0]],
+                    sampled_source_indices[pair[1]],
+                ]
+            })
+            .collect::<Vec<_>>();
+        let unique_source_indices = pair_source_indices
+            .iter()
+            .flat_map(|pair| pair.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        request_frame_count = request_frame_count
+            .checked_add(unique_source_indices.len())
+            .ok_or_else(|| VideoError::Extract {
+                path: PathBuf::new(),
+                message: "Inkling request decoded-frame count overflowed".into(),
+            })?;
+        let clip_pixel_bytes =
+            inkling_decoded_pixel_bytes(meta.width, meta.height, unique_source_indices.len())
+                .ok_or_else(|| VideoError::Extract {
+                    path: PathBuf::new(),
+                    message: "Inkling request decoded pixel-byte count overflowed".into(),
+                })?;
+        request_pixel_bytes = request_pixel_bytes
+            .checked_add(clip_pixel_bytes)
+            .ok_or_else(|| VideoError::Extract {
+                path: PathBuf::new(),
+                message: "Inkling request decoded pixel-byte count overflowed".into(),
+            })?;
+        let timestamps = pair_source_indices
+            .iter()
+            .map(|pair| pair[0] as f64 / meta.fps)
+            .collect();
+        planned.push(PlannedClip {
+            unique_source_indices,
+            pair_source_indices,
+            timestamps,
+            sampled_frame_count: *sampled_frame_count,
+        });
+    }
+    if request_frame_count > INKLING_MAX_DECODED_FRAMES {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: format!(
+                "Inkling request selects {request_frame_count} unique frames, exceeding the cap of {INKLING_MAX_DECODED_FRAMES}"
+            ),
+        });
+    }
+    if request_pixel_bytes > INKLING_MAX_DECODED_PIXEL_BYTES {
+        return Err(VideoError::Extract {
+            path: PathBuf::new(),
+            message: format!(
+                "Inkling request requires {request_pixel_bytes} decoded pixel bytes, exceeding the cap of {INKLING_MAX_DECODED_PIXEL_BYTES}"
+            ),
+        });
+    }
+
+    let mut decoded = Vec::with_capacity(inputs.len());
+    for (input, plan) in inputs.iter().zip(planned) {
+        let frames =
+            extract_frames_single_pass(input.source, &plan.unique_source_indices, 0.0, limits)?;
+        if frames.len() != plan.unique_source_indices.len() {
+            return Err(VideoError::Extract {
+                path: input.source.canonical_path().to_path_buf(),
+                message: format!(
+                    "Inkling selected {} unique frames but ffmpeg decoded {}",
+                    plan.unique_source_indices.len(),
+                    frames.len()
+                ),
+            });
+        }
+        let compact_positions = plan
+            .unique_source_indices
+            .iter()
+            .enumerate()
+            .map(|(position, &source_index)| (source_index, position))
+            .collect::<BTreeMap<_, _>>();
+        let pairs = plan
+            .pair_source_indices
+            .iter()
+            .map(|pair| [compact_positions[&pair[0]], compact_positions[&pair[1]]])
+            .collect();
+        decoded.push(InklingDecodedVideo {
+            frames,
+            pairs,
+            timestamps: plan.timestamps,
+            sampled_frame_count: plan.sampled_frame_count,
+        });
+    }
+    Ok(decoded)
 }
 
 /// Convenience: load multiple videos by path, returning one frame vector per video.

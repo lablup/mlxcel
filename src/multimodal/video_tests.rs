@@ -54,6 +54,87 @@ fn is_video_file_rejects_images_and_other_files() {
     assert!(!is_video_file(Path::new("/data/")));
 }
 
+#[test]
+fn pair_adjacent_frames_spacing_and_adjacency() {
+    let plan = pair_adjacent_frame_indices(10, 4).unwrap();
+    assert_eq!(plan.anchors, vec![0, 3, 5, 8]);
+    assert_eq!(plan.pairs, vec![[0, 1], [3, 4], [5, 6], [8, 9]]);
+
+    let odd = pair_adjacent_frame_indices(3, 16).unwrap();
+    assert_eq!(odd.anchors, vec![0, 2]);
+    assert_eq!(odd.pairs, vec![[0, 1], [2, 2]]);
+
+    let minimum = pair_adjacent_frame_indices(10, 1).unwrap();
+    assert_eq!(minimum.anchors, vec![0, 8]);
+    assert_eq!(minimum.pairs, vec![[0, 1], [8, 9]]);
+
+    let single = pair_adjacent_frame_indices(1, 16).unwrap();
+    assert_eq!(single.pairs, vec![[0, 0], [0, 0]]);
+}
+
+#[test]
+fn inkling_pair_budget_is_request_wide_but_clip_local() {
+    let budgets = allocate_inkling_pair_budgets(&[5, 8, 3], 10).unwrap();
+    assert_eq!(budgets, vec![4, 3, 3]);
+    assert_eq!(budgets.iter().sum::<usize>(), 10);
+
+    let clips = [
+        pair_adjacent_frame_indices(12, budgets[0]).unwrap(),
+        pair_adjacent_frame_indices(20, budgets[1]).unwrap(),
+        pair_adjacent_frame_indices(8, budgets[2]).unwrap(),
+    ];
+    assert!(clips.iter().all(|clip| {
+        clip.pairs
+            .iter()
+            .all(|pair| pair[1] == pair[0] + 1 || pair[0] == pair[1])
+    }));
+
+    let too_many =
+        allocate_inkling_pair_budgets(&[2; INKLING_MAX_VIDEO_CLIPS + 1], 16).unwrap_err();
+    assert!(too_many.to_string().contains("at most 8 clips"));
+}
+
+#[test]
+fn inkling_decode_budget_caps_pixel_bytes_before_decode() {
+    let at_cap = inkling_decoded_pixel_bytes(4096, 4096, 8).unwrap();
+    assert_eq!(at_cap, INKLING_MAX_DECODED_PIXEL_BYTES);
+    let over_cap = inkling_decoded_pixel_bytes(4096, 4096, 9).unwrap();
+    assert!(over_cap > INKLING_MAX_DECODED_PIXEL_BYTES);
+    assert_eq!(INKLING_MAX_DECODED_FRAMES, 32);
+}
+
+#[test]
+fn inkling_timestamps_use_actual_source_indices_after_sampling_cap() {
+    let source_fps = 30.0;
+    let sampled_count = 768;
+    let sampled_source_indices = uniform_indices(18_000, sampled_count);
+    let plan = pair_adjacent_frame_indices(sampled_count, 4).unwrap();
+    let final_anchor = *plan.anchors.last().unwrap();
+    let final_source_index = sampled_source_indices[*plan.pairs.last().unwrap().first().unwrap()];
+    let actual_seconds = final_source_index as f64 / source_fps;
+    let requested_fps_seconds = final_anchor as f64 / 2.0;
+    assert!((599.0..600.0).contains(&actual_seconds));
+    assert!(actual_seconds - requested_fps_seconds > 200.0);
+}
+
+#[test]
+fn timestamped_pair_messages_layout() {
+    let parts = timestamped_pair_messages("Describe the motion.", &[0.0, 1.5]);
+    assert_eq!(
+        parts,
+        vec![
+            InklingVideoPromptPart::Text(
+                "Here is a video as a sequence of frames in chronological order.".into(),
+            ),
+            InklingVideoPromptPart::Text("frame at t=0.0s:".into()),
+            InklingVideoPromptPart::Image,
+            InklingVideoPromptPart::Text("frame at t=1.5s:".into()),
+            InklingVideoPromptPart::Image,
+            InklingVideoPromptPart::Text("Describe the motion.".into()),
+        ]
+    );
+}
+
 // ─── smart_nframes ───────────────────────────────────────────────────────────
 
 #[test]

@@ -426,6 +426,7 @@ pub(crate) fn compute_vlm_embeddings(
     target_fps: f64,
     tokenizer: &MlxcelTokenizer,
     image_soft_tokens: Option<usize>,
+    no_chat_template: bool,
 ) -> Result<Option<InputEmbeddings>> {
     // Handle video-only or video + image mode for Gemma4.
     // Video and audio cannot coexist in this CLI surface yet, surface a
@@ -435,6 +436,24 @@ pub(crate) fn compute_vlm_embeddings(
             return Err(anyhow::anyhow!(
                 "Combined --video and --audio inputs are not supported yet"
             ));
+        }
+        if let LoadedModel::InklingVLM(inkling) = model {
+            let prompt_layout = if no_chat_template {
+                mlxcel::vlm_runtime::InklingVideoPromptLayout::Plain
+            } else {
+                mlxcel::vlm_runtime::InklingVideoPromptLayout::Structured(
+                    mlxcel::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
+                )
+            };
+            return compute_inkling_video_embeddings(
+                inkling,
+                prompt_tokens,
+                image_paths,
+                video_paths,
+                target_fps,
+                tokenizer,
+                prompt_layout,
+            );
         }
         if let LoadedModel::Gemma4VLM(gemma4_vl) = model {
             return compute_gemma4_video_embeddings(
@@ -475,7 +494,7 @@ pub(crate) fn compute_vlm_embeddings(
             );
         }
         return Err(anyhow::anyhow!(
-            "--video input is currently only supported by Gemma 4, Kimi-VL, and Qwen-VL VLMs"
+            "--video input is currently only supported by Inkling, Gemma 4, Kimi-VL, and Qwen-VL VLMs"
         ));
     }
 
@@ -1094,6 +1113,82 @@ fn compute_gemma4_unified_multimodal_embeddings(
         total_tokens: prompt_tokens.len(),
     });
 
+    Ok(Some(embeddings))
+}
+
+/// Compute Inkling adjacent-frame video embeddings with optional companion
+/// still images. Pair selection is request-wide, matching the public mlx-vlm
+/// fallback: frames are sampled at the requested FPS (2.0 by default), capped
+/// at 16 evenly spaced adjacent pairs, and represented by one prompt image
+/// entity per pair.
+fn compute_inkling_video_embeddings(
+    inkling: &mlxcel::vision::InklingVlModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    video_paths: &[PathBuf],
+    target_fps: f64,
+    tokenizer: &MlxcelTokenizer,
+    prompt_layout: mlxcel::vlm_runtime::InklingVideoPromptLayout,
+) -> Result<Option<InputEmbeddings>> {
+    if !video::ffmpeg_available() {
+        return Err(anyhow::anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+    let sources = video_paths
+        .iter()
+        .cloned()
+        .map(video::VideoSource::from_path)
+        .collect::<Vec<_>>();
+    let inputs = sources
+        .iter()
+        .map(|source| video::InklingVideoInput { source, target_fps })
+        .collect::<Vec<_>>();
+    let videos = video::load_inkling_video_pairs(
+        &inputs,
+        video::INKLING_MAX_VIDEO_PAIRS,
+        &video::VideoLimits::from_env(),
+    )
+    .map_err(|err| anyhow::anyhow!("Failed to load Inkling video(s): {err}"))?;
+    let sampled_frame_count = videos
+        .iter()
+        .map(|clip| clip.sampled_frame_count)
+        .sum::<usize>();
+    let decoded_frame_count = videos.iter().map(|clip| clip.frames.len()).sum::<usize>();
+    println!(
+        "Loaded {} Inkling video(s) ({} sampled frames planned, {} unique selected frames decoded).",
+        video_paths.len(),
+        sampled_frame_count,
+        decoded_frame_count
+    );
+
+    let images = image_paths
+        .iter()
+        .map(|path| {
+            image::open(path)
+                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {}", path, error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (embeddings, stats) = mlxcel::vlm_runtime::compute_inkling_video_embeddings(
+        inkling,
+        prompt_tokens,
+        &images,
+        &videos,
+        prompt_layout,
+        |text, add_special| {
+            tokenizer.encode(text, add_special).map(|tokens| {
+                tokens
+                    .into_iter()
+                    .map(|token| token as i32)
+                    .collect::<Vec<_>>()
+            })
+        },
+    )?;
+    println!(
+        "Inkling: selected {} adjacent video pair(s) across {} media block(s) ({} HMLP tile tokens)",
+        stats.video_pairs, stats.image_blocks, stats.total_image_tokens
+    );
     Ok(Some(embeddings))
 }
 
