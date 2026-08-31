@@ -36,6 +36,8 @@ use self::attention::InklingAttention;
 use self::mlp::InklingMlp;
 use self::runtime::InklingLayerCache;
 use super::model_owned::ModelOwnedSequenceState;
+use crate::audio::inkling_tower::{InklingAudioConfig, InklingAudioTower};
+use crate::vision::merge::InputEmbeddings;
 
 const DEFAULT_EOS_TOKEN_ID: i32 = 200_006;
 
@@ -215,6 +217,8 @@ pub struct InklingConfig {
     #[serde(default = "d_model_type")]
     pub model_type: String,
     pub text_config: InklingTextConfig,
+    #[serde(default)]
+    pub audio_config: Option<InklingAudioConfig>,
     #[serde(default = "d_image_token")]
     pub image_token_id: i32,
     #[serde(default = "d_audio_token")]
@@ -335,6 +339,7 @@ pub struct InklingModel {
     layers: Vec<InklingDecoderLayer>,
     norm: RMSNorm,
     lm_head: Option<UnifiedLinear>,
+    audio_tower: Option<InklingAudioTower>,
     eos_token_ids: Vec<i32>,
     sequence_state: ModelOwnedSequenceState<InklingLayerCache>,
 }
@@ -374,6 +379,11 @@ impl InklingModel {
                 &weights, "lm_head", group, bits,
             )?)
         };
+        let audio_tower = config
+            .audio_config
+            .as_ref()
+            .map(|audio| InklingAudioTower::from_weights(&weights, audio, group, bits))
+            .transpose()?;
         let state = (0..text.num_hidden_layers)
             .map(|_| InklingLayerCache::new())
             .collect();
@@ -385,6 +395,7 @@ impl InklingModel {
             layers,
             norm,
             lm_head,
+            audio_tower,
             eos_token_ids,
             sequence_state: ModelOwnedSequenceState::new(state),
         })
@@ -392,6 +403,90 @@ impl InklingModel {
 
     pub fn input_embeddings(&self, input: &MlxArray) -> UniquePtr<MlxArray> {
         self.embed_tokens.forward(input)
+    }
+
+    /// Text embeddings after Inkling's optional embedding RMSNorm.
+    ///
+    /// Image and audio soft tokens are already normalized by their towers, so
+    /// multimodal wrappers merge them into this tensor and then enter the
+    /// decoder without applying `embed_norm` a second time.
+    pub fn normalized_input_embeddings(
+        &self,
+        input: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let embeddings = self.embed_tokens.forward(input);
+        Ok(match &self.embed_norm {
+            Some(norm) => norm.forward(&embeddings),
+            None => embeddings,
+        })
+    }
+
+    #[must_use]
+    pub fn supports_audio(&self) -> bool {
+        self.audio_tower.is_some()
+    }
+
+    #[must_use]
+    pub fn audio_token_id(&self) -> i32 {
+        self.config.audio_token_id
+    }
+
+    /// Merge valid dMel rows into already-normalized text/image embeddings.
+    ///
+    /// The caller owns prompt placeholder expansion and passes only valid
+    /// `[frames, n_mel_bins]` rows in clip order. This makes the method usable
+    /// by the image wrapper from #1327, where image rows are scattered first
+    /// and audio rows must be scattered second.
+    pub fn merge_audio_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        normalized_embeddings: &MlxArray,
+        audio_input_ids: &MlxArray,
+    ) -> Result<InputEmbeddings, String> {
+        let input_shape = mlxcel_core::array_shape(input_ids);
+        if mlxcel_core::array_dtype(input_ids) != mlxcel_core::dtype::INT32
+            || input_shape.len() != 2
+            || input_shape[0] != 1
+            || input_shape[1] <= 0
+        {
+            return Err(format!(
+                "Inkling audio merge requires int32 input_ids shaped [1, sequence], got {input_shape:?}"
+            ));
+        }
+        let embedding_shape = mlxcel_core::array_shape(normalized_embeddings);
+        if embedding_shape.len() != 3
+            || embedding_shape[0] != 1
+            || embedding_shape[1] != input_shape[1]
+            || embedding_shape[2] != self.config.text_config.hidden_size as i32
+        {
+            return Err(format!(
+                "Inkling audio merge requires normalized embeddings shaped [1, {}, {}], got {embedding_shape:?}",
+                input_shape[1], self.config.text_config.hidden_size
+            ));
+        }
+        let tower = self.audio_tower.as_ref().ok_or_else(|| {
+            "This Inkling checkpoint was loaded without an audio tower".to_string()
+        })?;
+        let features = tower.forward(audio_input_ids)?;
+        let placeholders = mlxcel_core::item_i32(&mlxcel_core::sum_all(&mlxcel_core::astype(
+            &mlxcel_core::equal(
+                input_ids,
+                &mlxcel_core::from_slice_i32(&[self.config.audio_token_id], &[1]),
+            ),
+            mlxcel_core::dtype::INT32,
+        )));
+        let feature_rows = mlxcel_core::array_shape(&features)[0];
+        if placeholders != feature_rows {
+            return Err(format!(
+                "Inkling prompt has {placeholders} audio placeholder rows but the tower produced {feature_rows} rows"
+            ));
+        }
+        Ok(crate::vision::merge::merge_llava(
+            self.config.audio_token_id,
+            &features,
+            normalized_embeddings,
+            input_ids,
+        ))
     }
 
     fn make_internal_caches(&self) -> Vec<InklingLayerCache> {

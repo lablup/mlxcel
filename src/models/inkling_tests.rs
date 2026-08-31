@@ -156,6 +156,39 @@ fn validation_rejects_unknown_layer_schedule_entries() {
 }
 
 #[test]
+fn validation_pins_inkling_audio_shape_and_text_width() {
+    let valid: InklingConfig = serde_json::from_value(json!({
+        "text_config": {
+            "intermediate_size": 32,
+            "dense_intermediate_size": 64
+        },
+        "audio_config": {}
+    }))
+    .unwrap();
+    validate_config(&valid).unwrap();
+
+    let bad_channels: InklingConfig = serde_json::from_value(json!({
+        "text_config": {
+            "intermediate_size": 32,
+            "dense_intermediate_size": 64
+        },
+        "audio_config": {"n_mel_bins": 79}
+    }))
+    .unwrap();
+    assert!(validate_config(&bad_channels).is_err());
+
+    let bad_width: InklingConfig = serde_json::from_value(json!({
+        "text_config": {
+            "intermediate_size": 32,
+            "dense_intermediate_size": 64
+        },
+        "audio_config": {"text_hidden_size": 1024}
+    }))
+    .unwrap();
+    assert!(validate_config(&bad_width).is_err());
+}
+
+#[test]
 fn mlp_width_resolution_accepts_both_spellings() {
     let hf = config(json!({"intermediate_size": 4096, "moe_intermediate_size": 512}));
     assert_eq!(hf.text_config.widths().unwrap(), (4096, 512));
@@ -278,7 +311,7 @@ fn router_normalizes_selected_and_shared_raw_logits_together() {
 }
 
 #[test]
-fn sanitize_original_layout_is_idempotent_and_drops_towers() {
+fn sanitize_original_layout_maps_audio_and_drops_visual_tower() {
     let mut weights = WeightMap::new();
     weights.insert(
         "model.llm.embed.weight".into(),
@@ -296,6 +329,15 @@ fn sanitize_original_layout_is_idempotent_and_drops_towers() {
         "model.visual.fake".into(),
         mlxcel_core::zeros(&[1], dtype::FLOAT32),
     );
+    for (key, value) in [
+        ("model.audio.encoder.weight", 1.0),
+        ("model.audio.encoder.scales", 2.0),
+        ("model.audio.encoder.biases", 3.0),
+        ("model.audio.final_norm.weight", 4.0),
+        ("model.audio.unused", 5.0),
+    ] {
+        weights.insert(key.into(), mlxcel_core::from_slice_f32(&[value], &[1]));
+    }
     let once = sanitize_weights(weights).unwrap();
     assert!(once.contains_key("model.embed_tokens.weight"));
     assert_eq!(
@@ -304,6 +346,11 @@ fn sanitize_original_layout_is_idempotent_and_drops_towers() {
     );
     assert!(once.contains_key("model.layers.0.mlp.gate_proj.weight"));
     assert!(!once.keys().any(|key| key.starts_with("model.visual")));
+    assert!(once.contains_key("audio_tower.embed_audio_tokens.weight"));
+    assert!(once.contains_key("audio_tower.embed_audio_tokens.scales"));
+    assert!(once.contains_key("audio_tower.embed_audio_tokens.biases"));
+    assert!(once.contains_key("audio_tower.norm.weight"));
+    assert!(!once.contains_key("model.audio.unused"));
     let mut keys = once.keys().cloned().collect::<Vec<_>>();
     keys.sort();
     let twice = sanitize_weights(once).unwrap();

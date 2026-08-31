@@ -13,8 +13,50 @@
 // limitations under the License.
 
 use super::{
-    ImageTokenBlockAction, ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks,
+    ImageTokenBlockAction, ImageTokenBlockInfo, ImageTokenBlockStats, InklingAudioPromptError,
+    apply_image_token_blocks, expand_inkling_audio_tokens,
 };
+
+#[test]
+fn inkling_placeholder_expansion_uses_valid_frames() {
+    let mut tokens = vec![1, 10, 200_053, 11, 20, 200_053, 21, 2];
+    let frames =
+        expand_inkling_audio_tokens(&mut tokens, 200_053, 200_051, 200_052, &[2, 3], None).unwrap();
+    assert_eq!(frames, 5);
+    assert_eq!(
+        tokens,
+        vec![
+            1, 10, 200_053, 200_053, 11, 20, 200_053, 200_053, 200_053, 21, 2
+        ]
+    );
+}
+
+#[test]
+fn inkling_server_insertion_synthesizes_wrappers_before_last_turn_end() {
+    let mut tokens = vec![1, 9, 50, 9, 2];
+    expand_inkling_audio_tokens(&mut tokens, 7, 6, 8, &[2], Some(9)).unwrap();
+    assert_eq!(tokens, vec![1, 9, 50, 6, 7, 7, 8, 9, 2]);
+}
+
+#[test]
+fn inkling_placeholder_expansion_rejects_cardinality_and_zero_frames() {
+    let mut tokens = vec![1, 7, 2];
+    assert_eq!(
+        expand_inkling_audio_tokens(&mut tokens, 7, 6, 8, &[1, 1], None),
+        Err(InklingAudioPromptError::MediaCardinality {
+            placeholder_count: 1,
+            audio_count: 2,
+        })
+    );
+    assert_eq!(
+        expand_inkling_audio_tokens(&mut tokens, 7, 6, 8, &[0], None),
+        Err(InklingAudioPromptError::EmptyAudio)
+    );
+    assert_eq!(
+        expand_inkling_audio_tokens(&mut tokens, 9, 6, 8, &[usize::MAX], None),
+        Err(InklingAudioPromptError::CapacityOverflow)
+    );
+}
 
 #[test]
 fn apply_image_token_blocks_expands_existing_tokens_with_boi_eoi() {

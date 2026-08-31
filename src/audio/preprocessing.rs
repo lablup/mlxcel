@@ -550,6 +550,7 @@ pub(crate) fn decode_wav_native_compat(
 fn tokens_for_clip(frames: usize, placeholder: AudioPlaceholderPolicy) -> usize {
     match placeholder {
         AudioPlaceholderPolicy::NumberedPerClip => frames.div_ceil(8),
+        AudioPlaceholderPolicy::OnePerFrame => frames,
         AudioPlaceholderPolicy::FixedSoftTokensPerClip(tokens) => tokens,
     }
 }

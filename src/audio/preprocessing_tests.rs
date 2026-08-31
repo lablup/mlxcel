@@ -292,6 +292,23 @@ fn acquisition_decode_and_resample_are_independently_cancellable() {
 
 #[test]
 fn family_policies_pin_waveform_feature_and_placeholder_contracts() {
+    let inkling = AudioFamilyPolicy::inkling();
+    assert_eq!(inkling.target_sample_rate, 16_000);
+    assert_eq!(inkling.max_duration_seconds, 300);
+    assert_eq!(inkling.max_frames_per_request, 6_000);
+    assert_eq!(inkling.frame_length_samples, 1_600);
+    assert_eq!(inkling.frame_hop_samples, 800);
+    assert_eq!(wav::estimate_frames(1, 16_000, inkling), 1);
+    assert_eq!(wav::estimate_frames(1_600, 16_000, inkling), 2);
+    assert_eq!(wav::estimate_frames(16_001, 16_000, inkling), 21);
+    assert_eq!(inkling.placeholder, AudioPlaceholderPolicy::OnePerFrame);
+    assert!(matches!(
+        inkling.source,
+        AudioPolicySource::PinnedOfficialDefault(
+            crate::audio::inkling_dmel::INKLING_MLX_VLM_REFERENCE_REVISION
+        )
+    ));
+
     let phi = AudioFamilyPolicy::phi4mm();
     assert_eq!(
         (

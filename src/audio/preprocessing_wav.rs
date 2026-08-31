@@ -369,6 +369,9 @@ pub(super) fn estimate_frames(
     effective_rate: u32,
     policy: AudioFamilyPolicy,
 ) -> usize {
+    if policy.family == "inkling" {
+        return samples.div_ceil(policy.frame_hop_samples);
+    }
     if policy.family == "gemma3n" {
         let padded = samples.div_ceil(128) * 128;
         return padded
