@@ -19,6 +19,7 @@
 //! 100-ms non-centered analysis window, and no global dynamic-range transform.
 
 use std::f64::consts::PI;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 
@@ -147,6 +148,17 @@ pub struct InklingLogMelBatch {
     pub valid_frames: Vec<usize>,
 }
 
+/// Valid-only rows in clip order. Unlike the padded batch shape, this never
+/// contains right-padding rows and therefore never spends an FFT on padding
+/// introduced by another, longer clip in the request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InklingCompactLogMelBatch {
+    pub features: Vec<f32>,
+    pub feature_size: usize,
+    pub valid_frames: Vec<usize>,
+    pub transformed_frames: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct InklingFeatureExtractor {
     config: InklingFeatureExtractorConfig,
@@ -252,6 +264,92 @@ impl InklingFeatureExtractor {
             frames_per_clip: frames,
             feature_size: self.config.feature_size,
             valid_frames,
+        })
+    }
+
+    /// Extract only valid rows, with a hard limit on the number of FFTs and a
+    /// cancellation check before every frame transform.
+    pub fn extract_compact_batch_cancellable(
+        &self,
+        clips: &[&[f32]],
+        max_frames: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<InklingCompactLogMelBatch, String> {
+        self.extract_compact_batch_with_cancel(clips, max_frames, || {
+            cancelled.load(Ordering::Acquire)
+        })
+    }
+
+    fn extract_compact_batch_with_cancel<C>(
+        &self,
+        clips: &[&[f32]],
+        max_frames: usize,
+        mut is_cancelled: C,
+    ) -> Result<InklingCompactLogMelBatch, String>
+    where
+        C: FnMut() -> bool,
+    {
+        if clips.is_empty() {
+            return Err("Inkling audio batch must contain at least one clip".into());
+        }
+        if clips.iter().any(|clip| clip.is_empty()) {
+            return Err("Inkling audio clips must contain at least one sample".into());
+        }
+        if let Some((clip, sample)) = clips.iter().enumerate().find_map(|(clip, samples)| {
+            samples
+                .iter()
+                .position(|sample| !sample.is_finite())
+                .map(|sample| (clip, sample))
+        }) {
+            return Err(format!(
+                "Inkling audio clip {clip} contains a non-finite sample at {sample}"
+            ));
+        }
+
+        let valid_frames = clips
+            .iter()
+            .map(|clip| clip.len().div_ceil(self.config.hop_length))
+            .collect::<Vec<_>>();
+        let total_frames = valid_frames
+            .iter()
+            .try_fold(0usize, |total, frames| total.checked_add(*frames))
+            .ok_or_else(|| "Inkling valid frame count overflowed".to_string())?;
+        if total_frames > max_frames {
+            return Err(format!(
+                "Inkling audio requires {total_frames} frame transforms, exceeding the request limit {max_frames}"
+            ));
+        }
+        let feature_count = total_frames
+            .checked_mul(self.config.feature_size)
+            .ok_or_else(|| "Inkling compact feature allocation overflowed".to_string())?;
+        let mut features = vec![self.config.padding_value; feature_count];
+        let left_pad = self.config.n_fft.saturating_sub(self.config.hop_length);
+        let mut transformed_frames = 0usize;
+        let mut frame_scratch = vec![0.0f64; self.config.n_fft];
+        for (clip, &frames) in clips.iter().zip(&valid_frames) {
+            for frame in 0..frames {
+                if is_cancelled() {
+                    return Err("Inkling audio feature extraction was cancelled".into());
+                }
+                let output = transformed_frames
+                    .checked_mul(self.config.feature_size)
+                    .ok_or_else(|| "Inkling compact feature offset overflowed".to_string())?;
+                self.extract_frame(
+                    clip,
+                    frame,
+                    left_pad,
+                    &mut frame_scratch,
+                    &mut features[output..output + self.config.feature_size],
+                )?;
+                transformed_frames += 1;
+            }
+        }
+        debug_assert_eq!(transformed_frames, total_frames);
+        Ok(InklingCompactLogMelBatch {
+            features,
+            feature_size: self.config.feature_size,
+            valid_frames,
+            transformed_frames,
         })
     }
 

@@ -22,7 +22,7 @@ Inkling does not use the Whisper-style frontend already present in mlxcel. It co
 
 Several details are numerically load-bearing. The STFT uses an uncentered 1,600-sample periodic Hann window every 800 samples. The Slaney filterbank is derived in f64 and cast to f32, while the mel accumulation uses f32 row-wise dot products. Quantizer boundaries are f64 midpoints rounded downward onto the f32 lattice, and values use strict greater-than comparisons so a boundary tie stays in the lower bin. Small changes can move values across neighboring bins while preserving valid tensor shapes.
 
-The control plane also needs exact cardinality and ordering. One prompt placeholder must expand to one token per valid audio frame. Right-padding rows must never reach the tower. In mixed image/audio requests, image and audio rows must scatter in the same order used by the public model. Server prompt synthesis must stay inside the current user turn rather than selecting an end marker from system messages or history. Prepared multimodal inputs must not enter the text-only speculative path.
+The control plane also needs exact cardinality and ordering. One prompt placeholder must expand to one token per valid audio frame. Right-padding rows must never reach the tower. In mixed image/audio requests, image and audio rows must scatter in the same order used by the public model. Server prompt materialization must retain every historical and current media part at its original location rather than rebinding flattened audio to the final user turn. Prepared multimodal inputs must not enter the text-only speculative path.
 
 ## 2. Change Summary
 
@@ -31,11 +31,11 @@ The control plane also needs exact cardinality and ordering. One prompt placehol
 | Host preprocessing | Reuses the bounded WAV boundary for decode, stereo averaging, linear 16 kHz resampling, cancellation checks, 16-clip admission, and five aggregate minutes |
 | dMel extraction | Implements periodic Hann, uncentered RFFT, librosa-compatible Slaney filters, f32 mel accumulation, `log10`, batching, masks, and exact frame counts |
 | Quantization | Builds downward-rounded f32 boundaries from f64 centers and applies strict lower-bin tie behavior |
-| Compact bridge | Removes every padded row and concatenates only valid frames in request order before MLX allocation |
+| Compact bridge | Computes and concatenates only valid per-clip rows in request order, caps actual FFTs at 6,000, and checks cancellation before every frame |
 | Audio tower | Offsets each channel into its 16-row segment, gathers dense or affine-quantized embeddings, sums 80 channels, RMS-normalizes, and chunks at no more than 256 frames |
 | Weight loading | Renames `model.audio.encoder.*` and `model.audio.final_norm.weight` into the reusable audio tower and validates dense and quantized layouts |
 | VLM integration | Stores processor metadata in `InklingVlModel` and implements normalized text -> image scatter -> audio scatter |
-| Prompt integration | Expands template placeholders in place or synthesizes complete wrappers at a validated current-user end boundary; plain CLI mode appends to the explicit raw prompt |
+| Prompt integration | Materializes server ordinal sentinels at their original message/part locations with complete image/audio structure, rejects raw reserved media tokens, and retains explicit CLI synthesis |
 | CLI and server | Adds Inkling dispatch for CLI `--audio` and server `input_audio`, with optional still images and shared preparation statistics |
 | Capability and detection | Exposes loaded-runtime audio capability while preserving the visual-shell detection rule: InklingVLM still requires both `vision_config` and `model.visual.*` weights |
 | Speculative safety | Declines MTP burst for raw audio and for prepared embeddings after the raw payload has been consumed |
@@ -45,9 +45,9 @@ The control plane also needs exact cardinality and ordering. One prompt placehol
 
 1. The CLI provides one WAV path; the server supplies one or more already-decoded `input_audio` byte payloads. Both routes enter the shared `AudioFamilyPolicy::inkling()` boundary.
 2. The boundary validates request limits, decodes WAV, averages channels, linearly resamples to 16 kHz mono, and reports source and normalized work metrics.
-3. The Inkling feature extractor pads the batch to its longest clip, adds the left STFT context, computes 80 log-mel values per 50 ms frame, masks padded rows, and reports each clip's valid frame count.
+3. The Inkling feature extractor adds the left STFT context independently for each clip and computes 80 log-mel values only for valid 50 ms frames. It checks cancellation before each FFT and rejects a request before extraction if the actual transform count exceeds 6,000.
 4. The quantizer clips values to `[-7, 2]`, counts strict comparisons against 15 downward-rounded boundaries, and emits int32 IDs in `[0, 15]`.
-5. The host bridge compacts valid `[frame, 80]` rows in clip order. Prompt preparation expands one audio placeholder per clip to exactly the corresponding valid-frame count.
+5. The host bridge quantizes the already-compact `[frame, 80]` rows in clip order. Prompt preparation expands one audio placeholder per clip to exactly the corresponding valid-frame count.
 6. Optional images are processed through the existing Inkling tiler and HMLP tower. Image placeholders expand to their actual tile counts.
 7. The model normalizes text embeddings once, scatters HMLP rows first, runs compact dMel IDs through the summed-channel audio tower, and scatters audio rows second.
 8. The wrapper's prepared-embedding prefill methods feed the merged tensor directly to the Inkling decoder. Server scheduling, chunked-prefill, Neural Accelerator alignment, and MTP burst gates observe the prepared tensor and keep the request on the classic path.
@@ -60,17 +60,17 @@ The frontend computes the filterbank and bin centers in f64 because their deriva
 
 Mel multiplication accumulates one f32 dot product per output row. This deliberately avoids a wider or differently associated matrix multiplication that can perturb values near a bin boundary. Tests compare random-noise output against an independent f64 reference and explicitly exercise every boundary.
 
-### 4.2 Compact padding before the tower
+### 4.2 Avoid padded transforms before the tower
 
-Batch extraction uses right padding for efficient host work, but the model contract contains no padding mask. The bridge therefore walks feature rows and the boolean mask together, retains only valid rows, verifies exact allocation cardinality, and constructs the MLX array as `[total_valid_frames, 80]`. Placeholder counts and tower output rows must match exactly before scatter.
+The model contract contains no padding mask, and transforming every clip to the longest clip's padded length could multiply FFT work by the 16-clip request limit. The production extractor therefore iterates each clip's valid frame count directly, checks cancellation before each transform, and enforces the 6,000-frame request ceiling on the same counter that drives FFT execution. It verifies exact allocation cardinality and constructs the MLX array as `[total_valid_frames, 80]`. Placeholder counts and tower output rows must match exactly before scatter.
 
 ### 4.3 Compose with HMLP without double normalization
 
 The text backbone exposes normalized input embeddings and prepared-embedding forward methods. `InklingVlModel` uses those APIs rather than reimplementing decoder behavior. Image preparation returns an already-normalized and image-scattered tensor; audio merge accepts that tensor and changes only audio placeholder rows. Audio-only requests start from the same normalized text tensor. A synthetic regression compares the combined helper with an explicit image-first then audio merge and verifies special-token suppression.
 
-### 4.4 Keep synthesized server audio in the current user turn
+### 4.4 Preserve server media message and part order
 
-The server's normalized text view may omit `input_audio` parts. When a template placeholder survives, expansion happens in place and exact media cardinality is required. Otherwise, the runtime resolves the public Inkling structural tokens, finds the final `[message_user, content_text]` boundary, requires its following end marker, rejects later user content, and inserts audio wrappers immediately before that marker. A regression includes system/history content, a companion image part, a current question, and a model-generation tail.
+The request renderer assigns private, monotonically increasing image and audio sentinels while flattening transport content for a chat template. The Inkling worker parses those sentinels after rendering, rejects missing or out-of-sequence markers, and reconstructs each original part in place. Image parts become complete `message_user/content_image/image/end_message` blocks; audio parts become complete `message_user/audio_bos/audio/audio_end/end_message` blocks before valid-frame expansion. Text before and after media remains in separate text parts, including historical turns, and text that directly encodes an image or audio placeholder is rejected as untrusted reserved-token input. Regressions cover system context, historical and current audio, and mixed image/audio order.
 
 ### 4.5 Exclude multimodal prefill from text-only MTP
 
@@ -78,7 +78,7 @@ InklingVLM remains an MTP target for text-only requests. Raw image/audio payload
 
 ## 5. Review and Hardening
 
-The inline correctness, security, and performance review found no unresolved CRITICAL or HIGH issue. The final implementation includes the following hardening:
+Independent review identified and the final implementation resolves two HIGH findings: cross-turn media rebinding after sentinel stripping, and padded batch extraction that could perform roughly 16 times more FFT work than the admitted valid-frame count. No CRITICAL or HIGH finding remains in the implementation handoff. The final implementation includes the following hardening:
 
 - checked arithmetic bounds feature, token, and allocation counts before host or MLX construction;
 - WAV and aggregate-duration admission occurs before model-specific feature work;
@@ -86,7 +86,8 @@ The inline correctness, security, and performance review found no unresolved CRI
 - audio special-token IDs are resolved from `processor_config.json` and the placeholder ID must match `config.json`;
 - visual-shell detection remains dependent on both visual config and visual weights, so audio weights cannot fabricate a VLM runtime;
 - server audio admission consults the loaded model capability before preprocessing;
-- prompt synthesis uses a structural current-user boundary rather than a global end-token search;
+- ordered server media is reconstructed at its original message/part boundary, and raw reserved image/audio tokens are rejected;
+- production dMel extraction performs only admitted valid-row FFTs and observes frame-level cancellation;
 - prepared audio tensors are excluded from chunked/speculative paths that would discard or misalign them.
 
 Independent PR review and CI remain required before merge. This report does not treat local green tests as merge approval.
@@ -95,7 +96,9 @@ Independent PR review and CI remain required before merge. This report does not 
 
 | Gate | Result |
 | --- | --- |
-| `cargo test --lib inkling -- --nocapture` | Pass, 77/77 |
+| `cargo test -p mlxcel --lib inkling -- --nocapture` | Pass, 83/83 |
+| `cargo test -p mlxcel --lib inkling_ordered_prompt -- --nocapture` | Pass, 2/2 |
+| `cargo test -p mlxcel --lib compact_batch_ -- --nocapture` | Pass, 3/3 |
 | `cargo test --lib inkling_audio -- --nocapture` | Pass, 6/6 |
 | `cargo test --lib mtp_burst_declines -- --nocapture` | Pass, 3/3 |
 | `cargo test --lib detect_model_media_support_recognises_inkling_video -- --nocapture` | Pass, 1/1 |
@@ -103,6 +106,7 @@ Independent PR review and CI remain required before merge. This report does not 
 | `cargo check --bin mlxcel` | Pass |
 | `cargo clippy --lib -- -D warnings` | Pass |
 | `cargo clippy --bin mlxcel -- -D warnings` | Pass |
+| `cargo clippy -p mlxcel --lib --tests -- -D warnings` | Pass |
 | `cargo fmt --all -- --check` | Pass |
 | `git diff --check` and `git diff --cached --check` | Pass |
 

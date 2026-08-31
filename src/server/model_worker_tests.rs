@@ -21,6 +21,7 @@ use super::{
     decode_request_images_with_limits, encode_ordered_media_prompt,
     materialize_phi4mm_ordered_prompt, merge_config_stop_tokens, preprocess_server_audio,
     require_single_server_audio_clip, resolve_end_of_turn_token_id, resolve_xtc_newline_token_ids,
+    tokenize_inkling_ordered_media_prompt,
 };
 use crate::SamplingConfig;
 use crate::audio::AudioFamilyPolicy;
@@ -186,6 +187,163 @@ fn gemma3n_ordered_prompt_expands_media_in_place_without_clustering() {
             i32::from(b'C'),
         ]
     );
+}
+
+#[test]
+fn inkling_ordered_prompt_preserves_history_and_mixed_part_order() {
+    const BOS: i32 = 1;
+    const SYSTEM: i32 = 40;
+    const USER: i32 = 41;
+    const MODEL: i32 = 42;
+    const TEXT: i32 = 43;
+    const CONTENT_IMAGE: i32 = 44;
+    const END: i32 = 45;
+    const AUDIO_BOS: i32 = 46;
+    const AUDIO_END: i32 = 47;
+    const IMAGE: i32 = 800;
+    const AUDIO: i32 = 900;
+    let prompt_ids = crate::vlm_runtime::InklingPromptTokenIds {
+        message_user: USER,
+        content_text: TEXT,
+        content_image: CONTENT_IMAGE,
+        end_message: END,
+    };
+    let audio_ids = crate::vlm_runtime::InklingAudioTokenIds {
+        audio_bos: AUDIO_BOS,
+        audio_end: AUDIO_END,
+    };
+    let prompt = format!(
+        "!{{policy}}[{{old{}after}}#{{answer}}[{{now{}mid{}end}}#",
+        ordered_audio_sentinel(1),
+        ordered_image_sentinel(1),
+        ordered_audio_sentinel(2),
+    );
+    let encode = |text: &str, add_special: bool| {
+        let mut tokens = Vec::new();
+        if add_special {
+            tokens.push(BOS);
+        }
+        tokens.extend(text.chars().map(|character| match character {
+            '!' => SYSTEM,
+            '[' => USER,
+            '#' => MODEL,
+            '{' => TEXT,
+            '}' => END,
+            other => other as i32,
+        }));
+        Ok(tokens)
+    };
+    let tokens = tokenize_inkling_ordered_media_prompt(
+        &prompt, prompt_ids, audio_ids, IMAGE, AUDIO, 1, 2, encode,
+    )
+    .unwrap();
+
+    let media_parts = tokens
+        .windows(5)
+        .filter_map(|window| match window {
+            [USER, AUDIO_BOS, AUDIO, AUDIO_END, END] => Some(AUDIO),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(media_parts, vec![AUDIO, AUDIO]);
+    assert_eq!(
+        tokens
+            .windows(4)
+            .filter(|window| *window == [USER, CONTENT_IMAGE, IMAGE, END])
+            .count(),
+        1
+    );
+
+    let historical_audio = tokens
+        .windows(5)
+        .position(|window| window == [USER, AUDIO_BOS, AUDIO, AUDIO_END, END])
+        .unwrap();
+    let history_answer = tokens.iter().position(|&token| token == MODEL).unwrap();
+    let image = tokens
+        .windows(4)
+        .position(|window| window == [USER, CONTENT_IMAGE, IMAGE, END])
+        .unwrap();
+    let current_audio = tokens
+        .windows(5)
+        .rposition(|window| window == [USER, AUDIO_BOS, AUDIO, AUDIO_END, END])
+        .unwrap();
+    assert!(historical_audio < history_answer);
+    assert!(history_answer < image);
+    assert!(image < current_audio);
+    assert_eq!(tokens.first(), Some(&BOS));
+    assert_eq!(tokens.last(), Some(&MODEL));
+
+    let mut expanded = tokens;
+    let audio_frames = crate::vlm_runtime::expand_inkling_audio_prompt(
+        &mut expanded,
+        AUDIO,
+        audio_ids,
+        &[2, 3],
+        crate::vlm_runtime::InklingAudioPromptLayout::Ordered,
+    )
+    .unwrap();
+    let image_stats =
+        crate::vlm_prompt::expand_inkling_image_tokens(&mut expanded, IMAGE, &[2]).unwrap();
+    assert_eq!(audio_frames, 5);
+    assert_eq!(expanded.iter().filter(|&&token| token == AUDIO).count(), 5);
+    assert_eq!(image_stats.total_image_tokens, 2);
+    assert_eq!(expanded.iter().filter(|&&token| token == IMAGE).count(), 2);
+    assert_eq!(
+        expanded.iter().filter(|&&token| token == AUDIO_BOS).count(),
+        2
+    );
+    assert_eq!(
+        expanded.iter().filter(|&&token| token == AUDIO_END).count(),
+        2
+    );
+    let first_audio = expanded.iter().position(|&token| token == AUDIO).unwrap();
+    let image = expanded.iter().position(|&token| token == IMAGE).unwrap();
+    let last_audio = expanded.iter().rposition(|&token| token == AUDIO).unwrap();
+    assert!(first_audio < image);
+    assert!(image < last_audio);
+}
+
+#[test]
+fn inkling_ordered_prompt_rejects_raw_reserved_media_tokens() {
+    const IMAGE: i32 = 800;
+    const AUDIO: i32 = 900;
+    let prompt_ids = crate::vlm_runtime::InklingPromptTokenIds {
+        message_user: 41,
+        content_text: 43,
+        content_image: 44,
+        end_message: 45,
+    };
+    let audio_ids = crate::vlm_runtime::InklingAudioTokenIds {
+        audio_bos: 46,
+        audio_end: 47,
+    };
+    for reserved in [IMAGE, AUDIO] {
+        let prompt = format!("[{{raw{}}}", ordered_audio_sentinel(1));
+        let error = tokenize_inkling_ordered_media_prompt(
+            &prompt,
+            prompt_ids,
+            audio_ids,
+            IMAGE,
+            AUDIO,
+            0,
+            1,
+            |text, add_special| {
+                let mut tokens = Vec::new();
+                if add_special {
+                    tokens.push(1);
+                }
+                tokens.extend(text.chars().map(|character| match character {
+                    '[' => 41,
+                    '{' => 43,
+                    '}' => 45,
+                    _ => reserved,
+                }));
+                Ok(tokens)
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("reserved image/audio"));
+    }
 }
 
 #[test]

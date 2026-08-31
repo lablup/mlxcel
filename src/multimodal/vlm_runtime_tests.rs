@@ -193,6 +193,28 @@ fn inkling_audio_expands_template_placeholders_without_reordering_parts() {
 }
 
 #[test]
+fn inkling_ordered_audio_never_synthesizes_a_missing_placeholder() {
+    let mut prompt = vec![1, 10, 11, 50, 13, 14, 99];
+    let error = expand_inkling_audio_prompt(
+        &mut prompt,
+        200_053,
+        InklingAudioTokenIds {
+            audio_bos: 20,
+            audio_end: 21,
+        },
+        &[3],
+        InklingAudioPromptLayout::Ordered,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("lost its required audio placeholders")
+    );
+    assert_eq!(prompt, vec![1, 10, 11, 50, 13, 14, 99]);
+}
+
+#[test]
 fn gemma3n_audio_expands_multiple_placeholders_in_order() {
     const AUDIO: i32 = 262_273;
     let mut prompt = vec![10, AUDIO, 20, AUDIO, 106];

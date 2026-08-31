@@ -109,6 +109,9 @@ pub enum InklingAudioPromptLayout {
     Plain,
     /// Insert audio wrappers before the final current-user end marker.
     Structured(InklingPromptTokenIds),
+    /// Server prompt whose original message/part positions have already been
+    /// materialized into one audio placeholder per clip.
+    Ordered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +451,9 @@ pub fn expand_inkling_audio_prompt(
                 }
                 Some(current_user_end)
             }
+            InklingAudioPromptLayout::Ordered => {
+                anyhow::bail!("Ordered Inkling audio prompt lost its required audio placeholders");
+            }
         }
     };
     expand_inkling_audio_tokens(
@@ -486,6 +492,18 @@ pub fn compute_inkling_audio_embeddings(
     let (pixel_values, image_blocks, total_image_tokens) = if images.is_empty() {
         (None, 0, 0)
     } else {
+        if prompt_layout == InklingAudioPromptLayout::Ordered {
+            let placeholders = prompt_tokens
+                .iter()
+                .filter(|&&token| token == model.image_token_id())
+                .count();
+            if placeholders != images.len() {
+                anyhow::bail!(
+                    "Ordered Inkling prompt contains {placeholders} image placeholder(s), but the request has {} image(s)",
+                    images.len()
+                );
+            }
+        }
         let processed = model
             .preprocess_images(images)
             .map_err(anyhow::Error::msg)?;

@@ -133,6 +133,49 @@ fn frame_count_and_mask_follow_hop() {
 }
 
 #[test]
+fn compact_batch_transforms_only_valid_rows_for_skewed_clips() {
+    let extractor = InklingFeatureExtractor::new(InklingFeatureExtractorConfig::default()).unwrap();
+    let long = vec![0.0; 16_000];
+    let short = vec![0.0; 1];
+    let mut clips = vec![long.as_slice()];
+    clips.extend(std::iter::repeat_n(short.as_slice(), 15));
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let batch = extractor
+        .extract_compact_batch_cancellable(&clips, 6_000, &cancelled)
+        .unwrap();
+    assert_eq!(batch.valid_frames, [vec![20], vec![1; 15]].concat());
+    assert_eq!(batch.transformed_frames, 35);
+    assert_eq!(batch.features.len(), 35 * 80);
+}
+
+#[test]
+fn compact_batch_caps_actual_transforms_before_fft_work() {
+    let extractor = InklingFeatureExtractor::new(InklingFeatureExtractorConfig::default()).unwrap();
+    let clip = vec![0.0; 2_401];
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let error = extractor
+        .extract_compact_batch_cancellable(&[&clip, &clip], 7, &cancelled)
+        .unwrap_err();
+    assert!(error.contains("8 frame transforms"));
+    assert!(error.contains("request limit 7"));
+}
+
+#[test]
+fn compact_batch_checks_cancellation_between_frames() {
+    let extractor = InklingFeatureExtractor::new(InklingFeatureExtractorConfig::default()).unwrap();
+    let clip = vec![0.0; 4_000];
+    let mut checks = 0usize;
+    let error = extractor
+        .extract_compact_batch_with_cancel(&[&clip], 6_000, || {
+            checks += 1;
+            checks > 2
+        })
+        .unwrap_err();
+    assert_eq!(checks, 3);
+    assert!(error.contains("cancelled"));
+}
+
+#[test]
 fn dmel_boundaries_round_down_and_ties_go_low() {
     let boundaries = dmel_boundaries(16, -7.0, 2.0);
     assert_eq!(boundaries.len(), 15);

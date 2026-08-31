@@ -15,6 +15,8 @@
 //! Host bridge from normalized waveforms to compact Inkling dMel token rows.
 
 use crate::audio::AudioWaveformBatch;
+use std::sync::atomic::AtomicBool;
+
 use crate::audio::inkling_dmel::{INKLING_SAMPLE_RATE, InklingFeatureExtractor, quantize_dmel};
 use crate::audio::inkling_processor::InklingProcessorConfig;
 
@@ -54,6 +56,16 @@ pub fn prepare_inkling_dmel_input(
     waveforms: &AudioWaveformBatch,
     processor: &InklingProcessorConfig,
 ) -> Result<InklingDmelInput, String> {
+    let cancelled = AtomicBool::new(false);
+    prepare_inkling_dmel_input_cancellable(waveforms, processor, &cancelled)
+}
+
+/// Server variant that propagates cancellation into every frame transform.
+pub fn prepare_inkling_dmel_input_cancellable(
+    waveforms: &AudioWaveformBatch,
+    processor: &InklingProcessorConfig,
+    cancelled: &AtomicBool,
+) -> Result<InklingDmelInput, String> {
     processor.validate()?;
     if waveforms.family != "inkling" {
         return Err(format!(
@@ -82,7 +94,11 @@ pub fn prepare_inkling_dmel_input(
         .iter()
         .map(|clip| clip.samples.as_slice())
         .collect();
-    let features = extractor.extract_batch(&clips)?;
+    let features = extractor.extract_compact_batch_cancellable(
+        &clips,
+        crate::audio::AudioFamilyPolicy::inkling().max_frames_per_request,
+        cancelled,
+    )?;
     let quantized = quantize_dmel(
         &features.features,
         processor.num_dmel_bins,
@@ -90,23 +106,11 @@ pub fn prepare_inkling_dmel_input(
         processor.dmel_max_value,
     )?;
 
-    let total_frames = features
-        .valid_frames
-        .iter()
-        .try_fold(0usize, |total, frames| total.checked_add(*frames))
-        .ok_or_else(|| "Inkling valid frame count overflowed".to_string())?;
+    let total_frames = features.transformed_frames;
     let id_capacity = total_frames
         .checked_mul(features.feature_size)
         .ok_or_else(|| "Inkling compact dMel allocation overflowed".to_string())?;
-    let mut input_ids = Vec::with_capacity(id_capacity);
-    for (row, keep) in quantized
-        .chunks_exact(features.feature_size)
-        .zip(features.mask.iter().copied())
-    {
-        if keep {
-            input_ids.extend_from_slice(row);
-        }
-    }
+    let input_ids = quantized;
     if input_ids.len() != id_capacity {
         return Err(format!(
             "Inkling dMel mask retained {} IDs, expected {id_capacity}",
