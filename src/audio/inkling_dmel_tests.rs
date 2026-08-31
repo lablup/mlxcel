@@ -67,13 +67,13 @@ fn reference_log_mel(clip: &[f32]) -> Vec<f32> {
     let mut output = vec![0.0f32; frames * 80];
     for frame_index in 0..frames {
         let mut frame = vec![0.0f64; n_fft];
-        for index in 0..n_fft {
+        for (index, value) in frame.iter_mut().enumerate() {
             let padded_index = frame_index * hop + index;
             if padded_index >= left_pad {
                 let source = padded_index - left_pad;
                 if source < clip.len() {
                     let window = 0.5 - 0.5 * (2.0 * PI * index as f64 / n_fft as f64).cos();
-                    frame[index] = clip[source] as f64 * window;
+                    *value = clip[source] as f64 * window;
                 }
             }
         }
