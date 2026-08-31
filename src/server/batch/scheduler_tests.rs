@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
@@ -31,9 +31,10 @@ use super::{
     resolve_max_batch_prefill_tokens, select_eviction_victim_from, vlm_prefix_sharing_allowed,
 };
 use crate::server::batch::active::ActiveBatch;
+use crate::server::batch::generation_bounds::GenerationBounds;
 use crate::server::batch::queue::PrefillQueue;
 use crate::server::batch::sequence::{
-    BatchSchedulerAction, RequestPriority, SequenceInfo, SequenceState,
+    BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
 };
 use crate::server::batch::stop_matcher::StopMatcher;
 use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
@@ -2153,4 +2154,47 @@ fn a_context_bound_stop_is_reported_as_truncated_with_stop_type_limit() {
     let result = seq.take_generation_result(&tokenizer, 0);
     assert_eq!(result.stop_kind, StopKind::ContextExhausted);
     assert_eq!(result.finish_reason, "length");
+}
+
+#[test]
+fn generation_deadline_finalizer_stops_single_sequence_decode_as_length() {
+    use super::BatchScheduler;
+
+    let (mut seq, _rx) = make_test_sequence(92);
+    seq.state = SequenceState::Decoding;
+    seq.bounds = GenerationBounds::new(0, Some(0));
+
+    // The deadline starts with the first decoded piece and, like b10621, is
+    // evaluated only when a later newline-bearing piece arrives.
+    seq.stream_decoded_text("prefix".to_owned(), Some(10), None);
+    std::thread::sleep(Duration::from_millis(2));
+    seq.stream_decoded_text("\n".to_owned(), Some(11), None);
+    assert!(seq.bound_stopped());
+
+    BatchScheduler::finish_on_generation_bound(&mut seq);
+    assert!(matches!(
+        seq.state,
+        SequenceState::Finished(FinishReason::Length)
+    ));
+}
+
+#[test]
+fn generation_bound_finalizer_preserves_a_prior_string_stop() {
+    use super::BatchScheduler;
+
+    let (mut seq, _rx) = make_test_sequence(93);
+    seq.state = SequenceState::Decoding;
+    seq.bounds = GenerationBounds::new(0, Some(0));
+    seq.stream_decoded_text("prefix".to_owned(), Some(10), None);
+    std::thread::sleep(Duration::from_millis(2));
+    seq.stream_decoded_text("\n".to_owned(), Some(11), None);
+    seq.state
+        .transition_to(SequenceState::Finished(FinishReason::StopSequence))
+        .expect("string stop transition succeeds");
+
+    BatchScheduler::finish_on_generation_bound(&mut seq);
+    assert!(matches!(
+        seq.state,
+        SequenceState::Finished(FinishReason::StopSequence)
+    ));
 }

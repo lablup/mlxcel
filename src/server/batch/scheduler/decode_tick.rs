@@ -15,6 +15,22 @@
 use super::*;
 
 impl BatchScheduler {
+    /// Finish a sequence when a b10621 generation bound fired.
+    ///
+    /// Call this immediately after streaming a decoded piece, after applying
+    /// any string-stop result. That ordering preserves `StopSequence` when a
+    /// string stop and `n_indent` / `t_max_predict_ms` land on the same piece.
+    pub(super) fn finish_on_generation_bound(seq: &mut SequenceInfo) {
+        if !seq.state.is_finished()
+            && seq.bound_stopped()
+            && let Err(err) = seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::Length))
+        {
+            tracing::error!("State transition error: {err}");
+        }
+    }
+
     /// Whether a bounded sequence must stop now because its next token would
     /// not fit the KV window with context shifting disabled (#1472).
     ///
@@ -994,19 +1010,7 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
-            // b10621's `n_indent` / `t_max_predict_ms` end a healthy request
-            // with `stop_type: "limit"` (#1477). Guarded on the sequence not
-            // already being finished, so a string stop that landed on the same
-            // piece keeps its own classification: upstream evaluates the stop
-            // strings first and stops feeding tokens there.
-            if !seq.state.is_finished()
-                && seq.bound_stopped()
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Length))
-            {
-                tracing::error!("State transition error: {err}");
-            }
+            Self::finish_on_generation_bound(seq);
 
             if !seq.state.is_finished()
                 && structured_stopped
@@ -1186,19 +1190,7 @@ impl BatchScheduler {
                 tracing::error!("State transition error: {err}");
             }
 
-            // b10621's `n_indent` / `t_max_predict_ms` end a healthy request
-            // with `stop_type: "limit"` (#1477). Guarded on the sequence not
-            // already being finished, so a string stop that landed on the same
-            // piece keeps its own classification: upstream evaluates the stop
-            // strings first and stops feeding tokens there.
-            if !seq.state.is_finished()
-                && seq.bound_stopped()
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Length))
-            {
-                tracing::error!("State transition error: {err}");
-            }
+            Self::finish_on_generation_bound(seq);
 
             if !seq.state.is_finished()
                 && seq.generated_tokens.len() >= seq.max_tokens
@@ -1483,6 +1475,12 @@ impl BatchScheduler {
         {
             tracing::error!("State transition error: {err}");
         }
+
+        // The common one-request decode dispatch reaches this single-step
+        // path rather than either batched loop. Keep b10621's generation
+        // bounds in the shared post-stream finalizer so all three paths stop
+        // with `stop_type: "limit"` (#1431 post-merge audit).
+        Self::finish_on_generation_bound(seq);
 
         if !seq.state.is_finished()
             && structured_stopped
