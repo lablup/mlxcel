@@ -934,6 +934,7 @@ mod tests {
             false,
             false,
             true,
+            &crate::tokenizer::ThinkingMarkers::default(),
         )
         .await
         {
@@ -960,6 +961,7 @@ mod tests {
             false,
             false,
             true,
+            &crate::tokenizer::ThinkingMarkers::default(),
         )
         .await
         .expect("engine-side render failure should keep fallback behavior");

@@ -316,6 +316,21 @@ pub fn prompt_primed_open_thinking(markers: &ThinkingMarkers, prompt: &str) -> b
         .ends_with(filter.think_start.as_str())
 }
 
+/// The close marker for a thinking block this prompt primed, or `None` when it
+/// primed none.
+///
+/// Companion to [`prompt_primed_open_thinking`], sharing its trailing-
+/// whitespace tolerance so the two can never disagree about whether a prompt is
+/// primed. The server needs the close marker as well as the boolean, and used
+/// to get both from a hardcoded suffix table that missed any family spelling
+/// its open marker without a trailing newline (issue #1554).
+pub fn prompt_primed_open_close_marker(markers: &ThinkingMarkers, prompt: &str) -> Option<String> {
+    if !prompt_primed_open_thinking(markers, prompt) {
+        return None;
+    }
+    markers.think_end.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

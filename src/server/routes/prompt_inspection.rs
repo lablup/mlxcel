@@ -98,6 +98,7 @@ async fn render_chat_prompt(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await
     .map(|prepared| prepared.prompt)

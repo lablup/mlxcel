@@ -219,6 +219,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         false,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .err()
@@ -235,6 +236,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         false,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .err()
@@ -251,6 +253,7 @@ async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() 
         false,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .expect("valid request after a rejection must still prepare");
@@ -1681,7 +1684,13 @@ async fn prompt_cache_on_defaults_preserve_thinking_to_true() {
     let request = three_turn_request_with_think_blocks();
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared = prepare_chat_request_with_cache(
-        &processor, &request, None, /* cache */ true, false, true,
+        &processor,
+        &request,
+        None,
+        /* cache */ true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -1709,7 +1718,13 @@ async fn prompt_cache_on_respects_explicit_false_override() {
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared = prepare_chat_request_with_cache(
-        &processor, &request, None, /* cache */ true, false, true,
+        &processor,
+        &request,
+        None,
+        /* cache */ true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -1738,7 +1753,13 @@ async fn prompt_cache_on_respects_explicit_false_via_extra_body() {
 
     let processor = ChatTemplateProcessor::with_template(dump_template());
     let prepared = prepare_chat_request_with_cache(
-        &processor, &request, None, /* cache */ true, false, true,
+        &processor,
+        &request,
+        None,
+        /* cache */ true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -1780,6 +1801,7 @@ async fn prompt_cache_on_respects_server_default_false() {
         /* cache */ true,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -1823,7 +1845,13 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
 
     // First call should add our session id.
     let _ = prepare_chat_request_with_cache(
-        &processor, &request, None, /* cache */ true, false, true,
+        &processor,
+        &request,
+        None,
+        /* cache */ true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -1840,7 +1868,13 @@ async fn preserve_thinking_defaulting_logs_once_per_session() {
     // (the HashSet::insert call returns false, which is the dedup signal
     // the production code relies on to skip the log).
     let _ = prepare_chat_request_with_cache(
-        &processor, &request, None, /* cache */ true, false, true,
+        &processor,
+        &request,
+        None,
+        /* cache */ true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -1876,15 +1910,31 @@ async fn preserve_thinking_defaulting_logs_per_distinct_session() {
 
     let mut req_a = three_turn_request_with_think_blocks();
     req_a.prompt_cache_key = Some(uniq_a.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_a, None, true, false, true)
-        .await
-        .unwrap();
+    let _ = prepare_chat_request_with_cache(
+        &processor,
+        &req_a,
+        None,
+        true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
 
     let mut req_b = three_turn_request_with_think_blocks();
     req_b.prompt_cache_key = Some(uniq_b.clone());
-    let _ = prepare_chat_request_with_cache(&processor, &req_b, None, true, false, true)
-        .await
-        .unwrap();
+    let _ = prepare_chat_request_with_cache(
+        &processor,
+        &req_b,
+        None,
+        true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
 
     let set = log_once_sessions().lock().expect("log-once mutex");
     assert!(
@@ -2530,6 +2580,7 @@ async fn history_render_is_a_prefix_of_the_next_turns_prompt() {
         true,
         true,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -2540,6 +2591,7 @@ async fn history_render_is_a_prefix_of_the_next_turns_prompt() {
         true,
         true,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .unwrap();
@@ -2586,9 +2638,17 @@ async fn history_render_is_absent_when_the_model_cannot_reuse_snapshots() {
     let request = cached_request(vec![text_message(Role::User, "q1")]);
     reset_history_boundary_render_attempts_for_test();
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, false, true)
-        .await
-        .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor,
+        &request,
+        None,
+        true,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         history_boundary_render_attempts_for_test(),
         0,
@@ -2610,9 +2670,17 @@ async fn history_render_is_absent_when_the_prompt_cache_is_off() {
     let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, false, true, true)
-        .await
-        .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor,
+        &request,
+        None,
+        false,
+        true,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         prepared.history_prompt.is_none(),
         "no boundary render should be paid for when the store is not installed"
@@ -2627,9 +2695,17 @@ async fn history_render_is_absent_when_the_template_render_falls_back() {
     let processor = ChatTemplateProcessor::with_template(broken_template());
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true, true)
-        .await
-        .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor,
+        &request,
+        None,
+        true,
+        true,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
     assert!(prepared.history_prompt.is_none());
 }
 
@@ -2655,9 +2731,17 @@ async fn history_render_is_absent_for_multimodal_requests() {
         tool_calls: None,
     }]);
 
-    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true, true, true)
-        .await
-        .unwrap();
+    let prepared = prepare_chat_request_with_cache(
+        &processor,
+        &request,
+        None,
+        true,
+        true,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
     assert!(prepared.history_prompt.is_none());
 }
 
@@ -2820,6 +2904,7 @@ async fn a_trailing_assistant_message_is_continued_when_prefill_is_on() {
         false,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .expect("render succeeds");
@@ -2844,6 +2929,7 @@ async fn no_prefill_assistant_answers_the_trailing_message_instead() {
         false,
         false,
         false,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .expect("render succeeds");
@@ -2867,6 +2953,7 @@ async fn the_two_renderings_differ_and_are_not_reachable_from_each_other() {
         false,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .expect("render succeeds");
@@ -2877,6 +2964,7 @@ async fn the_two_renderings_differ_and_are_not_reachable_from_each_other() {
         false,
         false,
         false,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     .expect("render succeeds");
@@ -2909,14 +2997,28 @@ async fn a_request_with_no_trailing_assistant_message_is_unaffected_by_the_flag(
         tool_calls: None,
         reasoning: None,
     }]);
-    let on =
-        prepare_chat_request_with_cache(&prefill_processor(), &request, None, false, false, true)
-            .await
-            .expect("render succeeds");
-    let off =
-        prepare_chat_request_with_cache(&prefill_processor(), &request, None, false, false, false)
-            .await
-            .expect("render succeeds");
+    let on = prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &request,
+        None,
+        false,
+        false,
+        true,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .expect("render succeeds");
+    let off = prepare_chat_request_with_cache(
+        &prefill_processor(),
+        &request,
+        None,
+        false,
+        false,
+        false,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .expect("render succeeds");
     assert_eq!(on.prompt, off.prompt);
     assert_eq!(on.assistant_prefill, None);
 }
@@ -2950,6 +3052,7 @@ async fn two_trailing_assistant_messages_are_refused_with_upstreams_wording() {
         false,
         false,
         true,
+        &crate::tokenizer::ThinkingMarkers::default(),
     )
     .await
     {

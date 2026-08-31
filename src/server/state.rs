@@ -414,6 +414,15 @@ pub struct AppState {
     pub chat_template: Arc<ChatTemplateProcessor>,
     /// Tokenizer for tokenize/detokenize endpoints (thread-safe).
     pub tokenizer: Arc<MlxcelTokenizer>,
+    /// Reasoning markers resolved once from the tokenizer's vocab.
+    ///
+    /// Cached rather than re-inferred per request, and cached HERE rather than
+    /// left to each call site, because the primed-open thinking check needs
+    /// them on the request path (issue #1554). Before that check was
+    /// marker-driven it matched a hardcoded table of prompt suffixes, which
+    /// silently failed for any family whose open marker carries no trailing
+    /// newline.
+    pub thinking_markers: Arc<crate::tokenizer::ThinkingMarkers>,
     /// Model directory path (for props/info).
     pub model_path: PathBuf,
     /// Static media-input capability flags resolved once at startup.
@@ -551,6 +560,7 @@ impl AppState {
             current_live,
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
+            thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
             tokenizer: Arc::new(tokenizer),
             model_path,
             media_support: ModelMediaSupport::default(),
@@ -608,6 +618,7 @@ impl AppState {
             current_live,
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
+            thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
             tokenizer: Arc::new(tokenizer),
             model_path,
             media_support: ModelMediaSupport::default(),

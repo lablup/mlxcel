@@ -845,6 +845,7 @@ async fn route_chat(
 
     // Render the chat template and reject multimodal requests (the
     // disaggregated path is text-only for pool-backed Fp16 families).
+    let thinking_markers = state.tokenizer.infer_thinking_markers();
     let prepared = match super::chat_request::prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
@@ -852,6 +853,7 @@ async fn route_chat(
         false,
         false,
         !state.config.no_prefill_assistant,
+        &thinking_markers,
     )
     .await
     {
@@ -876,9 +878,11 @@ async fn route_chat(
     // the primed-open-thinking start state when the rendered prompt ends
     // inside an open thinking block (enable_thinking=true templates), so the
     // model's first emitted tokens route to `reasoning_content`.
-    let primed_open_thinking = super::routes::chat::is_prompt_primed_open_thinking(&prompt);
+    let primed_open_thinking =
+        super::routes::chat::is_prompt_primed_open_thinking(&thinking_markers, &prompt);
     // The family the prompt primed, for the #1470 delimiter echo below.
-    let primed_close_marker = super::routes::chat::primed_open_thinking_close_marker(&prompt);
+    let primed_close_marker =
+        super::routes::chat::primed_open_thinking_close_marker(&thinking_markers, &prompt);
     let stream_filter = if primed_open_thinking {
         StreamFilter::new_primed_open_thinking()
     } else {
@@ -933,6 +937,7 @@ async fn route_chat(
         let max_tokens = opts.max_tokens;
 
         let mut filter = stream_filter;
+        let primed_close_owned = primed_close_marker.clone();
         tokio::spawn(async move {
             let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_initial(&request_id_str2, &model))));
 
@@ -941,7 +946,7 @@ async fn route_chat(
             // the tags too. A `Mutex` rather than a `RefCell` because the
             // spawned future must stay `Send`.
             let thinking_echo = std::sync::Mutex::new(
-                super::routes::chat::ThinkingDelimiterEcho::new(primed_close_marker),
+                super::routes::chat::ThinkingDelimiterEcho::new(primed_close_owned.as_deref()),
             );
             let emit_filtered = |emit: FilterOutput| {
                 let (echo_open, echo_close) = if reasoning_format.keeps_thoughts_in_content() {

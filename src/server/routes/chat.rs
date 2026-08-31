@@ -473,6 +473,7 @@ pub(crate) async fn non_stream_chat_completion(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;
@@ -495,7 +496,8 @@ pub(crate) async fn non_stream_chat_completion(
         c.history_prompt = None;
         c
     });
-    let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
+    let primed_open_thinking =
+        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     // Loop-detection amplifier signal (issues #967 and #977): only tool-shaped
     // prompts arm the family default. Grammar-only requests stay disabled.
     let amplified = chat_carries_loop_amplifier(&request);
@@ -895,7 +897,7 @@ pub(crate) struct ThinkingDelimiterEcho {
 impl ThinkingDelimiterEcho {
     /// `primed_close` is [`primed_open_thinking_close_marker`] for this
     /// request's prompt.
-    pub(crate) fn new(primed_close: Option<&'static str>) -> Self {
+    pub(crate) fn new(primed_close: Option<&str>) -> Self {
         Self {
             primed_open: primed_close
                 .and_then(tool_calls::thinking_marker_pair_for_close)
@@ -982,6 +984,7 @@ pub(crate) async fn stream_asr_completion(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await
     {
@@ -998,7 +1001,8 @@ pub(crate) async fn stream_asr_completion(
         &prepared.audio_data,
         prepared.history_prompt.as_deref(),
     );
-    let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
+    let primed_open_thinking =
+        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     // An ASR request carries no tools and no grammar, so the loop-detection
     // amplifier is off for the same reason it is off for a plain completion.
     let mut options =
@@ -1157,6 +1161,7 @@ async fn stream_chat_completion(
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
+        &state.thinking_markers,
     )
     .await;
     let prepared = match prepared {
@@ -1191,12 +1196,14 @@ async fn stream_chat_completion(
     let warmup_enabled = warmup_ctx.is_some()
         && !crate::server::prompt_cache::boundary_snapshot_disabled()
         && !tool_calls::should_parse_tool_calls(&request);
-    let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
+    let primed_open_thinking =
+        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     // The family whose block the prompt primed open, for the #1470 delimiter
     // echo: with the open marker in the prompt rather than the generation, the
     // streamed content has to synthesize it, exactly as the non-streaming
     // `content_with_thinking_block` does from the close marker in the raw text.
-    let primed_close_marker = primed_open_thinking_close_marker(&prepared.prompt);
+    let primed_close_marker =
+        primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
     let amplified = chat_carries_loop_amplifier(&request);
@@ -1387,7 +1394,7 @@ async fn stream_chat_completion(
                 StreamFilter::new()
             },
             lp_buffer: std::collections::VecDeque::new(),
-            thinking_echo: ThinkingDelimiterEcho::new(primed_close_marker),
+            thinking_echo: ThinkingDelimiterEcho::new(primed_close_marker.as_deref()),
         }));
         let cb_state_for_callback = cb_state.clone();
 
@@ -1823,24 +1830,6 @@ pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Resu
     Ok(())
 }
 
-/// Suffixes that a rendered chat prompt uses to leave the model inside an
-/// open thinking block. Each corresponds to a family-specific reasoning
-/// convention:
-///
-/// * `<think>\n` — Qwen3 / Qwen3.5 / Exaone4 / Jamba and similar templates
-///   that emit `<think>\n` at the end of the generation prompt to prime
-///   reasoning. The close marker in generated text is `</think>`.
-/// * `<|channel>thought\n` is the Gemma 4 open reasoning channel. Its close
-///   marker in generated text is `<channel|>`. Since issue #686 the Gemma 4
-///   generation prompt is rendered faithfully to the template (no post-render
-///   priming patch): the interactive default ends with the CLOSED
-///   `<|channel>thought\n<channel|>` scaffold (not primed for open thinking),
-///   so this suffix only matches a prompt that genuinely leaves the channel
-///   open (e.g. a caller-crafted continuation).
-///
-/// Ordered longest-first so the match is unambiguous.
-const OPEN_THINKING_SUFFIXES: &[&str] = &["<|channel>thought\n", "<think>\n"];
-
 /// Whether the rendered chat prompt primed an open thinking block whose
 /// close marker the model is expected to emit (`</think>` for Qwen-style,
 /// `<channel|>` for Gemma 4). Callers use this to:
@@ -1853,23 +1842,66 @@ const OPEN_THINKING_SUFFIXES: &[&str] = &["<|channel>thought\n", "<think>\n"];
 ///   emitted token from the start (otherwise the state would wait for an
 ///   opening token that never appears because the prompt already contains
 ///   it).
-pub(crate) fn is_prompt_primed_open_thinking(prompt: &str) -> bool {
-    primed_open_thinking_close_marker(prompt).is_some()
+pub(crate) fn is_prompt_primed_open_thinking(
+    markers: &crate::tokenizer::ThinkingMarkers,
+    prompt: &str,
+) -> bool {
+    if markers.has_thinking() {
+        return crate::reasoning_stream::prompt_primed_open_thinking(markers, prompt);
+    }
+    legacy_primed_close_marker(prompt).is_some()
+}
+
+/// Suffix table this check used before it became marker-driven, kept as a
+/// compatibility fallback for a tokenizer that declares no thinking markers.
+///
+/// The marker-driven path is strictly better when markers resolve, because it
+/// reads the model's own spelling and tolerates the trailing whitespace a
+/// template may strip. But it can only run when
+/// [`MlxcelTokenizer::infer_thinking_markers`] finds its pair in the vocab, and
+/// a model whose template primes `<think>` without declaring the token would
+/// have gone from "primed" to "not primed" across this change. That is a
+/// regression in the budget-accounting and unclosed-stripping paths even though
+/// the reasoning filter itself is inert without markers, so the old behaviour is
+/// preserved rather than assumed unreachable.
+///
+/// Every checkpoint on hand resolves markers (Gemma 4 through
+/// `<|channel>` / `<channel|>`, Qwen and DeepSeek-V4 through
+/// `<think>` / `</think>`), so this path is expected to be dead. It exists
+/// because "expected to be dead" is not the same as "cannot be reached".
+const LEGACY_OPEN_THINKING_SUFFIXES: &[(&str, &str)] = &[
+    ("<|channel>thought\n", "<channel|>"),
+    ("<think>\n", "</think>"),
+];
+
+fn legacy_primed_close_marker(prompt: &str) -> Option<&'static str> {
+    LEGACY_OPEN_THINKING_SUFFIXES
+        .iter()
+        .find(|(suffix, _)| prompt.ends_with(*suffix))
+        .map(|(_, close)| *close)
 }
 
 /// The close marker the model is expected to emit for the thinking block this
 /// generation prompt primed, or `None` when it primed none.
 ///
-/// Paired positionally with [`OPEN_THINKING_SUFFIXES`], and ordered
-/// longest-first with it so a prompt matches exactly one family.
+/// Resolved from the tokenizer's own markers rather than a table of known
+/// prompt suffixes (issue #1554). The table carried its trailing newline as a
+/// literal, so a family whose template strips that newline (DeepSeek-V4 renders
+/// a bare `<think>`) read as "not primed": the reasoning filter never entered
+/// its thinking state, and the trace was dropped on a completed generation or
+/// leaked into `content` when `max_tokens` cut it short. Deriving from markers
+/// covers every family whose tokenizer declares them, and shares one
+/// implementation with the CLI check that always did it this way.
 ///
 /// Used by: server::chat_request (b10621 assistant prefill, #1470)
-pub(crate) fn primed_open_thinking_close_marker(prompt: &str) -> Option<&'static str> {
-    OPEN_THINKING_SUFFIXES
-        .iter()
-        .zip(OPEN_THINKING_CLOSE_MARKERS.iter())
-        .find(|(suffix, _)| prompt.ends_with(**suffix))
-        .map(|(_, close)| *close)
+pub(crate) fn primed_open_thinking_close_marker(
+    markers: &crate::tokenizer::ThinkingMarkers,
+    prompt: &str,
+) -> Option<String> {
+    if markers.has_thinking() {
+        return crate::reasoning_stream::prompt_primed_open_close_marker(markers, prompt);
+    }
+    legacy_primed_close_marker(prompt).map(str::to_string)
 }
 
 /// Close markers for each supported open-thinking priming convention. Paired
@@ -2059,7 +2091,7 @@ pub(crate) fn build_generate_options_with_live(
             // default here is just a placeholder.
             reasoning_budget: ReasoningBudgetOverride::default(),
             // Placeholder: the caller overrides this with
-            // `is_prompt_primed_open_thinking(&prepared.prompt)` once the
+            // `is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt)` once the
             // chat template has rendered, so the value picked up by the
             // scheduler matches the actual prompt tail (Qwen `<think>\n`,
             // Gemma 4 `<|channel>thought\n`, or neither).
@@ -2233,14 +2265,23 @@ mod tests {
         assert!(tools.len() > MAX_TOOLS);
     }
 
-    // -- Gemma 4 open-thinking prompt-primed detection --
+    // -- prompt-primed open-thinking detection (marker-driven, issue #1554) --
+
+    fn markers_for(open: &str, close: &str) -> crate::tokenizer::ThinkingMarkers {
+        crate::tokenizer::ThinkingMarkers {
+            think_start: Some(open.to_string()),
+            think_end: Some(close.to_string()),
+            think_start_tokens: Some(vec![1]),
+            think_end_tokens: Some(vec![2]),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn prompt_primed_detection_matches_exact_suffix() {
-        // A prompt that genuinely ends in exactly `<|channel>thought\n`
-        // (open channel) is primed for open thinking. Only that exact suffix
-        // counts.
+        let m = markers_for("<|channel>thought", "<channel|>");
         assert!(is_prompt_primed_open_thinking(
+            &m,
             "<|turn>model\n<|channel>thought\n"
         ));
     }
@@ -2248,17 +2289,85 @@ mod tests {
     #[test]
     fn prompt_primed_detection_rejects_closed_priming() {
         // `enable_thinking=false` templates end with the CLOSED priming.
-        // Those are NOT prompt-primed open-thinking and must not trigger.
+        let m = markers_for("<|channel>thought", "<channel|>");
         assert!(!is_prompt_primed_open_thinking(
+            &m,
             "<|turn>model\n<|channel>thought\n<channel|>\n"
         ));
     }
 
     #[test]
     fn prompt_primed_detection_rejects_unrelated_endings() {
-        assert!(!is_prompt_primed_open_thinking("<|turn>model\n"));
-        assert!(!is_prompt_primed_open_thinking(""));
-        assert!(!is_prompt_primed_open_thinking("some content"));
+        let m = markers_for("<|channel>thought", "<channel|>");
+        assert!(!is_prompt_primed_open_thinking(&m, "<|turn>model\n"));
+        assert!(!is_prompt_primed_open_thinking(&m, ""));
+        assert!(!is_prompt_primed_open_thinking(&m, "some content"));
+    }
+
+    /// Issue #1554: DeepSeek-V4's template strips the newline after its open
+    /// marker, so the prompt ends with a bare `<think>`. The previous
+    /// implementation matched a table of literal suffixes that each carried a
+    /// trailing `\n`, so this read as "not primed": the reasoning filter never
+    /// entered its thinking state, and the trace was dropped on a completed
+    /// generation or leaked into `content` when `max_tokens` cut it short.
+    #[test]
+    fn prompt_primed_detection_accepts_a_newline_free_open_marker() {
+        let m = markers_for("<think>", "</think>");
+        // The real DeepSeek-V4 render, tail-exact.
+        assert!(is_prompt_primed_open_thinking(
+            &m,
+            "<\u{ff5c}User\u{ff5c}>hi<\u{ff5c}Assistant\u{ff5c}><think>"
+        ));
+        assert_eq!(
+            primed_open_thinking_close_marker(
+                &m,
+                "<\u{ff5c}User\u{ff5c}>hi<\u{ff5c}Assistant\u{ff5c}><think>"
+            )
+            .as_deref(),
+            Some("</think>")
+        );
+        // The Qwen-style newline form still works: whitespace is trimmed, not
+        // required.
+        assert!(is_prompt_primed_open_thinking(&m, "<think>\n"));
+        // A closed block is not primed.
+        assert!(!is_prompt_primed_open_thinking(&m, "<think>\n</think>"));
+    }
+
+    /// Without markers the check falls back to the pre-#1554 suffix table, so
+    /// no prompt shape that was primed before this change stops being primed.
+    /// The marker-driven path can only run when the tokenizer declares its
+    /// pair, and a model that primes `<think>` without declaring the token
+    /// would otherwise have silently lost its budget accounting and unclosed
+    /// stripping.
+    #[test]
+    fn prompt_primed_detection_falls_back_to_the_legacy_table_without_markers() {
+        let none = crate::tokenizer::ThinkingMarkers::default();
+
+        // Both shapes the old table covered still read as primed.
+        assert!(is_prompt_primed_open_thinking(&none, "<think>\n"));
+        assert_eq!(
+            primed_open_thinking_close_marker(&none, "<think>\n").as_deref(),
+            Some("</think>")
+        );
+        assert!(is_prompt_primed_open_thinking(
+            &none,
+            "<|turn>model\n<|channel>thought\n"
+        ));
+        assert_eq!(
+            primed_open_thinking_close_marker(&none, "<|turn>model\n<|channel>thought\n")
+                .as_deref(),
+            Some("<channel|>")
+        );
+
+        // And what the old table rejected is still rejected: the fallback is
+        // the old behaviour exactly, not a looser version of it.
+        assert!(!is_prompt_primed_open_thinking(&none, "<think>"));
+        assert!(!is_prompt_primed_open_thinking(&none, ""));
+        assert!(!is_prompt_primed_open_thinking(&none, "some content"));
+        assert!(!is_prompt_primed_open_thinking(
+            &none,
+            "<|turn>model\n<|channel>thought\n<channel|>\n"
+        ));
     }
 
     // -- strip_unclosed_primed_thinking --
