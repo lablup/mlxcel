@@ -33,13 +33,17 @@ pub(crate) fn load_inkling_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (config_raw, full_config) = read_sanitized_vlm_config(model_path)?;
     let config = InklingConfig::from_json_with_sidecar(model_path, &config_raw)
         .map_err(anyhow::Error::msg)?;
-    let vision_config: InklingVisionConfig = serde_json::from_value(
-        full_config
-            .get("vision_config")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Missing vision_config in Inkling config.json"))?,
-    )
-    .map_err(|error| anyhow::anyhow!("Failed to parse Inkling vision_config: {error}"))?;
+    // The vision half is deserialized straight off the raw config rather than
+    // through `InklingConfig`, so it needs the same `decoder_dmodel` /
+    // `text_hidden_size` reconciliation that path applies (issue #1549).
+    let mut vision_value = full_config
+        .get("vision_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing vision_config in Inkling config.json"))?;
+    crate::models::inkling::reconcile_vision_text_width_alias(&mut vision_value)
+        .map_err(anyhow::Error::msg)?;
+    let vision_config: InklingVisionConfig = serde_json::from_value(vision_value)
+        .map_err(|error| anyhow::anyhow!("Failed to parse Inkling vision_config: {error}"))?;
     if vision_config.text_hidden_size != config.text_config.hidden_size {
         anyhow::bail!(
             "Inkling vision text width {} does not match decoder hidden_size {}",

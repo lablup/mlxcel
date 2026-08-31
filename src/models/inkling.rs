@@ -22,7 +22,7 @@
 mod attention;
 mod mlp;
 mod runtime;
-mod sanitize;
+pub(crate) mod sanitize;
 mod speculative;
 mod validation;
 mod validation_shapes;
@@ -270,12 +270,22 @@ pub struct InklingConfig {
     pub quantization_config: Option<serde_json::Value>,
 }
 
+/// Reconcile the `decoder_dmodel` / `text_hidden_size` spelling on a bare
+/// `vision_config` object, for the loader path that deserializes it directly
+/// rather than through [`InklingConfig`] (issue #1549).
+pub(crate) fn reconcile_vision_text_width_alias(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    sanitize::reconcile_text_width_alias(value, "vision_config")
+}
+
 impl InklingConfig {
     pub(crate) fn from_json_with_sidecar(path: &Path, raw: &str) -> Result<Self, String> {
         let raw = super::sanitize_config_json(raw);
         let mut value: serde_json::Value =
             serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config.json: {e}"))?;
         sanitize::promote_nvfp4_config(path, &mut value)?;
+        sanitize::reconcile_text_width_aliases(&mut value)?;
         serde_json::from_value(value).map_err(|e| format!("Failed to parse Inkling config: {e}"))
     }
 

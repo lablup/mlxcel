@@ -479,3 +479,79 @@ fn sanitize_rejects_reverse_mixed_routed_weight_dtypes() {
     };
     assert!(error.contains("cannot mix native NVFP4"));
 }
+
+/// Issue #1549: the vision and audio sub-configs declare
+/// `#[serde(alias = "decoder_dmodel")] text_hidden_size`, and serde treats a
+/// field and its alias as the same field. A checkpoint carrying both keys was
+/// therefore a duplicate-field error and failed to load outright, even with the
+/// two values in agreement.
+///
+/// Neither spelling can be dropped: `Inkling-Small-mlx-4bit` and
+/// `Inkling-Small-NVFP4` ship only `decoder_dmodel`, while
+/// `Inkling-0.6B-A0.6B` ships both.
+#[test]
+fn inkling_config_accepts_both_text_width_spellings() {
+    let with_both = |v: serde_json::Value| {
+        let mut cfg = v;
+        crate::models::inkling::sanitize::reconcile_text_width_aliases(&mut cfg).map(|()| cfg)
+    };
+
+    // Every declared pair, both spellings, matching values: each collapses to
+    // its canonical name. This is the real Inkling-0.6B shape, which carries
+    // all three pairs doubled.
+    let out = with_both(serde_json::json!({
+        "vision_config": {
+            "decoder_dmodel": 1024, "text_hidden_size": 1024,
+            "n_channels": 3, "num_channels": 3,
+        },
+        "audio_config": {"decoder_dmodel": 1024, "text_hidden_size": 1024},
+    }))
+    .expect("agreeing values must reconcile");
+    for sec in ["vision_config", "audio_config"] {
+        assert_eq!(out[sec]["text_hidden_size"], 1024);
+        assert!(
+            out[sec].get("decoder_dmodel").is_none(),
+            "the alias must be removed so serde sees one key"
+        );
+    }
+    assert_eq!(out["vision_config"]["num_channels"], 3);
+    assert!(
+        out["vision_config"].get("n_channels").is_none(),
+        "num_channels/n_channels must reconcile too; fixing these one key at a \
+         time is how this pair went unnoticed until text_hidden_size was fixed"
+    );
+
+    // Alias only: untouched, which is what the Inkling-Small checkpoints need.
+    let out = with_both(serde_json::json!({
+        "vision_config": {"decoder_dmodel": 4096},
+        "audio_config": {"decoder_dmodel": 4096},
+    }))
+    .expect("alias-only must pass through");
+    assert_eq!(out["vision_config"]["decoder_dmodel"], 4096);
+    assert!(out["vision_config"].get("text_hidden_size").is_none());
+
+    // Canonical only: also untouched.
+    let out = with_both(serde_json::json!({"vision_config": {"text_hidden_size": 512}}))
+        .expect("canonical-only must pass through");
+    assert_eq!(out["vision_config"]["text_hidden_size"], 512);
+
+    // Disagreeing values are an error, not a silent pick: the two keys name one
+    // quantity, and choosing either would surface later as a shape mismatch.
+    let err = with_both(serde_json::json!({
+        "vision_config": {"decoder_dmodel": 1024, "text_hidden_size": 2048},
+    }))
+    .expect_err("contradictory widths must be rejected");
+    assert!(
+        err.contains("must agree") && err.contains("vision_config"),
+        "unhelpful error: {err}"
+    );
+    let err = with_both(serde_json::json!({
+        "vision_config": {"n_channels": 1, "num_channels": 3},
+    }))
+    .expect_err("contradictory channel counts must be rejected too");
+    assert!(err.contains("must agree"), "unhelpful error: {err}");
+
+    // A sub-config that is absent, or not an object, is not an error.
+    assert!(with_both(serde_json::json!({"text_config": {"hidden_size": 8}})).is_ok());
+    assert!(with_both(serde_json::json!({"vision_config": null})).is_ok());
+}
