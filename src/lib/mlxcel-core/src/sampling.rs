@@ -3963,9 +3963,10 @@ mod tests {
     /// intermittently in nightly `make verify-test` runs. The routed kernel
     /// cases therefore hold the exact support and keep every positive
     /// probability within one f32 ULP of the saved row. The non-routed stock
-    /// chain case still checks the same support, but compares the values with
-    /// a small numeric tolerance because its host backend can drift by two ULP
-    /// while preserving the same filtered distribution.
+    /// chain case uses the same support-preserving snapshot helper with a
+    /// two-ULP ceiling because local CPU validation observed a two-ULP drift
+    /// on one low-probability entry while preserving the same filtered
+    /// distribution.
     #[test]
     fn temperature_one_support_unchanged() {
         let row = lcg_logits(0x1379_5EED, 64);
@@ -4045,18 +4046,7 @@ mod tests {
             if routed {
                 assert_probs_match_snapshot_within_ulp(&got, &expected, 1, &ctx);
             } else {
-                let expected_f32: Vec<f32> = expected.iter().copied().map(f32::from_bits).collect();
-                assert_eq!(
-                    support_of(&got),
-                    support_of(&expected_f32),
-                    "{ctx}: support changed"
-                );
-                for (i, (&observed, &want)) in got.iter().zip(&expected_f32).enumerate() {
-                    assert!(
-                        (observed - want).abs() < 1e-6,
-                        "{ctx}: token {i} drifted numerically ({observed} vs {want})"
-                    );
-                }
+                assert_probs_match_snapshot_within_ulp(&got, &expected, 2, &ctx);
             }
         }
     }
