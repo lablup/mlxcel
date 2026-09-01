@@ -27,8 +27,8 @@ with mlxcel.LLM("mlx-community/Qwen3-4B-4bit") as llm:
 
     print(llm.chat([{"role": "user", "content": "Hello"}], max_tokens=64))
 
-    print(llm.model)        # resolved model id (auto-discovered)
-    print(llm.models())     # ["<id>"]
+    print(llm.model)  # resolved model id (auto-discovered)
+    print(llm.models())  # ["<id>"]
     ids = llm.tokenize("hello world")
     print(llm.detokenize(ids))
 
@@ -38,7 +38,7 @@ with mlxcel.LLM("mlx-community/Qwen3-4B-4bit") as llm:
 
 # Connect mode: talk to an already-running server.
 llm = mlxcel.LLM(base_url="http://localhost:8080/v1")  # TCP
-llm = mlxcel.LLM(socket="/tmp/mlxcel.sock")            # Unix socket
+llm = mlxcel.LLM(socket="/tmp/mlxcel.sock")  # Unix socket
 ```
 
 Async usage mirrors the sync API via `mlxcel.AsyncLLM` (`await llm.generate(...)`, `async for delta in llm.stream(...)`).
