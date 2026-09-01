@@ -63,7 +63,7 @@ $ MLXCEL_TRACE_ARCH=1 ./target/release/mlxcel generate -m ./models/mlx-community
 
 ## Method, and why each rule is load-bearing
 
-These are not style preferences. Breaking any one of them changes the answer by more than the effects this program is trying to measure, and three of them produced a wrong result during the work that led to this document.
+These are not style preferences. Breaking any one of them changes the answer by more than the effects this program is trying to measure, and three of them produced a wrong result during the work that led to this document. Rule 7 was added afterwards, by #1545, on the same basis: it was breaking it that produced the wrong result.
 
 **1. Decode rate is a slope, never `tokens / wall_time` from one run.** Report the marginal per-token cost, obtained from two runs at the same prompt and different `-n`:
 
@@ -83,6 +83,8 @@ This record uses `n_lo = 40`, `n_hi = 120`, three repetitions for the dense mode
 **5. nsys absolute times are trustworthy only when they reconcile against an unprofiled wall clock.** Graph-node tracing adds per-node instrumentation and does not add it evenly. Compare the profiled decode time against the same run unprofiled before drawing any kernel-level conclusion, and report the ratio. Here the dense pair reconciles at 102.4% and 101.6% and carries the kernel-level conclusion; the MoE 4-bit arm inflates to 144.0% and is reported as a wall-clock observation only.
 
 **6. Percentage-of-total shares do not compare across runs.** Two runs with different totals can move a kernel's share opposite to its absolute time. Compare absolute kernel time and instance counts, and only across runs whose instance counts match.
+
+**7. State the file page-cache state too, and for a first-token number state it first.** Added by #1545, which measured it. MLX loads safetensors lazily, so the first token reads the whole language model off disk; on `qwen3.8-27B-4bit` a 2-token first token costs 15.54 s with the checkpoint in the page cache and 79.22 s without, a 5.1x penalty against the PTX cache's 1.7x. This host's cgroup caps memory at 64 GB while the five checkpoints total 79 GB, so a sweep across models evicts whatever it is not reading and the next model's first run lands on a cold file. Warm the checkpoint with `cat model*.safetensors > /dev/null` immediately before any first-token measurement and say so in the record. Decode numbers are insensitive to this; first-token numbers are not.
 
 ## Decode throughput
 
@@ -278,6 +280,7 @@ Against the one-off audit recorded in #1536 and in the comments on #1538. The 10
 | `make bench-model`, qwen | 1.70 tok/s | 1.67 tok/s | reproduced |
 | `make bench-model`, MoE pair | 3.31 / 3.60 tok/s | 3.28 / 3.21 tok/s | 4-bit reproduced; the 8-bit arm did not, and the sign flipped |
 | TTFT, qwen | ~13 s | 24.94 s at a 54-token prompt, warm cache, after load | reproduced once both are reduced to their prompt-independent term (12.60 s against 12.66 s, 0.5%) |
+| TTFT, qwen, confirming test | ~13 s predicted at a 3-token prompt | 15.54 s at a 2-token prompt (#1545, post-#1539 build) | **direction confirmed, magnitude not.** A short prompt lands nowhere near 25 s, which is what the reconciliation predicted; it lands 20% above 13 s. The 0.5% agreement below is tighter than the method supports, because prefill is not affine at the short end |
 | `qmm_naive` instances, qwen 24-token run | 994 | 497 | **did not reproduce**, exactly half |
 | `qmm_naive` instances, dense pair | 658 | 329 | **did not reproduce**, exactly half |
 | `cuModuleLoadDataEx`, qwen | 848 ms / 13 calls | 172 ms / 13 calls | calls exact, time 4.9x lower |
@@ -338,7 +341,7 @@ To be filled as epic #1536's remaining items land. Each row is a re-run of the m
 | #1542 | f16 activation policy below Ampere | dense 4-bit 124.41 ms/tok; qwen 220.33 ms/tok | | |
 | #1543 | `qmm_sm70`, Volta tensor-core MMA for quantized GEMM | qwen prefill 8.00 tok/s marginal, 2.83% of FP32 peak | | |
 | #1544 | grouped GEMM arch tag on an sm_70 part | re-measured on this branch: MoE 4-bit 29.66 ms/tok, 8-bit 31.68 ms/tok; 4-bit prefill 12,720 ms at a 285-token prompt | MoE 4-bit 29.73 ms/tok, 8-bit 32.71 ms/tok; 4-bit prefill 12,644 ms | **No change, and byte-identical device code is why.** The pre-Ampere arm was tagged `cutlass::arch::Sm75` on a part that has no `m16n8k8` MMA. The branch is live here, not dead: #629's sorted-MoE prefill path routes a quantized `GatherQMM` into `cutlass_grouped_gemm_unaligned` once `B >= 8 * num_experts`, which for this checkpoint is a 128-token prompt, and an nsys profile at 573 prompt tokens shows 180 grouped-GEMM launches at 3.8% of GPU time. The kernel it selects is `MmaSimt` / `OpMultiplyAdd`, so the tag never reached an MMA atom and the output was never wrong; the grouped path and the legacy `qmm_naive` path give a byte-identical 64-token greedy continuation. Retagging to `Sm70` leaves the same 51 device symbols with byte-identical SASS at `compute_70`, `compute_80` and `compute_121`, so both columns above are the same machine code and every delta sits inside the before arm's own repetition spread. **The baseline column is re-measured rather than quoted**: this document's own 38.61 and 34.29 predate #1539. Full record: `grouped-gemm-arch-v100-2026-08-31.md` |
-| #1545 | CUDA graph instantiation and JIT module load in TTFT | qwen fixed prefill cost 18.41 s; graph APIs 3.3 s of a 24-token run | | |
+| #1545 | CUDA graph instantiation and JIT module load in TTFT | qwen fixed prefill cost 18.41 s; graph APIs 3.3 s of a 24-token run | re-measured on this branch: 2-token first token 15.54 s, of which 14.99 s is one-time; graph APIs 0.97 s at `-n 1` | **Findings only, and the issue's premise did not survive.** The fixed cost is 96.5% one-time process cost, and 12.08 s of it (77.8% of the first token) is materializing the language model's 15.13 GB of weights, which MLX loads lazily so the whole read and host-to-device copy land inside prefill: `Model loaded in 0.98s` is followed by `resident: 0.00 GB`. Graph instantiation is 0.10 s and saturates at 196 distinct graphs against a 2,000-entry cache, and `MLX_USE_CUDA_GRAPHS=0` changes the first token by less than the 6.5% repeat spread. The warm JIT cache holds sm_70 cubins rather than PTX and costs 0.06 s; cold it costs 12.0 s for 6 modules. Verdict: general, not Volta-specific, so the follow-up belongs outside #1536. Decode re-measured at 118.17 ms/token with `C` zero, so none of the fixed cost is in the decode loop. Full record: `volta-ttft-fixed-cost-2026-09-01.md` |
 
 ## Reproduce
 
