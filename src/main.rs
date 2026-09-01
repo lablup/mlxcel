@@ -2843,6 +2843,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Bailing",
     "Arcee",
     "Klear",
+    "Inkling",
     "Granite",
     "ExaOne",
     "Solar",
