@@ -7,10 +7,12 @@
 #include "mlx/backend/cuda/cutlass_utils.cuh"
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/gemms/grouped_gemm.h"
+#include "mlx/backend/cuda/gemms/grouped_gemm_arch.h"
 #include "mlx/backend/cuda/kernel_utils.cuh"
 #include "mlx/dtype_utils.h"
 
 #include <cooperative_groups.h>
+#include <stdexcept>
 #include <cutlass/gemm/device/default_gemm_configuration.h>
 #include <cutlass/gemm/device/gemm_grouped.h>
 #include <cutlass/gemm/kernel/default_gemm_grouped.h>
@@ -245,6 +247,44 @@ struct GemmConfiguration<float, cutlass::arch::Sm80, kAlignmentC, true>
   static const int kStages = 3; // use SM80_CP_ASYNC
 };
 
+// [mlxcel #1544] The pre-Ampere arm of `dispatch_cutlass_arch` tags every part
+// below compute capability 8.0 with `cutlass::arch::Sm70`, Turing included.
+// That holds only while the configuration the arm selects stays SIMT: with
+// `OpClassSimt` and `InstructionShape<1, 1, 1>` there is no MMA atom for the
+// tag to choose, CUTLASS erases the tag, and one arm can serve 7.0 through
+// 7.5. Give the pre-Ampere arm a tensor-core operator and the tag becomes
+// load-bearing, at which point a Turing part tagged `Sm70` silently loses
+// `m16n8k8` and Turing needs its own arm again. These two assertions fail the
+// build on that day instead. The second one carries `kEnableTF32 = true`,
+// which is the arm `MLX_ENABLE_TF32` reaches, and is what rules out a
+// pre-Ampere tag ever selecting one of the two tensor-core specializations
+// above: both are constrained on `Arch::kMinComputeCapability >= 80`.
+static_assert(
+    std::is_same_v<
+        GemmConfiguration<float, cutlass::arch::Sm70, 1, false>::OpClass,
+        cutlass::arch::OpClassSimt>,
+    "pre-Ampere grouped GEMM is no longer SIMT: the architecture tag in "
+    "dispatch_cutlass_arch became load-bearing, so Turing needs its own arm "
+    "again (see gemms/grouped_gemm_arch.h)");
+static_assert(
+    std::is_same_v<
+        GemmConfiguration<float, cutlass::arch::Sm70, 8, true>::OpClass,
+        cutlass::arch::OpClassSimt>,
+    "a pre-Ampere tag selected a tensor-core configuration under "
+    "MLX_ENABLE_TF32 (see gemms/grouped_gemm_arch.h)");
+
+// [mlxcel #1544] `cp.async` arrived with Ampere. The 3-stage pipeline above is
+// commented "use SM80_CP_ASYNC" and is bound to `cutlass::arch::Sm80` by an
+// explicit full specialization, so no pre-Ampere tag can reach it; a
+// pre-Ampere configuration stays at the 2 stages `MmaPipelined` implements
+// with ordinary global-to-shared copies. Asserted rather than reasoned about,
+// because a 3-stage pipeline without `cp.async` is either a build failure or a
+// silent serialization and neither announces itself.
+static_assert(
+    GemmConfiguration<float, cutlass::arch::Sm70, 8, true>::kStages == 2,
+    "a pre-Ampere grouped GEMM configuration asked for a 3-stage pipeline, "
+    "which needs the cp.async that Ampere introduced");
+
 // Get direct access to kernel.
 template <typename GemmKernel>
 class GemmGroupedEncoder
@@ -335,19 +375,57 @@ void grouped_gemm_v2(
   });
 }
 
+// [mlxcel #1544] The architecture decision itself lives in
+// `gemms/grouped_gemm_arch.h` as a pure function of the compute capability
+// major version, so it can be enumerated over every architecture on a host
+// with no GPU (`grouped_gemm_arch_tests.rs`, through
+// `cpp/grouped_gemm_arch_probe.cpp`). Upstream mapped every pre-Ampere part to
+// `cutlass::arch::Sm75`, which names Turing and so described hardware that a
+// compute capability 7.0 part does not have. That header records why the
+// corrected tag is `Sm70` for the whole pre-Ampere arm, what it measured to
+// establish that the retag moves no device code, and what has to change before
+// Turing needs an arm of its own.
 template <typename F>
 void dispatch_cutlass_arch(cu::Device& device, F&& f) {
-  if (device.compute_capability_major() < 8) {
-    f(type_identity<cutlass::arch::Sm75>{});
-  } else if (device.compute_capability_major() == 8) {
-    f(type_identity<cutlass::arch::Sm80>{});
-  } else {
-    f(type_identity<cutlass::arch::Sm90>{});
+  switch (mlxcel::grouped_gemm_arch_for(device.compute_capability_major())) {
+    case mlxcel::GroupedGemmArch::Sm70:
+      f(type_identity<cutlass::arch::Sm70>{});
+      return;
+    case mlxcel::GroupedGemmArch::Sm80:
+      f(type_identity<cutlass::arch::Sm80>{});
+      return;
+    case mlxcel::GroupedGemmArch::Sm90:
+      f(type_identity<cutlass::arch::Sm90>{});
+      return;
   }
 }
 
-auto* get_grouped_mm_funcion(Dtype dtype, int N, cu::Device& device) {
-  auto* fun = grouped_gemm_v2<GemmConfiguration<float, cutlass::arch::Sm75>>;
+// The signature every `grouped_gemm_v2` instantiation shares, named so the
+// selection below can start from no kernel at all rather than from a
+// placeholder instantiation.
+using GroupedGemmFn = void (*)(
+    bool,
+    bool,
+    int,
+    ProblemSize*,
+    int64_t*,
+    int64_t*,
+    int64_t*,
+    void*,
+    void*,
+    void*,
+    cu::CommandEncoder&);
+
+GroupedGemmFn get_grouped_mm_funcion(Dtype dtype, int N, cu::Device& device) {
+  // [mlxcel #1544] This was
+  // `grouped_gemm_v2<GemmConfiguration<float, cutlass::arch::Sm75>>`, a
+  // placeholder that reads as a pre-Ampere default and names Turing on parts
+  // that are not Turing. It was never the value returned, because
+  // `dispatch_float_types` throws on a non-float dtype and every float dtype
+  // assigns `fun`, but it did force one more template instantiation into the
+  // binary purely to serve as an initializer. `nullptr` says what the code
+  // means and cannot be misread as an architecture decision.
+  GroupedGemmFn fun = nullptr;
   dispatch_float_types(dtype, "grouped_gemm_v2", [&](auto type_tag) {
     using DataType = cutlass_type_t<MLX_GET_TYPE(type_tag)>;
     dispatch_cutlass_arch(device, [&](auto arch_tag) {
@@ -361,6 +439,14 @@ auto* get_grouped_mm_funcion(Dtype dtype, int N, cu::Device& device) {
       });
     });
   });
+  // Unreachable while `dispatch_float_types` throws on every dtype it does not
+  // dispatch, which is the contract today. Kept so that a future widening of
+  // that dispatch surfaces as a named error instead of a null call.
+  if (fun == nullptr) {
+    throw std::runtime_error(
+        "[grouped_gemm_v2] no grouped GEMM kernel was selected for the "
+        "requested dtype");
+  }
   return fun;
 }
 
