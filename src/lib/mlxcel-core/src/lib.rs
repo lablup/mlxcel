@@ -3508,6 +3508,14 @@ mod cuda_arch_tests;
 #[path = "qmm_naive_tile_tests.rs"]
 mod qmm_naive_tile_tests;
 
+// The pre-first-token phase breakdown (#1545) reported by
+// `MLXCEL_PROFILE_TTFT`. The phases are timed around GPU work, but whether
+// they account for the reported prefill is pure arithmetic, so it is pinned
+// here rather than left to a Volta host. No GPU and no CUDA toolkit needed.
+#[cfg(test)]
+#[path = "ttft_profile_tests.rs"]
+mod ttft_profile_tests;
+
 // The grouped GEMM CUTLASS architecture tag decision (#1544), enumerated
 // through the C shim in `cpp/grouped_gemm_arch_probe.cpp`. Host code and a pure
 // function of the compute capability major version, so its "sm_80 and later are

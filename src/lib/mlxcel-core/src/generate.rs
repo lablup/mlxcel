@@ -1305,6 +1305,97 @@ impl GenerationStats {
     }
 }
 
+/// Named phases of the pre-first-token path, in nanoseconds.
+///
+/// `MLXCEL_PROFILE_PIPELINE` instruments the decode loop only, so before issue
+/// #1545 the entire pre-first-token phase was one opaque number: the
+/// `Prefill:` line of `--profile`. On a CUDA host that number is not mostly
+/// prefill arithmetic. It also carries the lazy materialization of every
+/// weight (MLX loads safetensors as unevaluated `Load` arrays, so the host
+/// read and the host-to-device copy are charged to the first `eval`), the
+/// first load of every JIT module, and the first instantiation of every CUDA
+/// graph the forward pass needs.
+///
+/// The split these fields draw is between work MLX does on the host while the
+/// device is idle and the single blocking `eval` that does everything else.
+/// `build` is pure graph construction: MLX is lazy, so `forward_last_logits`
+/// returns without touching the device. `eval` is where the weights, the
+/// modules, the graphs and the kernels all land. A large `build` points at
+/// host-side op-recording overhead; a large `eval` points at the device, the
+/// PCIe link, or the CUDA graph machinery, and separating those two is what
+/// `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` needed.
+///
+/// `setup_ns` sits *outside* the reported prefill time, because the generator
+/// resets its caches before the prefill clock starts. Every other field sits
+/// inside it, and [`TtftPhases::format_line`] prints the residual so a reader
+/// can see that they account for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TtftPhases {
+    /// Generator reset, KV-cache construction, KV-mode application and stream
+    /// install. Measured outside the reported prefill time.
+    pub setup_ns: u128,
+    /// Lazy construction of the prefill forward graph. Host only: no kernel
+    /// runs and no weight is materialized here.
+    pub build_ns: u128,
+    /// Lazy construction of the sampler graph for the first token.
+    pub sample_ns: u128,
+    /// The one blocking `eval` that materializes the first token, and with it
+    /// every weight, JIT module and CUDA graph the forward pass reaches.
+    pub eval_ns: u128,
+    /// Fixed post-eval work before the decode loop starts.
+    pub post_ns: u128,
+}
+
+impl TtftPhases {
+    /// Sum of the phases that sit inside the reported prefill time.
+    ///
+    /// `setup_ns` is excluded: it is measured before the prefill clock starts.
+    #[must_use]
+    pub fn in_prefill_ns(&self) -> u128 {
+        self.build_ns + self.sample_ns + self.eval_ns + self.post_ns
+    }
+
+    /// Sum of every phase, including the setup that precedes prefill.
+    #[must_use]
+    pub fn total_ns(&self) -> u128 {
+        self.setup_ns + self.in_prefill_ns()
+    }
+
+    /// One `[TTFT]` diagnostic line.
+    ///
+    /// `prefill_ns` is the wall clock `--profile` reports as `Prefill:`. The
+    /// trailing `residual` is that number minus [`Self::in_prefill_ns`], so a
+    /// reader can confirm the named phases account for the total instead of
+    /// taking it on trust. It is a saturating subtraction: the phases are
+    /// nested inside the prefill clock, so a negative residual would mean the
+    /// timers disagree, and reporting `0.00` there is preferable to wrapping.
+    #[must_use]
+    pub fn format_line(&self, prompt_tokens: usize, prefill_ns: u128) -> String {
+        let ms = |ns: u128| ns as f64 / 1e6;
+        format!(
+            "[TTFT] prompt={prompt_tokens} tok setup={:.2}ms build={:.2}ms sample={:.2}ms eval={:.2}ms post={:.2}ms | prefill={:.2}ms residual={:.2}ms",
+            ms(self.setup_ns),
+            ms(self.build_ns),
+            ms(self.sample_ns),
+            ms(self.eval_ns),
+            ms(self.post_ns),
+            ms(prefill_ns),
+            ms(prefill_ns.saturating_sub(self.in_prefill_ns())),
+        )
+    }
+}
+
+/// Whether `MLXCEL_PROFILE_TTFT` asked for the pre-first-token breakdown.
+///
+/// Read once per process: the phases are timed on the first-token path, which
+/// runs once per generation, but a server calls it per request and an
+/// environment read per request is pointless.
+#[must_use]
+pub fn ttft_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MLXCEL_PROFILE_TTFT").is_some())
+}
+
 /// Generator state for managing generation
 pub struct CxxGenerator {
     caches: Vec<KVCache>,
@@ -2082,6 +2173,13 @@ impl CxxGenerator {
     ) -> (Vec<i32>, GenerationStats) {
         use std::time::Instant;
 
+        // Pre-first-token phase breakdown (issue #1545), same contract as the
+        // text-only `generate_with_stats`. A VLM prefill pays the same fixed
+        // costs plus the vision tower, so the breakdown is worth having on
+        // both `--profile` paths rather than only the one #1545 measured.
+        let profile_ttft = ttft_profile_enabled();
+        let ttft_setup_start = profile_ttft.then(Instant::now);
+
         self.reset_with_model(model);
 
         // Axis B: inject generator-cached language-bias into the sampling config.
@@ -2110,7 +2208,9 @@ impl CxxGenerator {
         // On M5+ hardware pad to a 32-token tile boundary (same logic as
         // generate_streaming_with_embeddings).
         let actual_len = prompt_tokens.len();
+        let ttft_setup_ns = ttft_setup_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_start = Instant::now();
+        let ttft_build_start = profile_ttft.then(Instant::now);
         let logits = if mask.is_none() && should_align_prefill() && model.supports_padded_prefill()
         {
             let padded_len = align_to_na_tile(actual_len);
@@ -2145,14 +2245,34 @@ impl CxxGenerator {
             model.forward_with_embeddings(&input, input_embeddings, &mut self.caches, mask)
         };
         model.after_prefill();
+        let ttft_build_ns = ttft_build_start.map_or(0, |t| t.elapsed().as_nanos());
+        let ttft_sample_start = profile_ttft.then(Instant::now);
         let (mut y, mut _logprobs) = if needs_history {
             sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
         } else {
             sample_token_optimized(&logits, sampling, &token_history)
         };
+        let ttft_sample_ns = ttft_sample_start.map_or(0, |t| t.elapsed().as_nanos());
+        let ttft_eval_start = profile_ttft.then(Instant::now);
         ffi::eval(&y);
+        let ttft_eval_ns = ttft_eval_start.map_or(0, |t| t.elapsed().as_nanos());
+        let ttft_post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        let ttft_post_ns = ttft_post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
+        if profile_ttft {
+            let phases = TtftPhases {
+                setup_ns: ttft_setup_ns,
+                build_ns: ttft_build_ns,
+                sample_ns: ttft_sample_ns,
+                eval_ns: ttft_eval_ns,
+                post_ns: ttft_post_ns,
+            };
+            eprintln!(
+                "{}",
+                phases.format_line(prompt_tokens.len(), prefill_time.as_nanos())
+            );
+        }
         ffi::clear_memory_cache();
 
         // Decode
@@ -2259,6 +2379,12 @@ impl CxxGenerator {
     ) -> (Vec<i32>, GenerationStats) {
         use std::time::Instant;
 
+        // Pre-first-token phase breakdown (issue #1545). Off unless
+        // `MLXCEL_PROFILE_TTFT` is set, and then it costs five `Instant::now`
+        // calls on a path that runs once per generation.
+        let profile_ttft = ttft_profile_enabled();
+        let ttft_setup_start = profile_ttft.then(Instant::now);
+
         // Reset generator-owned caches and model-owned fallback caches. See
         // `generate_streaming` for the model-owned cache rationale.
         self.reset_with_model(model);
@@ -2297,7 +2423,9 @@ impl CxxGenerator {
         // On M5+ hardware pad the sequence to a 32-token tile boundary for
         // optimal Neural Accelerator throughput.
         let actual_len = prompt_tokens.len();
+        let ttft_setup_ns = ttft_setup_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_start = Instant::now();
+        let ttft_build_start = profile_ttft.then(Instant::now);
         let prefill_chunk = effective_prefill_chunk(
             prefill_chunk_len(),
             model.supports_chunked_prefill(),
@@ -2332,15 +2460,36 @@ impl CxxGenerator {
             model.forward_last_logits(&input, &mut self.caches, None, actual_len.saturating_sub(1))
         };
 
+        let ttft_build_ns = ttft_build_start.map_or(0, |t| t.elapsed().as_nanos());
+
         // Sample first token and force sync to measure prefill accurately
+        let ttft_sample_start = profile_ttft.then(Instant::now);
         let (mut y, mut _logprobs) = if needs_history {
             sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
         } else {
             sample_token_optimized(&logits, sampling, &token_history)
         };
+        let ttft_sample_ns = ttft_sample_start.map_or(0, |t| t.elapsed().as_nanos());
+        let ttft_eval_start = profile_ttft.then(Instant::now);
         ffi::eval(&y);
+        let ttft_eval_ns = ttft_eval_start.map_or(0, |t| t.elapsed().as_nanos());
+        let ttft_post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        let ttft_post_ns = ttft_post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
+        if profile_ttft {
+            let phases = TtftPhases {
+                setup_ns: ttft_setup_ns,
+                build_ns: ttft_build_ns,
+                sample_ns: ttft_sample_ns,
+                eval_ns: ttft_eval_ns,
+                post_ns: ttft_post_ns,
+            };
+            eprintln!(
+                "{}",
+                phases.format_line(prompt_tokens.len(), prefill_time.as_nanos())
+            );
+        }
 
         // Clear intermediate tensors from prefill to free memory
         ffi::clear_memory_cache();
