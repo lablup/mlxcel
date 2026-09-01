@@ -2853,6 +2853,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Hybrid",
     "Falcon",
     "LFM2",
+    "Inkling",
     "PLaMo",
     "RWKV",
     "BitNet",
