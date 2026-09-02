@@ -176,18 +176,6 @@ impl Default for MambaCache {
     }
 }
 
-// Helper Functions.
-/// RMS normalization without learnable scale (for mixer_norm in falcon_mamba)
-/// RMS norm without learned scale — matches Python's
-/// `mx.fast.rms_norm(x, mx.ones(x.shape[-1], x.dtype), eps)`.
-/// Uses MLX fast kernel for float32-precision internal computation.
-fn rms_norm_no_scale(x: &MlxArray, eps: f32) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let last_dim = shape[shape.len() - 1];
-    let ones = mlxcel_core::ones(&[last_dim], mlxcel_core::array_dtype(x));
-    mlxcel_core::fast_rms_norm(x, &ones, eps)
-}
-
 // Model Components.
 /// Mamba SSM Block
 #[allow(dead_code)]
@@ -218,7 +206,7 @@ pub struct MambaBlock {
 impl MambaBlock {
     fn mixer_norm(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         if self.use_bcdt_rms {
-            rms_norm_no_scale(x, self.mixer_rms_eps)
+            mlxcel_core::fast_rms_norm_no_weight(x, self.mixer_rms_eps)
         } else {
             mlxcel_core::copy(x)
         }
@@ -307,13 +295,11 @@ impl MambaBlock {
             -1,
         );
 
-        // Apply mixer_norm if needed.
-        // Python reference applies mixer_norm TWICE when use_bcdt_rms is true:
-        // 1. During the map() over split outputs
-        // 2. Again in the `if self.use_bcdt_rms:` block
-        let delta_normed = self.mixer_norm(&self.mixer_norm(&delta_raw));
-        let b_normed = self.mixer_norm(&self.mixer_norm(&b_raw));
-        let c_normed = self.mixer_norm(&self.mixer_norm(&c_raw));
+        // Apply the weight-less mixer norm once per tensor, using mixer_rms_eps
+        // (a no-op pass-through when use_bcdt_rms is false).
+        let delta_normed = self.mixer_norm(&delta_raw);
+        let b_normed = self.mixer_norm(&b_raw);
+        let c_normed = self.mixer_norm(&c_raw);
 
         // delta = softplus(dt_proj(delta))
         let dt_out = self.dt_proj.forward(&delta_normed);
