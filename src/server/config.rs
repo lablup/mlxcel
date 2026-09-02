@@ -846,9 +846,13 @@ pub struct ServerConfig {
     ///
     /// Defaults to the baseline policy (enabled with 2 GiB / 1024 entries /
     /// 1-hour TTL). When `enabled = false` the store is skipped entirely at
-    /// startup so no memory is reserved. CLI/env parsing for the individual
-    /// fields is tracked separately in for now operators set
-    /// the policy via the Rust API or keep the default.
+    /// startup so no memory is reserved. The policy fields are parsed from
+    /// the `--prompt-cache-*` flags of `mlxcel serve` and `mlxcel-server`
+    /// (with `MLXCEL_PROMPT_CACHE_*` environment fallbacks) plus the
+    /// llama-server `--cache-prompt` / `--cache-ram` spellings in
+    /// [`crate::cli::cache_args`], and the nested APC sub-config from the
+    /// `--apc-*` flags; embedders that build a [`ServerConfig`] themselves
+    /// set the policy via the Rust API or keep the default.
     pub prompt_cache: crate::server::prompt_cache::PromptCacheConfig,
 
     /// Server-wide KV cache mode.
