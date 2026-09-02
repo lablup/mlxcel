@@ -352,6 +352,11 @@ fn resolve_stage_family(model_dir: &Path) -> Result<StageFamily> {
                 StageFamily::Llama
             }
         }
+        // IQuest-Coder is the same `llama3` decoder under a different
+        // `model_type` label, so it takes the same stage loader. Keeping it
+        // here preserves the pipeline-parallel support the label would have
+        // had as a plain `ModelType::Llama` alias.
+        ModelType::IQuestCoder => StageFamily::Llama,
         ModelType::Mixtral => StageFamily::Mixtral,
         ModelType::DeepSeekV3 => StageFamily::DeepSeekV3,
         ModelType::Llama4 | ModelType::Llama4VLM => StageFamily::Llama4,

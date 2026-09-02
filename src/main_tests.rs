@@ -1432,3 +1432,19 @@ fn serve_spec_draft_spellings_resolve_to_the_draft_controls() {
         );
     }
 }
+
+#[test]
+fn supported_models_output_lists_iquest_coder_under_the_llama_family() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    let llama_section = out
+        .split("\n\n")
+        .find(|section| section.starts_with("Llama:"))
+        .unwrap_or_else(|| panic!("no Llama family section in:\n{out}"));
+    assert!(
+        llama_section.contains("IQuest-Coder V1"),
+        "IQuest-Coder must be visible in `mlxcel arch`, which is how an operator \
+         answers \"is this checkpoint supported?\": {llama_section}"
+    );
+}
