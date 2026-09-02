@@ -182,6 +182,20 @@ pub fn tool_choice_grammar_with(
     if selected.is_empty() {
         return None;
     }
+    // Pre-flight the declared schemas before any of them is cloned. The
+    // finished Lark text is capped by `MAX_SCHEMA_BYTES` as well, but that cap
+    // is applied on the blocking pool after this function has already run, so
+    // on its own it bounds nothing this function does.
+    if !tool_schemas_fit(&selected, crate::server::structured::MAX_SCHEMA_BYTES) {
+        tracing::warn!(
+            target: "mlxcel::tool_calls",
+            tools = selected.len(),
+            limit = crate::server::structured::MAX_SCHEMA_BYTES,
+            "forced tool_choice: the declared tool schemas are larger than the grammar size \
+             limit; falling back to prompt-instruction enforcement"
+        );
+        return None;
+    }
     let single = selected.len() == 1;
     let mut schemas: Vec<serde_json::Value> = selected
         .into_iter()
@@ -219,6 +233,60 @@ pub fn tool_choice_grammar_with(
     }
     rule.push('\n');
     Some(rule)
+}
+
+/// Whether the selected tools' names and `parameters` schemas together
+/// serialize to at most `budget` bytes, measured without materializing any of
+/// them.
+///
+/// This runs before [`tool_choice_grammar_with`] clones a single schema, and it
+/// is the only thing that bounds that clone. Everything the grammar builder
+/// does afterwards -- a deep clone of each `parameters` value, a recursive
+/// `$ref` rewrite over the clone, and a full re-serialization of the result --
+/// is proportional to the tool schemas the request declared, runs on whichever
+/// thread the caller is on (a Tokio runtime worker for every HTTP route), and
+/// is then discarded by `build_lark_constraint`'s size cap. `tools` is capped
+/// by count (`MAX_TOOLS`) and not by size, and the JSON body limit is sized for
+/// base64 image payloads, so a single request can otherwise buy hundreds of
+/// milliseconds of blocked reactor time and a multiple of the body size in
+/// transient allocation for a grammar that was never going to compile.
+///
+/// `serde_json::to_writer` stops at the first writer error, so an oversized
+/// schema costs `budget` bytes of walking rather than its own size. The measure
+/// is a cheap lower bound on the finished Lark text, not a replacement for the
+/// cap: the wrapper literals and the per-call JSON scaffolding are not counted,
+/// and `build_lark_constraint` stays the authority on the final size.
+fn tool_schemas_fit(tools: &[&Tool], budget: usize) -> bool {
+    use std::io::Write;
+
+    /// A sink that accepts bytes until `budget` is exhausted and then fails.
+    struct Budget(usize);
+
+    impl Write for Budget {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.checked_sub(buf.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "tool schema exceeds the grammar size budget",
+                )
+            })?;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut remaining = Budget(budget);
+    tools.iter().all(|tool| {
+        remaining.write_all(tool.function.name.as_bytes()).is_ok()
+            && tool
+                .function
+                .parameters
+                .as_ref()
+                .is_none_or(|parameters| serde_json::to_writer(&mut remaining, parameters).is_ok())
+    })
 }
 
 /// Quote `text` as a Lark string literal.
@@ -604,6 +672,51 @@ mod tool_choice_grammar_tests {
             );
             assert!(tool_choice_grammar(format, &two_tools(), &named("get_time")).is_none());
         }
+    }
+
+    /// A forced choice whose declared schemas are larger than the grammar
+    /// size cap is answered before anything is cloned or serialized (#1319).
+    /// `build_lark_constraint` rejects the finished text anyway, but only on
+    /// the blocking pool and only after this builder has deep-cloned every
+    /// selected tool's `parameters`, walked the clone to relocate its `$ref`s
+    /// and re-serialized the result -- work proportional to a request body
+    /// whose limit is sized for base64 images, paid on a Tokio runtime worker
+    /// and then thrown away.
+    #[test]
+    fn tool_choice_grammar_is_none_when_the_declared_schemas_exceed_the_size_cap() {
+        let cap = crate::server::structured::MAX_SCHEMA_BYTES;
+        let schema = |bytes: usize| {
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {"note": {"type": "string", "description": "x".repeat(bytes)}}
+            }))
+        };
+
+        let one_over = vec![tool("get_time", schema(cap + 1))];
+        assert!(tool_choice_grammar(ToolCallFormat::Hermes, &one_over, &required()).is_none());
+        assert!(
+            tool_choice_grammar(ToolCallFormat::Hermes, &one_over, &named("get_time")).is_none()
+        );
+
+        // The budget is the sum over the selected tools, not any single one:
+        // two schemas at two thirds of the cap each fit alone and not together.
+        let two_thirds = vec![
+            tool("get_time", schema(cap / 3 * 2)),
+            tool("get_weather", schema(cap / 3 * 2)),
+        ];
+        assert!(tool_choice_grammar(ToolCallFormat::Hermes, &two_thirds, &required()).is_none());
+        assert!(
+            tool_choice_grammar(ToolCallFormat::Hermes, &two_thirds, &named("get_time")).is_some(),
+            "a named choice only pays for the tool it selects"
+        );
+
+        // An unbounded name is measured too: it is cloned into the `const`.
+        let long_name = "n".repeat(cap + 1);
+        let named_tool = vec![tool(&long_name, None)];
+        assert!(tool_choice_grammar(ToolCallFormat::Hermes, &named_tool, &required()).is_none());
+
+        // Ordinary schemas are unaffected.
+        assert!(tool_choice_grammar(ToolCallFormat::Hermes, &two_tools(), &required()).is_some());
     }
 
     #[test]
