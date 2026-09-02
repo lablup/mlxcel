@@ -57,6 +57,74 @@ pub(crate) fn has_vision_config(config: &serde_json::Value) -> bool {
     config.get("vision_config").is_some()
 }
 
+/// Classify an `iquestcoder` config, refusing the two switches that would make
+/// it stop being a plain Llama decoder (#1357).
+///
+/// IQuest-Coder V1 (7B / 14B / 40B, Base / Instruct / Thinking) is RMSNorm plus
+/// GQA with an explicit `head_dim`, SwiGLU, an untied `lm_head` and default
+/// RoPE, which is exactly what `models::llama3` runs. Its config schema is
+/// Llama's plus three keys that are dormant in every published checkpoint, and
+/// the whole equivalence rests on them staying dormant, so this refuses at load
+/// rather than ignoring them:
+///
+/// * `clip_qkv` clamps Q, K and V to `[-clip_qkv, clip_qkv]` before attention.
+///   The vendor decoder applies it whenever the value is not null
+///   (`IQuestCoderAttention.forward` in
+///   <https://huggingface.co/mlx-community/IQuest-Coder-V1-7B-Instruct-8bit/blob/main/modeling_iquestcoder.py>),
+///   and the shared Llama attention has no such clamp. Every published
+///   checkpoint sets it to `null`.
+/// * `use_sliding_window` with a non-null `sliding_window` makes every layer
+///   from `max_window_layers` on attend over a window instead of the full
+///   prefix. The Llama route builds a plain causal mask, so a windowed
+///   checkpoint would decode with the wrong receptive field. Every published
+///   checkpoint ships `use_sliding_window: false`, `sliding_window: null`,
+///   `max_window_layers: 0`.
+///
+/// Both refusals reproduce the vendor's own activation conditions, so a config
+/// that merely carries the keys at their inert values still routes.
+fn iquest_coder_model_type(config: &Value) -> Result<ModelType> {
+    if let Some(clip) = config.get("clip_qkv")
+        && !clip.is_null()
+    {
+        return Err(anyhow::anyhow!(
+            "IQuest-Coder checkpoint declares clip_qkv = {clip}, which clamps the Q/K/V \
+             projections before attention. mlxcel routes this family through the shared Llama \
+             decoder, which applies no such clamp, so loading it would silently change every \
+             attention score. Only checkpoints with clip_qkv null are supported."
+        ));
+    }
+
+    let uses_sliding_window = config
+        .get("use_sliding_window")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let window = config.get("sliding_window").and_then(Value::as_u64);
+    // The vendor gates the window on all three keys: it is applied only when
+    // `use_sliding_window` is set, a window size is present, and the layer
+    // index has reached `max_window_layers`. A config whose first windowed
+    // layer is past the end of the stack therefore never windows anything.
+    let first_windowed_layer = config
+        .get("max_window_layers")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let num_layers = config
+        .get("num_hidden_layers")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if uses_sliding_window && window.is_some() && first_windowed_layer < num_layers {
+        return Err(anyhow::anyhow!(
+            "IQuest-Coder checkpoint enables sliding-window attention (use_sliding_window = true, \
+             sliding_window = {}, max_window_layers = {first_windowed_layer}). mlxcel routes this \
+             family through the shared Llama decoder, which attends over the full prefix, so \
+             loading it would decode with the wrong receptive field. Only checkpoints with the \
+             sliding window disabled are supported.",
+            window.unwrap_or_default()
+        ));
+    }
+
+    Ok(ModelType::IQuestCoder)
+}
+
 fn gemma4_has_vision_weights(model_path: &Path) -> bool {
     let index_path = model_path.join("model.safetensors.index.json");
     if let Ok(index_str) = std::fs::read_to_string(&index_path)
@@ -437,6 +505,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
 
     match model_type.as_str() {
         "llama" | "mistral" => Ok(ModelType::Llama),
+        "iquestcoder" => iquest_coder_model_type(&v),
         "llama4" => Ok(detect_text_or_vlm(
             &v,
             ModelType::Llama4,

@@ -372,6 +372,7 @@ pub use kokoro::KokoroModel;
 pub enum ModelType {
     // Standard Transformer models
     Llama,             // Llama 1/2/3, Mistral
+    IQuestCoder,       // IQuest-Coder V1 (Llama-shaped decoder, `iquestcoder` label)
     Llama4,            // Llama 4 (MoE)
     Llama4VLM,         // Llama 4 VLM (vision-language)
     MllamaVLM,         // Llama 3.2 Vision (mllama): tiled ViT + gated cross-attention
@@ -639,6 +640,7 @@ pub enum ModelType {
 pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Standard Transformer models
     ModelType::Llama,
+    ModelType::IQuestCoder,
     ModelType::Llama4,
     ModelType::Llama4VLM,
     ModelType::MllamaVLM,
@@ -857,6 +859,7 @@ impl ModelType {
         match self {
             // ----- Llama -----
             ModelType::Llama => ("Llama 1/2/3", "Llama"),
+            ModelType::IQuestCoder => ("IQuest-Coder V1", "Llama"),
             ModelType::Llama4 => ("Llama 4 (MoE)", "Llama"),
             ModelType::Llama4VLM => ("Llama 4 VLM", "Llama VLM"),
             ModelType::MllamaVLM => (
@@ -1235,6 +1238,7 @@ mod metadata_tests {
         }
         let variants = all_variants!(
             Llama,
+            IQuestCoder,
             Llama4,
             Llama4VLM,
             MllamaVLM,

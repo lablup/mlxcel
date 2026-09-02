@@ -14,6 +14,7 @@
 
 pub mod fim;
 pub mod pieces;
+mod spm_proto;
 mod thinking;
 mod tiktoken;
 
@@ -824,12 +825,33 @@ impl SentencePieceTokenizer {
     }
 }
 
+/// What `tokenizer_config.json` says about a SentencePiece checkpoint.
+///
+/// Grouped into one value rather than returned as a tuple because the
+/// SentencePiece loader needs all of it and the set has grown twice.
+#[derive(Debug, Default)]
+struct SentencePieceConfig {
+    /// Special-token spelling to id, from `added_tokens_decoder`.
+    special_tokens: HashMap<String, u32>,
+    /// Non-special added tokens, id to content; these live outside the
+    /// SentencePiece vocabulary and must be decoded from this map.
+    added_token_contents: HashMap<u32, String>,
+    /// `add_bos_token`, defaulting to false when the key is absent.
+    add_bos: bool,
+    /// `add_prefix_space`, kept as an `Option` because "absent" and
+    /// "explicitly false" mean different things here: absent leaves the
+    /// SentencePiece model's own `add_dummy_prefix` alone, and an explicit
+    /// `false` overrides it. See [`open_sentencepiece_processor`].
+    add_prefix_space: Option<bool>,
+}
+
 /// Parse special tokens from tokenizer_config.json's `added_tokens_decoder` field
-fn parse_special_tokens(model_path: &Path) -> (HashMap<String, u32>, HashMap<u32, String>, bool) {
+fn parse_special_tokens(model_path: &Path) -> SentencePieceConfig {
     let config_path = model_path.join("tokenizer_config.json");
     let mut special_tokens = HashMap::new();
     let mut added_token_contents = HashMap::new();
     let mut add_bos = false;
+    let mut add_prefix_space = None;
 
     if let Ok(content) = std::fs::read_to_string(&config_path)
         && let Ok(config) = serde_json::from_str::<serde_json::Value>(&content)
@@ -838,6 +860,11 @@ fn parse_special_tokens(model_path: &Path) -> (HashMap<String, u32>, HashMap<u32
         if let Some(v) = config.get("add_bos_token").and_then(|v| v.as_bool()) {
             add_bos = v;
         }
+
+        // Parse add_prefix_space. Only an explicit boolean counts; a missing
+        // key must stay `None` so the SentencePiece model keeps its own
+        // setting.
+        add_prefix_space = config.get("add_prefix_space").and_then(|v| v.as_bool());
 
         // Parse added_tokens_decoder: { "128132": { "content": "<|im_start|>", "special": true }, ... }
         if let Some(decoder) = config
@@ -866,7 +893,74 @@ fn parse_special_tokens(model_path: &Path) -> (HashMap<String, u32>, HashMap<u32
         }
     }
 
-    (special_tokens, added_token_contents, add_bos)
+    SentencePieceConfig {
+        special_tokens,
+        added_token_contents,
+        add_bos,
+        add_prefix_space,
+    }
+}
+
+/// Load `tokenizer.model`, honoring an explicit `"add_prefix_space": false`.
+///
+/// A SentencePiece model normalizes with `add_dummy_prefix` on by default,
+/// which makes `encode("def foo")` behave as if the text were `" def foo"` and
+/// gives the first word the same `U+2581` word-boundary marker every later
+/// word gets. Most checkpoints want that. A checkpoint that ships
+/// `"add_prefix_space": false` in `tokenizer_config.json` does not, and the
+/// HuggingFace fast-tokenizer conversion honors the key by omitting the
+/// `Prepend` normalizer, so the fast tokenizer a reference stack builds from
+/// the same `tokenizer.model` tokenizes the first word bare.
+///
+/// mlxcel used to ignore the key, so on such a checkpoint every prompt started
+/// with a phantom space: a different first token, and after a chat template,
+/// a different first token in every segment between special tokens. The
+/// override is applied by rewriting the one proto field (see
+/// [`spm_proto::disable_add_dummy_prefix`]) and re-loading, which leaves the
+/// pieces, their scores and the merge order untouched.
+///
+/// A `tokenizer.model` this editor cannot parse falls back to the unmodified
+/// load with one warning rather than failing the whole model, matching how
+/// `llama3` handles a RoPE-scaling scheme it does not implement.
+fn open_sentencepiece_processor(
+    path: &Path,
+    add_prefix_space: Option<bool>,
+) -> Result<SentencePieceProcessor> {
+    let open_unmodified = || {
+        SentencePieceProcessor::open(path)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer.model: {}", e))
+    };
+
+    if add_prefix_space != Some(false) {
+        return open_unmodified();
+    }
+
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!(
+                "tokenizer_config.json sets add_prefix_space=false but {} could not be read \
+                 ({e}); loading it without the override, so the first token of every prompt \
+                 will carry a leading word-boundary marker",
+                path.display()
+            );
+            return open_unmodified();
+        }
+    };
+
+    match spm_proto::disable_add_dummy_prefix(&raw) {
+        Ok(patched) => SentencePieceProcessor::from_serialized_proto(&patched)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer.model: {}", e)),
+        Err(e) => {
+            tracing::warn!(
+                "tokenizer_config.json sets add_prefix_space=false but the SentencePiece model \
+                 at {} could not be rewritten ({e}); loading it unchanged, so the first token \
+                 of every prompt will carry a leading word-boundary marker",
+                path.display()
+            );
+            open_unmodified()
+        }
+    }
 }
 
 /// Find a `.tiktoken` file in the model directory.
@@ -1680,19 +1774,18 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Fall back to SentencePiece tokenizer.model
     let tokenizer_model_path = model_path.join("tokenizer.model");
     if tokenizer_model_path.exists() {
-        let processor = SentencePieceProcessor::open(&tokenizer_model_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer.model: {}", e))?;
+        let config = parse_special_tokens(model_path);
+        let processor =
+            open_sentencepiece_processor(&tokenizer_model_path, config.add_prefix_space)?;
 
         let bos_id = processor.bos_id();
 
-        let (special_tokens, added_token_contents, add_bos) = parse_special_tokens(model_path);
-
         let sp_tokenizer = SentencePieceTokenizer::new(
             processor,
-            special_tokens,
-            added_token_contents,
+            config.special_tokens,
+            config.added_token_contents,
             bos_id,
-            add_bos,
+            config.add_bos,
         );
         return Ok(MlxcelTokenizer::SentencePiece(sp_tokenizer));
     }
@@ -1741,8 +1834,8 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MlxcelTokenizer, build_qwen2_bpe_tokenizer, is_qwen2_slow_tokenizer_dir,
-        read_added_tokens_sorted, remote_tokenizer_override_for_model,
+        MlxcelTokenizer, build_qwen2_bpe_tokenizer, is_qwen2_slow_tokenizer_dir, load_tokenizer,
+        parse_special_tokens, read_added_tokens_sorted, remote_tokenizer_override_for_model,
         remote_tokenizer_repo_for_model, remote_tokenizer_repo_for_model_type,
     };
     use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE};
@@ -3020,5 +3113,99 @@ mod tests {
                 "decode round-trip mismatch for {text:?}: got {decoded:?}"
             );
         }
+    }
+
+    /// The IQuest-Coder checkpoint, absent on machines that never downloaded
+    /// it. It is the only local checkpoint that ships a SentencePiece
+    /// `tokenizer.model` together with an explicit `"add_prefix_space": false`.
+    const IQUEST_MODEL_DIR: &str = "models/mlx/iquest-coder-v1-7b-instruct-8bit";
+
+    #[test]
+    fn add_prefix_space_is_read_only_when_it_is_written_down() {
+        let dir = std::env::temp_dir().join(format!(
+            "mlxcel_tokenizer_prefix_space_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (body, expected) in [
+            (serde_json::json!({}), None),
+            (
+                serde_json::json!({ "add_prefix_space": false }),
+                Some(false),
+            ),
+            (serde_json::json!({ "add_prefix_space": true }), Some(true)),
+            // A non-boolean spelling is not an instruction; it must not be
+            // read as `false` and silently change every prompt's first token.
+            (serde_json::json!({ "add_prefix_space": "false" }), None),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("tokenizer_config.json"), body.to_string()).unwrap();
+            assert_eq!(
+                parse_special_tokens(&dir).add_prefix_space,
+                expected,
+                "for {body}"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// End-to-end: the loaded tokenizer must produce the ids the IQuest-Coder
+    /// checkpoint's own SentencePiece model produces with no leading word
+    /// boundary, and must resolve the three `eos_token_id` spellings.
+    #[test]
+    fn the_iquest_coder_tokenizer_encodes_without_a_leading_word_boundary() {
+        let model_dir = std::path::Path::new(IQUEST_MODEL_DIR);
+        if !model_dir.join("tokenizer.model").exists() {
+            crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint(
+                "the_iquest_coder_tokenizer_encodes_without_a_leading_word_boundary",
+                &format!(
+                    "IQuest-Coder checkpoint not present at {}",
+                    model_dir.display()
+                ),
+            );
+            return;
+        }
+
+        let tokenizer = load_tokenizer(model_dir).expect("load IQuest-Coder tokenizer");
+        assert!(matches!(tokenizer, MlxcelTokenizer::SentencePiece(_)));
+
+        // Both prompts are the ones the checkpoint was validated against.
+        assert_eq!(
+            tokenizer
+                .encode("The Fibonacci sequence begins with", true)
+                .unwrap(),
+            vec![1545, 56411, 6161, 43714, 7420, 13712, 409]
+        );
+        assert_eq!(
+            tokenizer
+                .encode(
+                    "In distributed systems, consensus protocols such as Raft",
+                    true
+                )
+                .unwrap(),
+            vec![578, 3594, 4785, 66560, 29900, 32343, 1442, 382, 421, 4121]
+        );
+
+        // `tokenizer_config.json` carries no `add_bos_token`, so no BOS is
+        // prepended even with `add_special_tokens` on; asserting the ids above
+        // already pins that, and this states it directly.
+        assert_ne!(tokenizer.encode("The", true).unwrap().first(), Some(&1));
+
+        // The chat template's turn markers are single ids, and every segment
+        // between them starts bare rather than with a phantom space.
+        assert_eq!(tokenizer.token_to_id("<|im_start|>"), Some(75863));
+        assert_eq!(tokenizer.token_to_id("<|im_end|>"), Some(75864));
+        assert_eq!(tokenizer.token_to_id("<|endoftext|>"), Some(75869));
+        let chat = tokenizer
+            .encode("<|im_start|>user\nhi<|im_end|>", true)
+            .unwrap();
+        assert_eq!(chat.first(), Some(&75863));
+        assert_eq!(chat.last(), Some(&75864));
+        assert_eq!(chat[1], tokenizer.encode("user", true).unwrap()[0]);
+
+        // The three `eos_token_id` entries generation stops on all resolve.
+        assert_eq!(crate::read_eos_token_ids(model_dir), vec![2, 75864, 75869]);
     }
 }

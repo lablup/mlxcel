@@ -151,6 +151,12 @@ fn detect_plan_architecture(config: &Value, model_type: ModelType) -> String {
 fn fallback_architecture(model_type: ModelType) -> &'static str {
     match model_type {
         ModelType::Llama | ModelType::Mistral3 | ModelType::Mistral3VLM => "llama",
+        // Deliberately not "llama": `is_llama_style_architecture` gates the
+        // tensor-parallel Llama runtime on this string, and the IQuest-Coder
+        // route has not been validated on a multi-rank host. The label is the
+        // one its `config.json` carries, so this only decides what a config
+        // with no architecture at all reports.
+        ModelType::IQuestCoder => "iquestcoder",
         ModelType::Llama4 | ModelType::Llama4VLM => "llama4",
         ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL | ModelType::FastVLM => "qwen2",
         ModelType::Qwen3 | ModelType::Qwen3VL => "qwen3",

@@ -1314,3 +1314,115 @@ fn embedding_layout_with_unknown_family_is_reported_not_misrouted() {
     assert!(err.contains("embedding checkpoint"), "{err}");
     assert!(err.contains("mpnet"), "{err}");
 }
+
+/// The published IQuest-Coder config, verbatim apart from the keys detection
+/// never reads. All three sizes (7B / 14B / 40B) differ only in
+/// `num_hidden_layers`.
+fn iquest_coder_config() -> serde_json::Value {
+    json!({
+        "architectures": ["IQuestCoderForCausalLM"],
+        "model_type": "iquestcoder",
+        "attention_bias": false,
+        "bos_token_id": 1,
+        "clip_qkv": serde_json::Value::Null,
+        "eos_token_id": [2, 75864, 75869],
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "intermediate_size": 27648,
+        "max_position_embeddings": 131072,
+        "max_window_layers": 0,
+        "mlp_bias": false,
+        "num_attention_heads": 40,
+        "num_hidden_layers": 14,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-05,
+        "rope_scaling": serde_json::Value::Null,
+        "rope_theta": 500000.0,
+        "sliding_window": serde_json::Value::Null,
+        "tie_word_embeddings": false,
+        "use_sliding_window": false,
+        "vocab_size": 76800
+    })
+}
+
+fn detect_iquest_coder(name: &str, config: serde_json::Value) -> anyhow::Result<ModelType> {
+    let model_dir = temp_path(name);
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), config.to_string()).unwrap();
+    let detected = super::detection::get_model_type(&model_dir);
+    fs::remove_dir_all(model_dir).unwrap();
+    detected
+}
+
+#[test]
+fn iquestcoder_model_type_is_detected() {
+    assert_eq!(
+        detect_iquest_coder("iquestcoder", iquest_coder_config()).unwrap(),
+        ModelType::IQuestCoder
+    );
+}
+
+#[test]
+fn iquestcoder_with_a_qkv_clamp_is_refused_at_load() {
+    let mut config = iquest_coder_config();
+    config["clip_qkv"] = json!(8.0);
+    let error = detect_iquest_coder("iquestcoder_clip", config).unwrap_err();
+    assert!(
+        error.to_string().contains("clip_qkv"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn iquestcoder_with_the_sliding_window_enabled_is_refused_at_load() {
+    let mut config = iquest_coder_config();
+    config["use_sliding_window"] = json!(true);
+    config["sliding_window"] = json!(4096);
+    let error = detect_iquest_coder("iquestcoder_window", config).unwrap_err();
+    assert!(
+        error.to_string().contains("sliding-window"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn iquestcoder_with_a_window_size_but_the_switch_off_still_routes() {
+    // `sliding_window` alone is inert: the vendor decoder reads it only when
+    // `use_sliding_window` is set, so a config that carries the size without
+    // the switch is still a plain causal model.
+    let mut config = iquest_coder_config();
+    config["sliding_window"] = json!(4096);
+    assert_eq!(
+        detect_iquest_coder("iquestcoder_window_off", config).unwrap(),
+        ModelType::IQuestCoder
+    );
+}
+
+#[test]
+fn iquestcoder_with_no_layer_reaching_the_window_still_routes() {
+    // The window starts at `max_window_layers`; when that is past the last
+    // layer no layer ever windows, which is the vendor's own condition.
+    let mut config = iquest_coder_config();
+    config["use_sliding_window"] = json!(true);
+    config["sliding_window"] = json!(4096);
+    config["max_window_layers"] = json!(14);
+    assert_eq!(
+        detect_iquest_coder("iquestcoder_window_unreached", config).unwrap(),
+        ModelType::IQuestCoder
+    );
+}
+
+#[test]
+fn the_llama_and_mistral_labels_keep_the_plain_llama_route() {
+    // The IQuest arm is additive: neither existing label may drift onto the
+    // new variant.
+    for model_type in ["llama", "mistral"] {
+        let mut config = iquest_coder_config();
+        config["model_type"] = json!(model_type);
+        assert_eq!(
+            detect_iquest_coder(&format!("plain_{model_type}"), config).unwrap(),
+            ModelType::Llama
+        );
+    }
+}
