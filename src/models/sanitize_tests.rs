@@ -748,7 +748,7 @@ fn load_text_weights_with_none_transform_matches_legacy_path() {
     // doubles as a regression guard against accidental divergence
     // between the alias and the new entry point.
     //
-    // (A4): the `load_text_weights(_, None)` call below
+    // The `load_text_weights(_, None)` call below
     // reads the process-global active-pipeline slot. Acquire
     // `env_lock` so a parallel test in `surgery_integration` can't
     // install a pipeline mid-test and leak it into the consolidated
@@ -832,7 +832,7 @@ fn load_text_weights_invokes_transform_when_supplied() {
     // transform the produced `WeightMap` must match the `None` path
     // bit-for-bit.
     //
-    // (A4): baseline call reads the active-pipeline slot,
+    // The baseline call reads the active-pipeline slot,
     // so we need the same `env_lock` discipline as the other tests
     // touching `load_text_weights(_, None)`.
     #[cfg(feature = "surgery")]
@@ -944,7 +944,7 @@ mod surgery_integration {
         // really does implement A1's `WeightTransform` trait at the
         // type level (the call would not type-check otherwise).
         //
-        // (A4): `load_text_weights(_, None)` reads the
+        // `load_text_weights(_, None)` reads the
         // process-global active-pipeline slot, so any test that calls
         // it must serialise on the same `env_lock` as the tests that
         // mutate the slot — otherwise a parallel mutator can leak a
@@ -1287,7 +1287,7 @@ operations:
         }
     }
 
-    /// (A4): when the CLI installs an active pipeline via
+    /// When the CLI installs an active pipeline via
     /// `crate::surgery::set_active_pipeline`, the consolidated loader
     /// must pick it up for `load_text_weights(_, None)` callers. This
     /// is the integration glue that lets `mlxcel generate --surgery
@@ -1341,7 +1341,7 @@ operations:
         std::fs::remove_dir_all(&dir_with_slot).unwrap();
     }
 
-    /// (A4): explicit `transform` argument takes precedence
+    /// The explicit `transform` argument takes precedence
     /// over the active-pipeline slot. This is the contract callers
     /// (e.g. future programmatic users and the existing integration tests) rely on to bypass the global slot.
     #[test]

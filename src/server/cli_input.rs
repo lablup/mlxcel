@@ -368,7 +368,7 @@ pub struct ServerStartupInput {
     /// consistently.
     pub chat_template_kwargs: Option<String>,
 
-    // (B11): llama-server-compatible K/V cache type split flags.
+    // llama-server-compatible K/V cache type split flags.
     //
     // These hold the raw CLI strings from `--cache-type-k` / `--cache-type-v`
     // (and their env var aliases `LLAMA_ARG_CACHE_TYPE_K` /
@@ -559,7 +559,7 @@ pub struct ServerStartupInput {
     /// `--conversation-store-ttl-secs` value (`0` disables TTL).
     pub conversation_store_ttl_secs: u64,
 
-    /// (A4): path to a YAML weight-load surgery configuration.
+    /// Path to a YAML weight-load surgery configuration.
     ///
     /// `None` (the default) keeps the server on the bit-exact baseline
     /// weight-load path — no surgery crate work, no observable
@@ -845,7 +845,7 @@ impl ServerStartupInput {
         )
         .map_err(|e| anyhow::anyhow!("--apc-hash: {e}"))?;
 
-        // (B11): resolve the effective KV cache mode from split flags,
+        // Resolve the effective KV cache mode from split flags,
         // legacy shorthand, or the default (FP16).
         let kv_cache_mode = resolve_kv_cache_mode(
             self.cache_type_k.as_deref(),
@@ -1168,7 +1168,7 @@ impl ServerStartupInput {
             conversation_store_max_entries: self.conversation_store_max_entries,
             conversation_store_max_bytes: self.conversation_store_max_bytes,
             conversation_store_ttl_secs: self.conversation_store_ttl_secs,
-            // (A4): forward the surgery YAML path verbatim.
+            // Forward the surgery YAML path verbatim.
             // start_server() parses the YAML and installs the pipeline
             // exactly once before spawning the model worker.
             #[cfg(feature = "surgery")]

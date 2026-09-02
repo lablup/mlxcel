@@ -1577,7 +1577,7 @@ pub fn load_and_sanitize_weights<P: AsRef<std::path::Path>>(
 /// see them. When `transform` is `None` the call is bit-exact identical
 /// to the pre-refactor `load_and_sanitize_weights` path.
 ///
-/// ## Active-pipeline fallback (— A4)
+/// ## Active-pipeline fallback
 ///
 /// When the explicit `transform` parameter is `None` *and* the
 /// `surgery` feature is enabled *and* the CLI has installed an active
@@ -1649,7 +1649,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // and before precision conversion so transforms observe weights in
     // their final tied/dequantized layout.
     //
-    // Resolution order (A4):
+    // Resolution order:
     //   1. Explicit `transform` argument — used as-is (test fixtures and
     //      future programmatic callers that want to bypass the global slot).
     //   2. `surgery` feature active + CLI-installed active pipeline —

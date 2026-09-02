@@ -2108,7 +2108,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     env_fallback_apc_num_blocks(&mut args.apc_num_blocks);
     env_fallback_apc_hash(&mut args.apc_hash);
 
-    // (B11): env-var fallbacks for KV cache type split flags.
+    // Env-var fallbacks for KV cache type split flags.
     // LLAMA_ARG_CACHE_TYPE_K / LLAMA_ARG_CACHE_TYPE_V are the canonical env
     // vars matching llama.cpp; the clap `env = "..."` attribute on the arg
     // also reads them directly, so these helpers are only needed when the CLI
@@ -2617,7 +2617,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         apc_block_size: args.apc_block_size,
         apc_num_blocks: args.apc_num_blocks,
         apc_hash: args.apc_hash,
-        // (B11): KV cache type split flags already resolved via
+        // KV cache type split flags already resolved via
         // env-var fallbacks (and clap `env = "..."`) above.
         cache_type_k: args.turbo.cache_type_k,
         cache_type_v: args.turbo.cache_type_v,
@@ -2647,7 +2647,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,
-        // (A4): forward the surgery YAML path. clap reads
+        // Forward the surgery YAML path. clap reads
         // `MLXCEL_SURGERY` directly via the `env = ...` attribute on
         // the flag, so no separate env-fallback helper is needed.
         #[cfg(feature = "surgery")]
