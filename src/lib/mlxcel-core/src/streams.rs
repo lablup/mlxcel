@@ -540,19 +540,21 @@ mod tests {
     #[test]
     fn trivial_op_runs_on_non_default_gpu_index() {
         let _lock = lock_default_device();
+        let _device = DefaultDeviceGuard::capture();
         let count = gpu_device_count();
         if count < 2 {
             // Single-GPU CUDA host: no second device to target.
             return;
         }
-        // Pin the default device to GPU 1, compute 1 + 1 there, then restore.
+        // Pin the default device to GPU 1 and compute 1 + 1 there. The guard
+        // restores the previous device even if allocation, evaluation, or an
+        // assertion panics before the end of the test.
         set_default_gpu_device(1).expect("index 1 valid on a multi-GPU host");
         let a = ffi::ones(&[1], crate::dtype::FLOAT32);
         let b = ffi::ones(&[1], crate::dtype::FLOAT32);
         let c = ffi::add(&a, &b);
         ffi::eval(&c);
         let value = ffi::item_f32(&c);
-        set_default_gpu_device(0).expect("index 0 is always valid");
         assert_eq!(value, 2.0, "1 + 1 on GPU 1 should equal 2");
     }
 

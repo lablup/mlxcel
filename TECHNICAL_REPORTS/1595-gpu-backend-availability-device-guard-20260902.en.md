@@ -3,7 +3,7 @@
 **Date**: 2026-09-02
 **Author**: mlxcel maintainers
 **Reviewer**: implementation and security review cycle
-**Status**: Completed (open PR; CI green on all three commits, unit and integration coverage passing on this host; CUDA-specific paths reasoned from the pinned MLX source, see Appendix)
+**Status**: Completed (open PR; original CI and Apple Silicon validation green, with final hardening independently verified on NVIDIA GB10/CUDA; see Appendix)
 **Languages**: Rust, C++
 **Risk Level**: Medium (touches the process-global MLX default device that every generation and test path dispatches through, but the change is additive — a rename with a deprecated shim, a new query function, and RAII guards — and is validated with hundreds of parallel test runs)
 
@@ -55,7 +55,7 @@ PR #1420 added an unconditional `set_default_device(true)` pin at the top of the
 
 ## 2. Technical Review
 
-The review cycle ran two passes over the initial implementation (`7bd6e18b`) and found defects in both, each fixed in its own commit rather than folded back into the first.
+The original review cycle ran two passes over the initial implementation (`7bd6e18b`) and found defects in both, each fixed in its own commit rather than folded back into the first. A final implementation-hardening pass added two further reliability fixes before merge.
 
 ### 2.1 Implementation review (`d1f2a38c`)
 
@@ -83,12 +83,19 @@ Measured effect of this commit: a representative parallel `cargo test --lib` fil
 | Atomic ordering of `LIVE_DEVICE_GUARDS` | — | Checked, sound (AcqRel on the write side, Acquire on the read side) |
 | Startup cost of `gpu_backend_available()` | — | Checked, negligible — see the follow-up comment on the "cheap" wording in §4.4 |
 | New log lines from the startup-line change | — | Checked, emit only a boolean and a fixed string, no new trust boundary |
-| MLX keeps `default_device_` in a plain non-atomic global; the one unlocked mover left after this PR is `initialize_runtime()`'s startup-only `set_default_device(false)` | MEDIUM | Reported only — not worth serializing given when it runs, but flagged so no future mover skips the lock without the same reasoning (addressed with a comment in this finalization, see §4.4) |
+| MLX keeps `default_device_` in a plain non-atomic global; the one unlocked mover left after this PR is `initialize_runtime()`'s startup-only `set_default_device(false)` | MEDIUM | Hardened — the actual startup transition remains intentionally unlocked, while redundant CPU-only and repeated-test writes are now skipped; the constraint is documented for future movers (see §4.4) |
 | `models::bert_tests::mlx_test_guard` / `models::modernbert_tests::mlx_guard` are pure delegations to the shared helper | MEDIUM | Reported only — no action needed, informational |
 | The `gpu_backend_available` bridge comment says the query is "safe before runtime init", true, but reads as implying the call is cheap; on Metal the first call constructs the Metal device singleton (a metallib load) | LOW | Reported only (addressed in this finalization, see §4.4) |
 | `tests/sampling_*_kill_switch.rs` moved from a default-device check to a backend check; nothing moves the default device in those binaries, so the distinction is currently unreachable there | LOW | Reported only, informational |
 
 Measured effect: 300 parallel runs of the two-module filter (0 failures after the fix), 200 parallel runs of the mlxcel-core `streams::` filter (0), and 60 parallel runs of a 2,432-test filter spanning `models::`, `rerank::`, `embeddings::`, `vision::`, and `multimodal::` (0 failures, no hang).
+
+### 2.3 Final implementation hardening
+
+| Finding | Severity | Status |
+|---|---|---|
+| `initialize_runtime()` wrote `Device::cpu` on every CPU resolution even when MLX already defaulted to the CPU. The function is called repeatedly in tests, while the pinned MLX stores the default device in a plain non-atomic global, so CPU-only runs performed unnecessary process-global writes | MEDIUM | Fixed by applying the CPU resolution only when the current default is still a GPU; the CUDA-without-driver transition remains covered |
+| The CUDA multi-GPU `trivial_op_runs_on_non_default_gpu_index` test restored GPU 0 manually after evaluation, so any panic before that line leaked GPU 1 into later tests despite holding the shared lock | MEDIUM | Fixed by capturing the prior device with `DefaultDeviceGuard` before selecting GPU 1; unwinding now restores it before releasing the lock |
 
 ---
 
@@ -127,7 +134,7 @@ Measured effect: 300 parallel runs of the two-module filter (0 failures after th
 
 **The CUDA `gpu::is_available()` quirk.** MLX seeds its own default device from `mlx::core::gpu::is_available()`, and the CUDA backend answers that call `true` unconditionally — it does not consult the driver the way `device_count(Device::gpu)` does. So a CUDA build running on a host without a working driver starts up with MLX's default device already pointed at a GPU that `gpu_backend_available()` (which does check `cudaGetDeviceCount`) correctly calls unusable. If `initialize_runtime()` only ever applied the operator's explicit override, that host would resolve `RuntimeSetup.device == Cpu` (because `resolve_device()` sees `gpu_backend_available() == false`) while MLX itself kept dispatching every uncovered op to the GPU it had already defaulted to — the struct would be reporting a fact that was false about where the runtime actually ran.
 
-**The fix, and why the GPU direction needs no counterpart.** `initialize_runtime()` now applies `set_default_device(false)` whenever `device.uses_gpu()` is false, regardless of whether that resolution came from the operator's override or from the backend answering "no GPU here". The GPU direction is asymmetric on purpose: `device == Gpu` can only be reached when `gpu_backend_available()` is true, which requires `device_count(Device::gpu) > 0`, which on every backend implies `gpu::is_available()` is also true — so MLX's own default is already the GPU in that branch, and there is nothing to apply. Not pinning the GPU direction has a second benefit: it keeps this call out of the reach of the leak assertion in `mlx_test_guard`, which only ever expects the GPU to already be the default, not something that gets pinned there on every runtime initialization.
+**The fix, and why the GPU direction needs no counterpart.** `initialize_runtime()` now applies `set_default_device(false)` for every CPU resolution whose current default is still a GPU, regardless of whether that resolution came from the operator's override or from the backend answering "no GPU here". The current-device check preserves the required driverless-CUDA transition while avoiding redundant writes on a CPU-only build and after an earlier CPU initialization. The GPU direction is asymmetric on purpose: `device == Gpu` can only be reached when `gpu_backend_available()` is true, which requires `device_count(Device::gpu) > 0`, which on every backend implies `gpu::is_available()` is also true — so MLX's initial default is the GPU in that branch, and there is nothing to apply. Not pinning the GPU direction has a second benefit: it keeps this call out of the reach of the leak assertion in `mlx_test_guard`, which only ever expects the GPU to already be the default, not something that gets pinned there on every runtime initialization.
 
 ### 3.5 RAII guard, one process-wide lock, and the live-guard backstop — three layers, not one
 
@@ -193,8 +200,8 @@ Every remaining call in `is_gpu_available`'s old default-device sense now goes t
 // on the CPU (issue #1421).
 let (device, cpu_override) =
     resolve_device(requested_device, mlxcel_core::gpu_backend_available());
-// Apply every CPU resolution, not just the operator's override. ...
-if !device.uses_gpu() {
+// Apply every CPU transition, not just the operator's override. ...
+if !device.uses_gpu() && mlxcel_core::default_device_is_gpu() {
     mlxcel_core::set_default_device(false);
 }
 ```
@@ -295,7 +302,7 @@ Three review findings were left as reported-only because they change no behavior
 
 - `DefaultDeviceGuard::drop` (§4.4 above) — why the restore needs no `gpu_backend_available()` guard.
 - `gpu_backend_available()`'s bridge comment (`mlx_cxx_bridge.cpp`) — the existing text said the call is "safe before runtime initialization finishes", which is true but reads as implying the call is cheap. On Metal the first call constructs the `metal::Device` singleton (a metallib load); the comment now says so explicitly, while noting that every array allocation ends up constructing that singleton anyway, so the query only moves the cost earlier rather than adding a new one, and that later calls (on Metal, and the CUDA backend's cached `cudaGetDeviceCount`) are a magic-static check.
-- `initialize_runtime`'s `set_default_device(false)` call (§4.3) — the security review flagged (MEDIUM, reported only) that this is the one in-tree default-device mover left unlocked after the third commit. It is not worth serializing given it runs once at startup and is inert on a GPU host under test, but the comment now says so explicitly and states the rule for any future mover: take `lock_default_device()`.
+- `initialize_runtime`'s `set_default_device(false)` call (§4.3) — the security review flagged (MEDIUM) that this is the one in-tree default-device mover left unlocked after the third commit. Production runs it before workers start, and the final hardening pass made it conditional so repeated CPU-only test initialization does not rewrite MLX's plain global. The comment records both constraints and states the rule for any new mover: take `lock_default_device()`.
 
 ---
 
@@ -367,11 +374,10 @@ Three review findings were left as reported-only because they change no behavior
 - `models::bert_tests::mlx_test_guard` / `models::modernbert_tests::mlx_guard` are pure delegations to the shared `embedding_test_support::mlx_test_guard`; no action needed, noted for anyone auditing call sites.
 - `tests/sampling_*_kill_switch.rs` moved from a default-device check to a backend-availability check; nothing in those binaries currently moves the default device, so the distinction is correct but currently unreachable there.
 
-### Not verifiable on this host
+### Remaining environment-specific gaps
 
-- The CUDA build of the bridge (`--features cuda`): `gpu_backend_available()` uses only `mlx::core::device_count`, which `gpu_device_count()` already calls unconditionally on every backend without an `#ifdef`, and the `no_cuda` stub path is untouched, but no CUDA toolchain is available on this Apple Silicon host.
-- `gpu_backend_available()` returning `true` on the GB10 CUDA build with a driver present, and `false` on a CUDA build without a driver — reasoned from the pinned MLX's `mlx/device.cpp` and `mlx/backend/cuda/device_info.cpp`, not executed.
-- The reranker gate numbers PR #1420 was chasing (0.9883 for the Beijing document, finite Qwen3-VL image scores): the checkpoints are not present on this host, so `rerank::real_checkpoint_tests` soft-skips rather than scoring.
+- The final hardening pass did not repeat the Apple Silicon suite from the original review; those results remain recorded in Appendix A.
+- A CUDA build without a working driver was not available. Its `gpu_backend_available() == false` behavior and startup GPU→CPU transition remain reasoned from the pinned MLX source and covered separately by the pure runtime resolution tests.
 
 ---
 
@@ -407,6 +413,19 @@ With `MLXCEL_DEVICE=cpu`: `Runtime device: CPU`, plus `Running on the CPU becaus
 
 Both lines are produced by the new `RuntimeSetup.cpu_override` field: the second line is only reachable when the override is `true` *and* a GPU backend was in fact available, which is exactly the distinction §1.2 and §3.4 exist to make reportable.
 
-### C. What was not run
+### C. What was not run during the original Apple Silicon review
 
-`--features cuda` cannot be compiled or exercised on this host (Apple Silicon only); see "Not verifiable on this host" above. `mlx-community/Phi-3.5-mini-instruct-4bit` and `mlx-community/Qwen3-4B-4bit` are the only checkpoints available locally, which is why the reranker real-checkpoint gates soft-skip rather than score.
+`--features cuda` could not be compiled or exercised on the original review host. `mlx-community/Phi-3.5-mini-instruct-4bit` and `mlx-community/Qwen3-4B-4bit` were the only checkpoints available there, which is why the reranker real-checkpoint gates soft-skipped rather than scored.
+
+### D. Final hardening validation (NVIDIA GB10, compute capability 12.1, CUDA, 2026-09-03)
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` and `git diff --check` | clean |
+| `cargo clippy --workspace --all-targets --profile test-fast --features cuda -- -D warnings` | clean (pre-existing C++ compiler warnings remain outside this diff) |
+| `cargo test --profile test-fast --features cuda -p mlxcel-core --lib streams:: -- --test-threads=1` | 18 passed, before and after the final hardening patch |
+| `cargo test --profile test-fast --features cuda --lib execution::runtime -- --test-threads=1` | 19 passed |
+| `MLXCEL_DEVICE=cpu cargo test --profile test-fast --features cuda --lib execution::runtime -- --test-threads=1` | 19 passed |
+| `cargo test --profile test-fast --features cuda --lib -- --test-threads=1 multimodal:: rerank::real_checkpoint_tests` | 262 passed, 26 ignored; locally available real reranker checkpoints executed successfully |
+| CPU-only `mlxcel-core` backend-availability regression test | 1 passed |
+| CPU-only root `execution::runtime` tests | 19 passed |

@@ -156,13 +156,17 @@ pub fn initialize_runtime() -> RuntimeSetup {
     // defaults to the GPU there. Not pinning the GPU also keeps this call out
     // of the way of the leak assertion in `mlx_test_guard`.
     // This is the one in-tree default-device mover that does not hold
-    // `mlxcel_core::streams::lock_default_device()`: it runs once at startup,
-    // before any generation worker or test could be racing it, and on a GPU
-    // host in the test binaries it is inert (`device.uses_gpu()` is true
-    // there, so this branch never executes). Any new mover added elsewhere
-    // must take that lock; this one is the sole exception, and only because
-    // of where and when it runs.
-    if !device.uses_gpu() {
+    // `mlxcel_core::streams::lock_default_device()`: in production it runs
+    // once at startup, before any generation worker could be racing it, and
+    // on a GPU host in the test binaries it is inert (`device.uses_gpu()` is
+    // true there, so this branch never executes). Any new mover added
+    // elsewhere must take that lock; this one is the sole exception, and only
+    // because of where and when it runs. Avoid assigning the same CPU value:
+    // `initialize_runtime` is also called repeatedly by tests, and MLX stores
+    // its default device in a plain, non-atomic global. A CPU-only build starts
+    // on the CPU already, and a second initialization after a CPU override is
+    // already there too, so neither case needs another process-global write.
+    if !device.uses_gpu() && mlxcel_core::default_device_is_gpu() {
         mlxcel_core::set_default_device(false);
     }
 

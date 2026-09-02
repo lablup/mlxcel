@@ -3,7 +3,7 @@
 **작성일**: 2026-09-02
 **작성자**: mlxcel maintainers
 **리뷰어**: 구현 및 보안 리뷰 사이클
-**상태**: 완료 (open PR. 세 커밋 모두 CI green, 이 호스트에서 unit/integration 커버리지 통과. CUDA 전용 경로는 pinned MLX 소스 기준 추론만 가능, 부록 참조)
+**상태**: 완료 (open PR. 기존 CI와 Apple Silicon 검증 green, 최종 hardening은 NVIDIA GB10/CUDA에서 독립 검증. 부록 참조)
 **언어**: Rust, C++
 **위험도**: Medium (모든 generation·test 경로가 거쳐 가는 process-global MLX default device를 건드리지만, 변경 자체는 rename + deprecated shim, 새 query 함수, RAII guard로 구성된 additive 변경이고 수백 회의 parallel test run으로 검증됨)
 
@@ -55,7 +55,7 @@ PR #1420은 공유 `mlx_test_guard()` 테스트 헬퍼 맨 앞에 무조건적�
 
 ## 2. 기술적 검토 사항
 
-리뷰 사이클은 최초 구현(`7bd6e18b`)에 대해 두 차례 진행됐고, 두 차례 모두 결함을 찾아 각각 별도 커밋으로 고쳤다(첫 커밋에 합쳐 넣지 않았다).
+최초 리뷰 사이클은 최초 구현(`7bd6e18b`)에 대해 두 차례 진행됐고, 두 차례 모두 결함을 찾아 각각 별도 커밋으로 고쳤다(첫 커밋에 합쳐 넣지 않았다). 머지 전 최종 구현 hardening에서 신뢰성 결함 두 건을 추가로 수정했다.
 
 ### 2.1 구현 리뷰 (`d1f2a38c`)
 
@@ -83,12 +83,19 @@ PR #1420은 공유 `mlx_test_guard()` 테스트 헬퍼 맨 앞에 무조건적�
 | `LIVE_DEVICE_GUARDS`의 atomic ordering | — | 점검 결과 안전함(쓰기 측 AcqRel, 읽기 측 Acquire) |
 | `gpu_backend_available()`의 startup 비용 | — | 점검 결과 무시할 만함 — "cheap" 표현에 대한 후속 작업은 4.4절 참조 |
 | startup 라인 변경으로 생긴 새 로그 라인 | — | 점검 결과 boolean 하나와 고정 문자열만 출력, 새 trust boundary 없음 |
-| MLX는 `default_device_`를 평범한 non-atomic 전역 변수로 보관하는데, 이 PR 이후 유일하게 lock을 안 쥐는 mover는 `initialize_runtime()`의 startup 전용 `set_default_device(false)` | MEDIUM | 보고만 됨 — 실행 시점을 고려하면 직렬화할 가치는 없지만, 앞으로 다른 mover가 같은 근거 없이 lock을 건너뛰지 않도록 표시(이번 마무리 작업에서 주석으로 반영, 4.4절 참조) |
+| MLX는 `default_device_`를 평범한 non-atomic 전역 변수로 보관하는데, 이 PR 이후 유일하게 lock을 안 쥐는 mover는 `initialize_runtime()`의 startup 전용 `set_default_device(false)` | MEDIUM | Hardening 완료 — 실제 startup 전환은 의도적으로 lock 없이 유지하되, CPU-only 및 반복 테스트의 중복 write를 생략하도록 수정했고 미래 mover를 위한 제약을 문서화함(4.4절 참조) |
 | `models::bert_tests::mlx_test_guard` / `models::modernbert_tests::mlx_guard`는 공유 헬퍼로의 순수 위임 | MEDIUM | 보고만 됨 — 조치 불필요, 정보성 |
 | `mlx_cxx_bridge.cpp`의 `gpu_backend_available` 주석이 "runtime init 전에도 안전하다"고 말하는 건 사실이지만 "저렴하다"는 뉘앙스로 읽힘. Metal에서는 첫 호출이 Metal device singleton을 생성함(metallib load) | LOW | 보고만 됨(이번 마무리 작업에서 반영, 4.4절 참조) |
 | `tests/sampling_*_kill_switch.rs`가 default-device 체크에서 backend 체크로 바뀌었는데, 해당 바이너리들은 아무것도 default device를 옮기지 않아 이 구분이 현재로선 도달 불가능 | LOW | 보고만 됨, 정보성 |
 
 측정 효과: 2모듈 filter 300회 parallel run(수정 후 0회 실패), mlxcel-core `streams::` filter 200회(0회), `models::`/`rerank::`/`embeddings::`/`vision::`/`multimodal::`에 걸친 2,432개 테스트 filter 60회(0회 실패, hang 없음).
+
+### 2.3 최종 구현 hardening
+
+| 발견 사항 | 심각도 | 상태 |
+|---|---|---|
+| `initialize_runtime()`이 MLX default가 이미 CPU인데도 CPU 확정 때마다 `Device::cpu`를 다시 썼다. 이 함수는 테스트에서 반복 호출되고 pinned MLX는 default device를 평범한 non-atomic 전역에 저장하므로, CPU-only 실행에서 불필요한 process-global write가 발생했다 | MEDIUM | 현재 default가 아직 GPU일 때만 CPU 확정을 적용하도록 수정. driver 없는 CUDA의 GPU→CPU 전환은 그대로 보장됨 |
+| CUDA multi-GPU 테스트 `trivial_op_runs_on_non_default_gpu_index`가 평가 뒤 GPU 0을 수동 복원해, 그 줄 전에 panic이 나면 공유 lock을 쥐고도 GPU 1이 후속 테스트에 누수됐다 | MEDIUM | GPU 1 선택 전에 `DefaultDeviceGuard`로 이전 device를 capture하도록 수정. 이제 unwinding 중에도 lock 해제 전에 복원됨 |
 
 ---
 
@@ -127,7 +134,7 @@ PR #1420은 공유 `mlx_test_guard()` 테스트 헬퍼 맨 앞에 무조건적�
 
 **CUDA `gpu::is_available()`의 특이점.** MLX 자신의 default device는 `mlx::core::gpu::is_available()`로부터 시작되는데, CUDA backend는 이 호출에 무조건 `true`로 답한다 — `device_count(Device::gpu)`처럼 driver에게 실제로 물어보지 않는다. 그래서 driver가 제대로 동작하지 않는 호스트의 CUDA 빌드는, `gpu_backend_available()`(실제로 `cudaGetDeviceCount`를 확인하는)이 정확히 사용 불가로 판정하는 GPU를 이미 default로 가리킨 채로 시작한다. `initialize_runtime()`이 운영자의 명시적 override만 적용했다면, 이 호스트는 (`resolve_device()`가 `gpu_backend_available() == false`를 보므로) `RuntimeSetup.device == Cpu`로 확정되면서도 MLX 자신은 이미 default로 삼은 GPU에 커버되지 않은 모든 op를 계속 dispatch했을 것이다 — 구조체가 런타임이 실제로 실행되는 곳에 대해 거짓인 사실을 보고하는 셈이다.
 
-**수정 내용과 GPU 방향에 대응이 필요 없는 이유.** `initialize_runtime()`은 이제 `device.uses_gpu()`가 false이면, 그 확정이 운영자 override에서 왔든 backend가 "여기 GPU 없음"이라고 답한 데서 왔든 상관없이 `set_default_device(false)`를 적용한다. GPU 방향은 의도적으로 비대칭이다: `device == Gpu`는 `gpu_backend_available()`가 true일 때만 도달 가능하고, 이는 `device_count(Device::gpu) > 0`을 요구하며, 어떤 backend에서든 이것은 `gpu::is_available()`도 true임을 함의한다 — 즉 그 분기에서는 MLX 자신의 default가 이미 GPU이므로 적용할 것이 없다. GPU 방향을 pin하지 않는 데는 두 번째 이점도 있다: `mlx_test_guard`의 leak assertion이 닿을 수 없는 곳에 이 호출을 둔다는 점이다. 그 assertion은 GPU가 이미 default라고 기대할 뿐, 모든 런타임 초기화마다 거기에 pin되는 무언가를 기대하지 않는다.
+**수정 내용과 GPU 방향에 대응이 필요 없는 이유.** `initialize_runtime()`은 이제 현재 default가 아직 GPU인 모든 CPU 확정에 `set_default_device(false)`를 적용한다. 그 확정이 운영자 override에서 왔든 backend가 "여기 GPU 없음"이라고 답한 데서 왔든 상관없다. 현재-device 체크는 driver 없는 CUDA에서 필요한 전환을 유지하면서 CPU-only 빌드와 앞선 CPU 초기화 뒤의 중복 write를 피한다. GPU 방향은 의도적으로 비대칭이다: `device == Gpu`는 `gpu_backend_available()`가 true일 때만 도달 가능하고, 이는 `device_count(Device::gpu) > 0`을 요구하며, 어떤 backend에서든 이것은 `gpu::is_available()`도 true임을 함의한다 — 즉 그 분기에서는 MLX의 초기 default가 GPU이므로 적용할 것이 없다. GPU 방향을 pin하지 않는 데는 두 번째 이점도 있다: `mlx_test_guard`의 leak assertion이 닿을 수 없는 곳에 이 호출을 둔다는 점이다. 그 assertion은 GPU가 이미 default라고 기대할 뿐, 모든 런타임 초기화마다 거기에 pin되는 무언가를 기대하지 않는다.
 
 ### 3.5 RAII guard, process-wide lock 하나, live-guard backstop — 하나가 아니라 세 겹
 
@@ -192,8 +199,8 @@ pub fn is_gpu_available() -> bool {
 // on the CPU (issue #1421).
 let (device, cpu_override) =
     resolve_device(requested_device, mlxcel_core::gpu_backend_available());
-// Apply every CPU resolution, not just the operator's override. ...
-if !device.uses_gpu() {
+// Apply every CPU transition, not just the operator's override. ...
+if !device.uses_gpu() && mlxcel_core::default_device_is_gpu() {
     mlxcel_core::set_default_device(false);
 }
 ```
@@ -294,7 +301,7 @@ assert!(
 
 - `DefaultDeviceGuard::drop`(위 4.4절) — 복원에 `gpu_backend_available()` 체크가 필요 없는 이유.
 - `gpu_backend_available()`의 bridge 주석(`mlx_cxx_bridge.cpp`) — 기존 문구는 이 호출이 "runtime 초기화가 끝나기 전에도 안전하다"고 했는데, 이는 사실이지만 저렴하다는 뉘앙스로 읽힌다. Metal에서는 첫 호출이 `metal::Device` singleton을 생성한다(metallib load). 주석은 이제 이를 명시하면서, 어차피 모든 array 할당이 그 singleton을 생성하게 되므로 이 query는 비용을 새로 더하는 게 아니라 그저 더 일찍 당기는 것뿐이라는 점, 그리고 이후 호출들(Metal에서, 그리고 CUDA backend의 캐시된 `cudaGetDeviceCount`)은 magic-static 체크에 불과하다는 점을 함께 밝힌다.
-- `initialize_runtime`의 `set_default_device(false)` 호출(4.3절) — 보안 리뷰는(MEDIUM, 보고만 됨) 세 번째 커밋 이후 이것이 lock을 쥐지 않는 유일한 in-tree default-device mover라고 지적했다. 한 번 startup에서만 실행되고 테스트 중 GPU 호스트에서는 무해하다는 점을 감안하면 직렬화할 가치는 없지만, 이제 주석이 이를 명시적으로 밝히고 앞으로 새로 추가되는 mover를 위한 규칙도 함께 적는다: `lock_default_device()`를 쥐어라.
+- `initialize_runtime`의 `set_default_device(false)` 호출(4.3절) — 보안 리뷰는(MEDIUM) 세 번째 커밋 이후 이것이 lock을 쥐지 않는 유일한 in-tree default-device mover라고 지적했다. Production에서는 worker가 시작되기 전에 실행되고, 최종 hardening은 이를 조건부로 만들어 CPU-only 테스트의 반복 초기화가 MLX의 평범한 전역 변수를 다시 쓰지 않게 했다. 주석은 두 제약을 모두 기록하고 앞으로 새 mover가 따라야 할 규칙도 명시한다: `lock_default_device()`를 쥐어라.
 
 ---
 
@@ -366,11 +373,10 @@ assert!(
 - `models::bert_tests::mlx_test_guard` / `models::modernbert_tests::mlx_guard`는 공유 `embedding_test_support::mlx_test_guard`로의 순수 위임이다. 조치는 필요 없고, 호출부를 감사하는 사람을 위해 기록해 둔다.
 - `tests/sampling_*_kill_switch.rs`는 default-device 체크에서 backend-availability 체크로 바뀌었다. 해당 바이너리들은 현재 아무것도 default device를 옮기지 않으므로 이 구분은 맞지만 지금은 도달 불가능하다.
 
-### 이 호스트에서 검증 불가능한 것
+### 남아 있는 환경별 검증 공백
 
-- bridge의 CUDA 빌드(`--features cuda`): `gpu_backend_available()`는 `mlx::core::device_count`만 사용하고, 이는 `gpu_device_count()`가 이미 모든 backend에서 `#ifdef` 없이 무조건 호출하는 것이며, `no_cuda` stub 경로도 손대지 않았지만, 이 Apple Silicon 호스트에는 CUDA 툴체인이 없다.
-- driver가 있는 GB10 CUDA 빌드에서 `gpu_backend_available()`가 `true`를 반환하는 것, driver 없는 CUDA 빌드에서 `false`를 반환하는 것 — pinned MLX의 `mlx/device.cpp`, `mlx/backend/cuda/device_info.cpp`를 근거로 추론했을 뿐 실행하지는 않았다.
-- PR #1420이 쫓던 reranker gate 수치들(베이징 문서에 대한 0.9883, 유한한 Qwen3-VL 이미지 점수): 체크포인트가 이 호스트에 없어 `rerank::real_checkpoint_tests`는 점수를 매기는 대신 soft-skip된다.
+- 최종 hardening 단계에서는 기존 리뷰의 Apple Silicon suite를 다시 실행하지 않았다. 해당 결과는 부록 A에 그대로 기록되어 있다.
+- 동작하는 driver가 없는 CUDA 빌드 환경은 확보하지 못했다. 이 환경의 `gpu_backend_available() == false` 동작과 startup GPU→CPU 전환은 pinned MLX 소스 분석 및 별도의 순수 runtime resolution 테스트를 근거로 한다.
 
 ---
 
@@ -406,6 +412,19 @@ override 없을 때: `Runtime device: Apple GPU (Metal)`, 13.27 tok/s.
 
 두 줄 다 새 `RuntimeSetup.cpu_override` 필드가 만든다. 두 번째 줄은 override가 `true`*이면서 동시에* 실제로 GPU backend가 사용 가능했을 때만 나올 수 있는데, 이것이 정확히 1.2절과 3.4절이 보고 가능하게 만들려 했던 구분이다.
 
-### C. 실행하지 않은 것
+### C. 기존 Apple Silicon 리뷰에서 실행하지 않은 것
 
-`--features cuda`는 이 호스트(Apple Silicon 전용)에서 컴파일도 실행도 불가능하다. 위 "이 호스트에서 검증 불가능한 것" 참조. `mlx-community/Phi-3.5-mini-instruct-4bit`와 `mlx-community/Qwen3-4B-4bit`만 로컬에 있는 체크포인트라서, reranker real-checkpoint gate들이 점수를 매기는 대신 soft-skip된다.
+기존 리뷰 호스트에서는 `--features cuda`를 컴파일하거나 실행할 수 없었다. 당시 로컬 체크포인트는 `mlx-community/Phi-3.5-mini-instruct-4bit`와 `mlx-community/Qwen3-4B-4bit`뿐이어서 reranker real-checkpoint gate는 점수를 계산하지 않고 soft-skip됐다.
+
+### D. 최종 hardening 검증 (NVIDIA GB10, compute capability 12.1, CUDA, 2026-09-03)
+
+| 체크 | 결과 |
+|---|---|
+| `cargo fmt --all -- --check` 및 `git diff --check` | clean |
+| `cargo clippy --workspace --all-targets --profile test-fast --features cuda -- -D warnings` | clean(이 diff 밖의 기존 C++ compiler warning은 남아 있음) |
+| `cargo test --profile test-fast --features cuda -p mlxcel-core --lib streams:: -- --test-threads=1` | 최종 hardening patch 전후 각 18 passed |
+| `cargo test --profile test-fast --features cuda --lib execution::runtime -- --test-threads=1` | 19 passed |
+| `MLXCEL_DEVICE=cpu cargo test --profile test-fast --features cuda --lib execution::runtime -- --test-threads=1` | 19 passed |
+| `cargo test --profile test-fast --features cuda --lib -- --test-threads=1 multimodal:: rerank::real_checkpoint_tests` | 262 passed, 26 ignored; 로컬에 있는 real reranker checkpoint가 정상 실행됨 |
+| CPU-only `mlxcel-core` backend-availability 회귀 테스트 | 1 passed |
+| CPU-only root `execution::runtime` 테스트 | 19 passed |
