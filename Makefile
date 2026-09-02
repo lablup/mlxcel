@@ -939,7 +939,7 @@ webpage-dev: ## Run download webpage dev server
 	cd webpage/site && pnpm install && pnpm dev
 
 .PHONY: webpage-build
-webpage-build: ## Build download webpage (static export)
+webpage-build: docs-guard ## Build download webpage (static export) (manual sources not in this checkout)
 	@echo "$(CYAN)Building documentation for webpage...$(RESET)"
 	rm -rf webpage/site/public/en/manual webpage/site/public/ko/manual
 	uv run zensical build -f mkdocs.yml -d webpage/site/public/en/manual
@@ -948,9 +948,22 @@ webpage-build: ## Build download webpage (static export)
 	cd webpage/site && pnpm install && pnpm build
 	@echo "$(GREEN)Build complete. Output in webpage/site/out/$(RESET)"
 
+# webpage-deploy is intentionally not gated behind docs-guard. deploy_webpage.sh
+# never invokes zensical or reads docs_dir, so it cannot fail the way
+# webpage-build does, and docs-guard checks for docs/en (a build input) rather
+# than for the manual output deploy actually reads. What deploy needs is the
+# manual already built into webpage/site/public/{en,ko}/manual by a prior
+# 'make webpage-build' (or copied in from elsewhere); a missing docs/en does
+# not imply that output is missing. So this checks the actual precondition and
+# warns without blocking, since a maintainer may be re-deploying an unchanged
+# site from a previous build.
 .PHONY: webpage-deploy
 webpage-deploy: ## Deploy download webpage to GitHub Pages
 	@echo "$(CYAN)Deploying webpage...$(RESET)"
+	@if [ ! -d webpage/site/public/en/manual ] || [ ! -d webpage/site/public/ko/manual ]; then \
+		echo "$(YELLOW)Warning: webpage/site/public/en/manual or .../ko/manual is missing.$(RESET)"; \
+		echo "  Run 'make webpage-build' first, or the deployed site will be missing (or serving a stale copy of) the manual pages."; \
+	fi
 	./scripts/deploy_webpage.sh
 
 # ============================================================================
