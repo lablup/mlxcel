@@ -197,7 +197,7 @@ use crate::models::gemma4_mtp_target::{
     Gemma4MtpBatchedTargetAdapter, Gemma4MtpTargetAdapter, Gemma4UnifiedMtpBatchedTargetAdapter,
     Gemma4VLMtpBatchedTargetAdapter,
 };
-use crate::server::model_provider::GenerateEvent;
+use crate::server::model_provider::{GenerateEvent, SpeculativeStats};
 
 use super::sequence::{FinishReason, SequenceInfo, SequenceState};
 
@@ -872,6 +872,7 @@ pub(crate) fn try_run_burst_b1(
             prefill_time_ms,
             decode_time_ms,
             profile,
+            speculative,
         }) => {
             // Transition Queued → Prefilling now that we know the
             // burst owned the request lifecycle.
@@ -901,8 +902,15 @@ pub(crate) fn try_run_burst_b1(
             // path's prompt-cache donate. `logprobs` is
             // forwarded so a speculative response carries the same
             // `TokenWithLogprobs` payload as the classic decode path
-            let finalized =
-                finalize_burst_success(ctx, seq, tokens, logprobs, prefill_time_ms, decode_time_ms);
+            let finalized = finalize_burst_success(
+                ctx,
+                seq,
+                tokens,
+                logprobs,
+                prefill_time_ms,
+                decode_time_ms,
+                speculative,
+            );
             let wall_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
             Ok(BurstFinalized {
                 seq_id,
@@ -976,6 +984,11 @@ struct BurstSuccess {
     /// runs that produced no round. The scheduler feeds it to the adaptive
     /// policy after the burst finalizes.
     profile: Option<MtpBurstProfile>,
+    /// Per-request drafter acceptance counters (issue #1314), `Some` on both
+    /// arms when at least one verify round ran. Unlike [`Self::profile`] this
+    /// is client-facing: it rides `GenerationResult::speculative` onto the
+    /// `timings` block of the response.
+    speculative: Option<SpeculativeStats>,
 }
 
 /// Outcome of [`finalize_burst_success`].
@@ -1395,6 +1408,23 @@ fn run_mtp_burst(
         .filter(|summary| summary.rounds > 0 || summary.probe_rounds > 0)
         .map(|summary| MtpBurstProfile::from_summary(summary, 1, prompt.len()));
 
+    // Client-facing acceptance counters (issue #1314). `MtpAcceptanceSummary`
+    // is `Copy`, so this reads the same value the profile above did rather
+    // than re-deriving it. The filter is narrower than the profile's on
+    // purpose: a run that executed only classic-step probe rounds drafted
+    // nothing, and reporting it as a speculative request would misdescribe it.
+    // The kind is `Mtp` because this function is only reachable from
+    // `SpeculativeDispatch::Mtp`, which is exactly what
+    // `SpeculativeDispatch::drafter_kind` answers for that variant.
+    let speculative = output.acceptance.and_then(|summary| {
+        SpeculativeStats::from_counts(
+            DrafterKind::Mtp,
+            summary.rounds,
+            summary.proposed_tokens,
+            summary.accepted_draft_tokens,
+        )
+    });
+
     // Hand the recovered drafter back to the slot for the next
     // request. The slot's `return_drafter` calls `reset` against the
     // target LM so the drafter starts clean.
@@ -1407,6 +1437,7 @@ fn run_mtp_burst(
         prefill_time_ms: stats.prefill_time_ms,
         decode_time_ms: stats.decode_time_ms,
         profile,
+        speculative,
     })
 }
 
@@ -1612,7 +1643,12 @@ fn run_dflash_burst(
     // text-only requests. The multimodal gate above rejects image/audio
     // payloads before this point.
     let prefill_start = Instant::now();
-    let (tokens, logprobs, decode_time_ms) = match ctx.model {
+    let DFlashTargetRun {
+        tokens,
+        logprobs,
+        decode_time_ms,
+        speculative,
+    } = match ctx.model {
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_dflash_on_qwen35(
             qwen,
             &prompt,
@@ -1663,7 +1699,26 @@ fn run_dflash_burst(
         // The adaptive MTP policy (issue #333) governs the MTP path only;
         // DFlash carries no profile.
         profile: None,
+        speculative,
     })
+}
+
+/// What one DFlash target run hands back to [`run_dflash_burst`].
+///
+/// A struct rather than a tuple because the run grew a fourth member with
+/// issue #1314 and a four-element tuple of two vectors, a float and an option
+/// is read once and then guessed at forever.
+struct DFlashTargetRun {
+    /// Every token the run emitted, the first bonus included.
+    tokens: Vec<i32>,
+    /// Per-token logprob payloads, index-aligned with [`Self::tokens`]; empty
+    /// when the request did not ask for logprobs.
+    logprobs: Vec<Option<TokenLogprobData>>,
+    /// Round-loop decode wall clock in milliseconds.
+    decode_time_ms: f64,
+    /// Client-facing drafter acceptance counters (issue #1314); `None` when
+    /// the run executed no verify round.
+    speculative: Option<SpeculativeStats>,
 }
 
 /// DFlash burst on a Qwen 3.5 text target (including a Qwen 3.5 VLM wrapper
@@ -1700,7 +1755,7 @@ fn run_dflash_on_qwen35<T>(
     drafter_slot: &mut WorkerDrafterSlot,
     cancel: &AtomicBool,
     logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
-) -> Result<(Vec<i32>, Vec<Option<TokenLogprobData>>, f64), BurstOutcome>
+) -> Result<DFlashTargetRun, BurstOutcome>
 where
     T: Qwen35DFlashTarget,
 {
@@ -1881,7 +1936,21 @@ where
             } else {
                 Vec::new()
             };
-            Ok((tokens, logprobs, output.stats.decode_time_ms))
+            Ok(DFlashTargetRun {
+                tokens,
+                logprobs,
+                decode_time_ms: output.stats.decode_time_ms,
+                // Client-facing acceptance counters (issue #1314), from the
+                // same `diagnostics` the log line above reports. The kind is
+                // `Dflash` because this is the DFlash driver itself, which
+                // `SpeculativeDispatch::DFlash` is the only route into.
+                speculative: SpeculativeStats::from_counts(
+                    DrafterKind::Dflash,
+                    diagnostics.rounds,
+                    diagnostics.proposed_tokens,
+                    diagnostics.accepted_tokens,
+                ),
+            })
         }
         Err(e) => Err(BurstOutcome::Error(format!(
             "DFlash round loop failed: {e}"
@@ -1961,10 +2030,11 @@ fn finalize_burst_success(
     logprobs: Vec<Option<TokenLogprobData>>,
     _prefill_time_ms: f64,
     _decode_time_ms: f64,
+    speculative: Option<SpeculativeStats>,
 ) -> FinalizeOutcome {
     let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
-    finalize_burst_stream(ctx.tokenizer, seq, &stream)
+    finalize_burst_stream(ctx.tokenizer, seq, &stream, speculative)
 }
 
 /// Cross-slice streaming state of a burst-produced token stream
@@ -2121,10 +2191,17 @@ pub(crate) fn stream_burst_tokens(
 /// incremental detokenizer, and emit the `Done` event. The tail of the
 /// legacy `finalize_burst_success`, shared by the run-to-completion and
 /// tick-cooperative paths.
+///
+/// `speculative` is the request's drafter acceptance summary (issue #1314):
+/// the run-to-completion arms take it off `BurstSuccess`, the tick-cooperative
+/// slice builds it from the session's acceptance summary at finalize. It rides
+/// the `Done` result out to the response layer, which turns it into the
+/// `timings` block's `draft_*` keys.
 pub(crate) fn finalize_burst_stream(
     tokenizer: &crate::tokenizer::MlxcelTokenizer,
     mut seq: SequenceInfo,
     stream: &BurstStreamState,
+    speculative: Option<SpeculativeStats>,
 ) -> FinalizeOutcome {
     // Final state classification. A matched string stop sequence outranks the
     // budget: the request ended because the caller's own stop string appeared,
@@ -2175,7 +2252,7 @@ pub(crate) fn finalize_burst_stream(
     let tail = seq.decode_state.flush(tokenizer);
     seq.close_text_stream(tail);
     let cached = seq.already_cached_tokens;
-    let result = seq.take_generation_result(tokenizer, cached);
+    let result = seq.take_generation_result(tokenizer, cached, speculative);
     tracing::info!(
         prompt_tokens = seq.prompt_tokens.len(),
         generated_tokens = tokens_generated,
@@ -2427,6 +2504,12 @@ pub(crate) fn try_run_burst_batched(
                     Vec::new(),
                     /* prefill_time_ms */ 0.0,
                     /* decode_time_ms */ 0.0,
+                    // The batched round loops return per-row tokens and no
+                    // per-row acceptance counters, so this arm reports no
+                    // `draft_*` block rather than an invented or a
+                    // window-wide one (#1314). The path is off by default
+                    // (`mtp_batched_burst_enabled`).
+                    None,
                 );
                 // Surface the per-row prompt + committed token vectors
                 // and the healthy-finish flag so the scheduler can

@@ -60,8 +60,8 @@ use mlxcel_core::{MlxArray, UniquePtr, from_slice_f32};
 
 use crate::server::batch::sequence::{RequestPriority, SequenceInfo, SequenceState};
 use crate::server::batch::stop_matcher::StopMatcher;
-use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
+use crate::server::model_provider::{GenerateEvent, GenerationResult, SpeculativeStats};
 use crate::server::thinking_budget::ThinkingState;
 
 use super::speculative_burst::{begin_burst_stream, finalize_burst_stream, stream_burst_tokens};
@@ -356,7 +356,7 @@ fn run_to_completion_reference(
     let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
     let mut stream = begin_burst_stream(eos, &seq);
     stream_burst_tokens(&tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
-    let outcome = finalize_burst_stream(&tokenizer, seq, &stream);
+    let outcome = finalize_burst_stream(&tokenizer, seq, &stream, None);
     let events = drain_events(&rx);
     (tokens, summary, events, outcome)
 }
@@ -439,7 +439,7 @@ fn slice_driver_commits_identical_stream_to_run_to_completion() {
     assert_eq!(summary.probe_rounds, ref_summary.probe_rounds);
 
     let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
-    let outcome = finalize_burst_stream(&tokenizer, job.seq, &job.stream);
+    let outcome = finalize_burst_stream(&tokenizer, job.seq, &job.stream, None);
     assert_eq!(
         outcome.generated_tokens, ref_outcome.generated_tokens,
         "slice-driven committed stream must equal the run-to-completion stream token-for-token"
@@ -497,7 +497,7 @@ fn slice_driver_cancel_between_slices_finishes_without_another_round() {
     // Early bail (not EOS, not budget) classifies as a clean Stop, same
     // as the legacy burst's early-bail classification.
     let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
-    let outcome = finalize_burst_stream(&tokenizer, job.seq, &job.stream);
+    let outcome = finalize_burst_stream(&tokenizer, job.seq, &job.stream, None);
     assert!(outcome.healthy_finish);
 }
 
@@ -717,7 +717,7 @@ fn finalize_rot_job(
     let slices = job.slices;
     let finish = job.finish.take().expect("job finished");
     let rounds = finish.summary.map(|s| s.rounds).unwrap_or(0);
-    let outcome = finalize_burst_stream(tokenizer, job.seq, &job.stream);
+    let outcome = finalize_burst_stream(tokenizer, job.seq, &job.stream, None);
     RotOutcome {
         committed: outcome.generated_tokens,
         healthy_finish: outcome.healthy_finish,
@@ -1223,4 +1223,60 @@ fn rotation_skip_cap_prevents_high_lane_starvation() {
         a_grants >= 3,
         "A must keep progressing under High-lane pressure: {grant_log:?}"
     );
+}
+
+// =============================================================================
+// Per-request acceptance stats on the finished result (#1314)
+// =============================================================================
+
+/// Finish a burst-shaped request through the shared finalize and return the
+/// `Done` result the client receives, so the acceptance block can be read off
+/// the same event the response layer reads it off.
+fn done_result_with(speculative: Option<SpeculativeStats>) -> GenerationResult {
+    let (mut seq, rx) = make_slice_sequence(16);
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let mut stream = begin_burst_stream(Vec::new(), &seq);
+    stream_burst_tokens(&tokenizer, &mut seq, &mut stream, &[10, 11, 12], &[]);
+    let _ = finalize_burst_stream(&tokenizer, seq, &stream, speculative);
+    rx.try_iter()
+        .find_map(|event| match event {
+            GenerateEvent::Done(result) => Some(result),
+            _ => None,
+        })
+        .expect("the burst finalize sends exactly one Done event")
+}
+
+#[test]
+fn the_done_result_carries_the_acceptance_counters_of_a_drafted_request() {
+    // The counters come from the real generator over the two-round script
+    // rather than from literals, so the mapping under test is the one the
+    // round loop actually feeds it: `MtpAcceptanceSummary` in, the four
+    // client-facing fields out.
+    let (_tokens, summary, _events, _outcome) = run_to_completion_reference(16);
+    let stats = SpeculativeStats::from_counts(
+        DrafterKind::Mtp,
+        summary.rounds,
+        summary.proposed_tokens,
+        summary.accepted_draft_tokens,
+    )
+    .expect("the two-round script executes speculative rounds");
+
+    let carried = done_result_with(Some(stats))
+        .speculative
+        .expect("a drafted request reports its acceptance");
+    assert_eq!(carried, stats);
+    assert!(carried.draft_rounds > 0, "{carried:?}");
+    assert!(carried.draft_n_accepted <= carried.draft_n, "{carried:?}");
+    assert!(
+        carried.draft_n_accepted > 0,
+        "the script accepts every proposal: {carried:?}"
+    );
+    assert_eq!(carried.draft_kind, DrafterKind::Mtp);
+}
+
+#[test]
+fn the_done_result_reports_no_acceptance_for_an_undrafted_finish() {
+    // What every classic-decode call site passes. The absence is the signal
+    // that no drafter served the request, so it must not become zeros.
+    assert!(done_result_with(None).speculative.is_none());
 }

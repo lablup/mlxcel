@@ -1499,7 +1499,8 @@ impl BatchScheduler {
             let tail = seq.decode_state.flush(&self.tokenizer);
             seq.close_text_stream(tail);
             let cached = seq.already_cached_tokens;
-            let result = seq.take_generation_result(&self.tokenizer, cached);
+            // Finished inside prefill, so no verify round ran (#1314).
+            let result = seq.take_generation_result(&self.tokenizer, cached, None);
             tracing::info!(
                 prompt_tokens = seq.prompt_tokens.len(),
                 cached_tokens = cached,

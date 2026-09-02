@@ -1854,6 +1854,11 @@ fn chat_chunk_reasoning(
 /// Final streaming chunk carrying the request's `finish_reason` ("stop" or
 /// "length"); the router derives it from the worker's authoritative token count
 /// (issue #387) so it matches the single-node chat route.
+///
+/// Unlike the single-node finish chunk it carries no `timings` block (#1314):
+/// this stream is assembled from the handoff protocol, whose outcome reports a
+/// generated-token count and no speculative acceptance counters. Surfacing them
+/// here is a handoff-protocol change rather than a response-shaping one.
 fn chat_chunk_finish(id: &str, model: &str, finish_reason: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -1915,6 +1920,10 @@ fn chat_chunk_usage(
 /// `ChatCompletionResponse` shape (`prompt_tokens`, `completion_tokens`,
 /// `total_tokens`); `completion_tokens` is the caller's already-resolved
 /// authoritative count (issue #398).
+///
+/// Like the streaming finish chunk it carries no `timings` block (#1314), for
+/// the same reason: the handoff outcome reports a generated-token count and no
+/// speculative acceptance counters.
 fn chat_completion_json(
     id: &str,
     model: &str,

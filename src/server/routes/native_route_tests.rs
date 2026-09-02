@@ -28,38 +28,40 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
+use crate::server::model_provider::{ScriptedStreamHandle, SpeculativeStats};
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
 use crate::tokenizer::MlxcelTokenizer;
 
 fn app() -> Router {
     let (options_tx, _options_rx) = mpsc::channel();
-    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    create_app(state_for(Arc::new(
+        ModelProvider::recording_for_route_tests(options_tx),
+    )))
+}
+
+fn state_for(provider: Arc<ModelProvider>) -> AppState {
     let batch_metrics = provider.batch_metrics().clone();
-    let state = AppState::new(
+    AppState::new(
         provider,
         ServerConfig::default(),
         ChatTemplateProcessor::with_template("ok".to_string()),
         MlxcelTokenizer::stub(),
         PathBuf::from("native-route-test-model"),
         batch_metrics,
-    );
-    create_app(state)
+    )
 }
 
-async fn post(path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-    let request = Request::builder()
+fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
         .method(Method::POST)
         .uri(path)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
-        .expect("request builds");
-    let response = app().oneshot(request).await.expect("router responds");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body collects");
-    let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-    (status, parsed)
+        .expect("request builds")
+}
+
+async fn post(path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    post_to(app(), path, body).await
 }
 
 /// The native completion body, whose shape is what separates the handlers.
@@ -733,4 +735,267 @@ async fn generation_settings_reports_the_b10621_task_params_keys_mlxcel_resolves
     assert_eq!(settings["reasoning_format"], "deepseek");
     assert_eq!(settings["reasoning_in_content"], false);
     assert_eq!(settings["timings_per_token"], false);
+}
+
+// ---------------------------------------------------------------------------
+// Speculative acceptance on the timings block (#1314)
+// ---------------------------------------------------------------------------
+
+/// The DFlash acceptance a drafted request reports in these tests: nine rounds
+/// proposing 72 tokens of which 55 were accepted.
+fn dflash_stats() -> SpeculativeStats {
+    SpeculativeStats::from_counts(mlxcel_core::drafter::DrafterKind::Dflash, 9, 72, 55)
+        .expect("nine rounds proposing 72 tokens is a speculative run")
+}
+
+/// The same app as [`app`], served by a provider that answers as a
+/// DFlash-drafted request.
+fn speculative_app() -> Router {
+    let (options_tx, _options_rx) = mpsc::channel();
+    create_app(state_for(Arc::new(
+        ModelProvider::recording_for_route_tests_with_speculative(options_tx, dflash_stats()),
+    )))
+}
+
+/// The same app again, but streaming step by step from the returned handle, so
+/// a test can drive real content frames between the opening and closing ones.
+fn scripted_speculative_app() -> (Router, ScriptedStreamHandle) {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let (provider, handle) = ModelProvider::scripted_streaming_for_route_tests_with_speculative(
+        options_tx,
+        dflash_stats(),
+    );
+    (create_app(state_for(Arc::new(provider))), handle)
+}
+
+async fn post_to(
+    app: Router,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .oneshot(json_request(path, body))
+        .await
+        .expect("router responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body collects");
+    let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, parsed)
+}
+
+/// The SSE frames of a streaming response, as parsed `data:` payloads with the
+/// `[DONE]` sentinel dropped.
+async fn stream_frames(app: Router, path: &str, body: serde_json::Value) -> Vec<serde_json::Value> {
+    let response = app
+        .oneshot(json_request(path, body))
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        axum::body::to_bytes(response.into_body(), 1024 * 1024),
+    )
+    .await
+    .expect("stream ends")
+    .expect("body collects");
+    String::from_utf8(bytes.to_vec())
+        .expect("utf-8 stream")
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|l| l.trim() != "[DONE]")
+        .map(|l| serde_json::from_str(l).expect("frame parses"))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_native_timings_omit_the_draft_keys_without_a_drafter() {
+    // A server started without `--draft-model` answers exactly the body it
+    // answered before #1314. The keys are absent, not zero: a zero `draft_n`
+    // would say a drafter ran and proposed nothing.
+    let (status, body) = post("/completion", native_prompt()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let timings = body["timings"].as_object().expect("timings is an object");
+    for key in ["draft_n", "draft_n_accepted", "draft_rounds", "draft_kind"] {
+        assert!(!timings.contains_key(key), "{key} must be absent: {body}");
+    }
+}
+
+#[tokio::test]
+async fn the_native_timings_report_the_draft_counters_of_a_drafted_request() {
+    // `draft_n` / `draft_n_accepted` are b10621's own optional pair, so a
+    // client already reading llama-server timings reads these unchanged;
+    // `draft_rounds` and `draft_kind` are the mlxcel extension beside them.
+    for path in ["/completion", "/completions"] {
+        let (status, body) = post_to(speculative_app(), path, native_prompt()).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body["timings"]["draft_n"], 72, "{path}: {body}");
+        assert_eq!(body["timings"]["draft_n_accepted"], 55, "{path}: {body}");
+        assert_eq!(body["timings"]["draft_rounds"], 9, "{path}: {body}");
+        assert_eq!(body["timings"]["draft_kind"], "dflash", "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn a_chat_completion_carries_no_timings_object_without_a_drafter() {
+    // The OpenAI wire shape of a non-speculative deployment is unchanged: no
+    // `timings` key at all, rather than one reporting zeros.
+    let (status, body) = post(
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "native-route-test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("timings").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn a_chat_completion_carries_the_timings_object_of_a_drafted_request() {
+    let (status, body) = post_to(
+        speculative_app(),
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "native-route-test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["timings"]["draft_n"], 72, "{body}");
+    assert_eq!(body["timings"]["draft_n_accepted"], 55, "{body}");
+    assert_eq!(body["timings"]["draft_rounds"], 9, "{body}");
+    assert_eq!(body["timings"]["draft_kind"], "dflash", "{body}");
+    // The whole b10621 block, not the draft half alone: a client that probes
+    // for `timings` and reads `predicted_per_second` off it has to find the
+    // key it expects. Same object the native route answers with.
+    assert_eq!(
+        keys(&body["timings"]),
+        [
+            "cache_n",
+            "prompt_n",
+            "prompt_ms",
+            "prompt_per_token_ms",
+            "prompt_per_second",
+            "predicted_n",
+            "predicted_ms",
+            "predicted_per_token_ms",
+            "predicted_per_second",
+            "draft_n",
+            "draft_n_accepted",
+            "draft_rounds",
+            "draft_kind",
+        ],
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn the_streaming_chat_finish_chunk_carries_the_timings_and_the_others_do_not() {
+    // The finish chunk is where the totals are final. A mid-stream chunk that
+    // carried a running `draft_n` would read as a total and be wrong, so only
+    // the frame that already carries `finish_reason` carries the block. Driven
+    // through the scripted provider so the negative half of the assertion runs
+    // against a stream that really has content frames.
+    let (app, handle) = scripted_speculative_app();
+    let frames = tokio::spawn(stream_frames(
+        app,
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "native-route-test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4,
+            "stream": true,
+        }),
+    ));
+    handle.token("Hello");
+    handle.token(" world");
+    handle.finish();
+    let frames = frames.await.expect("stream task joins");
+
+    let mut content_frames = 0;
+    let mut saw_finish = false;
+    for chunk in &frames {
+        if chunk["choices"][0]["finish_reason"].is_string() {
+            saw_finish = true;
+            assert_eq!(chunk["timings"]["draft_n"], 72, "{chunk}");
+            assert_eq!(chunk["timings"]["draft_n_accepted"], 55, "{chunk}");
+            assert_eq!(chunk["timings"]["draft_rounds"], 9, "{chunk}");
+            assert_eq!(chunk["timings"]["draft_kind"], "dflash", "{chunk}");
+        } else {
+            if chunk["choices"][0]["delta"]["content"].is_string() {
+                content_frames += 1;
+            }
+            assert!(
+                chunk.get("timings").is_none(),
+                "only the finish chunk carries the totals: {chunk}"
+            );
+        }
+    }
+    assert!(saw_finish, "the stream must end with a finish chunk");
+    assert!(
+        content_frames >= 2,
+        "the negative half must run against real content frames, saw {content_frames}"
+    );
+}
+
+#[tokio::test]
+async fn the_native_stream_carries_the_draft_keys_on_the_final_frame_only() {
+    // `timings_per_token` puts a timing block on every partial frame. Those
+    // frames must stay at the nine b10621 keys even for a drafted request: the
+    // acceptance counters are the run's totals and only exist once the round
+    // loop has finished. The final frame is the one that carries all thirteen.
+    let (app, handle) = scripted_speculative_app();
+    let frames = tokio::spawn(stream_frames(
+        app,
+        "/completion",
+        serde_json::json!({
+            "prompt": "hello",
+            "n_predict": 4,
+            "stream": true,
+            "timings_per_token": true,
+        }),
+    ));
+    handle.token("Hello");
+    handle.token(" world");
+    handle.finish();
+    let frames = frames.await.expect("stream task joins");
+
+    let (final_frame, partials) = frames.split_last().expect("the stream has frames");
+    assert_eq!(final_frame["stop"], true, "{final_frame}");
+    assert_eq!(final_frame["timings"]["draft_n"], 72, "{final_frame}");
+    assert_eq!(
+        final_frame["timings"]["draft_n_accepted"], 55,
+        "{final_frame}"
+    );
+    assert_eq!(final_frame["timings"]["draft_rounds"], 9, "{final_frame}");
+    assert_eq!(
+        final_frame["timings"]["draft_kind"], "dflash",
+        "{final_frame}"
+    );
+
+    let mut timed_partials = 0;
+    for frame in partials {
+        assert_eq!(frame["stop"], false, "{frame}");
+        let timings = frame["timings"]
+            .as_object()
+            .expect("timings_per_token puts a block on every partial frame");
+        timed_partials += 1;
+        for key in ["draft_n", "draft_n_accepted", "draft_rounds", "draft_kind"] {
+            assert!(
+                !timings.contains_key(key),
+                "{key} must be absent from a partial frame: {frame}"
+            );
+        }
+        assert_eq!(timings.len(), 9, "{frame}");
+    }
+    assert!(
+        timed_partials >= 2,
+        "the assertion must run against real partial frames, saw {timed_partials}"
+    );
 }

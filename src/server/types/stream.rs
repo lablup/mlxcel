@@ -98,6 +98,13 @@ pub struct ChatCompletionChunk {
     /// is true). Omitted from all other chunks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::response::Usage>,
+    /// The b10621 `timings` block for this request (issue #1314). Attached to
+    /// the finish chunk only, where the totals are final: a mid-stream chunk
+    /// that carried a running `draft_n` would read as a total and be wrong.
+    /// Absent unless a drafter executed at least one verify round for the
+    /// request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timings: Option<super::native_completion::NativeTimings>,
 }
 
 impl ChatCompletionChunk {
@@ -122,6 +129,7 @@ impl ChatCompletionChunk {
                 logprobs: None,
             }],
             usage: None,
+            timings: None,
         }
     }
 
@@ -156,6 +164,7 @@ impl ChatCompletionChunk {
                 logprobs,
             }],
             usage: None,
+            timings: None,
         }
     }
 
@@ -198,7 +207,25 @@ impl ChatCompletionChunk {
                 logprobs: None,
             }],
             usage: None,
+            timings: None,
         }
+    }
+
+    /// Attach this request's b10621 `timings` block (issue #1314), as built by
+    /// [`chat_timings`](super::native_completion::chat_timings), to the finish
+    /// chunk that closes a streamed response.
+    ///
+    /// `None` leaves the key absent, so a non-speculative stream is unchanged
+    /// frame for frame.
+    ///
+    /// Used by: chat.rs (streaming path)
+    #[must_use]
+    pub fn with_timings(
+        mut self,
+        timings: Option<super::native_completion::NativeTimings>,
+    ) -> Self {
+        self.timings = timings;
+        self
     }
 
     /// Create final chunk with finish reason
@@ -222,6 +249,7 @@ impl ChatCompletionChunk {
                 logprobs: None,
             }],
             usage: None,
+            timings: None,
         }
     }
 
@@ -260,6 +288,7 @@ impl ChatCompletionChunk {
                 logprobs: None,
             }],
             usage: None,
+            timings: None,
         }
     }
 
@@ -297,6 +326,7 @@ impl ChatCompletionChunk {
                 logprobs: None,
             }],
             usage: None,
+            timings: None,
         }
     }
 
@@ -349,6 +379,7 @@ impl ChatCompletionChunk {
                 total_tokens: prompt_tokens + completion_tokens,
                 prompt_tokens_details,
             }),
+            timings: None,
         }
     }
 }

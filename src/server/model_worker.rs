@@ -3420,6 +3420,10 @@ pub(crate) fn build_generation_result_with_cache(
         // Structured coordinate output is produced only by the Florence-2
         // seq2seq worker, which builds its result directly (issue #1073).
         structured_output: None,
+        // Filled in by the scheduler's `take_generation_result` on the three
+        // speculative paths (#1314); every other producer decodes classically
+        // and has no drafter to report.
+        speculative: None,
     }
 }
 

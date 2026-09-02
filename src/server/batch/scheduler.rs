@@ -663,11 +663,30 @@ impl BatchScheduler {
                     summary, 1, prompt_len,
                 )
             });
+        // Client-facing acceptance counters (issue #1314), from the same
+        // `Copy` summary the policy profile above reads. The session spans
+        // every slice of the request, so `finish_session` already returns the
+        // run's totals and nothing has to be accumulated here. `drafter_kind`
+        // resolves the kind from the dispatch that admitted the slice rather
+        // than assuming one, and yields `None` for a dispatch that runs no
+        // drafter, in which case there is nothing to report either.
+        let speculative = finish
+            .summary
+            .zip(self.speculative_dispatch.drafter_kind())
+            .and_then(|(summary, kind)| {
+                crate::server::model_provider::SpeculativeStats::from_counts(
+                    kind,
+                    summary.rounds,
+                    summary.proposed_tokens,
+                    summary.accepted_draft_tokens,
+                )
+            });
         let seq_id = seq.seq_id;
         let outcome = crate::server::batch::speculative_burst::finalize_burst_stream(
             &self.tokenizer,
             seq,
             &job.stream,
+            speculative,
         );
         self.finish_speculative_b1(crate::server::batch::speculative_burst::BurstFinalized {
             seq_id,

@@ -602,6 +602,11 @@ pub(crate) async fn non_stream_chat_completion(
     });
 
     let cached_tokens = result.cached_tokens;
+    // The b10621 `timings` block for this request (#1314), or `None` when no
+    // drafter served it. Built here because `result.text` is moved into one of
+    // the response shapes below, so every return path needs the block resolved
+    // before that happens.
+    let timings = crate::server::types::native_completion::chat_timings(&result);
 
     // b10621 `--skip-chat-parsing` (issue #1447): force a pure content parser.
     // Everything the model emitted goes to `content` verbatim, reasoning and
@@ -620,7 +625,8 @@ pub(crate) async fn non_stream_chat_completion(
                 logprobs,
             )
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-            .with_florence2_result(florence2_result),
+            .with_florence2_result(florence2_result)
+            .with_timings(timings.clone()),
         ));
     }
 
@@ -705,7 +711,8 @@ pub(crate) async fn non_stream_chat_completion(
                     .with_reasoning_content_alias_field(
                         shaped.reasoning_content,
                         reasoning_alias_field,
-                    ),
+                    )
+                    .with_timings(timings.clone()),
                 ));
             }
         }
@@ -733,7 +740,8 @@ pub(crate) async fn non_stream_chat_completion(
             )
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
             .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
-            .with_florence2_result(florence2_result),
+            .with_florence2_result(florence2_result)
+            .with_timings(timings.clone()),
         ));
     }
 
@@ -778,7 +786,8 @@ pub(crate) async fn non_stream_chat_completion(
         )
         .with_cached_tokens(cached_tokens, prompt_cache_enabled)
         .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
-        .with_florence2_result(florence2_result),
+        .with_florence2_result(florence2_result)
+        .with_timings(timings.clone()),
     ))
 }
 
@@ -1706,11 +1715,19 @@ async fn stream_chat_completion(
             submit_next_turn_warmup(state, &live, request, ctx, &reply);
         }
 
-        // Send finish chunk
+        // Send finish chunk. It is the frame that carries this request's
+        // speculative acceptance counters (#1314): the totals are final here,
+        // and this is the chunk a client already reads for `finish_reason`.
         let finish = ChatCompletionChunk::finish(
             request_id_clone.clone(),
             model_id_clone.clone(),
             finish_reason,
+        )
+        .with_timings(
+            result
+                .as_ref()
+                .ok()
+                .and_then(crate::server::types::native_completion::chat_timings),
         );
         let _ = finish_events.json(&finish);
 

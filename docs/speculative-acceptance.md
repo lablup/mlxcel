@@ -176,6 +176,66 @@ finished` line, and the drafter auto-detection line. Default output is
 unchanged when `RUST_LOG` is unset. `mlxcel serve` is unaffected: it installs
 its own subscriber.
 
+### Per-request acceptance on the response itself
+
+`mlxcel-server` reports what speculation did for **one request** on that
+request's own response, so a client can answer "did the drafter help me" without
+access to the server's logs (#1314). The block appears only when a drafter
+executed at least one verify round; a classic-decode deployment, and a
+speculative request that finished inside prefill, answer the body they always
+did.
+
+On the native `/completion` and `/completions` routes the counters ride the
+existing `timings` object:
+
+```json
+"timings": {"cache_n": 0, "prompt_n": 12, "predicted_n": 64, "...": "...",
+            "draft_n": 72, "draft_n_accepted": 55, "draft_rounds": 9,
+            "draft_kind": "dflash"}
+```
+
+`draft_n` and `draft_n_accepted` are llama-server's own optional pair, spelled
+as upstream spells them and appended the way upstream appends them, so a client
+that already reads llama-server timings reads mlxcel's unchanged.
+`draft_rounds` and `draft_kind` are mlxcel additions: upstream has neither a
+round count nor a drafter-kind concept, and without the round count the mean
+accepted length per round is not recoverable from the pair.
+
+`/v1/chat/completions` carries the whole block as a top-level `timings` object,
+on the non-streaming response and on the streaming chunk that carries
+`finish_reason`. b10621 puts a `timings` object on its own OpenAI chat
+responses, built from the same struct its native route uses, so mlxcel's is that
+same object rather than the `draft_*` half alone: a client that probes for the
+key and then reads `predicted_per_second` off it finds the key it expects. The
+one difference that remains is presence, upstream emits the block on every chat
+completion while mlxcel emits it only for a drafted request, and it is recorded
+against both chat routes in `compat/llama-server/b10621/routes.json`.
+
+Only the `finish_reason` chunk carries it: the counters are the run's totals,
+and a mid-stream frame reporting a running `draft_n` would be reporting a total
+that is not one yet. For the same reason the native route's per-token
+`timings_per_token` frames carry the nine base keys and none of the four.
+
+The mean accepted length per round is `(draft_n_accepted + draft_rounds) /
+draft_rounds`: every round emits its accepted drafts plus one bonus token. It
+is left to the client rather than reported, so a client that wants a different
+aggregate is not stuck with this one. `draft_kind` carries a `--draft-kind`
+name. In practice today it is `dflash` or `mtp`: `internal-mtp` resolves to the
+classic dispatch, which the burst gate declines, so no request is served
+speculatively under it and none reports a block.
+
+The block covers the three paths that own a request's whole round loop: the
+DFlash B=1 burst, the MTP B=1 burst, and the tick-cooperative MTP slice (whose
+counters are the session totals across every slice, not one slice's). The
+default-off B>1 batched burst reports nothing, because its round loops return
+per-row tokens without per-row acceptance counters.
+
+The disaggregated router front reports nothing either. It assembles its stream
+from the prefill/decode handoff protocol rather than from a finished
+`GenerationResult`, and that protocol carries a generated-token count and no
+acceptance counters, so surfacing the block there is a handoff-protocol change
+and not a response-shaping one.
+
 ## Verifying the gain before trusting a throughput number
 
 `MLXCEL_SPECULATIVE_ACCEPT_DIAG=1` adds a second line:
