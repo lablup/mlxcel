@@ -182,7 +182,7 @@ impl TurboKvCacheArgs {
     }
 }
 
-// ── (B11)   KV cache type split flags ─────────────────────────────
+// ── KV cache type split flags ────────────────────────────────────
 // (Comment kept in non-doc form for code-archeology only; the user-facing
 // help text intentionally omits closed-repo issue numbers.)
 

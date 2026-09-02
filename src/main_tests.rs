@@ -403,7 +403,7 @@ fn generate_command_parses_tensor_parallel_flags() {
     assert_eq!(args.tensor_parallel.tp_lm_head_mode, "replicated");
 }
 
-// (A4): CLI argument-parsing tests for the `--surgery <FILE>`
+// CLI argument-parsing tests for the `--surgery <FILE>`
 // flag on the `generate` and `serve` subcommands. These tests only cover
 // the clap surface — they do not invoke the surgery pipeline or touch
 // any model weights. The end-to-end behavior is exercised by the

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Axis A "weight-load surgery" CLI integration glue (— A4).
+//! Axis A "weight-load surgery" CLI integration glue.
 //!
 //! This module owns the **active-pipeline slot**: a process-wide
 //! `Option<Arc<SurgeryPipeline>>` set by the CLI/server entry points

@@ -198,7 +198,7 @@ fn sample_input() -> ServerStartupInput {
         apc_block_size: None,
         apc_num_blocks: None,
         apc_hash: None,
-        // (B11): KV cache type split flags — default to None (FP16).
+        // KV cache type split flags — default to None (FP16).
         cache_type_k: None,
         cache_type_v: None,
         kv_cache_mode_legacy: None,
@@ -224,7 +224,7 @@ fn sample_input() -> ServerStartupInput {
         conversation_store_max_bytes:
             crate::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
         conversation_store_ttl_secs: 3600,
-        // (A4): default to None for baseline-path tests.
+        // Surgery config path defaults to None for baseline-path tests.
         #[cfg(feature = "surgery")]
         surgery_config_path: None,
         // serve-level diffusion knobs (#217 phase 3): engine defaults in tests.
@@ -1353,7 +1353,7 @@ fn prompt_cache_e2e_cli_capacity_bytes_flows_to_startup_config() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (B11) — resolve_kv_cache_mode tests
+// resolve_kv_cache_mode tests
 //
 // These tests cover the K/V-to-KVCacheMode mapping logic: all supported pairs,
 // unsupported combinations, and legacy/split flag interaction.
@@ -1567,7 +1567,7 @@ fn into_startup_config_kv_cache_mode_unsupported_pair_errors() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (B11) — env-var fallback tests for LLAMA_ARG_CACHE_TYPE_K/V
+// env-var fallback tests for LLAMA_ARG_CACHE_TYPE_K/V
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// `LLAMA_ARG_CACHE_TYPE_K` is applied when the CLI flag is absent.

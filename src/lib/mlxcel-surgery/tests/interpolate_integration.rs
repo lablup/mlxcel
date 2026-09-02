@@ -143,7 +143,7 @@ operations:
     fs::write(&yaml_path, yaml).expect("write yaml");
 
     // 3. Parse the YAML — this is the exact entry point the CLI
-    //    flag (A4) will invoke.
+    //    flag will invoke.
     let pipeline: SurgeryPipeline = parse_config_file(&yaml_path).expect("parse_config_file");
     assert_eq!(pipeline.len(), 1);
 

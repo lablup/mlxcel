@@ -234,7 +234,7 @@ pub fn parse_config_str(
 /// [`SurgeryPipeline`]. Relative `source*` paths in the YAML are
 /// resolved against the file's parent directory.
 ///
-/// Used by: future CLI wiring (A4), `mlxcel surgery validate` (A4),
+/// Used by: the `--surgery` CLI wiring, `mlxcel surgery validate`,
 /// integration tests in this crate
 pub fn parse_config_file<P: AsRef<Path>>(path: P) -> Result<SurgeryPipeline, SurgeryError> {
     let path = path.as_ref();

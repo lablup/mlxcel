@@ -851,7 +851,7 @@ pub struct ServerConfig {
     /// the policy via the Rust API or keep the default.
     pub prompt_cache: crate::server::prompt_cache::PromptCacheConfig,
 
-    /// (B11): server-wide KV cache mode.
+    /// Server-wide KV cache mode.
     ///
     /// Resolved from `--cache-type-k`/`--cache-type-v` (llama-server split
     /// flags) or the legacy `--kv-cache-mode` shorthand.  Defaults to

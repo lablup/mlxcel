@@ -212,7 +212,7 @@ fn sample_args() -> crate::ServeArgs {
         conversation_store_max_bytes:
             mlxcel::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
         conversation_store_ttl_secs: 3600,
-        // (A4): keep tests on the baseline path by default.
+        // Keep tests on the baseline path by default.
         #[cfg(feature = "surgery")]
         surgery: None,
         // serve-level diffusion knobs (#217 phase 3): engine defaults in tests.

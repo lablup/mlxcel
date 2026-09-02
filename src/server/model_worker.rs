@@ -108,7 +108,7 @@ pub(crate) struct WorkerSchedulerConfig {
     /// scheduler can adopt detached prefixes on cache hits and donate-back
     /// finished sequences.
     pub prompt_cache: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
-    /// (B11) / server-wide KV cache quantization mode.
+    /// Server-wide KV cache quantization mode.
     ///
     /// Defaults to [`mlxcel_core::cache::KVCacheMode::Fp16`] (bit-exact
     /// baseline). When a Turbo4 variant is configured, the scheduler
