@@ -903,6 +903,14 @@ impl BatchScheduler {
         // reaches the check below assigns it exactly once; the others return.
         let prefill_eval: Option<Result<(), String>>;
         let logits = {
+            // A model that picks its RoPE frequency table from how long the
+            // whole prompt is has to make that choice once for the prompt. Per
+            // chunk it would rotate the head of a threshold-crossing prompt
+            // with one table and the tail with another, into the same cache.
+            // The guard covers this chunk's forward only, because the scheduler
+            // runs other sequences' decode steps between two chunks of this
+            // one. See `mlxcel_core::prefill_span`.
+            let _span = mlxcel_core::prefill_span::announce(seq.prompt_tokens.len() as i32);
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
                 None => {
@@ -1130,6 +1138,11 @@ impl BatchScheduler {
         let eff_len = eff_chunk.len() as i32;
         let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
         let logits = {
+            // Same announcement as the first chunk: every chunk of one prompt
+            // must resolve a position-dependent RoPE table the same way, and
+            // only the total prompt length answers that. See
+            // `mlxcel_core::prefill_span`.
+            let _span = mlxcel_core::prefill_span::announce(total as i32);
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
                 None => {

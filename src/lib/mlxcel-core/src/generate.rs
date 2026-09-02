@@ -306,6 +306,12 @@ fn chunked_prefill_last_logits<M: LanguageModel + ?Sized>(
     chunk: usize,
 ) -> UniquePtr<MlxArray> {
     debug_assert!(chunk > 0 && !prompt_tokens.is_empty());
+    // A model that picks its RoPE frequency table from how long the whole
+    // prompt is must make that choice once for the prompt, not once per chunk.
+    // Without this the chunks below write keys rotated with two different
+    // tables into one cache whenever the prompt straddles the threshold. See
+    // `crate::prefill_span`.
+    let _span = crate::prefill_span::announce(prompt_tokens.len() as i32);
     let mut logits: Option<UniquePtr<MlxArray>> = None;
     for piece in prompt_tokens.chunks(chunk) {
         let input = ffi::from_slice_i32(piece, &[1, piece.len() as i32]);

@@ -60,6 +60,16 @@ pub struct ModelArgs {
 
     #[serde(default = "default_max_position_embeddings")]
     pub max_position_embeddings: usize,
+
+    /// Trained context length, as the Phi checkpoints actually spell it.
+    ///
+    /// `microsoft/Phi-3.5-mini-instruct` and `microsoft/Phi-4-multimodal-instruct`
+    /// put `original_max_position_embeddings` at the top level of `config.json`
+    /// and not inside `rope_scaling`, so a reader that only looks in the block
+    /// falls back to its default and is right by luck. Resolved through
+    /// [`ModelArgs::original_max_position_embeddings`].
+    #[serde(default)]
+    pub original_max_position_embeddings: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +90,14 @@ pub struct RopeScaling {
     /// SuScaledRoPE / longrope: per-dimension scaling factors for short sequences.
     #[serde(default)]
     pub short_factor: Option<Vec<f64>>,
+    /// Attention-magnitude multiplier for the short table, overriding the
+    /// default `sqrt(1 + ln(M / L) / ln(L))`. Present on the Phi-4 configs.
+    #[serde(default)]
+    pub short_mscale: Option<f32>,
+    /// Attention-magnitude multiplier for the long table, overriding the same
+    /// default.
+    #[serde(default)]
+    pub long_mscale: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +132,20 @@ impl ModelArgs {
         ((self.head_dim() as f32) * self.partial_rotary_factor) as usize
     }
 
+    /// Trained context length `L`: the length up to which LongRoPE uses
+    /// `short_factor`, and the base of the default attention-magnitude scale.
+    ///
+    /// The `rope_scaling` block wins when it carries the key, then the top
+    /// level, then 4096. Both spellings occur in the wild and the shipped Phi
+    /// checkpoints use the top-level one.
+    pub fn original_max_position_embeddings(&self) -> usize {
+        self.rope_scaling
+            .as_ref()
+            .and_then(|s| s.original_max_position_embeddings)
+            .or(self.original_max_position_embeddings)
+            .unwrap_or_else(crate::models::config::default_original_max_position_embeddings)
+    }
+
     pub fn group_size(&self) -> i32 {
         self.quantization
             .as_ref()
@@ -123,6 +155,163 @@ impl ModelArgs {
 
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
+    }
+}
+
+// SuScaledRoPE / LongRoPE tables.
+
+/// One LongRoPE frequency table and the attention-magnitude scale that belongs
+/// to it.
+///
+/// Used by: Phi3, Phi3V, Phi4MM (`longrope` / `su` scaling)
+pub struct SuRopeTable {
+    /// `factor[i] * rope_theta ^ (2i / rope_dims)`, shape `[rope_dims / 2]`.
+    pub freqs: UniquePtr<MlxArray>,
+    /// Multiplier applied to the rotary prefix of Q and K before rotation.
+    ///
+    /// Upstream scales `cos` and `sin` instead; RoPE is linear in its input, so
+    /// scaling Q and K first is the same map and costs one multiply.
+    pub scale: f32,
+    /// `scale` as a `[1]` array, so the graph path allocates nothing per token.
+    /// `None` when the scale is exactly 1.0 and the multiply can be skipped.
+    scale_arr: Option<UniquePtr<MlxArray>>,
+}
+
+impl SuRopeTable {
+    /// Build the table for one factor list.
+    ///
+    /// `factor` must hold at least `rope_dims / 2` entries; the caller checks
+    /// that before constructing.
+    fn new(factor: &[f64], rope_dims: usize, rope_base: f64, scale: f32) -> Self {
+        let half_dims = rope_dims / 2;
+        let mut freqs = vec![0.0f32; half_dims];
+        for (i, freq) in freqs.iter_mut().enumerate() {
+            let exponent = (2 * i) as f64 / rope_dims as f64;
+            *freq = (factor[i] * rope_base.powf(exponent)) as f32;
+        }
+        Self {
+            freqs: mlxcel_core::from_slice_f32(&freqs, &[half_dims as i32]),
+            scale,
+            scale_arr: ((scale - 1.0).abs() > 1e-6)
+                .then(|| mlxcel_core::from_slice_f32(&[scale], &[1])),
+        }
+    }
+}
+
+/// Both LongRoPE tables and the position threshold that chooses between them.
+///
+/// The trained model rotates with `short_factor` while the sequence still fits
+/// in `original_max_position_embeddings` and with `long_factor` beyond it, which
+/// is what
+/// [`Phi3LongRoPEScaledRotaryEmbedding`](https://github.com/huggingface/transformers/blob/main/src/transformers/models/phi3/modeling_phi3.py)
+/// does. On `microsoft/Phi-3.5-mini-instruct` the two tables are far apart (the
+/// low-frequency `long_factor` entries reach 64.8 where `short_factor` stays
+/// under 2.9), so using one table everywhere mis-rotates every prompt on the
+/// other side of the threshold.
+///
+/// Note that mlx-lm is not the reference here.
+/// [`SuScaledRotaryEmbedding`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py)
+/// accepts `short_factor` and `short_mscale` and then builds its frequencies
+/// from `long_factor` and its scale from `long_mscale` alone, so it applies the
+/// long table at every position. A short-prompt comparison against mlx-lm
+/// therefore disagrees with the checkpoint, and a short-prompt comparison
+/// against transformers agrees with it.
+///
+/// Used by: Phi3, Phi3V, Phi4MM
+pub struct SuRope {
+    short: SuRopeTable,
+    long: SuRopeTable,
+    /// `original_max_position_embeddings`, the trained context the short table
+    /// covers.
+    original_max: i32,
+}
+
+impl SuRope {
+    /// Build both tables from a `longrope` / `su` config, or `None` when the
+    /// block names another scheme or carries no usable factor list.
+    fn from_args(args: &ModelArgs) -> Option<Self> {
+        let scaling = args.rope_scaling.as_ref()?;
+        let rope_type = scaling.rope_type.as_deref().unwrap_or("");
+        if rope_type != "longrope" && rope_type != "su" {
+            return None;
+        }
+
+        let rope_dims = args.rope_dims();
+        let half_dims = rope_dims / 2;
+        let long_factor = scaling.long_factor.as_ref()?;
+        if half_dims == 0 || long_factor.len() < half_dims {
+            return None;
+        }
+        // A block that carries only `long_factor` keeps its pre-#1358 behavior:
+        // one table, used at every position.
+        let short_factor = match scaling.short_factor.as_ref() {
+            Some(short) if short.len() >= half_dims => short,
+            _ => long_factor,
+        };
+
+        let original_max = args.original_max_position_embeddings();
+        let default_scale = default_su_scale(args.max_position_embeddings, original_max);
+        let rope_base = args.rope_theta as f64;
+
+        Some(Self {
+            short: SuRopeTable::new(
+                short_factor,
+                rope_dims,
+                rope_base,
+                scaling.short_mscale.unwrap_or(default_scale),
+            ),
+            long: SuRopeTable::new(
+                long_factor,
+                rope_dims,
+                rope_base,
+                scaling.long_mscale.unwrap_or(default_scale),
+            ),
+            original_max: original_max as i32,
+        })
+    }
+
+    /// Pick the table for one forward pass.
+    ///
+    /// The choice belongs to the whole sequence, not to this pass. A prompt
+    /// longer than one prefill chunk arrives as several passes over the same
+    /// cache, and deciding from `offset + seq_len` would rotate the head of a
+    /// threshold-crossing prompt with the short table and its tail with the
+    /// long one. So a chunked prefill announces the prompt length through
+    /// [`mlxcel_core::prefill_span`] and that answers the question for every
+    /// chunk; a single-pass prefill announces nothing because its own
+    /// `offset + seq_len` is already the sequence length. Taking the larger of
+    /// the two means an under-announcing driver still cannot make a long
+    /// sequence look short.
+    ///
+    /// Decode announces nothing either, so a generation that crosses the
+    /// threshold flips to the long table at `offset + 1 > L` and leaves the
+    /// short-table keys already in the cache alone. Transformers instead drops
+    /// the cache and re-encodes the sequence with the long table at that point;
+    /// see `docs/supported-models.md` for the divergence this leaves.
+    fn table_for(&self, offset: i32, seq_len: i32) -> &SuRopeTable {
+        let pass_end = offset.saturating_add(seq_len);
+        let span =
+            mlxcel_core::prefill_span::current().map_or(pass_end, |total| total.max(pass_end));
+        if span > self.original_max {
+            &self.long
+        } else {
+            &self.short
+        }
+    }
+}
+
+/// The attention-magnitude scale LongRoPE uses when the config overrides
+/// neither `short_mscale` nor `long_mscale`: `sqrt(1 + ln(M / L) / ln(L))`.
+fn default_su_scale(max_position_embeddings: usize, original_max: usize) -> f32 {
+    // `ln(L)` is the denominator, so `L <= 1` has no scale to compute.
+    if original_max <= 1 {
+        return 1.0;
+    }
+    let factor = max_position_embeddings as f64 / original_max as f64;
+    if factor <= 1.0 {
+        1.0
+    } else {
+        (1.0 + factor.ln() / (original_max as f64).ln()).sqrt() as f32
     }
 }
 
@@ -137,14 +326,11 @@ pub struct Phi3Attention {
     pub scale: f32,
     pub rope_dims: i32,
     pub rope_base: f32,
-    /// SuScaledRoPE: pre-computed frequencies (long_factor * base_freqs).
+    /// SuScaledRoPE: the short and long frequency tables, and the position
+    /// threshold that selects between them. `None` unless the config carries a
+    /// `longrope` / `su` block with usable factors.
     /// Used by: Phi4MM, Phi3V (longrope scaling)
-    pub su_rope_freqs: Option<UniquePtr<MlxArray>>,
-    /// SuScaledRoPE: input scaling factor applied to Q/K before rotation.
-    /// = sqrt(1 + log(max_pos/orig_max_pos) / log(orig_max_pos))
-    pub su_rope_scale: f32,
-    /// Pre-computed scale array to avoid per-token allocation in SuScaledRoPE forward
-    su_rope_scale_arr: Option<UniquePtr<MlxArray>>,
+    pub su_rope: Option<SuRope>,
 }
 
 impl Phi3Attention {
@@ -161,22 +347,25 @@ impl Phi3Attention {
         let offset = cache.offset;
 
         // Fused QKV split + RoPE preparation. The SuScaledRoPE quantized path
-        // mirrors mlx-lm/mlx-vlm by scaling only the rotary prefix and keeps
-        // the projection/split/reshape/transpose/RoPE chain in one bridge call.
-        let (q, k, v) = if let Some(ref freqs) = self.su_rope_freqs {
+        // scales only the rotary prefix and keeps the
+        // projection/split/reshape/transpose/RoPE chain in one bridge call.
+        // Both paths take the table selected here, so they cannot disagree
+        // about which one this pass rotates with.
+        let su_table = self.su_rope.as_ref().map(|su| su.table_for(offset, l));
+        let (q, k, v) = if let Some(table) = su_table {
             if let Some((q, k, v)) = self.qkv_proj.forward_fused_qkv_split_su_scaled_rope(
                 x,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
                 self.rope_dims,
-                freqs,
-                self.su_rope_scale,
+                &table.freqs,
+                table.scale,
                 offset,
             ) {
                 (q, k, v)
             } else {
-                self.prepare_qkv_with_rope(x, b, l, offset, Some(freqs))
+                self.prepare_qkv_with_rope(x, b, l, offset, Some(table))
             }
         } else {
             self.prepare_qkv_with_rope(x, b, l, offset, None)
@@ -213,7 +402,7 @@ impl Phi3Attention {
         b: i32,
         l: i32,
         offset: i32,
-        su_freqs: Option<&MlxArray>,
+        su_table: Option<&SuRopeTable>,
     ) -> (
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
@@ -235,12 +424,24 @@ impl Phi3Attention {
         let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
-        let (q, k) = if let Some(freqs) = su_freqs {
-            let (q, k) = self.scale_su_rope_rotary_prefix(&q, &k);
-            let q =
-                mlxcel_core::fast_rope_with_freqs(&q, self.rope_dims, false, 1.0, offset, freqs);
-            let k =
-                mlxcel_core::fast_rope_with_freqs(&k, self.rope_dims, false, 1.0, offset, freqs);
+        let (q, k) = if let Some(table) = su_table {
+            let (q, k) = self.scale_su_rope_rotary_prefix(&q, &k, table);
+            let q = mlxcel_core::fast_rope_with_freqs(
+                &q,
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                &table.freqs,
+            );
+            let k = mlxcel_core::fast_rope_with_freqs(
+                &k,
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                &table.freqs,
+            );
             (q, k)
         } else {
             let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
@@ -255,8 +456,9 @@ impl Phi3Attention {
         &self,
         q: &MlxArray,
         k: &MlxArray,
+        table: &SuRopeTable,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        let Some(ref scale_arr) = self.su_rope_scale_arr else {
+        let Some(ref scale_arr) = table.scale_arr else {
             return (
                 mlxcel_core::reshape(q, &mlxcel_core::array_shape(q)),
                 mlxcel_core::reshape(k, &mlxcel_core::array_shape(k)),
@@ -296,7 +498,7 @@ impl Phi3Attention {
 
         let head_dim = args.head_dim() as i32;
 
-        let mut attn = Self {
+        Ok(Self {
             qkv_proj,
             o_proj,
             num_heads: args.num_attention_heads as i32,
@@ -305,63 +507,8 @@ impl Phi3Attention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: args.rope_dims() as i32,
             rope_base: args.rope_theta,
-            su_rope_freqs: None,
-            su_rope_scale: 1.0,
-            su_rope_scale_arr: None,
-        };
-
-        // Configure SuScaledRoPE if longrope scaling is present
-        if let Some(ref scaling) = args.rope_scaling {
-            let rope_type = scaling.rope_type.as_deref().unwrap_or("");
-            if rope_type == "longrope" || rope_type == "su" {
-                attn.configure_su_rope(args);
-            }
-        }
-
-        Ok(attn)
-    }
-
-    /// Configure SuScaledRoPE from model config.
-    /// Used by: Phi4MM, Phi3V (longrope/su scaling)
-    fn configure_su_rope(&mut self, args: &ModelArgs) {
-        let scaling = match &args.rope_scaling {
-            Some(s) => s,
-            None => return,
-        };
-        let long_factor = match &scaling.long_factor {
-            Some(f) => f,
-            None => return,
-        };
-
-        let dims = self.rope_dims as usize;
-        let half_dims = dims / 2;
-        if long_factor.len() < half_dims {
-            return;
-        }
-
-        // Compute modified frequencies: long_factor[i] * base^(2i/dims)
-        let base = self.rope_base as f64;
-        let mut freqs = vec![0.0f32; half_dims];
-        for i in 0..half_dims {
-            let exponent = (2 * i) as f64 / dims as f64;
-            freqs[i] = (long_factor[i] * base.powf(exponent)) as f32;
-        }
-        self.su_rope_freqs = Some(mlxcel_core::from_slice_f32(&freqs, &[half_dims as i32]));
-
-        // Compute scaling factor
-        let orig_max = scaling.original_max_position_embeddings.unwrap_or(4096) as f64;
-        let max_pos = args.max_position_embeddings as f64;
-        let factor = max_pos / orig_max;
-        let scale = if factor <= 1.0 {
-            1.0
-        } else {
-            (1.0 + factor.ln() / orig_max.ln()).sqrt() as f32
-        };
-        self.su_rope_scale = scale;
-        // Pre-compute scale array to avoid per-token from_slice_f32 allocation
-        if (scale - 1.0).abs() > 1e-6 {
-            self.su_rope_scale_arr = Some(mlxcel_core::from_slice_f32(&[scale], &[1]));
-        }
+            su_rope: SuRope::from_args(args),
+        })
     }
 }
 
