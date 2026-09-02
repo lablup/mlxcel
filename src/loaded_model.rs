@@ -106,6 +106,9 @@ pub enum LoadedModel {
     Glm4v(vision::Glm4vModel),
     Glm4vMoe(vision::Glm4vMoeModel),
     GlmOcr(vision::GlmOcrModel),
+    /// Text-only Youtu-LLM: the same MLA decoder `YoutuVL` runs as its text
+    /// tower, loaded on its own from a checkpoint with no vision weights.
+    YoutuLLM(models::youtu_vl_lm::YoutuLanguageModel),
     YoutuVL(vision::YoutuVLModel),
     InternVLChatVLM(vision::InternVLChatVLM),
     KimiVL(vision::KimiVLModel),
@@ -278,6 +281,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Glm4v(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Glm4vMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GlmOcr(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::YoutuLLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::YoutuVL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::InternVLChatVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiVL(inner) => LanguageModel::$method(inner, $($arg),*),

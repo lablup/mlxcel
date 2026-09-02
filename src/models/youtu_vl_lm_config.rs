@@ -12,22 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Youtu-VL language-model configuration types.
+//! Youtu language-model configuration types.
 //!
 //! Lifted out of `youtu_vl_lm.rs` so the runtime module stays under the
 //! 500-line soft target and so the loader can depend on the pure data types
 //! without pulling in the full language-model implementation.
+//!
+//! The same type backs both routes onto the decoder: the Youtu-VL text tower,
+//! whose fields sit at the root of the VLM `config.json`, and the text-only
+//! Youtu-LLM checkpoint, whose `config.json` is the same field set without a
+//! `vision_config` (issue #1371).
 
 use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::models::deepseek_v3;
 
-/// Youtu-VL text-side configuration.
+/// Youtu text-side configuration.
 ///
-/// Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/config.py (TextConfig).
+/// Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/config.py (TextConfig)
+/// and, for the text-only checkpoint, the vendor's own
+/// https://huggingface.co/tencent/Youtu-LLM-2B/blob/main/configuration_youtu.py (YoutuConfig).
+/// The two declare the same MLA field set; the VLM adds a `vision_config`.
 /// MoE-related fields are kept for forward compatibility with possible larger
-/// variants but are not exercised by the standard `youtu_vl` checkpoint.
+/// variants but are not exercised by any published checkpoint.
 #[derive(Debug, Clone, Deserialize)]
 pub struct YoutuTextConfig {
     #[serde(default = "default_model_type")]
@@ -42,7 +50,14 @@ pub struct YoutuTextConfig {
     pub num_key_value_heads: Option<usize>,
 
     pub kv_lora_rank: usize,
-    pub q_lora_rank: usize,
+
+    /// `null` (or absent) on a backbone that projects the query directly
+    /// through a plain `q_proj` instead of the LoRA chain. Every published
+    /// Youtu checkpoint sets 1536, but the vendor config declares the field
+    /// optional, so parsing must not require it.
+    #[serde(default)]
+    pub q_lora_rank: Option<usize>,
+
     pub qk_rope_head_dim: usize,
     pub v_head_dim: usize,
     pub qk_nope_head_dim: usize,
@@ -149,6 +164,50 @@ impl YoutuTextConfig {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 
+    /// Whether RoPE rotates interleaved (adjacent) pairs rather than the
+    /// half-split pairs of the non-traditional form.
+    ///
+    /// The vendor decoder branches on `rope_interleave`
+    /// (https://huggingface.co/tencent/Youtu-LLM-2B/blob/main/modeling_youtu.py,
+    /// `YoutuMLAttention.forward`), while the mlx-vlm port spells the same
+    /// choice `rope_traditional`. A checkpoint may carry either key, both
+    /// default to true, and no published checkpoint sets them to opposite
+    /// values, so either one turned off selects the half-split form.
+    pub fn rope_is_interleaved(&self) -> bool {
+        self.rope_interleave && self.rope_traditional
+    }
+
+    /// Reject a `rope_scaling` block the decoder cannot honor.
+    ///
+    /// The MLA attention applies plain RoPE at `rope_theta`; it has no YaRN
+    /// frequency interpolation, so only a block that reduces to the identity is
+    /// safe. `mlx-community/Youtu-LLM-2B-4bit` ships
+    /// `{"type": "yarn", "factor": 1.0, "mscale_all_dim": 0}`, which is exactly
+    /// that: with a factor of 1 the extrapolation and interpolation frequencies
+    /// coincide and the attention mscale is 1. A factor above 1 would ask for a
+    /// real interpolation, and silently ignoring it yields fluent but wrong
+    /// long-context output, so it is refused at load instead.
+    pub fn validate_rope_scaling(&self) -> Result<(), String> {
+        let Some(scaling) = self.rope_scaling.as_ref() else {
+            return Ok(());
+        };
+        let factor = scaling
+            .get("factor")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        if factor > 1.0 {
+            let kind = scaling
+                .get("rope_type")
+                .or_else(|| scaling.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            return Err(format!(
+                "rope_scaling declares `{kind}` with factor {factor}, but the Youtu MLA decoder                  applies plain RoPE with no frequency interpolation. Only a block that reduces to                  the identity (factor <= 1) is supported; loading this checkpoint would produce                  fluent but positionally wrong output beyond the original context length."
+            ));
+        }
+        Ok(())
+    }
+
     /// Build the carrier `DeepSeekV3Config` used to construct an
     /// MLA `DeepSeekV3Attention` from shared weights. Only the fields read by
     /// `DeepSeekV3Attention::from_weights` and `get_attention_scale` are
@@ -167,9 +226,9 @@ impl YoutuTextConfig {
             n_routed_experts: self.n_routed_experts,
             routed_scaling_factor: self.routed_scaling_factor,
             kv_lora_rank: self.kv_lora_rank,
-            // Youtu-VL always uses LoRA-compressed queries; wrap the required
-            // rank so the shared DeepSeek-V3 attention takes the LoRA branch.
-            q_lora_rank: Some(self.q_lora_rank),
+            // A rank selects the LoRA chain in the shared DeepSeek-V3
+            // attention; `None` selects the direct `q_proj` branch.
+            q_lora_rank: self.q_lora_rank,
             qk_rope_head_dim: self.qk_rope_head_dim,
             v_head_dim: self.v_head_dim,
             qk_nope_head_dim: self.qk_nope_head_dim,

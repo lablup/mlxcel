@@ -363,6 +363,7 @@ pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
+pub use youtu_vl_lm::YoutuLanguageModel;
 
 pub use kokoro::KokoroModel;
 
@@ -418,6 +419,7 @@ pub enum ModelType {
     Glm4v,             // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
     Glm4vMoe,          // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
     GlmOcr,            // GLM-OCR (GLM-OCR ViT + GLM-4 text w/ full-width MRoPE)
+    YoutuLLM,          // Youtu-LLM (text-only Youtu MLA decoder, no vision tower)
     YoutuVLM,          // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM,   // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
     LocateAnythingVLM, // LocateAnything: MoonViT + MLP connector + Qwen2 text (grounding)
@@ -684,6 +686,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Glm4v,
     ModelType::Glm4vMoe,
     ModelType::GlmOcr,
+    ModelType::YoutuLLM,
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::LocateAnythingVLM,
@@ -1176,6 +1179,10 @@ impl ModelType {
                 "MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)",
                 "Other VLM",
             ),
+            ModelType::YoutuLLM => (
+                "Youtu-LLM (DeepSeek-V2-style MLA decoder, text-only)",
+                "Specialized",
+            ),
             ModelType::YoutuVLM => (
                 "Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3 MLA)",
                 "Other VLM",
@@ -1275,6 +1282,7 @@ mod metadata_tests {
             Glm4v,
             Glm4vMoe,
             GlmOcr,
+            YoutuLLM,
             YoutuVLM,
             InternVLChatVLM,
             LocateAnythingVLM,

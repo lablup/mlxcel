@@ -403,6 +403,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // does not panic on the dispatch table lookup. The actual loader
         // refuses TP routing earlier than this for VLM-kind models.
         ModelType::YoutuVLM => "youtu_vl",
+        // Text-only Youtu-LLM is not tensor-parallel enabled either: its MLA
+        // decoder has no sharded runtime. The planner's supported-architecture
+        // validation rejects this string before any TP load is attempted; the
+        // arm exists so the dispatch table stays total.
+        ModelType::YoutuLLM => "youtu",
         // MiniCPM-V 4.6 uses Qwen3.5 backbone; TP is not supported for VLM-kind
         // models and the loader refuses TP routing earlier. Return placeholder.
         ModelType::MiniCPMV46VLM => "minicpmv4_6",

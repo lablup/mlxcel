@@ -29,7 +29,7 @@ fn minimal_config() -> YoutuTextConfig {
         num_attention_heads: 4,
         num_key_value_heads: Some(4),
         kv_lora_rank: 16,
-        q_lora_rank: 32,
+        q_lora_rank: Some(32),
         qk_rope_head_dim: 8,
         v_head_dim: 16,
         qk_nope_head_dim: 16,
@@ -276,4 +276,302 @@ fn quantized_kv_b_proj_rejects_a_kv_lora_rank_no_packing_can_describe() {
     if let Err(e) = sanitize_text_weights(float_only, &wide_rank) {
         panic!("a float kv_b_proj must not be gated on quantization params: {e}");
     }
+}
+
+// ---- Issue #1371: the text-only Youtu-LLM route --------------------------
+//
+// The text-only checkpoint is the same decoder without a vision tower, so the
+// tests below pin the three config properties the VLM sibling does not
+// exercise: an identity YaRN block, a `deepseek_v2` label, and the
+// `rope_interleave` switch actually reaching the rope call.
+
+/// The published text-only field set, taken from
+/// `mlx-community/Youtu-LLM-2B-4bit`'s `config.json`. It labels itself
+/// `deepseek_v2` for mlx-lm compatibility, omits `rope_traditional`, and
+/// carries a YaRN block whose factor is 1.
+fn text_only_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "model_type": "deepseek_v2",
+        "architectures": ["YoutuForCausalLM"],
+        "vocab_size": 128256,
+        "hidden_size": 2048,
+        "intermediate_size": 6144,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 16,
+        "kv_lora_rank": 512,
+        "q_lora_rank": 1536,
+        "qk_rope_head_dim": 64,
+        "qk_nope_head_dim": 128,
+        "v_head_dim": 128,
+        "rms_norm_eps": 1e-6,
+        "rope_scaling": {"type": "yarn", "factor": 1.0, "mscale_all_dim": 0},
+        "rope_theta": 1600000,
+        "rope_interleave": true,
+        "tie_word_embeddings": true,
+        "attention_bias": false,
+        "mlp_bias": false,
+        "quantization": {"group_size": 64, "bits": 4, "mode": "affine"}
+    })
+}
+
+/// The identity YaRN block must parse and must leave the attention scale at the
+/// plain `(qk_nope + qk_rope) ** -0.5`. The vendor applies its mscale only when
+/// `mscale_all_dim` is truthy, and `yarn_get_mscale` returns 1 at factor 1, so
+/// anything other than the unscaled value here would be a silent divergence
+/// from the reference decoder.
+#[test]
+fn text_only_config_with_identity_yarn_parses() {
+    let config: YoutuTextConfig = serde_json::from_value(text_only_config_json()).unwrap();
+
+    assert_eq!(config.q_lora_rank, Some(1536));
+    assert_eq!(config.rope_theta, 1_600_000.0);
+    assert!(config.tie_word_embeddings);
+    // `rope_traditional` is absent from this checkpoint and defaults to true,
+    // so the interleaved layout is selected by `rope_interleave` alone.
+    assert!(config.rope_interleave);
+    assert!(config.rope_is_interleaved());
+    assert_eq!(config.group_size(), 64);
+    assert_eq!(config.bits(), 4);
+
+    let with_yarn = config.to_deepseek_v3_config().get_attention_scale();
+
+    let mut plain: YoutuTextConfig = serde_json::from_value(text_only_config_json()).unwrap();
+    plain.rope_scaling = None;
+    let without_yarn = plain.to_deepseek_v3_config().get_attention_scale();
+
+    let expected = ((config.qk_nope_head_dim + config.qk_rope_head_dim) as f32).powf(-0.5);
+    assert_eq!(with_yarn, without_yarn);
+    assert_eq!(with_yarn, expected);
+
+    config
+        .validate_rope_scaling()
+        .expect("an identity yarn block must be accepted");
+}
+
+/// A YaRN block that actually interpolates is refused at load. The decoder
+/// applies plain RoPE at `rope_theta` and has no frequency interpolation, so
+/// accepting one would produce fluent but positionally wrong long-context
+/// output rather than a visible failure.
+#[test]
+fn rope_scaling_that_interpolates_is_refused() {
+    let mut raw = text_only_config_json();
+    raw["rope_scaling"] = serde_json::json!({"type": "yarn", "factor": 4.0, "mscale_all_dim": 1});
+    let config: YoutuTextConfig = serde_json::from_value(raw).unwrap();
+
+    let err = config
+        .validate_rope_scaling()
+        .expect_err("a factor above 1 must be refused, not silently ignored");
+    assert!(err.contains("factor"), "unhelpful error: {err}");
+    assert!(err.contains("yarn"), "error should name the scaling: {err}");
+}
+
+/// `q_lora_rank: null` selects the direct `q_proj` branch of the shared MLA
+/// attention. No published Youtu checkpoint sets it, but the vendor config
+/// declares the field optional, so a missing or null value must parse rather
+/// than fail the whole load.
+#[test]
+fn null_q_lora_rank_parses_and_selects_the_direct_q_projection() {
+    let mut raw = text_only_config_json();
+    raw["q_lora_rank"] = serde_json::Value::Null;
+    let config: YoutuTextConfig = serde_json::from_value(raw).unwrap();
+    assert_eq!(config.q_lora_rank, None);
+    assert_eq!(config.to_deepseek_v3_config().q_lora_rank, None);
+
+    let mut absent = text_only_config_json();
+    absent.as_object_mut().unwrap().remove("q_lora_rank");
+    let config: YoutuTextConfig = serde_json::from_value(absent).unwrap();
+    assert_eq!(config.q_lora_rank, None);
+
+    // A numeric rank still selects the LoRA chain.
+    let config: YoutuTextConfig = serde_json::from_value(text_only_config_json()).unwrap();
+    assert_eq!(config.to_deepseek_v3_config().q_lora_rank, Some(1536));
+}
+
+/// `rope_is_interleaved` folds the two spellings of the same switch: the
+/// vendor's `rope_interleave` and the mlx-vlm port's `rope_traditional`. Both
+/// default to true, and either one turned off selects the half-split form.
+#[test]
+fn rope_interleave_and_rope_traditional_are_the_same_switch() {
+    let mut config = minimal_config();
+    assert!(config.rope_is_interleaved());
+
+    config.rope_interleave = false;
+    assert!(!config.rope_is_interleaved());
+
+    config.rope_interleave = true;
+    config.rope_traditional = false;
+    assert!(!config.rope_is_interleaved());
+}
+
+/// Build the complete unquantized weight set for a `minimal_config` model,
+/// including the `kv_b_proj` that `sanitize_text_weights` decomposes. No
+/// `lm_head` is inserted: the config ties word embeddings, which is what every
+/// published Youtu checkpoint does.
+fn synthetic_tied_weights(config: &YoutuTextConfig) -> WeightMap {
+    fn ramp(n: usize) -> Vec<f32> {
+        // Small alternating values keep the forward pass numerically tame while
+        // still making every weight distinct.
+        (0..n)
+            .map(|i| ((i % 17) as f32 - 8.0) / 64.0)
+            .collect::<Vec<f32>>()
+    }
+    fn insert(weights: &mut WeightMap, key: &str, shape: &[i32]) {
+        let n: usize = shape.iter().map(|d| *d as usize).product();
+        weights.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&ramp(n), shape),
+        );
+    }
+
+    let hidden = config.hidden_size as i32;
+    let heads = config.num_attention_heads as i32;
+    let nope = config.qk_nope_head_dim as i32;
+    let rope = config.qk_rope_head_dim as i32;
+    let v_dim = config.v_head_dim as i32;
+    let kv_lora = config.kv_lora_rank as i32;
+    let q_lora = config.q_lora_rank.expect("minimal_config uses a q LoRA") as i32;
+    let inter = config.intermediate_size as i32;
+
+    let mut weights = WeightMap::new();
+    insert(
+        &mut weights,
+        "model.embed_tokens.weight",
+        &[config.vocab_size as i32, hidden],
+    );
+    insert(&mut weights, "model.norm.weight", &[hidden]);
+
+    for layer in 0..config.num_hidden_layers {
+        let attn = format!("model.layers.{layer}.self_attn");
+        insert(
+            &mut weights,
+            &format!("{attn}.q_a_proj.weight"),
+            &[q_lora, hidden],
+        );
+        insert(
+            &mut weights,
+            &format!("{attn}.q_a_layernorm.weight"),
+            &[q_lora],
+        );
+        insert(
+            &mut weights,
+            &format!("{attn}.q_b_proj.weight"),
+            &[heads * (nope + rope), q_lora],
+        );
+        insert(
+            &mut weights,
+            &format!("{attn}.kv_a_proj_with_mqa.weight"),
+            &[kv_lora + rope, hidden],
+        );
+        insert(
+            &mut weights,
+            &format!("{attn}.kv_a_layernorm.weight"),
+            &[kv_lora],
+        );
+        insert(
+            &mut weights,
+            &format!("{attn}.kv_b_proj.weight"),
+            &[heads * (nope + v_dim), kv_lora],
+        );
+        insert(
+            &mut weights,
+            &format!("{attn}.o_proj.weight"),
+            &[hidden, heads * v_dim],
+        );
+
+        let mlp = format!("model.layers.{layer}.mlp");
+        insert(
+            &mut weights,
+            &format!("{mlp}.gate_proj.weight"),
+            &[inter, hidden],
+        );
+        insert(
+            &mut weights,
+            &format!("{mlp}.up_proj.weight"),
+            &[inter, hidden],
+        );
+        insert(
+            &mut weights,
+            &format!("{mlp}.down_proj.weight"),
+            &[hidden, inter],
+        );
+
+        let layer_prefix = format!("model.layers.{layer}");
+        insert(
+            &mut weights,
+            &format!("{layer_prefix}.input_layernorm.weight"),
+            &[hidden],
+        );
+        insert(
+            &mut weights,
+            &format!("{layer_prefix}.post_attention_layernorm.weight"),
+            &[hidden],
+        );
+    }
+
+    weights
+}
+
+fn build_tied_model(config: &YoutuTextConfig) -> YoutuLanguageModel {
+    let weights = sanitize_text_weights(synthetic_tied_weights(config), config)
+        .expect("sanitize must succeed");
+    YoutuLanguageModel::from_weights(&weights, config).expect("from_weights must succeed")
+}
+
+/// A tied checkpoint carries no `lm_head`, so the head has to come from the
+/// embedding table. This is the whole-model shape of the text-only route:
+/// build, forward, and land on `[batch, seq, vocab]` with finite logits.
+#[test]
+fn tied_embeddings_produce_logits_without_an_lm_head() {
+    let config = minimal_config();
+    assert!(config.tie_word_embeddings);
+    let model = build_tied_model(&config);
+    assert!(
+        model.lm_head.is_none(),
+        "a tied checkpoint must not build a separate lm_head"
+    );
+
+    let ids = mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[1, 4]);
+    let mut caches = model.make_caches_impl();
+    let logits = model.forward_impl(&ids, None, &mut caches, None);
+
+    assert_eq!(
+        mlxcel_core::array_shape(&logits),
+        vec![1, 4, config.vocab_size as i32]
+    );
+    let values = mlxcel_core::utils::array_to_vec_f32(&logits);
+    assert!(
+        values.iter().all(|v| v.is_finite()),
+        "tied-head logits must be finite"
+    );
+}
+
+/// The interleaved switch has to reach the rope call, not just parse. Before
+/// issue #1371 the shared MLA attention hardcoded the interleaved layout, so a
+/// checkpoint declaring `rope_interleave: false` would have been rotated the
+/// wrong way with no error and no visible symptom beyond wrong text.
+#[test]
+fn rope_interleave_reaches_the_rope_call() {
+    let interleaved = minimal_config();
+    let mut half_split = minimal_config();
+    half_split.rope_interleave = false;
+
+    let ids = mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[1, 4]);
+
+    let model = build_tied_model(&interleaved);
+    let mut caches = model.make_caches_impl();
+    let a =
+        mlxcel_core::utils::array_to_vec_f32(&model.forward_impl(&ids, None, &mut caches, None));
+
+    let model = build_tied_model(&half_split);
+    let mut caches = model.make_caches_impl();
+    let b =
+        mlxcel_core::utils::array_to_vec_f32(&model.forward_impl(&ids, None, &mut caches, None));
+
+    assert!(a.iter().all(|v| v.is_finite()) && b.iter().all(|v| v.is_finite()));
+    assert_eq!(a.len(), b.len());
+    assert!(
+        a.iter().zip(b.iter()).any(|(x, y)| (x - y).abs() > 1e-5),
+        "flipping rope_interleave must change the logits; the flag is being ignored"
+    );
 }

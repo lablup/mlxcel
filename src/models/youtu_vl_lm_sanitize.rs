@@ -37,7 +37,8 @@ use super::youtu_vl_lm_config::YoutuTextConfig;
 /// Returns `Err` if a quantized `kv_b_proj` layer is missing its `biases`
 /// tensor, or if the resulting weight shape is inconsistent with the config.
 ///
-/// Used by: `loading::vlm_youtu_vl::load_youtu_vl_vlm`.
+/// Used by: `loading::vlm_youtu_vl::load_youtu_vl_vlm`,
+/// `models::youtu_vl_lm::YoutuLanguageModel::load` (the text-only route).
 pub fn sanitize_text_weights(
     mut weights: WeightMap,
     config: &YoutuTextConfig,

@@ -223,9 +223,24 @@ pub struct DeepSeekV3Attention {
     pub kv_lora_rank: i32,
     pub scale: f32,
     pub rope_base: f32,
+    /// Rotate interleaved (adjacent) pairs rather than half-split pairs.
+    ///
+    /// True for every DeepSeek MLA backbone, which is why `from_weights` sets
+    /// it unconditionally. Youtu exposes the choice as a config key
+    /// (`rope_interleave`), so its decoder overrides this through
+    /// [`DeepSeekV3Attention::with_rope_traditional`] (issue #1371).
+    pub rope_traditional: bool,
 }
 
 impl DeepSeekV3Attention {
+    /// Override the RoPE pair layout after construction.
+    ///
+    /// Used by: `models::youtu_vl_lm::YoutuDecoderLayer`.
+    pub fn with_rope_traditional(mut self, traditional: bool) -> Self {
+        self.rope_traditional = traditional;
+        self
+    }
+
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -277,7 +292,7 @@ impl DeepSeekV3Attention {
         let q_pe = mlxcel_core::fast_rope(
             &q_pe,
             self.qk_rope_head_dim,
-            true,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             offset,
@@ -285,7 +300,7 @@ impl DeepSeekV3Attention {
         let k_pe = mlxcel_core::fast_rope(
             &k_pe,
             self.qk_rope_head_dim,
-            true,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             offset,
@@ -455,6 +470,10 @@ impl DeepSeekV3Attention {
             kv_lora_rank: args.kv_lora_rank as i32,
             scale: args.get_attention_scale(),
             rope_base: args.rope_theta,
+            // Every DeepSeek MLA backbone rotates interleaved pairs. A backbone
+            // that exposes the choice overrides this with
+            // `with_rope_traditional` after construction.
+            rope_traditional: true,
         })
     }
 }

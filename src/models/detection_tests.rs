@@ -767,6 +767,133 @@ fn lfm2_vl_model_type_is_detected_both_spellings() {
     }
 }
 
+/// Text-only Youtu-LLM ships under two vendor labels: `youtu` on
+/// `tencent/Youtu-LLM-2B` and `youtu_llm` on one community conversion. Both
+/// must reach the Youtu MLA decoder rather than the unsupported-model arm.
+#[test]
+fn youtu_llm_model_type_is_detected_for_both_vendor_labels() {
+    for mt in ["youtu", "youtu_llm"] {
+        let model_dir = temp_path(&format!("youtu_llm_{mt}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "model_type": "{mt}",
+                    "architectures": ["YoutuForCausalLM"],
+                    "vocab_size": 128256,
+                    "hidden_size": 2048,
+                    "intermediate_size": 6144,
+                    "num_hidden_layers": 32,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 16,
+                    "kv_lora_rank": 512,
+                    "q_lora_rank": 1536,
+                    "qk_rope_head_dim": 64,
+                    "qk_nope_head_dim": 128,
+                    "v_head_dim": 128,
+                    "rope_theta": 1600000,
+                    "rope_interleave": true,
+                    "tie_word_embeddings": true
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::YoutuLLM, "label {mt}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+/// `mlx-community/Youtu-LLM-2B-4bit` relabels itself `deepseek_v2` so mlx-lm
+/// can load it, but it is a Youtu export: `architectures[0]` stays
+/// `YoutuForCausalLM` and `auto_map` still points at the vendor modules. The
+/// two decoders are not interchangeable in mlxcel, so the architecture string
+/// has to win over the label (issue #1371).
+#[test]
+fn deepseek_v2_labelled_youtu_export_routes_to_the_youtu_decoder() {
+    let model_dir = temp_path("youtu_llm_deepseek_v2_label");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "deepseek_v2",
+            "architectures": ["YoutuForCausalLM"],
+            "auto_map": {
+                "AutoConfig": "configuration_youtu.YoutuConfig",
+                "AutoModelForCausalLM": "modeling_youtu.YoutuForCausalLM"
+            },
+            "vocab_size": 128256,
+            "hidden_size": 2048,
+            "intermediate_size": 6144,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "kv_lora_rank": 512,
+            "q_lora_rank": 1536,
+            "qk_rope_head_dim": 64,
+            "qk_nope_head_dim": 128,
+            "v_head_dim": 128,
+            "rope_scaling": {"type": "yarn", "factor": 1.0, "mscale_all_dim": 0},
+            "rope_theta": 1600000,
+            "rope_interleave": true,
+            "tie_word_embeddings": true
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::YoutuLLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+/// The counterpart guard: a genuine DeepSeek-V2 checkpoint, and one that
+/// carries no `architectures` array at all, both keep the historical
+/// DeepSeek-V2 route. Without this the arm above would be a silent
+/// regression for every DeepSeek-V2 user.
+#[test]
+fn genuine_deepseek_v2_keeps_its_route() {
+    let cases: [(&str, Option<&str>); 2] = [
+        ("deepseek_v2_genuine", Some("DeepseekV2ForCausalLM")),
+        ("deepseek_v2_no_architectures", None),
+    ];
+
+    for (name, architecture) in cases {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        let architectures = match architecture {
+            Some(arch) => format!(r#""architectures": ["{arch}"],"#),
+            None => String::new(),
+        };
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "model_type": "deepseek_v2",
+                    {architectures}
+                    "vocab_size": 102400,
+                    "hidden_size": 2048,
+                    "num_hidden_layers": 27,
+                    "num_attention_heads": 16,
+                    "kv_lora_rank": 512,
+                    "qk_rope_head_dim": 64,
+                    "qk_nope_head_dim": 128,
+                    "v_head_dim": 128
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::DeepSeekV2, "case {name}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
 #[test]
 fn granite_vision_model_type_is_detected() {
     // MLX conversions ship `model_type: "granite_vision"`.
