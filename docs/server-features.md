@@ -204,6 +204,12 @@ dialects such as Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and
 the narrowed tool list only, and a forced choice that ends without a call is
 logged at `warn` with the format name.
 
+Tool schemas that the grammar engine cannot express fall back to that same
+instruction-only path rather than failing the request: the compile failure is
+logged at `warn` and generation runs unconstrained. Only a `response_format`
+schema, which the client asked for explicitly, turns a compile failure into a
+400.
+
 A forced `tool_choice` cannot be combined with a `response_format` schema (400).
 The Anthropic `tool_choice` values `{"type": "any"}` and
 `{"type": "tool", "name": "f"}` map to `required` and the named form, so the

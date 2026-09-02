@@ -252,7 +252,8 @@ declared function with `finish_reason: "tool_calls"` (a `function_call` output
 item). Templates without a JSON wire shape (ATEM, Gemma 4, XML dialects such as
 Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and the narrowed
 tool list only, and a forced choice that ends without a call is logged at
-`warn`.
+`warn`. A tool schema the grammar engine cannot express falls back to that same
+instruction-only path instead of failing the request.
 
 A forced `tool_choice` cannot be combined with `text.format` of type
 `json_schema`: the two constraints would each claim the whole generation, so

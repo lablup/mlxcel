@@ -437,6 +437,16 @@ pub(crate) type SharedConstraint = std::sync::Arc<std::sync::Mutex<StructuredOut
 /// `tool_choice` semantics. Callers run [`validate_chat_tool_inputs`] first;
 /// that is what rejects the `response_format` + forced-tool combination, so
 /// here `response_format` simply takes precedence if both are present.
+///
+/// A `response_format` that fails to compile is the client's own error and is
+/// returned as a 400. A forced tool-call grammar that fails is not: the client
+/// asked for a tool call, not for a grammar, and the grammar is this server's
+/// way of delivering one. Tool schemas that llguidance cannot express (a
+/// `$ref` it will not follow, a nesting depth past its limits, a set of tools
+/// whose combined grammar exceeds the size cap) therefore fall back to the
+/// instruction-only enforcement every non-grammar-capable template already
+/// gets, with a `warn` naming the reason, instead of failing a request that
+/// worked before the choice was enforced at all.
 pub(crate) async fn build_chat_constraint(
     state: &AppState,
     request: &ChatCompletionRequest,
@@ -450,9 +460,13 @@ pub(crate) async fn build_chat_constraint(
         {
             return Ok(Some(constraint));
         }
-        forced_grammar
-            .map(|lark| build_lark_constraint(tokenizer.as_ref(), &lark))
-            .transpose()
+        let Some(lark) = forced_grammar else {
+            return Ok(None);
+        };
+        Ok(forced_constraint_or_instruction_only(
+            tokenizer.as_ref(),
+            &lark,
+        ))
     })
     .await
     {
@@ -464,6 +478,31 @@ pub(crate) async fn build_chat_constraint(
                 "structured-output preparation failed",
                 "server_error",
             ))
+        }
+    }
+}
+
+/// Compile a forced tool-call grammar, degrading to instruction-only
+/// enforcement when it does not compile (#1319).
+///
+/// Split out of [`build_chat_constraint`] so the fallback is exercised without
+/// standing up an [`AppState`]. Returning `None` here is the same answer a
+/// non-grammar-capable template gives, so the request proceeds with the
+/// injected prompt instruction and the narrowed tool list.
+fn forced_constraint_or_instruction_only(
+    tokenizer: &MlxcelTokenizer,
+    lark: &str,
+) -> Option<SharedConstraint> {
+    match build_lark_constraint(tokenizer, lark) {
+        Ok(constraint) => Some(constraint),
+        Err(err) => {
+            tracing::warn!(
+                target: "mlxcel::tool_calls",
+                error = %err,
+                "forced tool_choice grammar did not compile from the declared tool schemas; \
+                 falling back to prompt-instruction enforcement"
+            );
+            None
         }
     }
 }
@@ -2282,6 +2321,28 @@ mod tests {
     #[test]
     fn max_tools_constant_is_128() {
         assert_eq!(MAX_TOOLS, 128);
+    }
+
+    /// A forced `tool_choice` whose tool schemas the grammar engine cannot
+    /// express must not fail the request (#1319): the client asked for a tool
+    /// call, not for a grammar, and the same request was served without any
+    /// constraint before the choice was enforced. The compile failure degrades
+    /// to the instruction-only path instead.
+    #[test]
+    fn a_grammar_that_does_not_compile_degrades_to_instruction_only() {
+        let tokenizer = MlxcelTokenizer::stub_all_byte_fallback();
+        assert!(
+            forced_constraint_or_instruction_only(&tokenizer, "start: %json").is_none(),
+            "a grammar the engine rejects yields no constraint, not an error"
+        );
+        assert!(
+            forced_constraint_or_instruction_only(
+                &tokenizer,
+                r#"start: "<tool_call>" %json {"type": "object"} "</tool_call>""#,
+            )
+            .is_some(),
+            "a grammar that compiles still constrains the generation"
+        );
     }
 
     // -- XTC (Exclude Top Choices) request validation --

@@ -182,11 +182,24 @@ pub fn tool_choice_grammar_with(
     if selected.is_empty() {
         return None;
     }
+    let single = selected.len() == 1;
     let mut schemas: Vec<serde_json::Value> = selected
         .into_iter()
-        .map(|tool| tool_call_schema(tool, arguments_key))
+        .enumerate()
+        .map(|(index, tool)| {
+            // Where this branch's `arguments` object ends up in the finished
+            // document, so the tool's own internal `$ref`s can be re-pointed
+            // at it. A single tool is the document root; several tools sit
+            // under `anyOf`.
+            let base = if single {
+                format!("properties/{arguments_key}")
+            } else {
+                format!("anyOf/{index}/properties/{arguments_key}")
+            };
+            tool_call_schema(tool, arguments_key, &base)
+        })
         .collect();
-    let schema = if schemas.len() == 1 {
+    let schema = if single {
         schemas.remove(0)
     } else {
         let mut any_of = serde_json::Map::new();
@@ -248,13 +261,18 @@ pub fn special_token_id(tokenizer: &crate::tokenizer::MlxcelTokenizer, text: &st
 /// with both keys required and nothing else allowed, in that order (the order
 /// llguidance enforces is the schema's own, which matches how the templates
 /// teach the call shape).
-fn tool_call_schema(tool: &Tool, arguments_key: &str) -> serde_json::Value {
-    let parameters = tool
+///
+/// `base` is the JSON Pointer path, relative to the finished document's root,
+/// at which the tool's `parameters` schema comes to rest. The tool's own
+/// root-relative `$ref`s are re-pointed at it by [`relocate_root_refs`].
+fn tool_call_schema(tool: &Tool, arguments_key: &str, base: &str) -> serde_json::Value {
+    let mut parameters = tool
         .function
         .parameters
         .clone()
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+    relocate_root_refs(&mut parameters, base);
     let mut name = serde_json::Map::new();
     name.insert(
         "const".to_string(),
@@ -281,6 +299,46 @@ fn tool_call_schema(tool: &Tool, arguments_key: &str) -> serde_json::Value {
         serde_json::Value::Bool(false),
     );
     serde_json::Value::Object(schema)
+}
+
+/// Re-point a schema's root-relative `$ref`s after it is embedded at `base`
+/// inside a larger document (#1319).
+///
+/// A tool's `parameters` schema is written as its own document: the shapes
+/// that Pydantic, the OpenAI SDK and LangChain emit for a nested model carry
+/// a `$defs` block and refer to it as `#/$defs/Name`. Dropped verbatim under
+/// `properties/arguments` of the forced-call wrapper, those pointers resolve
+/// against the wrapper's root, where no `$defs` exists, and the grammar fails
+/// to compile. Rewriting `#/x` to `#/<base>/x` (and a bare `#` self-reference
+/// to `#/<base>`) keeps every pointer aimed at the block it was written for,
+/// which also keeps two tools' identically-named definitions apart because
+/// each branch's pointers stay inside that branch.
+///
+/// Absolute refs into another document are left alone: they are not ours to
+/// rewrite, and the grammar compiler rejects them on its own.
+fn relocate_root_refs(value: &mut serde_json::Value, base: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Only a string `$ref` is a reference; an entry named `$ref`
+            // inside a `properties` map describes a property with that name.
+            if let Some(serde_json::Value::String(target)) = map.get_mut("$ref") {
+                if target == "#" {
+                    *target = format!("#/{base}");
+                } else if let Some(rest) = target.strip_prefix("#/") {
+                    *target = format!("#/{base}/{rest}");
+                }
+            }
+            for nested in map.values_mut() {
+                relocate_root_refs(nested, base);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                relocate_root_refs(item, base);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Check if tool call parsing should be attempted for this request.
