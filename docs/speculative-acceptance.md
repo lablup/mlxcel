@@ -220,6 +220,12 @@ counters are the session totals across every slice, not one slice's). The
 default-off B>1 batched burst reports nothing, because its round loops return
 per-row tokens without per-row acceptance counters.
 
+The disaggregated router front reports nothing either. It assembles its stream
+from the prefill/decode handoff protocol rather than from a finished
+`GenerationResult`, and that protocol carries a generated-token count and no
+acceptance counters, so surfacing the block there is a handoff-protocol change
+and not a response-shaping one.
+
 ## Verifying the gain before trusting a throughput number
 
 `MLXCEL_SPECULATIVE_ACCEPT_DIAG=1` adds a second line:
