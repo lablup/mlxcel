@@ -762,42 +762,6 @@ pub(crate) fn short_uuid() -> String {
     raw.chars().take(16).collect()
 }
 
-/// Convenience entry point for the route layer: build a response object
-/// representing an error that occurred mid-generation.
-#[allow(dead_code)]
-pub fn build_failed_response(
-    id: String,
-    model: String,
-    created_at: f64,
-    error_code: &str,
-    error_message: &str,
-    request: &CreateResponseRequest,
-) -> ResponseObject {
-    let ctx = OutboundContext {
-        response_id: id,
-        model_id: model,
-        created_at,
-        completed_at: created_at,
-        status: ResponseStatus::Failed,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        cached_tokens: 0,
-        reasoning_tokens: 0,
-        text: String::new(),
-        reasoning_text: None,
-        parsed_tool_calls: None,
-        max_tool_calls: None,
-        request,
-        error: Some(ResponseErrorBody {
-            code: error_code.to_string(),
-            message: error_message.to_string(),
-        }),
-        incomplete_reason: None,
-        finish_reason: "error".to_string(),
-    };
-    build_response_object(ctx)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
