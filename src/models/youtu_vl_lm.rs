@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Youtu-VL language model (text backbone).
+//! Youtu language model (the text backbone of Youtu-VL, and the whole model for
+//! text-only Youtu-LLM).
 //!
 //! Faithful port of https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/youtu_vl/language.py.
+//! The vendor's text-only decoder is the same architecture; see
+//! https://huggingface.co/tencent/Youtu-LLM-2B/blob/main/modeling_youtu.py (YoutuMLAttention).
 //!
 //! Architecture summary:
 //! - Multi-Latent Attention (MLA) — identical to DeepSeek-V3's MLA layout
@@ -38,7 +41,8 @@
 //! - `UnifiedLinear`, `UnifiedEmbedding`, `RMSNorm`, and `KVCache` come from
 //!   `mlxcel_core::layers`.
 //!
-//! Used by: Youtu-VL VLM (`vision::youtu_vl::YoutuVLModel`).
+//! Used by: Youtu-VL VLM (`vision::youtu_vl::YoutuVLModel`), text-only
+//! Youtu-LLM (`ModelType::YoutuLLM` through `loading::nonstandard`).
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -137,8 +141,12 @@ impl YoutuDecoderLayer {
         let prefix = format!("model.layers.{}", layer_idx);
 
         let ds_cfg = config.to_deepseek_v3_config();
+        // The shared MLA attention defaults to the interleaved pair layout that
+        // every DeepSeek backbone uses; Youtu carries the choice in its config,
+        // so the flag has to reach the rope call rather than being assumed.
         let self_attn =
-            DeepSeekV3Attention::from_weights(weights, &ds_cfg, &format!("{}.self_attn", prefix))?;
+            DeepSeekV3Attention::from_weights(weights, &ds_cfg, &format!("{}.self_attn", prefix))?
+                .with_rope_traditional(config.rope_is_interleaved());
 
         let mlp = YoutuMLP::from_weights(weights, config, &format!("{}.mlp", prefix))?;
 
@@ -306,8 +314,10 @@ impl LanguageModel for YoutuLanguageModel {
     }
 }
 
-// Standalone text-only loader (chiefly used by tests and for ad-hoc CLI runs
-// that target a Youtu-VL `model.safetensors` directory directly).
+// Standalone text-only loader. This is the directory route for the text-only
+// Youtu-LLM checkpoint (`ModelType::YoutuLLM`, issue #1371); it also serves
+// ad-hoc CLI runs that point at a Youtu-VL directory and want only its text
+// tower.
 impl YoutuLanguageModel {
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, YoutuTextConfig), String> {
         let model_dir = model_dir.as_ref();
@@ -317,12 +327,40 @@ impl YoutuLanguageModel {
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
         let config: YoutuTextConfig = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        config.validate_rope_scaling()?;
+
+        let raw_config: serde_json::Value = serde_json::from_str(&config_str)
+            .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        let eos_token_ids = parse_eos_token_ids(&raw_config);
 
         let weights = crate::models::load_text_weights(model_dir, None)?;
         let weights = sanitize_text_weights(weights, &config)?;
 
-        let model = Self::from_weights(&weights, &config)?;
+        let model = Self::from_weights(&weights, &config)?.with_eos_token_ids(eos_token_ids);
         Ok((model, config))
+    }
+}
+
+/// Read `eos_token_id` from a checkpoint `config.json`, accepting both the
+/// single-number and the array spelling.
+///
+/// The directory loaders that build a `LoadedModel` merge this with
+/// `generation_config.json` / `tokenizer_config.json` through
+/// `crate::loading::read_eos_token_ids`; parsing it here means the model itself
+/// reports a stop id even when it is constructed outside that path.
+fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
+    match config.get("eos_token_id") {
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+            .map(|id| vec![id])
+            .unwrap_or_default(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .filter_map(|n| i32::try_from(n).ok())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

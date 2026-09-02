@@ -767,6 +767,100 @@ fn lfm2_vl_model_type_is_detected_both_spellings() {
     }
 }
 
+/// Text-only Youtu-LLM ships under two vendor labels: `youtu` on
+/// `tencent/Youtu-LLM-2B` and `youtu_llm` on one community conversion. Both
+/// must reach the Youtu MLA decoder rather than the unsupported-model arm.
+#[test]
+fn youtu_llm_model_type_is_detected_for_both_vendor_labels() {
+    for mt in ["youtu", "youtu_llm"] {
+        let model_dir = temp_path(&format!("youtu_llm_{mt}"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "model_type": "{mt}",
+                    "architectures": ["YoutuForCausalLM"],
+                    "vocab_size": 128256,
+                    "hidden_size": 2048,
+                    "intermediate_size": 6144,
+                    "num_hidden_layers": 32,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 16,
+                    "kv_lora_rank": 512,
+                    "q_lora_rank": 1536,
+                    "qk_rope_head_dim": 64,
+                    "qk_nope_head_dim": 128,
+                    "v_head_dim": 128,
+                    "rope_theta": 1600000,
+                    "rope_interleave": true,
+                    "tie_word_embeddings": true
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::YoutuLLM, "label {mt}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+/// `mlx-community/Youtu-LLM-2B-4bit` relabels itself `deepseek_v2` so mlx-lm
+/// can load it, while keeping `architectures: ["YoutuForCausalLM"]` and an
+/// `auto_map` that points at the vendor's own modules. It stays on the
+/// DeepSeek-V2 route anyway.
+///
+/// This is a guard against re-adding an architecture-string split to the
+/// `deepseek_v2` arm. #1371 first added one, on the belief that the DeepSeek-V2
+/// decoder mishandled that export. Greedy decode of the real checkpoint through
+/// both decoders, against an mlx-lm `deepseek_v2` oracle on the same weights,
+/// showed otherwise: on a chat-templated prompt the DeepSeek-V2 route matches
+/// the oracle for all 32 tokens, and on a raw prompt it matches for 18. A split
+/// would move working checkpoints onto a different decoder for no gain, so the
+/// label decides the route and only the two vendor labels are new.
+#[test]
+fn deepseek_v2_label_keeps_the_deepseek_v2_route() {
+    let cases: [(&str, Option<&str>); 3] = [
+        ("deepseek_v2_youtu_relabel", Some("YoutuForCausalLM")),
+        ("deepseek_v2_genuine", Some("DeepseekV2ForCausalLM")),
+        ("deepseek_v2_no_architectures", None),
+    ];
+
+    for (name, architecture) in cases {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        let architectures = match architecture {
+            Some(arch) => format!(r#""architectures": ["{arch}"],"#),
+            None => String::new(),
+        };
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "model_type": "deepseek_v2",
+                    {architectures}
+                    "vocab_size": 102400,
+                    "hidden_size": 2048,
+                    "num_hidden_layers": 27,
+                    "num_attention_heads": 16,
+                    "kv_lora_rank": 512,
+                    "qk_rope_head_dim": 64,
+                    "qk_nope_head_dim": 128,
+                    "v_head_dim": 128
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::DeepSeekV2, "case {name}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
 #[test]
 fn granite_vision_model_type_is_detected() {
     // MLX conversions ship `model_type: "granite_vision"`.
