@@ -894,11 +894,15 @@ const MINIMAX_M2_MAX_PARAMS_PER_CALL: usize = 1024;
 /// `<invoke name="fn_name"><parameter name="k">v</parameter></invoke>`
 ///
 /// Multiple `<invoke>` blocks may appear sequentially for parallel tool calls.
-/// Parameter values are converted to their most likely JSON types (number,
-/// boolean, null, object/array via JSON parse) before falling back to string.
+///
+/// `tools` supplies the per-function JSON schema each parameter value is typed
+/// by: a `string`-typed parameter keeps its raw text (`02134` stays `"02134"`),
+/// an `integer`-typed one accepts a zero-fraction float literal, and a value
+/// that fits neither its declared type nor a JSON literal stays a string, so a
+/// call is never dropped. Without a schema the loose literal rules apply.
 ///
 /// Mirrors the upstream Python rewrite in mlx-lm PR #1171 (commit 6d11468).
-pub fn try_minimax_m2(text: &str) -> Option<ToolCallParseResult> {
+pub fn try_minimax_m2(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallParseResult> {
     let invoke_open = "<invoke name=";
     let invoke_close = "</invoke>";
 
@@ -942,7 +946,8 @@ pub fn try_minimax_m2(text: &str) -> Option<ToolCallParseResult> {
             b
         };
 
-        let arguments = extract_minimax_parameters(body);
+        let fn_schema = minimax_m3_function_schema(tools, &function_name);
+        let arguments = extract_minimax_parameters(body, fn_schema);
         calls.push(ParsedToolCall {
             name: function_name,
             arguments,
@@ -985,8 +990,9 @@ fn extract_quoted_name(s: &str) -> String {
 /// Parse all `<parameter name="k">v</parameter>` tags inside an `<invoke>` body.
 ///
 /// Returns a JSON object string mapping parameter names to their typed values.
-/// Type coercion order: null → integer → float → boolean → JSON object/array → string.
-fn extract_minimax_parameters(body: &str) -> String {
+/// `fn_schema` is the called function's JSON-schema `parameters` object; each
+/// value is typed by its declared type through [`coerce_xml_param`].
+fn extract_minimax_parameters(body: &str, fn_schema: Option<&serde_json::Value>) -> String {
     let param_open = "<parameter name=";
     let param_close = "</parameter>";
 
@@ -1037,8 +1043,8 @@ fn extract_minimax_parameters(body: &str) -> String {
         }
         let raw_value = raw_value.trim();
 
-        let json_value = coerce_minimax_param(raw_value);
         if !param_name.is_empty() {
+            let json_value = coerce_xml_param(raw_value, kv_param_schema(fn_schema, &param_name));
             pairs.push((param_name, json_value));
         }
 
@@ -1056,45 +1062,76 @@ fn extract_minimax_parameters(body: &str) -> String {
     serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Convert a raw string parameter value to the most specific JSON type.
+/// Convert a raw XML parameter value to JSON using its declared schema.
 ///
-/// Priority: null → integer → float → boolean → JSON object/array → string.
-fn coerce_minimax_param(value: &str) -> serde_json::Value {
-    // Null
-    let lower = value.to_lowercase();
-    if lower == "null" || lower == "none" || lower == "nil" {
+/// Two rules run ahead of the shared leaf coercion. Both are grounded in the
+/// declared type rather than in the shape of the text, which is the difference
+/// between this and the guesswork it replaced.
+///
+/// 1. The bare word `null` in any casing is JSON null: these grammars have no
+///    other spelling for one, and both parsers have always emitted one here. A
+///    parameter declared a plain `string` is the exception, because there the
+///    declaration says the value is text and `null` is a legitimate query, ref
+///    or filename. A type that explicitly admits null, as in
+///    `{"type": ["string", "null"]}`, keeps the null.
+/// 2. A parameter declared `boolean` also accepts the words the strict JSON
+///    reading rejects: `yes`, `on`, `1` and their negatives, plus any casing of
+///    `true` and `false`. The declaration is the basis the old schema-free
+///    guess never had. Without it those words stay the strings the model wrote.
+///
+/// Everything else goes through the shared MiniMax M3 leaf coercion, so a
+/// `string`-typed parameter keeps its raw text and a numeric one is typed by
+/// its declaration. A value that fits neither its declared type nor a JSON
+/// literal stays a string, so a call is never dropped for being unparseable.
+///
+/// The schema-free guesses this replaced are gone: `yes`/`on`, `no`/`off` and
+/// `none`/`nil` are now the strings the model wrote unless a `boolean`
+/// declaration says otherwise.
+// Used by: try_minimax_m2, try_qwen3_coder
+fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
+    let declared = schema.and_then(minimax_m3_schema_type);
+    let keeps_raw_text =
+        declared == Some(M3Type::Str) && !schema.is_some_and(schema_type_admits_null);
+    if !keeps_raw_text && raw.eq_ignore_ascii_case("null") {
         return serde_json::Value::Null;
     }
-
-    // Integer (try before float so we preserve exact integer representation)
-    if let Ok(i) = value.parse::<i64>() {
-        return serde_json::Value::Number(serde_json::Number::from(i));
-    }
-
-    // Float
-    if let Ok(f) = value.parse::<f64>()
-        && let Some(n) = serde_json::Number::from_f64(f)
+    if declared == Some(M3Type::Boolean)
+        && let Some(b) = loose_boolean_word(raw)
     {
-        return serde_json::Value::Number(n);
+        return serde_json::Value::Bool(b);
     }
+    minimax_m3_coerce_leaf(raw, schema)
+}
 
-    // Boolean
-    if lower == "true" || lower == "1" || lower == "yes" || lower == "on" {
-        return serde_json::Value::Bool(true);
+/// Whether a schema's `type` explicitly admits JSON null, as a nullable
+/// declaration such as `{"type": ["string", "null"]}` does.
+// Used by: coerce_xml_param
+fn schema_type_admits_null(schema: &serde_json::Value) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::Array(items)) => items.iter().any(|v| v.as_str() == Some("null")),
+        _ => false,
     }
-    if lower == "false" || lower == "0" || lower == "no" || lower == "off" {
-        return serde_json::Value::Bool(false);
-    }
+}
 
-    // JSON object or array
-    if (value.starts_with('{') || value.starts_with('['))
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(value)
+/// The boolean a `boolean`-declared parameter spells, including the words a
+/// strict JSON reading rejects. Case-insensitive; `None` when the text is not
+/// one of them, so the caller falls through to its declared-type path.
+// Used by: coerce_xml_param
+fn loose_boolean_word(raw: &str) -> Option<bool> {
+    let raw = raw.trim();
+    if ["true", "yes", "on", "1"]
+        .iter()
+        .any(|w| raw.eq_ignore_ascii_case(w))
     {
-        return v;
+        return Some(true);
     }
-
-    // Fallback: string
-    serde_json::Value::String(value.to_string())
+    if ["false", "no", "off", "0"]
+        .iter()
+        .any(|w| raw.eq_ignore_ascii_case(w))
+    {
+        return Some(false);
+    }
+    None
 }
 
 // Defensive caps mirroring the MiniMax M2 parser: bound parallel-call and
@@ -1123,7 +1160,11 @@ const QWEN3_CODER_MAX_PARAMS_PER_CALL: usize = 1024;
 ///
 /// The surrounding `<tool_call>` wrapper is not required: scanning for
 /// `<function=` naturally skips it, matching Qwen3-Coder variants that omit it.
-pub fn try_qwen3_coder(text: &str) -> Option<ToolCallParseResult> {
+///
+/// `tools` supplies the per-function JSON schema each parameter value is typed
+/// by, exactly as in [`try_minimax_m2`]: a `string`-typed parameter keeps its
+/// raw text rather than being guessed into a number or a boolean.
+pub fn try_qwen3_coder(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallParseResult> {
     let fn_open = "<function=";
     let fn_close = "</function>";
 
@@ -1166,7 +1207,8 @@ pub fn try_qwen3_coder(text: &str) -> Option<ToolCallParseResult> {
         };
 
         if !function_name.is_empty() {
-            let arguments = extract_qwen_parameters(body);
+            let fn_schema = minimax_m3_function_schema(tools, &function_name);
+            let arguments = extract_qwen_parameters(body, fn_schema);
             calls.push(ParsedToolCall {
                 name: function_name,
                 arguments,
@@ -1196,8 +1238,9 @@ pub fn try_qwen3_coder(text: &str) -> Option<ToolCallParseResult> {
 /// Mirrors [`extract_minimax_parameters`] but keys on the bare `<parameter=`
 /// opener (Qwen3-Coder) rather than `<parameter name=` (MiniMax M2). Values are
 /// stripped of one surrounding newline (the model pretty-prints each parameter
-/// on its own line) then trimmed, and typed via [`coerce_minimax_param`].
-fn extract_qwen_parameters(body: &str) -> String {
+/// on its own line) then trimmed, and typed via [`coerce_xml_param`] against the
+/// called function's schema in `fn_schema`.
+fn extract_qwen_parameters(body: &str, fn_schema: Option<&serde_json::Value>) -> String {
     let param_open = "<parameter=";
     let param_close = "</parameter>";
 
@@ -1242,7 +1285,8 @@ fn extract_qwen_parameters(body: &str) -> String {
         let raw_value = raw_value.trim();
 
         if !param_name.is_empty() {
-            pairs.push((param_name, coerce_minimax_param(raw_value)));
+            let json_value = coerce_xml_param(raw_value, kv_param_schema(fn_schema, &param_name));
+            pairs.push((param_name, json_value));
         }
 
         if pairs.len() >= QWEN3_CODER_MAX_PARAMS_PER_CALL {
@@ -2010,13 +2054,26 @@ fn minimax_m3_extract_invoke_name(attr_region: &str) -> Option<String> {
 }
 
 /// Look up a function's JSON-schema `parameters` object by name.
+///
+/// A namespaced call name (`functions.get_weather`) falls back to the bare name
+/// after the first `.`, the same normalisation `filter_by_tools` applies when it
+/// matches a parsed call against the registered tools. Without that fallback the
+/// lookup misses for every namespacing model, every value silently takes the
+/// loose rules, and the call still succeeds, so nothing marks the schema as
+/// having been ignored.
+// Used by: try_minimax_m3, try_glm47, try_longcat, try_minimax_m2, try_qwen3_coder
 fn minimax_m3_function_schema<'a>(
     tools: Option<&'a [Tool]>,
     name: &str,
 ) -> Option<&'a serde_json::Value> {
-    tools?
+    let tools = tools?;
+    tools
         .iter()
         .find(|t| t.function.name == name)
+        .or_else(|| {
+            name.split_once('.')
+                .and_then(|(_, bare)| tools.iter().find(|t| t.function.name == bare))
+        })
         .and_then(|t| t.function.parameters.as_ref())
 }
 
@@ -2237,6 +2294,7 @@ fn minimax_m3_child_in_schema<'a>(
 
 /// Coerce a leaf value string using the element's schema, then a JSON parse,
 /// then a loose literal parse, then the raw string.
+// Used by: MiniMax M3, MiniMax M2, Qwen3-Coder
 fn minimax_m3_coerce_leaf(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
     if let Some(schema) = schema {
         // A repeated tag declared as `list`/`array` arrives here one occurrence
@@ -2263,6 +2321,7 @@ fn minimax_m3_coerce_leaf(raw: &str, schema: Option<&serde_json::Value>) -> serd
 /// Strict, schema-directed coercion. Returns `None` when the declared type does
 /// not apply (so the caller falls back), which is what lets `anyOf`/`oneOf` try
 /// the next alternative and `enum` reject a non-member.
+// Used by: MiniMax M3, MiniMax M2, Qwen3-Coder (through minimax_m3_coerce_leaf)
 fn minimax_m3_typed_coerce(raw: &str, schema: &serde_json::Value) -> Option<serde_json::Value> {
     if let Some(members) = schema.get("enum").and_then(|e| e.as_array()) {
         return members
@@ -2278,20 +2337,15 @@ fn minimax_m3_typed_coerce(raw: &str, schema: &serde_json::Value) -> Option<serd
         }
     }
     match minimax_m3_schema_type(schema)? {
-        M3Type::Integer => raw
-            .parse::<i64>()
-            .ok()
-            .map(|i| serde_json::Value::Number(i.into()))
-            .or_else(|| {
-                raw.parse::<u64>()
-                    .ok()
-                    .map(|u| serde_json::Value::Number(u.into()))
-            }),
-        M3Type::Number => raw
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(serde_json::Value::Number),
+        M3Type::Integer => parse_integer_literal(raw),
+        // An integral literal keeps its written form under `number` (`5` stays
+        // `5`, `5.0` stays `5.0`); only `integer` normalises `5.0` to `5`.
+        M3Type::Number => parse_exact_integer_literal(raw).or_else(|| {
+            raw.parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(serde_json::Value::Number)
+        }),
         M3Type::Boolean => match raw.trim() {
             "true" | "True" => Some(serde_json::Value::Bool(true)),
             "false" | "False" => Some(serde_json::Value::Bool(false)),
@@ -2305,6 +2359,45 @@ fn minimax_m3_typed_coerce(raw: &str, schema: &serde_json::Value) -> Option<serd
             .filter(|v| v.is_array()),
         M3Type::Str => Some(serde_json::Value::String(raw.to_string())),
     }
+}
+
+/// Parse a raw value as a JSON integer, exactly as written.
+// Used by: parse_integer_literal, minimax_m3_typed_coerce (number arm)
+fn parse_exact_integer_literal(raw: &str) -> Option<serde_json::Value> {
+    if let Ok(i) = raw.parse::<i64>() {
+        return Some(serde_json::Value::Number(i.into()));
+    }
+    raw.parse::<u64>()
+        .ok()
+        .map(|u| serde_json::Value::Number(u.into()))
+}
+
+/// Parse a raw value as a JSON integer for an `integer`-typed parameter.
+///
+/// Accepts an `i64` or `u64` literal, plus the same literal written with a zero
+/// fraction (`5.0`, `-5.000`), which models emit often enough for an
+/// `integer`-typed parameter to be worth honouring: the declared type says the
+/// value is an integer, so `5.0` is `5` and the decimal point is formatting.
+///
+/// The fraction is stripped textually rather than through an `f64` round trip,
+/// for two reasons. A round trip rounds before anything can inspect the result,
+/// so `9007199254740991.5` would arrive with an empty fraction and become an
+/// integer, and `9007199254740993.0` would come back off by one. It also admits
+/// the exponent form, and under `anyOf: [integer, string]` the integer
+/// alternative is tried first, so an identifier such as `1e5` would be taken
+/// from the string alternative that should own it. Text with an exponent, or
+/// with an integer part outside `i64`/`u64`, declines here and stays a number
+/// through the caller's fallback.
+// Used by: minimax_m3_typed_coerce (integer arm), coerce_kv_value
+fn parse_integer_literal(raw: &str) -> Option<serde_json::Value> {
+    if let Some(v) = parse_exact_integer_literal(raw) {
+        return Some(v);
+    }
+    let (int_part, fraction) = raw.split_once('.')?;
+    if fraction.bytes().any(|b| b != b'0') {
+        return None;
+    }
+    parse_exact_integer_literal(int_part)
 }
 
 /// Map a schema's `type` (a string, or the first non-`null` of a type array) to
@@ -2344,6 +2437,7 @@ fn minimax_m3_enum_member_matches(member: &serde_json::Value, raw: &str) -> bool
 
 /// Schema-free coercion: JSON parse, then a loose literal parse (numbers and
 /// booleans), then the raw string.
+// Used by: MiniMax M3, MiniMax M2, Qwen3-Coder, GLM-4.7, LongCat
 fn minimax_m3_fallback_coerce(raw: &str) -> serde_json::Value {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         return v;
@@ -2744,6 +2838,7 @@ fn shell_split(s: &str) -> Vec<String> {
 }
 
 /// Look up a parameter's JSON schema inside a function's `parameters` object.
+// Used by: GLM-4.7, LongCat, MiniMax M2, Qwen3-Coder
 fn kv_param_schema<'a>(
     fn_schema: Option<&'a serde_json::Value>,
     key: &str,
@@ -2755,14 +2850,26 @@ fn kv_param_schema<'a>(
 }
 
 /// Coerce a raw argument value using schema-aware rules: a `string`-typed
-/// parameter keeps its raw text; any other type (or no schema) falls back to a
-/// JSON parse, then a loose literal parse (numbers, booleans, lists), then the
-/// raw string. Reuses the MiniMax M3 schema-type mapper and fallback coercion.
+/// parameter keeps its raw text, an `integer`-typed one takes the shared
+/// integer rule (so a zero-fraction float literal such as `5.0` becomes `5`),
+/// and any other type (or no schema) falls back to a JSON parse, then a loose
+/// literal parse (numbers, booleans, lists), then the raw string. Reuses the
+/// MiniMax M3 schema-type mapper and fallback coercion.
+///
+/// This grammar deliberately stops at those two declared types rather than
+/// running the full [`minimax_m3_typed_coerce`] path: the loose fallback is
+/// what GLM-4.7 and LongCat have always used for every other type.
 fn coerce_kv_value(raw: &str, param_schema: Option<&serde_json::Value>) -> serde_json::Value {
-    if let Some(schema) = param_schema
-        && minimax_m3_schema_type(schema) == Some(M3Type::Str)
-    {
-        return serde_json::Value::String(raw.to_string());
+    if let Some(schema) = param_schema {
+        match minimax_m3_schema_type(schema) {
+            Some(M3Type::Str) => return serde_json::Value::String(raw.to_string()),
+            Some(M3Type::Integer) => {
+                if let Some(v) = parse_integer_literal(raw) {
+                    return v;
+                }
+            }
+            _ => {}
+        }
     }
     minimax_m3_fallback_coerce(raw)
 }
@@ -3359,7 +3466,7 @@ mod tests {
     fn minimax_m2_single_tool_call() {
         // From upstream test_tool_parsing.py: single invoke with a string parameter
         let text = "<invoke name=\"get_current_temperature\">\n<parameter name=\"location\">London</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_current_temperature");
         let args: serde_json::Value =
@@ -3372,7 +3479,7 @@ mod tests {
     fn minimax_m2_parallel_tool_calls() {
         // From upstream test_minimax_m2: two parallel invocations in one response
         let text = "<invoke name=\"search\">\n<parameter name=\"query\">weather</parameter>\n</invoke>\n<invoke name=\"read_file\">\n<parameter name=\"path\">/tmp/test.txt</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].name, "search");
         let args0: serde_json::Value =
@@ -3388,7 +3495,7 @@ mod tests {
     fn minimax_m2_numeric_params() {
         // From upstream test_parsers: multiply with numeric a and b
         let text = "<invoke name=\"multiply\">\n<parameter name=\"a\">12234585</parameter>\n<parameter name=\"b\">48838483920</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "multiply");
         let args: serde_json::Value =
@@ -3401,7 +3508,7 @@ mod tests {
     #[test]
     fn minimax_m2_boolean_param() {
         let text = "<invoke name=\"fn\">\n<parameter name=\"active\">true</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert_eq!(args["active"], true);
@@ -3410,7 +3517,7 @@ mod tests {
     #[test]
     fn minimax_m2_null_param() {
         let text = "<invoke name=\"fn\">\n<parameter name=\"val\">null</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert_eq!(args["val"], serde_json::Value::Null);
@@ -3419,7 +3526,7 @@ mod tests {
     #[test]
     fn minimax_m2_json_object_param() {
         let text = "<invoke name=\"fn\">\n<parameter name=\"config\">{\"key\": \"val\", \"n\": 1}</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         let config = &args["config"];
@@ -3429,13 +3536,17 @@ mod tests {
 
     #[test]
     fn minimax_m2_no_match_plain_text() {
-        assert!(try_minimax_m2("Hello, world!").is_none());
+        assert!(try_minimax_m2("Hello, world!", None).is_none());
     }
 
     #[test]
     fn minimax_m2_no_match_hermes_format() {
         assert!(
-            try_minimax_m2(r#"<tool_call>{"name": "fn", "arguments": {}}</tool_call>"#).is_none()
+            try_minimax_m2(
+                r#"<tool_call>{"name": "fn", "arguments": {}}</tool_call>"#,
+                None
+            )
+            .is_none()
         );
     }
 
@@ -3443,7 +3554,7 @@ mod tests {
     fn minimax_m2_single_quotes_name() {
         // Name quoted with single quotes (edge case)
         let text = "<invoke name='search'>\n<parameter name='query'>rust</parameter>\n</invoke>";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         assert_eq!(result.tool_calls[0].name, "search");
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
@@ -3454,7 +3565,7 @@ mod tests {
     fn minimax_m2_missing_close_invoke() {
         // No </invoke> closing tag: still parses what it can
         let text = "<invoke name=\"search\">\n<parameter name=\"query\">rust</parameter>\n";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "search");
     }
@@ -3468,15 +3579,15 @@ mod tests {
         // skips that block or returns no calls — but never panics.
         let text = "<invoke name=\">\n<parameter name=\"k\">v</parameter>\n</invoke>";
         // Must not panic.
-        let _ = try_minimax_m2(text);
+        let _ = try_minimax_m2(text, None);
 
         // Same check for a single apostrophe.
         let text = "<invoke name='>\n<parameter name=\"k\">v</parameter>\n</invoke>";
-        let _ = try_minimax_m2(text);
+        let _ = try_minimax_m2(text, None);
 
         // Same check inside a parameter name.
         let text = "<invoke name=\"fn\">\n<parameter name=\">v</parameter>\n</invoke>";
-        let _ = try_minimax_m2(text);
+        let _ = try_minimax_m2(text, None);
     }
 
     #[test]
@@ -3486,7 +3597,7 @@ mod tests {
         // first call.  Same fix pattern as
         // `functionary_v31_malformed_trailing_tag_preserves_prior_calls`.
         let text = "<invoke name=\"get_weather\">\n<parameter name=\"loc\">Paris</parameter>\n</invoke><invoke name=\"broken_no_close";
-        let result = try_minimax_m2(text).unwrap();
+        let result = try_minimax_m2(text, None).unwrap();
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
         let args: serde_json::Value =
@@ -3511,7 +3622,7 @@ mod tests {
         body.push_str("</invoke>");
 
         let start = std::time::Instant::now();
-        let result = try_minimax_m2(&body);
+        let result = try_minimax_m2(&body, None);
         let elapsed = start.elapsed();
 
         // Should complete in well under one second on any reasonable hardware.
@@ -3534,7 +3645,7 @@ mod tests {
         // MINIMAX_M2_MAX_CALLS to bound memory amplification.
         let one = "<invoke name=\"x\"><parameter name=\"a\">1</parameter></invoke>";
         let huge = one.repeat(10_000);
-        let result = try_minimax_m2(&huge).unwrap();
+        let result = try_minimax_m2(&huge, None).unwrap();
         assert!(
             result.tool_calls.len() <= MINIMAX_M2_MAX_CALLS,
             "expected <= {}, got {}",
@@ -3553,7 +3664,7 @@ mod tests {
             body.push_str(&format!("<parameter name=\"k{i}\">v</parameter>"));
         }
         body.push_str("</invoke>");
-        let result = try_minimax_m2(&body).unwrap();
+        let result = try_minimax_m2(&body, None).unwrap();
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         let obj = args.as_object().unwrap();
@@ -4794,5 +4905,475 @@ mod tests {
     fn longcat_malformed_returns_none() {
         assert!(try_longcat("plain text with no markers", None).is_none());
         assert!(try_longcat("<longcat_tool_call></longcat_tool_call>", None).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Schema-driven coercion for the XML parameter grammars (#1336)
+    // ------------------------------------------------------------------
+
+    /// The parsed `arguments` object of one call.
+    fn xml_args(result: &ToolCallParseResult, idx: usize) -> serde_json::Value {
+        serde_json::from_str(&result.tool_calls[idx].arguments).expect("arguments must be JSON")
+    }
+
+    /// A Qwen3-Coder call: `<function=NAME>` with one `<parameter=KEY>` per pair.
+    fn qwen_block(name: &str, params: &[(&str, &str)]) -> String {
+        let body: String = params
+            .iter()
+            .map(|(k, v)| format!("<parameter={k}>{v}</parameter>"))
+            .collect();
+        format!("<tool_call><function={name}>{body}</function></tool_call>")
+    }
+
+    /// A MiniMax M2 call: `<invoke name="NAME">` with one `<parameter name="KEY">` per pair.
+    fn m2_block(name: &str, params: &[(&str, &str)]) -> String {
+        let body: String = params
+            .iter()
+            .map(|(k, v)| format!("<parameter name=\"{k}\">{v}</parameter>"))
+            .collect();
+        format!("<invoke name=\"{name}\">{body}</invoke>")
+    }
+
+    /// A tool registered without a `parameters` schema.
+    fn schemaless_tool(name: &str) -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: name.to_string(),
+                description: None,
+                parameters: None,
+            },
+        }
+    }
+
+    fn zip_and_count_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "zip": {"type": "string"},
+                "n": {"type": "integer"}
+            }
+        })
+    }
+
+    #[test]
+    fn qwen3_coder_string_typed_param_keeps_numeric_text() {
+        // The same numeric-looking text under two declared types: the string
+        // keeps its leading zero, the integer is coerced (and loses it).
+        let output = qwen_block("f", &[("zip", "02134"), ("n", "02134")]);
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let result = try_qwen3_coder(&output, Some(&tools)).unwrap();
+        let args = xml_args(&result, 0);
+        assert_eq!(args["zip"], "02134");
+        assert!(
+            args["zip"].is_string(),
+            "a string-typed param stays a string"
+        );
+        assert_eq!(args["n"], 2134);
+    }
+
+    #[test]
+    fn qwen3_coder_string_typed_true_stays_string() {
+        let output = qwen_block("f", &[("flag", "true"), ("exp", "1e5")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"flag": {"type": "string"}, "exp": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["flag"], "true");
+        assert!(args["flag"].is_string());
+        assert_eq!(args["exp"], "1e5");
+        assert!(args["exp"].is_string());
+    }
+
+    #[test]
+    fn qwen3_coder_integer_typed_accepts_zero_fraction_float() {
+        let output = qwen_block("f", &[("n", "5.0")]);
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert!(args["n"].is_i64(), "an integer-typed 5.0 is the integer 5");
+    }
+
+    #[test]
+    fn qwen3_coder_integer_typed_keeps_fractional_value_as_number() {
+        // A value that does not fit its declared type is not a reason to drop
+        // the call: it falls back to the loose rules and stays a number.
+        let output = qwen_block("f", &[("n", "5.5")]);
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let result = try_qwen3_coder(&output, Some(&tools)).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(xml_args(&result, 0)["n"], 5.5);
+    }
+
+    #[test]
+    fn qwen3_coder_number_typed_keeps_written_form() {
+        // `number` accepts both spellings, so neither is rewritten.
+        let output = qwen_block("f", &[("a", "5"), ("b", "5.0")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"a": {"type": "number"}, "b": {"type": "number"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["a"], 5);
+        assert!(args["a"].is_i64());
+        assert_eq!(args["b"], 5.0);
+        assert!(args["b"].is_f64());
+    }
+
+    #[test]
+    fn qwen3_coder_object_typed_invalid_json_falls_back_to_string() {
+        let output = qwen_block("f", &[("cfg", "{not json")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"cfg": {"type": "object"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let result = try_qwen3_coder(&output, Some(&tools)).unwrap();
+        assert_eq!(result.tool_calls.len(), 1, "the call must survive");
+        assert_eq!(xml_args(&result, 0)["cfg"], "{not json");
+    }
+
+    #[test]
+    fn qwen3_coder_object_typed_valid_json_parses() {
+        let output = qwen_block("f", &[("cfg", r#"{"a": 1}"#)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"cfg": {"type": "object"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["cfg"], serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn qwen3_coder_without_schema_uses_loose_rules() {
+        // A tool registered without `parameters` keeps the schema-free
+        // behaviour: numbers and booleans are guessed, `null` is null, and a
+        // word that is neither stays the string the model wrote.
+        let output = qwen_block(
+            "f",
+            &[
+                ("n", "5"),
+                ("flag", "true"),
+                ("val", "null"),
+                ("word", "yes"),
+                ("list", "[1, 2]"),
+                ("text", "plain words"),
+            ],
+        );
+        let tools = vec![schemaless_tool("f")];
+        for tools in [None, Some(tools.as_slice())] {
+            let args = xml_args(&try_qwen3_coder(&output, tools).unwrap(), 0);
+            assert_eq!(args["n"], 5);
+            assert_eq!(args["flag"], true);
+            assert_eq!(args["val"], serde_json::Value::Null);
+            assert_eq!(args["word"], "yes", "`yes` has no schema basis for true");
+            assert_eq!(args["list"], serde_json::json!([1, 2]));
+            assert_eq!(args["text"], "plain words");
+        }
+    }
+
+    #[test]
+    fn xml_null_literal_is_null_except_under_a_plain_string_schema() {
+        // The bare word is the only JSON null these grammars can spell, so it
+        // wins over every declared type but a plain `string`, where the
+        // declaration says the value is text (a query, a ref, a filename).
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "maybe_text": {"type": ["string", "null"]},
+                "n": {"type": "integer"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let params = &[("text", "NULL"), ("maybe_text", "null"), ("n", "null")];
+
+        let qwen = try_qwen3_coder(&qwen_block("f", params), Some(&tools)).unwrap();
+        let args = xml_args(&qwen, 0);
+        assert_eq!(args["text"], "NULL", "a string-typed value keeps its text");
+        assert!(args["text"].is_string());
+        assert_eq!(
+            args["maybe_text"],
+            serde_json::Value::Null,
+            "a nullable declaration still takes the null"
+        );
+        assert_eq!(args["n"], serde_json::Value::Null);
+
+        let m2 = try_minimax_m2(&m2_block("f", params), Some(&tools)).unwrap();
+        let args = xml_args(&m2, 0);
+        assert_eq!(args["text"], "NULL");
+        assert_eq!(args["maybe_text"], serde_json::Value::Null);
+        assert_eq!(args["n"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn xml_boolean_typed_accepts_the_words_a_strict_json_read_rejects() {
+        // A `boolean` declaration is the schema basis the old free-text guess
+        // never had, so `yes` and `on` are booleans here and strings without it.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "boolean"},
+                "b": {"type": "boolean"},
+                "c": {"type": "boolean"},
+                "d": {"type": "boolean"},
+                "e": {"type": "boolean"},
+                "f": {"type": "boolean"},
+                "g": {"type": "boolean"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let params = &[
+            ("a", "true"),
+            ("b", "TRUE"),
+            ("c", "yes"),
+            ("d", "on"),
+            ("e", "1"),
+            ("f", "off"),
+            ("g", "maybe"),
+        ];
+
+        for args in [
+            xml_args(
+                &try_qwen3_coder(&qwen_block("f", params), Some(&tools)).unwrap(),
+                0,
+            ),
+            xml_args(
+                &try_minimax_m2(&m2_block("f", params), Some(&tools)).unwrap(),
+                0,
+            ),
+        ] {
+            assert_eq!(args["a"], true);
+            assert_eq!(
+                args["b"], true,
+                "casing must not matter under a declaration"
+            );
+            assert_eq!(args["c"], true);
+            assert_eq!(args["d"], true);
+            assert_eq!(args["e"], true);
+            assert_eq!(args["f"], false);
+            assert_eq!(
+                args["g"], "maybe",
+                "a non-boolean word is not invented into one"
+            );
+        }
+    }
+
+    #[test]
+    fn xml_boolean_words_need_a_declaration() {
+        // Without a `boolean` schema the same words stay the text the model
+        // wrote, matching MiniMax M3, GLM-4.7 and LongCat.
+        let output = qwen_block("f", &[("a", "yes"), ("b", "on"), ("c", "TRUE")]);
+        let args = xml_args(&try_qwen3_coder(&output, None).unwrap(), 0);
+        assert_eq!(args["a"], "yes");
+        assert_eq!(args["b"], "on");
+        assert_eq!(args["c"], "TRUE");
+    }
+
+    #[test]
+    fn xml_parsers_resolve_a_namespaced_function_name() {
+        // A model that namespaces its call (`functions.f`) must still find the
+        // schema; `filter_by_tools` strips the same prefix after parsing.
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let qwen = try_qwen3_coder(
+            &qwen_block("functions.f", &[("zip", "02134")]),
+            Some(&tools),
+        )
+        .unwrap();
+        assert_eq!(xml_args(&qwen, 0)["zip"], "02134");
+        let m2 =
+            try_minimax_m2(&m2_block("functions.f", &[("zip", "02134")]), Some(&tools)).unwrap();
+        assert_eq!(xml_args(&m2, 0)["zip"], "02134");
+    }
+
+    #[test]
+    fn minimax_m2_without_schema_uses_loose_rules() {
+        // The mirror of the Qwen3-Coder case, including the words that used to
+        // be guessed into booleans and null.
+        let output = m2_block(
+            "f",
+            &[
+                ("n", "5"),
+                ("flag", "true"),
+                ("val", "null"),
+                ("word", "yes"),
+                ("nil_word", "none"),
+            ],
+        );
+        let args = xml_args(&try_minimax_m2(&output, None).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert_eq!(args["flag"], true);
+        assert_eq!(args["val"], serde_json::Value::Null);
+        assert_eq!(args["word"], "yes");
+        assert_eq!(args["nil_word"], "none", "only `null` is null");
+    }
+
+    #[test]
+    fn xml_array_typed_bare_scalar_takes_the_item_type() {
+        // These grammars have no way to spell a repeated element, so an
+        // array-typed parameter carrying one bare scalar is coerced against
+        // `items` and stays a scalar. Documented rather than changed: the loose
+        // rules produced the same scalar before this path existed.
+        let output = qwen_block("f", &[("ids", "3"), ("names", r#"["a", "b"]"#)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "names": {"type": "array", "items": {"type": "string"}}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["ids"], 3);
+        assert_eq!(args["names"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn minimax_m3_anyof_integer_or_string_keeps_the_exponent_form_a_string() {
+        // The integer alternative is tried first, so widening it must not let
+        // it claim an identifier the string alternative used to take.
+        let body = format!("{}{}", m3_el("x", "1e5"), m3_el("y", "5.0"));
+        let output = m3_block(&[("f", &body)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "x": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+                "y": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = m3_args(&try_minimax_m3(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["x"], "1e5");
+        assert!(args["x"].is_string());
+        assert_eq!(
+            args["y"], 5,
+            "a zero fraction is the integer the schema allows"
+        );
+    }
+
+    #[test]
+    fn minimax_m2_string_typed_param_keeps_numeric_text() {
+        let output = m2_block("f", &[("zip", "02134"), ("n", "02134")]);
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let args = xml_args(&try_minimax_m2(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["zip"], "02134");
+        assert!(args["zip"].is_string());
+        assert_eq!(args["n"], 2134);
+    }
+
+    #[test]
+    fn minimax_m2_integer_typed_accepts_zero_fraction_float() {
+        let output = m2_block("f", &[("n", "5.0")]);
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let args = xml_args(&try_minimax_m2(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert!(args["n"].is_i64());
+    }
+
+    #[test]
+    fn xml_parsers_ignore_a_schema_for_a_different_function() {
+        // The schema is looked up by the called function's name; an unrelated
+        // tool in the request must not type this call's parameters.
+        let output = qwen_block("f", &[("zip", "02134")]);
+        let tools = vec![m3_tool("other", zip_and_count_schema())];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(
+            args["zip"], 2134,
+            "no schema for `f`, so the loose rules run"
+        );
+    }
+
+    #[test]
+    fn minimax_m3_integer_typed_accepts_zero_fraction_float() {
+        let output = m3_block(&[("f", &m3_el("n", "5.0"))]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = m3_args(&try_minimax_m3(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert!(args["n"].is_i64());
+    }
+
+    #[test]
+    fn minimax_m3_number_typed_keeps_written_form() {
+        let body = format!("{}{}", m3_el("a", "5"), m3_el("b", "5.0"));
+        let output = m3_block(&[("f", &body)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"a": {"type": "number"}, "b": {"type": "num"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = m3_args(&try_minimax_m3(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["a"], 5);
+        assert!(args["a"].is_i64());
+        assert_eq!(args["b"], 5.0);
+        assert!(args["b"].is_f64());
+    }
+
+    #[test]
+    fn glm47_integer_typed_accepts_zero_fraction_float() {
+        let output = glm_block("f", &[("n", "5.0"), ("s", "5.0")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer"}, "s": {"type": "string"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = kv_args(&try_glm47(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert!(args["n"].is_i64());
+        assert_eq!(args["s"], "5.0", "a string-typed value is still untouched");
+    }
+
+    #[test]
+    fn longcat_integer_typed_accepts_zero_fraction_float() {
+        let output = longcat_block("f", &[("n", "5.0"), ("m", "5.5")]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer"}, "m": {"type": "integer"}}
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = kv_args(&try_longcat(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert_eq!(args["m"], 5.5, "a fractional value stays a number");
+    }
+
+    #[test]
+    fn integer_literal_rule_is_textual_and_exact() {
+        // Zero fractions are stripped as text, so the result is exact at every
+        // magnitude and a fractional value can never round its way to an
+        // integer. Both properties fail under an f64 round trip.
+        assert_eq!(parse_integer_literal("5"), Some(serde_json::json!(5)));
+        assert_eq!(parse_integer_literal("5.0"), Some(serde_json::json!(5)));
+        assert_eq!(parse_integer_literal("-5.000"), Some(serde_json::json!(-5)));
+        assert_eq!(parse_integer_literal("5."), Some(serde_json::json!(5)));
+        assert_eq!(parse_integer_literal("5.5"), None);
+        assert_eq!(parse_integer_literal(".5"), None);
+        assert_eq!(parse_integer_literal("5.0.0"), None);
+        // Exact past 2^53, where an f64 round trip comes back off by one.
+        assert_eq!(
+            parse_integer_literal("9007199254740993.0"),
+            Some(serde_json::json!(9_007_199_254_740_993_i64))
+        );
+        // An f64 round trip rounds this to a zero fraction and would call it an
+        // integer.
+        assert_eq!(parse_integer_literal("9007199254740991.5"), None);
+        // The exponent form belongs to the string alternative of an `anyOf`.
+        assert_eq!(parse_integer_literal("1e5"), None);
+        assert_eq!(parse_integer_literal("inf"), None);
+        assert_eq!(parse_integer_literal("nan"), None);
+        assert_eq!(parse_integer_literal("abc"), None);
+        // A u64 literal past i64::MAX still parses exactly; one past u64 does
+        // not, and stays a number through the caller's fallback.
+        assert_eq!(
+            parse_integer_literal("18446744073709551615"),
+            Some(serde_json::json!(18_446_744_073_709_551_615_u64))
+        );
+        assert_eq!(parse_integer_literal("18446744073709551616.0"), None);
     }
 }
