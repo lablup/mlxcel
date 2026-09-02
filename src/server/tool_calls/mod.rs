@@ -196,6 +196,26 @@ pub fn tool_choice_grammar_with(
         );
         return None;
     }
+    // Same `$ref` budget the `response_format` path enforces before compiling:
+    // every reference expands into its own sub-grammar, so a small schema that
+    // references itself many times buys compile time out of proportion to its
+    // size. The walk is linear and, after the size pre-flight, bounded.
+    let refs: usize = selected
+        .iter()
+        .filter_map(|tool| tool.function.parameters.as_ref())
+        .map(count_refs)
+        .sum();
+    if refs > crate::server::structured::MAX_SCHEMA_REFS {
+        tracing::warn!(
+            target: "mlxcel::tool_calls",
+            tools = selected.len(),
+            refs,
+            limit = crate::server::structured::MAX_SCHEMA_REFS,
+            "forced tool_choice: the declared tool schemas carry more $ref entries than the \
+             grammar limit; falling back to prompt-instruction enforcement"
+        );
+        return None;
+    }
     let single = selected.len() == 1;
     let mut schemas: Vec<serde_json::Value> = selected
         .into_iter()
@@ -233,6 +253,18 @@ pub fn tool_choice_grammar_with(
     }
     rule.push('\n');
     Some(rule)
+}
+
+/// Number of `$ref` entries in a schema, counted the way the schema path's
+/// pre-compilation guard counts them (a `$ref` key on any object).
+fn count_refs(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(map) => {
+            usize::from(map.contains_key("$ref")) + map.values().map(count_refs).sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items.iter().map(count_refs).sum(),
+        _ => 0,
+    }
 }
 
 /// Whether the selected tools' names and `parameters` schemas together
@@ -717,6 +749,45 @@ mod tool_choice_grammar_tests {
 
         // Ordinary schemas are unaffected.
         assert!(tool_choice_grammar(ToolCallFormat::Hermes, &two_tools(), &required()).is_some());
+    }
+
+    /// The `$ref` budget of the schema path applies to the tool schemas too:
+    /// each reference expands into a sub-grammar, so a tiny schema that
+    /// references itself hundreds of times is answered with the instruction-only
+    /// fallback instead of a long compile on the blocking pool.
+    #[test]
+    fn tool_choice_grammar_is_none_when_the_declared_schemas_exceed_the_ref_cap() {
+        let cap = crate::server::structured::MAX_SCHEMA_REFS;
+        let schema = |refs: usize| {
+            let properties: serde_json::Map<String, serde_json::Value> = (0..refs)
+                .map(|i| (format!("p{i}"), serde_json::json!({"$ref": "#/$defs/Leaf"})))
+                .collect();
+            Some(serde_json::json!({
+                "type": "object",
+                "$defs": {"Leaf": {"type": "string"}},
+                "properties": properties
+            }))
+        };
+
+        let at_cap = vec![tool("get_time", schema(cap))];
+        assert!(
+            tool_choice_grammar(ToolCallFormat::Hermes, &at_cap, &required()).is_some(),
+            "exactly the limit is still allowed"
+        );
+        let over = vec![tool("get_time", schema(cap + 1))];
+        assert!(tool_choice_grammar(ToolCallFormat::Hermes, &over, &required()).is_none());
+
+        // Summed over the selected tools, so two tools at two thirds each fit
+        // alone and not together.
+        let two_thirds = vec![
+            tool("get_time", schema(cap / 3 * 2)),
+            tool("get_weather", schema(cap / 3 * 2)),
+        ];
+        assert!(tool_choice_grammar(ToolCallFormat::Hermes, &two_thirds, &required()).is_none());
+        assert!(
+            tool_choice_grammar(ToolCallFormat::Hermes, &two_thirds, &named("get_weather"))
+                .is_some()
+        );
     }
 
     #[test]

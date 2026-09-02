@@ -809,6 +809,25 @@ async fn route_chat(
         return Ok(ErrorResponse::new(message, "invalid_request_error").into_response());
     }
 
+    // The same frame limitation means a forced `tool_choice` (#1319) cannot be
+    // grammar-forced on this path either. Unlike `response_format`, that form
+    // is still meaningfully enforced without a grammar (the narrowed tool list
+    // and the injected instruction reach the rendered prompt), and rejecting
+    // it would refuse a request the router accepted before, so it proceeds as
+    // instruction-only enforcement and says so once per request.
+    if request
+        .tool_choice
+        .as_ref()
+        .is_some_and(|choice| choice.is_forced())
+    {
+        tracing::warn!(
+            target: "mlxcel::tool_calls",
+            tool_choice = request.tool_choice.as_ref().map(|choice| choice.mode()),
+            "forced tool_choice on the disaggregated router is enforced through the prompt \
+             only; the grammar constraint cannot travel to the decode node"
+        );
+    }
+
     // PrefillRequestFrame cannot carry a compiled structured-output
     // constraint to the decode node. Reject rather than return unconstrained
     // output for a request that explicitly asked for structured output.
