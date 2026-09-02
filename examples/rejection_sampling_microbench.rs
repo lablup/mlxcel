@@ -106,7 +106,7 @@ use std::time::{Duration, Instant};
 
 use mlxcel_core::{
     MlxArray, UniquePtr, array_to_raw_bytes, async_eval_pair, eval, from_slice_f32, fused_sample,
-    fused_sample_categorical, fused_sample_rejection, is_gpu_available, matmul, random_seed,
+    fused_sample_categorical, fused_sample_rejection, gpu_backend_available, matmul, random_seed,
     rejection_cap_overflow_launches, rejection_cap_overflow_rows, reset_sampling_dispatch,
     sampling_dispatch_drain_pending, sampling_dispatch_recorded_report,
     sampling_rejection_available, sampling_rejection_max_rounds, sampling_rejection_probe,
@@ -346,7 +346,7 @@ fn print_dispatch(prefix: &str) {
 fn main() {
     let opts = parse_options();
 
-    if !is_gpu_available() {
+    if !gpu_backend_available() {
         eprintln!("No GPU backend available; the sampling kernel cannot run here.");
         return;
     }

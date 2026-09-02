@@ -2065,7 +2065,17 @@ mod ffi {
         fn set_default_stream(stream: &MlxStream);
 
         /// Check whether the current default device is GPU
-        fn is_gpu_available() -> bool;
+        fn default_device_is_gpu() -> bool;
+
+        /// True when the active MLX backend exposes at least one usable GPU
+        /// (issue #1421): the unclamped `device_count(Device::gpu) > 0`, so
+        /// a CPU-only build and a CUDA build on a host without a driver both
+        /// answer `false`, while Metal and a CUDA build with a device answer
+        /// `true`. Independent of the default device, which
+        /// `default_device_is_gpu` reports and `set_default_device` moves.
+        /// Never moves the default device or creates a stream, so it is safe
+        /// before `initialize_runtime` finishes.
+        fn gpu_backend_available() -> bool;
 
         /// True when the MLX Metal backend is available at runtime (macOS
         /// Apple Silicon). False on CUDA-only and CPU-only builds. Mirrors the
@@ -2954,6 +2964,20 @@ mod ffi {
 
 // Re-export the FFI types and functions
 pub use ffi::*;
+
+/// Deprecated name for [`default_device_is_gpu`] (issue #1421).
+///
+/// The old name read as a hardware query, but the answer is whether the
+/// process-wide MLX default device is currently the GPU: it flips to `false`
+/// the moment any caller runs `set_default_device(false)`, on a machine that
+/// has a GPU. Callers that want to know whether a GPU backend exists at all
+/// should use [`gpu_backend_available`]; callers that want the default-device
+/// answer should say so with [`default_device_is_gpu`]. Kept for one release
+/// so out-of-tree callers get a compile warning instead of a break.
+#[deprecated(note = "use default_device_is_gpu or gpu_backend_available")]
+pub fn is_gpu_available() -> bool {
+    ffi::default_device_is_gpu()
+}
 
 // Re-export cxx::UniquePtr for consumers of this crate
 pub use cxx::UniquePtr;

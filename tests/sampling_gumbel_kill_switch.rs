@@ -52,7 +52,7 @@ fn falsy_env_restores_the_categorical_sampling_path() {
 
     // A GPU is still needed to compare the two sampling arms; on a CPU-only
     // build the assertion above is the whole test.
-    if !mlxcel_core::is_gpu_available() {
+    if !mlxcel_core::gpu_backend_available() {
         return;
     }
 

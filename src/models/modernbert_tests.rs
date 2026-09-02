@@ -20,8 +20,6 @@
 //! deterministic synthetic weights, so it needs no checkpoint. The
 //! real-checkpoint gates live in `modernbert_real_checkpoint_tests.rs`.
 
-use std::sync::MutexGuard;
-
 use mlxcel_core::utils::{array_to_vec_f32, create_bidirectional_window_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -55,9 +53,10 @@ use crate::models::{ModelType, get_model_type};
 ///
 /// Delegates to the process-wide guard in
 /// [`crate::models::embedding_test_support`], which serializes every
-/// embedding and reranker family against each other and pins the default
-/// device back to the GPU.
-pub(super) fn mlx_guard() -> MutexGuard<'static, ()> {
+/// embedding and reranker family against each other and holds the
+/// default-device lock so no concurrent test can move the measurement onto
+/// the CPU backend.
+pub(super) fn mlx_guard() -> crate::models::embedding_test_support::MlxTestGuard {
     crate::models::embedding_test_support::mlx_test_guard()
 }
 

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    RuntimeDevice, parse_memory_size, parse_runtime_device, resolve_runtime_device,
-    should_warn_cpu_only_on_nvidia_host,
+    RuntimeDevice, cpu_override_requested, parse_memory_size, parse_runtime_device, resolve_device,
+    resolve_runtime_device, should_warn_cpu_only_on_nvidia_host,
 };
 
 #[test]
@@ -140,6 +140,63 @@ fn warns_only_for_cpu_fallback_on_nvidia_host_without_cuda() {
     assert!(!should_warn_cpu_only_on_nvidia_host(Cpu, Cpu, false, true));
     // Already running on the GPU: nothing to warn about.
     assert!(!should_warn_cpu_only_on_nvidia_host(Gpu, Gpu, false, true));
+}
+
+// ── Backend availability vs. the CPU override (issue #1421) ──────────────────
+
+/// `RuntimeSetup.device` comes from the backend's availability answer and the
+/// override is reported next to it, so the two reasons for `Cpu` stay apart.
+#[test]
+fn resolve_device_separates_backend_availability_from_the_cpu_override() {
+    use RuntimeDevice::{Cpu, Gpu};
+    // GPU wanted and a backend exists: the GPU, no override.
+    assert_eq!(resolve_device(Gpu, true), (Gpu, false));
+    // GPU wanted but no backend: the CPU is the only option, not an override.
+    assert_eq!(resolve_device(Gpu, false), (Cpu, false));
+    // CPU asked for: an override, whether or not a backend exists.
+    assert_eq!(resolve_device(Cpu, true), (Cpu, true));
+    assert_eq!(resolve_device(Cpu, false), (Cpu, true));
+}
+
+/// Run both with and without `MLXCEL_DEVICE=cpu`: the setup reports the
+/// override, the resolved device follows the backend answer when nothing asked
+/// for the CPU, and the backend answer is the same before and after, even
+/// though the override moves the MLX default device. A guard puts the default
+/// device back so the override does not leak into later tests in this process.
+#[test]
+fn initialize_runtime_reports_the_cpu_override_without_hiding_the_backend() {
+    let _device = mlxcel_core::streams::DefaultDeviceGuard::capture();
+    let backend_before = mlxcel_core::gpu_backend_available();
+
+    let setup = super::initialize_runtime();
+    let cpu_requested = cpu_override_requested();
+
+    assert_eq!(setup.cpu_override, cpu_requested);
+    if setup.device == RuntimeDevice::Cpu {
+        // Every CPU resolution is applied, not just the operator's override:
+        // a CUDA build on a host without a driver starts with MLX defaulting
+        // to a GPU that `gpu_backend_available()` calls unusable, and
+        // reporting `Cpu` while leaving MLX dispatching there would make the
+        // field a claim rather than a fact (issue #1421).
+        assert!(
+            !mlxcel_core::default_device_is_gpu(),
+            "a runtime that resolved to the CPU must leave MLX's default device on the CPU"
+        );
+    }
+    if cpu_requested {
+        assert_eq!(setup.device, RuntimeDevice::Cpu);
+    } else {
+        assert_eq!(
+            setup.device == RuntimeDevice::Gpu,
+            backend_before,
+            "without an override the device is the GPU exactly when a backend exists"
+        );
+    }
+    assert_eq!(
+        mlxcel_core::gpu_backend_available(),
+        backend_before,
+        "the override must not change what the backend reports"
+    );
 }
 
 // ── CUDA architecture refusal (issue #1537) ──────────────────────────────────

@@ -13,12 +13,33 @@
 // limitations under the License.
 
 use super::{masked_scatter, merge_llava, prepare_inputs_for_multimodal};
+use mlxcel_core::streams::{DefaultDeviceGuard, DefaultDeviceLock, lock_default_device};
 use mlxcel_core::{self, MlxArray, dtype};
-use std::sync::Once;
 
-fn ensure_cpu_device() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| mlxcel_core::set_default_device(false));
+/// Run one test on the CPU and put the previous default device back when the
+/// returned guards drop; bind the result to a named local for the test's
+/// duration. The `Once` this replaces moved the process-wide default device
+/// for good, so every test that ran after this module measured the CPU
+/// backend (issue #1421).
+///
+/// The lock is `mlxcel_core::streams::lock_default_device`, the one
+/// process-wide lock every default-device mover takes. libtest runs one
+/// binary's tests in parallel unless told otherwise, and a guard records the
+/// current default device when it is created, so unserialized movers
+/// interleave into exactly the leak this module was converted to remove: the
+/// second records the first's CPU default as its baseline, the first restores
+/// the GPU, and the second then restores the CPU for good. A lock private to
+/// this module would not have covered that, because the other movers are in
+/// `multimodal::host_preprocessor` and behind `mlx_test_guard`.
+///
+/// The tuple order is load-bearing. Tuple fields drop in declaration order,
+/// so the device guard must come first: releasing the lock before the device
+/// is restored would let the next test take the lock and record the *moved*
+/// device as its baseline.
+fn cpu_device() -> (DefaultDeviceGuard, DefaultDeviceLock) {
+    let lock = lock_default_device();
+    let device = DefaultDeviceGuard::cpu();
+    (device, lock)
 }
 
 fn assert_arrays_equal(actual: &MlxArray, expected: &MlxArray) {
@@ -28,7 +49,7 @@ fn assert_arrays_equal(actual: &MlxArray, expected: &MlxArray) {
 
 #[test]
 fn masked_scatter_replaces_only_masked_positions() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     let base = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 3, 2]);
     let input_ids = mlxcel_core::from_slice_i32(&[0, 7, 0], &[1, 3]);
@@ -47,7 +68,7 @@ fn masked_scatter_replaces_only_masked_positions() {
 
 #[test]
 fn prepare_inputs_for_multimodal_builds_additive_mask_and_preserves_dtype() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     let image_features = mlxcel_core::from_slice_f32(&[4.0, 6.0], &[1, 1, 2]);
     let inputs_embeds =
@@ -102,7 +123,7 @@ fn prepare_inputs_for_multimodal_builds_additive_mask_and_preserves_dtype() {
 
 #[test]
 fn prepare_inputs_for_multimodal_all_ones_mask_is_all_zeros() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     // Sanity check for the common case: when attention_mask is all ones,
     // the additive 4D mask must be all zeros (attend everywhere).
@@ -141,7 +162,7 @@ fn prepare_inputs_for_multimodal_all_ones_mask_is_all_zeros() {
 
 #[test]
 fn merge_llava_flattens_projected_features_in_image_token_order() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     let image_features = mlxcel_core::from_slice_f32(&[10.0, 11.0, 12.0, 13.0], &[1, 2, 2]);
     let inputs_embeds =

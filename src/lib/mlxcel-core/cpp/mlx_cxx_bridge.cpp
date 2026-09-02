@@ -4700,8 +4700,27 @@ void set_default_stream(const MlxStream& stream) {
 }
 
 // Check whether the current default device is GPU
-bool is_gpu_available() {
+bool default_device_is_gpu() {
     return mlx::core::default_device() == mlx::core::Device::gpu;
+}
+
+// Whether the active MLX backend exposes at least one usable GPU (issue
+// #1421). This is the unclamped `device_count(Device::gpu)`, unlike
+// `gpu_device_count` above, which clamps to >= 1 so that `Device::gpu` is
+// always selectable. A CPU-only build counts 0, and so does a CUDA build on a
+// host without a driver (`cudaGetDeviceCount` fails and MLX returns the zero
+// it started from), so both answer false; Metal and a CUDA build with a
+// device answer true. `device_count` is portable across backends, so no
+// backend `#ifdef` is needed. The answer is independent of the default device
+// (`set_default_device(false)` does not change it), and the query neither
+// moves the default device nor creates a stream, so it is safe before runtime
+// initialization finishes. Safe is not the same as free, though: on Metal the
+// first call constructs the `metal::Device` singleton (a metallib load),
+// which every array allocation ends up constructing anyway, so this only
+// moves that cost earlier rather than adding a new one. Later calls, like the
+// CUDA backend's cached `cudaGetDeviceCount`, are just a magic-static check.
+bool gpu_backend_available() {
+    return mlx::core::device_count(mlx::core::Device::gpu) > 0;
 }
 
 // Top-p (nucleus) filtering.

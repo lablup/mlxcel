@@ -69,7 +69,21 @@ impl fmt::Display for RuntimeDevice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSetup {
+    /// The device the runtime resolved to. `Gpu` when a GPU backend is
+    /// available (`mlxcel_core::gpu_backend_available()`) and nothing asked
+    /// for the CPU; `Cpu` either because no GPU backend exists or because
+    /// `MLXCEL_DEVICE=cpu` asked for it, which [`Self::cpu_override`] tells
+    /// apart. This is what was resolved, not the MLX default device read
+    /// back afterwards: the field used to be filled from
+    /// `is_gpu_available()` after the CPU override had already moved the
+    /// default device, so it echoed the request instead of reporting
+    /// availability (issue #1421).
     pub device: RuntimeDevice,
+    /// `true` when `MLXCEL_DEVICE=cpu` moved the MLX default device to the
+    /// CPU. Together with [`Self::device`] this separates "CPU by request"
+    /// from "CPU because no GPU backend exists", so the startup lines can say
+    /// which one applies instead of printing `CPU` for both.
+    pub cpu_override: bool,
     pub wired_limit_bytes: Option<usize>,
     /// Soft MLX allocator memory limit applied via `MLXCEL_MEMORY_LIMIT`
     /// (issue #55). `None` when the env var was unset or invalid and
@@ -123,15 +137,38 @@ pub fn initialize_runtime() -> RuntimeSetup {
     let (requested_device, invalid_device_override) =
         resolve_runtime_device(std::env::var(RUNTIME_DEVICE_ENV).ok().as_deref());
 
-    if requested_device == RuntimeDevice::Cpu {
+    // Availability is a backend fact and the override is an operator request;
+    // resolve them separately so the setup can say which one put the runtime
+    // on the CPU (issue #1421). The availability query never moves the MLX
+    // default device, so the resolution has to be applied afterwards.
+    let (device, cpu_override) =
+        resolve_device(requested_device, mlxcel_core::gpu_backend_available());
+    // Apply every CPU resolution, not just the operator's override. MLX seeds
+    // its default device from `gpu::is_available()`, which the CUDA backend
+    // answers `true` unconditionally while `device_count(Device::gpu)` reports
+    // what `cudaGetDeviceCount` found, so a CUDA build on a host without a
+    // driver starts with a GPU default that `gpu_backend_available()` calls
+    // unusable. Reporting `Cpu` while leaving MLX dispatching to that GPU
+    // would make `RuntimeSetup.device` a claim rather than a fact, which is
+    // the class of bug this issue exists to remove. The GPU direction needs no
+    // counterpart: `device == Gpu` requires `device_count(Device::gpu) > 0`,
+    // and on every backend that implies `gpu::is_available()`, so MLX already
+    // defaults to the GPU there. Not pinning the GPU also keeps this call out
+    // of the way of the leak assertion in `mlx_test_guard`.
+    // This is the one in-tree default-device mover that does not hold
+    // `mlxcel_core::streams::lock_default_device()`: in production it runs
+    // once at startup, before any generation worker could be racing it, and
+    // on a GPU host in the test binaries it is inert (`device.uses_gpu()` is
+    // true there, so this branch never executes). Any new mover added
+    // elsewhere must take that lock; this one is the sole exception, and only
+    // because of where and when it runs. Avoid assigning the same CPU value:
+    // `initialize_runtime` is also called repeatedly by tests, and MLX stores
+    // its default device in a plain, non-atomic global. A CPU-only build starts
+    // on the CPU already, and a second initialization after a CPU override is
+    // already there too, so neither case needs another process-global write.
+    if !device.uses_gpu() && mlxcel_core::default_device_is_gpu() {
         mlxcel_core::set_default_device(false);
     }
-
-    let device = if mlxcel_core::is_gpu_available() {
-        RuntimeDevice::Gpu
-    } else {
-        RuntimeDevice::Cpu
-    };
 
     // Footgun guard: a default `cargo build --release` on Linux omits the `cuda`
     // feature and silently runs MLX on the CPU. If the user wanted the GPU but
@@ -172,6 +209,7 @@ pub fn initialize_runtime() -> RuntimeSetup {
 
     RuntimeSetup {
         device,
+        cpu_override,
         wired_limit_bytes,
         memory_limit_bytes,
         cache_limit_bytes,
@@ -187,6 +225,34 @@ fn resolve_runtime_device(value: Option<&str>) -> (RuntimeDevice, Option<String>
         },
         None => (RuntimeDevice::Gpu, None),
     }
+}
+
+/// Resolve the runtime device from the operator's request and the backend's
+/// availability answer, returning `(device, cpu_override)`.
+///
+/// The two inputs are independent facts and stay separate in the result: a
+/// CPU request yields `(Cpu, true)` whether or not a GPU backend exists, and
+/// a GPU request yields `Gpu` only when a backend exists, `(Cpu, false)`
+/// otherwise. Pure, so all four combinations are unit-tested without an
+/// environment or a device.
+fn resolve_device(requested: RuntimeDevice, gpu_backend_available: bool) -> (RuntimeDevice, bool) {
+    let cpu_override = requested == RuntimeDevice::Cpu;
+    let device = if !cpu_override && gpu_backend_available {
+        RuntimeDevice::Gpu
+    } else {
+        RuntimeDevice::Cpu
+    };
+    (device, cpu_override)
+}
+
+/// Whether `MLXCEL_DEVICE` currently requests the CPU. Test support reads
+/// this to tell an operator's CPU request, which `initialize_runtime` honors
+/// by moving the default device on purpose, from a default device that a
+/// test moved and never restored (`mlx_test_guard`, issue #1421).
+#[cfg(test)]
+pub(crate) fn cpu_override_requested() -> bool {
+    resolve_runtime_device(std::env::var(RUNTIME_DEVICE_ENV).ok().as_deref()).0
+        == RuntimeDevice::Cpu
 }
 
 /// Resolve wired memory limit from MLXCEL_WIRED_LIMIT env var.

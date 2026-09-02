@@ -16,8 +16,6 @@
 //! sanitization, position-id construction and the forward pass over a tiny
 //! deterministic random-weight checkpoint.
 
-use std::sync::MutexGuard;
-
 use mlxcel_core::utils::array_to_vec_f32;
 use mlxcel_core::weights::WeightMap;
 use serde_json::{Value, json};
@@ -38,9 +36,10 @@ use super::{BertArgs, BertEncoder, BertVariant, sanitize, xlm_roberta_position_i
 ///
 /// Delegates to the process-wide guard in
 /// [`crate::models::embedding_test_support`], which serializes every
-/// embedding and reranker family against each other and pins the default
-/// device back to the GPU.
-pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
+/// embedding and reranker family against each other and holds the
+/// default-device lock so no concurrent test can move the measurement onto
+/// the CPU backend.
+pub(crate) fn mlx_test_guard() -> crate::models::embedding_test_support::MlxTestGuard {
     crate::models::embedding_test_support::mlx_test_guard()
 }
 

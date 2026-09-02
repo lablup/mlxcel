@@ -90,6 +90,14 @@ fn print_runtime_setup(runtime: &RuntimeSetup) {
         );
     }
     println!("Runtime device: {}", runtime.device);
+    if runtime.cpu_override {
+        // Say why the CPU is in use, so a CPU line on a GPU host is not read
+        // as a missing backend (issue #1421).
+        println!(
+            "Running on the CPU because MLXCEL_DEVICE=cpu asked for it (GPU backend available: {}).",
+            mlxcel_core::gpu_backend_available()
+        );
+    }
     if let Some(max_memory) = runtime.wired_limit_bytes {
         println!(
             "Wired memory limit: {:.1} GB",

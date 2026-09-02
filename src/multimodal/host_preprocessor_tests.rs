@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Once;
+use std::sync::OnceLock;
 
 use image::DynamicImage;
 use mlxcel_core::dtype;
+use mlxcel_core::streams::{DefaultDeviceGuard, DefaultDeviceLock, lock_default_device};
 
 use super::{
     CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
@@ -27,9 +28,35 @@ use super::{
 use crate::multimodal::vlm_prompt::ImageTokenBlockError;
 use crate::vision::merge::merge_llava;
 
-fn ensure_cpu_device() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| mlxcel_core::set_default_device(false));
+/// Where MLX's default device was before the first test here moved it, so
+/// [`the_default_device_is_restored_after_the_export_tests`] can check that it
+/// came back.
+static DEFAULT_DEVICE_BEFORE: OnceLock<bool> = OnceLock::new();
+
+/// Run one export test on the CPU. Bind the result to a named local for the
+/// test's duration: the lock keeps other tests from observing a half-moved
+/// device, and the guard restores the previous default device when it drops.
+/// The `Once` this replaces moved the process-wide default device for good, so
+/// under `--test-threads=1` every real-checkpoint gate that sorted after this
+/// module measured the CPU backend (issue #1421).
+///
+/// The lock is `mlxcel_core::streams::lock_default_device`, the one
+/// process-wide lock every default-device mover takes, and not a lock private
+/// to this module. A private lock would exclude only the tests in this file,
+/// while `vision::merge` holds a CPU guard for each of its own four tests and
+/// `mlx_test_guard` measures real checkpoints through the same device; with
+/// two separate locks those spans interleave and the baseline recorded below
+/// is whichever device the other module happened to be holding.
+///
+/// The tuple order is load-bearing. Tuple fields drop in declaration order,
+/// so the device guard must come first: releasing the lock before the device
+/// is restored would let the next test take the lock and record the *moved*
+/// device as its baseline, which is the leak this helper exists to prevent.
+fn cpu_device() -> (DefaultDeviceGuard, DefaultDeviceLock) {
+    let lock = lock_default_device();
+    DEFAULT_DEVICE_BEFORE.get_or_init(mlxcel_core::default_device_is_gpu);
+    let device = DefaultDeviceGuard::cpu();
+    (device, lock)
 }
 
 fn images(count: usize) -> Vec<DynamicImage> {
@@ -218,7 +245,7 @@ fn processor_shape_validation_rejects_layout_and_size_drift() {
 
 #[test]
 fn owned_llava_export_matches_existing_mlx_merge_fixture() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
     let text = mlxcel_core::from_slice_f32(&[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5], &[1, 4, 2]);
     let ids = mlxcel_core::from_slice_i32(&[7, 42, 42, 8], &[1, 4]);
     let vision = mlxcel_core::from_slice_f32(&[10.0, 11.0, 12.0, 13.0], &[1, 2, 2]);
@@ -250,7 +277,7 @@ fn owned_llava_export_matches_existing_mlx_merge_fixture() {
 
 #[test]
 fn mlx_export_supports_f16_bf16_and_f32_with_exact_byte_counts() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
     let values = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 2, 2]);
     for mlx_dtype in [dtype::FLOAT16, dtype::BFLOAT16, dtype::FLOAT32] {
         let array = mlxcel_core::astype(&values, mlx_dtype);
@@ -262,7 +289,7 @@ fn mlx_export_supports_f16_bf16_and_f32_with_exact_byte_counts() {
 
 #[test]
 fn llava_export_rejects_hidden_size_mismatch() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
     let text = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 2, 2]);
     let merged = crate::vision::merge::InputEmbeddings {
         inputs_embeds: text,
@@ -277,7 +304,7 @@ fn llava_export_rejects_hidden_size_mismatch() {
 
 #[test]
 fn qwen2_vl_export_builds_exact_mrope_positions_and_delta() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
     let merged = crate::vision::merge::InputEmbeddings {
         inputs_embeds: mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 6, 2]),
         attention_mask_4d: None,
@@ -320,7 +347,7 @@ fn qwen2_vl_export_builds_exact_mrope_positions_and_delta() {
 
 #[test]
 fn qwen2_vl_export_rejects_video_and_cross_image_run_drift() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
     let input = || crate::vision::merge::InputEmbeddings {
         inputs_embeds: mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 6, 2]),
         attention_mask_4d: None,
@@ -351,6 +378,41 @@ fn qwen2_vl_export_rejects_video_and_cross_image_run_drift() {
         split_runs,
         HostPreprocessorError::InvalidConfig(_)
     ));
+}
+
+/// Issue #1421: once every test here that moved the default device has run
+/// (they all sort before this one, and the gates run tests in name order under
+/// `--test-threads=1`), the default device is where it was before the first of
+/// them touched it. The old `Once` left it on the CPU, and the real-checkpoint
+/// gates that sorted after this module scored a reranker on the CPU backend.
+/// Without `--test-threads=1` the shared lock still makes the check
+/// meaningful for whichever export tests ran before it.
+#[test]
+fn the_default_device_is_restored_after_the_export_tests() {
+    let _lock = lock_default_device();
+    // A guard taken without the shared lock is somebody else's live span, not
+    // a leak this test can diagnose, so stand down rather than report one.
+    // Same exemption `mlx_test_guard` carries, and for the same reason.
+    if mlxcel_core::streams::default_device_guards_held() > 0 {
+        return;
+    }
+    let before = *DEFAULT_DEVICE_BEFORE.get_or_init(mlxcel_core::default_device_is_gpu);
+    assert_eq!(
+        mlxcel_core::default_device_is_gpu(),
+        before,
+        "an export test moved MLX's default device and did not restore it"
+    );
+    // The same invariant `mlx_test_guard` asserts for the gates: with a GPU
+    // backend and no operator request for the CPU, the default device is the
+    // GPU. This catches a leak from any module that ran before this one, not
+    // only from this file.
+    if mlxcel_core::gpu_backend_available() && !crate::execution::runtime::cpu_override_requested()
+    {
+        assert!(
+            before,
+            "a test that ran before this module left MLX's default device on the CPU"
+        );
+    }
 }
 
 /// The pinned 4B checkpoint's geometry, so the expected numbers below are the

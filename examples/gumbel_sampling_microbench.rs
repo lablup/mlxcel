@@ -63,8 +63,8 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use mlxcel_core::{
-    MlxArray, UniquePtr, eval, from_slice_f32, fused_sample_categorical, gumbel_max_sample,
-    gumbel_sample_num_splits, is_gpu_available, random_seed, sampling_gumbel_available,
+    MlxArray, UniquePtr, eval, from_slice_f32, fused_sample_categorical, gpu_backend_available,
+    gumbel_max_sample, gumbel_sample_num_splits, random_seed, sampling_gumbel_available,
     synchronize_default,
 };
 
@@ -159,7 +159,7 @@ where
 fn main() {
     let opts = parse_options();
 
-    if !is_gpu_available() {
+    if !gpu_backend_available() {
         eprintln!("No GPU backend available; the sampling kernel cannot run here.");
         return;
     }
