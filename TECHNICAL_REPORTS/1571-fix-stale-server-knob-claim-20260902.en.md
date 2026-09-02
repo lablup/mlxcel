@@ -1,7 +1,7 @@
 # Technical Report: PR #1571 - docs: correct stale "not a server knob" claim in turbo-kv-cache.md
 
 **Date**: 2026-09-02
-**Author**: AI Code Reviewer
+**Author**: mlxcel maintainers
 **Reviewer**: (pending)
 **Status**: Completed
 **Languages**: Markdown (documentation only)
@@ -55,7 +55,7 @@ Not applicable; no code path changed.
 
 - **Test Coverage**: N/A (docs only).
 - **Code Complexity**: N/A.
-- **Technical Debt**: Reduced — one fewer page contradicting the variable's actual current behavior.
+- **Technical Debt**: Reduced: one fewer page contradicting the variable's actual current behavior.
 
 ---
 
@@ -72,7 +72,7 @@ Not applicable; no code path changed.
 |--------|------|------|
 | Option A: Paraphrase the corrected behavior independently | Tailored wording for this page's context | Risks re-introducing a subtly different (and possibly re-stale) description; duplicates the token-floor and log-line details already documented elsewhere |
 | Option B: Delete the "not a server knob" claim without adding the current behavior | Minimal diff | Leaves the page silent on the variable's dual consumers, ADR 0001 link context is orphaned |
-| **Chosen: Option C — reuse `cf4e22cd`'s framing, cross-link instead of duplicating** | Keeps this page and `docs/environment-variables.md` in agreement by construction; token floors and dispatch policy stay defined in one place each | Requires the reader to follow two links for full detail on the server-side floors |
+| **Chosen: Option C: reuse `cf4e22cd`'s framing, cross-link instead of duplicating** | Keeps this page and `docs/environment-variables.md` in agreement by construction; token floors and dispatch policy stay defined in one place each | Requires the reader to follow two links for full detail on the server-side floors |
 
 **Rationale:**
 The issue explicitly asked to read `git show cf4e22cd -- docs/environment-variables.md` and reuse that corrected framing, then cross-link `docs/environment-variables.md#paged-decode-v2-variables` and `docs/CONTINUOUS_BATCHING.md#seeing-which-path-ran` rather than duplicating the dispatch policy and log-line prose. This keeps the four pages that describe the variable (`README.md`, `docs/CONTINUOUS_BATCHING.md`, `docs/environment-variables.md`, `docs/turbo-kv-cache.md`) from drifting apart again the next time one of them is updated.

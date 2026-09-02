@@ -72,7 +72,7 @@
 |-----|-----|-----|
 | Option A: 수정된 동작을 독자적으로 다시 서술 | 이 페이지 맥락에 맞춘 문장 구성 가능 | 미묘하게 다른(그리고 다시 오래된 설명이 될 수 있는) 서술을 재도입할 위험이 있고, 이미 다른 곳에 문서화된 토큰 하한값·로그 라인 세부사항을 중복시킴 |
 | Option B: "서버 노브가 아니다" 주장만 삭제하고 현재 동작을 추가하지 않음 | 최소한의 diff | 이 변수의 두 소비자에 대해 이 페이지가 침묵하게 되고, ADR 0001 링크의 맥락이 고아 상태가 됨 |
-| **선택: Option C — `cf4e22cd`의 서술을 재사용하고, 중복 대신 상호 링크** | 이 페이지와 `docs/environment-variables.md`가 구조적으로 일치하게 됨; 토큰 하한값과 디스패치 정책은 각각 한 곳에서만 정의됨 | 서버 측 하한값의 전체 세부사항을 확인하려면 독자가 링크 두 개를 따라가야 함 |
+| **선택: Option C: `cf4e22cd`의 서술을 재사용하고, 중복 대신 상호 링크** | 이 페이지와 `docs/environment-variables.md`가 구조적으로 일치하게 됨; 토큰 하한값과 디스패치 정책은 각각 한 곳에서만 정의됨 | 서버 측 하한값의 전체 세부사항을 확인하려면 독자가 링크 두 개를 따라가야 함 |
 
 **선택 이유:**
 이슈는 `git show cf4e22cd -- docs/environment-variables.md`를 먼저 읽고 그 수정된 서술을 재사용한 뒤, 디스패치 정책과 로그 라인 서술을 중복시키지 말고 `docs/environment-variables.md#paged-decode-v2-variables`와 `docs/CONTINUOUS_BATCHING.md#seeing-which-path-ran`을 상호 링크하라고 명시적으로 요구했다. 이렇게 하면 이 변수를 설명하는 네 페이지(`README.md`, `docs/CONTINUOUS_BATCHING.md`, `docs/environment-variables.md`, `docs/turbo-kv-cache.md`)가 다음에 어느 한쪽이 갱신될 때 다시 어긋나는 일을 줄일 수 있다.
