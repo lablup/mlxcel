@@ -146,6 +146,18 @@ overhead, but the scales then remain fixed for the life of the process. Live
 updates and per-request selection are refused in fused mode. Distributed
 tensor and pipeline loaders currently imply fused behavior.
 
+An adapter has to map onto the checkpoint it is loaded with, on the fused and
+the unfused path alike. Every tensor in `adapters.safetensors` must be one half
+of a `<layer>.lora_a` / `<layer>.lora_b` pair whose base weight the model
+actually holds. An adapter trained for another architecture, a renamed
+projection, or a stray tensor fails the load with every offending name listed,
+rather than starting a server that answers from the base weights while
+reporting the adapter as loaded. DoRA adapters are refused outright: applying
+their low-rank pair without the magnitude vectors would produce weights that
+match neither the base model nor the fine-tune. In a pipeline-parallel run a
+stage that owns none of the adapter's layers still applies nothing, which stays
+a valid load.
+
 ## Sampling, structured output, and reasoning
 
 The server exposes the commonly used llama-server sampling stages, including

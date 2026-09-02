@@ -58,7 +58,17 @@ impl LlamaStageExecutor {
         // falls inside this stage's range, avoiding wasteful reads of
         // adapter tensors owned by other stages.
         if let Some(path) = adapter_path {
-            crate::lora::apply_stage_lora_adapter(&mut weights, path, &effective_filter)?;
+            // Zero applied pairs is a valid outcome here and must never be
+            // gated on, unlike the whole-model path: an adapter may target a
+            // subset of the model's layers, so a stage that owns none of them
+            // legitimately applies nothing. The count is logged with the stage
+            // index because the loader's own log line cannot name the stage.
+            let fused =
+                crate::lora::apply_stage_lora_adapter(&mut weights, path, &effective_filter)?;
+            tracing::debug!(
+                "stage {stage_index} applied {fused} LoRA pair(s) from {}",
+                path.display()
+            );
         }
 
         filter_weight_map(&mut weights, &effective_filter);

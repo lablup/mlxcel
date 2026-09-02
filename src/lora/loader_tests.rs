@@ -24,6 +24,7 @@
 //! classification before exercising fusion.
 
 use super::*;
+use crate::lora::test_support::{adapter_pair_tensors, ones_vector, temp_dir, write_adapter_dir};
 use crate::models::gpt2::Gpt2Layout;
 use crate::models::gpt2::tests::{mlx_converted_weights, raw_hf_weights, tiny_args};
 
@@ -46,6 +47,17 @@ fn lora_pair(layer: &str, in_features: i32, rank: i32, out_features: i32) -> Wei
         mlxcel_core::ones(&[rank, out_features], mlxcel_core::dtype::FLOAT32),
     );
     adapter
+}
+
+/// The error text of a call that must fail.
+///
+/// `Result::expect_err` needs `T: Debug`, and a [`WeightMap`] holds
+/// `UniquePtr<MlxArray>`, which is not `Debug`.
+fn fusion_error<T>(result: Result<T>, what: &str) -> String {
+    match result {
+        Ok(_) => panic!("{what}"),
+        Err(err) => err.to_string(),
+    }
 }
 
 fn tensor_sum(weight: &MlxArray) -> f32 {
@@ -258,7 +270,7 @@ fn conv1d_checkpoint_rejects_every_non_square_projection_without_aborting() {
         let adapter = lora_pair(layer, in_features, 2, out_features);
 
         let err = match fuse_lora_weights_into(&mut base, &adapter, 0.5) {
-            Ok(()) => panic!("{layer} must not fuse"),
+            Ok(fused) => panic!("{layer} must not fuse ({fused} applied)"),
             Err(err) => err.to_string(),
         };
         assert!(err.contains("Conv1D"), "{layer}: {err}");
@@ -382,4 +394,266 @@ fn a_mismatch_that_is_not_a_transpose_omits_the_transpose_hint() {
         .to_string();
     assert!(err.contains("[8, 4]") && err.contains("[4, 4]"), "{err}");
     assert!(!err.contains("transposes"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Adapter tensor validation (issue #1328)
+//
+// Every case below used to be a `warn!` and a `continue`: the load succeeded,
+// the "fused into N layers" line counted the skipped tensors anyway, and the
+// server answered from base weights under the adapter's name.
+// ---------------------------------------------------------------------------
+
+/// A base weight map holding one `[out, in]` projection per named layer.
+fn base_map(layers: &[(&str, i32, i32)]) -> WeightMap {
+    let mut base = WeightMap::new();
+    for (layer, out_features, in_features) in layers {
+        base.insert(
+            format!("{layer}.weight"),
+            mlxcel_core::ones(&[*out_features, *in_features], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+    base
+}
+
+#[test]
+fn adapter_pair_without_base_weight_is_an_error() {
+    let base = base_map(&[("layer", 3, 4)]);
+    let adapter = lora_pair("other", 4, 2, 3);
+
+    let err = fusion_error(
+        fuse_lora_weights(&base, &adapter, 1.0),
+        "an adapter layer the model does not have must not load",
+    );
+    assert!(err.contains("other.lora_a"), "{err}");
+    assert!(err.contains("no base weight"), "{err}");
+    assert!(err.contains("tried other.weight"), "{err}");
+}
+
+#[test]
+fn adapter_with_unknown_leaf_is_an_error() {
+    // A DoRA magnitude vector next to a well-formed pair: the pair alone would
+    // fuse cleanly and produce weights that are neither base nor fine-tune.
+    let base = base_map(&[("layer", 3, 4)]);
+    let mut adapter = lora_pair("layer", 4, 2, 3);
+    adapter.insert(
+        "layer.m".to_string(),
+        mlxcel_core::ones(&[3], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let err = fusion_error(
+        fuse_lora_weights(&base, &adapter, 1.0),
+        "an unrecognised adapter tensor must not be dropped",
+    );
+    assert!(err.contains("layer.m"), "{err}");
+    assert!(err.contains("not a LoRA tensor"), "{err}");
+}
+
+#[test]
+fn incomplete_pair_is_an_error() {
+    let base = base_map(&[("layer", 3, 4)]);
+    let mut adapter = WeightMap::new();
+    adapter.insert(
+        "layer.lora_a".to_string(),
+        mlxcel_core::ones(&[4, 2], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let err = fusion_error(
+        fuse_lora_weights(&base, &adapter, 1.0),
+        "half a pair cannot be applied",
+    );
+    assert!(err.contains("layer.lora_a"), "{err}");
+    assert!(err.contains("layer.lora_b"), "{err}");
+    assert!(err.contains("incomplete pair"), "{err}");
+
+    // The mirror case: a lone `lora_b` names the missing `lora_a`.
+    let mut adapter = WeightMap::new();
+    adapter.insert(
+        "layer.lora_b".to_string(),
+        mlxcel_core::ones(&[2, 3], mlxcel_core::dtype::FLOAT32),
+    );
+    let err = fusion_error(
+        fuse_lora_weights(&base, &adapter, 1.0),
+        "half a pair cannot be applied",
+    );
+    assert!(err.contains("layer.lora_b: incomplete pair"), "{err}");
+    assert!(err.contains("missing layer.lora_a"), "{err}");
+}
+
+#[test]
+fn all_violations_are_reported_together() {
+    // An adapter built for another architecture fails on every layer it
+    // carries. Reporting one at a time would need as many load attempts as the
+    // model has layers, so the report is exhaustive and sorted (`WeightMap` is
+    // a `HashMap`, so an unsorted report would reorder run to run).
+    let base = base_map(&[("kept", 3, 4)]);
+    let mut adapter = lora_pair("missing_one", 4, 2, 3);
+    adapter.extend(lora_pair("missing_two", 4, 2, 3));
+    adapter.insert(
+        "kept.stray".to_string(),
+        mlxcel_core::ones(&[3], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let err = fusion_error(fuse_lora_weights(&base, &adapter, 1.0), "must not load");
+    assert!(err.contains("3 adapter tensors cannot be applied"), "{err}");
+
+    let kept = err.find("kept.stray").expect("stray leaf reported");
+    let one = err
+        .find("missing_one.lora_a")
+        .expect("first layer reported");
+    let two = err
+        .find("missing_two.lora_a")
+        .expect("second layer reported");
+    assert!(kept < one && one < two, "report must be sorted: {err}");
+}
+
+#[test]
+fn fused_count_reports_applied_pairs() {
+    let mut base = base_map(&[("a", 3, 4), ("b", 5, 6)]);
+    let mut adapter = lora_pair("a", 4, 2, 3);
+    adapter.extend(lora_pair("b", 6, 2, 5));
+
+    let fused = fuse_lora_weights_into(&mut base, &adapter, 1.0).expect("both pairs apply");
+    assert_eq!(fused, 2);
+}
+
+#[test]
+fn a_peft_base_layer_pair_resolves_to_the_wrapped_weight() {
+    // HuggingFace PEFT wraps the frozen projection, so `<layer>.base_layer`
+    // has to resolve to `<layer>.weight`. Dropping the no-match fallback must
+    // not lose that.
+    let mut base = base_map(&[("model.layers.0.self_attn.q_proj", 3, 4)]);
+    let before = tensor_sum(base.get("model.layers.0.self_attn.q_proj.weight").unwrap());
+
+    let adapter = lora_pair("model.layers.0.self_attn.q_proj.base_layer", 4, 2, 3);
+    let fused = fuse_lora_weights_into(&mut base, &adapter, 0.5).expect("PEFT naming resolves");
+    assert_eq!(fused, 1);
+
+    let after = tensor_sum(base.get("model.layers.0.self_attn.q_proj.weight").unwrap());
+    let expected = before + 0.5 * 2.0 * (3 * 4) as f32;
+    assert!(
+        (after - expected).abs() < 1e-3,
+        "after={after}, expected={expected}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Adapter directory acceptance (`apply_lora_adapters`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dora_adapter_is_refused() {
+    // The pair itself is valid, so nothing but the declared type can catch
+    // this: applying it would drop the magnitude vectors the checkpoint's own
+    // tooling folds in, and the result matches neither base nor fine-tune.
+    let dir = temp_dir("dora");
+    write_adapter_dir(&dir, "dora", 2, adapter_pair_tensors("layer", 4, 2, 3));
+
+    let base = base_map(&[("layer", 3, 4)]);
+    let err = fusion_error(
+        apply_lora_adapters(&base, &dir),
+        "a DoRA adapter must not be applied as LoRA",
+    );
+    assert!(err.contains("DoRA"), "{err}");
+    assert!(err.contains("dora"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn full_fine_tune_adapter_is_refused() {
+    let dir = temp_dir("full");
+    write_adapter_dir(&dir, "full", 2, adapter_pair_tensors("layer", 4, 2, 3));
+
+    let base = base_map(&[("layer", 3, 4)]);
+    let err = fusion_error(
+        apply_lora_adapters(&base, &dir),
+        "a full fine-tune is not an adapter",
+    );
+    assert!(err.contains("not LoRA type"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_adapter_that_applies_nothing_is_refused() {
+    // Every tensor is either applied or reported, so an empty file is the one
+    // way to reach zero. It is still a failed load: the model would serve base
+    // weights while the startup log said an adapter was in place.
+    let dir = temp_dir("empty");
+    write_adapter_dir(&dir, "lora", 2, std::collections::HashMap::new());
+
+    let base = base_map(&[("layer", 3, 4)]);
+    let err = fusion_error(
+        apply_lora_adapters(&base, &dir),
+        "an adapter with no pairs must not load",
+    );
+    assert!(err.contains("applied no tensors"), "{err}");
+    assert!(err.contains(&dir.display().to_string()), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_valid_adapter_directory_still_applies_and_names_its_directory_on_failure() {
+    let dir = temp_dir("valid");
+    let mut tensors = adapter_pair_tensors("layer", 4, 2, 3);
+    tensors.insert("layer.m".to_string(), ones_vector(3));
+    write_adapter_dir(&dir, "lora", 2, tensors);
+
+    let base = base_map(&[("layer", 3, 4)]);
+    let err = fusion_error(
+        apply_lora_adapters(&base, &dir),
+        "the stray magnitude tensor fails the load",
+    );
+    assert!(err.contains(&dir.display().to_string()), "{err}");
+    assert!(err.contains("layer.m"), "{err}");
+
+    // The same directory without the stray tensor loads and applies one pair.
+    write_adapter_dir(&dir, "lora", 2, adapter_pair_tensors("layer", 4, 2, 3));
+    let fused = apply_lora_adapters(&base, &dir).expect("a well-formed adapter applies");
+    let after = tensor_sum(fused.get("layer.weight").unwrap());
+    // 12 base entries of 1.0 plus a delta of scale (1.0) * rank (2) everywhere.
+    assert!((after - 36.0).abs() < 1e-3, "unexpected fused sum: {after}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_peft_named_adapter_is_reported_once_with_the_conversion_hint() {
+    // A HuggingFace PEFT export spells every tensor `.lora_A.weight` /
+    // `.lora_B.weight`, which this build does not read. Reporting that per
+    // tensor would be one line per layer per module, so the whole adapter gets
+    // a single line that names the spelling and how many tensors carry it.
+    let base = base_map(&[("model.layers.0.self_attn.q_proj", 3, 4)]);
+    let mut adapter = WeightMap::new();
+    for layer in 0..3 {
+        for half in ["lora_A", "lora_B"] {
+            adapter.insert(
+                format!("base_model.model.model.layers.{layer}.self_attn.q_proj.{half}.weight"),
+                mlxcel_core::ones(&[2, 4], mlxcel_core::dtype::FLOAT32),
+            );
+        }
+    }
+
+    let err = fusion_error(
+        fuse_lora_weights(&base, &adapter, 1.0),
+        "PEFT tensor naming is not read by this build",
+    );
+    assert!(
+        err.contains("1 adapter tensor cannot be applied"),
+        "the whole adapter must collapse to one line: {err}"
+    );
+    assert!(err.contains("HuggingFace PEFT tensor naming"), "{err}");
+    assert!(err.contains("(6 tensors in this adapter)"), "{err}");
+    assert!(
+        err.contains("convert the adapter with mlx-lm first"),
+        "{err}"
+    );
+    // The example names the lexicographically smallest offender, so the report
+    // does not depend on `WeightMap`'s hash order.
+    assert!(
+        err.contains("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"),
+        "{err}"
+    );
 }

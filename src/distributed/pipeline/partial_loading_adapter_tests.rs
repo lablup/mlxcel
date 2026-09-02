@@ -531,7 +531,7 @@ fn stage_local_fusion_rejects_a_conv1d_layout_stage_weight_map() {
     let before = sum_of(&base, key);
 
     let err = match crate::lora::apply_stage_lora_adapter(&mut base, &tmp_dir, &filter) {
-        Ok(()) => panic!("a Conv1D-layout stage weight map must not fuse"),
+        Ok(fused) => panic!("a Conv1D-layout stage weight map must not fuse ({fused} applied)"),
         Err(err) => err.to_string(),
     };
     assert!(err.contains("Conv1D"), "{err}");
@@ -573,6 +573,91 @@ fn stage_local_fusion_still_applies_to_an_out_in_stage_weight_map() {
     // 16 entries of 1.0, plus a delta of scale (1.0) * rank (2) everywhere.
     let fused = sum_of(&base, "model.layers.0.self_attn.q_proj.weight");
     assert!((fused - 48.0).abs() < 1e-4, "unexpected fused sum: {fused}");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn stage_with_no_in_range_adapter_tensors_is_valid() {
+    // An adapter may target a subset of the model's layers, so a stage that
+    // owns none of them applies nothing and must still load. The whole-model
+    // path treats zero applied pairs as a failed load; this path must not
+    // (issue #1328).
+    use mlxcel_core::weights::WeightMap;
+
+    let mut base: WeightMap = WeightMap::new();
+    base.insert(
+        "model.layers.5.self_attn.q_proj.weight".into(),
+        mlxcel_core::ones(&[4, 4], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let tmp_dir = temp_dir("out_of_range");
+    write_adapter_dir(&tmp_dir, "model.layers.0.self_attn.q_proj", 4, 2, 4);
+
+    let filter = LayerFilter {
+        layer_range: 5..6,
+        has_embedding: false,
+        has_lm_head: false,
+    };
+
+    let fused = crate::lora::apply_stage_lora_adapter(&mut base, &tmp_dir, &filter)
+        .expect("a stage that owns none of the adapter's layers still loads");
+    assert_eq!(fused, 0);
+
+    // And the stage's own weights are untouched.
+    let after = sum_of(&base, "model.layers.5.self_attn.q_proj.weight");
+    assert!(
+        (after - 16.0).abs() < 1e-5,
+        "stage weights drifted: {after}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn stage_local_fusion_reports_the_pairs_it_applied() {
+    // The count the stage logs must be the number of pairs fused, not the
+    // number of adapter keys read.
+    use mlxcel_core::weights::WeightMap;
+
+    let mut base: WeightMap = WeightMap::new();
+    for layer in 0..2 {
+        base.insert(
+            format!("model.layers.{layer}.self_attn.q_proj.weight"),
+            mlxcel_core::ones(&[4, 4], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+
+    let tmp_dir = temp_dir("counted");
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    std::fs::write(
+        tmp_dir.join("adapter_config.json"),
+        r#"{"fine_tune_type": "lora", "lora_parameters": {"rank": 2, "scale": 1.0}}"#,
+    )
+    .unwrap();
+    let mut tensors: std::collections::HashMap<String, OwnedTensor> =
+        std::collections::HashMap::new();
+    for layer in 0..2 {
+        tensors.insert(
+            format!("model.layers.{layer}.self_attn.q_proj.lora_a"),
+            ones_tensor(4, 2),
+        );
+        tensors.insert(
+            format!("model.layers.{layer}.self_attn.q_proj.lora_b"),
+            ones_tensor(2, 4),
+        );
+    }
+    safetensors::serialize_to_file(&tensors, None, &tmp_dir.join("adapters.safetensors")).unwrap();
+
+    let filter = LayerFilter {
+        layer_range: 0..2,
+        has_embedding: false,
+        has_lm_head: false,
+    };
+
+    let fused = crate::lora::apply_stage_lora_adapter(&mut base, &tmp_dir, &filter)
+        .expect("both in-range pairs apply");
+    assert_eq!(fused, 2);
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
