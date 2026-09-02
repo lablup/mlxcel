@@ -638,33 +638,21 @@ fn resolve_env_memory_limit_bytes() -> Option<u64> {
     parse_optional_memory_size_bytes(&raw)
 }
 
+/// Read `MLXCEL_MEMORY_LIMIT` the way the runtime allocator cap reads it.
+///
+/// The `0` / `none` / empty spellings mean "unset" and belong here, next to
+/// the preflight that consumes the result; everything else goes through
+/// [`crate::execution::runtime::parse_memory_size`], so the preflight and the
+/// allocator cap resolve one string to one number. Issue #1317: this used to
+/// be a second parser that accepted only `GB` and `MB`, which made
+/// `MLXCEL_MEMORY_LIMIT=4G` cap the allocator while the preflight ignored it
+/// and reported the machine's total memory.
 fn parse_optional_memory_size_bytes(raw: &str) -> Option<u64> {
     let s = raw.trim();
     if s.is_empty() || s == "0" || s.eq_ignore_ascii_case("none") {
         return None;
     }
-
-    let upper = s.to_ascii_uppercase();
-    if let Some(n) = upper.strip_suffix("GB") {
-        return parse_scaled_memory_size(n, 1024.0 * 1024.0 * 1024.0);
-    }
-    if let Some(n) = upper.strip_suffix("MB") {
-        return parse_scaled_memory_size(n, 1024.0 * 1024.0);
-    }
-
-    s.parse::<u64>().ok().filter(|v| *v > 0)
-}
-
-fn parse_scaled_memory_size(raw: &str, scale: f64) -> Option<u64> {
-    let value = raw.trim().parse::<f64>().ok()?;
-    if !value.is_finite() || value <= 0.0 {
-        return None;
-    }
-    let bytes = value * scale;
-    if !bytes.is_finite() || bytes <= 0.0 {
-        return None;
-    }
-    Some(bytes.min(u64::MAX as f64) as u64)
+    crate::execution::runtime::parse_memory_size(s).filter(|bytes| *bytes > 0)
 }
 
 /// Parse `/proc/meminfo` for `MemAvailable` (preferred) or `MemTotal`.
@@ -1443,6 +1431,21 @@ mod tests {
         assert_eq!(est.available_bytes, 512 * 1024 * 1024);
     }
 
+    /// Issue #1317: the short suffix reaches the preflight too. Before the two
+    /// parsers were merged this returned the machine's total memory, because
+    /// the preflight's own parser took `MB` but not `M`.
+    #[test]
+    fn available_memory_honors_short_suffix_env_limit() {
+        let _env = crate::test_support::env_lock::env_lock();
+        let _restore = EnvRestore::set(MEMORY_LIMIT_ENV, "512M");
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+
+        let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, false);
+        assert_eq!(est.available_bytes, 512 * 1024 * 1024);
+    }
+
     #[test]
     fn parse_optional_memory_size_rejects_non_positive_and_non_finite() {
         assert_eq!(parse_optional_memory_size_bytes("0"), None);
@@ -1453,6 +1456,24 @@ mod tests {
             parse_optional_memory_size_bytes("1.5GB"),
             Some((1.5 * 1024.0 * 1024.0 * 1024.0) as u64),
         );
+    }
+
+    /// Issue #1317: one grammar, so the preflight resolves `4G` and `4GB` to
+    /// the same number the allocator cap uses.
+    #[test]
+    fn parse_optional_memory_size_accepts_the_runtime_grammar() {
+        let four_gib = Some(4 * 1024 * 1024 * 1024);
+        assert_eq!(parse_optional_memory_size_bytes("4G"), four_gib);
+        assert_eq!(parse_optional_memory_size_bytes("4GB"), four_gib);
+        assert_eq!(parse_optional_memory_size_bytes("4gb"), four_gib);
+        assert_eq!(
+            parse_optional_memory_size_bytes("512M"),
+            parse_optional_memory_size_bytes("512MB"),
+        );
+        assert_eq!(parse_optional_memory_size_bytes("8K"), Some(8192));
+        assert_eq!(parse_optional_memory_size_bytes("1024"), Some(1024));
+        // `0` after scaling is still "unset" to the preflight.
+        assert_eq!(parse_optional_memory_size_bytes("0GB"), None);
     }
 
     #[test]

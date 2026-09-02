@@ -26,16 +26,17 @@ const WIRED_LIMIT_ENV: &str = "MLXCEL_WIRED_LIMIT";
 /// runtime calls `mlxcel_core::memory::set_memory_limit(...)` at startup
 /// so MLX raises an exception once allocations would push the working
 /// set past this value, instead of thrashing or OOM-killing the process.
-/// Used by the future preflight capstone (#56). Accepts the same syntax
-/// as `MLXCEL_WIRED_LIMIT`: plain bytes, `NGB`, or `NMB`. Unset means
-/// "do not override MLX's default limit".
+/// Used by the future preflight capstone (#56). Accepts the shared size
+/// grammar of [`parse_memory_size`]: plain bytes, `NK`/`NKB`, `NM`/`NMB`
+/// or `NG`/`NGB`. Unset means "do not override MLX's default limit".
 const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
 /// Issue #627: optional bound on MLX's buffer cache. When set, the runtime
 /// calls `mlxcel_core::memory::set_cache_limit(...)` at startup so the CUDA
 /// memory pool stays bounded without the per-decode `clear_memory_cache`
-/// churn that defeats CUDA-graph reuse (ml-explore/mlx#2358). Same syntax as
-/// `MLXCEL_WIRED_LIMIT`: plain bytes, `NG`/`NGB`, or `NM`/`NMB`. Unset means
-/// "do not override MLX's default cache behavior".
+/// churn that defeats CUDA-graph reuse (ml-explore/mlx#2358). Accepts the
+/// shared size grammar of [`parse_memory_size`]: plain bytes, `NK`/`NKB`,
+/// `NM`/`NMB` or `NG`/`NGB`. Unset means "do not override MLX's default
+/// cache behavior".
 const CACHE_LIMIT_ENV: &str = "MLXCEL_CACHE_LIMIT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,13 +196,15 @@ fn resolve_runtime_device(value: Option<&str>) -> (RuntimeDevice, Option<String>
 ///
 /// - Not set or "max": set to gpu_max_memory_size (default, matches Python mlx-lm)
 /// - "0" or "none": disable wired limit
-/// - Number (bytes) or "NGB"/"NMB": explicit limit
+/// - Any size accepted by [`parse_memory_size`]: explicit limit
 fn resolve_wired_limit() -> Option<usize> {
     let raw = std::env::var(WIRED_LIMIT_ENV).ok();
     let limit = match raw.as_deref() {
         Some("0") | Some("none") | Some("NONE") => return None,
         None | Some("") | Some("max") | Some("MAX") => mlxcel_core::gpu_max_memory_size(),
-        Some(s) => parse_memory_size(s).unwrap_or(mlxcel_core::gpu_max_memory_size()),
+        Some(s) => parse_memory_size(s)
+            .map(clamp_to_usize)
+            .unwrap_or(mlxcel_core::gpu_max_memory_size()),
     };
     if limit > 0 {
         mlxcel_core::set_wired_limit(limit);
@@ -227,8 +230,8 @@ fn resolve_memory_limit() -> Option<usize> {
     if bytes == 0 {
         return None;
     }
-    mlxcel_core::memory::set_memory_limit(bytes as u64);
-    Some(bytes)
+    mlxcel_core::memory::set_memory_limit(bytes);
+    Some(clamp_to_usize(bytes))
 }
 
 /// Resolve the MLX buffer-cache bound from MLXCEL_CACHE_LIMIT (issue #627).
@@ -246,26 +249,64 @@ fn resolve_cache_limit() -> Option<usize> {
     if bytes == 0 {
         return None;
     }
-    mlxcel_core::memory::set_cache_limit(bytes as u64);
-    Some(bytes)
+    mlxcel_core::memory::set_cache_limit(bytes);
+    Some(clamp_to_usize(bytes))
 }
 
-/// Parse a memory size string: plain bytes, "NG"/"NGB", or "NM"/"NMB".
-fn parse_memory_size(s: &str) -> Option<usize> {
+/// The one size grammar behind every size-valued mlxcel environment variable
+/// (issue #1317).
+///
+/// Accepted input is trimmed and case-insensitive. A `K`/`KB`, `M`/`MB` or
+/// `G`/`GB` suffix scales the numeric part by the matching power of 1024 and
+/// may carry a fraction (`1.5GB`); no suffix means plain bytes. A scaled
+/// result is floored and saturates at `u64::MAX`, and a negative, `NaN` or
+/// infinite numeric part is rejected. `"0"` parses to `Some(0)`: mapping that
+/// to "unset" belongs to the caller, next to its own `none` and empty-string
+/// handling.
+///
+/// Multiplying by a power of two is exact in binary floating point, so a
+/// fractional value loses nothing before the floor: `4.1GB` is 4402341478
+/// bytes here and in any other caller.
+///
+/// This is `pub(crate)` because the memory-estimation preflight in
+/// [`crate::execution::memory_estimate`] reads the same variables before
+/// runtime bring-up and must reach the same number. It used to carry its own
+/// parser that accepted only `GB` and `MB`, so `MLXCEL_MEMORY_LIMIT=4G` capped
+/// the allocator while the preflight silently ignored it and reported the
+/// machine's total memory instead.
+pub(crate) fn parse_memory_size(s: &str) -> Option<u64> {
     let s = s.trim().to_ascii_uppercase();
-    if let Some(n) = s.strip_suffix("GB").or_else(|| s.strip_suffix('G')) {
-        n.trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| (v * 1024.0 * 1024.0 * 1024.0) as usize)
+    let (number, scale) = if let Some(n) = s.strip_suffix("GB").or_else(|| s.strip_suffix('G')) {
+        (n, 1024.0 * 1024.0 * 1024.0)
     } else if let Some(n) = s.strip_suffix("MB").or_else(|| s.strip_suffix('M')) {
-        n.trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| (v * 1024.0 * 1024.0) as usize)
+        (n, 1024.0 * 1024.0)
+    } else if let Some(n) = s.strip_suffix("KB").or_else(|| s.strip_suffix('K')) {
+        (n, 1024.0)
     } else {
-        s.parse::<usize>().ok()
+        // No suffix: plain bytes, and deliberately integer-only. A bare
+        // `1.5` was never a byte count and stays rejected.
+        return s.parse::<u64>().ok();
+    };
+
+    let value = number.trim().parse::<f64>().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
     }
+    // `value >= 0` and `scale > 0`, so the product is either a finite
+    // non-negative number or `+inf`; both compare correctly against the
+    // saturation bound.
+    let bytes = (value * scale).floor();
+    if bytes >= u64::MAX as f64 {
+        return Some(u64::MAX);
+    }
+    Some(bytes as u64)
+}
+
+/// Narrow a parsed byte count to the `usize` the MLX C++ setters and
+/// [`RuntimeSetup`] use. Lossless on every 64-bit target mlxcel builds for;
+/// the saturation is there so a 32-bit build clamps instead of wrapping.
+fn clamp_to_usize(bytes: u64) -> usize {
+    usize::try_from(bytes).unwrap_or(usize::MAX)
 }
 
 fn parse_runtime_device(value: &str) -> Option<RuntimeDevice> {
