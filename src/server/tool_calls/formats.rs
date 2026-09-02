@@ -1064,23 +1064,74 @@ fn extract_minimax_parameters(body: &str, fn_schema: Option<&serde_json::Value>)
 
 /// Convert a raw XML parameter value to JSON using its declared schema.
 ///
-/// `null` in any casing is the one value that ignores the schema: the XML
-/// grammars carry no other spelling for a JSON null, and both parsers have
-/// always emitted one here. Everything else goes through the shared MiniMax M3
-/// leaf coercion, so a `string`-typed parameter keeps its raw text and a
-/// numeric or boolean one is typed by its declaration instead of by guesswork
-/// on the text. A value that fits neither its declared type nor a JSON literal
-/// stays a string, so a call is never dropped for being unparseable.
+/// Two rules run ahead of the shared leaf coercion. Both are grounded in the
+/// declared type rather than in the shape of the text, which is the difference
+/// between this and the guesswork it replaced.
 ///
-/// The guesses this replaced (`yes`/`on` to `true`, `no`/`off` to `false`,
-/// `none`/`nil` to null) had no schema basis and are gone: those words are now
-/// the strings the model wrote.
+/// 1. The bare word `null` in any casing is JSON null: these grammars have no
+///    other spelling for one, and both parsers have always emitted one here. A
+///    parameter declared a plain `string` is the exception, because there the
+///    declaration says the value is text and `null` is a legitimate query, ref
+///    or filename. A type that explicitly admits null, as in
+///    `{"type": ["string", "null"]}`, keeps the null.
+/// 2. A parameter declared `boolean` also accepts the words the strict JSON
+///    reading rejects: `yes`, `on`, `1` and their negatives, plus any casing of
+///    `true` and `false`. The declaration is the basis the old schema-free
+///    guess never had. Without it those words stay the strings the model wrote.
+///
+/// Everything else goes through the shared MiniMax M3 leaf coercion, so a
+/// `string`-typed parameter keeps its raw text and a numeric one is typed by
+/// its declaration. A value that fits neither its declared type nor a JSON
+/// literal stays a string, so a call is never dropped for being unparseable.
+///
+/// The schema-free guesses this replaced are gone: `yes`/`on`, `no`/`off` and
+/// `none`/`nil` are now the strings the model wrote unless a `boolean`
+/// declaration says otherwise.
 // Used by: try_minimax_m2, try_qwen3_coder
 fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
-    if raw.eq_ignore_ascii_case("null") {
+    let declared = schema.and_then(minimax_m3_schema_type);
+    let keeps_raw_text =
+        declared == Some(M3Type::Str) && !schema.is_some_and(schema_type_admits_null);
+    if !keeps_raw_text && raw.eq_ignore_ascii_case("null") {
         return serde_json::Value::Null;
     }
+    if declared == Some(M3Type::Boolean)
+        && let Some(b) = loose_boolean_word(raw)
+    {
+        return serde_json::Value::Bool(b);
+    }
     minimax_m3_coerce_leaf(raw, schema)
+}
+
+/// Whether a schema's `type` explicitly admits JSON null, as a nullable
+/// declaration such as `{"type": ["string", "null"]}` does.
+// Used by: coerce_xml_param
+fn schema_type_admits_null(schema: &serde_json::Value) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::Array(items)) => items.iter().any(|v| v.as_str() == Some("null")),
+        _ => false,
+    }
+}
+
+/// The boolean a `boolean`-declared parameter spells, including the words a
+/// strict JSON reading rejects. Case-insensitive; `None` when the text is not
+/// one of them, so the caller falls through to its declared-type path.
+// Used by: coerce_xml_param
+fn loose_boolean_word(raw: &str) -> Option<bool> {
+    let raw = raw.trim();
+    if ["true", "yes", "on", "1"]
+        .iter()
+        .any(|w| raw.eq_ignore_ascii_case(w))
+    {
+        return Some(true);
+    }
+    if ["false", "no", "off", "0"]
+        .iter()
+        .any(|w| raw.eq_ignore_ascii_case(w))
+    {
+        return Some(false);
+    }
+    None
 }
 
 // Defensive caps mirroring the MiniMax M2 parser: bound parallel-call and
@@ -2003,13 +2054,26 @@ fn minimax_m3_extract_invoke_name(attr_region: &str) -> Option<String> {
 }
 
 /// Look up a function's JSON-schema `parameters` object by name.
+///
+/// A namespaced call name (`functions.get_weather`) falls back to the bare name
+/// after the first `.`, the same normalisation `filter_by_tools` applies when it
+/// matches a parsed call against the registered tools. Without that fallback the
+/// lookup misses for every namespacing model, every value silently takes the
+/// loose rules, and the call still succeeds, so nothing marks the schema as
+/// having been ignored.
+// Used by: try_minimax_m3, try_glm47, try_longcat, try_minimax_m2, try_qwen3_coder
 fn minimax_m3_function_schema<'a>(
     tools: Option<&'a [Tool]>,
     name: &str,
 ) -> Option<&'a serde_json::Value> {
-    tools?
+    let tools = tools?;
+    tools
         .iter()
         .find(|t| t.function.name == name)
+        .or_else(|| {
+            name.split_once('.')
+                .and_then(|(_, bare)| tools.iter().find(|t| t.function.name == bare))
+        })
         .and_then(|t| t.function.parameters.as_ref())
 }
 
@@ -2230,6 +2294,7 @@ fn minimax_m3_child_in_schema<'a>(
 
 /// Coerce a leaf value string using the element's schema, then a JSON parse,
 /// then a loose literal parse, then the raw string.
+// Used by: MiniMax M3, MiniMax M2, Qwen3-Coder
 fn minimax_m3_coerce_leaf(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
     if let Some(schema) = schema {
         // A repeated tag declared as `list`/`array` arrives here one occurrence
@@ -2256,6 +2321,7 @@ fn minimax_m3_coerce_leaf(raw: &str, schema: Option<&serde_json::Value>) -> serd
 /// Strict, schema-directed coercion. Returns `None` when the declared type does
 /// not apply (so the caller falls back), which is what lets `anyOf`/`oneOf` try
 /// the next alternative and `enum` reject a non-member.
+// Used by: MiniMax M3, MiniMax M2, Qwen3-Coder (through minimax_m3_coerce_leaf)
 fn minimax_m3_typed_coerce(raw: &str, schema: &serde_json::Value) -> Option<serde_json::Value> {
     if let Some(members) = schema.get("enum").and_then(|e| e.as_array()) {
         return members
@@ -2295,9 +2361,6 @@ fn minimax_m3_typed_coerce(raw: &str, schema: &serde_json::Value) -> Option<serd
     }
 }
 
-/// Largest magnitude an `f64` carries with full integer precision (2^53).
-const INTEGER_FROM_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
-
 /// Parse a raw value as a JSON integer, exactly as written.
 // Used by: parse_integer_literal, minimax_m3_typed_coerce (number arm)
 fn parse_exact_integer_literal(raw: &str) -> Option<serde_json::Value> {
@@ -2311,23 +2374,30 @@ fn parse_exact_integer_literal(raw: &str) -> Option<serde_json::Value> {
 
 /// Parse a raw value as a JSON integer for an `integer`-typed parameter.
 ///
-/// Accepts an `i64` or `u64` literal, plus a float literal with no fractional
-/// part (`5.0`, `1e5`), which models emit often enough for an `integer`-typed
-/// parameter to be worth honouring: the declared type says the value is an
-/// integer, so `5.0` is `5`, not the float the text spells. The float arm is
-/// bounded by 2^53 because past that an `f64` no longer carries every integer;
-/// an out-of-range value declines here and stays a float through the caller's
-/// fallback rather than being silently rounded.
+/// Accepts an `i64` or `u64` literal, plus the same literal written with a zero
+/// fraction (`5.0`, `-5.000`), which models emit often enough for an
+/// `integer`-typed parameter to be worth honouring: the declared type says the
+/// value is an integer, so `5.0` is `5` and the decimal point is formatting.
+///
+/// The fraction is stripped textually rather than through an `f64` round trip,
+/// for two reasons. A round trip rounds before anything can inspect the result,
+/// so `9007199254740991.5` would arrive with an empty fraction and become an
+/// integer, and `9007199254740993.0` would come back off by one. It also admits
+/// the exponent form, and under `anyOf: [integer, string]` the integer
+/// alternative is tried first, so an identifier such as `1e5` would be taken
+/// from the string alternative that should own it. Text with an exponent, or
+/// with an integer part outside `i64`/`u64`, declines here and stays a number
+/// through the caller's fallback.
 // Used by: minimax_m3_typed_coerce (integer arm), coerce_kv_value
 fn parse_integer_literal(raw: &str) -> Option<serde_json::Value> {
     if let Some(v) = parse_exact_integer_literal(raw) {
         return Some(v);
     }
-    let f = raw.parse::<f64>().ok()?;
-    if f.is_finite() && f.fract() == 0.0 && f.abs() <= INTEGER_FROM_FLOAT_LIMIT {
-        return Some(serde_json::Value::Number((f as i64).into()));
+    let (int_part, fraction) = raw.split_once('.')?;
+    if fraction.bytes().any(|b| b != b'0') {
+        return None;
     }
-    None
+    parse_exact_integer_literal(int_part)
 }
 
 /// Map a schema's `type` (a string, or the first non-`null` of a type array) to
@@ -2367,6 +2437,7 @@ fn minimax_m3_enum_member_matches(member: &serde_json::Value, raw: &str) -> bool
 
 /// Schema-free coercion: JSON parse, then a loose literal parse (numbers and
 /// booleans), then the raw string.
+// Used by: MiniMax M3, MiniMax M2, Qwen3-Coder, GLM-4.7, LongCat
 fn minimax_m3_fallback_coerce(raw: &str) -> serde_json::Value {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         return v;
@@ -2767,6 +2838,7 @@ fn shell_split(s: &str) -> Vec<String> {
 }
 
 /// Look up a parameter's JSON schema inside a function's `parameters` object.
+// Used by: GLM-4.7, LongCat, MiniMax M2, Qwen3-Coder
 fn kv_param_schema<'a>(
     fn_schema: Option<&'a serde_json::Value>,
     key: &str,
@@ -5005,18 +5077,182 @@ mod tests {
     }
 
     #[test]
-    fn xml_null_literal_is_null_under_any_schema() {
-        // The XML grammars spell a JSON null only as the bare word, so it wins
-        // over the declared type in both parsers.
+    fn xml_null_literal_is_null_except_under_a_plain_string_schema() {
+        // The bare word is the only JSON null these grammars can spell, so it
+        // wins over every declared type but a plain `string`, where the
+        // declaration says the value is text (a query, a ref, a filename).
         let schema = serde_json::json!({
             "type": "object",
-            "properties": {"val": {"type": "string"}}
+            "properties": {
+                "text": {"type": "string"},
+                "maybe_text": {"type": ["string", "null"]},
+                "n": {"type": "integer"}
+            }
         });
         let tools = vec![m3_tool("f", schema)];
-        let qwen = try_qwen3_coder(&qwen_block("f", &[("val", "NULL")]), Some(&tools)).unwrap();
-        assert_eq!(xml_args(&qwen, 0)["val"], serde_json::Value::Null);
-        let m2 = try_minimax_m2(&m2_block("f", &[("val", "null")]), Some(&tools)).unwrap();
-        assert_eq!(xml_args(&m2, 0)["val"], serde_json::Value::Null);
+        let params = &[("text", "NULL"), ("maybe_text", "null"), ("n", "null")];
+
+        let qwen = try_qwen3_coder(&qwen_block("f", params), Some(&tools)).unwrap();
+        let args = xml_args(&qwen, 0);
+        assert_eq!(args["text"], "NULL", "a string-typed value keeps its text");
+        assert!(args["text"].is_string());
+        assert_eq!(
+            args["maybe_text"],
+            serde_json::Value::Null,
+            "a nullable declaration still takes the null"
+        );
+        assert_eq!(args["n"], serde_json::Value::Null);
+
+        let m2 = try_minimax_m2(&m2_block("f", params), Some(&tools)).unwrap();
+        let args = xml_args(&m2, 0);
+        assert_eq!(args["text"], "NULL");
+        assert_eq!(args["maybe_text"], serde_json::Value::Null);
+        assert_eq!(args["n"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn xml_boolean_typed_accepts_the_words_a_strict_json_read_rejects() {
+        // A `boolean` declaration is the schema basis the old free-text guess
+        // never had, so `yes` and `on` are booleans here and strings without it.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "boolean"},
+                "b": {"type": "boolean"},
+                "c": {"type": "boolean"},
+                "d": {"type": "boolean"},
+                "e": {"type": "boolean"},
+                "f": {"type": "boolean"},
+                "g": {"type": "boolean"}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let params = &[
+            ("a", "true"),
+            ("b", "TRUE"),
+            ("c", "yes"),
+            ("d", "on"),
+            ("e", "1"),
+            ("f", "off"),
+            ("g", "maybe"),
+        ];
+
+        for args in [
+            xml_args(
+                &try_qwen3_coder(&qwen_block("f", params), Some(&tools)).unwrap(),
+                0,
+            ),
+            xml_args(
+                &try_minimax_m2(&m2_block("f", params), Some(&tools)).unwrap(),
+                0,
+            ),
+        ] {
+            assert_eq!(args["a"], true);
+            assert_eq!(
+                args["b"], true,
+                "casing must not matter under a declaration"
+            );
+            assert_eq!(args["c"], true);
+            assert_eq!(args["d"], true);
+            assert_eq!(args["e"], true);
+            assert_eq!(args["f"], false);
+            assert_eq!(
+                args["g"], "maybe",
+                "a non-boolean word is not invented into one"
+            );
+        }
+    }
+
+    #[test]
+    fn xml_boolean_words_need_a_declaration() {
+        // Without a `boolean` schema the same words stay the text the model
+        // wrote, matching MiniMax M3, GLM-4.7 and LongCat.
+        let output = qwen_block("f", &[("a", "yes"), ("b", "on"), ("c", "TRUE")]);
+        let args = xml_args(&try_qwen3_coder(&output, None).unwrap(), 0);
+        assert_eq!(args["a"], "yes");
+        assert_eq!(args["b"], "on");
+        assert_eq!(args["c"], "TRUE");
+    }
+
+    #[test]
+    fn xml_parsers_resolve_a_namespaced_function_name() {
+        // A model that namespaces its call (`functions.f`) must still find the
+        // schema; `filter_by_tools` strips the same prefix after parsing.
+        let tools = vec![m3_tool("f", zip_and_count_schema())];
+        let qwen = try_qwen3_coder(
+            &qwen_block("functions.f", &[("zip", "02134")]),
+            Some(&tools),
+        )
+        .unwrap();
+        assert_eq!(xml_args(&qwen, 0)["zip"], "02134");
+        let m2 =
+            try_minimax_m2(&m2_block("functions.f", &[("zip", "02134")]), Some(&tools)).unwrap();
+        assert_eq!(xml_args(&m2, 0)["zip"], "02134");
+    }
+
+    #[test]
+    fn minimax_m2_without_schema_uses_loose_rules() {
+        // The mirror of the Qwen3-Coder case, including the words that used to
+        // be guessed into booleans and null.
+        let output = m2_block(
+            "f",
+            &[
+                ("n", "5"),
+                ("flag", "true"),
+                ("val", "null"),
+                ("word", "yes"),
+                ("nil_word", "none"),
+            ],
+        );
+        let args = xml_args(&try_minimax_m2(&output, None).unwrap(), 0);
+        assert_eq!(args["n"], 5);
+        assert_eq!(args["flag"], true);
+        assert_eq!(args["val"], serde_json::Value::Null);
+        assert_eq!(args["word"], "yes");
+        assert_eq!(args["nil_word"], "none", "only `null` is null");
+    }
+
+    #[test]
+    fn xml_array_typed_bare_scalar_takes_the_item_type() {
+        // These grammars have no way to spell a repeated element, so an
+        // array-typed parameter carrying one bare scalar is coerced against
+        // `items` and stays a scalar. Documented rather than changed: the loose
+        // rules produced the same scalar before this path existed.
+        let output = qwen_block("f", &[("ids", "3"), ("names", r#"["a", "b"]"#)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "names": {"type": "array", "items": {"type": "string"}}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["ids"], 3);
+        assert_eq!(args["names"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn minimax_m3_anyof_integer_or_string_keeps_the_exponent_form_a_string() {
+        // The integer alternative is tried first, so widening it must not let
+        // it claim an identifier the string alternative used to take.
+        let body = format!("{}{}", m3_el("x", "1e5"), m3_el("y", "5.0"));
+        let output = m3_block(&[("f", &body)]);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "x": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+                "y": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
+            }
+        });
+        let tools = vec![m3_tool("f", schema)];
+        let args = m3_args(&try_minimax_m3(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["x"], "1e5");
+        assert!(args["x"].is_string());
+        assert_eq!(
+            args["y"], 5,
+            "a zero fraction is the integer the schema allows"
+        );
     }
 
     #[test]
@@ -5108,25 +5344,36 @@ mod tests {
     }
 
     #[test]
-    fn integer_literal_rule_declines_beyond_exact_float_range() {
-        // Past 2^53 an f64 no longer carries every integer, so the float arm
-        // declines rather than round; the loose fallback keeps it a number.
+    fn integer_literal_rule_is_textual_and_exact() {
+        // Zero fractions are stripped as text, so the result is exact at every
+        // magnitude and a fractional value can never round its way to an
+        // integer. Both properties fail under an f64 round trip.
+        assert_eq!(parse_integer_literal("5"), Some(serde_json::json!(5)));
+        assert_eq!(parse_integer_literal("5.0"), Some(serde_json::json!(5)));
+        assert_eq!(parse_integer_literal("-5.000"), Some(serde_json::json!(-5)));
+        assert_eq!(parse_integer_literal("5."), Some(serde_json::json!(5)));
+        assert_eq!(parse_integer_literal("5.5"), None);
+        assert_eq!(parse_integer_literal(".5"), None);
+        assert_eq!(parse_integer_literal("5.0.0"), None);
+        // Exact past 2^53, where an f64 round trip comes back off by one.
         assert_eq!(
-            parse_integer_literal("9007199254740992.0"),
-            Some(serde_json::json!(9_007_199_254_740_992_i64))
+            parse_integer_literal("9007199254740993.0"),
+            Some(serde_json::json!(9_007_199_254_740_993_i64))
         );
-        assert_eq!(parse_integer_literal("9007199254740994.0"), None);
+        // An f64 round trip rounds this to a zero fraction and would call it an
+        // integer.
+        assert_eq!(parse_integer_literal("9007199254740991.5"), None);
+        // The exponent form belongs to the string alternative of an `anyOf`.
+        assert_eq!(parse_integer_literal("1e5"), None);
         assert_eq!(parse_integer_literal("inf"), None);
         assert_eq!(parse_integer_literal("nan"), None);
-        assert_eq!(
-            parse_integer_literal("1e5"),
-            Some(serde_json::json!(100_000))
-        );
         assert_eq!(parse_integer_literal("abc"), None);
-        // A u64 literal past i64::MAX still parses exactly.
+        // A u64 literal past i64::MAX still parses exactly; one past u64 does
+        // not, and stays a number through the caller's fallback.
         assert_eq!(
             parse_integer_literal("18446744073709551615"),
             Some(serde_json::json!(18_446_744_073_709_551_615_u64))
         );
+        assert_eq!(parse_integer_literal("18446744073709551616.0"), None);
     }
 }
