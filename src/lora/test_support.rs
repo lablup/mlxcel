@@ -61,6 +61,21 @@ pub(crate) fn ones_tensor(rows: usize, cols: usize) -> OwnedTensor {
     }
 }
 
+/// An all-ones 1-D f32 tensor of length `n`.
+///
+/// A real DoRA magnitude vector is 1-D, so the fixtures that stand one in use
+/// this rather than a degenerate `[n, 1]`.
+pub(crate) fn ones_vector(n: usize) -> OwnedTensor {
+    let mut data = Vec::with_capacity(n * 4);
+    for _ in 0..n {
+        data.extend_from_slice(&1.0f32.to_le_bytes());
+    }
+    OwnedTensor {
+        shape: vec![n],
+        data,
+    }
+}
+
 /// A unique temporary directory for one test case.
 ///
 /// The PID disambiguates parallel `cargo test` processes and the counter

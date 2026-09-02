@@ -796,6 +796,7 @@ pub fn load_model_with_adapter(
     let model_path = model_path.as_path();
     // Disable CUDA graphs for Gemma 4 before any weight realisation (issue #688).
     maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
+    reject_adapter_unsupported_family(model_path)?;
     // Load base weights
     let base_weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -827,6 +828,7 @@ pub fn load_model_with_adapter_specs(
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
+    reject_adapter_unsupported_family(model_path)?;
     let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     if let Some(set) = runtime {
@@ -861,6 +863,30 @@ pub fn load_model_with_adapter_specs(
     let model = load_model_from_weights(model_path, &mut weights)?;
     let tokenizer = tokenizer::load_tokenizer(model_path)?;
     Ok((model, tokenizer))
+}
+
+/// Refuse an adapter for a family that cannot take one, before any fusion runs.
+///
+/// The same verdict is taken again inside [`load_model_from_weights`], which is
+/// where it has always lived, but that runs *after* fusion. The ordering was
+/// harmless while fusion skipped whatever it could not apply. Now that an
+/// unmapped adapter tensor fails the load (#1328), a family that refuses
+/// adapters outright would answer with a line per adapter tensor instead of the
+/// one sentence that explains the situation, and the operator would never see
+/// it. Checking here also means the base weights are never read for a load that
+/// cannot succeed.
+///
+/// Used by: [`load_model_with_adapter`], [`load_model_with_adapter_specs`]
+fn reject_adapter_unsupported_family(model_path: &Path) -> Result<()> {
+    let model_type = get_model_type(model_path)?;
+    let config_path = model_path.join("config.json");
+    let config_str = sanitize_config_json(&std::fs::read_to_string(&config_path)?);
+    let config_value: serde_json::Value = parse_model_config(&config_str)?;
+    let policy = model_load_policy(model_type, Some(&config_value))?;
+    if let Some(message) = policy.capabilities.adapter_unsupported_message {
+        return Err(anyhow::anyhow!(message));
+    }
+    Ok(())
 }
 
 /// Build a model from pre-loaded weights (used by adapter loading)

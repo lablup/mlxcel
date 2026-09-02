@@ -24,7 +24,7 @@
 //! classification before exercising fusion.
 
 use super::*;
-use crate::lora::test_support::{adapter_pair_tensors, ones_tensor, temp_dir, write_adapter_dir};
+use crate::lora::test_support::{adapter_pair_tensors, ones_vector, temp_dir, write_adapter_dir};
 use crate::models::gpt2::Gpt2Layout;
 use crate::models::gpt2::tests::{mlx_converted_weights, raw_hf_weights, tiny_args};
 
@@ -598,7 +598,7 @@ fn an_adapter_that_applies_nothing_is_refused() {
 fn a_valid_adapter_directory_still_applies_and_names_its_directory_on_failure() {
     let dir = temp_dir("valid");
     let mut tensors = adapter_pair_tensors("layer", 4, 2, 3);
-    tensors.insert("layer.m".to_string(), ones_tensor(3, 1));
+    tensors.insert("layer.m".to_string(), ones_vector(3));
     write_adapter_dir(&dir, "lora", 2, tensors);
 
     let base = base_map(&[("layer", 3, 4)]);
@@ -617,4 +617,43 @@ fn a_valid_adapter_directory_still_applies_and_names_its_directory_on_failure() 
     assert!((after - 36.0).abs() < 1e-3, "unexpected fused sum: {after}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_peft_named_adapter_is_reported_once_with_the_conversion_hint() {
+    // A HuggingFace PEFT export spells every tensor `.lora_A.weight` /
+    // `.lora_B.weight`, which this build does not read. Reporting that per
+    // tensor would be one line per layer per module, so the whole adapter gets
+    // a single line that names the spelling and how many tensors carry it.
+    let base = base_map(&[("model.layers.0.self_attn.q_proj", 3, 4)]);
+    let mut adapter = WeightMap::new();
+    for layer in 0..3 {
+        for half in ["lora_A", "lora_B"] {
+            adapter.insert(
+                format!("base_model.model.model.layers.{layer}.self_attn.q_proj.{half}.weight"),
+                mlxcel_core::ones(&[2, 4], mlxcel_core::dtype::FLOAT32),
+            );
+        }
+    }
+
+    let err = fusion_error(
+        fuse_lora_weights(&base, &adapter, 1.0),
+        "PEFT tensor naming is not read by this build",
+    );
+    assert!(
+        err.contains("1 adapter tensor cannot be applied"),
+        "the whole adapter must collapse to one line: {err}"
+    );
+    assert!(err.contains("HuggingFace PEFT tensor naming"), "{err}");
+    assert!(err.contains("(6 tensors in this adapter)"), "{err}");
+    assert!(
+        err.contains("convert the adapter with mlx-lm first"),
+        "{err}"
+    );
+    // The example names the lexicographically smallest offender, so the report
+    // does not depend on `WeightMap`'s hash order.
+    assert!(
+        err.contains("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"),
+        "{err}"
+    );
 }

@@ -130,7 +130,7 @@ impl AdapterConfig {
             .with_context(|| format!("Failed to read adapter config: {:?}", config_path))?;
 
         let config: AdapterConfig = serde_json::from_str(&config_str)
-            .with_context(|| "Failed to parse adapter_config.json")?;
+            .with_context(|| format!("Failed to parse {}", config_path.display()))?;
 
         Ok(config)
     }
@@ -141,8 +141,8 @@ impl AdapterConfig {
     /// answered `true` for DoRA as well, so a DoRA adapter was accepted and
     /// then applied as if its magnitude vectors did not exist, producing
     /// weights that match neither the base model nor the fine-tune (issue
-    /// #1328). Rejecting it is [`crate::lora::AdapterConfig`]'s job only in the
-    /// sense of reporting the type; the message lives with the loaders.
+    /// #1328). This only reports the type; the refusal message lives with the
+    /// loaders, in `reject_unsupported_fine_tune_type`.
     pub fn is_fusable_lora(&self) -> bool {
         self.fine_tune_type == FineTuneType::LoRA
     }

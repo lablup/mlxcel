@@ -144,8 +144,10 @@ fn find_base_weight_name(lora_name: &str, base_weights: &WeightMap) -> Option<St
 /// the base weight in place:
 ///
 /// 1. Every tensor is one half of a `<layer>.lora_a` / `<layer>.lora_b` pair.
-///    A DoRA magnitude vector, a stray `.weight`, and the HuggingFace PEFT
-///    `.lora_A.weight` spelling this build does not read all land here.
+///    A DoRA magnitude vector and a stray `.weight` land here. The HuggingFace
+///    PEFT `.lora_A.weight` spelling this build does not read gets its own
+///    single aggregated line, because reporting it per tensor would be one
+///    line per layer per module for an adapter that has exactly one problem.
 /// 2. Both halves of every pair are present.
 /// 3. Every pair resolves to a base weight this checkpoint actually holds.
 ///
@@ -172,12 +174,20 @@ pub(super) fn validate_adapter_tensors(
 
     let mut halves: HashMap<&str, Halves<'_>> = HashMap::new();
     let mut violations: Vec<String> = Vec::new();
+    // A HuggingFace PEFT export spells every tensor `<layer>.lora_A.weight` /
+    // `.lora_B.weight`, so reporting it per tensor would bury the one thing the
+    // user needs to know under a line per layer per module. Counted here and
+    // reported once below.
+    let mut peft_named: Option<(usize, &str)> = None;
 
     for (name, weight) in adapter_weights {
         if let Some(layer) = name.strip_suffix(".lora_a") {
             halves.entry(layer).or_default().0 = Some(weight);
         } else if let Some(layer) = name.strip_suffix(".lora_b") {
             halves.entry(layer).or_default().1 = Some(weight);
+        } else if name.ends_with(".lora_A.weight") || name.ends_with(".lora_B.weight") {
+            let (count, example) = peft_named.unwrap_or((0, name.as_str()));
+            peft_named = Some((count + 1, example.min(name.as_str())));
         } else {
             violations.push(format!(
                 "{name}: not a LoRA tensor (expected .lora_a or .lora_b)"
@@ -185,7 +195,19 @@ pub(super) fn validate_adapter_tensors(
         }
     }
 
-    let mut pairs: Vec<FusablePair> = Vec::with_capacity(halves.len());
+    if let Some((count, example)) = peft_named {
+        violations.push(format!(
+            "{example}: HuggingFace PEFT tensor naming (.lora_A.weight / .lora_B.weight) is not \
+             read by this build, which expects the mlx-lm .lora_a / .lora_b spelling ({count} \
+             tensors in this adapter); convert the adapter with mlx-lm first"
+        ));
+    }
+
+    // Resolved without copying any tensor, because a wrong-architecture adapter
+    // fails on every layer and would otherwise materialize a full set of copies
+    // only to drop them at the bail below.
+    let mut resolved: Vec<(&str, String, &UniquePtr<MlxArray>, &UniquePtr<MlxArray>)> =
+        Vec::with_capacity(halves.len());
     for (layer, (lora_a, lora_b)) in halves {
         let (Some(lora_a), Some(lora_b)) = (lora_a, lora_b) else {
             let (present, missing) = if lora_a.is_some() {
@@ -205,12 +227,7 @@ pub(super) fn validate_adapter_tensors(
             ));
             continue;
         };
-        pairs.push(FusablePair {
-            layer: layer.to_string(),
-            base_weight_name,
-            lora_a: mlxcel_core::copy(lora_a),
-            lora_b: mlxcel_core::copy(lora_b),
-        });
+        resolved.push((layer, base_weight_name, lora_a, lora_b));
     }
 
     if !violations.is_empty() {
@@ -226,6 +243,15 @@ pub(super) fn validate_adapter_tensors(
         );
     }
 
+    let mut pairs: Vec<FusablePair> = resolved
+        .into_iter()
+        .map(|(layer, base_weight_name, lora_a, lora_b)| FusablePair {
+            layer: layer.to_string(),
+            base_weight_name,
+            lora_a: mlxcel_core::copy(lora_a),
+            lora_b: mlxcel_core::copy(lora_b),
+        })
+        .collect();
     pairs.sort_by(|a, b| {
         a.base_weight_name
             .cmp(&b.base_weight_name)

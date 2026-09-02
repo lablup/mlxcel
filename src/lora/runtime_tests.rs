@@ -20,7 +20,7 @@
 //! a well-formed adapter still stages (issue #1328).
 
 use super::*;
-use crate::lora::test_support::{adapter_pair_tensors, ones_tensor, temp_dir, write_adapter_dir};
+use crate::lora::test_support::{adapter_pair_tensors, ones_vector, temp_dir, write_adapter_dir};
 
 /// A base weight map holding one `[out, in]` projection per named layer.
 fn base_map(layers: &[(&str, i32, i32)]) -> WeightMap {
@@ -67,7 +67,7 @@ fn runtime_staging_refuses_a_pair_with_no_base_weight() {
 fn runtime_staging_refuses_an_unknown_adapter_tensor() {
     let dir = temp_dir("runtime_leaf");
     let mut tensors = adapter_pair_tensors("layer", 4, 2, 3);
-    tensors.insert("layer.m".to_string(), ones_tensor(3, 1));
+    tensors.insert("layer.m".to_string(), ones_vector(3));
     write_adapter_dir(&dir, "lora", 2, tensors);
 
     let set = RuntimeLoraSet::from_specs(&[spec_for(&dir)]).expect("a lora adapter config");
@@ -107,7 +107,10 @@ fn a_well_formed_runtime_adapter_still_stages() {
     let base = base_map(&[("layer", 3, 4)]);
 
     stage_runtime_adapters(&base, &set).expect("a well-formed adapter stages");
-    let unclaimed = mlxcel_core::runtime_lora::drain_unclaimed();
+    // `drain_unclaimed` drains a `HashMap`, so sort before comparing: this
+    // fixture has one layer today and would be order-flaky with two.
+    let mut unclaimed = mlxcel_core::runtime_lora::drain_unclaimed();
+    unclaimed.sort();
     assert_eq!(
         unclaimed,
         vec!["layer".to_string()],

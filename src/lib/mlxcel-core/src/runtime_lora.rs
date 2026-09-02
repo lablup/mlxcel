@@ -31,9 +31,15 @@
 //! on one worker thread and two models must never see each other's
 //! adapters), and the layer constructors in [`crate::layers`] claim the
 //! terms for the prefixes they build. Whatever is left after construction is
-//! reported back to the loader, which logs it exactly like the fused path
-//! logs an unmatched adapter tensor (strict refusal is issue #1328's scope,
-//! for both paths).
+//! reported back to the loader, which logs it.
+//!
+//! Note that an unclaimed term is not the same hole as an unmatched adapter
+//! tensor. Issue #1328 made an adapter tensor that maps onto no base weight a
+//! hard load failure on the fused and the unfused path alike. An unclaimed
+//! term is one whose tensor did map onto a real base weight, but whose prefix
+//! no constructor here reads runtime terms for, so those layers still serve
+//! base weights after a load that succeeded. That is still only logged; issue
+//! #1577 owns making it strict.
 //!
 //! A term whose user scale reads `0.0` contributes nothing and, crucially,
 //! changes nothing about the base computation path, so a model loaded with
@@ -217,8 +223,10 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
 }
 
 /// Drain whatever construction did not claim, returning the layer prefixes.
-/// The loader logs these with the same warning posture as the fused path's
-/// unmatched-tensor case (#1328 owns making both strict).
+///
+/// The loader only logs these. The fused path's unmatched-tensor case became a
+/// hard failure in #1328, but an unclaimed term is a different hole and is not
+/// covered by it: issue #1577 owns turning this into a load failure.
 pub fn drain_unclaimed() -> Vec<String> {
     PENDING.with(|pending| pending.borrow_mut().drain().map(|(k, _)| k).collect())
 }
