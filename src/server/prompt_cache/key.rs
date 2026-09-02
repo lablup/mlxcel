@@ -256,6 +256,16 @@ pub struct PromptCacheKey<'a> {
     /// requests. Build from resolved bytes via [`multimodal_digest`] or
     /// [`multimodal_digest_from_vecs`].
     pub mm_digest: MultimodalDigest,
+    /// RoPE table regime this request will be encoded under, from
+    /// [`mlxcel_core::generate::LanguageModel::rope_table_regime`]. `None` for
+    /// every model whose rotation does not depend on the sequence length, which
+    /// is all of them except Phi-3 / Phi-4 LongRoPE.
+    ///
+    /// Part of bucket identity, not just of the digest: a prefix encoded under
+    /// the short table is not valid KV for a request that reads it under the
+    /// long one, and the reverse holds too, so the two must never land in the
+    /// same bucket for any reuse channel (#1358).
+    pub rope_regime: Option<u8>,
     /// Prefix slice of token ids. Only the first `prefix_len` elements are
     /// hashed.
     pub tokens: &'a [i32],
@@ -285,6 +295,7 @@ impl<'a> PromptCacheKey<'a> {
             template_sig,
             session_key,
             mm_digest,
+            rope_regime: None,
             tokens,
             prefix_len: tokens.len(),
         }
@@ -310,6 +321,7 @@ impl<'a> PromptCacheKey<'a> {
             template_sig,
             session_key,
             mm_digest,
+            rope_regime: None,
             tokens,
             prefix_len: prefix_len.min(tokens.len()),
         }
@@ -346,8 +358,10 @@ impl<'a> PromptCacheKey<'a> {
         // Domain separator so this digest cannot be reused from a different
         // hashing context accidentally.
         // NOTE: bumped to v2 when mm_digest was added so that
-        // stale v1 cache entries do not collide with new multimodal-aware keys.
-        hasher.update(b"mlxcel:prompt-cache:v2");
+        // stale v1 cache entries do not collide with new multimodal-aware keys,
+        // and to v3 when rope_regime was added for the same reason: a v2 entry
+        // carries no regime and must not be matched by a regime-aware lookup.
+        hasher.update(b"mlxcel:prompt-cache:v3");
 
         write_field(&mut hasher, self.model_id.as_bytes());
         write_field(
@@ -360,8 +374,15 @@ impl<'a> PromptCacheKey<'a> {
             self.session_key.map(str::as_bytes).unwrap_or_default(),
         );
 
+        // RoPE table regime: one tag byte, prefixed by a presence byte so
+        // `None` and `Some(0)` cannot collide.
+        match self.rope_regime {
+            Some(regime) => hasher.update(&[1u8, regime]),
+            None => hasher.update(&[0u8, 0u8]),
+        };
+
         // Multimodal digest: 32 raw bytes, already a BLAKE3 hash
-        // so no length-prefix needed — the fixed size makes it unambiguous.
+        // so no length-prefix needed: the fixed size makes it unambiguous.
         hasher.update(self.mm_digest.as_bytes());
 
         let prefix_len = self.effective_prefix_len();
@@ -373,6 +394,20 @@ impl<'a> PromptCacheKey<'a> {
         let mut out = [0u8; 32];
         hasher.finalize_xof().fill(&mut out);
         PromptCacheKeyDigest(out)
+    }
+}
+
+impl PromptCacheKey<'_> {
+    /// Attach the request's RoPE table regime.
+    ///
+    /// Both constructors default to `None`, which is the answer for every model
+    /// whose rotation does not depend on the sequence length. Callers that hold
+    /// a model ask it (`LanguageModel::rope_table_regime`) and attach the answer
+    /// here, so the regime reaches the digest and both bucket keys (#1358).
+    #[must_use]
+    pub fn with_rope_regime(mut self, rope_regime: Option<u8>) -> Self {
+        self.rope_regime = rope_regime;
+        self
     }
 }
 

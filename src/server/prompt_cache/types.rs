@@ -59,6 +59,9 @@ pub struct BucketKey {
     pub lora_id: Option<String>,
     pub template_sig: String,
     pub mm_digest: MultimodalDigest,
+    /// See [`PromptCacheKey::rope_regime`]. Two requests on opposite sides of a
+    /// position-selected RoPE table must not share a bucket (#1358).
+    pub rope_regime: Option<u8>,
     pub session_key: Option<String>,
 }
 
@@ -71,6 +74,7 @@ impl BucketKey {
             lora_id: key.lora_id.map(str::to_string),
             template_sig: key.template_sig.to_string(),
             mm_digest: key.mm_digest,
+            rope_regime: key.rope_regime,
             session_key: key.session_key.map(str::to_string),
         }
     }
@@ -89,6 +93,10 @@ pub(super) struct SessionlessBucketKey {
     pub lora_id: Option<String>,
     pub template_sig: String,
     pub mm_digest: MultimodalDigest,
+    /// See [`PromptCacheKey::rope_regime`]. This is the radix trie's index key,
+    /// so without the regime here a cross-session prefix lookup would still
+    /// reach entries encoded under the other table (#1358).
+    pub rope_regime: Option<u8>,
 }
 
 impl SessionlessBucketKey {
@@ -98,6 +106,7 @@ impl SessionlessBucketKey {
             lora_id: key.lora_id.map(str::to_string),
             template_sig: key.template_sig.to_string(),
             mm_digest: key.mm_digest,
+            rope_regime: key.rope_regime,
         }
     }
 }

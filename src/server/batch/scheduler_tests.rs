@@ -1140,9 +1140,9 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         ..text_ctx.clone()
     };
 
-    let k_text = super::BatchScheduler::compose_prompt_cache_key(&text_ctx, &tokens);
-    let k_image_a = super::BatchScheduler::compose_prompt_cache_key(&image_a, &tokens);
-    let k_image_b = super::BatchScheduler::compose_prompt_cache_key(&image_b, &tokens);
+    let k_text = super::BatchScheduler::compose_prompt_cache_key(&text_ctx, &tokens, None);
+    let k_image_a = super::BatchScheduler::compose_prompt_cache_key(&image_a, &tokens, None);
+    let k_image_b = super::BatchScheduler::compose_prompt_cache_key(&image_b, &tokens, None);
 
     // Same tokens, text vs image: distinct buckets (no cross-modal collision).
     assert_ne!(
@@ -1157,7 +1157,7 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         "different image payloads must land in different buckets"
     );
     // Same image twice: identical bucket, the reuse the digest unlocks.
-    let k_image_a_again = super::BatchScheduler::compose_prompt_cache_key(&image_a, &tokens);
+    let k_image_a_again = super::BatchScheduler::compose_prompt_cache_key(&image_a, &tokens, None);
     assert_eq!(k_image_a.digest(), k_image_a_again.digest());
 
     // Text path stays byte-identical to building the key with an explicit empty

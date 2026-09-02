@@ -392,6 +392,7 @@ impl Inner {
                             lora_id: bucket.lora_id.clone(),
                             template_sig: bucket.template_sig.clone(),
                             mm_digest: bucket.mm_digest,
+                            rope_regime: bucket.rope_regime,
                         },
                         session_key: bucket.session_key,
                         origin: entry.origin,

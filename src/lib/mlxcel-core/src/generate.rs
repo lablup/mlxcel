@@ -306,6 +306,12 @@ fn chunked_prefill_last_logits<M: LanguageModel + ?Sized>(
     chunk: usize,
 ) -> UniquePtr<MlxArray> {
     debug_assert!(chunk > 0 && !prompt_tokens.is_empty());
+    // A model that picks its RoPE frequency table from how long the whole
+    // prompt is must make that choice once for the prompt, not once per chunk.
+    // Without this the chunks below write keys rotated with two different
+    // tables into one cache whenever the prompt straddles the threshold. See
+    // `crate::prefill_span`.
+    let _span = crate::prefill_span::announce(prompt_tokens.len() as i32);
     let mut logits: Option<UniquePtr<MlxArray>> = None;
     for piece in prompt_tokens.chunks(chunk) {
         let input = ffi::from_slice_i32(piece, &[1, piece.len() as i32]);
@@ -525,6 +531,36 @@ pub trait LanguageModel {
 
     /// Release model-owned/runtime sequence state by its scheduler `SequenceId`.
     fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
+
+    /// Which RoPE frequency table a prompt of `total_prompt_len` tokens will be
+    /// rotated with, when this model chooses one from the sequence length.
+    ///
+    /// `None`, the default, means every position uses the same table, so any
+    /// cached prefix of this model is reusable by any request. A model that
+    /// switches tables returns a small opaque tag: two requests that get the
+    /// same tag agree on every position's rotation, and two that do not must
+    /// never share KV.
+    ///
+    /// Phi-3 / Phi-4 LongRoPE is the case this exists for. It rotates with
+    /// `short_factor` while the sequence fits in
+    /// `original_max_position_embeddings` and with `long_factor` above it, so a
+    /// prefix that one request encoded under the short table is not valid input
+    /// for a longer request that will read it under the long table, and the
+    /// reverse holds too. Restoring across that boundary leaves one KV cache
+    /// holding keys built from two tables, which reads as fluent-looking
+    /// repetition rather than as an error.
+    ///
+    /// The tag is an identity, not an ordering: callers may only compare tags
+    /// for equality. It is derived from the length of the whole prompt, which is
+    /// what selects the table (see [`crate::prefill_span`]), so a caller must
+    /// pass the request's full prompt length and not the length of the prefix it
+    /// is trying to reuse.
+    ///
+    /// Used by: the server prompt cache, which folds the tag into its bucket
+    /// identity so a lookup only ever matches entries stored under the same tag.
+    fn rope_table_regime(&self, _total_prompt_len: usize) -> Option<u8> {
+        None
+    }
 
     /// Whether this model can donate and restore exact-prefix model-owned
     /// state snapshots for cross-request prompt-cache reuse.
@@ -2883,6 +2919,68 @@ mod tests {
         fn eos_token_ids(&self) -> Vec<i32> {
             vec![99]
         }
+    }
+
+    /// A model that records what [`crate::prefill_span`] reported inside each
+    /// forward, so a driver's announcement can be observed from where a real
+    /// model would read it.
+    struct SpanProbeModel {
+        spans: std::cell::RefCell<Vec<Option<i32>>>,
+    }
+
+    impl LanguageModel for SpanProbeModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            self.spans.borrow_mut().push(crate::prefill_span::current());
+            let l = ffi::array_shape(input_ids)[1];
+            ffi::from_slice_f32(&vec![0.0; l as usize * 4], &[1, l, 4])
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new()]
+        }
+
+        fn num_layers(&self) -> usize {
+            1
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+    }
+
+    /// Every chunk of a chunked prefill sees the whole prompt's length, and the
+    /// announcement is gone once the prefill returns.
+    ///
+    /// A model that selects a RoPE frequency table from the prompt length reads
+    /// exactly this (Phi-3 / Phi-4 LongRoPE, #1358). Per chunk it would rotate
+    /// the head of a threshold-crossing prompt with one table and the tail with
+    /// another, into one KV cache.
+    #[test]
+    fn chunked_prefill_announces_the_whole_prompt_to_every_chunk() {
+        let prompt: Vec<i32> = (1..=10).collect();
+        let model = SpanProbeModel {
+            spans: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut caches = model.make_caches();
+
+        let logits = chunked_prefill_last_logits(&model, &mut caches, &prompt, 3);
+        ffi::eval(&logits);
+
+        assert_eq!(
+            model.spans.borrow().as_slice(),
+            &[Some(10), Some(10), Some(10), Some(10)],
+            "four chunks of 3, 3, 3, 1 must each see the prompt length, not their own"
+        );
+        assert_eq!(
+            crate::prefill_span::current(),
+            None,
+            "the announcement must not outlive the prefill; a decode step or another sequence would read it"
+        );
     }
 
     /// The chunk gate applies only when configured, supported, and useful.

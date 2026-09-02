@@ -519,6 +519,10 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, supports_snapshot_reuse())
     }
 
+    fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
+        delegate_language_model!(self, rope_table_regime(total_prompt_len))
+    }
+
     fn snapshot_sequence_state(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,

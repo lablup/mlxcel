@@ -3449,6 +3449,11 @@ pub mod memory;
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.
 pub mod rope_proportional;
 
+// How many positions the sequence currently being prefilled will span, so a
+// model whose RoPE table is chosen from the whole prompt length can still make
+// that choice from inside a chunked prefill (Phi-3 / Phi-4 LongRoPE, #1358).
+pub mod prefill_span;
+
 pub mod runtime_lora;
 
 // Unicode-script classifier and language-steering index for Axis B.

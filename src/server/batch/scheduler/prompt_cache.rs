@@ -35,9 +35,23 @@ impl BatchScheduler {
     /// Build a [`PromptCacheKey`] bound to the per-request metadata the
     /// scheduler captured at enqueue time. Returns `None` when the request
     /// carried no [`PromptCacheRequestContext`] (e.g. non-chat endpoints).
+    /// The regime tag for a sequence the model was told is `encoded_span`
+    /// positions long, or `None` when this model's rotation does not depend on
+    /// the sequence length.
+    ///
+    /// `encoded_span` is the value the prefill announced through
+    /// [`mlxcel_core::prefill_span`], not the length of the prefix being stored
+    /// or looked up: a 3000-token history-boundary snapshot cut out of a
+    /// 5136-token prompt was rotated with that prompt's table, not with the
+    /// table 3000 tokens would have selected on their own (#1358).
+    pub(super) fn rope_regime_for(&self, encoded_span: usize) -> Option<u8> {
+        self.model.rope_table_regime(encoded_span)
+    }
+
     pub(super) fn compose_prompt_cache_key<'a>(
         ctx: &'a PromptCacheRequestContext,
         tokens: &'a [i32],
+        rope_regime: Option<u8>,
     ) -> PromptCacheKey<'a> {
         // The digest is computed over the request's resolved image/audio bytes
         // in the route layer (#124 step b). For text-only requests it is
@@ -54,6 +68,7 @@ impl BatchScheduler {
             ctx.mm_digest,
             tokens,
         )
+        .with_rope_regime(rope_regime)
     }
 
     /// Attempt to adopt a cached prefix for a freshly tokenized request,
@@ -106,7 +121,9 @@ impl BatchScheduler {
         self.drain_store_paged_releases();
 
         let store = self.prompt_cache.as_ref()?.clone();
-        let key = Self::compose_prompt_cache_key(ctx, tokens);
+        // The request's own prompt length picks its table, so it may only match
+        // entries stored by a request on the same side of the boundary (#1358).
+        let key = Self::compose_prompt_cache_key(ctx, tokens, self.rope_regime_for(tokens.len()));
         let snapshot_outcome = if self.model.supports_snapshot_reuse() {
             // The truncation capability is the model's own answer (#1145):
             // rotating-attention families can restore to the longest common
@@ -627,12 +644,18 @@ impl BatchScheduler {
     ///
     /// Used by: `donate_finished_sequence_cache`,
     /// `capture_history_boundary_snapshot`
+    /// `encoded_span` is the total sequence length the model was told about when
+    /// this state was produced, which is what selects a position-dependent RoPE
+    /// table. It is the whole prompt for a history-boundary snapshot even though
+    /// `tokens` holds only its prefix, and prompt plus generated for a
+    /// completion snapshot (#1358).
     pub(super) fn insert_model_state_snapshot(
         &mut self,
         seq_id: SequenceId,
         ctx: &PromptCacheRequestContext,
         tokens: Vec<i32>,
         origin: SnapshotOrigin,
+        encoded_span: usize,
     ) {
         let store = match self.prompt_cache.as_ref() {
             Some(s) => s.clone(),
@@ -679,7 +702,8 @@ impl BatchScheduler {
         };
         let entry = ModelSnapshotEntry::new(tokens, snapshot).with_origin(origin);
         let key_tokens = entry.tokens.clone();
-        let key = Self::compose_prompt_cache_key(ctx, &key_tokens);
+        let key =
+            Self::compose_prompt_cache_key(ctx, &key_tokens, self.rope_regime_for(encoded_span));
         match store.insert_snapshot(&key, entry) {
             Ok(()) => {
                 tracing::debug!(
@@ -784,7 +808,7 @@ impl BatchScheduler {
         // no ancestor to restore there is nothing incremental to do: warming
         // would mean prefilling the whole history from cold, which is exactly
         // the foreground work this is supposed to avoid, spent speculatively.
-        let key = Self::compose_prompt_cache_key(&ctx, &tokens);
+        let key = Self::compose_prompt_cache_key(&ctx, &tokens, self.rope_regime_for(tokens.len()));
         let Some((entry, matched_len)) = store.lookup_snapshot_prefix(&key, &tokens) else {
             self.batch_observability.record_prompt_cache_warmup_skip();
             return;
@@ -811,6 +835,11 @@ impl BatchScheduler {
             return;
         }
 
+        // The forward below covers only `tokens[matched_len..]`, and for a
+        // non-batching family the restored prefix is not reflected in the
+        // scheduler's `KVCache::offset` either, so the pass geometry alone
+        // understates the sequence. Announce the warm-up target's full length.
+        let _span = mlxcel_core::prefill_span::announce(tokens.len() as i32);
         let delta: Vec<i32> = tokens[matched_len..].to_vec();
         let delta_len = delta.len() as i32;
         let input = mlxcel_core::from_slice_i32(&delta, &[1, delta_len]);
@@ -844,7 +873,13 @@ impl BatchScheduler {
         // conversation at one boundary snapshot while making that one cover the
         // previous reply as well.
         let warmed_len = tokens.len();
-        self.insert_model_state_snapshot(seq_id, &ctx, tokens, SnapshotOrigin::Boundary);
+        self.insert_model_state_snapshot(
+            seq_id,
+            &ctx,
+            tokens,
+            SnapshotOrigin::Boundary,
+            warmed_len,
+        );
         self.release_sequence_caches(seq_id);
         mlxcel_core::clear_memory_cache();
 
@@ -924,6 +959,12 @@ impl BatchScheduler {
         &mut self,
         seq: &mut SequenceInfo,
     ) -> Result<(), String> {
+        // The segment forward below covers `prompt_tokens[start..boundary]`, a
+        // strict prefix of the prompt, so it must resolve a whole-prompt RoPE
+        // table from the prompt and not from its own span. Both callers already
+        // announce; announcing here as well keeps the function correct on its
+        // own if a third caller ever appears.
+        let _span = self.announce_prefill_span(seq);
         if !self.model.supports_snapshot_reuse() || !self.prompt_cache_active() {
             return Ok(());
         }
@@ -1002,11 +1043,13 @@ impl BatchScheduler {
             Some(c) => c.clone(),
             None => return Ok(()),
         };
+        let encoded_span = seq.prompt_tokens.len();
         self.insert_model_state_snapshot(
             seq.seq_id,
             &ctx,
             boundary_tokens,
             SnapshotOrigin::Boundary,
+            encoded_span,
         );
 
         // Return the segment's intermediates to the allocator before the
@@ -1072,6 +1115,23 @@ impl BatchScheduler {
         tokens.extend_from_slice(prompt_tokens);
         tokens.extend_from_slice(generated_tokens);
 
+        // A generation that crossed a position-selected RoPE table boundary
+        // mid-decode left this cache holding keys from both tables: the prompt
+        // was rotated under the table its own length selected, and the tail
+        // under the other one. There is no single regime that describes it, so
+        // it can never be donated (#1358). Only Phi-3 / Phi-4 LongRoPE answers
+        // this hook at all; every other family reports `None` on both sides and
+        // takes the same path it always did.
+        let prompt_regime = self.model.rope_table_regime(prompt_tokens.len());
+        if prompt_regime.is_some() && self.model.rope_table_regime(tokens.len()) != prompt_regime {
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::RopeRegimeMismatch,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
+            return;
+        }
+
         // Families with model-owned recurrent or linear-attention state opt
         // into exact-prefix snapshots explicitly. Check this capability before
         // consulting the allocated storage backend: under the paged decode
@@ -1079,7 +1139,14 @@ impl BatchScheduler {
         // placeholder even though the real state lives in
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
         if self.model.supports_snapshot_reuse() {
-            self.insert_model_state_snapshot(seq_id, &ctx, tokens, SnapshotOrigin::Completion);
+            let encoded_span = tokens.len();
+            self.insert_model_state_snapshot(
+                seq_id,
+                &ctx,
+                tokens,
+                SnapshotOrigin::Completion,
+                encoded_span,
+            );
             return;
         }
 
@@ -1176,7 +1243,11 @@ impl BatchScheduler {
         // allocation without copying the vector.
         let entry = CacheEntry::new(tokens, kv_set);
         let key_tokens = entry.tokens.clone();
-        let key = Self::compose_prompt_cache_key(&ctx, &key_tokens);
+        let key = Self::compose_prompt_cache_key(
+            &ctx,
+            &key_tokens,
+            self.rope_regime_for(key_tokens.len()),
+        );
         match store.insert(&key, entry) {
             Ok(()) => {
                 self.batch_observability.record_prompt_cache_insert();

@@ -93,12 +93,24 @@ pub enum PromptCacheRejectReason {
     /// keep donating a real model-owned snapshot, so they never reach this
     /// reason.
     ModelOwnedState,
+    /// The stored KV was encoded under a different position-selected RoPE
+    /// frequency table than the requesting sequence will use, or the entry
+    /// being donated spans both tables because generation crossed the boundary
+    /// mid-decode (issue #1358).
+    ///
+    /// Phi-3 / Phi-4 LongRoPE rotates with `short_factor` while the sequence
+    /// fits in `original_max_position_embeddings` and with `long_factor` above
+    /// it, so a prefix cached by a short request is not valid KV for a long one
+    /// and the reverse holds too. This reject is the correct outcome, not a
+    /// failure: the request falls back to a full prefill under its own table,
+    /// which is what the reference implementation does by resetting its cache.
+    RopeRegimeMismatch,
 }
 
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
@@ -109,6 +121,7 @@ impl PromptCacheRejectReason {
         Self::BlockBoundaryFloor,
         Self::SnapshotDiverged,
         Self::ModelOwnedState,
+        Self::RopeRegimeMismatch,
     ];
 
     /// Stable lowercase snake_case label used as the Prometheus `reason`
@@ -125,6 +138,7 @@ impl PromptCacheRejectReason {
             Self::BlockBoundaryFloor => "block_boundary_floor",
             Self::SnapshotDiverged => "snapshot_diverged",
             Self::ModelOwnedState => "model_owned_state",
+            Self::RopeRegimeMismatch => "rope_regime_mismatch",
         }
     }
 }
@@ -184,6 +198,7 @@ pub struct PromptCacheRejectCounters {
     block_boundary_floor: AtomicU64,
     snapshot_diverged: AtomicU64,
     model_owned_state: AtomicU64,
+    rope_regime_mismatch: AtomicU64,
     last: Mutex<Option<PromptCacheLastReject>>,
 }
 
@@ -204,6 +219,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::BlockBoundaryFloor => &self.block_boundary_floor,
             PromptCacheRejectReason::SnapshotDiverged => &self.snapshot_diverged,
             PromptCacheRejectReason::ModelOwnedState => &self.model_owned_state,
+            PromptCacheRejectReason::RopeRegimeMismatch => &self.rope_regime_mismatch,
         }
     }
 
