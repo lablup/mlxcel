@@ -136,8 +136,12 @@ impl ToolChoice {
                         choice.choice_type
                     ));
                 }
-                let name = choice.function.name.trim();
-                if name.is_empty() {
+                // Match the name exactly as sent: the renderer, the grammar
+                // builder and the response filter all compare the raw string,
+                // so a padded name that passed here would render no tool and
+                // filter every call instead of failing fast.
+                let name = choice.function.name.as_str();
+                if name.trim().is_empty() {
                     return Err("tool_choice function name must not be empty.".to_string());
                 }
                 if declared.is_empty() {
@@ -1935,6 +1939,13 @@ mod tests {
             .validate(Some(&tools))
             .expect_err("an empty function name is rejected");
         assert!(err.contains("must not be empty"), "{err}");
+
+        // Names are matched exactly as sent: a padded spelling is not the
+        // declared tool, and letting it through would render no tool at all.
+        let err = named_choice("function", " get_weather ")
+            .validate(Some(&tools))
+            .expect_err("a padded function name is not a declared tool");
+        assert!(err.contains("not declared"), "{err}");
     }
 
     #[test]
