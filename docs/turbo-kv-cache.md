@@ -391,12 +391,22 @@ batch or context, since the Metal ceilings do not apply there. Gather runs
 everywhere else, and the env var still force-pins either arm for A/B testing.
 The chunked slab storage narrows that island further, since
 the kernel declines (falling back to gather) once a layer has grown past one
-slab. #710 retired this pooled entry point to a library-only API: neither this
-kernel nor its selector is on the `mlxcel serve` decode path (which stays on the
-block-table kernel described above), and `MLXCEL_PAGED_ATTENTION_NATIVE` is a
-control for external mlxcel-core consumers and the kernel bench, not a server
-knob. See ADR 0001's #710 decision record,
-[ADR 0001](adr/0001-paged-attention-gather-vs-fused-kernel.md).
+slab. #710 retired the pooled entry point and its selector to a library-only
+API, off the `mlxcel serve` decode path, which stays on the block-table kernel
+described above. The variable itself keeps two consumers today, per
+`resolve_dispatch_decision` and `resolve_paged_v2_dispatch` in
+`src/lib/mlxcel-core/src/layers.rs`: that library-only pooled entry point, and
+the server's pool-backed batched paged decode. On the server side, issue #899
+made the fused v2 kernel the production decode path and named this variable's
+force-off values its kill switch; a force-on value pins v2 for every servable
+shape, bypassing the measured token floors. See
+[Paged decode v2 variables](environment-variables.md#paged-decode-v2-variables)
+for the floors and defaults, and
+[Continuous batching](CONTINUOUS_BATCHING.md#seeing-which-path-ran) for the
+dispatch policy and per-outcome log lines. History: #710's retirement of the
+library entry point is where the "not a server knob" reading came from; #899
+gave the variable its second, server-side consumer. See ADR 0001's #710 decision
+record, [ADR 0001](adr/0001-paged-attention-gather-vs-fused-kernel.md).
 
 Pool growth appends fixed-size slabs instead of reallocating one big tensor
 per layer, so extending the pool never copies existing KV and never strands a
