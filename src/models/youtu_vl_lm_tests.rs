@@ -575,3 +575,73 @@ fn rope_interleave_reaches_the_rope_call() {
         "flipping rope_interleave must change the logits; the flag is being ignored"
     );
 }
+
+/// The MLA attention is absorbed: a multi-token prefill materializes per-head
+/// keys and values from the latent, while a single-token decode step instead
+/// projects the query into latent space and attends against the cached latent
+/// directly. The two are algebraically the same attention, so a prefill over
+/// `n` tokens and `n` single-token decode steps over the same tokens must agree
+/// at every position.
+///
+/// That equality is the invariant a real decode-path defect breaks, and it is
+/// worth a test because nothing else in the suite exercises the `l == 1` arm:
+/// every other test here runs one multi-token forward. It is also the check
+/// that cleared the decode path while diagnosing #1371, where the free-running
+/// greedy trajectory on the real 2B checkpoint diverged from an mlx-lm oracle
+/// and the question was whether the decode arm or the model was at fault. On
+/// the real checkpoint this comparison was exact over 33 positions; on the
+/// synthetic weights below it holds to the tolerance named at the assertion.
+#[test]
+fn prefill_and_decode_paths_agree_position_by_position() {
+    let config = minimal_config();
+    let model = build_tied_model(&config);
+    let prompt: [i32; 4] = [1, 2, 3, 4];
+
+    let ids = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+    let mut caches = model.make_caches_impl();
+    let prefill =
+        mlxcel_core::utils::array_to_vec_f32(&model.forward_impl(&ids, None, &mut caches, None));
+
+    let mut caches = model.make_caches_impl();
+    let mut stepwise = Vec::with_capacity(prefill.len());
+    for t in prompt {
+        let step = mlxcel_core::from_slice_i32(&[t], &[1, 1]);
+        let logits = model.forward_impl(&step, None, &mut caches, None);
+        stepwise.extend(mlxcel_core::utils::array_to_vec_f32(&logits));
+    }
+
+    assert_eq!(prefill.len(), stepwise.len());
+    let vocab = config.vocab_size;
+    for pos in 0..prompt.len() {
+        let a = &prefill[pos * vocab..(pos + 1) * vocab];
+        let b = &stepwise[pos * vocab..(pos + 1) * vocab];
+        let argmax = |row: &[f32]| {
+            let mut best = 0usize;
+            for (j, x) in row.iter().enumerate() {
+                if *x > row[best] {
+                    best = j;
+                }
+            }
+            best
+        };
+        assert_eq!(
+            argmax(a),
+            argmax(b),
+            "position {pos}: the prefill and decode arms disagree on the argmax"
+        );
+        // The two arms contract the same sums in a different order, so they are
+        // not expected to be bitwise equal; anything past a fraction of a
+        // percent is a different computation rather than a different order.
+        let scale = a.iter().map(|x| x.abs()).sum::<f32>() / a.len() as f32;
+        let diff = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .sum::<f32>()
+            / a.len() as f32;
+        assert!(
+            diff <= 0.01 * scale.max(1e-6),
+            "position {pos}: mean |prefill - decode| {diff} exceeds 1% of {scale}"
+        );
+    }
+}

@@ -808,55 +808,22 @@ fn youtu_llm_model_type_is_detected_for_both_vendor_labels() {
 }
 
 /// `mlx-community/Youtu-LLM-2B-4bit` relabels itself `deepseek_v2` so mlx-lm
-/// can load it, but it is a Youtu export: `architectures[0]` stays
-/// `YoutuForCausalLM` and `auto_map` still points at the vendor modules. The
-/// two decoders are not interchangeable in mlxcel, so the architecture string
-/// has to win over the label (issue #1371).
+/// can load it, while keeping `architectures: ["YoutuForCausalLM"]` and an
+/// `auto_map` that points at the vendor's own modules. It stays on the
+/// DeepSeek-V2 route anyway.
+///
+/// This is a guard against re-adding an architecture-string split to the
+/// `deepseek_v2` arm. #1371 first added one, on the belief that the DeepSeek-V2
+/// decoder mishandled that export. Greedy decode of the real checkpoint through
+/// both decoders, against an mlx-lm `deepseek_v2` oracle on the same weights,
+/// showed otherwise: on a chat-templated prompt the DeepSeek-V2 route matches
+/// the oracle for all 32 tokens, and on a raw prompt it matches for 18. A split
+/// would move working checkpoints onto a different decoder for no gain, so the
+/// label decides the route and only the two vendor labels are new.
 #[test]
-fn deepseek_v2_labelled_youtu_export_routes_to_the_youtu_decoder() {
-    let model_dir = temp_path("youtu_llm_deepseek_v2_label");
-    fs::create_dir_all(&model_dir).unwrap();
-    fs::write(
-        model_dir.join("config.json"),
-        r#"{
-            "model_type": "deepseek_v2",
-            "architectures": ["YoutuForCausalLM"],
-            "auto_map": {
-                "AutoConfig": "configuration_youtu.YoutuConfig",
-                "AutoModelForCausalLM": "modeling_youtu.YoutuForCausalLM"
-            },
-            "vocab_size": 128256,
-            "hidden_size": 2048,
-            "intermediate_size": 6144,
-            "num_hidden_layers": 32,
-            "num_attention_heads": 16,
-            "num_key_value_heads": 16,
-            "kv_lora_rank": 512,
-            "q_lora_rank": 1536,
-            "qk_rope_head_dim": 64,
-            "qk_nope_head_dim": 128,
-            "v_head_dim": 128,
-            "rope_scaling": {"type": "yarn", "factor": 1.0, "mscale_all_dim": 0},
-            "rope_theta": 1600000,
-            "rope_interleave": true,
-            "tie_word_embeddings": true
-        }"#,
-    )
-    .unwrap();
-
-    let detected = super::detection::get_model_type(&model_dir).unwrap();
-    assert_eq!(detected, ModelType::YoutuLLM);
-
-    fs::remove_dir_all(model_dir).unwrap();
-}
-
-/// The counterpart guard: a genuine DeepSeek-V2 checkpoint, and one that
-/// carries no `architectures` array at all, both keep the historical
-/// DeepSeek-V2 route. Without this the arm above would be a silent
-/// regression for every DeepSeek-V2 user.
-#[test]
-fn genuine_deepseek_v2_keeps_its_route() {
-    let cases: [(&str, Option<&str>); 2] = [
+fn deepseek_v2_label_keeps_the_deepseek_v2_route() {
+    let cases: [(&str, Option<&str>); 3] = [
+        ("deepseek_v2_youtu_relabel", Some("YoutuForCausalLM")),
         ("deepseek_v2_genuine", Some("DeepseekV2ForCausalLM")),
         ("deepseek_v2_no_architectures", None),
     ];

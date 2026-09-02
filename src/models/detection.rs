@@ -246,34 +246,6 @@ fn first_architecture(config: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-/// Architecture string carried by every published text-only Youtu-LLM export,
-/// vendor and community conversions alike.
-const YOUTU_CAUSAL_LM_ARCHITECTURE: &str = "YoutuForCausalLM";
-
-/// Split the `deepseek_v2` label between the DeepSeek-V2 decoder and the Youtu
-/// MLA decoder.
-///
-/// Youtu-LLM's MLA layout is close enough to DeepSeek-V2's that
-/// `mlx-community/Youtu-LLM-2B-4bit` relabels itself `"model_type":
-/// "deepseek_v2"` to be loadable by mlx-lm, while keeping
-/// `architectures: ["YoutuForCausalLM"]` and an `auto_map` that points at the
-/// vendor's own `configuration_youtu` / `modeling_youtu` modules. The two
-/// decoders are not interchangeable in mlxcel: routing that export to
-/// `DeepSeekV2` loads and generates, but the text is incoherent, so the label
-/// alone cannot decide the route (issue #1371).
-///
-/// The architecture string is the discriminator because it survives the
-/// relabelling: a genuine DeepSeek-V2 checkpoint declares
-/// `DeepseekV2ForCausalLM`, and a checkpoint with no `architectures` array at
-/// all keeps the historical DeepSeek-V2 route.
-fn deepseek_v2_or_youtu(config: &Value) -> ModelType {
-    if first_architecture(config) == Some(YOUTU_CAUSAL_LM_ARCHITECTURE) {
-        ModelType::YoutuLLM
-    } else {
-        ModelType::DeepSeekV2
-    }
-}
-
 /// `config.architectures[0]` ends with `ForSequenceClassification`.
 pub(crate) fn is_sequence_classification_architecture(config: &Value) -> bool {
     first_architecture(config).is_some_and(|arch| arch.ends_with("ForSequenceClassification"))
@@ -535,7 +507,14 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "dbrx" => Ok(ModelType::Dbrx),
         "olmoe" => Ok(ModelType::OLMoE),
         "deepseek" => Ok(ModelType::DeepSeek),
-        "deepseek_v2" => Ok(deepseek_v2_or_youtu(&v)),
+        // `mlx-community/Youtu-LLM-2B-4bit` relabels a Youtu-LLM export
+        // `deepseek_v2` so mlx-lm can load it, keeping
+        // `architectures: ["YoutuForCausalLM"]`. It stays on this arm on
+        // purpose: greedy decode of that checkpoint through the DeepSeek-V2
+        // decoder was measured against an mlx-lm oracle on the same weights and
+        // matches it, so there is nothing for a detection split to fix and one
+        // would only move working checkpoints onto a different decoder (#1371).
+        "deepseek_v2" => Ok(ModelType::DeepSeekV2),
         "deepseek_v3" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
         "deepseek_v4" => Ok(ModelType::DeepSeekV4),
@@ -643,9 +622,10 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "glm4v" => Ok(ModelType::Glm4v),
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
         "glm_ocr" => Ok(ModelType::GlmOcr),
-        // Text-only Youtu-LLM. The vendor checkpoint labels itself `youtu` and a
-        // community conversion `youtu_llm`; a third spells itself `deepseek_v2`
-        // and is recovered by `deepseek_v2_or_youtu` above.
+        // Text-only Youtu-LLM. The vendor checkpoint labels itself `youtu` and
+        // a community conversion `youtu_llm`; both were rejected outright
+        // before #1371. A third conversion relabels itself `deepseek_v2` for
+        // mlx-lm compatibility and keeps the DeepSeek-V2 arm above.
         "youtu" | "youtu_llm" => Ok(ModelType::YoutuLLM),
         "youtu_vl" => Ok(ModelType::YoutuVLM),
         "internvl_chat" => Ok(ModelType::InternVLChatVLM),
