@@ -374,8 +374,26 @@ fn timings_carries_the_b10621_draft_pair_for_a_speculative_request() {
     assert_eq!(json["draft_rounds"], 9);
     assert_eq!(json["draft_kind"], "dflash");
     // Flattened onto the block rather than nested under a key of their own,
-    // which is where upstream puts its pair.
-    assert_eq!(json.as_object().expect("object").len(), 13, "{json}");
+    // which is where upstream puts its pair, and appended after the nine base
+    // keys in their unchanged order, which is where upstream appends it.
+    assert_eq!(
+        keys(&json),
+        [
+            "cache_n",
+            "prompt_n",
+            "prompt_ms",
+            "prompt_per_token_ms",
+            "prompt_per_second",
+            "predicted_n",
+            "predicted_ms",
+            "predicted_per_token_ms",
+            "predicted_per_second",
+            "draft_n",
+            "draft_n_accepted",
+            "draft_rounds",
+            "draft_kind",
+        ]
+    );
     // The nine base keys still report what they always did.
     assert_eq!(json["predicted_n"], 64);
     assert_eq!(json["prompt_n"], 17);
