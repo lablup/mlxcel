@@ -225,6 +225,31 @@ fn post_close_whitespace<'a>(raw: &'a str, close: &str) -> &'a str {
     &rest[..rest.len() - rest.trim_start().len()]
 }
 
+/// One entry of the ordered format table [`parse_tool_calls`] walks.
+///
+/// Most format parsers read only the generated text. The two XML grammars that
+/// spell an argument's type nowhere in their markup (MiniMax M2 and
+/// Qwen3-Coder) also need the request's `tools` to type each value by its
+/// declared schema, so the table carries both shapes rather than being an array
+/// of one `fn(&str)` pointer type. The variant says only which arguments an
+/// entry takes; dispatch is still the table order, top to bottom, and moving a
+/// parser between the variants does not move it in that order.
+enum FormatParser {
+    /// Parses the text alone.
+    Plain(fn(&str) -> Option<ToolCallParseResult>),
+    /// Parses the text against the request's tool schemas.
+    WithTools(fn(&str, Option<&[Tool]>) -> Option<ToolCallParseResult>),
+}
+
+impl FormatParser {
+    fn run(&self, text: &str, tools: Option<&[Tool]>) -> Option<ToolCallParseResult> {
+        match self {
+            Self::Plain(parse) => parse(text),
+            Self::WithTools(parse) => parse(text, tools),
+        }
+    }
+}
+
 /// Parse model output for tool calls, trying each known format in order.
 ///
 /// `tools` is the set of tools that were passed in the request.  When
@@ -276,16 +301,14 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         }
     }
 
-    // MiniMax M3 (namespaced XML). Handled ahead of the marker loop below for two
-    // reasons: it is the only parser that needs the request tool schema (for
-    // schema-aware value coercion), and its embedded `<invoke name=` / `<tool_call>`
-    // substrings would otherwise be claimed by the generic marker parsers
-    // (`try_minimax_m2`, `try_hermes`) that run in the loop. Its `]<]minimax[>[`
-    // namespace token is highly distinctive, so it declines (returns `None`)
-    // cleanly on any non-M3 output, and this placement keeps it before the
-    // generic JSON parsers (`try_llama3` / `try_generic_json`). When its calls
-    // filter down to empty, execution falls through to the loop just like a
-    // declined parser.
+    // MiniMax M3 (namespaced XML). Handled ahead of the marker loop below because
+    // its embedded `<invoke name=` / `<tool_call>` substrings would otherwise be
+    // claimed by the generic marker parsers (`try_minimax_m2`, `try_hermes`) that
+    // run in the loop. Its `]<]minimax[>[` namespace token is highly distinctive,
+    // so it declines (returns `None`) cleanly on any non-M3 output, and this
+    // placement keeps it before the generic JSON parsers (`try_llama3` /
+    // `try_generic_json`). When its calls filter down to empty, execution falls
+    // through to the loop just like a declined parser.
     if let Some(mut result) = formats::try_minimax_m3(text, tools) {
         if let Some(tools) = tools {
             result.tool_calls = filter_by_tools(result.tool_calls, tools);
@@ -299,14 +322,14 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
     // LongCat-Flash emit tool calls in an XML-ish key/value grammar:
     // `NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>`. Both need the
     // request tool schema for schema-aware value coercion (a `string`-typed
-    // parameter keeps its raw text), so like try_minimax_m3 they run here ahead of
-    // the marker loop rather than inside the `fn(&str)` array. GLM shares the
-    // `<tool_call>` block tags with Hermes; try_glm47 declines cleanly on a bare
-    // `{name, arguments}` JSON body so it falls through to try_hermes in the loop
-    // below (a Hermes call is never misrouted to GLM), while the non-JSON
-    // key/value grammar is claimed here before Hermes sees it. When calls filter
-    // down to empty, execution falls through to the loop just like a declined
-    // parser.
+    // parameter keeps its raw text), and like try_minimax_m3 they run here ahead
+    // of the marker loop so the loop's generic parsers cannot claim them first.
+    // GLM shares the `<tool_call>` block tags with Hermes; try_glm47 declines
+    // cleanly on a bare `{name, arguments}` JSON body so it falls through to
+    // try_hermes in the loop below (a Hermes call is never misrouted to GLM),
+    // while the non-JSON key/value grammar is claimed here before Hermes sees
+    // it. When calls filter down to empty, execution falls through to the loop
+    // just like a declined parser.
     if let Some(mut result) = formats::try_glm47(text, tools) {
         if let Some(tools) = tools {
             result.tool_calls = filter_by_tools(result.tool_calls, tools);
@@ -326,29 +349,30 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
     }
 
     // Try each format in order of specificity (most distinctive markers first)
-    let parsers: &[fn(&str) -> Option<ToolCallParseResult>] = &[
-        formats::try_granite, // <response><tool_call> — more specific than bare Hermes
-        formats::try_gemma4,  // <|tool_call>call:... — pipe-delimited, before Hermes
-        formats::try_function_gemma, // <start_function_call>call:... (distinct markers from Gemma 4)
-        formats::try_hermes,         // <tool_call> — Hermes/Qwen/DeepSeek
-        formats::try_minimax_m2, // <invoke name=...><parameter name=...>...</parameter></invoke>
-        formats::try_kimi_k2,    // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
+    use FormatParser::{Plain, WithTools};
+    let parsers: &[FormatParser] = &[
+        Plain(formats::try_granite), // <response><tool_call> — more specific than bare Hermes
+        Plain(formats::try_gemma4),  // <|tool_call>call:... — pipe-delimited, before Hermes
+        Plain(formats::try_function_gemma), // <start_function_call>call:... (distinct markers from Gemma 4)
+        Plain(formats::try_hermes),         // <tool_call> — Hermes/Qwen/DeepSeek
+        WithTools(formats::try_minimax_m2), // <invoke name=...><parameter name=...>...</parameter></invoke>
+        Plain(formats::try_kimi_k2), // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
         // [TOOL_CALLS]NAME[ARGS]{json}; declines (returns None) without [ARGS], so the
         // older JSON-array format below still falls through to try_mistral_nemo.
-        formats::try_mistral_bracket,
-        formats::try_mistral_nemo,    // [TOOL_CALLS]
-        formats::try_functionary_v31, // <function=name>{json}
-        formats::try_qwen3_coder, // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
-        formats::try_functionary_v32, // >>>name\n
+        Plain(formats::try_mistral_bracket),
+        Plain(formats::try_mistral_nemo),    // [TOOL_CALLS]
+        Plain(formats::try_functionary_v31), // <function=name>{json}
+        WithTools(formats::try_qwen3_coder), // <function=name><parameter=key>val</parameter> (after v31, which declines non-JSON bodies)
+        Plain(formats::try_functionary_v32), // >>>name\n
         // <|tool_call_start|>[func(arg=value)]<|tool_call_end|> — pythonic, before generic JSON
-        formats::try_pythonic,
-        formats::try_llama3,       // {"name": ..., "parameters": ...}
-        formats::try_generic_json, // {"name": ..., "arguments": ...}
-        formats::try_command_r,    // Action: / Action Input: — least specific
+        Plain(formats::try_pythonic),
+        Plain(formats::try_llama3), // {"name": ..., "parameters": ...}
+        Plain(formats::try_generic_json), // {"name": ..., "arguments": ...}
+        Plain(formats::try_command_r), // Action: / Action Input: — least specific
     ];
 
     for parser in parsers {
-        if let Some(mut result) = parser(text) {
+        if let Some(mut result) = parser.run(text, tools) {
             // Filter tool calls to only those in the provided tool set
             if let Some(tools) = tools {
                 result.tool_calls = filter_by_tools(result.tool_calls, tools);
@@ -1241,6 +1265,72 @@ mod tests {
         let result = parse_tool_calls(output, Some(&tools));
         assert!(result.has_tool_calls());
         assert_eq!(arg_obj(&result.tool_calls[0])["location"], "Berlin");
+    }
+
+    #[test]
+    fn parse_qwen3_coder_passes_request_schema_to_parser() {
+        // End to end through the dispatcher: the request schema must reach the
+        // Qwen3-Coder parser, or a string-typed ZIP code loses its leading zero.
+        let output = "<tool_call><function=forecast><parameter=zip>02134</parameter><parameter=days>3</parameter></function></tool_call>";
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"zip": {"type": "string"}, "days": {"type": "integer"}},
+            "required": ["zip", "days"]
+        });
+        let tools = vec![make_tool_with_schema("forecast", schema)];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Qwen3Coder)
+        );
+        let args = arg_obj(&result.tool_calls[0]);
+        assert_eq!(args["zip"], "02134");
+        assert!(args["zip"].is_string());
+        assert_eq!(args["days"], 3);
+    }
+
+    #[test]
+    fn parse_minimax_m2_passes_request_schema_to_parser() {
+        let output =
+            "<invoke name=\"forecast\">\n<parameter name=\"zip\">02134</parameter>\n</invoke>";
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"zip": {"type": "string"}}
+        });
+        let tools = vec![make_tool_with_schema("forecast", schema)];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::MinimaxM2)
+        );
+        assert_eq!(arg_obj(&result.tool_calls[0])["zip"], "02134");
+    }
+
+    #[test]
+    fn parse_qwen3_coder_still_runs_after_functionary_v31() {
+        // Threading `tools` through the table must not reorder it: a JSON body
+        // is still Functionary v3.1's, an XML body is still Qwen3-Coder's.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"location": {"type": "string"}}
+        });
+        let tools = vec![make_tool_with_schema("get_weather", schema)];
+
+        let json_body = r#"<function=get_weather>{"location": "Paris"}</function>"#;
+        let functionary = parse_tool_calls(json_body, Some(&tools));
+        assert_eq!(
+            functionary.format,
+            Some(crate::server::tool_calls::ToolCallFormat::FunctionaryV31)
+        );
+        assert_eq!(arg_obj(&functionary.tool_calls[0])["location"], "Paris");
+
+        let xml_body = "<tool_call><function=get_weather><parameter=location>Paris</parameter></function></tool_call>";
+        let qwen = parse_tool_calls(xml_body, Some(&tools));
+        assert_eq!(
+            qwen.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Qwen3Coder)
+        );
+        assert_eq!(arg_obj(&qwen.tool_calls[0])["location"], "Paris");
     }
 
     // -- namespace normalization tests -----------------------------------------
