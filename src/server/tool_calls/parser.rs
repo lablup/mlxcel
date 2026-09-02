@@ -351,10 +351,10 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
     // Try each format in order of specificity (most distinctive markers first)
     use FormatParser::{Plain, WithTools};
     let parsers: &[FormatParser] = &[
-        Plain(formats::try_granite), // <response><tool_call> — more specific than bare Hermes
-        Plain(formats::try_gemma4),  // <|tool_call>call:... — pipe-delimited, before Hermes
+        Plain(formats::try_granite), // <response><tool_call>: more specific than bare Hermes
+        Plain(formats::try_gemma4),  // <|tool_call>call:...: pipe-delimited, before Hermes
         Plain(formats::try_function_gemma), // <start_function_call>call:... (distinct markers from Gemma 4)
-        Plain(formats::try_hermes),         // <tool_call> — Hermes/Qwen/DeepSeek
+        Plain(formats::try_hermes),         // <tool_call>: Hermes/Qwen/DeepSeek
         WithTools(formats::try_minimax_m2), // <invoke name=...><parameter name=...>...</parameter></invoke>
         Plain(formats::try_kimi_k2), // <|tool_calls_section_begin|>...<|tool_calls_section_end|>
         // [TOOL_CALLS]NAME[ARGS]{json}; declines (returns None) without [ARGS], so the
@@ -368,7 +368,7 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         Plain(formats::try_pythonic),
         Plain(formats::try_llama3), // {"name": ..., "parameters": ...}
         Plain(formats::try_generic_json), // {"name": ..., "arguments": ...}
-        Plain(formats::try_command_r), // Action: / Action Input: — least specific
+        Plain(formats::try_command_r), // Action: / Action Input: is the least specific
     ];
 
     for parser in parsers {
