@@ -81,7 +81,24 @@ pub(crate) fn has_vision_config(config: &serde_json::Value) -> bool {
 ///   `max_window_layers: 0`.
 ///
 /// Both refusals reproduce the vendor's own activation conditions, so a config
-/// that merely carries the keys at their inert values still routes.
+/// that merely carries the keys at their inert values still routes. The vendor
+/// window condition reads, verbatim:
+///
+/// ```text
+/// self.config.use_sliding_window
+/// and getattr(self.config, "sliding_window", None) is not None
+/// and self.layer_idx >= self.config.max_window_layers
+/// ```
+///
+/// so the layer comparison is `>=`, and a `max_window_layers` at or past the
+/// last layer index leaves every layer unwindowed.
+///
+/// Both tests are deliberately written against JSON *presence*, not JSON type.
+/// The vendor tests `is not None` and Python truthiness, so a `sliding_window`
+/// written as `4096.0` or `"4096"` is just as live as `4096`, and reading it
+/// through `as_u64` would answer `None` and let the checkpoint through into a
+/// full-attention decode. A guard that exists to stop silently wrong output
+/// must fail closed on a spelling it does not recognise.
 fn iquest_coder_model_type(config: &Value) -> Result<ModelType> {
     if let Some(clip) = config.get("clip_qkv")
         && !clip.is_null()
@@ -94,35 +111,59 @@ fn iquest_coder_model_type(config: &Value) -> Result<ModelType> {
         ));
     }
 
+    // Python truthiness: absent, null and `false` are off, anything else is on.
     let uses_sliding_window = config
         .get("use_sliding_window")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let window = config.get("sliding_window").and_then(Value::as_u64);
-    // The vendor gates the window on all three keys: it is applied only when
-    // `use_sliding_window` is set, a window size is present, and the layer
-    // index has reached `max_window_layers`. A config whose first windowed
-    // layer is past the end of the stack therefore never windows anything.
+        .is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)));
+    let window = config.get("sliding_window").filter(|v| !v.is_null());
     let first_windowed_layer = config
         .get("max_window_layers")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // An unreadable layer count has to mean "assume some layer reaches the
+    // window", or an absent `num_hidden_layers` would open the guard.
     let num_layers = config
         .get("num_hidden_layers")
         .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if uses_sliding_window && window.is_some() && first_windowed_layer < num_layers {
+        .unwrap_or(u64::MAX);
+    if let Some(window) = window
+        && uses_sliding_window
+        && first_windowed_layer < num_layers
+    {
         return Err(anyhow::anyhow!(
-            "IQuest-Coder checkpoint enables sliding-window attention (use_sliding_window = true, \
-             sliding_window = {}, max_window_layers = {first_windowed_layer}). mlxcel routes this \
-             family through the shared Llama decoder, which attends over the full prefix, so \
+            "IQuest-Coder checkpoint enables sliding-window attention (use_sliding_window is set, \
+             sliding_window = {window}, max_window_layers = {first_windowed_layer}). mlxcel routes \
+             this family through the shared Llama decoder, which attends over the full prefix, so \
              loading it would decode with the wrong receptive field. Only checkpoints with the \
-             sliding window disabled are supported.",
-            window.unwrap_or_default()
+             sliding window disabled are supported."
         ));
     }
 
     Ok(ModelType::IQuestCoder)
+}
+
+/// `architectures[0]` of the IQuest-Coder causal-LM checkpoints.
+const IQUEST_CODER_ARCHITECTURE: &str = "IQuestCoderForCausalLM";
+
+/// Whether a config declares the IQuest-Coder architecture regardless of the
+/// `model_type` it carries.
+///
+/// A checkpoint relabelled `"model_type": "llama"` loads on the same decoder
+/// either way, so this is not about routing. It is about the guards: without
+/// it, relabelling is a way to reach the Llama route with a live `clip_qkv` or
+/// sliding window and get exactly the silently wrong decode
+/// [`iquest_coder_model_type`] exists to refuse. Relabelling to `llama` is a
+/// real practice for this family, because it is how a checkpoint is made
+/// loadable by reference stacks that do not run its `auto_map` code.
+fn declares_iquest_coder_architecture(config: &Value) -> bool {
+    config
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.as_str() == Some(IQUEST_CODER_ARCHITECTURE))
+        })
 }
 
 fn gemma4_has_vision_weights(model_path: &Path) -> bool {
@@ -504,6 +545,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     }
 
     match model_type.as_str() {
+        // An IQuest-Coder checkpoint relabelled `llama` (the usual way to make
+        // it loadable by a stack that will not run its `auto_map` code) routes
+        // to the same decoder either way, but it has to pass the same config
+        // guards; see `declares_iquest_coder_architecture`.
+        "llama" | "mistral" if declares_iquest_coder_architecture(&v) => {
+            iquest_coder_model_type(&v)
+        }
         "llama" | "mistral" => Ok(ModelType::Llama),
         "iquestcoder" => iquest_coder_model_type(&v),
         "llama4" => Ok(detect_text_or_vlm(

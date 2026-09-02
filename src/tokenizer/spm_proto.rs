@@ -28,7 +28,7 @@
 //! <https://github.com/huggingface/transformers/blob/main/src/transformers/convert_slow_tokenizer.py>.
 //!
 //! The `sentencepiece` crate exposes no setter for the normalizer, but it does
-//! expose [`SentencePieceProcessor::from_serialized_proto`], so mlxcel rewrites
+//! expose [`sentencepiece::SentencePieceProcessor::from_serialized_proto`], so mlxcel rewrites
 //! the single field and re-loads. Everything else about the model, the pieces,
 //! their scores, the BPE merge order, byte fallback, is left byte-for-byte
 //! alone, which is the point: the checkpoint's own segmentation is preserved
@@ -115,8 +115,16 @@ fn write_varint(out: &mut Vec<u8>, mut value: u64) {
     }
 }
 
-/// Walk `buf` as a protobuf message body and return one [`FieldSpan`] per field.
-fn scan_fields(buf: &[u8]) -> Result<Vec<FieldSpan>> {
+/// Walk `buf` as a protobuf message body and return one [`FieldSpan`] per
+/// field whose number `keep` accepts.
+///
+/// The whole message is still validated; `keep` only decides what is collected.
+/// It exists because a real `ModelProto` holds one length-delimited field per
+/// vocabulary entry (76800 of them in the checkpoint this was written for), and
+/// the caller that walks the outer message wants exactly one of them. Keeping
+/// every span would turn a hostile file of minimum-width fields into roughly 24
+/// bytes of `Vec` per input byte.
+fn scan_fields_where(buf: &[u8], keep: impl Fn(u32) -> bool) -> Result<Vec<FieldSpan>> {
     let mut fields = Vec::new();
     let mut pos = 0usize;
     while pos < buf.len() {
@@ -160,14 +168,22 @@ fn scan_fields(buf: &[u8]) -> Result<Vec<FieldSpan>> {
             }
             other => bail!("unsupported protobuf wire type {other} at offset {start}"),
         };
-        fields.push(FieldSpan {
-            number,
-            start,
-            end: pos,
-            payload,
-        });
+        if keep(number) {
+            fields.push(FieldSpan {
+                number,
+                start,
+                end: pos,
+                payload,
+            });
+        }
     }
     Ok(fields)
+}
+
+/// [`scan_fields_where`] with every field collected. Only for message bodies
+/// small enough that the span vector cannot matter.
+fn scan_fields(buf: &[u8]) -> Result<Vec<FieldSpan>> {
+    scan_fields_where(buf, |_| true)
 }
 
 /// Emit a length-delimited field: tag, length, payload.
@@ -201,7 +217,7 @@ fn normalizer_spec_without_dummy_prefix(body: &[u8]) -> Result<Vec<u8>> {
 /// rather than losing data. Returns an error only when `proto` is not a
 /// well-formed protobuf message.
 pub(crate) fn disable_add_dummy_prefix(proto: &[u8]) -> Result<Vec<u8>> {
-    let fields = scan_fields(proto)?;
+    let fields = scan_fields_where(proto, |number| number == MODEL_NORMALIZER_SPEC_FIELD)?;
 
     let mut out = Vec::with_capacity(proto.len() + 2);
     let mut copied_to = 0usize;
@@ -212,9 +228,6 @@ pub(crate) fn disable_add_dummy_prefix(proto: &[u8]) -> Result<Vec<u8>> {
     // occurrence carrying `add_dummy_prefix = true` would undo a patch applied
     // only to the first one.
     for field in &fields {
-        if field.number != MODEL_NORMALIZER_SPEC_FIELD {
-            continue;
-        }
         let Some((body_start, body_end)) = field.payload else {
             bail!("ModelProto.normalizer_spec is not a length-delimited field");
         };

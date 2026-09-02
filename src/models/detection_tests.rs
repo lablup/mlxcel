@@ -1416,13 +1416,85 @@ fn iquestcoder_with_no_layer_reaching_the_window_still_routes() {
 #[test]
 fn the_llama_and_mistral_labels_keep_the_plain_llama_route() {
     // The IQuest arm is additive: neither existing label may drift onto the
-    // new variant.
+    // new variant on the strength of the config geometry alone.
     for model_type in ["llama", "mistral"] {
         let mut config = iquest_coder_config();
         config["model_type"] = json!(model_type);
+        config["architectures"] = json!(["LlamaForCausalLM"]);
         assert_eq!(
             detect_iquest_coder(&format!("plain_{model_type}"), config).unwrap(),
             ModelType::Llama
         );
     }
+}
+
+#[test]
+fn an_iquestcoder_checkpoint_relabelled_llama_still_routes_to_iquest_coder() {
+    // Relabelling `model_type` to `llama` is how this family is made loadable
+    // by a stack that will not run its `auto_map` code. The decoder is the same
+    // either way, so the point of following `architectures` here is that the
+    // config guards keep applying.
+    let mut config = iquest_coder_config();
+    config["model_type"] = json!("llama");
+    assert_eq!(
+        detect_iquest_coder("relabelled_llama", config).unwrap(),
+        ModelType::IQuestCoder
+    );
+}
+
+#[test]
+fn relabelling_to_llama_does_not_escape_the_config_guards() {
+    let mut config = iquest_coder_config();
+    config["model_type"] = json!("llama");
+    config["clip_qkv"] = json!(8.0);
+    let error = detect_iquest_coder("relabelled_llama_clip", config).unwrap_err();
+    assert!(
+        error.to_string().contains("clip_qkv"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn a_sliding_window_written_as_a_float_or_a_string_is_still_refused() {
+    // The vendor tests `sliding_window is not None`, so any spelling is live.
+    // Reading it through `as_u64` would answer `None` for these and let the
+    // checkpoint through into a full-attention decode.
+    for window in [json!(4096.0), json!("4096"), json!(true)] {
+        let mut config = iquest_coder_config();
+        config["use_sliding_window"] = json!(true);
+        config["sliding_window"] = window.clone();
+        let error = detect_iquest_coder("iquestcoder_window_typed", config).unwrap_err();
+        assert!(
+            error.to_string().contains("sliding-window"),
+            "window {window} was accepted: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_truthy_non_boolean_use_sliding_window_is_still_refused() {
+    let mut config = iquest_coder_config();
+    config["use_sliding_window"] = json!(1);
+    config["sliding_window"] = json!(4096);
+    let error = detect_iquest_coder("iquestcoder_window_truthy", config).unwrap_err();
+    assert!(
+        error.to_string().contains("sliding-window"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn an_unreadable_layer_count_does_not_open_the_sliding_window_guard() {
+    // `num_hidden_layers` is what decides whether any layer reaches the
+    // window, so an absent one has to mean "assume one does".
+    let mut config = iquest_coder_config();
+    config["use_sliding_window"] = json!(true);
+    config["sliding_window"] = json!(4096);
+    config["max_window_layers"] = json!(14);
+    config.as_object_mut().unwrap().remove("num_hidden_layers");
+    let error = detect_iquest_coder("iquestcoder_window_no_layers", config).unwrap_err();
+    assert!(
+        error.to_string().contains("sliding-window"),
+        "unexpected error: {error}"
+    );
 }

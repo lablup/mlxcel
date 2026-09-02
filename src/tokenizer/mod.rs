@@ -829,7 +829,7 @@ impl SentencePieceTokenizer {
 ///
 /// Grouped into one value rather than returned as a tuple because the
 /// SentencePiece loader needs all of it and the set has grown twice.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SentencePieceConfig {
     /// Special-token spelling to id, from `added_tokens_decoder`.
     special_tokens: HashMap<String, u32>,
@@ -949,8 +949,23 @@ fn open_sentencepiece_processor(
     };
 
     match spm_proto::disable_add_dummy_prefix(&raw) {
-        Ok(patched) => SentencePieceProcessor::from_serialized_proto(&patched)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer.model: {}", e)),
+        Ok(patched) => {
+            // Deliberately not the same message the unmodified path raises: if
+            // the rewrite ever produces something sentencepiece rejects, a
+            // previously-loadable checkpoint turns into a load error, and the
+            // operator needs to see that mlxcel edited the bytes.
+            let processor =
+                SentencePieceProcessor::from_serialized_proto(&patched).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to load tokenizer.model after clearing add_dummy_prefix                          (tokenizer_config.json sets add_prefix_space=false): {}",
+                        e
+                    )
+                })?;
+            tracing::debug!(
+                "tokenizer.model loaded with add_dummy_prefix cleared, because                  tokenizer_config.json sets add_prefix_space=false"
+            );
+            Ok(processor)
+        }
         Err(e) => {
             tracing::warn!(
                 "tokenizer_config.json sets add_prefix_space=false but the SentencePiece model \
@@ -3122,13 +3137,7 @@ mod tests {
 
     #[test]
     fn add_prefix_space_is_read_only_when_it_is_written_down() {
-        let dir = std::env::temp_dir().join(format!(
-            "mlxcel_tokenizer_prefix_space_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = tempfile::tempdir().expect("temp dir");
         for (body, expected) in [
             (serde_json::json!({}), None),
             (
@@ -3140,14 +3149,12 @@ mod tests {
             // read as `false` and silently change every prompt's first token.
             (serde_json::json!({ "add_prefix_space": "false" }), None),
         ] {
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("tokenizer_config.json"), body.to_string()).unwrap();
+            std::fs::write(dir.path().join("tokenizer_config.json"), body.to_string()).unwrap();
             assert_eq!(
-                parse_special_tokens(&dir).add_prefix_space,
+                parse_special_tokens(dir.path()).add_prefix_space,
                 expected,
                 "for {body}"
             );
-            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 
