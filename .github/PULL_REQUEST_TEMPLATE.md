@@ -34,8 +34,8 @@ For inference changes, real-checkpoint validation is required — synthetic-only
 -->
 
 - [ ] `cargo fmt --all -- --check` (enforced by CI — violations block merge)
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace --profile test-fast`
+- [ ] `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings`
+- [ ] `cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast -- --test-threads=1`
 - [ ] `cargo deny check`
 - [ ] Validated with a real checkpoint (specify which, e.g. `mlx-community/Qwen3.5-0.8B-OptiQ-4bit`): ...
 - [ ] If the change moves the numbers (quantization, kernel selection, fused ops, block widths), traced it: disagreement at decided positions, and the width and context it was traced at. See [Judging a change that moves the numbers](../docs/benchmarks.md#judging-a-change-that-moves-the-numbers).
