@@ -28,6 +28,14 @@ use mlxcel::vlm_runtime::{
 
 use crate::MlxcelTokenizer;
 
+/// Open an image file for a CLI command, naming the path in the error.
+///
+/// Used by: the VLM image-loading paths in this module and
+/// `generate_diffusion::prepare_diffusion_vision`.
+pub(crate) fn open_image(path: &Path) -> Result<image::DynamicImage> {
+    image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+}
+
 fn print_audio_preprocess_summary(batch: &mlxcel::audio::AudioWaveformBatch, started: Instant) {
     println!(
         "Audio preprocessing [{}]: clips={}, source_seconds={:.6}, source_samples={}, \
@@ -648,9 +656,7 @@ pub(crate) fn compute_vlm_embeddings(
 
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
@@ -723,10 +729,7 @@ fn compute_inkling_audio_embeddings(
     };
     let images = image_paths
         .iter()
-        .map(|path| {
-            image::open(path)
-                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {}", path, error))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     let (embeddings, stats) = mlxcel::vlm_runtime::compute_inkling_audio_embeddings(
         inkling,
@@ -761,10 +764,7 @@ fn compute_phi4mm_audio_embeddings(
 ) -> Result<Option<InputEmbeddings>> {
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path)
-                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {}", path, error))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     let processed_images = phi4mm.processor.preprocess(&images);
 
@@ -904,10 +904,7 @@ fn compute_gemma3n_audio_embeddings(
     let invalid = mlxcel_core::logical_not(&valid);
     let images = image_paths
         .iter()
-        .map(|path| {
-            image::open(path)
-                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {error}", path))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     let pixel_values = if images.is_empty() {
         None
@@ -1041,9 +1038,7 @@ fn compute_gemma4_multimodal_embeddings(
     // Process images
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
@@ -1141,10 +1136,7 @@ fn compute_gemma4_unified_multimodal_embeddings(
     } else {
         let images: Vec<image::DynamicImage> = image_paths
             .iter()
-            .map(|path| {
-                image::open(path)
-                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-            })
+            .map(|path| open_image(path))
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
         let processed = unified
@@ -1247,10 +1239,7 @@ fn compute_inkling_video_embeddings(
 
     let images = image_paths
         .iter()
-        .map(|path| {
-            image::open(path)
-                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {}", path, error))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     let (embeddings, stats) = mlxcel::vlm_runtime::compute_inkling_video_embeddings(
         inkling,
@@ -1312,9 +1301,7 @@ fn compute_gemma4_video_embeddings(
     // Optional companion images (e.g. user passes both --image and --video).
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     if !images.is_empty() {
         println!("Loaded {} image(s).", images.len());
@@ -1438,9 +1425,7 @@ fn compute_kimi_vl_video_embeddings(
     // Optional companion images (e.g. user passes both --image and --video).
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     if !images.is_empty() {
         println!("Loaded {} image(s).", images.len());
@@ -1502,9 +1487,7 @@ fn compute_qwen_vl_video_embeddings(
 
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     if !images.is_empty() {
         println!("Loaded {} image(s).", images.len());
@@ -1563,10 +1546,7 @@ fn compute_gemma4_unified_video_embeddings(
     } else {
         let images: Vec<image::DynamicImage> = image_paths
             .iter()
-            .map(|path| {
-                image::open(path)
-                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-            })
+            .map(|path| open_image(path))
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
         let processed = unified
@@ -1718,10 +1698,7 @@ fn compute_qwen3_omni_audio_embeddings(
     let images_data = if !image_paths.is_empty() {
         let images: Vec<image::DynamicImage> = image_paths
             .iter()
-            .map(|path| {
-                image::open(path)
-                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-            })
+            .map(|path| open_image(path))
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
         let (pixel_values, grid_thw) = model.processor.preprocess_with_grid(&images);
@@ -1945,10 +1922,7 @@ fn compute_nemotron_h_nano_omni_audio_embeddings(
     let processed_images = if !image_paths.is_empty() {
         let images: Vec<image::DynamicImage> = image_paths
             .iter()
-            .map(|path| {
-                image::open(path)
-                    .map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
-            })
+            .map(|path| open_image(path))
             .collect::<Result<Vec<_>>>()?;
         println!("Loaded {} image(s).", images.len());
         let processed = model.processor.preprocess_batch(&images);
