@@ -48,7 +48,7 @@ use mlxcel::lang_bias::LangBiasCliArgs;
     long_about = None,
     after_help = "\
 Environment Variables:
-  MLXCEL_DEVICE          Runtime device: \"gpu\" (default), \"cpu\"
+  MLXCEL_DEVICE          Runtime device: \"gpu\" (default), \"metal\", \"cpu\"
   MLXCEL_WIRED_LIMIT     Apple Silicon wired memory limit
                            unset/\"max\", use MLX gpu_max_memory_size (default)
                            \"0\"/\"none\", disable the wired limit
