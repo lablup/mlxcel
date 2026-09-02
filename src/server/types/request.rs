@@ -92,6 +92,72 @@ impl ToolChoice {
             _ => None,
         }
     }
+
+    /// Returns true for `"required"`: the model must call at least one of the
+    /// declared functions.
+    pub fn is_required(&self) -> bool {
+        matches!(self, ToolChoice::Mode(s) if s == "required")
+    }
+
+    /// Returns true for the two forms that force a call: `"required"` and the
+    /// named-function object. Both narrow the prompt, inject an instruction,
+    /// and (on grammar-capable tool formats) constrain generation.
+    pub fn is_forced(&self) -> bool {
+        self.is_required() || matches!(self, ToolChoice::Specific(_))
+    }
+
+    /// Validate this choice against the request's `tools` array.
+    ///
+    /// Shared by the single-node chat route and the disaggregated router front
+    /// so both reject the same shapes with the same messages before any
+    /// template work: an unknown string mode, `"required"` without tools, a
+    /// named object whose `type` is not `function`, an empty function name,
+    /// and a named function that is not declared in `tools`.
+    pub fn validate(&self, tools: Option<&[Tool]>) -> Result<(), String> {
+        let declared = tools.unwrap_or(&[]);
+        match self {
+            ToolChoice::Mode(mode) => {
+                if !["auto", "none", "required"].contains(&mode.as_str()) {
+                    return Err(format!(
+                        "Invalid tool_choice value: '{mode}'. Must be 'auto', 'none', 'required', or a function object."
+                    ));
+                }
+                if mode == "required" && declared.is_empty() {
+                    return Err(
+                        "tool_choice 'required' needs a non-empty 'tools' array.".to_string()
+                    );
+                }
+                Ok(())
+            }
+            ToolChoice::Specific(choice) => {
+                if choice.choice_type != "function" {
+                    return Err(format!(
+                        "Invalid tool_choice type: '{}'. Must be 'function'.",
+                        choice.choice_type
+                    ));
+                }
+                // Match the name exactly as sent: the renderer, the grammar
+                // builder and the response filter all compare the raw string,
+                // so a padded name that passed here would render no tool and
+                // filter every call instead of failing fast.
+                let name = choice.function.name.as_str();
+                if name.trim().is_empty() {
+                    return Err("tool_choice function name must not be empty.".to_string());
+                }
+                if declared.is_empty() {
+                    return Err(format!(
+                        "tool_choice names function '{name}' but 'tools' is empty."
+                    ));
+                }
+                if !declared.iter().any(|tool| tool.function.name == name) {
+                    return Err(format!(
+                        "tool_choice names function '{name}', which is not declared in 'tools'."
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Named function tool choice
@@ -1773,6 +1839,114 @@ pub struct AudioTranscriptionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn declared_tools(names: &[&str]) -> Vec<Tool> {
+        names
+            .iter()
+            .map(|name| Tool {
+                tool_type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: (*name).to_string(),
+                    description: None,
+                    parameters: None,
+                },
+            })
+            .collect()
+    }
+
+    fn named_choice(choice_type: &str, name: &str) -> ToolChoice {
+        ToolChoice::Specific(ToolChoiceFunction {
+            choice_type: choice_type.to_string(),
+            function: ToolChoiceFunctionName {
+                name: name.to_string(),
+            },
+        })
+    }
+
+    #[test]
+    fn tool_choice_required_without_tools_is_rejected() {
+        let required = ToolChoice::Mode("required".to_string());
+        assert!(required.is_required());
+        assert!(required.is_forced());
+
+        let err = required
+            .validate(None)
+            .expect_err("required with no tools array must be rejected");
+        assert!(err.contains("required"), "message names the mode: {err}");
+
+        let err = required
+            .validate(Some(&[]))
+            .expect_err("required with an empty tools array must be rejected");
+        assert!(err.contains("non-empty"), "message explains the fix: {err}");
+
+        required
+            .validate(Some(&declared_tools(&["get_time"])))
+            .expect("required with one declared tool is valid");
+    }
+
+    #[test]
+    fn tool_choice_auto_and_none_validate_without_tools() {
+        for mode in ["auto", "none"] {
+            let choice = ToolChoice::Mode(mode.to_string());
+            assert!(!choice.is_forced());
+            choice
+                .validate(None)
+                .unwrap_or_else(|err| panic!("{mode} needs no tools: {err}"));
+        }
+        let err = ToolChoice::Mode("always".to_string())
+            .validate(Some(&declared_tools(&["f"])))
+            .expect_err("unknown string mode is rejected");
+        assert!(
+            err.starts_with("Invalid tool_choice value: 'always'."),
+            "the pre-existing wording is preserved: {err}"
+        );
+    }
+
+    #[test]
+    fn tool_choice_unknown_function_is_rejected() {
+        let choice = named_choice("function", "get_weather");
+        assert!(choice.is_forced());
+        assert!(!choice.is_required());
+
+        let err = choice
+            .validate(Some(&declared_tools(&["get_time"])))
+            .expect_err("a function missing from tools must be rejected");
+        assert!(
+            err.contains("get_weather") && err.contains("not declared"),
+            "message names the missing function: {err}"
+        );
+
+        let err = choice
+            .validate(Some(&[]))
+            .expect_err("a named function with an empty tools array must be rejected");
+        assert!(err.contains("'tools' is empty"), "{err}");
+
+        choice
+            .validate(Some(&declared_tools(&["get_time", "get_weather"])))
+            .expect("a declared function is valid");
+    }
+
+    #[test]
+    fn tool_choice_object_without_function_type_is_rejected() {
+        let tools = declared_tools(&["get_weather"]);
+
+        let err = named_choice("tool", "get_weather")
+            .validate(Some(&tools))
+            .expect_err("type other than function is rejected");
+        assert!(err.contains("'tool'"), "message echoes the bad type: {err}");
+
+        let err = named_choice("function", "   ")
+            .validate(Some(&tools))
+            .expect_err("an empty function name is rejected");
+        assert!(err.contains("must not be empty"), "{err}");
+
+        // Names are matched exactly as sent: a padded spelling is not the
+        // declared tool, and letting it through would render no tool at all.
+        let err = named_choice("function", " get_weather ")
+            .validate(Some(&tools))
+            .expect_err("a padded function name is not a declared tool");
+        assert!(err.contains("not declared"), "{err}");
+    }
 
     #[test]
     fn chat_request_accepts_llama_sampling_aliases_and_scalar_stop() {

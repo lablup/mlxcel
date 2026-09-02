@@ -188,7 +188,9 @@ pub(crate) fn carries_loop_amplifier(
 ///
 /// 1. Tool declarations that reach the rendered prompt, per
 ///    [`crate::server::chat_request::effective_tools`]. `tool_choice: "none"`
-///    drops these, so on its own it does not amplify.
+///    drops these, so on its own it does not amplify. A named function
+///    (#1319) narrows the slice to that single tool, and one rendered tool
+///    still counts: the prompt is tool-shaped either way.
 /// 2. Tool-shaped message content, per
 ///    [`crate::server::chat_request::has_tool_fields`]. Messages carrying
 ///    `tool_calls` or `tool_call_id` take the raw-JSON render path, which writes

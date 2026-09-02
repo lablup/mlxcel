@@ -3064,3 +3064,301 @@ async fn two_trailing_assistant_messages_are_refused_with_upstreams_wording() {
         "Cannot have 2 or more assistant messages at the end of the list."
     );
 }
+
+// ---------------------------------------------------------------------------
+// Forced tool choice (#1319)
+// ---------------------------------------------------------------------------
+
+use super::{
+    effective_tools, inject_tool_choice_instruction, resolve_effective_kwargs,
+    tool_choice_instruction, with_tool_choice_instruction,
+};
+use crate::server::prompt_cache::key::template_sig;
+use crate::server::types::request::{
+    FunctionDefinition, Tool, ToolChoice, ToolChoiceFunction, ToolChoiceFunctionName,
+};
+
+const REQUIRED_INSTRUCTION: &str = "You must call one or more of the available functions to \
+                                    answer the user's request. Do not answer directly without \
+                                    calling a function.";
+
+fn two_tools() -> Vec<Tool> {
+    ["get_time", "get_weather"]
+        .into_iter()
+        .map(|name| Tool {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: name.to_string(),
+                description: None,
+                parameters: Some(serde_json::json!({"type": "object"})),
+            },
+        })
+        .collect()
+}
+
+fn named_choice(name: &str) -> ToolChoice {
+    ToolChoice::Specific(ToolChoiceFunction {
+        choice_type: "function".to_string(),
+        function: ToolChoiceFunctionName {
+            name: name.to_string(),
+        },
+    })
+}
+
+fn tool_request(messages: Vec<Message>, choice: Option<ToolChoice>) -> ChatCompletionRequest {
+    let mut request = request_with_messages(messages);
+    request.tools = Some(two_tools());
+    request.tool_choice = choice;
+    request
+}
+
+#[test]
+fn effective_tools_narrows_to_named_function() {
+    let user = || vec![text_message(Role::User, "What time is it in Seoul?")];
+
+    let named = tool_request(user(), Some(named_choice("get_weather")));
+    let narrowed = effective_tools(&named).expect("the named tool is rendered");
+    assert_eq!(narrowed.len(), 1);
+    assert_eq!(narrowed[0].function.name, "get_weather");
+
+    let required = tool_request(user(), Some(ToolChoice::Mode("required".to_string())));
+    assert_eq!(effective_tools(&required).map(<[Tool]>::len), Some(2));
+
+    let auto = tool_request(user(), Some(ToolChoice::Mode("auto".to_string())));
+    assert_eq!(effective_tools(&auto).map(<[Tool]>::len), Some(2));
+    let absent = tool_request(user(), None);
+    assert_eq!(effective_tools(&absent).map(<[Tool]>::len), Some(2));
+
+    let none = tool_request(user(), Some(ToolChoice::Mode("none".to_string())));
+    assert!(effective_tools(&none).is_none());
+
+    // Undeclared names render nothing; the routes reject them before this.
+    let missing = tool_request(user(), Some(named_choice("get_stock")));
+    assert!(effective_tools(&missing).is_none());
+}
+
+#[test]
+fn tool_choice_instruction_wording_is_fixed() {
+    assert_eq!(
+        tool_choice_instruction(&ToolChoice::Mode("required".to_string())).as_deref(),
+        Some(REQUIRED_INSTRUCTION)
+    );
+    assert_eq!(
+        tool_choice_instruction(&named_choice("get_weather")).as_deref(),
+        Some(
+            "You must call the 'get_weather' function to answer the user's request. Do not call \
+             any other function and do not answer directly."
+        )
+    );
+    for mode in ["auto", "none"] {
+        assert!(tool_choice_instruction(&ToolChoice::Mode(mode.to_string())).is_none());
+    }
+}
+
+#[test]
+fn tool_choice_instruction_appends_to_system_message() {
+    let mut messages = vec![
+        text_message(Role::User, "Earlier turn"),
+        text_message(Role::System, "You are a helpful assistant."),
+        text_message(Role::System, "Second system prompt"),
+        text_message(Role::User, "Say hello."),
+    ];
+    inject_tool_choice_instruction(&mut messages, REQUIRED_INSTRUCTION);
+
+    assert_eq!(
+        messages.len(),
+        4,
+        "nothing is inserted when a system message exists"
+    );
+    assert_eq!(
+        messages[1].content.text(),
+        format!("You are a helpful assistant.\n\n{REQUIRED_INSTRUCTION}"),
+        "the first system message carries the instruction"
+    );
+    assert_eq!(messages[2].content.text(), "Second system prompt");
+    assert_eq!(messages[0].content.text(), "Earlier turn");
+    assert_eq!(messages[3].content.text(), "Say hello.");
+}
+
+#[test]
+fn tool_choice_instruction_appends_to_last_text_user_message() {
+    let mut messages = vec![
+        text_message(Role::User, "first"),
+        text_message(Role::Assistant, "reply"),
+        text_message(Role::User, "second"),
+        text_message(Role::Assistant, "prefill"),
+    ];
+    inject_tool_choice_instruction(&mut messages, REQUIRED_INSTRUCTION);
+
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0].content.text(), "first");
+    assert_eq!(
+        messages[2].content.text(),
+        format!("second\n\n{REQUIRED_INSTRUCTION}"),
+        "the last user message carries the instruction"
+    );
+    assert_eq!(messages[3].content.text(), "prefill");
+
+    // A content-parts user message keeps its media and gains a trailing text
+    // part rather than being flattened.
+    let mut messages = vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::ImageUrl {
+                image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+            },
+            ContentPart::Text {
+                text: "What is in this picture?".to_string(),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }];
+    inject_tool_choice_instruction(&mut messages, REQUIRED_INSTRUCTION);
+    assert_eq!(messages.len(), 1);
+    let MessageContent::Parts(parts) = &messages[0].content else {
+        panic!("parts content must stay parts");
+    };
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(parts[0], ContentPart::ImageUrl { .. }));
+    assert!(matches!(
+        &parts[2],
+        ContentPart::Text { text } if text == &format!("\n\n{REQUIRED_INSTRUCTION}")
+    ));
+}
+
+#[test]
+fn tool_choice_instruction_inserts_system_when_no_system_and_no_text_user() {
+    let mut messages = vec![
+        text_message(Role::Assistant, "I previously said"),
+        Message {
+            role: Role::Tool,
+            content: MessageContent::Text("{\"ok\":true}".to_string()),
+            name: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning: None,
+            tool_calls: None,
+        },
+    ];
+    inject_tool_choice_instruction(&mut messages, REQUIRED_INSTRUCTION);
+
+    assert_eq!(
+        messages.len(),
+        3,
+        "a new leading system message is inserted"
+    );
+    assert_eq!(messages[0].role, Role::System);
+    assert_eq!(
+        messages[0].content.text(),
+        REQUIRED_INSTRUCTION,
+        "a fresh system message carries the bare instruction"
+    );
+    assert_eq!(messages[1].content.text(), "I previously said");
+    assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
+
+    // An empty conversation gets the same treatment.
+    let mut empty = Vec::new();
+    inject_tool_choice_instruction(&mut empty, REQUIRED_INSTRUCTION);
+    assert_eq!(empty.len(), 1);
+    assert_eq!(empty[0].role, Role::System);
+}
+
+#[test]
+fn with_tool_choice_instruction_leaves_unforced_requests_untouched() {
+    let auto = tool_request(
+        vec![text_message(Role::User, "hi")],
+        Some(ToolChoice::Mode("auto".to_string())),
+    );
+    assert!(matches!(
+        with_tool_choice_instruction(&auto),
+        std::borrow::Cow::Borrowed(_)
+    ));
+
+    let required = tool_request(
+        vec![text_message(Role::User, "hi")],
+        Some(ToolChoice::Mode("required".to_string())),
+    );
+    let rendered = with_tool_choice_instruction(&required);
+    assert!(matches!(rendered, std::borrow::Cow::Owned(_)));
+    assert!(
+        rendered.messages[0]
+            .content
+            .text()
+            .ends_with(REQUIRED_INSTRUCTION)
+    );
+    assert_eq!(
+        required.messages[0].content.text(),
+        "hi",
+        "the original request is not mutated"
+    );
+}
+
+#[tokio::test]
+async fn named_tool_choice_changes_rendered_prompt_and_template_sig() {
+    let template = concat!(
+        "{% if tools %}<tools>{{ tools | tojson }}</tools>{% endif %}",
+        "{% for m in messages %}[{{ m.role }}: {{ m.content }}]{% endfor %}",
+    );
+    let processor = ChatTemplateProcessor::with_template(template.to_string());
+    let messages = || {
+        vec![
+            text_message(Role::System, "You are helpful."),
+            text_message(Role::User, "What time is it in Seoul?"),
+        ]
+    };
+
+    let auto = tool_request(messages(), Some(ToolChoice::Mode("auto".to_string())));
+    let named = tool_request(messages(), Some(named_choice("get_weather")));
+
+    let auto_prompt = prepare_chat_request(&processor, &auto, None)
+        .await
+        .expect("auto renders")
+        .prompt;
+    let named_prompt = prepare_chat_request(&processor, &named, None)
+        .await
+        .expect("named renders")
+        .prompt;
+
+    assert!(auto_prompt.contains("get_time") && auto_prompt.contains("get_weather"));
+    assert!(
+        !auto_prompt.contains("You must call"),
+        "auto injects nothing"
+    );
+
+    assert!(named_prompt.contains("get_weather"), "{named_prompt}");
+    assert!(
+        !named_prompt.contains("get_time"),
+        "the named form renders only the named tool: {named_prompt}"
+    );
+    assert!(
+        named_prompt.contains(
+            "[system: You are helpful.\n\nYou must call the 'get_weather' function to answer \
+             the user's request. Do not call any other function and do not answer directly.]"
+        ),
+        "the instruction reaches the rendered system message: {named_prompt}"
+    );
+    assert_eq!(
+        named.messages[0].content.text(),
+        "You are helpful.",
+        "rendering never mutates the request"
+    );
+
+    let sig = |request: &ChatCompletionRequest| {
+        let kwargs =
+            resolve_effective_kwargs(&processor, request, None, &request.merged_extra_body());
+        template_sig(
+            processor.template_source(),
+            &kwargs,
+            request.tool_choice.as_ref(),
+            request.tools.as_deref(),
+            false,
+        )
+    };
+    assert_ne!(
+        sig(&auto),
+        sig(&named),
+        "two prompts that render differently must not share a cache bucket"
+    );
+}

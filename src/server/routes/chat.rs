@@ -31,6 +31,7 @@ use crate::server::batch::RequestPriority;
 use crate::server::chat_request::{
     prepare_chat_request_with_cache, request_has_effective_input, resolve_effective_kwargs,
 };
+use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::prompt_cache::key::{
     MultimodalDigest, multimodal_digest_from_vecs, resolve_session_key, template_sig,
@@ -40,10 +41,15 @@ use crate::server::request_options::{
     resolve_server_max_tokens_with_live,
 };
 use crate::server::streaming::{sse_channel_resumable, sse_response};
-use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
+use crate::server::structured::{
+    StructuredOutputConstraint, StructuredOutputError, build_constraint_from_response_format,
+    build_lark_constraint,
+};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
+use crate::server::tool_calls::ToolCallFormat;
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
+use crate::server::types::request::ToolChoice;
 use crate::server::types::response::{ChatLogprobs, TokenLogprob, TopLogprob};
 use crate::server::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse,
@@ -383,24 +389,12 @@ pub async fn chat_completions(
     // it directly on the Tokio runtime worker thread would block other
     // in-flight requests. We move it onto a blocking task and await the
     // join handle. Returns `None` when the request did not ask for
-    // structured output, in which case the rest of the pipeline behaves
-    // identically to before this issue.
-    let structured = {
-        let tokenizer = state.tokenizer.clone();
-        let response_format = request.response_format.clone();
-        match tokio::task::spawn_blocking(move || {
-            build_constraint_from_response_format(tokenizer.as_ref(), response_format.as_ref())
-        })
-        .await
-        {
-            Ok(Ok(opt)) => opt,
-            Ok(Err(err)) => return structured_error_to_response(err).into_response(),
-            Err(join_err) => {
-                tracing::error!("structured-output build task panicked: {join_err}");
-                return ErrorResponse::new("structured-output preparation failed", "server_error")
-                    .into_response();
-            }
-        }
+    // structured output (`response_format`, or a forced `tool_choice` on a
+    // grammar-capable template, #1319), in which case the rest of the
+    // pipeline behaves identically to before this issue.
+    let structured = match build_chat_constraint(&state, &request).await {
+        Ok(structured) => structured,
+        Err(response) => return response.into_response(),
     };
 
     let priority = parse_priority_header(&headers);
@@ -427,6 +421,176 @@ pub async fn chat_completions(
             .await
             .into_response()
     }
+}
+
+/// The per-request structured-output constraint, shared with the scheduler.
+pub(crate) type SharedConstraint = std::sync::Arc<std::sync::Mutex<StructuredOutputConstraint>>;
+
+/// Build the structured-output constraint for a chat-shaped request on the
+/// blocking pool: the `response_format` schema when the request carries one,
+/// otherwise the forced tool-call grammar (#1319) when `tool_choice` is
+/// `"required"` or a named function and the loaded template's tool format is
+/// grammar-capable. `Ok(None)` leaves generation unconstrained.
+///
+/// Shared by the chat-completions, Responses and Anthropic Messages routes so
+/// every surface that feeds a `ChatCompletionRequest` enforces the same
+/// `tool_choice` semantics. Callers run [`validate_chat_tool_inputs`] first;
+/// that is what rejects the `response_format` + forced-tool combination, so
+/// here `response_format` simply takes precedence if both are present.
+///
+/// A `response_format` that fails to compile is the client's own error and is
+/// returned as a 400. A forced tool-call grammar that fails is not: the client
+/// asked for a tool call, not for a grammar, and the grammar is this server's
+/// way of delivering one. Tool schemas that llguidance cannot express (a
+/// `$ref` it will not follow, a nesting depth past its limits, a set of tools
+/// whose combined grammar exceeds the size cap) therefore fall back to the
+/// instruction-only enforcement every non-grammar-capable template already
+/// gets, with a `warn` naming the reason, instead of failing a request that
+/// worked before the choice was enforced at all.
+pub(crate) async fn build_chat_constraint(
+    state: &AppState,
+    request: &ChatCompletionRequest,
+) -> Result<Option<SharedConstraint>, ErrorResponse> {
+    let tokenizer = state.tokenizer.clone();
+    let response_format = request.response_format.clone();
+    let forced_grammar = forced_tool_choice_grammar(&state.chat_template, &tokenizer, request);
+    match tokio::task::spawn_blocking(move || {
+        if let Some(constraint) =
+            build_constraint_from_response_format(tokenizer.as_ref(), response_format.as_ref())?
+        {
+            return Ok(Some(constraint));
+        }
+        let Some(lark) = forced_grammar else {
+            return Ok(None);
+        };
+        Ok(forced_constraint_or_instruction_only(
+            tokenizer.as_ref(),
+            &lark,
+        ))
+    })
+    .await
+    {
+        Ok(Ok(opt)) => Ok(opt),
+        Ok(Err(err)) => Err(structured_error_to_response(err)),
+        Err(join_err) => {
+            tracing::error!("structured-output build task panicked: {join_err}");
+            Err(ErrorResponse::new(
+                "structured-output preparation failed",
+                "server_error",
+            ))
+        }
+    }
+}
+
+/// Compile a forced tool-call grammar, degrading to instruction-only
+/// enforcement when it does not compile (#1319).
+///
+/// Split out of [`build_chat_constraint`] so the fallback is exercised without
+/// standing up an [`AppState`]. Returning `None` here is the same answer a
+/// non-grammar-capable template gives, so the request proceeds with the
+/// injected prompt instruction and the narrowed tool list.
+fn forced_constraint_or_instruction_only(
+    tokenizer: &MlxcelTokenizer,
+    lark: &str,
+) -> Option<SharedConstraint> {
+    match build_lark_constraint(tokenizer, lark) {
+        Ok(constraint) => Some(constraint),
+        Err(err) => {
+            tracing::warn!(
+                target: "mlxcel::tool_calls",
+                error = %err,
+                "forced tool_choice grammar did not compile from the declared tool schemas; \
+                 falling back to prompt-instruction enforcement"
+            );
+            None
+        }
+    }
+}
+
+/// The Lark grammar a forced `tool_choice` compiles to for this request
+/// (#1319), or `None` when nothing is to be forced: `auto` / `none` / absent,
+/// a template whose tool format has no fixed JSON wrapper (those get the
+/// prompt instruction and tool narrowing only), or no declared tools.
+///
+/// The wrapper markers are resolved against the loaded tokenizer so a marker
+/// it carries as a special token (Qwen's `<tool_call>`) is referenced by id in
+/// the grammar; see [`tool_calls::special_token_id`].
+pub(crate) fn forced_tool_choice_grammar(
+    chat_template: &ChatTemplateProcessor,
+    tokenizer: &MlxcelTokenizer,
+    request: &ChatCompletionRequest,
+) -> Option<String> {
+    let choice = request
+        .tool_choice
+        .as_ref()
+        .filter(|choice| choice.is_forced())?;
+    let format = chat_template.forced_tool_call_format()?;
+    let tools = request.tools.as_deref()?;
+    let grammar = tool_calls::tool_choice_grammar_with(format, tools, choice, |text| {
+        tool_calls::special_token_id(tokenizer, text)
+    });
+    if grammar.is_some() {
+        tracing::debug!(
+            target: "mlxcel::tool_calls",
+            format = %format,
+            tool_choice = choice.mode(),
+            function = choice.specific_function().unwrap_or("-"),
+            "forcing the tool call through a grammar constraint"
+        );
+    }
+    grammar
+}
+
+/// Whether a parsed tool call matches a forced named `tool_choice` filter
+/// (#1319). `None` means every call matches (the `"required"` case, or no
+/// forced choice at all); `Some(name)` restricts matches to that one function
+/// name, mirroring the named-function contract [`ToolChoice::validate`]
+/// enforces at the request boundary.
+fn tool_call_matches_choice(call_name: &str, specific_function: Option<&str>) -> bool {
+    specific_function.is_none_or(|name| call_name == name)
+}
+
+/// Count of parsed tool calls that pass the forced-choice filter and would
+/// therefore reach the client as tool-call deltas (#1319).
+///
+/// Split out of [`stream_chat_completion`]'s end-of-stream block so the "did a
+/// call actually reach the client" gate on `finish_reason` is a plain,
+/// testable function instead of a counter that only exists inside the
+/// streaming task's `spawn_blocking` closure. `finish_reason` may claim
+/// `"tool_calls"` only when this is greater than zero: a named filter that
+/// drops every parsed call must not report a call the client never saw.
+fn count_tool_calls_reaching_client(
+    calls: &[tool_calls::ParsedToolCall],
+    specific_function: Option<&str>,
+) -> usize {
+    calls
+        .iter()
+        .filter(|call| tool_call_matches_choice(&call.name, specific_function))
+        .count()
+}
+
+/// Log a forced `tool_choice` (#1319) that finished without a usable call.
+///
+/// Only the grammar-capable formats can guarantee a call; on every other
+/// template the injected instruction is advisory, and a grammar-forced
+/// generation can still be cut off by `max_tokens`. So this is a warning, not
+/// an error, and `finish_reason` stays whatever the model produced.
+fn warn_unmet_tool_choice(
+    tool_choice: Option<&ToolChoice>,
+    forced_format: Option<ToolCallFormat>,
+    finish_reason: &str,
+) {
+    let Some(choice) = tool_choice.filter(|choice| choice.is_forced()) else {
+        return;
+    };
+    tracing::warn!(
+        target: "mlxcel::tool_calls",
+        tool_choice = choice.mode(),
+        function = choice.specific_function().unwrap_or("-"),
+        grammar_format = forced_format.map_or("none", ToolCallFormat::as_str),
+        finish_reason,
+        "forced tool_choice produced no tool call; the response carries the model's plain output"
+    );
 }
 
 /// Extract the `X-Priority` header value, defaulting to `Normal`.
@@ -716,6 +880,15 @@ pub(crate) async fn non_stream_chat_completion(
                 ));
             }
         }
+
+        // A forced tool_choice that ends here was not satisfied (#1319): either
+        // the template is instruction-only, or the named filter above dropped
+        // every call. Say so in the log; the client still gets the output.
+        warn_unmet_tool_choice(
+            request.tool_choice.as_ref(),
+            state.chat_template.forced_tool_call_format(),
+            &result.finish_reason,
+        );
 
         // No tool calls found, but tool parsing was enabled — use the cleaned
         // content from the parser (thinking blocks and structural markers
@@ -1276,6 +1449,8 @@ async fn stream_chat_completion(
         None
     };
     let tool_choice = request.tool_choice.clone();
+    // For the end-of-stream forced-tool-choice diagnostic (#1319).
+    let forced_format = state.chat_template.forced_tool_call_format();
 
     // b10621 `reasoning_control` (#1444): arm realtime reasoning control for
     // this completion. The shared flag travels into the scheduler's thinking
@@ -1664,12 +1839,15 @@ async fn stream_chat_completion(
                     .as_ref()
                     .and_then(|tc| tc.specific_function())
                     .map(|s| s.to_string());
+                // #1319: how many parsed calls will actually reach the client
+                // as tool-call deltas, computed once via the same predicate
+                // the emission loop below applies per call.
+                let emitted =
+                    count_tool_calls_reaching_client(&parsed.tool_calls, specific_fn.as_deref());
 
                 for (idx, call) in parsed.tool_calls.iter().enumerate() {
-                    // Filter by specific function if applicable
-                    if let Some(ref fn_name) = specific_fn
-                        && call.name != *fn_name
-                    {
+                    // Filter by specific function if applicable.
+                    if !tool_call_matches_choice(&call.name, specific_fn.as_deref()) {
                         continue;
                     }
 
@@ -1695,8 +1873,16 @@ async fn stream_chat_completion(
                     let _ = finish_events.json(&args_chunk);
                 }
 
-                finish_reason = "tool_calls".to_string();
+                // Only calls that actually reached the client count: when the
+                // named-function filter dropped every parsed call, the stream
+                // carried no tool-call delta and must not claim `tool_calls`.
+                if emitted > 0 {
+                    finish_reason = "tool_calls".to_string();
+                }
             }
+        }
+        if finish_reason != "tool_calls" {
+            warn_unmet_tool_choice(tool_choice.as_ref(), forced_format, &finish_reason);
         }
 
         // Warm the next turn's history prefix in the background (issue #1144).
@@ -1821,18 +2007,31 @@ pub(crate) fn validate_typical_p(typical_p: Option<f32>) -> Result<(), &'static 
 /// Maximum number of tools allowed in a single request.
 pub(crate) const MAX_TOOLS: usize = 128;
 
-/// Validate the chat tool fields shared by single-node and router fronts.
+/// Validate the chat tool fields shared by the single-node routes (chat
+/// completions, Responses, Anthropic Messages) and the disaggregated router
+/// front.
 ///
-/// Both callers run this before chat-template rendering so an invalid
-/// `tool_choice` or oversized tool list cannot reach Jinja2. Error strings are
-/// intentionally kept byte-identical to the original single-node guards.
+/// Every caller runs this before chat-template rendering so an invalid
+/// `tool_choice` or oversized tool list cannot reach Jinja2. The `tool_choice`
+/// rules live on [`ToolChoice::validate`] (#1319): unknown string modes,
+/// `"required"` without tools, and a named function that is malformed or not
+/// declared. A forced choice combined with a constraining `response_format`
+/// is rejected here as well, since two grammars cannot be composed over one
+/// generation. The unknown-mode string is byte-identical to the original
+/// single-node guard.
 pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Result<(), String> {
-    if let Some(crate::server::types::request::ToolChoice::Mode(mode)) = &request.tool_choice
-        && !["auto", "none", "required"].contains(&mode.as_str())
-    {
-        return Err(format!(
-            "Invalid tool_choice value: '{mode}'. Must be 'auto', 'none', 'required', or a function object."
-        ));
+    if let Some(choice) = &request.tool_choice {
+        choice.validate(request.tools.as_deref())?;
+        if choice.is_forced()
+            && response_format_requests_constraint(request.response_format.as_ref())
+        {
+            return Err(
+                "tool_choice 'required' or a named function cannot be combined with a \
+                 response_format schema: the forced tool call and the response schema \
+                 would each constrain the whole generation."
+                    .to_string(),
+            );
+        }
     }
 
     if let Some(tools) = &request.tools
@@ -1845,6 +2044,14 @@ pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Resu
     }
 
     Ok(())
+}
+
+/// Whether `response_format` asks for constrained decoding. Absent and
+/// `{"type": "text"}` both mean no; every other shape is either a schema or a
+/// malformed value that the structured-output builder reports on its own.
+fn response_format_requests_constraint(response_format: Option<&serde_json::Value>) -> bool {
+    response_format
+        .is_some_and(|value| value.get("type").and_then(serde_json::Value::as_str) != Some("text"))
 }
 
 /// Whether the rendered chat prompt primed an open thinking block whose
@@ -2160,6 +2367,87 @@ mod tests {
     #[test]
     fn max_tools_constant_is_128() {
         assert_eq!(MAX_TOOLS, 128);
+    }
+
+    /// A forced `tool_choice` whose tool schemas the grammar engine cannot
+    /// express must not fail the request (#1319): the client asked for a tool
+    /// call, not for a grammar, and the same request was served without any
+    /// constraint before the choice was enforced. The compile failure degrades
+    /// to the instruction-only path instead.
+    #[test]
+    fn a_grammar_that_does_not_compile_degrades_to_instruction_only() {
+        let tokenizer = MlxcelTokenizer::stub_all_byte_fallback();
+        assert!(
+            forced_constraint_or_instruction_only(&tokenizer, "start: %json").is_none(),
+            "a grammar the engine rejects yields no constraint, not an error"
+        );
+        assert!(
+            forced_constraint_or_instruction_only(
+                &tokenizer,
+                r#"start: "<tool_call>" %json {"type": "object"} "</tool_call>""#,
+            )
+            .is_some(),
+            "a grammar that compiles still constrains the generation"
+        );
+    }
+
+    /// The streaming finish path may only claim `finish_reason: "tool_calls"`
+    /// when a tool-call delta actually reached the client (#1319). This is the
+    /// pure gate behind that rule, extracted from
+    /// [`stream_chat_completion`]'s `spawn_blocking` closure so it is testable
+    /// on its own rather than only through a live SSE stream.
+    #[test]
+    fn count_tool_calls_reaching_client_counts_every_call_when_choice_is_required() {
+        let calls = [
+            tool_calls::ParsedToolCall {
+                name: "get_time".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_calls::ParsedToolCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+        assert_eq!(count_tool_calls_reaching_client(&calls, None), 2);
+    }
+
+    /// A named `tool_choice` filter must count only the matching call, and the
+    /// streaming loop's per-call predicate must agree with that count so the
+    /// two can never disagree about what reached the client.
+    #[test]
+    fn count_tool_calls_reaching_client_counts_only_the_named_function() {
+        let calls = [
+            tool_calls::ParsedToolCall {
+                name: "get_time".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_calls::ParsedToolCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+        assert_eq!(
+            count_tool_calls_reaching_client(&calls, Some("get_weather")),
+            1
+        );
+        assert!(tool_call_matches_choice("get_weather", Some("get_weather")));
+        assert!(!tool_call_matches_choice("get_time", Some("get_weather")));
+    }
+
+    /// When the named-function filter matches none of the parsed calls, the
+    /// count is zero: this is the exact condition that must keep
+    /// `finish_reason` from claiming `"tool_calls"` in the streaming path,
+    /// since no tool-call delta was sent to the client (#1319).
+    #[test]
+    fn count_tool_calls_reaching_client_is_zero_when_the_named_filter_matches_nothing() {
+        let calls = [tool_calls::ParsedToolCall {
+            name: "get_time".to_string(),
+            arguments: "{}".to_string(),
+        }];
+        assert_eq!(
+            count_tool_calls_reaching_client(&calls, Some("get_weather")),
+            0
+        );
     }
 
     // -- XTC (Exclude Top Choices) request validation --

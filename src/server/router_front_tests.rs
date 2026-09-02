@@ -294,6 +294,30 @@ async fn router_chat_rejects_invalid_tool_choice_before_rendering() {
 }
 
 #[tokio::test]
+async fn router_chat_forwards_forced_tool_choice_instead_of_rejecting_it() {
+    // Unlike `response_format`, a forced `tool_choice` (#1319) is still
+    // meaningfully enforced on the disaggregated router through the injected
+    // prompt instruction alone (see `route_chat`'s warn branch), so it must
+    // not be rejected with a 400 the way `response_format` is. Prove the
+    // request reaches template rendering (rather than being rejected earlier
+    // by `validate_chat_tool_inputs` or a router-only guard) by rendering with
+    // a template that raises once it gets there: getting *that* error, not
+    // the tool_choice/response_format guard's 400, is the signal.
+    let state = router_test_state_with_template("{{ raise_exception('reached rendering') }}").await;
+    let mut body = chat_request();
+    body["tools"] = json!([{"type": "function", "function": {"name": "get_weather"}}]);
+    body["tool_choice"] = json!("required");
+
+    let response = post_router_json_with_state(state, "/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(response).await;
+    assert_eq!(
+        body["error"]["message"],
+        "the model's chat template rejected this request: reached rendering"
+    );
+}
+
+#[tokio::test]
 async fn router_chat_maps_template_rejection_to_bad_request() {
     let state = router_test_state_with_template(
         "{% if reasoning_effort not in ['low', 'medium'] %}{{ raise_exception('Unexpected reasoning effort ' ~ reasoning_effort) }}{% endif %}ok",

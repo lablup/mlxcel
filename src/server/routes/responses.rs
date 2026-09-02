@@ -46,7 +46,6 @@ use crate::server::responses_translator::{
 };
 use crate::server::streaming::sse_response;
 use crate::server::streaming_responses::{ResponseStreamEmitter, responses_sse_channel_resumable};
-use crate::server::structured::build_constraint_from_response_format;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
 use crate::server::tool_calls::stream_filter::StreamFilter;
@@ -133,26 +132,20 @@ pub async fn create_response(
         return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
-    // Build the structured-output constraint (json_schema) up front.
-    let structured = {
-        let tokenizer = state.tokenizer.clone();
-        let response_format = translated.chat_request.response_format.clone();
-        match tokio::task::spawn_blocking(move || {
-            build_constraint_from_response_format(tokenizer.as_ref(), response_format.as_ref())
-        })
-        .await
-        {
-            Ok(Ok(opt)) => opt,
-            Ok(Err(err)) => {
-                return ErrorResponse::new(err.to_string(), "invalid_request_error")
-                    .into_response();
-            }
-            Err(_) => {
-                return ErrorResponse::new("structured-output preparation failed", "server_error")
-                    .into_response();
-            }
-        }
-    };
+    // Reject invalid tool shapes with the chat route's own messages before any
+    // template or grammar work (#1319): `tool_choice` is forwarded unchanged by
+    // the translator, so the same rules apply here.
+    if let Err(message) = super::chat::validate_chat_tool_inputs(&translated.chat_request) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
+    }
+
+    // Build the structured-output constraint up front: the `text.format`
+    // json_schema, otherwise the forced tool-call grammar (#1319).
+    let structured =
+        match super::chat::build_chat_constraint(&state, &translated.chat_request).await {
+            Ok(structured) => structured,
+            Err(response) => return response.into_response(),
+        };
 
     // Resolve thinking budget the same way the chat path does.
     let effective_max_tokens = resolve_server_max_tokens_with_live(

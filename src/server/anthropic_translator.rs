@@ -908,6 +908,58 @@ mod tests {
         assert_eq!(tc.specific_function(), Some("f"));
     }
 
+    /// `{"type": "any"}` lands as the forced `required` mode (#1319), so the
+    /// chat pipeline's validation, prompt narrowing and grammar forcing all
+    /// apply to it exactly as they do to an OpenAI `"required"`.
+    #[test]
+    fn anthropic_tool_choice_any_maps_to_required() {
+        let req = parse_req(
+            r#"{"model":"m","messages":[],"tool_choice":{"type":"any"},"tools":[{"name":"f","input_schema":{"type":"object"}}]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let tc = t.chat_request.tool_choice.as_ref().unwrap();
+        assert!(tc.is_required());
+        assert!(tc.is_forced());
+        tc.validate(t.chat_request.tools.as_deref())
+            .expect("required validates against the translated tools");
+
+        // Without any translated tools the same choice is unsatisfiable and is
+        // rejected the way the chat route rejects it.
+        let req = parse_req(r#"{"model":"m","messages":[],"tool_choice":{"type":"any"}}"#);
+        let t = anthropic_request_to_chat(&req);
+        let tc = t.chat_request.tool_choice.as_ref().unwrap();
+        assert!(tc.validate(t.chat_request.tools.as_deref()).is_err());
+    }
+
+    /// `{"type": "tool", "name": "f"}` lands as the named-function form
+    /// (#1319): forced, validated against the declared tools, and narrowing
+    /// the prompt to `f`.
+    #[test]
+    fn anthropic_tool_choice_tool_maps_to_named() {
+        let req = parse_req(
+            r#"{"model":"m","messages":[],"tool_choice":{"type":"tool","name":"f"},"tools":[{"name":"f","input_schema":{"type":"object"}},{"name":"g","input_schema":{"type":"object"}}]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let tc = t.chat_request.tool_choice.as_ref().unwrap();
+        assert!(tc.is_forced());
+        assert!(!tc.is_required());
+        assert_eq!(tc.specific_function(), Some("f"));
+        tc.validate(t.chat_request.tools.as_deref())
+            .expect("a declared tool name validates");
+        let narrowed = crate::server::chat_request::effective_tools(&t.chat_request)
+            .expect("the named tool is rendered");
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].function.name, "f");
+
+        // A name that is not among the translated tools is a 400 upstream.
+        let req = parse_req(
+            r#"{"model":"m","messages":[],"tool_choice":{"type":"tool","name":"missing"},"tools":[{"name":"f","input_schema":{"type":"object"}}]}"#,
+        );
+        let t = anthropic_request_to_chat(&req);
+        let tc = t.chat_request.tool_choice.as_ref().unwrap();
+        assert!(tc.validate(t.chat_request.tools.as_deref()).is_err());
+    }
+
     #[test]
     fn stop_sequences_propagate_to_sampling_params() {
         let req = parse_req(

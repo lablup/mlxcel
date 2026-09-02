@@ -175,6 +175,46 @@ Reasoning-capable checkpoints support runtime placement through
 the native chat-control endpoint. Model-emitted tool calls can be parsed and
 returned to the client, but mlxcel does not execute tools server-side.
 
+### Tool calling and `tool_choice`
+
+`tool_choice` on `/v1/chat/completions`, and on the Responses and Anthropic
+Messages translations of it, is enforced rather than echoed:
+
+- absent or `"auto"`: every declared tool is rendered into the prompt.
+- `"none"`: no tool is rendered.
+- `"required"`: every tool is rendered and an instruction is appended to the
+  prompt. The request is rejected with 400 when `tools` is absent or empty.
+- `{"type": "function", "function": {"name": "f"}}`: only `f` is rendered and
+  the model is instructed to call it. The request is rejected with 400 when `f`
+  is not declared, `type` is not `function`, or the name is empty.
+
+The instruction is appended to the first system message, otherwise to the last
+user message, otherwise inserted as a new leading system message. The request
+object itself is never modified, and the prompt cache keys on the prompt that
+was actually rendered.
+
+On templates whose tool-call wire shape is a JSON object inside a fixed wrapper,
+the call is additionally forced through the structured-output grammar built from
+the tool schemas, so `required` always yields a call to a declared function and
+the named form always yields that function, with `finish_reason: "tool_calls"`.
+The wrapper is read off the loaded chat template: Hermes / Qwen (`<tool_call>`),
+Mistral Nemo (`[TOOL_CALLS]`), and Llama 3 (`<|python_tag|>` or
+`"parameters":`). Formats without a JSON wire shape (ATEM, Gemma 4, XML
+dialects such as Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and
+the narrowed tool list only, and a forced choice that ends without a call is
+logged at `warn` with the format name.
+
+Tool schemas that the grammar engine cannot express fall back to that same
+instruction-only path rather than failing the request: the compile failure is
+logged at `warn` and generation runs unconstrained. Only a `response_format`
+schema, which the client asked for explicitly, turns a compile failure into a
+400.
+
+A forced `tool_choice` cannot be combined with a `response_format` schema (400).
+The Anthropic `tool_choice` values `{"type": "any"}` and
+`{"type": "tool", "name": "f"}` map to `required` and the named form, so the
+same rules apply on `/v1/messages`.
+
 ## Observability, persistence, and resumable streams
 
 - `GET /health` and `/v1/health` provide readiness.

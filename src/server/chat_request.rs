@@ -73,7 +73,8 @@ use super::media::{
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::request::{
-    ContentPart, Message, MessageContent, Tool, ordered_audio_sentinel, ordered_image_sentinel,
+    ContentPart, Message, MessageContent, Tool, ToolChoice, ordered_audio_sentinel,
+    ordered_image_sentinel,
 };
 use super::types::{ChatCompletionRequest, Role};
 
@@ -376,6 +377,12 @@ pub(crate) async fn prepare_chat_request_with_cache(
     if declared_audio > 0 {
         validate_no_reserved_media_sentinels(request)?;
     }
+    // Forced tool choice (#1319): from here on the renderer works on a copy
+    // that carries the injected instruction. Shadowing the parameter keeps the
+    // primary render, the history-boundary render and the media resolution
+    // reading one message list, so `history_prompt` stays a prefix of `prompt`.
+    let request_for_render = with_tool_choice_instruction(request);
+    let request: &ChatCompletionRequest = &request_for_render;
     // Determine effective tools based on tool_choice
     let effective_tools = effective_tools(request);
     let merged_extra_body = request.merged_extra_body();
@@ -656,6 +663,11 @@ pub(crate) fn render_next_turn_history(
         tracing::debug!("warmup: multimodal");
         return None;
     }
+    // Same forced-tool-choice injection as `prepare_chat_request_with_cache`
+    // (#1319), so the warmed prefix matches what a next turn carrying the same
+    // `tool_choice` will render.
+    let request_for_render = with_tool_choice_instruction(request);
+    let request: &ChatCompletionRequest = &request_for_render;
 
     // Resolve the kwargs through the same helper the render pipeline and the
     // prompt-cache context builder use, so a mapped top-level
@@ -850,13 +862,108 @@ fn maybe_log_defaulting_once(request: &ChatCompletionRequest) {
 /// erring toward keeping issue #432's protection on is the safe direction, and
 /// the alternative would mean resolving the gate after rendering.
 pub(crate) fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]> {
-    // If tool_choice is "none", do not pass tools to template
-    if let Some(ref tc) = request.tool_choice
-        && tc.is_none()
-    {
-        return None;
+    let tools = request.tools.as_deref();
+    match request.tool_choice.as_ref() {
+        // "none": do not pass tools to the template.
+        Some(tc) if tc.is_none() => None,
+        // Named function (#1319): the template sees only that tool, so the
+        // model cannot pick another one. A name that is not declared renders
+        // no tools at all; the routes reject that shape before rendering
+        // through `ToolChoice::validate`, so this branch is defensive.
+        Some(ToolChoice::Specific(choice)) => tools
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|tool| tool.function.name == choice.function.name)
+            })
+            .map(std::slice::from_ref),
+        _ => tools,
     }
-    request.tools.as_deref()
+}
+
+/// The instruction a forced `tool_choice` adds to the prompt (#1319), or `None`
+/// for `auto` / `none` / absent.
+///
+/// The wording is fixed so the rendered prompt, and with it the prompt-cache
+/// key, is a pure function of the request. It is injected by
+/// [`inject_tool_choice_instruction`] on the message list handed to the
+/// renderer, never on the request itself.
+pub(crate) fn tool_choice_instruction(choice: &ToolChoice) -> Option<String> {
+    match choice {
+        ToolChoice::Mode(mode) if mode == "required" => Some(
+            "You must call one or more of the available functions to answer the user's \
+             request. Do not answer directly without calling a function."
+                .to_string(),
+        ),
+        ToolChoice::Specific(choice) => Some(format!(
+            "You must call the '{}' function to answer the user's request. Do not call \
+             any other function and do not answer directly.",
+            choice.function.name
+        )),
+        _ => None,
+    }
+}
+
+/// Place a forced-tool-choice instruction into `messages` (#1319).
+///
+/// Placement, in order: appended to the first `system` message as
+/// `"\n\n" + instruction`; otherwise appended to the last `user` message
+/// (plain text gets the same suffix, a content-parts message gets a trailing
+/// text part); otherwise inserted as a new leading `system` message. The
+/// message list is the renderer's copy, so the original request stays
+/// untouched for response echoing.
+pub(crate) fn inject_tool_choice_instruction(messages: &mut Vec<Message>, instruction: &str) {
+    let suffix = format!("\n\n{instruction}");
+    if let Some(system) = messages.iter_mut().find(|m| m.role == Role::System) {
+        append_text(&mut system.content, &suffix);
+        return;
+    }
+    if let Some(user) = messages.iter_mut().rev().find(|m| m.role == Role::User) {
+        append_text(&mut user.content, &suffix);
+        return;
+    }
+    messages.insert(
+        0,
+        Message {
+            role: Role::System,
+            content: MessageContent::Text(instruction.to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+    );
+}
+
+/// Append `suffix` to a message body without disturbing its media parts.
+fn append_text(content: &mut MessageContent, suffix: &str) {
+    match content {
+        MessageContent::Text(text) => text.push_str(suffix),
+        MessageContent::Parts(parts) => parts.push(ContentPart::Text {
+            text: suffix.to_string(),
+        }),
+    }
+}
+
+/// The request as the renderer should see it: unchanged unless `tool_choice`
+/// is forced, in which case a clone carries the injected instruction (#1319).
+///
+/// Every render of a request goes through this, including the history-boundary
+/// render and the next-turn warm-up probes, so the prompt-cache prefix those
+/// derive is taken from the prompt the model was actually shown.
+pub(crate) fn with_tool_choice_instruction(
+    request: &ChatCompletionRequest,
+) -> std::borrow::Cow<'_, ChatCompletionRequest> {
+    let Some(instruction) = request
+        .tool_choice
+        .as_ref()
+        .and_then(tool_choice_instruction)
+    else {
+        return std::borrow::Cow::Borrowed(request);
+    };
+    let mut injected = request.clone();
+    inject_tool_choice_instruction(&mut injected.messages, &instruction);
+    std::borrow::Cow::Owned(injected)
 }
 
 /// Check if any message in the request has tool-related fields that
