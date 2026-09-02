@@ -342,6 +342,13 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.eos_token_ids()
     }
 
+    /// Delegated so a VLM whose text backbone selects a RoPE table by position
+    /// (Phi-3 Vision, Phi4MM, Phi4 SigLIP through `Phi3Model`) keeps its
+    /// prompt-cache reuse regime-aware (#1358).
+    fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
+        self.text_model.rope_table_regime(total_prompt_len)
+    }
+
     fn after_prefill(&self) {
         self.text_model.after_prefill()
     }

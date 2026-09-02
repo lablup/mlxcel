@@ -240,6 +240,26 @@ fn a_server_prefill_pins_one_table_across_the_boundary_segment_and_every_chunk()
 }
 
 #[test]
+fn the_cache_regime_agrees_with_the_table_the_same_length_selects() {
+    // `SuRope::regime` is what the server prompt cache stores in its bucket
+    // identity, and `table_for` is what the attention layers rotate with. If the
+    // two ever disagreed, the cache would hand a prefix to a request that reads
+    // it under the other table, which is the #1358 failure it exists to prevent.
+    let su = su_rope_with(4096, 131072);
+    for total in [1, 2, 1078, 4095, 4096, 4097, 5136, 131072] {
+        let selects_long = picks_long(&su, 0, total as i32);
+        assert_eq!(
+            su.regime(total) == 1,
+            selects_long,
+            "regime and table selection disagree at a {total}-token prompt"
+        );
+    }
+    // Concretely, the two lengths the server gate uses.
+    assert_eq!(su.regime(1078), 0);
+    assert_eq!(su.regime(5136), 1);
+}
+
+#[test]
 fn mscale_override_wins_over_the_default_scale() {
     let args = args_with(serde_json::json!({
         "max_position_embeddings": 128,

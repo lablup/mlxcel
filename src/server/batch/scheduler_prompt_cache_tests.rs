@@ -131,6 +131,169 @@ fn hit_then_decode_reports_matched_len_and_consumes_entry() {
 }
 
 // ---------------------------------------------------------------------------
+// Position-selected RoPE table regimes (#1358)
+// ---------------------------------------------------------------------------
+
+/// `make_key` with a RoPE table regime attached, the way the scheduler's
+/// `compose_prompt_cache_key` attaches `LanguageModel::rope_table_regime`.
+fn make_key_in_regime<'a>(
+    model_id: &'a str,
+    session_key: &'a str,
+    template_sig: &'a str,
+    tokens: &'a [i32],
+    regime: u8,
+) -> PromptCacheKey<'a> {
+    make_key(model_id, session_key, template_sig, tokens).with_rope_regime(Some(regime))
+}
+
+/// A short prompt's cached prefix must not be restored into a long request.
+///
+/// This is the shape that got past the first two rounds of #1358. Phi-3.5-mini
+/// rotates with `short_factor` up to `original_max_position_embeddings` and with
+/// `long_factor` above it, so KV a 1078-token request encoded is not valid input
+/// for a 5136-token request whose prompt starts with the same tokens. Restoring
+/// it leaves one cache holding keys from two tables, and the server returns
+/// repetition while every CLI gate passes.
+#[test]
+fn a_short_regime_prefix_is_not_reused_by_a_long_regime_request() {
+    let store = test_store();
+    let short_prompt: Vec<i32> = (100..=155).collect();
+    store
+        .insert(
+            &make_key_in_regime("phi35", "session-1", "tpl", &short_prompt, 0),
+            fake_entry(short_prompt.clone(), 4096),
+        )
+        .expect("insert succeeds");
+
+    // The long request's prompt starts with exactly the short one.
+    let mut long_prompt = short_prompt.clone();
+    long_prompt.extend(300..=399);
+
+    assert!(
+        store
+            .lookup_longest_prefix(
+                &make_key_in_regime("phi35", "session-1", "tpl", &long_prompt, 1),
+                &long_prompt,
+            )
+            .is_none(),
+        "a long-table request must not adopt a prefix encoded under the short table"
+    );
+
+    // Same tokens, same everything else: only the regime differs, so this
+    // proves the regime is what declined the match and not some other field.
+    assert!(
+        store
+            .lookup_longest_prefix(
+                &make_key_in_regime("phi35", "session-1", "tpl", &long_prompt, 0),
+                &long_prompt,
+            )
+            .is_some(),
+        "the same lookup in the storing regime must still hit"
+    );
+}
+
+/// The reverse order, which is just as unsafe: a prefix a long request encoded
+/// under `long_factor` must not be restored into a short request that will read
+/// every position under `short_factor`.
+#[test]
+fn a_long_regime_prefix_is_not_reused_by_a_short_regime_request() {
+    let store = test_store();
+    let shared: Vec<i32> = (100..=155).collect();
+    store
+        .insert(
+            &make_key_in_regime("phi35", "session-1", "tpl", &shared, 1),
+            fake_entry(shared.clone(), 4096),
+        )
+        .expect("insert succeeds");
+
+    let mut short_prompt = shared.clone();
+    short_prompt.extend([200, 201, 202]);
+    assert!(
+        store
+            .lookup_longest_prefix(
+                &make_key_in_regime("phi35", "session-1", "tpl", &short_prompt, 0),
+                &short_prompt,
+            )
+            .is_none(),
+        "a short-table request must not adopt a prefix encoded under the long table"
+    );
+}
+
+/// Regime-aware, not disabled: two requests on the same side of the boundary
+/// keep sharing their prefix exactly as before.
+#[test]
+fn two_long_regime_requests_still_share_the_prefix() {
+    let store = test_store();
+    let shared: Vec<i32> = (100..=155).collect();
+    store
+        .insert(
+            &make_key_in_regime("phi35", "session-1", "tpl", &shared, 1),
+            fake_entry(shared.clone(), 4096),
+        )
+        .expect("insert succeeds");
+
+    let mut next = shared.clone();
+    next.extend(300..=399);
+    let (_, matched_len) = store
+        .lookup_longest_prefix(
+            &make_key_in_regime("phi35", "session-1", "tpl", &next, 1),
+            &next,
+        )
+        .expect("two long-table requests must still share the prefix");
+    assert_eq!(matched_len, shared.len());
+}
+
+/// A model that does not select by position is unaffected: `None` is its regime
+/// on both sides, and reuse behaves exactly as it did before #1358.
+#[test]
+fn a_model_without_a_position_selected_table_shares_as_before() {
+    let store = test_store();
+    let shared: Vec<i32> = (100..=155).collect();
+    store
+        .insert(
+            &make_key("llama", "session-1", "tpl", &shared),
+            fake_entry(shared.clone(), 4096),
+        )
+        .expect("insert succeeds");
+
+    let mut next = shared.clone();
+    next.extend([200, 201, 202]);
+    let (_, matched_len) = store
+        .lookup_longest_prefix(&make_key("llama", "session-1", "tpl", &next), &next)
+        .expect("a regime-free model keeps its prefix sharing");
+    assert_eq!(matched_len, shared.len());
+
+    // And `None` is its own bucket: it must not collide with a tagged one.
+    assert!(
+        store
+            .lookup_longest_prefix(
+                &make_key_in_regime("llama", "session-1", "tpl", &next, 0),
+                &next,
+            )
+            .is_none(),
+        "an untagged entry must not be matched by a regime-tagged lookup"
+    );
+}
+
+/// The regime reaches the exact-digest map as well as the prefix tiers.
+#[test]
+fn the_regime_changes_the_bucket_digest() {
+    let tokens: Vec<i32> = (100..=155).collect();
+    let short = make_key_in_regime("phi35", "session-1", "tpl", &tokens, 0);
+    let long = make_key_in_regime("phi35", "session-1", "tpl", &tokens, 1);
+    let untagged = make_key("phi35", "session-1", "tpl", &tokens);
+
+    assert_ne!(short.digest(), long.digest());
+    assert_ne!(short.digest(), untagged.digest());
+    assert_ne!(long.digest(), untagged.digest());
+    // Stable: the same key digests the same way twice.
+    assert_eq!(
+        short.digest(),
+        make_key_in_regime("phi35", "session-1", "tpl", &tokens, 0).digest()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Miss path
 // ---------------------------------------------------------------------------
 

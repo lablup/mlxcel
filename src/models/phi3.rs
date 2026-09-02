@@ -270,6 +270,17 @@ impl SuRope {
         })
     }
 
+    /// Which table a prompt of `total_prompt_len` tokens will be rotated with.
+    ///
+    /// The tag a `LanguageModel::rope_table_regime` caller compares for
+    /// equality: `0` is the short table, `1` the long one. It answers the same
+    /// question as [`Self::table_for`] but from the sequence length alone, which
+    /// is what the server prompt cache has when it decides whether one request's
+    /// KV may be restored into another's.
+    fn regime(&self, total_prompt_len: usize) -> u8 {
+        u8::from(total_prompt_len > self.original_max.max(0) as usize)
+    }
+
     /// Pick the table for one forward pass.
     ///
     /// The choice belongs to the whole sequence, not to this pass. A prompt
@@ -778,6 +789,20 @@ impl LanguageModel for Phi3Model {
     fn eos_token_ids(&self) -> Vec<i32> {
         // Phi3 EOS tokens
         vec![32000, 32007] // <|end|>, <|endoftext|>
+    }
+
+    /// LongRoPE picks its table from the whole prompt length, so a cached
+    /// prefix is only valid for another request on the same side of
+    /// `original_max_position_embeddings` (#1358).
+    ///
+    /// Read from layer 0's tables rather than from a copy of the config, so
+    /// this cannot drift from what the attention layers actually rotate with. A
+    /// checkpoint without a `longrope` / `su` block (`Phi-3-mini`, for example)
+    /// builds no tables and answers `None`, which leaves prompt-cache reuse
+    /// exactly as it was.
+    fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
+        let su = self.layers.first()?.self_attn.su_rope.as_ref()?;
+        Some(su.regime(total_prompt_len))
     }
 }
 

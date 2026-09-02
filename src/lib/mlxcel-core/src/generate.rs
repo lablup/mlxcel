@@ -532,6 +532,36 @@ pub trait LanguageModel {
     /// Release model-owned/runtime sequence state by its scheduler `SequenceId`.
     fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
 
+    /// Which RoPE frequency table a prompt of `total_prompt_len` tokens will be
+    /// rotated with, when this model chooses one from the sequence length.
+    ///
+    /// `None`, the default, means every position uses the same table, so any
+    /// cached prefix of this model is reusable by any request. A model that
+    /// switches tables returns a small opaque tag: two requests that get the
+    /// same tag agree on every position's rotation, and two that do not must
+    /// never share KV.
+    ///
+    /// Phi-3 / Phi-4 LongRoPE is the case this exists for. It rotates with
+    /// `short_factor` while the sequence fits in
+    /// `original_max_position_embeddings` and with `long_factor` above it, so a
+    /// prefix that one request encoded under the short table is not valid input
+    /// for a longer request that will read it under the long table, and the
+    /// reverse holds too. Restoring across that boundary leaves one KV cache
+    /// holding keys built from two tables, which reads as fluent-looking
+    /// repetition rather than as an error.
+    ///
+    /// The tag is an identity, not an ordering: callers may only compare tags
+    /// for equality. It is derived from the length of the whole prompt, which is
+    /// what selects the table (see [`crate::prefill_span`]), so a caller must
+    /// pass the request's full prompt length and not the length of the prefix it
+    /// is trying to reuse.
+    ///
+    /// Used by: the server prompt cache, which folds the tag into its bucket
+    /// identity so a lookup only ever matches entries stored under the same tag.
+    fn rope_table_regime(&self, _total_prompt_len: usize) -> Option<u8> {
+        None
+    }
+
     /// Whether this model can donate and restore exact-prefix model-owned
     /// state snapshots for cross-request prompt-cache reuse.
     fn supports_snapshot_reuse(&self) -> bool {
