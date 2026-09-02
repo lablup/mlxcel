@@ -76,6 +76,17 @@ use safetensors::tensor::{Dtype as SafeTensorDtype, View};
 /// leak: `initialize_runtime()` moves the default device to the CPU on
 /// purpose under it, so the check is skipped for that request and the gates
 /// measure the CPU the operator asked for.
+///
+/// A `DefaultDeviceGuard` that another test is holding *right now* is not a
+/// leak either, so the check is skipped while any guard is alive
+/// (`mlxcel_core::streams::default_device_guards_held`). That exemption costs
+/// the gates nothing: they all pass `--test-threads=1`, where no guard can be
+/// alive while this test runs, so a real leak still fails here. It matters for
+/// the parallel runs the repository also defines, such as the
+/// `cargo test --lib` in `scripts/run_quality_gate.sh`, where a concurrent
+/// `DefaultDeviceGuard::cpu()` in `vision::merge` or
+/// `multimodal::host_preprocessor` is correct code doing its job and would
+/// otherwise trip this assertion.
 pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     let guard = GUARD
@@ -85,8 +96,9 @@ pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
     assert!(
         mlxcel_core::default_device_is_gpu()
             || !mlxcel_core::gpu_backend_available()
-            || crate::execution::runtime::cpu_override_requested(),
-        "MLX's default device is the CPU although a GPU backend is available and MLXCEL_DEVICE=cpu is not set: an earlier test moved the default device and never restored it. Hold a mlxcel_core::streams::DefaultDeviceGuard for the test's duration instead of calling set_default_device directly."
+            || crate::execution::runtime::cpu_override_requested()
+            || mlxcel_core::streams::default_device_guards_held() > 0,
+        "MLX's default device is the CPU although a GPU backend is available, MLXCEL_DEVICE=cpu is not set, and no DefaultDeviceGuard is held: an earlier test moved the default device and never restored it. Hold a mlxcel_core::streams::DefaultDeviceGuard for the test's duration instead of calling set_default_device directly."
     );
     guard
 }

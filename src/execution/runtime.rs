@@ -139,11 +139,23 @@ pub fn initialize_runtime() -> RuntimeSetup {
 
     // Availability is a backend fact and the override is an operator request;
     // resolve them separately so the setup can say which one put the runtime
-    // on the CPU (issue #1421). The override moves the MLX default device;
-    // the availability query never does.
+    // on the CPU (issue #1421). The availability query never moves the MLX
+    // default device, so the resolution has to be applied afterwards.
     let (device, cpu_override) =
         resolve_device(requested_device, mlxcel_core::gpu_backend_available());
-    if cpu_override {
+    // Apply every CPU resolution, not just the operator's override. MLX seeds
+    // its default device from `gpu::is_available()`, which the CUDA backend
+    // answers `true` unconditionally while `device_count(Device::gpu)` reports
+    // what `cudaGetDeviceCount` found, so a CUDA build on a host without a
+    // driver starts with a GPU default that `gpu_backend_available()` calls
+    // unusable. Reporting `Cpu` while leaving MLX dispatching to that GPU
+    // would make `RuntimeSetup.device` a claim rather than a fact, which is
+    // the class of bug this issue exists to remove. The GPU direction needs no
+    // counterpart: `device == Gpu` requires `device_count(Device::gpu) > 0`,
+    // and on every backend that implies `gpu::is_available()`, so MLX already
+    // defaults to the GPU there. Not pinning the GPU also keeps this call out
+    // of the way of the leak assertion in `mlx_test_guard`.
+    if !device.uses_gpu() {
         mlxcel_core::set_default_device(false);
     }
 

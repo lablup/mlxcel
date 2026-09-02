@@ -39,6 +39,8 @@
 //! deployments where construction and execution can happen on
 //! different threads.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::UniquePtr;
 use crate::ffi;
 use crate::ffi::{MlxStream, MlxThreadLocalStream};
@@ -188,9 +190,31 @@ pub struct DefaultDeviceGuard {
     previous_is_gpu: bool,
 }
 
+/// How many [`DefaultDeviceGuard`]s exist right now, process-wide. See
+/// [`default_device_guards_held`].
+static LIVE_DEVICE_GUARDS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of [`DefaultDeviceGuard`]s currently held anywhere in the
+/// process.
+///
+/// A test helper that asserts nobody leaked the default device reads this to
+/// tell a leak from a guard another test is legitimately holding at this
+/// instant. Under `--test-threads=1`, which every gate this repository
+/// defines passes, no guard can be alive while an unrelated test runs, so a
+/// real leak still fails loudly. A parallel run has no such guarantee:
+/// `scripts/run_quality_gate.sh` runs `cargo test --lib` without
+/// `--test-threads=1`, and there a concurrent `DefaultDeviceGuard::cpu()` is
+/// correct code doing its job, not the leak the assertion is looking for
+/// (issue #1421).
+#[must_use]
+pub fn default_device_guards_held() -> usize {
+    LIVE_DEVICE_GUARDS.load(Ordering::Acquire)
+}
+
 impl DefaultDeviceGuard {
     /// Record the current default device without moving it.
     pub fn capture() -> Self {
+        LIVE_DEVICE_GUARDS.fetch_add(1, Ordering::AcqRel);
         Self {
             previous_is_gpu: ffi::default_device_is_gpu(),
         }
@@ -217,6 +241,9 @@ impl DefaultDeviceGuard {
 impl Drop for DefaultDeviceGuard {
     fn drop(&mut self) {
         ffi::set_default_device(self.previous_is_gpu);
+        // Decrement after the restore, so an observer that sees zero live
+        // guards also sees the restored device rather than a half-dropped one.
+        LIVE_DEVICE_GUARDS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -587,6 +614,31 @@ mod tests {
             ffi::default_device_is_gpu(),
             baseline,
             "the guard must restore the device during unwinding"
+        );
+    }
+
+    /// The live-guard count rises and falls with the guards themselves, and a
+    /// guard's restore has already run by the time the count reaches zero, so
+    /// a reader that sees no live guard also sees the restored device. This is
+    /// what lets a leak assertion elsewhere tell a leak from a guard that a
+    /// concurrent test is legitimately holding.
+    #[test]
+    fn live_device_guards_are_counted_until_the_device_is_restored() {
+        let _lock = device_lock();
+        let baseline = default_device_guards_held();
+        {
+            let _outer = DefaultDeviceGuard::capture();
+            assert_eq!(default_device_guards_held(), baseline + 1);
+            {
+                let _inner = DefaultDeviceGuard::cpu();
+                assert_eq!(default_device_guards_held(), baseline + 2);
+            }
+            assert_eq!(default_device_guards_held(), baseline + 1);
+        }
+        assert_eq!(
+            default_device_guards_held(),
+            baseline,
+            "every guard must be accounted for once it has dropped"
         );
     }
 

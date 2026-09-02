@@ -15,14 +15,37 @@
 use super::{masked_scatter, merge_llava, prepare_inputs_for_multimodal};
 use mlxcel_core::streams::DefaultDeviceGuard;
 use mlxcel_core::{self, MlxArray, dtype};
+use std::sync::{Mutex, MutexGuard};
+
+/// Serializes the tests here that move MLX's process-wide default device.
+/// libtest runs the tests of one binary in parallel unless told otherwise, and
+/// a guard records the current default device when it is created, so two
+/// unserialized tests can interleave into exactly the leak this module was
+/// converted to remove: the second records the first's CPU default as its
+/// baseline, the first restores the GPU, and the second then restores the CPU
+/// for good.
+static DEVICE_TESTS: Mutex<()> = Mutex::new(());
+
+fn device_tests_lock() -> MutexGuard<'static, ()> {
+    DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Run one test on the CPU and put the previous default device back when the
-/// returned guard drops; bind it to a named local for the test's duration. The
-/// `Once` this replaces moved the process-wide default device for good, so
-/// every test that ran after this module measured the CPU backend (issue
-/// #1421).
-fn cpu_device() -> DefaultDeviceGuard {
-    DefaultDeviceGuard::cpu()
+/// returned guards drop; bind the result to a named local for the test's
+/// duration. The `Once` this replaces moved the process-wide default device
+/// for good, so every test that ran after this module measured the CPU
+/// backend (issue #1421).
+///
+/// The tuple order is load-bearing. Tuple fields drop in declaration order,
+/// so the device guard must come first: releasing the lock before the device
+/// is restored would let the next test take the lock and record the *moved*
+/// device as its baseline.
+fn cpu_device() -> (DefaultDeviceGuard, MutexGuard<'static, ()>) {
+    let lock = device_tests_lock();
+    let device = DefaultDeviceGuard::cpu();
+    (device, lock)
 }
 
 fn assert_arrays_equal(actual: &MlxArray, expected: &MlxArray) {

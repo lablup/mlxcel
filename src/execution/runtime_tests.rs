@@ -172,12 +172,19 @@ fn initialize_runtime_reports_the_cpu_override_without_hiding_the_backend() {
     let cpu_requested = cpu_override_requested();
 
     assert_eq!(setup.cpu_override, cpu_requested);
-    if cpu_requested {
-        assert_eq!(setup.device, RuntimeDevice::Cpu);
+    if setup.device == RuntimeDevice::Cpu {
+        // Every CPU resolution is applied, not just the operator's override:
+        // a CUDA build on a host without a driver starts with MLX defaulting
+        // to a GPU that `gpu_backend_available()` calls unusable, and
+        // reporting `Cpu` while leaving MLX dispatching there would make the
+        // field a claim rather than a fact (issue #1421).
         assert!(
             !mlxcel_core::default_device_is_gpu(),
-            "MLXCEL_DEVICE=cpu moves the MLX default device to the CPU"
+            "a runtime that resolved to the CPU must leave MLX's default device on the CPU"
         );
+    }
+    if cpu_requested {
+        assert_eq!(setup.device, RuntimeDevice::Cpu);
     } else {
         assert_eq!(
             setup.device == RuntimeDevice::Gpu,

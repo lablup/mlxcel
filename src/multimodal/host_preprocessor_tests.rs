@@ -47,11 +47,16 @@ fn device_tests_lock() -> MutexGuard<'static, ()> {
 /// The `Once` this replaces moved the process-wide default device for good, so
 /// under `--test-threads=1` every real-checkpoint gate that sorted after this
 /// module measured the CPU backend (issue #1421).
-fn cpu_device() -> (MutexGuard<'static, ()>, DefaultDeviceGuard) {
+///
+/// The tuple order is load-bearing. Tuple fields drop in declaration order,
+/// so the device guard must come first: releasing the lock before the device
+/// is restored would let the next test take the lock and record the *moved*
+/// device as its baseline, which is the leak this helper exists to prevent.
+fn cpu_device() -> (DefaultDeviceGuard, MutexGuard<'static, ()>) {
     let lock = device_tests_lock();
     DEFAULT_DEVICE_BEFORE.get_or_init(mlxcel_core::default_device_is_gpu);
     let device = DefaultDeviceGuard::cpu();
-    (lock, device)
+    (device, lock)
 }
 
 fn images(count: usize) -> Vec<DynamicImage> {
