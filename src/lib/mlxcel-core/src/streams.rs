@@ -288,6 +288,12 @@ impl DefaultDeviceGuard {
 
 impl Drop for DefaultDeviceGuard {
     fn drop(&mut self) {
+        // Unlike `gpu()`, this does not check `gpu_backend_available()` first:
+        // `previous_is_gpu` can only be `true` if it was captured while the
+        // default device already was the GPU, which requires a GPU backend to
+        // have been present at that point, and that is the same condition
+        // under which the pinned `set_default_device(Device::gpu)` throws. So
+        // restoring `previous_is_gpu` can never hit the throwing case.
         ffi::set_default_device(self.previous_is_gpu);
         // Decrement after the restore, so an observer that sees zero live
         // guards also sees the restored device rather than a half-dropped one.

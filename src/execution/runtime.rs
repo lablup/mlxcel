@@ -155,6 +155,13 @@ pub fn initialize_runtime() -> RuntimeSetup {
     // and on every backend that implies `gpu::is_available()`, so MLX already
     // defaults to the GPU there. Not pinning the GPU also keeps this call out
     // of the way of the leak assertion in `mlx_test_guard`.
+    // This is the one in-tree default-device mover that does not hold
+    // `mlxcel_core::streams::lock_default_device()`: it runs once at startup,
+    // before any generation worker or test could be racing it, and on a GPU
+    // host in the test binaries it is inert (`device.uses_gpu()` is true
+    // there, so this branch never executes). Any new mover added elsewhere
+    // must take that lock; this one is the sole exception, and only because
+    // of where and when it runs.
     if !device.uses_gpu() {
         mlxcel_core::set_default_device(false);
     }

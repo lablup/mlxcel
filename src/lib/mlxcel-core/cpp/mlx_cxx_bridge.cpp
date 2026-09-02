@@ -4714,7 +4714,11 @@ bool default_device_is_gpu() {
 // backend `#ifdef` is needed. The answer is independent of the default device
 // (`set_default_device(false)` does not change it), and the query neither
 // moves the default device nor creates a stream, so it is safe before runtime
-// initialization finishes.
+// initialization finishes. Safe is not the same as free, though: on Metal the
+// first call constructs the `metal::Device` singleton (a metallib load),
+// which every array allocation ends up constructing anyway, so this only
+// moves that cost earlier rather than adding a new one. Later calls, like the
+// CUDA backend's cached `cudaGetDeviceCount`, are just a magic-static check.
 bool gpu_backend_available() {
     return mlx::core::device_count(mlx::core::Device::gpu) > 0;
 }
