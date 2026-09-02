@@ -69,7 +69,7 @@ with client.responses.stream(
 | `input` | supported | String or typed input item array. |
 | `instructions` | supported | Prepended as a system-style message; not inherited through `previous_response_id`. |
 | `tools` | function-only | Only `{"type":"function", ...}` is accepted. |
-| `tool_choice` | supported subset | String or named function choice compatible with chat-completions tooling. |
+| `tool_choice` | supported | `auto`, `none`, `required`, or a named function. `required` and the named form are enforced, not just accepted; see [Tool choice enforcement](#tool-choice-enforcement). |
 | `parallel_tool_calls` | accepted | Forwarded to existing tool-call handling. |
 | `text.format` | supported subset | `text` and `json_schema` shapes are handled through existing structured-output code. |
 | `reasoning` | supported subset | `reasoning.effort` is echoed unchanged and feeds the same template controls as chat-completions `reasoning_effort`: `none`, `off`, `disabled`, `false`, and `0` (case-insensitive after trimming) disable `enable_thinking`; other values enable thinking and are forwarded verbatim as `reasoning_effort`, or as `reasoning_strength` when that is the identifier the loaded template reads. The derived controls override server-wide template defaults per key. `summary` remains model/runtime dependent. |
@@ -225,6 +225,38 @@ disabled, requests using `conversation` return an error.
 - `conversation` loads and appends to an in-memory transcript by id.
 - The two fields are mutually exclusive.
 - `instructions` from the referenced prior response are not carried over.
+
+## Tool choice enforcement
+
+`tool_choice` is forwarded to the chat-completions pipeline unchanged, so the
+four modes behave exactly as they do on `/v1/chat/completions`:
+
+| `tool_choice` | tools rendered | prompt instruction | constraint | 400 when |
+|---|---|---|---|---|
+| absent / `"auto"` | all | none | none | never |
+| `"none"` | none | none | none | never |
+| `"required"` | all | "You must call one or more of the available functions ..." | forced call on grammar-capable formats | `tools` absent or empty |
+| `{"type":"function","function":{"name":"f"}}` | only `f` | "You must call the 'f' function ..." | forced call to `f` on grammar-capable formats | `f` not declared, `type` not `function`, or empty name |
+
+The instruction is appended to the first system message (this includes the
+`instructions` field, which becomes the leading system message), otherwise to
+the last user message, otherwise inserted as a new leading system message. The
+stored request and the echoed fields are not modified.
+
+Grammar-capable formats are the ones whose emitted call is a JSON object in a
+fixed wrapper that can be read off the loaded chat template: Hermes / Qwen
+(`<tool_call>`), Mistral Nemo (`[TOOL_CALLS]`), and Llama 3 (`<|python_tag|>`
+or `"parameters":`). There the call is forced through the structured-output
+grammar built from the tool schemas, and the response carries a call to a
+declared function with `finish_reason: "tool_calls"` (a `function_call` output
+item). Templates without a JSON wire shape (ATEM, Gemma 4, XML dialects such as
+Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and the narrowed
+tool list only, and a forced choice that ends without a call is logged at
+`warn`.
+
+A forced `tool_choice` cannot be combined with `text.format` of type
+`json_schema`: the two constraints would each claim the whole generation, so
+the request returns 400.
 
 ## Unsupported tool types
 

@@ -60,8 +60,8 @@ use crate::server::types::anthropic_stream::{
 };
 
 use super::chat::{
-    MAX_TOOLS, build_generate_options_with_live, build_prompt_cache_request_context,
-    parse_priority_header,
+    MAX_TOOLS, SharedConstraint, build_chat_constraint, build_generate_options_with_live,
+    build_prompt_cache_request_context, parse_priority_header, validate_chat_tool_inputs,
 };
 
 fn generation_error_to_response(err: anyhow::Error) -> Response {
@@ -131,19 +131,34 @@ pub async fn anthropic_messages(
         .into_response();
     }
 
-    // Enforce the tools array size limit to prevent DoS via template
-    // rendering, matching the chat-completions route. The check runs on the
-    // *converted* function tools (server tools without `input_schema` are
-    // already dropped) since that is what reaches the chat template.
-    if let Some(ref tools) = translated.chat_request.tools
-        && tools.len() > MAX_TOOLS
-    {
-        return AnthropicErrorResponse::bad_request(format!(
-            "Too many tools: {}. Maximum allowed is {MAX_TOOLS}.",
-            tools.len()
-        ))
-        .into_response();
+    // Enforce the chat route's tool rules: the tools array size limit (DoS via
+    // template rendering) and the translated `tool_choice` (#1319, where
+    // `{"type": "any"}` lands as `required` and `{"type": "tool"}` as a named
+    // function). The check runs on the *converted* function tools (server
+    // tools without `input_schema` are already dropped) since that is what
+    // reaches the chat template.
+    if let Err(message) = validate_chat_tool_inputs(&translated.chat_request) {
+        return AnthropicErrorResponse::bad_request(message).into_response();
     }
+
+    // Forced tool choice on a grammar-capable template (#1319): build the
+    // constraint on the blocking pool before any generation work, in this
+    // route's own error envelope.
+    let structured = match build_chat_constraint(&state, &translated.chat_request).await {
+        Ok(structured) => structured,
+        Err(err) => {
+            return AnthropicErrorResponse::new(
+                err.status,
+                err.error.message,
+                if err.status.is_client_error() {
+                    "invalid_request_error"
+                } else {
+                    "api_error"
+                },
+            )
+            .into_response();
+        }
+    };
 
     // Resolve the thinking budget exactly as the chat / responses routes do.
     let effective_max_tokens = resolve_server_max_tokens_with_live(
@@ -181,6 +196,7 @@ pub async fn anthropic_messages(
             translated,
             priority,
             budget_override,
+            structured,
             include_thinking,
             resumable,
         )
@@ -193,6 +209,7 @@ pub async fn anthropic_messages(
             translated,
             priority,
             budget_override,
+            structured,
             include_thinking,
         )
         .await
@@ -206,6 +223,7 @@ async fn non_stream_messages(
     translated: AnthropicTranslated,
     priority: crate::server::batch::RequestPriority,
     budget_override: ReasoningBudgetOverride,
+    structured: Option<SharedConstraint>,
     include_thinking: bool,
 ) -> Response {
     if !state.can_accept_request() {
@@ -247,6 +265,8 @@ async fn non_stream_messages(
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
     options.reasoning_budget = budget_override;
+    // Forced tool-call grammar (#1319), built at the request boundary.
+    options.structured = structured;
     // Wire the cross-request prompt-prefix KV cache (epic #116) into the
     // Anthropic Messages path, mirroring the chat-completions handler. Built
     // after `prepare_chat_request_with_cache` so the digest sees the resolved
@@ -362,6 +382,7 @@ async fn stream_messages(
     translated: AnthropicTranslated,
     priority: crate::server::batch::RequestPriority,
     budget_override: ReasoningBudgetOverride,
+    structured: Option<SharedConstraint>,
     include_thinking: bool,
     resumable: super::chat::ResumableStreamContext,
 ) -> Response {
@@ -404,6 +425,8 @@ async fn stream_messages(
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
     options.reasoning_budget = budget_override;
+    // Forced tool-call grammar (#1319), built at the request boundary.
+    options.structured = structured;
     // Wire the prompt-prefix KV cache (epic #116) into the streaming Anthropic
     // path too, before `options`/`prepared` move into the spawned task.
     options.prompt_cache_ctx = build_prompt_cache_request_context(

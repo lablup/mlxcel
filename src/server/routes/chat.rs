@@ -31,6 +31,7 @@ use crate::server::batch::RequestPriority;
 use crate::server::chat_request::{
     prepare_chat_request_with_cache, request_has_effective_input, resolve_effective_kwargs,
 };
+use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::prompt_cache::key::{
     MultimodalDigest, multimodal_digest_from_vecs, resolve_session_key, template_sig,
@@ -40,10 +41,15 @@ use crate::server::request_options::{
     resolve_server_max_tokens_with_live,
 };
 use crate::server::streaming::{sse_channel_resumable, sse_response};
-use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
+use crate::server::structured::{
+    StructuredOutputConstraint, StructuredOutputError, build_constraint_from_response_format,
+    build_lark_constraint,
+};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
+use crate::server::tool_calls::ToolCallFormat;
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
+use crate::server::types::request::ToolChoice;
 use crate::server::types::response::{ChatLogprobs, TokenLogprob, TopLogprob};
 use crate::server::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse,
@@ -383,24 +389,12 @@ pub async fn chat_completions(
     // it directly on the Tokio runtime worker thread would block other
     // in-flight requests. We move it onto a blocking task and await the
     // join handle. Returns `None` when the request did not ask for
-    // structured output, in which case the rest of the pipeline behaves
-    // identically to before this issue.
-    let structured = {
-        let tokenizer = state.tokenizer.clone();
-        let response_format = request.response_format.clone();
-        match tokio::task::spawn_blocking(move || {
-            build_constraint_from_response_format(tokenizer.as_ref(), response_format.as_ref())
-        })
-        .await
-        {
-            Ok(Ok(opt)) => opt,
-            Ok(Err(err)) => return structured_error_to_response(err).into_response(),
-            Err(join_err) => {
-                tracing::error!("structured-output build task panicked: {join_err}");
-                return ErrorResponse::new("structured-output preparation failed", "server_error")
-                    .into_response();
-            }
-        }
+    // structured output (`response_format`, or a forced `tool_choice` on a
+    // grammar-capable template, #1319), in which case the rest of the
+    // pipeline behaves identically to before this issue.
+    let structured = match build_chat_constraint(&state, &request).await {
+        Ok(structured) => structured,
+        Err(response) => return response.into_response(),
     };
 
     let priority = parse_priority_header(&headers);
@@ -427,6 +421,109 @@ pub async fn chat_completions(
             .await
             .into_response()
     }
+}
+
+/// The per-request structured-output constraint, shared with the scheduler.
+pub(crate) type SharedConstraint = std::sync::Arc<std::sync::Mutex<StructuredOutputConstraint>>;
+
+/// Build the structured-output constraint for a chat-shaped request on the
+/// blocking pool: the `response_format` schema when the request carries one,
+/// otherwise the forced tool-call grammar (#1319) when `tool_choice` is
+/// `"required"` or a named function and the loaded template's tool format is
+/// grammar-capable. `Ok(None)` leaves generation unconstrained.
+///
+/// Shared by the chat-completions, Responses and Anthropic Messages routes so
+/// every surface that feeds a `ChatCompletionRequest` enforces the same
+/// `tool_choice` semantics. Callers run [`validate_chat_tool_inputs`] first;
+/// that is what rejects the `response_format` + forced-tool combination, so
+/// here `response_format` simply takes precedence if both are present.
+pub(crate) async fn build_chat_constraint(
+    state: &AppState,
+    request: &ChatCompletionRequest,
+) -> Result<Option<SharedConstraint>, ErrorResponse> {
+    let tokenizer = state.tokenizer.clone();
+    let response_format = request.response_format.clone();
+    let forced_grammar = forced_tool_choice_grammar(&state.chat_template, &tokenizer, request);
+    match tokio::task::spawn_blocking(move || {
+        if let Some(constraint) =
+            build_constraint_from_response_format(tokenizer.as_ref(), response_format.as_ref())?
+        {
+            return Ok(Some(constraint));
+        }
+        forced_grammar
+            .map(|lark| build_lark_constraint(tokenizer.as_ref(), &lark))
+            .transpose()
+    })
+    .await
+    {
+        Ok(Ok(opt)) => Ok(opt),
+        Ok(Err(err)) => Err(structured_error_to_response(err)),
+        Err(join_err) => {
+            tracing::error!("structured-output build task panicked: {join_err}");
+            Err(ErrorResponse::new(
+                "structured-output preparation failed",
+                "server_error",
+            ))
+        }
+    }
+}
+
+/// The Lark grammar a forced `tool_choice` compiles to for this request
+/// (#1319), or `None` when nothing is to be forced: `auto` / `none` / absent,
+/// a template whose tool format has no fixed JSON wrapper (those get the
+/// prompt instruction and tool narrowing only), or no declared tools.
+///
+/// The wrapper markers are resolved against the loaded tokenizer so a marker
+/// it carries as a special token (Qwen's `<tool_call>`) is referenced by id in
+/// the grammar; see [`tool_calls::special_token_id`].
+pub(crate) fn forced_tool_choice_grammar(
+    chat_template: &ChatTemplateProcessor,
+    tokenizer: &MlxcelTokenizer,
+    request: &ChatCompletionRequest,
+) -> Option<String> {
+    let choice = request
+        .tool_choice
+        .as_ref()
+        .filter(|choice| choice.is_forced())?;
+    let format = chat_template.forced_tool_call_format()?;
+    let tools = request.tools.as_deref()?;
+    let grammar = tool_calls::tool_choice_grammar_with(format, tools, choice, |text| {
+        tool_calls::special_token_id(tokenizer, text)
+    });
+    if grammar.is_some() {
+        tracing::debug!(
+            target: "mlxcel::tool_calls",
+            format = %format,
+            tool_choice = choice.mode(),
+            function = choice.specific_function().unwrap_or("-"),
+            "forcing the tool call through a grammar constraint"
+        );
+    }
+    grammar
+}
+
+/// Log a forced `tool_choice` (#1319) that finished without a usable call.
+///
+/// Only the grammar-capable formats can guarantee a call; on every other
+/// template the injected instruction is advisory, and a grammar-forced
+/// generation can still be cut off by `max_tokens`. So this is a warning, not
+/// an error, and `finish_reason` stays whatever the model produced.
+fn warn_unmet_tool_choice(
+    tool_choice: Option<&ToolChoice>,
+    forced_format: Option<ToolCallFormat>,
+    finish_reason: &str,
+) {
+    let Some(choice) = tool_choice.filter(|choice| choice.is_forced()) else {
+        return;
+    };
+    tracing::warn!(
+        target: "mlxcel::tool_calls",
+        tool_choice = choice.mode(),
+        function = choice.specific_function().unwrap_or("-"),
+        grammar_format = forced_format.map_or("none", ToolCallFormat::as_str),
+        finish_reason,
+        "forced tool_choice produced no tool call; the response carries the model's plain output"
+    );
 }
 
 /// Extract the `X-Priority` header value, defaulting to `Normal`.
@@ -709,6 +806,15 @@ pub(crate) async fn non_stream_chat_completion(
                 ));
             }
         }
+
+        // A forced tool_choice that ends here was not satisfied (#1319): either
+        // the template is instruction-only, or the named filter above dropped
+        // every call. Say so in the log; the client still gets the output.
+        warn_unmet_tool_choice(
+            request.tool_choice.as_ref(),
+            state.chat_template.forced_tool_call_format(),
+            &result.finish_reason,
+        );
 
         // No tool calls found, but tool parsing was enabled — use the cleaned
         // content from the parser (thinking blocks and structural markers
@@ -1267,6 +1373,8 @@ async fn stream_chat_completion(
         None
     };
     let tool_choice = request.tool_choice.clone();
+    // For the end-of-stream forced-tool-choice diagnostic (#1319).
+    let forced_format = state.chat_template.forced_tool_call_format();
 
     // b10621 `reasoning_control` (#1444): arm realtime reasoning control for
     // this completion. The shared flag travels into the scheduler's thinking
@@ -1655,6 +1763,7 @@ async fn stream_chat_completion(
                     .as_ref()
                     .and_then(|tc| tc.specific_function())
                     .map(|s| s.to_string());
+                let mut emitted = 0usize;
 
                 for (idx, call) in parsed.tool_calls.iter().enumerate() {
                     // Filter by specific function if applicable
@@ -1684,10 +1793,19 @@ async fn stream_chat_completion(
                         call.arguments.clone(),
                     );
                     let _ = finish_events.json(&args_chunk);
+                    emitted += 1;
                 }
 
-                finish_reason = "tool_calls".to_string();
+                // Only calls that actually reached the client count: when the
+                // named-function filter dropped every parsed call, the stream
+                // carried no tool-call delta and must not claim `tool_calls`.
+                if emitted > 0 {
+                    finish_reason = "tool_calls".to_string();
+                }
             }
+        }
+        if finish_reason != "tool_calls" {
+            warn_unmet_tool_choice(tool_choice.as_ref(), forced_format, &finish_reason);
         }
 
         // Warm the next turn's history prefix in the background (issue #1144).
@@ -1804,18 +1922,31 @@ pub(crate) fn validate_typical_p(typical_p: Option<f32>) -> Result<(), &'static 
 /// Maximum number of tools allowed in a single request.
 pub(crate) const MAX_TOOLS: usize = 128;
 
-/// Validate the chat tool fields shared by single-node and router fronts.
+/// Validate the chat tool fields shared by the single-node routes (chat
+/// completions, Responses, Anthropic Messages) and the disaggregated router
+/// front.
 ///
-/// Both callers run this before chat-template rendering so an invalid
-/// `tool_choice` or oversized tool list cannot reach Jinja2. Error strings are
-/// intentionally kept byte-identical to the original single-node guards.
+/// Every caller runs this before chat-template rendering so an invalid
+/// `tool_choice` or oversized tool list cannot reach Jinja2. The `tool_choice`
+/// rules live on [`ToolChoice::validate`] (#1319): unknown string modes,
+/// `"required"` without tools, and a named function that is malformed or not
+/// declared. A forced choice combined with a constraining `response_format`
+/// is rejected here as well, since two grammars cannot be composed over one
+/// generation. The unknown-mode string is byte-identical to the original
+/// single-node guard.
 pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Result<(), String> {
-    if let Some(crate::server::types::request::ToolChoice::Mode(mode)) = &request.tool_choice
-        && !["auto", "none", "required"].contains(&mode.as_str())
-    {
-        return Err(format!(
-            "Invalid tool_choice value: '{mode}'. Must be 'auto', 'none', 'required', or a function object."
-        ));
+    if let Some(choice) = &request.tool_choice {
+        choice.validate(request.tools.as_deref())?;
+        if choice.is_forced()
+            && response_format_requests_constraint(request.response_format.as_ref())
+        {
+            return Err(
+                "tool_choice 'required' or a named function cannot be combined with a \
+                 response_format schema: the forced tool call and the response schema \
+                 would each constrain the whole generation."
+                    .to_string(),
+            );
+        }
     }
 
     if let Some(tools) = &request.tools
@@ -1828,6 +1959,14 @@ pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Resu
     }
 
     Ok(())
+}
+
+/// Whether `response_format` asks for constrained decoding. Absent and
+/// `{"type": "text"}` both mean no; every other shape is either a schema or a
+/// malformed value that the structured-output builder reports on its own.
+fn response_format_requests_constraint(response_format: Option<&serde_json::Value>) -> bool {
+    response_format
+        .is_some_and(|value| value.get("type").and_then(serde_json::Value::as_str) != Some("text"))
 }
 
 /// Whether the rendered chat prompt primed an open thinking block whose

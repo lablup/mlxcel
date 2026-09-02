@@ -767,6 +767,36 @@ pub fn build_json_schema_constraint(
     )
 }
 
+/// Build a constraint from llguidance Lark grammar text.
+///
+/// Used by the forced `tool_choice` path (#1319), which spells a tool format's
+/// fixed wrapper around `%json { ... }` tool schemas. Shares the tokenizer
+/// environment cache, the tightened `ParserLimits` and the size cap of the
+/// JSON-schema path: the Lark text embeds the serialized tool schemas, so
+/// [`MAX_SCHEMA_BYTES`] bounds it exactly as it bounds a `response_format`
+/// schema before any grammar work starts. Grammar failures surface as the
+/// same generic `InvalidGrammar` the GBNF path uses; verbose details stay in
+/// the server log.
+pub fn build_lark_constraint(
+    tokenizer: &MlxcelTokenizer,
+    lark: &str,
+) -> Result<Arc<Mutex<StructuredOutputConstraint>>, StructuredOutputError> {
+    if lark.len() > MAX_SCHEMA_BYTES {
+        return Err(StructuredOutputError::SchemaTooLarge(format!(
+            "grammar serialised size {} bytes exceeds limit {} bytes",
+            lark.len(),
+            MAX_SCHEMA_BYTES
+        )));
+    }
+    let tok_env = tok_env_for(tokenizer)?;
+    build_constraint(
+        tok_env,
+        TopLevelGrammar::from_lark(lark.to_string()),
+        None,
+        || StructuredOutputError::InvalidGrammar("failed to compile grammar".to_string()),
+    )
+}
+
 /// `<token-text>` resolution for the GBNF front end, wired to mlxcel's
 /// tokenizer with b10621's own flags.
 struct TokenizerVocab<'a>(&'a MlxcelTokenizer);

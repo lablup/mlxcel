@@ -156,6 +156,12 @@ pub struct ChatTemplateProcessor {
     /// Cached result of `supports_tools()` introspection.
     /// `None` means not yet computed.
     supports_tools_cached: Option<bool>,
+    /// The tool-call format a forced `tool_choice` can grammar-constrain on
+    /// this template (#1319), detected once at construction from the template
+    /// text by [`detect_forced_tool_call_format`]. `None` for templates whose
+    /// wire shape is not a fixed JSON wrapper (ATEM, XML dialects, Gemma 4,
+    /// ...) and for templates without tool markers.
+    forced_tool_call_format: Option<ToolCallFormat>,
     /// Default value for the `enable_thinking` Jinja kwarg when the request
     /// (or its server-side merge with CLI/env defaults) does not provide one.
     ///
@@ -284,13 +290,16 @@ impl ChatTemplateProcessor {
             .and_then(|c| extract_token(c, "eos_token"))
             .unwrap_or_default();
 
+        let template = preprocess_template(template);
+        let forced_tool_call_format = detect_forced_tool_call_format(&template);
         Ok(Some(Self {
-            template: preprocess_template(template),
+            template,
             compiled_template: Arc::new(OnceLock::new()),
             bos_token,
             eos_token,
             add_generation_prompt: true,
             supports_tools_cached: None,
+            forced_tool_call_format,
             default_enable_thinking: false,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -299,13 +308,16 @@ impl ChatTemplateProcessor {
 
     /// Create a processor with a custom template string
     pub fn with_template(template: String) -> Self {
+        let template = preprocess_template(template);
+        let forced_tool_call_format = detect_forced_tool_call_format(&template);
         Self {
-            template: preprocess_template(template),
+            template,
             compiled_template: Arc::new(OnceLock::new()),
             bos_token: String::new(),
             eos_token: String::new(),
             add_generation_prompt: true,
             supports_tools_cached: None,
+            forced_tool_call_format,
             default_enable_thinking: false,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -404,6 +416,20 @@ impl ChatTemplateProcessor {
         explicit: Option<ToolCallFormat>,
     ) -> Option<ToolCallFormat> {
         tool_calls::resolve_tool_call_format(explicit, None, None, Some(&self.template))
+    }
+
+    /// The tool-call format a forced `tool_choice` (`"required"` or a named
+    /// function, #1319) can grammar-constrain on this template.
+    ///
+    /// Only formats whose emitted call is a JSON object inside a fixed wrapper
+    /// qualify, because that wrapper can be spelled as a Lark grammar around
+    /// the tool schemas before generation: Hermes (`<tool_call>`), Mistral
+    /// Nemo (`[TOOL_CALLS]`) and Llama 3 (`<|python_tag|>` / `"parameters":`).
+    /// Every other template, including ATEM ones for which
+    /// [`default_tool_call_format`](Self::default_tool_call_format) reports
+    /// `Atem`, returns `None` and gets the instruction and tool narrowing only.
+    pub fn forced_tool_call_format(&self) -> Option<ToolCallFormat> {
+        self.forced_tool_call_format
     }
 
     /// Name to expose as the active tool-call parser for diagnostics.
@@ -1721,6 +1747,42 @@ pub fn default_chat_template() -> &'static str {
 {% endif %}{% endfor %}{% if add_generation_prompt %}Assistant: {% endif %}"#
 }
 
+/// Read the grammar-capable tool-call format off a template's text (#1319).
+///
+/// This is deliberately a marker scan rather than a render probe: the markers
+/// are the literal wrapper strings the template teaches the model to emit, so
+/// their presence is the same evidence the parsers rely on. Dialects that
+/// reuse a JSON format's block tags around a non-JSON body are excluded by
+/// their own distinctive markers, because forcing a JSON object into those
+/// tags would produce output the model was never trained to emit:
+///
+/// * Qwen3-Coder / Functionary (`<function=`), GLM-4.7 (`<arg_key>`) and
+///   Laguna-style XML (`<function_name>`) share Hermes's `<tool_call>` tags.
+/// * Bracketed Mistral (`[TOOL_CALLS]name[ARGS]{...}`) shares Nemo's
+///   `[TOOL_CALLS]` marker.
+/// * ATEM templates are namespaced XML and never qualify, even though the
+///   default format resolver reports them as `Atem`.
+fn detect_forced_tool_call_format(template: &str) -> Option<ToolCallFormat> {
+    if tool_calls::infer_default_tool_call_format(None, None, Some(template))
+        == Some(ToolCallFormat::Atem)
+    {
+        return None;
+    }
+    if template.contains("<tool_call>") {
+        let xml_body = template.contains("<function=")
+            || template.contains("<arg_key>")
+            || template.contains("<function_name>");
+        return (!xml_body).then_some(ToolCallFormat::Hermes);
+    }
+    if template.contains("[TOOL_CALLS]") {
+        return (!template.contains("[ARGS]")).then_some(ToolCallFormat::MistralNemo);
+    }
+    if template.contains("<|python_tag|>") || template.contains("\"parameters\":") {
+        return Some(ToolCallFormat::Llama3);
+    }
+    None
+}
+
 impl Default for ChatTemplateProcessor {
     fn default() -> Self {
         Self::with_template(default_chat_template().to_string())
@@ -1734,6 +1796,7 @@ impl std::fmt::Debug for ChatTemplateProcessor {
             .field("eos_token", &self.eos_token)
             .field("add_generation_prompt", &self.add_generation_prompt)
             .field("supports_tools_cached", &self.supports_tools_cached)
+            .field("forced_tool_call_format", &self.forced_tool_call_format)
             .field("compiled_template", &self.compiled_template.get().is_some())
             .finish_non_exhaustive()
     }
@@ -2551,6 +2614,108 @@ mod tests {
                 parameters: None,
             },
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Forced tool-choice format detection (#1319)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn forced_tool_call_format_detects_hermes_marker() {
+        // The Qwen2.5 / Qwen3 / Hermes shape: the template teaches the model
+        // the `<tool_call>{json}</tool_call>` wrapper in its tools preamble.
+        let template = concat!(
+            r#"{% if tools %}For each function call, return a json object within "#,
+            r#"<tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "#,
+            r#""arguments": <args-json-object>}\n</tool_call>{% endif %}"#,
+            r#"{% for m in messages %}{{ m.content }}{% endfor %}"#,
+        );
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        assert_eq!(
+            processor.forced_tool_call_format(),
+            Some(ToolCallFormat::Hermes)
+        );
+        // The default resolver has no opinion on Hermes templates; the forced
+        // format is the more specific answer and does not disturb it.
+        assert_eq!(processor.default_tool_call_format(), None);
+    }
+
+    #[test]
+    fn forced_tool_call_format_detects_mistral_nemo_and_llama3_markers() {
+        let nemo = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}{% if m.tool_calls %}[TOOL_CALLS] [{{ m.tool_calls | tojson }}]{% endif %}{{ m.content }}{% endfor %}"#.to_string(),
+        );
+        assert_eq!(
+            nemo.forced_tool_call_format(),
+            Some(ToolCallFormat::MistralNemo)
+        );
+
+        let llama = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}{% if m.tool_calls %}{{ '{"name": "' + m.tool_calls[0].function.name + '", "parameters": ' }}{{ m.tool_calls[0].function.arguments | tojson }}}{% endif %}{{ m.content }}{% endfor %}"#.to_string(),
+        );
+        assert_eq!(
+            llama.forced_tool_call_format(),
+            Some(ToolCallFormat::Llama3)
+        );
+
+        let python_tag = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}<|python_tag|>{{ m.content }}{% endfor %}"#.to_string(),
+        );
+        assert_eq!(
+            python_tag.forced_tool_call_format(),
+            Some(ToolCallFormat::Llama3)
+        );
+    }
+
+    #[test]
+    fn forced_tool_call_format_is_none_for_atem_template() {
+        // Muse Glimmer's template declares the ATEM grammar: namespaced XML,
+        // no JSON wrapper to force. The default resolver still reports ATEM so
+        // the parser side keeps working.
+        let template = concat!(
+            r#"{% for m in messages %}{{ m.content }}{% endfor %}"#,
+            r#"<atem:function_calls><atem:invoke name="f"></atem:invoke></atem:function_calls>"#,
+        );
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        assert_eq!(processor.forced_tool_call_format(), None);
+        assert_eq!(
+            processor.default_tool_call_format(),
+            Some(ToolCallFormat::Atem)
+        );
+    }
+
+    #[test]
+    fn forced_tool_call_format_is_none_for_xml_body_dialects_and_plain_templates() {
+        // Qwen3-Coder reuses Hermes's block tags around an XML body.
+        let qwen3_coder = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}<tool_call>\n<function={{ m.content }}>\n<parameter=x>1</parameter>\n</function>\n</tool_call>{% endfor %}"#.to_string(),
+        );
+        assert_eq!(qwen3_coder.forced_tool_call_format(), None);
+
+        // GLM-4.7 likewise: `<tool_call>NAME<arg_key>...`.
+        let glm = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}<tool_call>{{ m.content }}<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>{% endfor %}"#.to_string(),
+        );
+        assert_eq!(glm.forced_tool_call_format(), None);
+
+        // Bracketed Mistral shares `[TOOL_CALLS]` but is not a JSON array.
+        let bracketed = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}[TOOL_CALLS]{{ m.content }}[ARGS]{}{% endfor %}"#.to_string(),
+        );
+        assert_eq!(bracketed.forced_tool_call_format(), None);
+
+        // Gemma 4's `<|tool_call>call:name{...}<tool_call|>` is not `<tool_call>`.
+        let gemma4 = ChatTemplateProcessor::with_template(
+            r#"{% for m in messages %}<|tool_call>call:{{ m.content }}{}<tool_call|>{% endfor %}"#
+                .to_string(),
+        );
+        assert_eq!(gemma4.forced_tool_call_format(), None);
+
+        // A template with no tool markers at all.
+        assert_eq!(
+            ChatTemplateProcessor::default().forced_tool_call_format(),
+            None
+        );
     }
 
     #[test]

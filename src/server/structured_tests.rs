@@ -716,3 +716,134 @@ fn bench_packed_mask_apply() {
         bias_total / packed_total
     );
 }
+
+// ---------------------------------------------------------------------------
+// Forced tool choice (#1319): Lark grammars around tool schemas
+// ---------------------------------------------------------------------------
+
+/// Drive a constraint through `text` one byte-token at a time on the
+/// all-byte-fallback stub (token id == byte value), asserting every step is
+/// allowed by the mask the matcher offered just before it.
+fn feed_bytes(
+    constraint: &std::sync::Arc<std::sync::Mutex<StructuredOutputConstraint>>,
+    text: &str,
+) {
+    let mut guard = constraint.lock().expect("fresh lock");
+    for (i, byte) in text.bytes().enumerate() {
+        let token = byte as usize;
+        {
+            let mask = guard.compute_mask().expect("mask before each token");
+            assert!(
+                mask.get(token).copied().unwrap_or(false),
+                "byte {byte:#04x} ({:?}) at offset {i} must be allowed by the grammar",
+                byte as char
+            );
+        }
+        guard
+            .consume_token(token as i32)
+            .unwrap_or_else(|err| panic!("consume byte {byte:#04x} at offset {i}: {err}"));
+    }
+}
+
+#[test]
+fn lark_constraint_forces_hermes_wrapper() {
+    let tokenizer = MlxcelTokenizer::stub_all_byte_fallback();
+    let tools: Vec<crate::server::types::request::Tool> = serde_json::from_value(json!([
+        {"type": "function", "function": {"name": "get_weather", "parameters": {
+            "type": "object", "properties": {"city": {"type": "string"}},
+            "additionalProperties": false}}},
+        {"type": "function", "function": {"name": "get_time"}}
+    ]))
+    .expect("tools deserialize");
+    let choice = crate::server::types::request::ToolChoice::Mode("required".to_string());
+    let lark = crate::server::tool_calls::tool_choice_grammar(
+        crate::server::tool_calls::ToolCallFormat::Hermes,
+        &tools,
+        &choice,
+    )
+    .expect("Hermes is grammar-capable");
+
+    let constraint = build_lark_constraint(&tokenizer, &lark).expect("grammar compiles");
+
+    // A plain-text opening is masked out: the model cannot answer in prose.
+    {
+        let mut guard = constraint.lock().expect("fresh lock");
+        let mask = guard.compute_mask().expect("initial mask");
+        assert!(
+            !mask[b'H' as usize],
+            "prose must not be allowed as the first token"
+        );
+        assert!(
+            !mask[b'{' as usize],
+            "a bare JSON object is not the Hermes wrapper"
+        );
+        assert!(mask[b'<' as usize], "the wrapper's first byte is allowed");
+        assert!(!guard.is_stopped());
+    }
+
+    feed_bytes(
+        &constraint,
+        r#"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#,
+    );
+    assert!(
+        constraint.lock().expect("fresh lock").is_stopped(),
+        "the closing tag completes the grammar"
+    );
+
+    // The `arguments` object is validated against the tool's own schema, taken
+    // verbatim: with `additionalProperties: false` an unknown property is
+    // refused mid-object (a schema without it would allow one, as JSON Schema
+    // does by default).
+    let strict = build_lark_constraint(&tokenizer, &lark).expect("grammar compiles");
+    feed_bytes(
+        &strict,
+        r#"<tool_call>{"name":"get_weather","arguments":{""#,
+    );
+    let mut guard = strict.lock().expect("fresh lock");
+    let mask = guard.compute_mask().expect("mask inside arguments");
+    assert!(mask[b'c' as usize], "`city` is a declared property");
+    assert!(
+        !mask[b'z' as usize],
+        "an undeclared property name is masked out"
+    );
+}
+
+#[test]
+fn lark_constraint_named_choice_refuses_other_tool_names() {
+    let tokenizer = MlxcelTokenizer::stub_all_byte_fallback();
+    let tools: Vec<crate::server::types::request::Tool> = serde_json::from_value(json!([
+        {"type": "function", "function": {"name": "get_time"}},
+        {"type": "function", "function": {"name": "get_weather"}}
+    ]))
+    .expect("tools deserialize");
+    let choice: crate::server::types::request::ToolChoice =
+        serde_json::from_value(json!({"type": "function", "function": {"name": "get_weather"}}))
+            .expect("named choice deserializes");
+    let lark = crate::server::tool_calls::tool_choice_grammar(
+        crate::server::tool_calls::ToolCallFormat::Hermes,
+        &tools,
+        &choice,
+    )
+    .expect("Hermes is grammar-capable");
+    let constraint = build_lark_constraint(&tokenizer, &lark).expect("grammar compiles");
+
+    feed_bytes(&constraint, r#"<tool_call>{"name":"get_"#);
+    let mut guard = constraint.lock().expect("fresh lock");
+    let mask = guard.compute_mask().expect("mask at the name fork");
+    assert!(mask[b'w' as usize], "get_weather is the pinned name");
+    assert!(
+        !mask[b't' as usize],
+        "get_time is not reachable under a named choice"
+    );
+}
+
+#[test]
+fn lark_constraint_rejects_oversized_grammar_text() {
+    let tokenizer = MlxcelTokenizer::stub_all_byte_fallback();
+    let oversized = format!("start: \"{}\"", "x".repeat(MAX_SCHEMA_BYTES + 1));
+    let err = build_lark_constraint(&tokenizer, &oversized).expect_err("size cap applies");
+    assert!(matches!(err, StructuredOutputError::SchemaTooLarge(_)));
+
+    let err = build_lark_constraint(&tokenizer, "start: %json").expect_err("malformed lark");
+    assert!(matches!(err, StructuredOutputError::InvalidGrammar(_)));
+}
