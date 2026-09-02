@@ -66,9 +66,9 @@ LoRA 어댑터 로딩은 적용할 수 없는 텐서를 조용히 버렸다. 그
 
 ### 2.4 코드 품질
 
-- **테스트 커버리지**: `lora` 모듈에 테스트 14개가 늘었다(`loader_tests.rs` 11개, 신규 `runtime_tests.rs` 4개, `config.rs` 1개, 여기에 `partial_loading_adapter_tests.rs`의 스테이지 경로 테스트 2개). `--lib lora` 셀렉터 기준 47개에서 61개로 늘었다.
+- **테스트 커버리지**: `--lib lora` 셀렉터 기준 47개에서 62개로 늘었다. `loader_tests.rs`, 신규 `runtime_tests.rs`, `config.rs`, `partial_loading_adapter_tests.rs`에 걸쳐 신규 케이스 18개.
 - **코드 복잡도**: `fuse_lora_weights_into`가 짧아졌다. 쌍 구성, 해석, 건너뛰기 처리가 `validate_adapter_tensors`로 옮겨가고, 델타를 계산해 더하는 루프만 남았다.
-- **기술 부채**: 감소. 런타임 경로의 `// #1328 owns making both strict` 표식이 해소됐고, 두 경로가 서로 어긋날 수 있는 복사본 두 벌 대신 유효한 어댑터 텐서의 정의 하나를 공유한다.
+- **기술 부채**: 감소. 두 경로가 서로 어긋날 수 있는 복사본 두 벌 대신 유효한 어댑터 텐서의 정의 하나를 공유하고, `src/lora/runtime.rs`의 `// #1328 owns making both strict` 표식이 해소됐다. 같은 문구를 단 `mlxcel_core::runtime_lora`의 표식 두 개는 다른 결함을 가리키고 있었으므로, 삭제하지 않고 #1577을 가리키도록 정정했다.
 
 ---
 
@@ -109,7 +109,7 @@ LoRA 어댑터 로딩은 적용할 수 없는 텐서를 조용히 버렸다. 그
 폴백이 증상이 아니라 근본 원인이다. "키를 줄 텐데, 있을 수도 없을 수도 있다"고 답하는 함수는 이 이슈가 다루는 `warn!` 후 continue를 정확히 유도하고, 실제로 독립적으로 두 번 유도했다. 부재를 `None`으로 만들면 판단이 타입 시스템으로 넘어간다.
 
 **트레이드오프:**
-함수를 공유하던 런타임 경로를 같은 PR에서 고쳐야 했다. 결과적으로는 그게 옳은 범위였다(3.4 참조).
+함수를 공유하던 런타임 경로를 같은 PR에서 고쳐야 했다. 결과적으로는 그게 옳은 범위였다(3.5 참조).
 
 ### 3.3 적용 쌍 0개는 전체 모델 경로에서만 에러
 
@@ -130,7 +130,25 @@ LoRA 어댑터 로딩은 적용할 수 없는 텐서를 조용히 버렸다. 그
 **트레이드오프:**
 어떤 스테이지도 아무것도 적용하지 않은 파이프라인 병렬 실행은 여전히 감지되지 않는다. 이를 잡으려면 스테이지 간 조율이 필요하며 후속 과제로 남긴다(8절).
 
-### 3.4 같은 검증기를 비융합 런타임 경로까지 확장
+### 3.4 패밀리 capability 게이트를 융합보다 앞에 두기
+
+**맥락:**
+`src/model_metadata.rs`에서 20여 개 패밀리가 `adapter_unsupported_message`를 설정하는데, 그 판정은 융합 이후에 실행되는 `load_model_from_weights` 안에서 내려졌다. 융합이 적용할 수 없는 것을 건너뛰던 동안에는 순서가 문제되지 않았다. Qwen VL 체크포인트는 융합을 경고와 함께 통과한 뒤 "Qwen3.5 VLM does not support adapter loading"를 냈다.
+
+**검토한 대안:**
+
+| 선택지 | 장점 | 단점 |
+|--------|------|------|
+| 게이트를 그대로 둔다 | 변경 없음 | 해당 패밀리 중 키 경로가 어댑터와 맞지 않는 경우, 운영자는 `no base weight` 줄의 벽만 보고 실제 상황을 설명하는 문장은 영영 못 본다 |
+| **선택: 융합 앞에 호출을 하나 더 두고 원래 검사는 백스톱으로 유지** | 설명이 담긴 에러가 이긴다, 성공할 수 없는 로딩을 위해 베이스 가중치를 읽지 않는다 | `config.json`을 두 번 파싱, 검사가 두 곳에 존재 |
+
+**근거:**
+이것은 독립된 결함이 아니라 엄격화가 불러온 진단 퇴행이다. 그 메시지는 융합이 공허하게 성공하던 덕분에만 도달 가능했다. 그러니 그것을 깨뜨리는 변경과 같은 곳에서 고치는 게 맞다.
+
+**트레이드오프:**
+어댑터 로딩마다 `config.json`을 두 번 읽는다. 그 뒤에 오는 가중치 로딩에 비하면 무시할 수준이다.
+
+### 3.5 같은 검증기를 비융합 런타임 경로까지 확장
 
 **맥락:**
 이슈의 "Out of scope" 절이 런타임 LoRA를 언급하지만, 그 문장은 #1439가 `stage_runtime_adapters`를 넣기 전에 쓰인 것이고, 해당 함수에는 `Unmatched tensors warn with the same posture as the fused path (#1328 owns making both strict)`라는 주석이 달려 있다.
@@ -305,7 +323,8 @@ fn resolve(name: &str, map: &Map) -> Option<String> {
 ### 관련 PR/이슈
 
 - 이슈 #1328: 이 PR이 닫는 결함
-- 이슈 #1439: 비융합 런타임 경로를 추가하면서 이 PR이 해소하는 `#1328 owns making both strict` 표식을 남김
+- 이슈 #1439: 비융합 런타임 경로를 추가하면서, 어댑터 텐서에 한해 이 PR이 해소하는 `#1328 owns making both strict` 표식을 남김
+- 이슈 #1577: 이 PR이 닫지 않는 잔여 결함. 스테이징된 런타임 항을 어떤 레이어 생성자도 클레임하지 않는 경우
 
 ---
 
@@ -315,24 +334,26 @@ fn resolve(name: &str, map: &Map) -> Option<String> {
 
 | 항목 | 값 |
 |------|-----|
-| 변경 파일 | 11 |
-| 추가 라인 | +941 |
-| 삭제 라인 | -180 |
-| 추가 테스트 | 17 |
+| 변경 파일 | 14 |
+| 추가 라인 | +1820 |
+| 삭제 라인 | -186 |
+| 추가 테스트 | 18 |
 
 ### 카테고리별 변경
 
 | 카테고리 | 개수 | 요약 |
 |----------|------|------|
 | 정합성 | 5 | 텐서 검증, 베이스 가중치 해석, 적용 쌍 개수, DoRA 거부, 런타임 경로 동등성 |
+| 진단 | 3 | 패밀리 capability 게이트를 융합 앞으로, 파싱 에러에 어댑터 설정 경로 명시, PEFT 명명을 한 번만 보고 |
 | 코드 품질 | 2 | 세 호출 경로가 검증기 공유, 테스트가 온디스크 어댑터 픽스처 공유 |
-| 문서 | 1 | `docs/server-features.md`에 수용 규칙과 스테이지 예외 기록 |
+| 문서 | 2 | `docs/server-features.md`에 수용 규칙과 스테이지 예외 기록, `runtime_lora` 주석 2개를 #1577을 가리키도록 정정 |
 
 ### 관련 커밋
 
 | 해시 | 유형 | 메시지 |
 |------|------|--------|
 | `fc6467a` | fix | fix(lora): refuse adapters whose tensors do not map onto the model |
+| `45a391f` | fix | fix(lora): keep family and PEFT adapter diagnostics readable |
 
 ---
 
@@ -348,10 +369,13 @@ fn resolve(name: &str, map: &Map) -> Option<String> {
 
 ### 향후 개선
 
+- 이슈 #1577: 클레임되지 않은 런타임 항은 여전히 로그만 남는다. 텐서는 실제 베이스 가중치에 대응됐지만 그 prefix를 클레임하는 레이어 생성자가 없는 항은, 성공한 로딩 뒤에도 해당 레이어가 베이스 가중치를 서빙하게 만든다. `SwitchLinear`(모든 MoE 패밀리의 전문가 경로)가 확인된 사례다. 인접 사례는 더 나쁘다. `src/models/nemotron_h.rs`는 융합 Mamba-2 커널을 위해 `UnifiedLinear::Quantized`를 구조 분해하면서 `runtime_lora::any_active`를 전혀 참조하지 않으므로, 그 항은 클레임됐는데도 forward에 도달하지 않는다. 클레임되지 않은 목록을 로딩 실패로 만드는 일은 이번 변경에서 제외했다. 기본 `--lora` 채널에 대한 하드 실패 변경이고, 다수 패밀리의 실제 체크포인트 없이는 검증할 수 없기 때문이다.
+- 이슈 #1577은 융합 단일 프로세스 경로가 원본 체크포인트를 대상으로 검증하는 반면 파이프라인 스테이지 경로는 `sanitize_tied_embeddings`를 거친 맵을 대상으로 검증한다는 점도 기록한다. 그래서 tied embeddings 체크포인트에서 `lm_head` 쌍은 한 경로에서는 실패하고 다른 경로에서는 적용된다. tied 모델에서 `lm_head`만 따로 적응시키면 tie가 깨지므로, 어느 방향이 옳은지는 자명하지 않다.
+- MoE LoRA는 두 경로 모두 미지원이다. `mlx-lm`의 `LoRASwitchLinear`는 3차원 `lora_a` / `lora_b`를 쓰는데 `compute_lora_delta`가 예전부터 "Expected 2D LoRA matrices"로 거부해 왔다. 회귀는 아니며 #1577에 기록했다.
 - 어떤 스테이지도 쌍을 적용하지 않은 파이프라인 병렬 실행은 여전히 감지되지 않는다. 감지하려면 모든 스테이지 보고 후의 스테이지 간 집계가 필요하다.
 - DoRA 융합(출력 행별로 `W' = m * (W + scale * B A) / ||W + scale * B A||`)은 미구현이다. 검증할 DoRA 체크포인트가 있어야 한다.
 - 양자화 베이스에 대한 융합 어댑터 적용은 미지원이다(역양자화, 덧셈, 재양자화). 지금은 shape 가드에서 실패한다. 양자화 체크포인트에는 비융합 `--lora` 경로가 동작하는 답이다.
-- HuggingFace PEFT의 `lora_A.weight` / `lora_B.weight` 표기는 이제 조용히 무시되는 대신 명확히 보고되지만, 여전히 읽지는 않는다.
+- HuggingFace PEFT의 `lora_A.weight` / `lora_B.weight` 표기는 이제 조용히 무시되는 대신 어댑터당 한 줄로 변환 방법과 함께 명확히 보고되지만, 여전히 읽지는 않는다.
 
 ---
 
@@ -361,7 +385,7 @@ fn resolve(name: &str, map: &Map) -> Option<String> {
 
 | 명령 | 결과 |
 |------|------|
-| `cargo test --profile test-fast --features metal,accelerate --lib lora` | 61 passed, 0 failed |
+| `cargo test --profile test-fast --features metal,accelerate --lib lora` | 62 passed, 0 failed |
 | `cargo test --profile test-fast --features metal,accelerate --lib distributed::pipeline` | 323 passed, 0 failed |
 | `cargo test --profile test-fast --features metal,accelerate --lib loading::` | 312 passed, 0 failed |
 | `cargo clippy --profile test-fast --lib --tests --features metal,accelerate -- -D warnings` | clean |

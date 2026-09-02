@@ -66,9 +66,9 @@ No measurable effect. Validation walks the adapter's tensor names once, which is
 
 ### 2.4 Code Quality
 
-- **Test Coverage**: the `lora` module gained 14 tests (11 in `loader_tests.rs`, 4 in the new `runtime_tests.rs`, 1 in `config.rs`, offset by the two stage-path tests added in `partial_loading_adapter_tests.rs`). The `--lib lora` selector goes from 47 to 61 passing tests.
+- **Test Coverage**: the `--lib lora` selector goes from 47 to 62 passing tests, from 18 new cases across `loader_tests.rs`, the new `runtime_tests.rs`, `config.rs`, and `partial_loading_adapter_tests.rs`.
 - **Code Complexity**: `fuse_lora_weights_into` shrank. Its pairing, resolution, and skip handling moved into `validate_adapter_tensors`, leaving a loop that only computes and adds deltas.
-- **Technical Debt**: decreased. The runtime path's `// #1328 owns making both strict` marker is discharged, and the two paths now share one definition of what a valid adapter tensor is instead of two drifting copies.
+- **Technical Debt**: decreased. The two paths now share one definition of what a valid adapter tensor is instead of two drifting copies, and `src/lora/runtime.rs`'s `// #1328 owns making both strict` marker is discharged. The two `mlxcel_core::runtime_lora` markers with the same wording covered a different hole and are corrected to point at #1577 rather than deleted.
 
 ---
 
@@ -109,7 +109,7 @@ A foreign adapter produces a long error. Accepted: the alternative is a short er
 The fallback is the root cause, not the symptom. A function that answers "here is the key, it may or may not be there" invites exactly the `warn!`-and-continue the issue is about, and it invited it twice independently. Making the absence a `None` moves the decision to the type system.
 
 **Trade-offs:**
-The runtime path had to change in the same PR because it shared the function. That turned out to be the right scope anyway (see 3.4).
+The runtime path had to change in the same PR because it shared the function. That turned out to be the right scope anyway (see 3.5).
 
 ### 3.3 Zero applied pairs is an error on the whole-model path only
 
@@ -130,7 +130,25 @@ The whole-model path sees the entire adapter and the entire checkpoint, so zero 
 **Trade-offs:**
 A pipeline-parallel run where *no* stage applies anything is still not detected. Catching that needs cross-stage coordination and is left as future work (section 8).
 
-### 3.4 Extend the same validator to the unfused runtime path
+### 3.4 Keep the family capability gate ahead of fusion
+
+**Context:**
+About 20 families set `adapter_unsupported_message` in `src/model_metadata.rs`, and that verdict was taken inside `load_model_from_weights`, which runs after fusion. While fusion skipped what it could not apply, the order did not matter: a Qwen VL checkpoint warn-skipped through fusion and then produced "Qwen3.5 VLM does not support adapter loading".
+
+**Alternatives Considered:**
+
+| Option | Pros | Cons |
+|--------|------|------|
+| Leave the gate where it is | No change | For any of those families whose key paths do not match the adapter's, the operator now gets a wall of `no base weight` lines and never sees the sentence explaining the real situation |
+| **Chosen: hoist a second call ahead of fusion, keep the original as backstop** | The explanatory error wins; base weights are never read for a load that cannot succeed | `config.json` is parsed twice, and the check exists in two places |
+
+**Rationale:**
+This is a diagnostics regression that the strictness change introduces rather than an independent defect: the message was reachable only because fusion used to succeed vacuously. Fixing it belongs in the same change that breaks it.
+
+**Trade-offs:**
+Two `config.json` reads per adapter load, which is negligible next to the weight load it now precedes.
+
+### 3.5 Extend the same validator to the unfused runtime path
 
 **Context:**
 The issue's "Out of scope" section names runtime LoRA, but it was written before #1439 landed `stage_runtime_adapters`, and that function carries the comment `Unmatched tensors warn with the same posture as the fused path (#1328 owns making both strict)`.
@@ -305,7 +323,8 @@ Establishing an honest smoke plan surfaced that the fused `--adapter` path canno
 ### Related PRs/Issues
 
 - Issue #1328: the defect this PR closes
-- Issue #1439: added the unfused runtime path, which left the `#1328 owns making both strict` marker this PR discharges
+- Issue #1439: added the unfused runtime path, which left the `#1328 owns making both strict` marker this PR discharges for adapter tensors
+- Issue #1577: the residual this PR does not close, where a staged runtime term is never claimed by any layer constructor
 
 ---
 
@@ -315,24 +334,26 @@ Establishing an honest smoke plan surfaced that the fused `--adapter` path canno
 
 | Item | Value |
 |------|-------|
-| Files changed | 11 |
-| Lines added | +941 |
-| Lines deleted | -180 |
-| Tests added | 17 |
+| Files changed | 14 |
+| Lines added | +1820 |
+| Lines deleted | -186 |
+| Tests added | 18 |
 
 ### Changes by Category
 
 | Category | Count | Summary |
 |----------|-------|---------|
 | Correctness | 5 | Tensor validation, base-weight resolution, applied-pair count, DoRA refusal, runtime-path parity |
+| Diagnostics | 3 | Family capability gate ahead of fusion, adapter config path in the parse error, PEFT naming reported once |
 | Code Quality | 2 | Shared validator across three call paths, shared on-disk adapter fixture for tests |
-| Documentation | 1 | `docs/server-features.md` records the acceptance rule and the stage exception |
+| Documentation | 2 | `docs/server-features.md` records the acceptance rule and the stage exception; two `runtime_lora` comments corrected to point at #1577 |
 
 ### Related Commits
 
 | Hash | Type | Message |
 |------|------|---------|
 | `fc6467a` | fix | fix(lora): refuse adapters whose tensors do not map onto the model |
+| `45a391f` | fix | fix(lora): keep family and PEFT adapter diagnostics readable |
 
 ---
 
@@ -348,10 +369,13 @@ Establishing an honest smoke plan surfaced that the fused `--adapter` path canno
 
 ### Future Improvements
 
+- Issue #1577: unclaimed runtime terms are still only logged. A term whose tensor mapped onto a real base weight but whose prefix no layer constructor claims leaves those layers serving base weights after a load that succeeded. `SwitchLinear` (every MoE family's expert path) is the confirmed example. The adjacent case is worse: `src/models/nemotron_h.rs` destructures a `UnifiedLinear::Quantized` for its fused Mamba-2 kernel and never consults `runtime_lora::any_active`, so its terms are claimed and still never reach the forward pass. Making the unclaimed list a load failure was left out of this change because it is a hard-failure change to the default `--lora` channel that cannot be validated without real checkpoints across many families.
+- Issue #1577 also records that the fused single-process path validates against the raw checkpoint while the pipeline-stage path validates against a `sanitize_tied_embeddings`-processed map, so an `lm_head` pair on a tied-embeddings checkpoint now fails on one path and applies on the other. Neither direction is obviously right, since adapting `lm_head` separately on a tied model breaks the tie.
+- MoE LoRA is unsupported on both paths: `mlx-lm`'s `LoRASwitchLinear` writes 3-D `lora_a` / `lora_b`, which `compute_lora_delta` has always rejected with "Expected 2D LoRA matrices". Not a regression, recorded in #1577.
 - A pipeline-parallel run in which no stage applies any pair is still undetected. Detecting it needs a cross-stage tally after all stages report.
 - DoRA fusion (`W' = m * (W + scale * B A) / ||W + scale * B A||` per output row) remains unimplemented; it needs a DoRA checkpoint to validate against.
 - Fused adapter application on a quantized base is unsupported (dequantize, add, requantize). Today it fails on the shape guard. The unfused `--lora` path is the working answer for quantized checkpoints.
-- The HuggingFace PEFT `lora_A.weight` / `lora_B.weight` spelling is now reported clearly rather than silently ignored, but is still not read.
+- The HuggingFace PEFT `lora_A.weight` / `lora_B.weight` spelling is now reported clearly, once per adapter with the conversion step, rather than silently ignored, but is still not read.
 
 ---
 
@@ -361,7 +385,7 @@ Establishing an honest smoke plan surfaced that the fused `--adapter` path canno
 
 | Command | Result |
 |---------|--------|
-| `cargo test --profile test-fast --features metal,accelerate --lib lora` | 61 passed, 0 failed |
+| `cargo test --profile test-fast --features metal,accelerate --lib lora` | 62 passed, 0 failed |
 | `cargo test --profile test-fast --features metal,accelerate --lib distributed::pipeline` | 323 passed, 0 failed |
 | `cargo test --profile test-fast --features metal,accelerate --lib loading::` | 312 passed, 0 failed |
 | `cargo clippy --profile test-fast --lib --tests --features metal,accelerate -- -D warnings` | clean |
