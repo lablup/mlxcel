@@ -45,6 +45,7 @@ fn sample_result() -> GenerationResult {
         logprobs: None,
         cached_tokens: 0,
         structured_output: None,
+        speculative: None,
     }
 }
 
@@ -533,6 +534,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             logprobs: None,
             cached_tokens: 0,
             structured_output: None,
+            speculative: None,
         }))
         .expect("send done");
     });

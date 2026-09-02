@@ -46,6 +46,45 @@ pub enum StopType {
     Eos,
 }
 
+/// The `draft_*` half of a `timings` block: what speculation did for one
+/// request (issue #1314).
+///
+/// `draft_n` and `draft_n_accepted` are b10621's own optional pair, which
+/// upstream appends to `timings` only when `draft_n > 0`, so a client that
+/// already reads llama-server timings reads these unchanged. `draft_rounds`
+/// and `draft_kind` are mlxcel additions upstream has no analogue for:
+/// `draft_rounds` is what makes the mean accepted length per round
+/// (`(draft_n_accepted + draft_rounds) / draft_rounds`) computable by the
+/// client, and `draft_kind` names which of mlxcel's drafters served the
+/// request, which upstream has no equivalent concept for.
+///
+/// Also the whole `timings` object on the OpenAI chat routes, which carry it
+/// only for a speculative request and so would otherwise report prompt and
+/// predicted rates that appear and vanish with the drafter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SpeculativeTimings {
+    /// Draft tokens proposed across all rounds (b10621's `draft_n`).
+    pub draft_n: usize,
+    /// Draft tokens the target accepted (b10621's `draft_n_accepted`).
+    pub draft_n_accepted: usize,
+    /// Verify rounds executed for this request (mlxcel extension).
+    pub draft_rounds: usize,
+    /// Which drafter served the request (mlxcel extension): `dflash`, `mtp`
+    /// or `internal-mtp`.
+    pub draft_kind: &'static str,
+}
+
+impl From<&crate::server::model_provider::SpeculativeStats> for SpeculativeTimings {
+    fn from(stats: &crate::server::model_provider::SpeculativeStats) -> Self {
+        Self {
+            draft_n: stats.draft_n,
+            draft_n_accepted: stats.draft_n_accepted,
+            draft_rounds: stats.draft_rounds,
+            draft_kind: stats.draft_kind.as_str(),
+        }
+    }
+}
+
 /// Timing block. `cache_n` leads, matching b10621's field order.
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeTimings {
@@ -61,6 +100,13 @@ pub struct NativeTimings {
     pub predicted_ms: f64,
     pub predicted_per_token_ms: f64,
     pub predicted_per_second: f64,
+    /// Speculative acceptance, flattened onto the block so its keys sit
+    /// alongside the rest of `timings` exactly as upstream's `draft_n` pair
+    /// does (issue #1314). Absent, key and all, on a request no drafter
+    /// served: `None` flattens to nothing, so the non-speculative body is
+    /// byte-identical to what it was.
+    #[serde(flatten)]
+    pub speculative: Option<SpeculativeTimings>,
 }
 
 impl NativeTimings {
@@ -112,7 +158,22 @@ impl NativeTimings {
             predicted_ms,
             predicted_per_token_ms: per_token(predicted_ms, predicted_intervals),
             predicted_per_second: per_second(predicted_ms, predicted_intervals),
+            speculative: None,
         }
+    }
+
+    /// Attach this request's speculative acceptance counters (issue #1314).
+    ///
+    /// A builder rather than two more parameters on [`Self::new`], so the
+    /// timing arithmetic that was measured against the pinned binary keeps one
+    /// call shape and every existing caller and test reads unchanged.
+    #[must_use]
+    pub fn with_speculative(
+        mut self,
+        stats: Option<&crate::server::model_provider::SpeculativeStats>,
+    ) -> Self {
+        self.speculative = stats.map(SpeculativeTimings::from);
+        self
     }
 }
 

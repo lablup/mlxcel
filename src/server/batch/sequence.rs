@@ -583,11 +583,18 @@ impl SequenceInfo {
     /// and `generated_tokens`). The decode state is swapped out for an empty
     /// one, which is never read again.
     ///
+    /// `speculative` is the request's drafter acceptance summary (#1314), which
+    /// only the three speculative finalize paths can supply: the counters are
+    /// produced by the round loop that ran the request, and the sequence itself
+    /// never sees them. Every classic-decode call site passes `None`, which is
+    /// what keeps the non-speculative wire shape and its cost unchanged.
+    ///
     /// [`StopKind::Word`]: crate::server::model_provider::StopKind::Word
     pub(crate) fn take_generation_result(
         &mut self,
         tokenizer: &crate::tokenizer::MlxcelTokenizer,
         cached_tokens: usize,
+        speculative: Option<crate::server::model_provider::SpeculativeStats>,
     ) -> crate::server::model_provider::GenerationResult {
         let state = std::mem::replace(
             &mut self.decode_state,
@@ -646,6 +653,9 @@ impl SequenceInfo {
         // excluded from `content` (measured against the pinned binary, #1477).
         // `generated_tokens` is exactly that sequence.
         result.generated_token_ids = self.generated_tokens.clone();
+        // The drafter acceptance summary the caller's round loop produced
+        // (#1314), or `None` on every classic-decode path.
+        result.speculative = speculative;
         result
     }
 }

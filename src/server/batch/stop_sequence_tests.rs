@@ -146,7 +146,7 @@ fn drive(text: &str, stops: &[&str], max_tokens: usize, chunk_bytes: usize) -> R
 
     let tail = seq.decode_state.flush(&tokenizer);
     seq.close_text_stream(tail);
-    let result = seq.take_generation_result(&tokenizer, 0);
+    let result = seq.take_generation_result(&tokenizer, 0, None);
     let finished_as = std::mem::replace(&mut seq.state, SequenceState::Queued);
 
     let mut streamed = String::new();

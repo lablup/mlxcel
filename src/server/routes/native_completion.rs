@@ -346,6 +346,7 @@ async fn non_stream_native_completion(
             predicted_ms: gen_ms,
             id_slot: slot.id_slot(),
             probs: result.logprobs,
+            speculative: result.speculative,
         },
     );
     Ok(Json(project_native_response(&request, &response)))
@@ -469,6 +470,10 @@ struct NativeOutcome<'a> {
     /// Per-token probability data accumulated over the generation (#1485);
     /// `None` unless the request set `n_probs`.
     probs: Option<Vec<mlxcel_core::sampling::TokenLogprobData>>,
+    /// Drafter acceptance counters for the request (#1314); `None` unless a
+    /// drafter executed at least one verify round, in which case `timings`
+    /// carries none of the `draft_*` keys.
+    speculative: Option<crate::server::model_provider::SpeculativeStats>,
 }
 
 /// Assemble the b10621 native completion object.
@@ -537,7 +542,10 @@ fn build_native_response(
             outcome.prompt_ms,
             outcome.tokens_predicted,
             outcome.predicted_ms,
-        ),
+        )
+        // b10621 appends `draft_n` / `draft_n_accepted` to `timings` only
+        // when the request was drafted, and omits them otherwise (#1314).
+        .with_speculative(outcome.speculative.as_ref()),
         completion_probabilities: match (native_n_probs(request), outcome.probs.as_ref()) {
             (n, Some(entries)) if n > 0 => Some(native_completion_probabilities(
                 state
@@ -910,7 +918,11 @@ async fn stream_native_completion(
                         .unwrap_or_default();
                     // Upstream's per-token frame is small: the full metadata
                     // block belongs to the final frame alone. `timings` is
-                    // attached here only under `timings_per_token`.
+                    // attached here only under `timings_per_token`, and
+                    // without the `draft_*` keys (#1314): those counters are
+                    // the run's totals and are only known once the round loop
+                    // has finished, so a mid-stream frame carrying them would
+                    // be reporting a total that is not one yet.
                     let chunk = NativeCompletionChunk {
                         index: 0,
                         content: token.to_string(),
@@ -1022,6 +1034,10 @@ async fn stream_native_completion(
                         prompt_ms: result.prompt_eval_ms as f64,
                         predicted_ms: result.generation_only_ms as f64,
                         id_slot: slot.id_slot(),
+                        // The final frame is where the run's totals are
+                        // known; the per-token frames above stay without
+                        // them (#1314).
+                        speculative: result.speculative,
                     },
                 );
                 let _ = finish_events.json(&project_native_response(&request, &final_frame));

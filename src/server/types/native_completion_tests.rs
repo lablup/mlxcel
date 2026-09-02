@@ -17,10 +17,13 @@
 //! The expected key sets and orders come from a capture of the pinned b10621
 //! binary; see the module docs on `native_completion.rs`.
 
+use mlxcel_core::drafter::DrafterKind;
+
 use super::{
     NativeCompletionChunk, NativeCompletionResponse, NativeTimings, PromptProgress, StopType,
     select_response_fields,
 };
+use crate::server::model_provider::SpeculativeStats;
 
 fn sample() -> NativeCompletionResponse {
     NativeCompletionResponse {
@@ -327,4 +330,77 @@ fn a_nested_object_can_be_selected_whole() {
     let json = projected(&["timings"]);
     assert_eq!(keys(&json), ["timings"]);
     assert!(json["timings"]["cache_n"].is_number());
+}
+
+// ---------------------------------------------------------------------------
+// Speculative acceptance on the timings block (#1314)
+// ---------------------------------------------------------------------------
+
+fn dflash_stats() -> SpeculativeStats {
+    SpeculativeStats::from_counts(DrafterKind::Dflash, 9, 72, 55)
+        .expect("nine rounds is speculative")
+}
+
+#[test]
+fn timings_carries_no_draft_keys_without_a_drafter() {
+    // The wire shape of a deployment that runs no drafter has to be exactly
+    // what it was before #1314: absent keys, not zeros. A zero `draft_n` would
+    // be indistinguishable from a drafter that proposed nothing, which is the
+    // one distinction the block exists to make.
+    let json =
+        serde_json::to_value(NativeTimings::new(0, 17, 40.387, 4, 15.132)).expect("serializes");
+    let object = json.as_object().expect("timings is an object");
+    for key in ["draft_n", "draft_n_accepted", "draft_rounds", "draft_kind"] {
+        assert!(!object.contains_key(key), "{key} must be absent: {json}");
+    }
+    // The nine keys the pinned binary reports are untouched.
+    assert_eq!(object.len(), 9, "{json}");
+}
+
+#[test]
+fn timings_carries_the_b10621_draft_pair_for_a_speculative_request() {
+    // `draft_n` / `draft_n_accepted` are b10621's own optional pair and are
+    // spelled exactly as upstream spells them, so a client that already reads
+    // llama-server timings reads mlxcel's unchanged. `draft_rounds` and
+    // `draft_kind` are the mlxcel extension: the first makes the mean accepted
+    // length per round computable, the second names the drafter.
+    let stats = dflash_stats();
+    let json = serde_json::to_value(
+        NativeTimings::new(0, 17, 40.387, 64, 800.0).with_speculative(Some(&stats)),
+    )
+    .expect("serializes");
+    assert_eq!(json["draft_n"], 72);
+    assert_eq!(json["draft_n_accepted"], 55);
+    assert_eq!(json["draft_rounds"], 9);
+    assert_eq!(json["draft_kind"], "dflash");
+    // Flattened onto the block rather than nested under a key of their own,
+    // which is where upstream puts its pair.
+    assert_eq!(json.as_object().expect("object").len(), 13, "{json}");
+    // The nine base keys still report what they always did.
+    assert_eq!(json["predicted_n"], 64);
+    assert_eq!(json["prompt_n"], 17);
+}
+
+#[test]
+fn a_zero_round_speculative_run_reports_no_draft_block() {
+    // A request that finished inside prefill (immediate EOS, or `n_predict:
+    // 1`) never gave the drafter a round to run. Reporting it with zeros would
+    // say a drafter ran and accepted nothing.
+    assert!(SpeculativeStats::from_counts(DrafterKind::Mtp, 0, 0, 0).is_none());
+}
+
+#[test]
+fn every_drafter_kind_renders_its_canonical_name() {
+    for (kind, name) in [
+        (DrafterKind::Dflash, "dflash"),
+        (DrafterKind::Mtp, "mtp"),
+        (DrafterKind::InternalMtp, "internal-mtp"),
+    ] {
+        let stats = SpeculativeStats::from_counts(kind, 1, 4, 3).expect("one round is speculative");
+        let json = serde_json::to_value(
+            NativeTimings::new(0, 1, 1.0, 4, 1.0).with_speculative(Some(&stats)),
+        )
+        .expect("serializes");
+        assert_eq!(json["draft_kind"], name);
+    }
 }

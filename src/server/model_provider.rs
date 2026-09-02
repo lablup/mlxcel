@@ -24,6 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+use mlxcel_core::drafter::DrafterKind;
 use mlxcel_core::sampling::TokenLogprobData;
 
 use crate::server::ServerGenerateOptions;
@@ -291,6 +292,65 @@ impl StopKind {
     }
 }
 
+/// Per-request speculative-decoding acceptance counters (issue #1314).
+///
+/// The scheduler already computes these for every drafted request and used to
+/// discard them into a `tracing` line, which no client can read. Carrying them
+/// on [`GenerationResult`] is what lets `/completion` and `/v1/chat/completions`
+/// answer "did speculation help *this* request", the question an operator
+/// tuning `--draft-max` / `--draft-block-size` and a client A/B-ing the two
+/// decode paths both need.
+///
+/// `Copy` and allocation-free on purpose: the non-speculative path carries
+/// [`None`] and pays nothing, and the speculative path pays four machine words
+/// once per request rather than a `String` per finish.
+///
+/// The realized mean accepted length per round is
+/// `(draft_n_accepted + draft_rounds) / draft_rounds`, because every round
+/// emits its accepted drafts plus one bonus token. It is left to the client
+/// rather than reported, so a client that wants a different aggregate is not
+/// stuck with this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculativeStats {
+    /// Which drafter served the request. Mirrors
+    /// [`crate::server::SpeculativeDispatch::drafter_kind`]; rendered on the
+    /// wire through [`DrafterKind::as_str`].
+    pub draft_kind: DrafterKind,
+    /// Verify rounds this request executed.
+    pub draft_rounds: usize,
+    /// Draft tokens proposed across all rounds. b10621 spells this `draft_n`.
+    pub draft_n: usize,
+    /// Draft tokens the target accepted across all rounds. b10621 spells this
+    /// `draft_n_accepted`.
+    pub draft_n_accepted: usize,
+}
+
+impl SpeculativeStats {
+    /// Build the counters for a finished speculative run, or [`None`] when the
+    /// run executed no verify round.
+    ///
+    /// A zero-round run is a request that finished inside prefill (immediate
+    /// EOS, or `max_tokens == 1`): speculation never got a chance to help or
+    /// hurt it, so reporting zeros would tell a client a drafter ran and
+    /// accepted nothing. Omitting the block instead keeps "no drafter" and
+    /// "drafter accepted nothing" distinguishable, which is the whole point of
+    /// reporting acceptance at all.
+    #[must_use]
+    pub(crate) fn from_counts(
+        draft_kind: DrafterKind,
+        draft_rounds: usize,
+        draft_n: usize,
+        draft_n_accepted: usize,
+    ) -> Option<Self> {
+        (draft_rounds > 0).then_some(Self {
+            draft_kind,
+            draft_rounds,
+            draft_n,
+            draft_n_accepted,
+        })
+    }
+}
+
 /// Result of a generation
 #[derive(Debug, Clone)]
 pub struct GenerationResult {
@@ -328,6 +388,15 @@ pub struct GenerationResult {
     /// shape unchanged. Surfaced on the non-streaming chat response as the
     /// assistant message's `florence2_result` extension field.
     pub structured_output: Option<serde_json::Value>,
+    /// Speculative-decoding acceptance counters for this request (#1314).
+    ///
+    /// `Some` only when a drafter executed at least one verify round for it:
+    /// the DFlash B=1 burst, the MTP B=1 burst, and the tick-cooperative MTP
+    /// slice all populate it. `None` for classic decode, for a speculative
+    /// request that finished inside prefill, and for the default-off B>1
+    /// batched burst, whose round loops return per-row tokens without per-row
+    /// acceptance counters.
+    pub speculative: Option<SpeculativeStats>,
 }
 
 // `pub` (not `pub(crate)`) so the offline interactive chat REPL

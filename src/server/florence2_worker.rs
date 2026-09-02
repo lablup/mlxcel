@@ -420,6 +420,9 @@ fn handle_florence2_request(
         logprobs: None,
         cached_tokens: 0,
         structured_output: Some(structured),
+        // Florence-2 decodes inside one model-owned call with no drafter
+        // (#1314).
+        speculative: None,
     }));
 
     // Release the transient encode/decode allocations before the next request.

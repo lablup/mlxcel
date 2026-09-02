@@ -1642,7 +1642,9 @@ impl BatchScheduler {
                 let tail = seq.decode_state.flush(&self.tokenizer);
                 seq.close_text_stream(tail);
                 let cached = seq.already_cached_tokens;
-                let result = seq.take_generation_result(&self.tokenizer, cached);
+                // Classic decode: no drafter ran, so no acceptance block
+                // reaches the client (#1314).
+                let result = seq.take_generation_result(&self.tokenizer, cached, None);
                 // Per-request TTFT / decode-rate telemetry (epic #623 #624).
                 // Recorded once here, where the finished sequence's timings are
                 // available, never on the per-token hot path.

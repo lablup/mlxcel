@@ -2151,7 +2151,7 @@ fn a_context_bound_stop_is_reported_as_truncated_with_stop_type_limit() {
     let (mut seq, _rx) = make_test_sequence(91);
     seq.retention.context_exhausted = true;
     let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
-    let result = seq.take_generation_result(&tokenizer, 0);
+    let result = seq.take_generation_result(&tokenizer, 0, None);
     assert_eq!(result.stop_kind, StopKind::ContextExhausted);
     assert_eq!(result.finish_reason, "length");
 }
