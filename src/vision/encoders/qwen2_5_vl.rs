@@ -175,8 +175,30 @@ impl VisionRMSNorm {
         Ok(Self { weight, eps })
     }
 
+    /// Normalize `x`, promoting a float16 input to float32 for the reduction.
+    ///
+    /// Qwen2.5-VL's tower carries massive activations: on a 448x448 image one
+    /// channel of the residual stream reaches 5.4e2 by block 15 and 2.3e4 by
+    /// block 31. `rms_norm` reduces `sum(x * x)` over the 1280-wide feature
+    /// axis, and in float16 that sum saturates at 65504, so every row whose
+    /// energy crosses the limit reduces to infinity and leaves the norm as
+    /// `rsqrt(inf) = 0`. The whole token row is then erased. Measured on
+    /// `Qwen/Qwen2.5-VL-3B-Instruct`, 15 of 1024 tower tokens were zeroed at
+    /// block 16 and 21 at block 17, which is what dropped an object from the
+    /// description in issue #1596.
+    ///
+    /// Reducing in float32 gives the sum the exponent range it needs. Only the
+    /// reduction changes dtype: the surrounding projections and attention keep
+    /// running in the tower's own float16, so this costs two casts per norm on
+    /// the image prefill and nothing on decode.
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        mlxcel_core::rms_norm(x, &self.weight, self.eps)
+        if mlxcel_core::array_dtype(x) != mlxcel_core::dtype::FLOAT16 {
+            return mlxcel_core::rms_norm(x, &self.weight, self.eps);
+        }
+        let x32 = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
+        let w32 = mlxcel_core::astype(&self.weight, mlxcel_core::dtype::FLOAT32);
+        let normed = mlxcel_core::rms_norm(&x32, &w32, self.eps);
+        mlxcel_core::astype(&normed, mlxcel_core::dtype::FLOAT16)
     }
 }
 
@@ -612,124 +634,12 @@ impl Qwen25VLVisionEncoder {
     /// - window_index: reordering of merged patches into window groups
     /// - cu_window_seqlens: cumulative sequence lengths for windowed attention
     fn get_window_index(&self, grid_thw: &[(i32, i32, i32)]) -> (Vec<i32>, Vec<i32>) {
-        let spatial_merge_unit = (self.spatial_merge_size * self.spatial_merge_size) as i32;
-        let vit_merger_window_size =
-            (self.window_size / self.spatial_merge_size / self.patch_size) as i32;
-
-        let mut window_index: Vec<i32> = Vec::new();
-        let mut cu_window_seqlens: Vec<i32> = vec![0];
-        let mut window_index_id: i32 = 0;
-
-        for &(grid_t, grid_h, grid_w) in grid_thw {
-            let llm_grid_h = grid_h / self.spatial_merge_size as i32;
-            let llm_grid_w = grid_w / self.spatial_merge_size as i32;
-
-            let total = grid_t * llm_grid_h * llm_grid_w;
-
-            // Create index array [0..total)
-            let index_3d: Vec<i32> = (0..total).collect();
-
-            // Compute padding
-            let pad_h = if llm_grid_h % vit_merger_window_size == 0 {
-                0
-            } else {
-                vit_merger_window_size - llm_grid_h % vit_merger_window_size
-            };
-            let pad_w = if llm_grid_w % vit_merger_window_size == 0 {
-                0
-            } else {
-                vit_merger_window_size - llm_grid_w % vit_merger_window_size
-            };
-            let num_windows_h = (llm_grid_h + pad_h) / vit_merger_window_size;
-            let num_windows_w = (llm_grid_w + pad_w) / vit_merger_window_size;
-            let padded_h = llm_grid_h + pad_h;
-            let padded_w = llm_grid_w + pad_w;
-
-            // Pad index to [grid_t, padded_h, padded_w] with -100
-            let mut index_padded = vec![-100i32; (grid_t * padded_h * padded_w) as usize];
-            for ti in 0..grid_t {
-                for hi in 0..llm_grid_h {
-                    for wi in 0..llm_grid_w {
-                        let src_idx =
-                            (ti * llm_grid_h * llm_grid_w + hi * llm_grid_w + wi) as usize;
-                        let dst_idx = (ti * padded_h * padded_w + hi * padded_w + wi) as usize;
-                        index_padded[dst_idx] = index_3d[src_idx];
-                    }
-                }
-            }
-
-            // Reshape to [grid_t, num_windows_h, ws, num_windows_w, ws]
-            // Then transpose to [grid_t, num_windows_h, num_windows_w, ws, ws]
-            // Then reshape to [grid_t, num_windows_h*num_windows_w, ws, ws]
-            let ws = vit_merger_window_size;
-            let mut reordered =
-                vec![-100i32; (grid_t * num_windows_h * num_windows_w * ws * ws) as usize];
-
-            for ti in 0..grid_t {
-                for wh in 0..num_windows_h {
-                    for ww in 0..num_windows_w {
-                        for sh in 0..ws {
-                            for sw in 0..ws {
-                                let src_h = wh * ws + sh;
-                                let src_w = ww * ws + sw;
-                                let src =
-                                    (ti * padded_h * padded_w + src_h * padded_w + src_w) as usize;
-                                let win_idx = wh * num_windows_w + ww;
-                                let dst = (ti * num_windows_h * num_windows_w * ws * ws
-                                    + win_idx * ws * ws
-                                    + sh * ws
-                                    + sw) as usize;
-                                reordered[dst] = index_padded[src];
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Compute seqlens per window (count non-padding entries)
-            let num_windows = (grid_t * num_windows_h * num_windows_w) as usize;
-            let ws2 = (ws * ws) as usize;
-            let mut seqlens: Vec<i32> = Vec::with_capacity(num_windows);
-            for win in 0..num_windows {
-                let mut count = 0i32;
-                for j in 0..ws2 {
-                    if reordered[win * ws2 + j] != -100 {
-                        count += 1;
-                    }
-                }
-                seqlens.push(count);
-            }
-
-            // Extract non-padding indices in order
-            let mut valid_indices: Vec<i32> = Vec::new();
-            for &val in &reordered {
-                if val != -100 {
-                    valid_indices.push(val + window_index_id);
-                }
-            }
-            window_index.extend_from_slice(&valid_indices);
-
-            // Compute cu_window_seqlens
-            let last_cum = *cu_window_seqlens.last().unwrap();
-            let mut cum = last_cum;
-            for &sl in &seqlens {
-                cum += sl * spatial_merge_unit;
-                cu_window_seqlens.push(cum);
-            }
-
-            window_index_id += total;
-        }
-
-        // Deduplicate cu_window_seqlens (remove consecutive duplicates)
-        let mut deduped: Vec<i32> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &val in &cu_window_seqlens {
-            if seen.insert(val) {
-                deduped.push(val);
-            }
-        }
-
-        (window_index, deduped)
+        window_index_for_grid(
+            grid_thw,
+            self.spatial_merge_size,
+            self.window_size,
+            self.patch_size,
+        )
     }
 
     /// Compute cu_seqlens for full attention from grid_thw
@@ -802,26 +712,185 @@ impl Qwen25VLVisionEncoder {
         // Merge patches
         h = self.merger.forward(&h);
 
-        // Un-reorder: apply reverse indices from argsort(window_index)
-        let mut reverse_indices = vec![0i32; window_index.len()];
-        let mut indexed: Vec<(i32, usize)> = window_index
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (v, i))
-            .collect();
-        indexed.sort_by_key(|&(v, _)| v);
-        for (rank, &(_, orig_idx)) in indexed.iter().enumerate() {
-            reverse_indices[orig_idx] = rank as i32;
-        }
-
-        // After merger: h has shape [total_merged, out_hidden_size]
-        // reverse_indices maps from window-ordered to original order
+        // After merger: h has shape [total_merged, out_hidden_size] in window
+        // order. `invert_window_index` maps it back to raster order.
+        let reverse_indices = invert_window_index(&window_index);
         let reverse_arr =
             mlxcel_core::from_slice_i32(&reverse_indices, &[reverse_indices.len() as i32]);
         h = mlxcel_core::take(&h, &reverse_arr, 0);
 
         VisionEncoderOutput { hidden_states: h }
     }
+}
+
+/// Group the merged vision tokens into attention windows.
+///
+/// Returns `(window_index, cu_window_seqlens)`, where `window_index[rank]` is
+/// the raster-order merged-token index that windowed attention sees at `rank`,
+/// and `cu_window_seqlens` are the cumulative pre-merge segment boundaries the
+/// per-window attention slices on. Padding slots inside a partial window are
+/// dropped, so `window_index` is always a permutation of `0..total_merged`.
+///
+/// Free-standing rather than a method so the permutation can be exercised on a
+/// grid alone, with no checkpoint. `Qwen25VLVisionEncoder::get_window_index` is
+/// the only caller.
+///
+/// Used by: Qwen2.5-VL (and ColQwen2.5 through the same encoder).
+fn window_index_for_grid(
+    grid_thw: &[(i32, i32, i32)],
+    spatial_merge_size: usize,
+    window_size: usize,
+    patch_size: usize,
+) -> (Vec<i32>, Vec<i32>) {
+    let spatial_merge_unit = (spatial_merge_size * spatial_merge_size) as i32;
+    let vit_merger_window_size = (window_size / spatial_merge_size / patch_size) as i32;
+
+    let mut window_index: Vec<i32> = Vec::new();
+    let mut cu_window_seqlens: Vec<i32> = vec![0];
+    let mut window_index_id: i32 = 0;
+
+    for &(grid_t, grid_h, grid_w) in grid_thw {
+        let llm_grid_h = grid_h / spatial_merge_size as i32;
+        let llm_grid_w = grid_w / spatial_merge_size as i32;
+
+        let total = grid_t * llm_grid_h * llm_grid_w;
+
+        // Create index array [0..total)
+        let index_3d: Vec<i32> = (0..total).collect();
+
+        // Compute padding
+        let pad_h = if llm_grid_h % vit_merger_window_size == 0 {
+            0
+        } else {
+            vit_merger_window_size - llm_grid_h % vit_merger_window_size
+        };
+        let pad_w = if llm_grid_w % vit_merger_window_size == 0 {
+            0
+        } else {
+            vit_merger_window_size - llm_grid_w % vit_merger_window_size
+        };
+        let num_windows_h = (llm_grid_h + pad_h) / vit_merger_window_size;
+        let num_windows_w = (llm_grid_w + pad_w) / vit_merger_window_size;
+        let padded_h = llm_grid_h + pad_h;
+        let padded_w = llm_grid_w + pad_w;
+
+        // Pad index to [grid_t, padded_h, padded_w] with -100
+        let mut index_padded = vec![-100i32; (grid_t * padded_h * padded_w) as usize];
+        for ti in 0..grid_t {
+            for hi in 0..llm_grid_h {
+                for wi in 0..llm_grid_w {
+                    let src_idx = (ti * llm_grid_h * llm_grid_w + hi * llm_grid_w + wi) as usize;
+                    let dst_idx = (ti * padded_h * padded_w + hi * padded_w + wi) as usize;
+                    index_padded[dst_idx] = index_3d[src_idx];
+                }
+            }
+        }
+
+        // Reshape to [grid_t, num_windows_h, ws, num_windows_w, ws]
+        // Then transpose to [grid_t, num_windows_h, num_windows_w, ws, ws]
+        // Then reshape to [grid_t, num_windows_h*num_windows_w, ws, ws]
+        let ws = vit_merger_window_size;
+        let mut reordered =
+            vec![-100i32; (grid_t * num_windows_h * num_windows_w * ws * ws) as usize];
+
+        for ti in 0..grid_t {
+            for wh in 0..num_windows_h {
+                for ww in 0..num_windows_w {
+                    for sh in 0..ws {
+                        for sw in 0..ws {
+                            let src_h = wh * ws + sh;
+                            let src_w = ww * ws + sw;
+                            let src =
+                                (ti * padded_h * padded_w + src_h * padded_w + src_w) as usize;
+                            let win_idx = wh * num_windows_w + ww;
+                            let dst = (ti * num_windows_h * num_windows_w * ws * ws
+                                + win_idx * ws * ws
+                                + sh * ws
+                                + sw) as usize;
+                            reordered[dst] = index_padded[src];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute seqlens per window (count non-padding entries)
+        let num_windows = (grid_t * num_windows_h * num_windows_w) as usize;
+        let ws2 = (ws * ws) as usize;
+        let mut seqlens: Vec<i32> = Vec::with_capacity(num_windows);
+        for win in 0..num_windows {
+            let mut count = 0i32;
+            for j in 0..ws2 {
+                if reordered[win * ws2 + j] != -100 {
+                    count += 1;
+                }
+            }
+            seqlens.push(count);
+        }
+
+        // Extract non-padding indices in order
+        let mut valid_indices: Vec<i32> = Vec::new();
+        for &val in &reordered {
+            if val != -100 {
+                valid_indices.push(val + window_index_id);
+            }
+        }
+        window_index.extend_from_slice(&valid_indices);
+
+        // Compute cu_window_seqlens
+        let last_cum = *cu_window_seqlens.last().unwrap();
+        let mut cum = last_cum;
+        for &sl in &seqlens {
+            cum += sl * spatial_merge_unit;
+            cu_window_seqlens.push(cum);
+        }
+
+        window_index_id += total;
+    }
+
+    // Deduplicate cu_window_seqlens (remove consecutive duplicates)
+    let mut deduped: Vec<i32> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &val in &cu_window_seqlens {
+        if seen.insert(val) {
+            deduped.push(val);
+        }
+    }
+
+    (window_index, deduped)
+}
+
+/// Invert the merged-token window permutation produced by `get_window_index`.
+///
+/// `window_index[rank]` is the raster-order position of the merged token that
+/// windowed attention sees at `rank`, so the inverse that restores raster order
+/// is `argsort(window_index)`: `out[window_index[rank]] = rank`. Upstream
+/// builds it exactly that way,
+/// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen2_5_vl/vision.py>
+/// (`reverse_indices = mx.argsort(window_index, axis=0)`).
+///
+/// Writing `out[rank] = window_index[rank]` instead reproduces `window_index`
+/// itself, which only restores raster order when the permutation is its own
+/// inverse. A 16-wide merged grid (a 448x448 image) happens to satisfy that, so
+/// the mistake was invisible there while it misplaced 120 of 144 merged tokens
+/// at 336x336 and 352 of 384 at 448x672 (issue #1596).
+///
+/// Used by: Qwen2.5-VL (and ColQwen2.5 through the same encoder).
+fn invert_window_index(window_index: &[i32]) -> Vec<i32> {
+    let len = window_index.len();
+    let mut inverse = vec![0i32; len];
+    for (rank, &raster_idx) in window_index.iter().enumerate() {
+        // `get_window_index` emits a permutation of `0..len` over every image in
+        // the batch, so this bound is a guard against a malformed grid rather
+        // than an expected branch.
+        if let Some(slot) = usize::try_from(raster_idx)
+            .ok()
+            .and_then(|i| inverse.get_mut(i))
+        {
+            *slot = rank as i32;
+        }
+    }
+    inverse
 }
 
 /// VisionEncoder trait - panics since grid_thw is required

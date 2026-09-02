@@ -24,7 +24,7 @@
 
 use mlxcel_core::weights::WeightMap;
 
-use super::normalize_patch_embed_layout;
+use super::{invert_window_index, normalize_patch_embed_layout, window_index_for_grid};
 use crate::models::embedding_test_support::{mlx_test_guard, to_vec};
 
 /// A `[out, a, b, c, d]` tensor filled with `0..count`, so a permutation is
@@ -170,4 +170,149 @@ fn patch_embed_layout_passes_through_shapes_it_cannot_classify() {
         mlxcel_core::array_shape(&ambiguous_map["vision_tower.patch_embed.proj.weight"]),
         vec![4, 3, 2, 3, 3]
     );
+}
+
+/// The tower's own configuration: `window_size / spatial_merge_size /
+/// patch_size` is `112 / 2 / 14 = 4`, so a merged grid is cut into 4x4 windows.
+const SPATIAL_MERGE_SIZE: usize = 2;
+const WINDOW_SIZE: usize = 112;
+const PATCH_SIZE: usize = 14;
+
+fn window_index_for(grid_thw: &[(i32, i32, i32)]) -> Vec<i32> {
+    window_index_for_grid(grid_thw, SPATIAL_MERGE_SIZE, WINDOW_SIZE, PATCH_SIZE).0
+}
+
+fn is_identity(permutation: &[i32]) -> bool {
+    permutation.iter().enumerate().all(|(i, &v)| v == i as i32)
+}
+
+/// `window_index` composed with its inverse, in the order the encoder applies
+/// them: the tower reads token `window_index[rank]` at `rank`, then the
+/// un-reorder puts `rank` back at `window_index[rank]`.
+fn round_trip(window_index: &[i32]) -> Vec<i32> {
+    let inverse = invert_window_index(window_index);
+    window_index.iter().map(|&v| inverse[v as usize]).collect()
+}
+
+#[test]
+fn window_index_inverse_is_argsort_not_the_permutation_itself() {
+    // The smallest permutation that is not its own inverse. Writing
+    // `out[rank] = window_index[rank]` would return `[2, 0, 1]` unchanged.
+    assert_eq!(invert_window_index(&[2, 0, 1]), vec![1, 2, 0]);
+    assert!(is_identity(&round_trip(&[2, 0, 1])));
+
+    // An involution is its own inverse, which is the case that hid the defect.
+    assert_eq!(invert_window_index(&[1, 0, 3, 2]), vec![1, 0, 3, 2]);
+}
+
+#[test]
+fn window_index_inverse_restores_raster_order_on_a_non_involution_grid() {
+    // 336x336 gives a 24x24 patch grid and a 12x12 merged grid, which is 3x3
+    // windows of 4x4 merged tokens. That permutation is not an involution, so
+    // applying `window_index` twice does not restore raster order.
+    let window_index = window_index_for(&[(1, 24, 24)]);
+    assert_eq!(window_index.len(), 144);
+    let applied_twice: Vec<i32> = window_index
+        .iter()
+        .map(|&v| window_index[v as usize])
+        .collect();
+    assert!(
+        !is_identity(&applied_twice),
+        "a (1, 24, 24) grid must exercise the non-involution case"
+    );
+    let misplaced = applied_twice
+        .iter()
+        .enumerate()
+        .filter(|&(i, &v)| v != i as i32)
+        .count();
+    assert_eq!(
+        misplaced, 120,
+        "the pre-#1596 un-reorder misplaced this many merged tokens at 336x336"
+    );
+
+    assert!(is_identity(&round_trip(&window_index)));
+}
+
+#[test]
+fn window_index_inverse_is_the_identity_case_that_hid_the_defect() {
+    // 448x448 gives a 32x32 patch grid and a 16x16 merged grid, which is 4x4
+    // windows of 4x4 merged tokens. Here the permutation IS an involution, so
+    // the incorrect un-reorder produced correct output and the defect stayed
+    // invisible at the size issue #1596 was first measured at.
+    let window_index = window_index_for(&[(1, 32, 32)]);
+    assert_eq!(window_index.len(), 256);
+    let applied_twice: Vec<i32> = window_index
+        .iter()
+        .map(|&v| window_index[v as usize])
+        .collect();
+    assert!(is_identity(&applied_twice));
+    assert!(is_identity(&round_trip(&window_index)));
+}
+
+#[test]
+fn window_index_inverse_round_trips_a_padded_and_a_multi_image_grid() {
+    // A merged grid that is not a multiple of the 4-token window (37x37 merged
+    // from a 74x74 patch grid) pads the last window, so `window_index` is still
+    // a permutation of the unpadded tokens only.
+    let padded = window_index_for(&[(1, 74, 74)]);
+    assert_eq!(padded.len(), 37 * 37);
+    assert!(is_identity(&round_trip(&padded)));
+
+    // Two images in one prompt: `window_index_id` offsets the second image's
+    // indices, so the concatenation is one permutation over both.
+    let two_images = window_index_for(&[(1, 32, 32), (1, 16, 32)]);
+    assert_eq!(two_images.len(), 16 * 16 + 8 * 16);
+    let mut sorted = two_images.clone();
+    sorted.sort_unstable();
+    assert!(is_identity(&sorted), "must be a permutation of 0..n");
+    assert!(is_identity(&round_trip(&two_images)));
+}
+
+/// A row whose squared sum crosses the float16 ceiling of 65504.
+///
+/// `rms_norm` reduces `sum(x * x)` over the feature axis. In float16 that sum
+/// saturates to infinity and the norm returns `rsqrt(inf) = 0`, erasing the
+/// row. Qwen2.5-VL's tower reaches this on real images: on a 448x448 input one
+/// channel of the residual stream carries 5.4e2 by block 15 and 2.3e4 by block
+/// 31 (issue #1596).
+#[test]
+fn vision_rms_norm_survives_a_float16_row_that_overflows_the_reduction() {
+    let _guard = mlx_test_guard();
+    let dim = 1280usize;
+    let mut row = vec![0.05f32; dim];
+    row[849] = 536.0;
+    let x = mlxcel_core::from_slice_f32(&row, &[1, dim as i32]);
+
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&vec![1.0f32; dim], &[dim as i32]),
+    );
+    let norm = super::VisionRMSNorm::from_weights(&weights, "norm", 1e-6).expect("norm weights");
+
+    let reference = norm.forward(&x);
+    mlxcel_core::eval(&reference);
+    let reference = to_vec(&reference);
+
+    let x16 = mlxcel_core::astype(&x, mlxcel_core::dtype::FLOAT16);
+    let normed = norm.forward(&x16);
+    mlxcel_core::eval(&normed);
+    assert_eq!(
+        mlxcel_core::array_dtype(&normed),
+        mlxcel_core::dtype::FLOAT16,
+        "the norm must hand the tower back its own dtype"
+    );
+    let normed = to_vec(&normed);
+
+    let peak = normed[849].abs();
+    assert!(
+        peak > 1.0,
+        "float16 reduction overflowed and erased the row: peak {peak}"
+    );
+    for (i, (&got, &want)) in normed.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            (got - want).abs() <= 1e-2 * want.abs().max(1e-2),
+            "element {i}: got {got}, want {want}"
+        );
+    }
 }
