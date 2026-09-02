@@ -292,7 +292,7 @@ fn resolve_tok_env(serialized_bytes: &[u8]) -> Result<(TokenizerFingerprint, Tok
 /// in [`crate::server::batch::SequenceInfo::structured`] and consults it
 /// before/after sampling on every step.
 ///
-/// `mask_buf` and `bias_buf` are reusable scratch buffers — pre-allocated at
+/// `mask_buf` and `packed_buf` are reusable scratch buffers, pre-allocated at
 /// construction and reset (not reallocated) on each per-token call. With a
 /// 150k-vocab tokenizer that saves roughly 750 KiB of allocator churn per
 /// emitted token per sequence.
@@ -310,11 +310,13 @@ pub struct StructuredOutputConstraint {
     /// the per-token decode path does not allocate a fresh `Vec<bool>` of
     /// length `vocab_size` (~150 KB for a 150k-vocab tokenizer).
     mask_buf: Vec<bool>,
-    /// Scratch buffer for [`apply_structured_mask_to_logits`] — reused so
-    /// the per-token decode path does not allocate a fresh `Vec<f32>` of
-    /// length `vocab_size_hint` (~600 KB for a 150k-vocab model). Filled
-    /// in-place on every call.
-    bias_buf: Vec<f32>,
+    /// Scratch buffer for [`Self::compute_packed_mask`], holding the matcher
+    /// mask in its packed form: 32 token bits per `u32`, bit `i % 32` of word
+    /// `i / 32` for token `i`. Reused across calls so the per-token decode
+    /// path neither allocates nor walks the vocabulary. For a 248320-row
+    /// logits axis this is 31 KB against the 993 KB `Vec<f32>` bias the
+    /// previous implementation rebuilt and uploaded on every step.
+    packed_buf: Vec<u32>,
 }
 
 impl std::fmt::Debug for StructuredOutputConstraint {
@@ -395,6 +397,62 @@ impl StructuredOutputConstraint {
             }
         });
         Ok(&self.mask_buf)
+    }
+
+    /// Compute the same allow-set as [`Self::compute_mask`], but leave it in
+    /// the matcher's packed form: bit `i % 32` of word `i / 32` is token `i`.
+    ///
+    /// This is the form the per-token decode path wants. [`Self::compute_mask`]
+    /// exists to let callers inspect individual entries and is what the
+    /// integration tests drive; it costs one host write per vocabulary entry,
+    /// which for a 248k-row head is 248320 writes that
+    /// [`apply_structured_mask_to_logits`] then reads back to build an f32
+    /// bias of the same length. Keeping the mask packed removes both walks:
+    /// the matcher already stores its answer as a bitset, so this copies
+    /// `ceil(vocab_size_hint / 32)` words straight out of it.
+    ///
+    /// `vocab_size_hint` is the model's logits width, the same value
+    /// [`apply_structured_mask_to_logits`] takes. The returned slice is
+    /// always exactly `ceil(vocab_size_hint / 32)` words long, so it expands
+    /// to a mask that broadcasts onto the model's logits: bits past the
+    /// matcher's vocabulary read zero, which keeps a padded head row masked.
+    ///
+    /// Returns an empty slice if the matcher is already stopped, matching
+    /// [`Self::compute_mask`]. Callers are expected to short-circuit on
+    /// `is_stopped()` first; this is defence in depth.
+    pub fn compute_packed_mask(
+        &mut self,
+        vocab_size_hint: usize,
+    ) -> Result<&[u32], StructuredOutputError> {
+        if self.matcher.is_stopped() {
+            self.packed_buf.clear();
+            return Ok(&self.packed_buf);
+        }
+
+        let vob = self.matcher.compute_mask_or_eos().map_err(|e| {
+            // Verbose llguidance details go to server logs only.
+            tracing::error!("structured-output compute_mask_or_eos failed: {e}");
+            StructuredOutputError::Matcher("compute_mask failed".to_string())
+        })?;
+
+        if let Some(err) = self.matcher.get_error() {
+            tracing::error!("structured-output matcher error after compute_mask: {err}");
+            return Err(StructuredOutputError::Matcher(
+                "matcher entered error state".to_string(),
+            ));
+        }
+
+        // `compute_mask` drops every entry at or past `self.vocab_size`, and a
+        // bitset shorter than that simply has no bit to read. Taking the
+        // smaller of the two reproduces that rule exactly.
+        let matcher_vocab = self.vocab_size.min(vob.len());
+        pack_mask_words(
+            vob.as_slice(),
+            matcher_vocab,
+            vocab_size_hint,
+            &mut self.packed_buf,
+        );
+        Ok(&self.packed_buf)
     }
 
     /// Advance the matcher state by the just-sampled token.
@@ -678,11 +736,12 @@ fn build_constraint(
         tok_env,
         lazy,
         mask_buf: Vec::with_capacity(vocab_size),
-        // The bias buffer is sized lazily on first call (vocab_size_hint
-        // depends on the model logits axis, which the constraint builder
-        // does not know about). Pre-reserving avoids reallocs on the
-        // first per-token call as well.
-        bias_buf: Vec::with_capacity(vocab_size),
+        // The packed buffer is sized lazily on first call: its width comes
+        // from `vocab_size_hint`, the model logits axis, which the constraint
+        // builder does not know about. Reserving the matcher's own word count
+        // covers the common case without a realloc on the first per-token
+        // call, and costs 1/32 of what the old f32 bias buffer reserved.
+        packed_buf: Vec::with_capacity(vocab_size.div_ceil(32)),
     })))
 }
 
@@ -859,6 +918,114 @@ pub fn build_constraint_from_response_format(
 // Logits-mask application
 // ---------------------------------------------------------------------------
 
+/// Bit position of each token inside its packed `u32` word, `0..32`.
+///
+/// Uploaded as a `u32[1, 32]` row and broadcast against the packed mask column
+/// so one shift expands every word into its 32 token bits at once. This is the
+/// same expansion MLX itself uses to unpack non-power-of-two quantized weights
+/// (see `bitwise_and(right_shift(w, arange(32, uint32)), 1)` in `dequantize`).
+const PACKED_MASK_BIT_POSITIONS: [u32; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+
+/// Copy a matcher bitset into `out`, sized and trimmed for a logits axis of
+/// `vocab_size_hint` tokens.
+///
+/// `src` is the matcher's own packed mask: bit `i % 32` of word `i / 32` is
+/// token `i`. `matcher_vocab` is the number of leading bits in `src` that name
+/// a real token; a bit at or past it is dropped, which is what keeps a padded
+/// head row masked. `out` ends up exactly `ceil(vocab_size_hint / 32)` words
+/// long, zero past the matcher's vocabulary, with the final partial word
+/// trimmed to its valid bit range so the matcher's own excess bits cannot leak
+/// in as spuriously allowed tokens.
+///
+/// This reproduces, in packed form, what `compute_mask` plus the old f32 bias
+/// fill computed one entry at a time: token `i` is allowed exactly when
+/// `i < min(matcher_vocab, vocab_size_hint)` and `src` has its bit set.
+fn pack_mask_words(src: &[u32], matcher_vocab: usize, vocab_size_hint: usize, out: &mut Vec<u32>) {
+    let n_words = vocab_size_hint.div_ceil(32);
+    out.clear();
+    out.resize(n_words, 0);
+
+    // A bit is only meaningful when it is inside the matcher's vocabulary,
+    // inside the model's logits axis, and actually backed by a source word.
+    let valid_bits = matcher_vocab.min(vocab_size_hint).min(src.len() * 32);
+    let full_words = valid_bits / 32;
+    let rem = valid_bits % 32;
+
+    // `full_words <= n_words` because `valid_bits <= vocab_size_hint`, and
+    // `full_words <= src.len()` because `valid_bits <= src.len() * 32`.
+    out[..full_words].copy_from_slice(&src[..full_words]);
+    if rem != 0 {
+        // `valid_bits` is not a word multiple here, so `full_words` is a
+        // strict index into both slices. Keep only the bits below it.
+        out[full_words] = src[full_words] & ((1u32 << rem) - 1);
+    }
+}
+
+/// Expand a packed mask into a `bool[1, vocab_size]` array on the device.
+///
+/// The packed words go up as a `u32[n_words, 1]` column and the bit positions
+/// as a `u32[1, 32]` row, so a single broadcast shift produces `[n_words, 32]`
+/// where element `(w, b)` carries bit `b` of word `w`. Row-major that is
+/// exactly token id `w * 32 + b`, so a reshape to one row and a trim to
+/// `vocab_size` recovers the mask in token order with no host-side unpacking
+/// and no per-token index table.
+///
+/// Only `ceil(vocab_size / 32) * 4` bytes cross the bus, 31 KB for a
+/// 248320-row head against the 993 KB the f32 bias needed.
+fn expand_packed_mask(
+    words: &[u32],
+    vocab_size: usize,
+) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    debug_assert_eq!(
+        words.len(),
+        vocab_size.div_ceil(32),
+        "the packed mask must cover exactly the logits width"
+    );
+    let n_words = words.len() as i32;
+    let packed = mlxcel_core::from_slice_u32(words, &[n_words, 1]);
+    let bit_pos = mlxcel_core::from_slice_u32(&PACKED_MASK_BIT_POSITIONS, &[1, 32]);
+    let one = mlxcel_core::from_slice_u32(&[1u32], &[1]);
+
+    // [n_words, 1] >> [1, 32] broadcasts to [n_words, 32]; masking with 1
+    // leaves the single bit that names token `w * 32 + b`.
+    let shifted = mlxcel_core::right_shift(&packed, &bit_pos);
+    let bits = mlxcel_core::bitwise_and(&shifted, &one);
+
+    let flat_len = n_words * 32;
+    let flat = mlxcel_core::reshape(&bits, &[1, flat_len]);
+    // `n_words * 32` overshoots `vocab_size` whenever the vocabulary is not a
+    // word multiple. Those trailing lanes are zero (see `pack_mask_words`), but
+    // the mask still has to match the logits width to broadcast.
+    let trimmed = if flat_len as usize == vocab_size {
+        flat
+    } else {
+        mlxcel_core::slice(&flat, &[0, 0], &[1, vocab_size as i32])
+    };
+
+    // The values here are already 0 or 1, so the cast is exact.
+    mlxcel_core::astype(&trimmed, mlxcel_core::dtype::BOOL)
+}
+
+/// Select `logits` where the packed mask allows a token and `-inf` where it
+/// does not.
+///
+/// `mlxcel_core::where_cond` promotes its two value operands to their common
+/// dtype, so pairing f16 or bf16 logits with an f32 `-inf` yields the same f32
+/// output the previous `add(logits, f32_bias)` produced, and an allowed logit
+/// passes through with the identical value it had.
+fn apply_packed_mask_to_logits(
+    words: &[u32],
+    vocab_size: usize,
+    logits: &mlxcel_core::MlxArray,
+) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let allowed = expand_packed_mask(words, vocab_size);
+    let neg_inf = mlxcel_core::from_slice_f32(&[f32::NEG_INFINITY], &[1]);
+    mlxcel_core::where_cond(&allowed, logits, &neg_inf)
+}
+
 /// Apply the structured-output mask to a 2-D `[1, vocab]` logits array.
 ///
 /// Returns a fresh array with `f32::NEG_INFINITY` written at every position
@@ -872,35 +1039,43 @@ pub fn build_constraint_from_response_format(
 /// the scheduler can transition the sequence to `Finished(Error)` rather
 /// than emit non-conforming output.
 ///
+/// # How the mask reaches the device
+///
+/// The matcher already answers as a bitset, so the mask stays packed all the
+/// way to the GPU: [`StructuredOutputConstraint::compute_packed_mask`] copies
+/// `ceil(vocab_size_hint / 32)` words out of it and [`expand_packed_mask`]
+/// turns those back into one bit per token with a broadcast shift, a mask and
+/// a cast. Nothing on the scheduler thread walks the vocabulary, and the
+/// per-step host-to-device copy is 1/32 of the f32 bias it replaces.
+///
+/// The result is the same array the previous additive bias produced.
+/// `where_cond` passes an allowed logit through untouched instead of adding
+/// `0.0` to it, which for IEEE floats is the same value, and writes the same
+/// `-inf` at every disallowed position.
+///
 /// # Vocab-size handling
 ///
-/// `vocab_size_hint` is the vocabulary size the model's logits axis
-/// exposes. The returned bias array has exactly `vocab_size_hint`
-/// entries so it broadcasts cleanly onto the model's logits — any other
-/// shape would trigger a hard FFI error inside `mlxcel_core::add`.
+/// `vocab_size_hint` is the vocabulary size the model's logits axis exposes.
+/// The mask is built with exactly `vocab_size_hint` entries so it broadcasts
+/// cleanly onto the model's logits; any other shape would trigger a hard FFI
+/// error inside `mlxcel_core::where_cond`.
 ///
 /// Two directions are possible:
 ///
 /// 1. `matcher_vocab >= vocab_size_hint`: the matcher carries entries
 ///    that the model cannot emit. Trailing matcher-only positions are
-///    silently dropped when building the bias; the sampler never sees
-///    them, so they cannot violate the schema.
+///    silently dropped when packing; the sampler never sees them, so they
+///    cannot violate the schema.
 /// 2. `matcher_vocab < vocab_size_hint`: rare, happens when the model
 ///    has padded its embedding table beyond the tokenizer's natural
-///    vocabulary. Positions in `[matcher_vocab, vocab_size_hint)` are
-///    conservatively masked out — an unknown token id can never satisfy
-///    the grammar.
+///    vocabulary. Positions in `[matcher_vocab, vocab_size_hint)` read a zero
+///    bit and are therefore masked out, conservatively: an unknown token id
+///    can never satisfy the grammar.
 pub fn apply_structured_mask_to_logits(
     constraint: &mut StructuredOutputConstraint,
     logits: &mlxcel_core::MlxArray,
     vocab_size_hint: usize,
 ) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>, StructuredOutputError> {
-    // Bias must broadcast onto the model's logits, so the bias length is
-    // pinned to `vocab_size_hint`. Anything the matcher allows beyond
-    // that is unreachable by the sampler (the model cannot emit a token
-    // id past its own logits axis); anything the matcher does NOT cover
-    // up to `vocab_size_hint` defaults to disallowed (conservative — an
-    // unknown id cannot satisfy the grammar).
     // A lazy grammar that has not triggered constrains nothing at all, so the
     // logits pass through untouched. This is not the same as an empty mask,
     // which below is (correctly) an error.
@@ -908,47 +1083,25 @@ pub fn apply_structured_mask_to_logits(
         return Ok(mlxcel_core::copy(logits));
     }
 
-    let vocab_size = vocab_size_hint;
-
-    // Compute the mask (borrows `constraint.mask_buf` mutably). Read out
-    // the count of in-range allowed bits, then drop the borrow before
-    // touching `constraint.bias_buf`.
-    {
-        let allowed = constraint.compute_mask()?;
-        let usable_allowed_count = allowed.iter().take(vocab_size).filter(|x| **x).count();
-        if usable_allowed_count == 0 {
-            // No legal continuation reachable by the sampler — surface
-            // as a clean error so the scheduler can stop the sequence
-            // with a 5xx-equivalent FinishReason::Error rather than
-            // silently emitting an arbitrary token.
-            return Err(StructuredOutputError::Matcher(
-                "structured-output matcher returned an empty mask: \
-                 no matcher-allowed token is reachable in the model's logits \
-                 vocabulary for the current constrained-decoding state."
-                    .to_string(),
-            ));
-        }
+    // Packed to the model's logits width, so every word this reads back is
+    // reachable by the sampler and the emptiness test below needs no separate
+    // bound. A stopped matcher yields an empty slice, which is all-zero and
+    // therefore takes the same error path.
+    let words = constraint.compute_packed_mask(vocab_size_hint)?;
+    if words.iter().all(|word| *word == 0) {
+        // No legal continuation reachable by the sampler. Surface it as a
+        // clean error so the scheduler can stop the sequence with a
+        // 5xx-equivalent FinishReason::Error rather than silently emitting an
+        // arbitrary token.
+        return Err(StructuredOutputError::Matcher(
+            "structured-output matcher returned an empty mask: \
+             no matcher-allowed token is reachable in the model's logits \
+             vocabulary for the current constrained-decoding state."
+                .to_string(),
+        ));
     }
 
-    // Build the bias from the now-populated `constraint.mask_buf`. We use
-    // the bias_buf directly (not via `bias_scratch`, which would conflict
-    // with the read of `mask_buf` since both alias `constraint`); resize
-    // in place and fill from the mask.
-    constraint.bias_buf.clear();
-    constraint.bias_buf.resize(vocab_size, 0.0);
-    let mask_len = constraint.mask_buf.len();
-    for (i, slot) in constraint.bias_buf.iter_mut().enumerate() {
-        // SAFETY of indexing: `mask_buf` was just (re-)sized to
-        // `constraint.vocab_size` by `compute_mask`, so the bounds check
-        // here matches what the previous `Vec<bool>`-returning version did.
-        let allowed = i < mask_len && constraint.mask_buf[i];
-        if !allowed {
-            *slot = f32::NEG_INFINITY;
-        }
-    }
-
-    let bias_arr = mlxcel_core::from_slice_f32(&constraint.bias_buf, &[1, vocab_size as i32]);
-    Ok(mlxcel_core::add(logits, &bias_arr))
+    Ok(apply_packed_mask_to_logits(words, vocab_size_hint, logits))
 }
 
 // ---------------------------------------------------------------------------
