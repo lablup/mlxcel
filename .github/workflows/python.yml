@@ -1,8 +1,9 @@
 # PR / push CI for the Python client package under python/. Runs ruff (lint +
-# format), mypy (type check), and pytest (unit + lifecycle tests). It needs
-# neither MLX nor the mlxcel binary, so it runs on plain ubuntu-latest and is
-# independent of the Rust CI in ci.yml. The e2e test is skipped here because it
-# requires a built binary (set MLXCEL_BIN to run it locally).
+# format), mypy (type check) once on the pinned interpreter, and pytest (unit
+# + lifecycle tests) across a floor/current/ceiling Python version matrix. It
+# needs neither MLX nor the mlxcel binary, so it runs on plain ubuntu-latest
+# and is independent of the Rust CI in ci.yml. The e2e test is skipped here
+# because it requires a built binary (set MLXCEL_BIN to run it locally).
 
 name: Python
 
@@ -22,8 +23,8 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: lint, type-check, test
+  lint:
+    name: lint, type-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -45,6 +46,25 @@ jobs:
 
       - name: Mypy
         run: mypy python/src
+
+  test:
+    name: test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev extras
+        run: python -m pip install --upgrade pip && pip install -e "python[dev]"
 
       - name: Pytest (unit + lifecycle)
         run: pytest python/tests -m "not e2e" -q
