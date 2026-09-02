@@ -2023,7 +2023,6 @@ pub(crate) fn apply_burst_thinking_budget(
 /// the token vectors + flag to call `donate_finished_sequence_cache`
 /// exactly as `finalize_completed` does for the classic
 /// path.
-#[allow(clippy::too_many_arguments)]
 fn finalize_burst_success(
     ctx: BurstContext<'_>,
     mut seq: SequenceInfo,

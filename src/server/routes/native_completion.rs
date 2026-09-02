@@ -33,7 +33,7 @@ use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::PrefillStats;
-use crate::server::model_provider::StopKind;
+use crate::server::model_provider::{SpeculativeStats, StopKind};
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options_with_live,
     resolve_server_max_tokens_with_live,
@@ -473,7 +473,7 @@ struct NativeOutcome<'a> {
     /// Drafter acceptance counters for the request (#1314); `None` unless a
     /// drafter executed at least one verify round, in which case `timings`
     /// carries none of the `draft_*` keys.
-    speculative: Option<crate::server::model_provider::SpeculativeStats>,
+    speculative: Option<SpeculativeStats>,
 }
 
 /// Assemble the b10621 native completion object.

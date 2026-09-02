@@ -174,16 +174,17 @@ pub struct ChatCompletionResponse {
     pub system_fingerprint: Option<String>,
     pub choices: Vec<ChatChoice>,
     pub usage: Usage,
-    /// Speculative acceptance for this request (issue #1314), the same
-    /// `draft_*` keys the native `/completion` `timings` block carries.
+    /// The b10621 `timings` block for this request (issue #1314), the same
+    /// object the native `/completion` route answers with, `draft_*` keys
+    /// included.
     ///
     /// Present only when a drafter executed at least one verify round, so a
     /// deployment that runs no drafter answers the byte-identical body it
-    /// always did. llama-server puts a `timings` object on its own OpenAI
-    /// chat responses too, which is why the field is spelled `timings` rather
-    /// than something mlxcel-specific.
+    /// always did. Built by
+    /// [`chat_timings`](super::native_completion::chat_timings), which owns
+    /// that rule.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timings: Option<super::native_completion::SpeculativeTimings>,
+    pub timings: Option<super::native_completion::NativeTimings>,
 }
 
 impl ChatCompletionResponse {
@@ -312,18 +313,18 @@ impl ChatCompletionResponse {
         self
     }
 
-    /// Attach this request's speculative acceptance counters as `timings`
-    /// (issue #1314). `None` leaves the key absent, which is the whole wire
-    /// shape of a non-speculative deployment. Chaining mirrors
-    /// [`Self::with_cached_tokens`].
+    /// Attach this request's b10621 `timings` block (issue #1314), as built by
+    /// [`chat_timings`](super::native_completion::chat_timings). `None` leaves
+    /// the key absent, which is the whole wire shape of a non-speculative
+    /// deployment. Chaining mirrors [`Self::with_cached_tokens`].
     ///
     /// Used by: chat.rs (non-streaming path)
     #[must_use]
-    pub fn with_speculative_timings(
+    pub fn with_timings(
         mut self,
-        stats: Option<&crate::server::model_provider::SpeculativeStats>,
+        timings: Option<super::native_completion::NativeTimings>,
     ) -> Self {
-        self.timings = stats.map(super::native_completion::SpeculativeTimings::from);
+        self.timings = timings;
         self
     }
 

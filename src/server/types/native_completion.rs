@@ -29,6 +29,8 @@
 
 use serde::Serialize;
 
+use crate::server::model_provider::{GenerationResult, SpeculativeStats};
+
 /// Why generation stopped, in b10621's vocabulary.
 ///
 /// Upstream emits this as a bare string on the `stop_type` field. `none`
@@ -58,9 +60,8 @@ pub enum StopType {
 /// client, and `draft_kind` names which of mlxcel's drafters served the
 /// request, which upstream has no equivalent concept for.
 ///
-/// Also the whole `timings` object on the OpenAI chat routes, which carry it
-/// only for a speculative request and so would otherwise report prompt and
-/// predicted rates that appear and vanish with the drafter.
+/// Flattened onto [`NativeTimings`], which is the whole `timings` object on the
+/// native routes and, through [`chat_timings`], on the OpenAI chat routes too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SpeculativeTimings {
     /// Draft tokens proposed across all rounds (b10621's `draft_n`).
@@ -75,8 +76,8 @@ pub struct SpeculativeTimings {
     pub draft_kind: &'static str,
 }
 
-impl From<&crate::server::model_provider::SpeculativeStats> for SpeculativeTimings {
-    fn from(stats: &crate::server::model_provider::SpeculativeStats) -> Self {
+impl From<&SpeculativeStats> for SpeculativeTimings {
+    fn from(stats: &SpeculativeStats) -> Self {
         Self {
             draft_n: stats.draft_n,
             draft_n_accepted: stats.draft_n_accepted,
@@ -169,13 +170,42 @@ impl NativeTimings {
     /// timing arithmetic that was measured against the pinned binary keeps one
     /// call shape and every existing caller and test reads unchanged.
     #[must_use]
-    pub fn with_speculative(
-        mut self,
-        stats: Option<&crate::server::model_provider::SpeculativeStats>,
-    ) -> Self {
+    pub fn with_speculative(mut self, stats: Option<&SpeculativeStats>) -> Self {
         self.speculative = stats.map(SpeculativeTimings::from);
         self
     }
+}
+
+/// The `timings` block an OpenAI chat response carries, or [`None`] for a
+/// request no drafter served (issue #1314).
+///
+/// b10621 puts a `timings` object on its own OpenAI chat responses, built from
+/// the same `result_timings` its native route uses, which is why the block here
+/// is the whole [`NativeTimings`] rather than the `draft_*` half alone: a client
+/// that probes for the key and then reads `predicted_per_second` off it has to
+/// find the key it expects, not a four-key object with none of them.
+///
+/// Where mlxcel still differs from upstream is presence, not content. Upstream
+/// emits the block on every completion; mlxcel emits it only for a request a
+/// drafter served, so a deployment that runs no drafter answers the body it
+/// always did. That difference is recorded against both chat routes in
+/// `compat/llama-server/b10621/routes.json`.
+///
+/// The field mapping is the native route's, so the two shapes report the same
+/// quantities for the same request.
+#[must_use]
+pub fn chat_timings(result: &GenerationResult) -> Option<NativeTimings> {
+    let stats = result.speculative.as_ref()?;
+    Some(
+        NativeTimings::new(
+            result.cached_tokens,
+            result.prompt_tokens,
+            result.prompt_eval_ms as f64,
+            result.completion_tokens,
+            result.generation_only_ms as f64,
+        )
+        .with_speculative(Some(stats)),
+    )
 }
 
 /// Apply b10621's `response_fields` projection to a finished native response

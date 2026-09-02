@@ -47,6 +47,7 @@ use mlxcel_core::sampling::{LogprobsConfig, SamplerState, TokenLogprobData};
 
 use super::generation_bounds::{BoundStop, GenerationBounds};
 use super::stop_matcher::StopMatcher;
+use crate::server::model_provider::SpeculativeStats;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::model_provider::{GenerateEvent, PrefillStats, TokenMeta};
 use crate::server::thinking_budget::ThinkingState;
@@ -594,7 +595,7 @@ impl SequenceInfo {
         &mut self,
         tokenizer: &crate::tokenizer::MlxcelTokenizer,
         cached_tokens: usize,
-        speculative: Option<crate::server::model_provider::SpeculativeStats>,
+        speculative: Option<SpeculativeStats>,
     ) -> crate::server::model_provider::GenerationResult {
         let state = std::mem::replace(
             &mut self.decode_state,

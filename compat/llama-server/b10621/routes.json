@@ -130,12 +130,18 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
-      "issue": 1441,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
+      "state": "by_design",
+      "issue": 1314,
+      "test": "src/server/routes/native_route_tests.rs::a_chat_completion_carries_the_timings_object_of_a_drafted_request",
+      "notes": "The OpenAI chat shape is answered on both spellings. #1314 added the b10621 `timings` object to the non-streaming body and to the streaming chunk that carries `finish_reason`, built from the same `result_timings` mapping the native route uses. What remains is the one difference in divergence, with its rationale and a pinning test.",
+      "divergence": [
+        "`timings` is present on a drafted request and absent otherwise, where b10621 emits its `timings` object on every chat completion (#1314). The object itself is upstream's: mlxcel answers the same `result_timings` block the native route answers with, `cache_n` through `predicted_per_second`, plus upstream's own optional `draft_n` / `draft_n_accepted` pair and the two mlxcel keys `draft_rounds` and `draft_kind` that the `POST /completion` entry records. Before #1314 the key was absent unconditionally, which this entry claimed as `supported` and should not have."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "Emitting the block unconditionally would change the response shape of every non-speculative deployment, which is a chat-route compatibility decision with its own blast radius rather than a side effect of adding acceptance reporting, and #1314 is scoped to the acceptance counters. Emitting the full upstream object when it is emitted at all is the half that was free: a b10621 client that probes for `timings` and reads `predicted_per_second` off it finds the key it expects, which a `draft_*`-only object would not have given it. The presence gate is therefore the whole remaining difference, and it is narrower than the one this entry carried before #1314.",
+        "revisit_if": "Emitting `timings` on every chat completion closes the difference entirely and is the natural follow-up; it needs an owner willing to change the non-speculative chat response shape, and a decision on whether `/v1/completions` moves with it, since upstream emits the block from the same OAI-compat builder there."
+      },
       "mlxcel": {
         "route": "POST /chat/completions"
       }
@@ -173,7 +179,7 @@
       "divergence": [
         "`generation_settings` reports 47 of b10621's 49 `task_params` keys: `backend_sampling` and `speculative.types` are omitted rather than invented, because mlxcel's sampler IS the backend graph with no CPU chain to switch to (`field:backend_sampling`) and mlxcel has no draft-model type to name. This is the omitted-rather-than-invented policy `GET /props` records (#1477).",
         "When generation ends while the stop matcher is still holding a partial stop-string match, mlxcel emits the held text as a final content frame so the streamed concatenation equals the non-streaming `content`; b10621 drops it from the stream and keeps it in the body. Measured on the pinned binary with `stop: [\" Paris.XYZ\"]` and `n_predict: 2`: the streamed concatenation is empty while the non-streaming `content` is ` Paris.` (#1477).",
-        "`timings` carries two keys b10621 has no analogue for on a drafted request, `draft_rounds` and `draft_kind` (#1314). Upstream's block ends at its optional `draft_n` / `draft_n_accepted` pair, which mlxcel reproduces verbatim and gates the same way; the two extra keys are additive and a client that reads only upstream's key set is unaffected. They exist because the pair alone cannot answer either question an operator tuning `--draft-max` asks: the mean accepted length per round needs the round count, and mlxcel has three drafters (`dflash`, `mtp`, `internal-mtp`) where upstream has one draft-model concept and so never had to name which one ran."
+        "`timings` carries two keys b10621 has no analogue for on a drafted request, `draft_rounds` and `draft_kind` (#1314). Upstream's block ends at its optional `draft_n` / `draft_n_accepted` pair, which mlxcel reproduces verbatim and gates the same way; the two extra keys are additive and a client that reads only upstream's key set is unaffected. They exist because the pair alone cannot answer either question an operator tuning `--draft-max` asks: the mean accepted length per round needs the round count, and mlxcel serves drafted requests under more than one drafter (`dflash` and `mtp` today, from a `DrafterKind` set that also names `internal-mtp`, which resolves to the classic dispatch and so reports nothing) where upstream has one draft-model concept and so never had to name which one ran."
       ],
       "rationale": {
         "kind": "policy",
@@ -199,7 +205,7 @@
       "divergence": [
         "`generation_settings` reports 47 of b10621's 49 `task_params` keys: `backend_sampling` and `speculative.types` are omitted rather than invented, because mlxcel's sampler IS the backend graph with no CPU chain to switch to (`field:backend_sampling`) and mlxcel has no draft-model type to name. This is the omitted-rather-than-invented policy `GET /props` records (#1477).",
         "When generation ends while the stop matcher is still holding a partial stop-string match, mlxcel emits the held text as a final content frame so the streamed concatenation equals the non-streaming `content`; b10621 drops it from the stream and keeps it in the body. Measured on the pinned binary with `stop: [\" Paris.XYZ\"]` and `n_predict: 2`: the streamed concatenation is empty while the non-streaming `content` is ` Paris.` (#1477).",
-        "`timings` carries two keys b10621 has no analogue for on a drafted request, `draft_rounds` and `draft_kind` (#1314). Upstream's block ends at its optional `draft_n` / `draft_n_accepted` pair, which mlxcel reproduces verbatim and gates the same way; the two extra keys are additive and a client that reads only upstream's key set is unaffected. They exist because the pair alone cannot answer either question an operator tuning `--draft-max` asks: the mean accepted length per round needs the round count, and mlxcel has three drafters (`dflash`, `mtp`, `internal-mtp`) where upstream has one draft-model concept and so never had to name which one ran."
+        "`timings` carries two keys b10621 has no analogue for on a drafted request, `draft_rounds` and `draft_kind` (#1314). Upstream's block ends at its optional `draft_n` / `draft_n_accepted` pair, which mlxcel reproduces verbatim and gates the same way; the two extra keys are additive and a client that reads only upstream's key set is unaffected. They exist because the pair alone cannot answer either question an operator tuning `--draft-max` asks: the mean accepted length per round needs the round count, and mlxcel serves drafted requests under more than one drafter (`dflash` and `mtp` today, from a `DrafterKind` set that also names `internal-mtp`, which resolves to the classic dispatch and so reports nothing) where upstream has one draft-model concept and so never had to name which one ran."
       ],
       "rationale": {
         "kind": "policy",
@@ -387,12 +393,18 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
-      "issue": 1441,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
-      "divergence": [],
-      "rationale": null,
+      "state": "by_design",
+      "issue": 1314,
+      "test": "src/server/routes/native_route_tests.rs::a_chat_completion_carries_the_timings_object_of_a_drafted_request",
+      "notes": "The OpenAI chat shape is answered on both spellings. #1314 added the b10621 `timings` object to the non-streaming body and to the streaming chunk that carries `finish_reason`, built from the same `result_timings` mapping the native route uses. What remains is the one difference in divergence, with its rationale and a pinning test.",
+      "divergence": [
+        "`timings` is present on a drafted request and absent otherwise, where b10621 emits its `timings` object on every chat completion (#1314). The object itself is upstream's: mlxcel answers the same `result_timings` block the native route answers with, `cache_n` through `predicted_per_second`, plus upstream's own optional `draft_n` / `draft_n_accepted` pair and the two mlxcel keys `draft_rounds` and `draft_kind` that the `POST /completion` entry records. Before #1314 the key was absent unconditionally, which this entry claimed as `supported` and should not have."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "Emitting the block unconditionally would change the response shape of every non-speculative deployment, which is a chat-route compatibility decision with its own blast radius rather than a side effect of adding acceptance reporting, and #1314 is scoped to the acceptance counters. Emitting the full upstream object when it is emitted at all is the half that was free: a b10621 client that probes for `timings` and reads `predicted_per_second` off it finds the key it expects, which a `draft_*`-only object would not have given it. The presence gate is therefore the whole remaining difference, and it is narrower than the one this entry carried before #1314.",
+        "revisit_if": "Emitting `timings` on every chat completion closes the difference entirely and is the natural follow-up; it needs an owner willing to change the non-speculative chat response shape, and a decision on whether `/v1/completions` moves with it, since upstream emits the block from the same OAI-compat builder there."
+      },
       "mlxcel": {
         "route": "POST /v1/chat/completions"
       }

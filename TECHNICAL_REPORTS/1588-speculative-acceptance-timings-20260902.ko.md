@@ -11,7 +11,7 @@
 
 ## 요약
 
-drafter가 요청을 처리하면 스케줄러는 이미 그 요청의 verify 라운드 수와 제안/수용된 draft 토큰 총계를 계산해 놓고, 세 값 모두를 `tracing` 로그 한 줄에 버렸다. 클라이언트는 자기 요청에서 speculation이 도움이 됐는지 알 방법이 없었다. `--draft-max` / `--draft-block-size`를 튜닝하는 운영자와 speculative/classic 경로를 A/B 하는 클라이언트 모두 정확히 그 값을 필요로 한다. PR #1588은 이 카운터를 `GenerationResult`에 실어, native `/completion`의 `timings` 객체에 llama-server가 쓰는 이름 그대로 `draft_n` / `draft_n_accepted`를 얹고 mlxcel 확장 키 두 개(`draft_rounds`, `draft_kind`)를 나란히 두며, `/v1/chat/completions`에는 최상위 `timings` 객체로 노출한다. 이 블록은 verify 라운드가 실제로 돌았을 때만 나타난다. "drafter가 없음"과 "drafter가 하나도 수용 못 함"이 0의 나열로 뭉개지지 않고 구분된 채로 남는다.
+drafter가 요청을 처리하면 스케줄러는 이미 그 요청의 verify 라운드 수와 제안/수용된 draft 토큰 총계를 계산해 놓고, 세 값 모두를 `tracing` 로그 한 줄에 버렸다. 클라이언트는 자기 요청에서 speculation이 도움이 됐는지 알 방법이 없었다. `--draft-max` / `--draft-block-size`를 튜닝하는 운영자와 speculative/classic 경로를 A/B 하는 클라이언트 모두 정확히 그 값을 필요로 한다. PR #1588은 이 카운터를 `GenerationResult`에 실어, native `/completion`의 `timings` 객체에 llama-server가 쓰는 이름 그대로 `draft_n` / `draft_n_accepted`를 얹고 mlxcel 확장 키 두 개(`draft_rounds`, `draft_kind`)를 나란히 둔다. `/v1/chat/completions`도 같은 객체를 최상위 `timings`로 갖는데, b10621이 자신의 OpenAI chat 응답에 `timings` 블록을 얹는 자리가 바로 거기다. 이 블록은 verify 라운드가 실제로 돌았을 때만 나타난다. "drafter가 없음"과 "drafter가 하나도 수용 못 함"이 0의 나열로 뭉개지지 않고 구분된 채로 남는다.
 
 ---
 
@@ -50,7 +50,9 @@ drafter가 요청을 처리하면 스케줄러는 이미 그 요청의 verify �
 
 **보안.** 새로 파싱하는 입력도, 추가된 요청 필드도 없다. 응답 쪽 write-only 변경이다. 카운터는 서버 자신의 라운드 루프에서 나온 정수이고 요청을 식별할 만한 정보를 담지 않으며, 클라이언트가 이미 제어하는 샘플링 파라미터 이상으로 영향을 줄 수 없다. 짚어볼 만한 정보 노출 지점은 `draft_kind`가 배포 설정을 흘리는가인데, 이 필드는 고정된 세 drafter 계열 중 하나를 가리키고 `GET /props`가 이미 `speculative` 아래에서 draft 모델 basename, kind override, `n_max`를 보고하고 있으므로 그 엔드포인트가 노출하지 않던 것을 노출하지는 않는다.
 
-**성능.** 지켜야 할 쪽은 비speculative 경로다. `--draft-model` 없이 뜬 배포에서는 모든 요청이 그 경로를 탄다. `SpeculativeStats`는 머신 워드 4개 크기의 `Copy` 타입이고, `take_generation_result`에 늘어난 것은 classic 호출부가 `None`으로 넘기는 `Option` 파라미터 하나뿐이라 `None`을 구조체 필드로 옮기는 것이 전부다. 토큰 단위 경로에는 할당도 clone도 분기도 없다. 값은 finalize에서 한 번, 어차피 요약을 손에 쥐고 있던 코드가 만든다. speculative 경로들도 정책 프로파일용으로 이미 읽던 `Copy` 요약을 읽으므로 추가 작업이 없다.
+**성능.** 지켜야 할 쪽은 비speculative 경로다. `--draft-model` 없이 뜬 배포에서는 모든 요청이 그 경로를 탄다. `SpeculativeStats`는 머신 워드 4개 크기의 `Copy` 타입이고, `take_generation_result`에 늘어난 것은 classic 호출부가 `None`으로 넘기는 `Option` 파라미터 하나뿐이라 `None`을 구조체 필드로 옮기는 것이 전부다. 토큰 단위 경로에 추가되는 할당도 clone도 분기도 없다. 값은 finalize에서 한 번, 어차피 요약을 손에 쥐고 있던 코드가 만든다. speculative 경로들도 정책 프로파일용으로 이미 읽던 `Copy` 요약을 읽으므로 추가 작업이 없다.
+
+토큰 단위로 측정 가능한 차이가 하나 있고, 얼버무리기보다 짚어 두는 편이 낫다. `GenerateEvent::Done`은 `GenerationResult`를 박싱 없이 담으므로 enum의 크기가 그 arm으로 정해지고, 응답 채널로 흐르는 모든 `GenerateEvent::Token`이 이제 32바이트를 더 실어 나른다. 기존 enum 크기의 10분의 1 정도이고, 수백 마이크로초 단위인 디코드 스텝에 견주면 무시할 수 있다. `Done` arm을 박싱하면 이 증가분도 사라지고 원래 있던 크기도 줄지만, 그것은 더 크고 별개인 변경이다(후속 조치 참조).
 
 **정확성.** 커버리지 주장을 검증 가능하게 만드는 것이 이 단일 합류 지점이다. MLX 스케줄러의 모든 응답은 `take_generation_result`가 만들고, 따라서 파라미터는 다섯 호출부 각각에서 값이 주어지거나 명시적으로 `None`이며, 어떤 경로가 조용히 빠져나갈 제3의 선택지가 없다.
 
@@ -82,9 +84,15 @@ mlxcel 키 두 개는 취향이 아니라 근거가 필요했다. `draft_rounds`
 
 에픽 #1431의 규칙에 따라 이 차이는 `notes`의 자유 서술이 아니라 `compat/llama-server/b10621/routes.json`의 두 native 라우트 항목에 검사되는 `divergence` 항목으로, 근거와 재검토 조건을 붙여 기록했다. 같은 편집에서 항목 산문의 영구 차이 개수를 둘에서 셋으로 고쳐, 기계가 검사하는 배열과 그 옆의 산문이 어긋날 수 없게 했다.
 
-### 3.5 chat의 `timings`는 draft 블록만 담는다
+### 3.5 chat의 `timings`는 draft 절반이 아니라 upstream의 블록 전체다
 
-llama-server는 자신의 OpenAI chat 응답에도 `timings` 객체를 얹는다. 필드 이름을 mlxcel 고유어가 아니라 `timings`로 정한 이유다. mlxcel 쪽은 draft 키 네 개만, 그것만 담는다. 아홉 키짜리 전체 블록을 내보내면 객체 전체가 speculation 활성 여부로 게이팅되는 탓에 prompt와 predicted 비율까지 drafter를 따라 나타났다 사라진다. 무관한 배포 설정에 따라 깜빡이는 wire shape는 아예 없거나 완전하거나 둘 중 하나인 쪽보다 나쁘다.
+llama-server는 자신의 OpenAI chat 응답에도 `timings` 객체를 얹고, 그 객체는 native 라우트가 쓰는 `result_timings`와 같은 것에서 만들어진다. 필드 이름을 mlxcel 고유어가 아니라 `timings`로 정한 이유다.
+
+첫 구현은 `draft_*` 키 네 개만 담았다. 객체 전체가 speculation 활성 여부로 게이팅되므로 아홉 개 기본 키까지 drafter를 따라 나타났다 사라진다는 것이 근거였다. 리뷰가 그 형태의 더 날카로운 귀결을 짚었다. `if (res.timings) show(res.timings.predicted_per_second)`처럼 쓰인 b10621 클라이언트는 이전에는 항상 부재 분기를 탔는데, 이제 존재 분기를 타고 `undefined`를 읽는다. upstream이 이미 정의해 둔 키 아래의 부분 객체는 키가 아예 없는 것보다 나쁘고, 깜빡임 논거는 두 형태를 구별하지 못한다. 어느 쪽이든 존재 여부는 게이팅되기 때문이다.
+
+그래서 이 블록은 upstream의 객체 전체, `cache_n`부터 `predicted_per_second`까지에 flatten된 draft 절반을 더한 것이다. 이것을 만드는 `chat_timings` 함수 하나가 존재 규칙도 함께 소유한다. 남은 차이는 내용이 아니라 존재다. upstream은 모든 chat completion에 블록을 얹고 mlxcel은 drafter가 처리한 요청에만 얹는데, 무조건 얹으면 모든 비speculative 배포의 응답 형태가 바뀌기 때문이다. 그것은 수용 통계를 추가한 부수 효과가 아니라 자체 파급 범위를 가진 chat 라우트 호환성 결정이다.
+
+매니페스트의 두 chat 라우트 항목은 `divergence`가 빈 `supported`에서, 그 차이와 근거와 재검토 조건을 담은 `by_design`으로 옮겼다. 두 항목은 `timings`를 전혀 내보내지 않으면서 `supported`를 주장하고 있었으니 이 변경 이전부터 이미 틀린 주장이었다. #1314이 그 주장을 사실로 만든 이슈이고, 그래서 지금 두 항목에 기록된 이슈이자 `pin.json`의 routes shard 소유자 목록에 추가된 번호이기도 하다.
 
 ### 3.6 `NativeTimings`에 `Option` 필드 네 개가 아니라 flatten
 
@@ -116,7 +124,7 @@ DFlash 드라이버의 반환 타입은 3원소 튜플에서 이름 있는 `DFla
 
 ### 4.4 wire
 
-`SpeculativeTimings`(`src/server/types/native_completion.rs`)는 `draft_n`, `draft_n_accepted`, `draft_rounds`, `draft_kind` 순으로, upstream 쌍을 앞에 두고 직렬화한다. 이 타입은 `NativeTimings`에 flatten되고, `ChatCompletionResponse`와 `ChatCompletionChunk`에서는 `timings` 객체 전체가 된다. 두 타입 모두 `#[serde(skip_serializing_if = "Option::is_none")] timings` 필드와, 기존 `with_cached_tokens` 스타일의 `with_speculative_timings` 빌더를 갖는다.
+`SpeculativeTimings`(`src/server/types/native_completion.rs`)는 `draft_n`, `draft_n_accepted`, `draft_rounds`, `draft_kind` 순으로, upstream 쌍을 앞에 두고 직렬화하며, `NativeTimings`의 아홉 기본 키 뒤에 flatten된다. `ChatCompletionResponse`와 `ChatCompletionChunk`는 `#[serde(skip_serializing_if = "Option::is_none")] timings: Option<NativeTimings>` 필드와, 기존 `with_cached_tokens` 스타일의 `with_timings` 빌더를 갖는다. 값은 `chat_timings`가 채우는데, 이 함수 하나가 두 형태 모두에 대해 "drafter가 처리한 요청에만"이라는 규칙을 소유한다.
 
 라우트 배선은 이렇다. `NativeOutcome`에 `speculative` 멤버가 생겨서, native 비스트리밍 본문과 스트리밍 최종 프레임이 원래 공유하던 `build_native_response` 한 함수를 통해 만들어지고 서로 어긋날 수 없다. 토큰별 `timings_per_token` 프레임은 손대지 않아 기본 아홉 키만 담는다. chat 라우트에서는 비스트리밍 반환 네 지점과 스트림의 finish 청크에 블록을 붙인다.
 
@@ -132,7 +140,11 @@ DFlash 드라이버의 반환 타입은 3원소 튜플에서 이름 있는 `DFla
 
 llama-server의 `draft_n` 철자를 맞추면서 무조건 내보냈다면 엄격한 클라이언트는 여전히 깨졌을 것이다. upstream의 이 키는 라운드 1 미만에서 아예 없고, 클라이언트는 키의 존재 자체를 신호로 다룰 수 있기 때문이다. 게이트 재현은 이름 재현만큼 핵심이었다.
 
-### 5.3 뒤늦게 찾은 합류점이 그것을 대체하는 계획보다 값지다
+### 5.3 생태계가 이미 정의한 키 아래의 부분 객체는 키가 없는 것보다 나쁘다
+
+chat 블록의 첫 구현은 `draft_*` 키 네 개만 담았고, 그것이 보수적으로 보였다. 키가 적고 표면이 작고 배포 설정을 따라 깜빡이는 비율 값도 없다. 실제로는 반대였다. `timings`는 b10621 클라이언트가 이미 존재를 확인하는 키이고, 그런 클라이언트는 하나같이 기본 키 중 하나를 그 위에서 읽는다. 기본 키 없이 그 키만 내보내면 멀쩡하던 부재 분기가 살아 있는 `undefined`로 바뀐다. 교훈은 이 필드를 넘어 일반화된다. 다른 구현이 이미 정의한 키를 추가할 때는 그들이 채우는 대로 채우거나 다른 이름을 고르는 수밖에 없다. 절반만 채우는 것이 이전까지 멀쩡했던 클라이언트를 깨뜨리는 유일한 선택지다.
+
+### 5.4 뒤늦게 찾은 합류점이 그것을 대체하는 계획보다 값지다
 
 이슈의 계획은 `take_generation_result`를 단일 finalize 합류점으로 만든 리팩터링보다 앞선 것이라, 그대로 따랐다면 두 번째 `finish_with_cache` 변형과 세 곳의 관통 작업이 나왔을 것이다. 트리를 먼저 확인하니 파라미터 하나에 호출부 다섯 곳이 됐고, 그중 셋은 단어 하나 수정이다. 일반화하면 이렇다. 이슈의 구현 계획이 병렬적인 호출부 여러 곳을 지목하면, 무엇을 관통시키기 전에 그것들이 그동안 하나로 합쳐지지 않았는지 확인한다.
 
@@ -163,11 +175,11 @@ llama-server의 `draft_n` 철자를 맞추면서 무조건 내보냈다면 엄�
 
 | 항목 | 값 |
 |---|---|
-| 변경 파일 | 25 |
-| 추가 라인 | 약 769 |
-| 삭제 라인 | 약 34 |
+| 변경 파일 | 27 |
+| 추가 라인 | 약 950 |
+| 삭제 라인 | 약 90 |
 | 신규 공개 타입 | 2 (`SpeculativeStats`, `SpeculativeTimings`) |
-| 신규 테스트 | 10 |
+| 신규 테스트 | 12 |
 
 ### 카테고리별 변경
 
@@ -175,7 +187,7 @@ llama-server의 `draft_n` 철자를 맞추면서 무조건 내보냈다면 엄�
 - **wire 타입**: `src/server/types/native_completion.rs`, `src/server/types/response.rs`, `src/server/types/stream.rs`.
 - **라우트**: `src/server/routes/native_completion.rs`, `src/server/routes/chat.rs`, `src/server/router_front.rs`(의도적 미지원을 문서화한 것뿐).
 - **테스트**: `src/server/types/native_completion_tests.rs`, `src/server/routes/native_route_tests.rs`, `src/server/batch/speculative_slice_tests.rs`, `src/server/model_provider_test_support.rs`, 그리고 기존 호출부의 기계적인 `None` 추가.
-- **문서 및 매니페스트**: `docs/speculative-acceptance.md`, `docs/llama-server-compat.md`, `compat/llama-server/b10621/routes.json`.
+- **문서 및 매니페스트**: `docs/speculative-acceptance.md`, `docs/llama-server-compat.md`, `compat/llama-server/b10621/routes.json`(native 라우트 두 항목 보완, chat 라우트 두 항목을 `by_design`으로 이동), `compat/llama-server/b10621/pin.json`(routes shard 소유자).
 
 ---
 
@@ -187,6 +199,8 @@ llama-server의 `draft_n` 철자를 맞추면서 무조건 내보냈다면 엄�
 
 ### 향후 개선 사항
 
+- upstream처럼 모든 chat completion에 `timings`를 내보내면 chat 라우트의 마지막 차이가 닫힌다. 비speculative chat 응답 형태가 바뀌므로 담당자가 필요하고, upstream이 같은 OAI-compat 빌더에서 `/v1/completions`에도 블록을 내보내므로 그쪽을 함께 옮길지도 결정해야 한다.
+- `GenerateEvent::Done(Box<GenerationResult>)`로 바꾸면 이번에 토큰당 전송에 더해진 32바이트가 사라지고 원래 있던 약 250바이트도 줄어든다. 이번 범위 밖이고 별도 이슈로 다룰 만하다.
 - 분리형 라우터 프런트는 아무것도 보고하지 않는다(4.3). 핸드오프 프로토콜로 카운터를 실어 나르면 마지막 서빙 경로가 닫히지만 프로토콜 필드가 하나 늘어난다.
 - B>1 배치 burst는 라운드 루프가 행별 수용 카운터를 내놓아야 무엇이든 보고할 수 있다. 오늘 기준 기본 비활성이므로 급하지 않다.
 - 토큰별 draft / verify 시간(`draft_time_ms`, `verify_time_ms`)의 wire 노출은 #1314에서 명시적으로 범위 밖이었다. 진단값에는 이미 둘 다 있으므로 노출할 근거가 생기면 배선은 준비되어 있다.
@@ -221,7 +235,7 @@ llama-server의 `draft_n` 철자를 맞추면서 무조건 내보냈다면 엄�
 - `a_zero_round_speculative_run_reports_no_draft_block`, `every_drafter_kind_renders_its_canonical_name`: 게이트와 세 정규 이름. 오늘 기준 도달 가능한 것은 셋 중 둘이다. `internal-mtp`은 classic dispatch로 해석되고 burst 게이트가 그것을 거절하므로, 그 kind로 speculative 처리되는 요청이 없고 블록을 보고하는 요청도 없다.
 - `the_done_result_carries_the_acceptance_counters_of_a_drafted_request`: 실제 2라운드 제너레이터 스크립트를 돌려 `Done` 이벤트가 라운드 루프가 만든 카운터를 싣는지, `draft_rounds > 0`과 `0 < draft_n_accepted <= draft_n`이 성립하는지 확인.
 - `the_done_result_reports_no_acceptance_for_an_undrafted_finish`: classic 경로의 계약.
-- 라우트 레벨: `/completion`, `/completions`, `/v1/chat/completions`의 네 키. drafter 없을 때 두 형태 모두에서의 부재. chat 스트림에서 `finish_reason` 청크만 `timings`를 싣는다는 점.
+- 라우트 레벨: `/completion`, `/completions`, `/v1/chat/completions`의 네 키와 chat 본문의 열세 키 순서. drafter 없을 때 두 형태 모두에서의 부재. chat 스트림에서 `finish_reason` 청크만 `timings`를 싣는다는 점(스크립트 provider로 실제 콘텐츠 프레임이 있는 스트림을 만들어 부정 절반이 실효를 갖게 함). drafted native 스트림의 `timings_per_token` 부분 프레임이 정확히 아홉 기본 키만 담고 최종 프레임이 열세 개를 담는다는 점.
 
 ### C. Merge 이후 검증 (오케스트레이터)
 

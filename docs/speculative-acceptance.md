@@ -189,7 +189,7 @@ On the native `/completion` and `/completions` routes the counters ride the
 existing `timings` object:
 
 ```json
-"timings": {"cache_n": 0, "prompt_n": 12, "...": "...", "predicted_n": 64,
+"timings": {"cache_n": 0, "prompt_n": 12, "predicted_n": 64, "...": "...",
             "draft_n": 72, "draft_n_accepted": 55, "draft_rounds": 9,
             "draft_kind": "dflash"}
 ```
@@ -201,9 +201,17 @@ that already reads llama-server timings reads mlxcel's unchanged.
 round count nor a drafter-kind concept, and without the round count the mean
 accepted length per round is not recoverable from the pair.
 
-`/v1/chat/completions` carries the same four keys as a top-level `timings`
-object, on the non-streaming response and on the streaming chunk that carries
-`finish_reason`. Only that chunk carries it: the counters are the run's totals,
+`/v1/chat/completions` carries the whole block as a top-level `timings` object,
+on the non-streaming response and on the streaming chunk that carries
+`finish_reason`. b10621 puts a `timings` object on its own OpenAI chat
+responses, built from the same struct its native route uses, so mlxcel's is that
+same object rather than the `draft_*` half alone: a client that probes for the
+key and then reads `predicted_per_second` off it finds the key it expects. The
+one difference that remains is presence, upstream emits the block on every chat
+completion while mlxcel emits it only for a drafted request, and it is recorded
+against both chat routes in `compat/llama-server/b10621/routes.json`.
+
+Only the `finish_reason` chunk carries it: the counters are the run's totals,
 and a mid-stream frame reporting a running `draft_n` would be reporting a total
 that is not one yet. For the same reason the native route's per-token
 `timings_per_token` frames carry the nine base keys and none of the four.

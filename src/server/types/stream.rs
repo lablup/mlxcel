@@ -98,12 +98,13 @@ pub struct ChatCompletionChunk {
     /// is true). Omitted from all other chunks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::response::Usage>,
-    /// Speculative acceptance for this request (issue #1314). Attached to the
-    /// finish chunk only, where the totals are final: a mid-stream chunk that
-    /// carried a running `draft_n` would read as a total and be wrong. Absent
-    /// unless a drafter executed at least one verify round for the request.
+    /// The b10621 `timings` block for this request (issue #1314). Attached to
+    /// the finish chunk only, where the totals are final: a mid-stream chunk
+    /// that carried a running `draft_n` would read as a total and be wrong.
+    /// Absent unless a drafter executed at least one verify round for the
+    /// request.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timings: Option<super::native_completion::SpeculativeTimings>,
+    pub timings: Option<super::native_completion::NativeTimings>,
 }
 
 impl ChatCompletionChunk {
@@ -210,19 +211,20 @@ impl ChatCompletionChunk {
         }
     }
 
-    /// Attach this request's speculative acceptance counters as `timings`
-    /// (issue #1314), for the finish chunk that closes a streamed response.
+    /// Attach this request's b10621 `timings` block (issue #1314), as built by
+    /// [`chat_timings`](super::native_completion::chat_timings), to the finish
+    /// chunk that closes a streamed response.
     ///
     /// `None` leaves the key absent, so a non-speculative stream is unchanged
     /// frame for frame.
     ///
     /// Used by: chat.rs (streaming path)
     #[must_use]
-    pub fn with_speculative_timings(
+    pub fn with_timings(
         mut self,
-        stats: Option<&crate::server::model_provider::SpeculativeStats>,
+        timings: Option<super::native_completion::NativeTimings>,
     ) -> Self {
-        self.timings = stats.map(super::native_completion::SpeculativeTimings::from);
+        self.timings = timings;
         self
     }
 

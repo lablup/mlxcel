@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-When a drafter serves a request, the scheduler already computes that request's verify rounds and its proposed and accepted draft-token totals, and then dropped all three into a `tracing` line. A client had no way to learn whether speculation helped its own request, which is what an operator tuning `--draft-max` / `--draft-block-size` and a client A/B-ing the speculative and classic paths both need. PR #1588 carries the counters on `GenerationResult` and surfaces them on the native `/completion` `timings` object under llama-server's own `draft_n` / `draft_n_accepted` names, plus two mlxcel keys (`draft_rounds`, `draft_kind`), and as a top-level `timings` object on `/v1/chat/completions`. The block is present only when a verify round actually ran, so "no drafter" and "the drafter accepted nothing" stay distinguishable rather than collapsing into a row of zeros.
+When a drafter serves a request, the scheduler already computes that request's verify rounds and its proposed and accepted draft-token totals, and then dropped all three into a `tracing` line. A client had no way to learn whether speculation helped its own request, which is what an operator tuning `--draft-max` / `--draft-block-size` and a client A/B-ing the speculative and classic paths both need. PR #1588 carries the counters on `GenerationResult` and surfaces them on the native `/completion` `timings` object under llama-server's own `draft_n` / `draft_n_accepted` names, plus two mlxcel keys (`draft_rounds`, `draft_kind`). `/v1/chat/completions` gains the same object at the top level, which is where b10621 puts a `timings` block on its own OpenAI chat responses. The block is present only when a verify round actually ran, so "no drafter" and "the drafter accepted nothing" stay distinguishable rather than collapsing into a row of zeros.
 
 ---
 
@@ -50,7 +50,9 @@ The issue body pointed at `TimingInfo` in `src/server/types/response.rs:552` as 
 
 **Security.** No new input is parsed and no request field is added; the change is write-only on the response side. The counters are integers derived from the server's own round loop, carry nothing request-identifying, and cannot be influenced by a client beyond the sampling parameters it already controls. The one information-disclosure question worth asking is whether `draft_kind` leaks deployment configuration: it names one of three fixed drafter families, which `GET /props` already reports under `speculative` (draft model basename, kind override, `n_max`), so the field discloses nothing that endpoint did not.
 
-**Performance.** The non-speculative path is the one to protect, since it is every request on a deployment without `--draft-model`. `SpeculativeStats` is four machine words and `Copy`; `take_generation_result` gained one `Option` parameter that the classic call sites pass as `None`, which is a move of a `None` into a struct field. No allocation, no clone, no branch on the per-token path: the value is produced once, at finalize, by code that had the summary in hand anyway. The speculative paths read a `Copy` summary they were already reading for the policy profile, so they add no work either.
+**Performance.** The non-speculative path is the one to protect, since it is every request on a deployment without `--draft-model`. `SpeculativeStats` is four machine words and `Copy`; `take_generation_result` gained one `Option` parameter that the classic call sites pass as `None`, which is a move of a `None` into a struct field. No allocation, no clone and no branch are added on the per-token path: the value is produced once, at finalize, by code that had the summary in hand anyway. The speculative paths read a `Copy` summary they were already reading for the policy profile, so they add no work either.
+
+There is one measurable per-token delta, and it is worth naming rather than glossing. `GenerateEvent::Done` holds a `GenerationResult` unboxed, so the enum's size is set by that arm, and every `GenerateEvent::Token` moved through the response channel now carries 32 more bytes of padding: roughly a tenth of the enum's existing size, against a decode step measured in hundreds of microseconds. Boxing the `Done` arm would remove it and shrink the pre-existing size too, which is a bigger and separate change (Follow-up).
 
 **Correctness.** The single funnel is what makes the coverage claim checkable: every MLX-scheduler response is built by `take_generation_result`, and the parameter is therefore either supplied or explicitly `None` at each of its five call sites, with no third possibility for a path to silently fall through.
 
@@ -82,9 +84,15 @@ The two mlxcel keys needed a justification rather than a preference. `draft_roun
 
 Per epic #1431's rule, that difference is recorded as a checked `divergence` entry on both native route entries in `compat/llama-server/b10621/routes.json`, with its rationale and revisit condition, rather than as free text in `notes`. The entries' prose count of permanent differences was updated from two to three in the same edit, so the machine-checked array and the prose beside it cannot disagree.
 
-### 3.5 The chat `timings` object is the draft block alone
+### 3.5 The chat `timings` object is upstream's whole block, not the draft half
 
-llama-server puts a `timings` object on its own OpenAI chat responses, which is why the field is spelled `timings` rather than something mlxcel-specific. mlxcel's carries the four draft keys and only those. Emitting the full nine-key block would mean the prompt and predicted rates appear and vanish with the drafter, since the whole object is gated on speculation being active, and a wire shape that flickers with an unrelated deployment setting is worse than one that is either absent or complete.
+llama-server puts a `timings` object on its own OpenAI chat responses, built from the same `result_timings` its native route uses, which is why the field is spelled `timings` rather than something mlxcel-specific.
+
+The first cut carried only the four `draft_*` keys, on the reasoning that the nine base keys would appear and vanish with the drafter since the whole object is gated on speculation being active. Review found the sharper consequence of that shape: a b10621 client written as `if (res.timings) show(res.timings.predicted_per_second)` previously took the absent branch every time and would now take the present branch and read `undefined`. A partial object under a key upstream already defines is worse than no key at all, and the flicker argument does not distinguish the two shapes, because presence is gated either way.
+
+So the block is upstream's whole object, `cache_n` through `predicted_per_second` plus the flattened draft half, built by one `chat_timings` function that also owns the presence rule. What remains is a presence difference, not a content one: upstream emits the block on every chat completion, mlxcel only for a drafted request, because emitting it unconditionally changes the response shape of every non-speculative deployment and that is a chat-route compatibility decision with its own blast radius rather than a side effect of adding acceptance reporting.
+
+Both chat route entries in the manifest moved from `supported` with an empty `divergence` to `by_design` carrying that difference, its rationale and its revisit condition. They were claiming `supported` while emitting no `timings` at all, so the claim was already wrong before this change; #1314 is the issue that made it accurate, which is why it is also the issue now recorded against them and added to the routes shard's owner set in `pin.json`.
 
 ### 3.6 Flatten rather than four `Option` fields on `NativeTimings`
 
@@ -116,7 +124,7 @@ The default-off B>1 batched burst passes `None`: its round loops return per-row 
 
 ### 4.4 The wire
 
-`SpeculativeTimings` (`src/server/types/native_completion.rs`) serializes `draft_n`, `draft_n_accepted`, `draft_rounds`, `draft_kind` in that order, upstream's pair first. It flattens into `NativeTimings` and is the whole `timings` object on `ChatCompletionResponse` and `ChatCompletionChunk`, both of which gained `#[serde(skip_serializing_if = "Option::is_none")] timings` plus a `with_speculative_timings` builder in the style of the existing `with_cached_tokens`.
+`SpeculativeTimings` (`src/server/types/native_completion.rs`) serializes `draft_n`, `draft_n_accepted`, `draft_rounds`, `draft_kind` in that order, upstream's pair first, and flattens into `NativeTimings` after its nine base keys. `ChatCompletionResponse` and `ChatCompletionChunk` gained `#[serde(skip_serializing_if = "Option::is_none")] timings: Option<NativeTimings>` plus a `with_timings` builder in the style of the existing `with_cached_tokens`, filled from `chat_timings`, the one function that owns the "only for a drafted request" rule for both shapes.
 
 Route wiring: `NativeOutcome` gained a `speculative` member, so the native non-streaming body and the final streaming frame are built through the one `build_native_response` function they already shared and cannot drift. The per-token `timings_per_token` frames are untouched and carry the nine base keys only. On the chat route the block is attached at the four non-streaming return sites and on the finish chunk of a stream.
 
@@ -132,7 +140,11 @@ The temptation in a change like this is to make the fields non-optional and repo
 
 Matching llama-server's `draft_n` spelling while emitting it unconditionally would still have broken a strict client, because upstream's key is absent below one round and a client may treat presence as the signal. Reproducing the gate was as load-bearing as reproducing the name.
 
-### 5.3 A funnel found late is worth more than the plan it replaces
+### 5.3 A partial object under a key the ecosystem already defines is worse than no key
+
+The first cut of the chat block carried the four `draft_*` keys and nothing else, which read as conservative: fewer keys, less surface, no rates that flicker with a deployment setting. It was the opposite. `timings` is a key b10621 clients already probe for, and every one of them reads a base key off it. Emitting the key with none of those present converts a clean absent-branch into a live `undefined`. The lesson generalises past this field: when you add a key another implementation already defines, either fill it the way they do or pick a different name, because half-filling it is the only option that breaks a client which was previously fine.
+
+### 5.4 A funnel found late is worth more than the plan it replaces
 
 The issue's plan predated the refactor that made `take_generation_result` the single finalize funnel, and following it would have produced a second `finish_with_cache` variant plus three threaded call sites. Checking the tree first turned that into one parameter with five call sites, of which three are one-word edits. The general form: when an issue's implementation plan names several parallel call sites, check whether they have since been unified before threading anything through them.
 
@@ -163,11 +175,11 @@ The issue's plan predated the refactor that made `take_generation_result` the si
 
 | Metric | Value |
 |---|---|
-| Files changed | 25 |
-| Lines added | ~769 |
-| Lines removed | ~34 |
+| Files changed | 27 |
+| Lines added | ~950 |
+| Lines removed | ~90 |
 | New public types | 2 (`SpeculativeStats`, `SpeculativeTimings`) |
-| New tests | 10 |
+| New tests | 12 |
 
 ### Changes by Category
 
@@ -175,7 +187,7 @@ The issue's plan predated the refactor that made `take_generation_result` the si
 - **Wire types**: `src/server/types/native_completion.rs`, `src/server/types/response.rs`, `src/server/types/stream.rs`.
 - **Routes**: `src/server/routes/native_completion.rs`, `src/server/routes/chat.rs`, `src/server/router_front.rs` (documentation of the deliberate gap only).
 - **Tests**: `src/server/types/native_completion_tests.rs`, `src/server/routes/native_route_tests.rs`, `src/server/batch/speculative_slice_tests.rs`, `src/server/model_provider_test_support.rs`, plus mechanical `None` at existing call sites.
-- **Docs and manifest**: `docs/speculative-acceptance.md`, `docs/llama-server-compat.md`, `compat/llama-server/b10621/routes.json`.
+- **Docs and manifest**: `docs/speculative-acceptance.md`, `docs/llama-server-compat.md`, `compat/llama-server/b10621/routes.json` (the two native route entries amended, the two chat route entries moved to `by_design`), `compat/llama-server/b10621/pin.json` (routes shard owners).
 
 ---
 
@@ -187,6 +199,8 @@ The issue's plan predated the refactor that made `take_generation_result` the si
 
 ### Future Improvements
 
+- Emitting `timings` on every chat completion, as upstream does, would close the last chat-route difference. It changes the non-speculative chat response shape, so it needs an owner and a decision on whether `/v1/completions` moves with it, since upstream emits the block from the same OAI-compat builder there.
+- `GenerateEvent::Done(Box<GenerationResult>)` would remove the 32 bytes this change added to every per-token send, and shrink the roughly 250 bytes that were already there. Out of scope here, worth its own issue.
 - The disaggregated router front reports nothing (4.3). Carrying the counters over the handoff protocol would close the last serving path, at the cost of a protocol field.
 - The B>1 batched burst would need per-row acceptance counters out of its round loops before it could report anything. It is off by default today, so this is not urgent.
 - Per-token draft and verify timing on the wire (`draft_time_ms`, `verify_time_ms`) was explicitly out of scope for #1314. The diagnostics already carry both, so the plumbing exists if a case for exposing them appears.
@@ -221,7 +235,7 @@ The issue's plan predated the refactor that made `take_generation_result` the si
 - `a_zero_round_speculative_run_reports_no_draft_block` and `every_drafter_kind_renders_its_canonical_name`: the gate and the three canonical names. Only two of the three are reachable today: `internal-mtp` resolves to the classic dispatch, which the burst gate declines, so no request is served speculatively under it and none reports a block.
 - `the_done_result_carries_the_acceptance_counters_of_a_drafted_request`: drives the real two-round generator script and asserts the `Done` event carries the counters the round loop produced, with `draft_rounds > 0` and `0 < draft_n_accepted <= draft_n`.
 - `the_done_result_reports_no_acceptance_for_an_undrafted_finish`: the classic-path contract.
-- Route level: the four keys on `/completion`, `/completions` and `/v1/chat/completions`; their absence without a drafter on both shapes; and that only the `finish_reason` chunk of a chat stream carries `timings`.
+- Route level: the four keys on `/completion`, `/completions` and `/v1/chat/completions`, and the chat body's full thirteen-key order; their absence without a drafter on both shapes; that only the `finish_reason` chunk of a chat stream carries `timings`, asserted against a stream driven through the scripted provider so the negative half runs against real content frames; and that a drafted native stream's `timings_per_token` partial frames carry exactly the nine base keys while its final frame carries all thirteen.
 
 ### C. Post-merge validation (orchestrator)
 

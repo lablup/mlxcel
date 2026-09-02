@@ -602,11 +602,11 @@ pub(crate) async fn non_stream_chat_completion(
     });
 
     let cached_tokens = result.cached_tokens;
-    // Drafter acceptance counters for this request (#1314). Read out here
-    // because `result.text` is moved into one of the response shapes below;
-    // `SpeculativeStats` is `Copy`, so this costs nothing and stays available
-    // to every return path.
-    let speculative = result.speculative;
+    // The b10621 `timings` block for this request (#1314), or `None` when no
+    // drafter served it. Built here because `result.text` is moved into one of
+    // the response shapes below, so every return path needs the block resolved
+    // before that happens.
+    let timings = crate::server::types::native_completion::chat_timings(&result);
 
     // b10621 `--skip-chat-parsing` (issue #1447): force a pure content parser.
     // Everything the model emitted goes to `content` verbatim, reasoning and
@@ -626,7 +626,7 @@ pub(crate) async fn non_stream_chat_completion(
             )
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
             .with_florence2_result(florence2_result)
-            .with_speculative_timings(speculative.as_ref()),
+            .with_timings(timings.clone()),
         ));
     }
 
@@ -712,7 +712,7 @@ pub(crate) async fn non_stream_chat_completion(
                         shaped.reasoning_content,
                         reasoning_alias_field,
                     )
-                    .with_speculative_timings(speculative.as_ref()),
+                    .with_timings(timings.clone()),
                 ));
             }
         }
@@ -741,7 +741,7 @@ pub(crate) async fn non_stream_chat_completion(
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
             .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
             .with_florence2_result(florence2_result)
-            .with_speculative_timings(speculative.as_ref()),
+            .with_timings(timings.clone()),
         ));
     }
 
@@ -787,7 +787,7 @@ pub(crate) async fn non_stream_chat_completion(
         .with_cached_tokens(cached_tokens, prompt_cache_enabled)
         .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
         .with_florence2_result(florence2_result)
-        .with_speculative_timings(speculative.as_ref()),
+        .with_timings(timings.clone()),
     ))
 }
 
@@ -1723,7 +1723,12 @@ async fn stream_chat_completion(
             model_id_clone.clone(),
             finish_reason,
         )
-        .with_speculative_timings(result.as_ref().ok().and_then(|r| r.speculative.as_ref()));
+        .with_timings(
+            result
+                .as_ref()
+                .ok()
+                .and_then(crate::server::types::native_completion::chat_timings),
+        );
         let _ = finish_events.json(&finish);
 
         // Send usage chunk if requested (stream_options.include_usage)

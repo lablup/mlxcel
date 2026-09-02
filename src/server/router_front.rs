@@ -1920,6 +1920,10 @@ fn chat_chunk_usage(
 /// `ChatCompletionResponse` shape (`prompt_tokens`, `completion_tokens`,
 /// `total_tokens`); `completion_tokens` is the caller's already-resolved
 /// authoritative count (issue #398).
+///
+/// Like the streaming finish chunk it carries no `timings` block (#1314), for
+/// the same reason: the handoff outcome reports a generated-token count and no
+/// speculative acceptance counters.
 fn chat_completion_json(
     id: &str,
     model: &str,

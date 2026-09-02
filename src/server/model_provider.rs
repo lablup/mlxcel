@@ -327,7 +327,7 @@ pub struct SpeculativeStats {
 
 impl SpeculativeStats {
     /// Build the counters for a finished speculative run, or [`None`] when the
-    /// run executed no verify round.
+    /// run drafted nothing.
     ///
     /// A zero-round run is a request that finished inside prefill (immediate
     /// EOS, or `max_tokens == 1`): speculation never got a chance to help or
@@ -335,6 +335,13 @@ impl SpeculativeStats {
     /// accepted nothing. Omitting the block instead keeps "no drafter" and
     /// "drafter accepted nothing" distinguishable, which is the whole point of
     /// reporting acceptance at all.
+    ///
+    /// Both counts are required to be non-zero rather than the round count
+    /// alone. b10621 gates its own `draft_n` / `draft_n_accepted` pair on
+    /// `draft_n > 0`, and mlxcel reproduces that gate rather than one that
+    /// merely coincides with it: every round both drafters run today proposes
+    /// at least one token, so the two conditions agree, and requiring both
+    /// keeps them agreeing if a future drafter can propose an empty block.
     #[must_use]
     pub(crate) fn from_counts(
         draft_kind: DrafterKind,
@@ -342,7 +349,7 @@ impl SpeculativeStats {
         draft_n: usize,
         draft_n_accepted: usize,
     ) -> Option<Self> {
-        (draft_rounds > 0).then_some(Self {
+        (draft_rounds > 0 && draft_n > 0).then_some(Self {
             draft_kind,
             draft_rounds,
             draft_n,

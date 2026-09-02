@@ -25,7 +25,7 @@ impl ModelProvider {
     /// `timings` block carries for a speculative request.
     pub(crate) fn recording_for_route_tests_with_speculative(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
-        speculative: crate::server::model_provider::SpeculativeStats,
+        speculative: SpeculativeStats,
     ) -> Self {
         Self::recording_for_route_tests_inner(options_tx, false, usize::MAX, Some(speculative))
     }
@@ -34,7 +34,7 @@ impl ModelProvider {
         options_tx: mpsc::Sender<ServerGenerateOptions>,
         single_stream_admission: bool,
         max_queue_depth: usize,
-        speculative: Option<crate::server::model_provider::SpeculativeStats>,
+        speculative: Option<SpeculativeStats>,
     ) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(true));
@@ -152,6 +152,23 @@ impl ModelProvider {
     pub(crate) fn scripted_streaming_for_route_tests(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
     ) -> (Self, ScriptedStreamHandle) {
+        Self::scripted_streaming_for_route_tests_inner(options_tx, None)
+    }
+
+    /// The same scripted provider, answering as a request a drafter served
+    /// (issue #1314), so a streaming route test can drive real content frames
+    /// and still assert which frame carries the acceptance block.
+    pub(crate) fn scripted_streaming_for_route_tests_with_speculative(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+        speculative: SpeculativeStats,
+    ) -> (Self, ScriptedStreamHandle) {
+        Self::scripted_streaming_for_route_tests_inner(options_tx, Some(speculative))
+    }
+
+    fn scripted_streaming_for_route_tests_inner(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+        speculative: Option<SpeculativeStats>,
+    ) -> (Self, ScriptedStreamHandle) {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let (step_tx, step_rx) = mpsc::channel::<ScriptedStreamStep>();
         let cancellation_flags: Arc<std::sync::Mutex<Vec<Arc<AtomicBool>>>> =
@@ -210,7 +227,7 @@ impl ModelProvider {
                             // stay zero, as every other route test expects.
                             generated_token_ids: vec![9001, 9002],
                             structured_output: None,
-                            speculative: None,
+                            speculative,
                         }));
                     }
                     ModelRequest::PromptCacheWarmup { .. } => continue,
