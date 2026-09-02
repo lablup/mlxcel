@@ -50,9 +50,7 @@ fn prepare_diffusion_vision(
 ) -> Result<PreparedDiffusionImagePrompt> {
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| super::generate_vlm::open_image(path))
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
