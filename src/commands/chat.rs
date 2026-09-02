@@ -306,7 +306,7 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     )?;
 
     let mut editor = DefaultEditor::new()
-        .map_err(|e| anyhow!("failed to initialize the interactive line editor: {e}"))?;
+        .map_err(|e| anyhow!("Failed to initialize the interactive line editor: {e}"))?;
     let interactive = io::stdin().is_terminal();
 
     print_banner(interactive);

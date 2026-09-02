@@ -566,7 +566,7 @@ fn confirm_removal(repo_id: &str, path: &str, size: &str) -> Result<bool> {
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)
-        .map_err(|e| anyhow!("failed to read confirmation: {e}"))?;
+        .map_err(|e| anyhow!("Failed to read confirmation: {e}"))?;
     let answer = answer.trim().to_ascii_lowercase();
     Ok(answer == "y" || answer == "yes")
 }
