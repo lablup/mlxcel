@@ -242,9 +242,10 @@ pub struct PromptCacheKey<'a> {
     pub model_id: &'a str,
     /// LoRA adapter identifier; `None` for the base model.
     pub lora_id: Option<&'a str>,
-    /// Chat-template signature. Full wiring is; for now any stable
-    /// digest of the template + tool-schema inputs is acceptable and will
-    /// simply slot into this field.
+    /// Chat-template signature: the [`template_sig`] digest of the template
+    /// source, merged chat-template kwargs, tool choice, tool schemas and
+    /// assistant-prefill flag, so two requests whose prompts would render
+    /// differently never share a bucket.
     pub template_sig: &'a str,
     /// Caller-supplied tenancy / conversation scope. `None` means global.
     pub session_key: Option<&'a str>,

@@ -182,10 +182,11 @@ pub fn user_selectable_kinds() -> Vec<&'static str> {
 pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
     match kind {
         DrafterKind::Mtp => DEFAULT_MTP_BLOCK_SIZE,
-        // DFlash and the future InternalMtp variant both share the
-        // upstream-published 16-token default. InternalMtp's user-facing
-        // override surface lands in for now its CLI knob
-        // shares the DFlash default.
+        // DFlash and InternalMtp both share the upstream-published
+        // 16-token default. InternalMtp is auto-detected rather than
+        // selectable via `--draft-kind` and has no user-facing override
+        // surface of its own yet, so for now its `--draft-block-size`
+        // default shares the DFlash value.
         DrafterKind::Dflash | DrafterKind::InternalMtp => DEFAULT_DFLASH_BLOCK_SIZE,
         // `DrafterKind` is `#[non_exhaustive]` so future variants force a
         // CI failure. Until a new variant lands the wildcard is
