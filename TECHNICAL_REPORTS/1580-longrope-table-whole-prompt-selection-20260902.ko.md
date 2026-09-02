@@ -156,7 +156,17 @@ CLI의 비청크 분기도 자기 `offset + seq_len`이 이미 시퀀스 길이�
 
 대응은 위의 함수 스코프 헬퍼와, `src/server/batch/scheduler/prefill_span_coverage_tests.rs`다. 헬퍼는 저자가 눈으로 본 forward가 아니라 진입점이 도달할 수 있는 모든 forward를 덮고, 후자는 `src/server/batch/scheduler` 아래의 모든 모델 forward를 prefill과 디코드로 분류해 표에 없는 함수에서 forward가 나타나면 실패하는 소스 수준 가드다.
 
-### 4.5 스케일 적용
+### 4.5 요청 간 KV 재사용도 테이블이 일치해야 하는 세 번째 지점
+
+prefill span 알림은 프롬프트 하나를 인코딩하는 모든 경로를 덮는다. 다른 프롬프트가 인코딩한 KV를 복원하는 경로는 건드리지 않는다. 다음 라운드에서 서버의 radix 접두 캐시가 그 틈을 찾아냈다. 1078 토큰 요청이 자기 프롬프트를 short 테이블로 인코딩해 기증했고, 같은 토큰으로 시작하는 5136 토큰 요청이 `cached=1056/5136`으로 적중해 나머지 4080만 long 테이블로 prefill했다. 세 번째 동일 요청은 `cached=5136/5136`으로 적중해 오염된 엔트리에서 그대로 디코드했다.
+
+위치로 테이블을 고르면 캐시된 접두는 `original_max_position_embeddings`를 기준으로 같은 쪽에 있는 요청에만 유효하고, 이는 양방향으로 성립한다. `LanguageModel::rope_table_regime(total_prompt_len) -> Option<u8>`이 그 훅이고, 회전이 시퀀스 길이에 의존하지 않는 모든 모델에는 기본값 `None`이 답이다. `Phi3Model`은 config 사본이 아니라 레이어 0의 테이블을 읽어 답하므로, 캐시의 태그가 레이어가 실제로 쓰는 회전에서 어긋날 수 없다.
+
+태그는 조회가 엔트리에 닿을 수 있는 세 곳 모두의 버킷 정체성에 들어간다. `PromptCacheKey` 다이제스트(도메인 구분자를 v3으로 올림), 세션별 접두 스캔의 `BucketKey`, 그리고 radix 트라이의 인덱스 키이자 이번 회귀가 실제로 통과한 `SessionlessBucketKey`다. 스케줄러가 묻는 span은 저장되는 벡터의 길이가 아니라 알림된 prefill span이므로 `insert_model_state_snapshot`은 명시적 `encoded_span`을 받는다. 5136 토큰 프롬프트에서 잘라낸 3000 토큰 경계 스냅샷은 그 프롬프트의 테이블로 회전됐기 때문이다. 디코드 도중 경계를 넘은 생성이 만든 엔트리는 두 테이블에 걸쳐 있으므로 아예 거절하고 `PromptCacheRejectReason::RopeRegimeMismatch`로 집계한다. 미스는 요청 자신의 테이블로 전체 prefill을 다시 하는 것으로 떨어지는데, 이것이 transformers가 캐시를 리셋해서 하는 일이다.
+
+노드 간 disaggregated 핸드오프에는 태그가 필요 없다. 프롬프트 캐시 상태를 전혀 싣지 않고, 요청 간이 아니라 한 요청의 KV를 prefill 노드에서 decode 노드로 옮길 뿐이다.
+
+### 4.6 스케일 적용
 
 두 경로 모두 회전 전에 Q와 K의 rotary 앞부분에 테이블의 스케일을 곱한다. 기존 코드가 `su_rope_scale`을 적용하던 자리와 같다. 업스트림은 대신 `cos`와 `sin`에 곱하는데, RoPE는 입력에 대해 선형이므로 둘은 같은 사상이고 입력에 곱하는 쪽이 더 작은 텐서에 곱셈 한 번이다.
 
@@ -166,8 +176,10 @@ CLI의 비청크 분기도 자기 `offset + seq_len`이 이미 시퀀스 길이�
 
 | 명령 | 결과 |
 |------|------|
-| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 12 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 13 passed |
 | `cargo test --profile test-fast --features metal,accelerate --lib server::batch::scheduler::prefill_span_coverage` | 3 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib server::batch::scheduler_prompt_cache_tests` | 30 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib server::prompt_cache` | 173 passed |
 | `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib prefill_span` | 5 passed |
 | `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib generate::tests` | 36 passed |
 | `cargo test --profile test-fast --features metal,accelerate --lib models::rope_utils` | 28 passed |
@@ -189,11 +201,11 @@ phi3 테스트가 다루는 것: 두 테이블의 주파수 구성을 닫힌 형
 
 | 항목 | 값 |
 |------|-----|
-| 변경 파일 | 11, 보고서 2개 별도 |
-| 추가 | 1629 (보고서 포함) |
+| 변경 파일 | 20, 보고서 2개 별도 |
+| 추가 | 약 2000 (보고서 포함) |
 | 삭제 | 82 |
 | 신규 모듈 | 1 (`mlxcel_core::prefill_span`) |
-| 신규 단위 테스트 | 19 (`phi3_tests.rs` 10개, `prefill_span_tests.rs` 5개, `prefill_span_coverage_tests.rs` 3개, `generate.rs` 1개) |
+| 신규 단위 테스트 | 25 (`phi3_tests.rs` 11개, `prefill_span_tests.rs` 5개, `prefill_span_coverage_tests.rs` 3개, `generate.rs` 1개, `scheduler_prompt_cache_tests.rs` 5개) |
 
 ### 카테고리별 변경
 
@@ -202,14 +214,16 @@ phi3 테스트가 다루는 것: 두 테이블의 주파수 구성을 닫힌 형
 | 모델 수정 | `src/models/phi3.rs` |
 | 코어 메커니즘 | `src/lib/mlxcel-core/src/prefill_span.rs`, `src/lib/mlxcel-core/src/lib.rs`, `src/lib/mlxcel-core/src/generate.rs` |
 | 서버 배선 | `src/server/batch/scheduler/prefill.rs`, `src/server/batch/scheduler/prompt_cache.rs`, `src/server/batch/scheduler/mod.rs` |
-| 테스트 | `src/models/phi3_tests.rs`, `src/lib/mlxcel-core/src/prefill_span_tests.rs`, `src/server/batch/scheduler/prefill_span_coverage_tests.rs` |
+| 프롬프트 캐시 regime | `src/server/prompt_cache/{key,types,store,metrics}.rs`, `src/loaded_model.rs`, `src/vision/mod.rs` |
+| 테스트 | `src/models/phi3_tests.rs`, `src/lib/mlxcel-core/src/prefill_span_tests.rs`, `src/server/batch/scheduler/prefill_span_coverage_tests.rs`, `src/server/batch/scheduler_prompt_cache_tests.rs` |
 | 문서 | `docs/supported-models.md` |
 
 ### 관련 커밋
 
 - `a770022` fix(phi3): select the LongRoPE table by whole-prompt position
 - `docs: add technical report for PR #1580`
-- `fix(server): announce the prefill span on the prompt-cache forwards`
+- `d24c0a4` fix(server): announce the prefill span on every prefill forward
+- `fa066b4` fix(server): make prompt-cache reuse RoPE-table-regime aware
 
 ### 관련 PR/이슈
 
@@ -225,5 +239,7 @@ phi3 테스트가 다루는 것: 두 테이블의 주파수 구성을 닫힌 형
 4. `mlxcel_core::prefill_span`은 범용이다. RoPE 테이블, 마스크 형태, 스케일이 전체 시퀀스 길이에 의존하는 향후 계열은 그대로 읽어 쓸 수 있다. 현재 다중 호출 prefill 드라이버는 알림 지점 두 곳이 전부이며, 나중에 세 번째가 생기면 반드시 알려야 한다는 점을 문서 주석에 적어 두었다.
 
 ### 더 넓은 교훈
+
+이 변경은 세 라운드가 걸렸고, 매 라운드의 틈은 한 단계 바깥에서 같은 모양이었다. 1라운드는 forward 패스 단위로 테이블을 골랐는데, 프롬프트 전체를 한 번에 prefill하는 구현에는 맞고 청크로 나누는 구현에는 틀리다. 2라운드는 청크 prefill 지점에서 프롬프트 전체 길이를 알렸는데, 이는 프롬프트 하나를 인코딩하는 모든 경로를 덮지만 다른 프롬프트가 인코딩한 KV를 복원하는 경로를 놓친다. 3라운드에서 요청 간 재사용을 regime 인식으로 바꿨다. 매번 빠져 있던 불변식은 같다. **하나의 KV 캐시에 키를 넣는 모든 것이 테이블에 합의해야 한다.** 그 '모든 것'이 한 prefill의 여러 패스든, 한 요청이 모델에 닿는 여러 지점이든, 접두를 공유하는 두 요청이든 마찬가지다. 저자가 눈으로 본 경로만 나열하는 수정은 그다음 경계에서 또 불완전해진다.
 
 이 부류의 결함은 "출력이 글처럼 읽히는가"를 묻는 모든 테스트를 통과한다. 변경 전 코드는 이 트리에서 보통 가장 강력한 근거인 업스트림 기준 구현과 정확히 일치했고, 그럼에도 틀렸다. 그 기준 구현 자체가 이 기능에 대해서는 불완전하기 때문이다. 두 구현을 가르는 성질은 유창함도 아니고 mlx-lm 대비 RMS도 아니다. 체크포인트가 학습되고 배포될 때 함께 쓰인 구현과의 토큰 일치다. 오라클을 고르는 일은 수정에 앞선 단계가 아니라 수정의 일부다.

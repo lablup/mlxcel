@@ -156,7 +156,17 @@ The first version of this change announced inside the two chunked-prefill functi
 
 The response is the function-scoped helper above, which covers every forward an entry point can reach rather than the ones the author happened to look at, plus `src/server/batch/scheduler/prefill_span_coverage_tests.rs`: a source-level guard that classifies every model forward under `src/server/batch/scheduler` as prefill or decode and fails when a forward turns up in a function the table does not name.
 
-### 4.5 Scale application
+### 4.5 Cross-request KV reuse is a third place the table has to agree
+
+Announcing the prefill span covers every path that encodes one prompt. It does not touch the path that restores KV encoded by a different one. The server's radix prefix cache found that gap on the next round: a 1078-token request encoded its prompt under the short table and donated it, and a 5136-token request whose prompt starts with the same tokens hit `cached=1056/5136` and prefilled only the remaining 4080 under the long table. A third identical request hit `cached=5136/5136` and decoded from the poisoned entry.
+
+A position-selected table makes a cached prefix valid only for requests on the same side of `original_max_position_embeddings`, in both directions. `LanguageModel::rope_table_regime(total_prompt_len) -> Option<u8>` is the hook, defaulting to `None` for every model whose rotation does not depend on the sequence length. `Phi3Model` answers it by reading layer 0's tables rather than a copy of the config, so the cache's tag cannot drift from what the layers rotate with.
+
+The tag joins bucket identity in all three places a lookup can reach an entry: the `PromptCacheKey` digest (domain separator bumped to v3), `BucketKey` for the per-session prefix scan, and `SessionlessBucketKey`, the radix trie's index key and the one the regression actually went through. The span the scheduler asks about is the announced prefill span, not the length of the vector being stored, so `insert_model_state_snapshot` takes an explicit `encoded_span`: a 3000-token boundary snapshot cut out of a 5136-token prompt was rotated with that prompt's table. An entry whose generation crossed the boundary mid-decode spans both tables and is declined outright, counted as `PromptCacheRejectReason::RopeRegimeMismatch`. A miss falls back to a full prefill under the request's own table, which is what transformers does by resetting its cache.
+
+The cross-node disaggregated handoff needs no tag: it carries no prompt-cache state and moves one request's KV from its prefill node to its decode node rather than across requests.
+
+### 4.6 Scale application
 
 Both paths multiply the rotary prefix of Q and K by the table's scale before rotation, which is where the old code applied `su_rope_scale`. Upstream scales `cos` and `sin` instead; RoPE is linear in its input, so the two are the same map, and scaling the input costs one multiply on a shorter tensor.
 
@@ -166,8 +176,10 @@ Both paths multiply the rotary prefix of Q and K by the table's scale before rot
 
 | Command | Result |
 |---------|--------|
-| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 12 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 13 passed |
 | `cargo test --profile test-fast --features metal,accelerate --lib server::batch::scheduler::prefill_span_coverage` | 3 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib server::batch::scheduler_prompt_cache_tests` | 30 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib server::prompt_cache` | 173 passed |
 | `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib prefill_span` | 5 passed |
 | `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib generate::tests` | 36 passed |
 | `cargo test --profile test-fast --features metal,accelerate --lib models::rope_utils` | 28 passed |
@@ -189,11 +201,11 @@ The real-checkpoint gates are outstanding and are run outside the implementation
 
 | Metric | Value |
 |--------|-------|
-| Files changed | 11, plus the two report files |
-| Additions | 1629 including the reports |
+| Files changed | 20, plus the two report files |
+| Additions | about 2000 including the reports |
 | Deletions | 82 |
 | New modules | 1 (`mlxcel_core::prefill_span`) |
-| New unit tests | 19 (10 in `phi3_tests.rs`, 5 in `prefill_span_tests.rs`, 3 in `prefill_span_coverage_tests.rs`, 1 in `generate.rs`) |
+| New unit tests | 25 (11 in `phi3_tests.rs`, 5 in `prefill_span_tests.rs`, 3 in `prefill_span_coverage_tests.rs`, 1 in `generate.rs`, 5 in `scheduler_prompt_cache_tests.rs`) |
 
 ### Changes by category
 
@@ -202,14 +214,16 @@ The real-checkpoint gates are outstanding and are run outside the implementation
 | Model fix | `src/models/phi3.rs` |
 | Core mechanism | `src/lib/mlxcel-core/src/prefill_span.rs`, `src/lib/mlxcel-core/src/lib.rs`, `src/lib/mlxcel-core/src/generate.rs` |
 | Server wiring | `src/server/batch/scheduler/prefill.rs`, `src/server/batch/scheduler/prompt_cache.rs`, `src/server/batch/scheduler/mod.rs` |
-| Tests | `src/models/phi3_tests.rs`, `src/lib/mlxcel-core/src/prefill_span_tests.rs`, `src/server/batch/scheduler/prefill_span_coverage_tests.rs` |
+| Prompt-cache regime | `src/server/prompt_cache/{key,types,store,metrics}.rs`, `src/loaded_model.rs`, `src/vision/mod.rs` |
+| Tests | `src/models/phi3_tests.rs`, `src/lib/mlxcel-core/src/prefill_span_tests.rs`, `src/server/batch/scheduler/prefill_span_coverage_tests.rs`, `src/server/batch/scheduler_prompt_cache_tests.rs` |
 | Docs | `docs/supported-models.md` |
 
 ### Related commits
 
 - `a770022` fix(phi3): select the LongRoPE table by whole-prompt position
 - `docs: add technical report for PR #1580`
-- `fix(server): announce the prefill span on the prompt-cache forwards`
+- `d24c0a4` fix(server): announce the prefill span on every prefill forward
+- `fa066b4` fix(server): make prompt-cache reuse RoPE-table-regime aware
 
 ### Related PRs and issues
 
@@ -225,5 +239,7 @@ The real-checkpoint gates are outstanding and are run outside the implementation
 4. `mlxcel_core::prefill_span` is generic: any future family whose RoPE table, mask shape, or scale depends on the whole sequence length can read it. The two announcement sites are the complete set of multi-call prefill drivers today; a third one added later must announce, and the doc comment says so.
 
 ### The broader lesson
+
+This change took three rounds, and each round's gap was the same shape one level out. Round one selected the table correctly per forward pass, which is right for an implementation that prefills a whole prompt at once and wrong for one that chunks. Round two announced the whole prompt's length at the chunked-prefill sites, which covers every path that encodes one prompt and misses the paths that restore KV encoded by another. Round three made cross-request reuse regime-aware. The invariant that was missing each time is the same: **everything that puts keys into one KV cache must agree on the table**, whether "everything" means the passes of one prefill, the several places one request reaches the model, or two different requests sharing a prefix. A fix that names only the paths the author happened to look at will keep being incomplete at the next boundary out.
 
 A defect of this class survives every test that asks "does the output read as text". The pre-change code matched its usual upstream reference exactly, which is normally the strongest evidence available in this tree, and was still wrong because that reference is itself incomplete for this feature. The property that separates the two implementations is not fluency and not RMS against mlx-lm; it is token identity against the implementation the checkpoint was trained and released with. Picking the oracle is part of the fix, not a step before it.
