@@ -52,10 +52,10 @@ Environment Variables:
   MLXCEL_WIRED_LIMIT     Apple Silicon wired memory limit
                            unset/\"max\", use MLX gpu_max_memory_size (default)
                            \"0\"/\"none\", disable the wired limit
-                           \"96GB\", explicit limit (supports GB, MB, or bytes)
+                           \"96GB\", explicit limit (GB/G, MB/M, KB/K, or bytes)
   MLXCEL_MEMORY_LIMIT    Soft MLX allocator memory cap (fails fast on overflow)
                            unset/\"0\"/\"none\", let MLX use its backend default (default)
-                           \"32GB\", explicit limit (supports GB, MB, or bytes)
+                           \"32GB\", explicit limit (GB/G, MB/M, KB/K, or bytes)
   MLX_MAX_OPS_PER_BUFFER MLX command-buffer op cap (decode dispatch-gap lever)
                            unset, auto-defaults to 1000 on pre-M5 Apple Silicon (M1-M4),
                              MLX default on M5+ and non-Apple (hardware-gated, #353)

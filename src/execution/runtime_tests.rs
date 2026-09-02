@@ -67,13 +67,64 @@ fn parse_memory_size_fractional_gb() {
     // 1.5 GB
     assert_eq!(
         parse_memory_size("1.5GB"),
-        Some((1.5 * 1024.0 * 1024.0 * 1024.0) as usize)
+        Some((1.5 * 1024.0 * 1024.0 * 1024.0) as u64)
     );
 }
 
 #[test]
 fn parse_memory_size_invalid() {
     assert_eq!(parse_memory_size("abc"), None);
+}
+
+/// Issue #1317: every spelling of a suffix is one value. The preflight used to
+/// carry a parser that took `GB` but not `G`, so `MLXCEL_MEMORY_LIMIT=4G`
+/// capped the allocator and was silently dropped by the estimate.
+#[test]
+fn parse_memory_size_accepts_every_suffix_spelling() {
+    let four_gib = Some(4 * 1024 * 1024 * 1024);
+    assert_eq!(parse_memory_size("4G"), four_gib);
+    assert_eq!(parse_memory_size("4GB"), four_gib);
+    assert_eq!(parse_memory_size("4gb"), four_gib);
+    assert_eq!(parse_memory_size(" 4 GB "), four_gib);
+
+    let five_hundred_twelve_mib = Some(512 * 1024 * 1024);
+    assert_eq!(parse_memory_size("512M"), five_hundred_twelve_mib);
+    assert_eq!(parse_memory_size("512MB"), five_hundred_twelve_mib);
+    assert_eq!(parse_memory_size("512mb"), five_hundred_twelve_mib);
+
+    assert_eq!(parse_memory_size("8K"), Some(8192));
+    assert_eq!(parse_memory_size("8KB"), Some(8192));
+
+    assert_eq!(parse_memory_size("1024"), Some(1024));
+}
+
+/// Every scale is a power of two, so the multiply is exact in binary floating
+/// point and only the floor removes anything.
+#[test]
+fn parse_memory_size_fractional_is_exact_floor() {
+    assert_eq!(parse_memory_size("1.5GB"), Some(1_610_612_736));
+    assert_eq!(parse_memory_size("4.1GB"), Some(4_402_341_478));
+    assert_eq!(parse_memory_size("0.5M"), Some(524_288));
+}
+
+#[test]
+fn parse_memory_size_rejects_garbage() {
+    assert_eq!(parse_memory_size("-1GB"), None);
+    assert_eq!(parse_memory_size("NaNGB"), None);
+    assert_eq!(parse_memory_size("infGB"), None);
+    assert_eq!(parse_memory_size("abc"), None);
+    assert_eq!(parse_memory_size("GB"), None);
+    // A bare number is a byte count, so a fraction of a byte is not a size.
+    assert_eq!(parse_memory_size("1.5"), None);
+    // `0` parses; each resolver is what maps it to "unset".
+    assert_eq!(parse_memory_size("0"), Some(0));
+}
+
+/// A value large enough to overflow the multiply saturates instead of
+/// wrapping into a small cap that would refuse every allocation.
+#[test]
+fn parse_memory_size_saturates_instead_of_wrapping() {
+    assert_eq!(parse_memory_size("1e30GB"), Some(u64::MAX));
 }
 
 #[test]
