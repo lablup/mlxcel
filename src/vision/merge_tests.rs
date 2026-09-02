@@ -13,12 +13,16 @@
 // limitations under the License.
 
 use super::{masked_scatter, merge_llava, prepare_inputs_for_multimodal};
+use mlxcel_core::streams::DefaultDeviceGuard;
 use mlxcel_core::{self, MlxArray, dtype};
-use std::sync::Once;
 
-fn ensure_cpu_device() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| mlxcel_core::set_default_device(false));
+/// Run one test on the CPU and put the previous default device back when the
+/// returned guard drops; bind it to a named local for the test's duration. The
+/// `Once` this replaces moved the process-wide default device for good, so
+/// every test that ran after this module measured the CPU backend (issue
+/// #1421).
+fn cpu_device() -> DefaultDeviceGuard {
+    DefaultDeviceGuard::cpu()
 }
 
 fn assert_arrays_equal(actual: &MlxArray, expected: &MlxArray) {
@@ -28,7 +32,7 @@ fn assert_arrays_equal(actual: &MlxArray, expected: &MlxArray) {
 
 #[test]
 fn masked_scatter_replaces_only_masked_positions() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     let base = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 3, 2]);
     let input_ids = mlxcel_core::from_slice_i32(&[0, 7, 0], &[1, 3]);
@@ -47,7 +51,7 @@ fn masked_scatter_replaces_only_masked_positions() {
 
 #[test]
 fn prepare_inputs_for_multimodal_builds_additive_mask_and_preserves_dtype() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     let image_features = mlxcel_core::from_slice_f32(&[4.0, 6.0], &[1, 1, 2]);
     let inputs_embeds =
@@ -102,7 +106,7 @@ fn prepare_inputs_for_multimodal_builds_additive_mask_and_preserves_dtype() {
 
 #[test]
 fn prepare_inputs_for_multimodal_all_ones_mask_is_all_zeros() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     // Sanity check for the common case: when attention_mask is all ones,
     // the additive 4D mask must be all zeros (attend everywhere).
@@ -141,7 +145,7 @@ fn prepare_inputs_for_multimodal_all_ones_mask_is_all_zeros() {
 
 #[test]
 fn merge_llava_flattens_projected_features_in_image_token_order() {
-    ensure_cpu_device();
+    let _cpu = cpu_device();
 
     let image_features = mlxcel_core::from_slice_f32(&[10.0, 11.0, 12.0, 13.0], &[1, 2, 2]);
     let inputs_embeds =

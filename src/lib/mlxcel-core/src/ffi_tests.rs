@@ -2532,7 +2532,9 @@ fn shapeless_compile_audit_harness() {
         Ok("1"),
         "the audit environment must be set before any compiled function is initialized"
     );
-    set_default_device(true);
+    // Pin the audit to the GPU for its duration and put the previous default
+    // device back on exit, even through a failed assertion (issue #1421).
+    let _device = crate::streams::DefaultDeviceGuard::gpu();
     random_seed(1392);
 
     let x_f32 = from_slice_f32(&[-3.0, -0.5, 0.25, 4.0], &[1, 4]);

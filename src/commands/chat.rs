@@ -173,6 +173,12 @@ enum SlashOutcome {
 pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     let runtime = initialize_runtime_checked()?;
     println!("Runtime device: {}", runtime.device);
+    if runtime.cpu_override {
+        println!(
+            "Running on the CPU because MLXCEL_DEVICE=cpu asked for it (GPU backend available: {}).",
+            mlxcel_core::gpu_backend_available()
+        );
+    }
 
     // Reuse the exact `-m` resolver `generate` / `serve` / `inspect` use, so a
     // repo-id auto-downloads into the global store (epic #92, issues #93/#94),

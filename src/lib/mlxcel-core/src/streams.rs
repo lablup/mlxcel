@@ -45,8 +45,10 @@ use crate::ffi::{MlxStream, MlxThreadLocalStream};
 
 /// Create a thread-local generation stream bound to the GPU device.
 ///
-/// Returns `None` on CPU-only builds (where `is_gpu_available()` is
-/// false) so callers can fall back to the MLX default stream.
+/// Returns `None` when the MLX default device is not the GPU (CPU-only
+/// builds, or a default moved to the CPU with `set_default_device(false)`;
+/// `default_device_is_gpu()` is false in both cases) so callers can fall
+/// back to the MLX default stream.
 ///
 /// The returned [`MlxThreadLocalStream`] handle is independent of the
 /// thread it was created on — pass it to
@@ -56,7 +58,7 @@ use crate::ffi::{MlxStream, MlxThreadLocalStream};
 ///
 /// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler, AudioWorker
 pub fn new_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalStream>> {
-    if ffi::is_gpu_available() {
+    if ffi::default_device_is_gpu() {
         Some(ffi::new_thread_local_stream_gpu())
     } else {
         None
@@ -146,6 +148,78 @@ impl Drop for DefaultStreamGuard {
     }
 }
 
+/// RAII guard that restores MLX's process-wide default device on drop.
+///
+/// [`DefaultDeviceGuard::cpu`] and [`DefaultDeviceGuard::gpu`] record whether
+/// the default device is currently the GPU (`default_device_is_gpu`), move
+/// it, and move it back when the guard drops. [`DefaultDeviceGuard::capture`]
+/// records without moving, for code that changes the device through another
+/// path such as [`set_default_gpu_device`].
+///
+/// The default device is process-global and every MLX op dispatched without
+/// an explicit stream lands on it, so a test that moves it and never moves it
+/// back changes what every later test in the same process measures: under
+/// `--test-threads=1` the real-checkpoint gates that sorted after
+/// `multimodal::host_preprocessor_tests` scored a reranker on the CPU backend
+/// instead of the GPU (issue #1421). A `Once` cannot restore anything; this
+/// guard can, and `Drop` runs during unwinding, so a failing test does not
+/// poison the modules after it either.
+///
+/// Guards nest: an inner guard restores the value the outer one installed,
+/// and the outer guard then restores the original. Restoration goes through
+/// the boolean `set_default_device`, so a GPU default comes back as GPU
+/// index 0 even if it had been moved to another index with
+/// [`set_default_gpu_device`].
+///
+/// [`DefaultDeviceGuard::gpu`] on a build without a GPU backend
+/// (`gpu_backend_available()` false) leaves the default device where it is:
+/// MLX rejects `set_default_device(gpu)` there, and the guard must never ask
+/// for a device the backend cannot provide.
+///
+/// # Example
+///
+/// ```ignore
+/// let _device = DefaultDeviceGuard::cpu();
+/// // … test body runs on the CPU …
+/// // guard restores the previous default device here
+/// ```
+#[must_use = "the previous default device is restored when the guard drops; bind it to a named local, not `_`"]
+pub struct DefaultDeviceGuard {
+    previous_is_gpu: bool,
+}
+
+impl DefaultDeviceGuard {
+    /// Record the current default device without moving it.
+    pub fn capture() -> Self {
+        Self {
+            previous_is_gpu: ffi::default_device_is_gpu(),
+        }
+    }
+
+    /// Move the default device to the CPU until the guard drops.
+    pub fn cpu() -> Self {
+        let guard = Self::capture();
+        ffi::set_default_device(false);
+        guard
+    }
+
+    /// Move the default device to the GPU until the guard drops. A no-op on
+    /// a build without a GPU backend, where the default device stays put.
+    pub fn gpu() -> Self {
+        let guard = Self::capture();
+        if ffi::gpu_backend_available() {
+            ffi::set_default_device(true);
+        }
+        guard
+    }
+}
+
+impl Drop for DefaultDeviceGuard {
+    fn drop(&mut self) {
+        ffi::set_default_device(self.previous_is_gpu);
+    }
+}
+
 /// Legacy helper — create a non-thread-local GPU stream.
 ///
 /// Kept for backward compatibility with any external user of the
@@ -160,7 +234,7 @@ impl Drop for DefaultStreamGuard {
     note = "Use `new_thread_local_generation_stream` so dispatch and synchronization stay on the same per-thread stream."
 )]
 pub fn new_generation_stream() -> Option<UniquePtr<MlxStream>> {
-    if ffi::is_gpu_available() {
+    if ffi::default_device_is_gpu() {
         Some(ffi::new_gpu_stream())
     } else {
         None
@@ -278,7 +352,21 @@ pub fn new_thread_local_stream_on_gpu(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
+
+    /// Serializes the tests here that move the process-wide default device,
+    /// so a guard held by one test cannot change what another records as its
+    /// baseline. libtest runs the tests of one binary in parallel unless told
+    /// otherwise.
+    static DEVICE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn device_lock() -> MutexGuard<'static, ()> {
+        DEVICE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     // --- Index-aware multi-GPU helpers (epic #486, sub-issue #487) ---
 
@@ -328,19 +416,22 @@ mod tests {
     }
 
     /// `set_default_gpu_device` validates the index: index 0 always succeeds,
-    /// an at-count index errors. The boolean GPU default is restored so the
-    /// process-global default device is not left mutated for sibling tests.
+    /// an at-count index errors. A [`DefaultDeviceGuard`] puts the previous
+    /// default device back so the process-global default is not left mutated
+    /// for sibling tests.
     #[test]
     fn set_default_gpu_device_validates_index() {
+        let _lock = device_lock();
+        let _device = DefaultDeviceGuard::capture();
         let count = gpu_device_count();
         assert!(
             set_default_gpu_device(count).is_err(),
             "index == count ({count}) must be rejected"
         );
         // Index 0 is the GPU that is already the default on a single-GPU
-        // backend, so installing then restoring leaves the process as-is.
+        // backend, so installing it leaves the process as-is; the guard
+        // restores the previous default either way.
         set_default_gpu_device(0).expect("index 0 is always valid");
-        ffi::set_default_device(true);
     }
 
     /// The thread-local stream factory validates indices the same way.
@@ -381,6 +472,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn trivial_op_runs_on_non_default_gpu_index() {
+        let _lock = device_lock();
         let count = gpu_device_count();
         if count < 2 {
             // Single-GPU CUDA host: no second device to target.
@@ -395,6 +487,118 @@ mod tests {
         let value = ffi::item_f32(&c);
         set_default_gpu_device(0).expect("index 0 is always valid");
         assert_eq!(value, 2.0, "1 + 1 on GPU 1 should equal 2");
+    }
+
+    // --- Backend availability vs. the default device (issue #1421) ---
+
+    /// `gpu_backend_available` answers whether a GPU backend exists, and that
+    /// answer does not move with the default device: it is the same before,
+    /// during and after a CPU guard. On Apple Silicon (Metal) it is `true`;
+    /// on a build with neither Metal nor CUDA it is `false`.
+    #[test]
+    fn gpu_backend_available_does_not_track_the_default_device() {
+        let _lock = device_lock();
+        let available = ffi::gpu_backend_available();
+        if crate::metal_is_available() {
+            assert!(
+                available,
+                "Metal is a GPU backend, so Apple Silicon must report one"
+            );
+        }
+        if !crate::metal_is_available() && !crate::cuda_is_available() {
+            assert!(!available, "a CPU-only build has no GPU backend to report");
+        }
+        let baseline = ffi::default_device_is_gpu();
+        {
+            let _cpu = DefaultDeviceGuard::cpu();
+            assert!(
+                !ffi::default_device_is_gpu(),
+                "the guard moves the default device to the CPU"
+            );
+            assert_eq!(
+                ffi::gpu_backend_available(),
+                available,
+                "moving the default device must not change whether a backend exists"
+            );
+        }
+        assert_eq!(
+            ffi::default_device_is_gpu(),
+            baseline,
+            "the guard restores the default device when it drops"
+        );
+        assert_eq!(ffi::gpu_backend_available(), available);
+    }
+
+    /// Nested guards restore in reverse order: the inner guard returns to the
+    /// value the outer one installed, and the outer returns to the original.
+    #[test]
+    fn default_device_guards_nest_and_restore_in_order() {
+        let _lock = device_lock();
+        let baseline = ffi::default_device_is_gpu();
+        {
+            let _outer = DefaultDeviceGuard::cpu();
+            assert!(!ffi::default_device_is_gpu());
+            {
+                let _inner = DefaultDeviceGuard::gpu();
+                // `gpu()` moves to the GPU when a backend exists and is a
+                // no-op otherwise, so the default tracks availability here.
+                assert_eq!(ffi::default_device_is_gpu(), ffi::gpu_backend_available());
+            }
+            assert!(
+                !ffi::default_device_is_gpu(),
+                "the inner guard restores the outer's CPU default"
+            );
+        }
+        assert_eq!(ffi::default_device_is_gpu(), baseline);
+    }
+
+    /// `capture` records without moving, so code that changes the device
+    /// through another path (here the raw boolean setter) is still put back.
+    #[test]
+    fn default_device_guard_capture_restores_without_moving() {
+        let _lock = device_lock();
+        let baseline = ffi::default_device_is_gpu();
+        {
+            let _device = DefaultDeviceGuard::capture();
+            assert_eq!(
+                ffi::default_device_is_gpu(),
+                baseline,
+                "capture must not move the device"
+            );
+            ffi::set_default_device(false);
+            assert!(!ffi::default_device_is_gpu());
+        }
+        assert_eq!(ffi::default_device_is_gpu(), baseline);
+    }
+
+    /// `Drop` runs while a panic unwinds, so a failing test that holds a
+    /// guard does not leave the CPU default behind for the modules after it.
+    #[test]
+    fn default_device_guard_restores_while_unwinding() {
+        let _lock = device_lock();
+        let baseline = ffi::default_device_is_gpu();
+        let outcome = std::panic::catch_unwind(|| {
+            let _cpu = DefaultDeviceGuard::cpu();
+            assert!(!ffi::default_device_is_gpu());
+            panic!("simulated test failure while the guard is held");
+        });
+        assert!(outcome.is_err(), "the closure must have panicked");
+        assert_eq!(
+            ffi::default_device_is_gpu(),
+            baseline,
+            "the guard must restore the device during unwinding"
+        );
+    }
+
+    /// The deprecated name still compiles (with a warning, silenced here on
+    /// purpose) and keeps its original default-device meaning.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_is_gpu_available_keeps_the_default_device_meaning() {
+        let _lock = device_lock();
+        assert_eq!(crate::is_gpu_available(), ffi::default_device_is_gpu());
+        let _cpu = DefaultDeviceGuard::cpu();
+        assert!(!crate::is_gpu_available());
     }
 
     /// Smoke test: the TLS handle factory either succeeds (GPU build)

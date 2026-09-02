@@ -49,32 +49,45 @@ use safetensors::tensor::{Dtype as SafeTensorDtype, View};
 /// raw multi-threaded `cargo test` over a wide filter is not a supported way
 /// to run this suite on either backend.
 ///
-/// The guard also pins MLX's process-wide default device back to the GPU
-/// when one is available. Other test modules move the default device to the
-/// CPU for their own reasons and never move it back
-/// (`multimodal::host_preprocessor_tests::ensure_cpu_device` does so inside a
-/// `Once`), and libtest runs modules in name order, so a gate that happens to
-/// sort after such a module silently measures the CPU backend instead: under
-/// `make verify-test-cuda` the `rerank::real_checkpoint_tests` gates scored a
-/// 4-bit Qwen3 reranker at 0.35 instead of 0.99 and produced NaN image
-/// scores from a bf16 Qwen3-VL reranker, while the same tests passed in
-/// isolation. Every real-checkpoint number this repository records is a GPU
-/// number, so the guard makes that explicit instead of depending on module
+/// The guard also checks that MLX's process-wide default device is still the
+/// GPU when a GPU backend exists. Other test modules move the default device
+/// to the CPU for their own reasons, and libtest runs modules in name order,
+/// so a gate that sorted after a module that never moved it back silently
+/// measured the CPU backend: under `make verify-test-cuda` the
+/// `rerank::real_checkpoint_tests` gates scored a 4-bit Qwen3 reranker at
+/// 0.35 instead of 0.99 and produced NaN image scores from a bf16 Qwen3-VL
+/// reranker, while the same tests passed in isolation. PR #1420 repaired that
+/// here with an unconditional `set_default_device(true)`, which hid the leak
+/// rather than removing it. The leaking modules now hold a
+/// `mlxcel_core::streams::DefaultDeviceGuard` for each test's duration, so
+/// the pin is reduced to this assertion and a future leak fails loudly at the
+/// first gate after it, naming the cause (issue #1421). Every
+/// real-checkpoint number this repository records is a GPU number, and the
+/// assertion is what makes that explicit instead of depending on module
 /// order.
 ///
-/// The pin is unconditional on purpose. `mlxcel_core::is_gpu_available()`
-/// reports whether the *current default* device is the GPU, so after another
-/// module has moved the default to the CPU it answers `false` and a guarded
-/// pin would never fire. `Device::gpu` is always constructible: on a CPU-only
-/// build MLX resolves it to the single default compute device (see
-/// `gpu_device_count`), so selecting it is safe on every backend.
+/// It is a plain `assert!`, not a `debug_assert!`: every gate runs under
+/// `--profile test-fast`, which inherits `release` and compiles debug
+/// assertions out, and this helper is test-only code where the check costs
+/// nothing. The check reads `mlxcel_core::default_device_is_gpu()` against
+/// `mlxcel_core::gpu_backend_available()`, the backend answer that does not
+/// move with the default device (the old `is_gpu_available()` did, which is
+/// why a guarded pin never fired). An explicit `MLXCEL_DEVICE=cpu` is not a
+/// leak: `initialize_runtime()` moves the default device to the CPU on
+/// purpose under it, so the check is skipped for that request and the gates
+/// measure the CPU the operator asked for.
 pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     let guard = GUARD
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    mlxcel_core::set_default_device(true);
+    assert!(
+        mlxcel_core::default_device_is_gpu()
+            || !mlxcel_core::gpu_backend_available()
+            || crate::execution::runtime::cpu_override_requested(),
+        "MLX's default device is the CPU although a GPU backend is available and MLXCEL_DEVICE=cpu is not set: an earlier test moved the default device and never restored it. Hold a mlxcel_core::streams::DefaultDeviceGuard for the test's duration instead of calling set_default_device directly."
+    );
     guard
 }
 

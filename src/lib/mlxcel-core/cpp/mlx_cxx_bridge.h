@@ -1300,8 +1300,18 @@ rust::String astype_breakdown_pair(const MlxArray& a, const MlxArray& b);
 // Set default stream for subsequent operations
 void set_default_stream(const MlxStream& stream);
 
-// Check if GPU is available
-bool is_gpu_available();
+// Check whether the current default device is GPU. Renamed from
+// `is_gpu_available` (issue #1421): the old name read as a hardware query, but
+// the answer flips to false the moment any caller runs
+// `set_default_device(false)`, on a machine that has a GPU.
+bool default_device_is_gpu();
+
+// True when the active MLX backend exposes at least one usable GPU: the
+// unclamped `device_count(Device::gpu) > 0` (compare `gpu_device_count`, which
+// clamps to >= 1). False on a CPU-only build and on a CUDA build without a
+// driver; true on Metal and on a CUDA build with a device. Independent of the
+// default device; never moves it or creates a stream. Issue #1421.
+bool gpu_backend_available();
 
 // Fused sampling: top-k + top-p + min-p on the untempered distribution, then
 // one temperature scaling, then the categorical draw, in a single function

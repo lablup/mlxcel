@@ -2568,6 +2568,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
     tracing::info!("Runtime device: {}", runtime.device);
+    if runtime.cpu_override {
+        // Say why the CPU is in use, so a CPU line on a GPU host is not read
+        // as a missing backend (issue #1421).
+        tracing::info!(
+            gpu_backend_available = mlxcel_core::gpu_backend_available(),
+            "Running on the CPU because MLXCEL_DEVICE=cpu asked for it"
+        );
+    }
     // Report the effective CUDA graph-cache LRU capacity now that a tracing
     // subscriber is installed (initialize_server_logging, above) and the runtime
     // device is known to be CUDA. `apply_cuda_graph_cache_default` sets the env var
