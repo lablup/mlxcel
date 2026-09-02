@@ -69,8 +69,9 @@ pub struct SpeculativeTimings {
     pub draft_n_accepted: usize,
     /// Verify rounds executed for this request (mlxcel extension).
     pub draft_rounds: usize,
-    /// Which drafter served the request (mlxcel extension): `dflash`, `mtp`
-    /// or `internal-mtp`.
+    /// Which drafter served the request (mlxcel extension): a `--draft-kind`
+    /// name. `dflash` or `mtp` in practice today, since `internal-mtp`
+    /// resolves to the classic dispatch, which the burst gate declines.
     pub draft_kind: &'static str,
 }
 

@@ -211,8 +211,10 @@ that is not one yet. For the same reason the native route's per-token
 The mean accepted length per round is `(draft_n_accepted + draft_rounds) /
 draft_rounds`: every round emits its accepted drafts plus one bonus token. It
 is left to the client rather than reported, so a client that wants a different
-aggregate is not stuck with this one. `draft_kind` is one of `dflash`, `mtp`,
-`internal-mtp`, matching `--draft-kind`.
+aggregate is not stuck with this one. `draft_kind` carries a `--draft-kind`
+name. In practice today it is `dflash` or `mtp`: `internal-mtp` resolves to the
+classic dispatch, which the burst gate declines, so no request is served
+speculatively under it and none reports a block.
 
 The block covers the three paths that own a request's whole round loop: the
 DFlash B=1 burst, the MTP B=1 burst, and the tick-cooperative MTP slice (whose

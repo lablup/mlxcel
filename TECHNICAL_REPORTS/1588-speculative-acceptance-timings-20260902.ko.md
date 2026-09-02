@@ -218,7 +218,7 @@ llama-server의 `draft_n` 철자를 맞추면서 무조건 내보냈다면 엄�
 
 - `timings_carries_no_draft_keys_without_a_drafter`: 아홉 키 그대로, `draft_*` 키 없음.
 - `timings_carries_the_b10621_draft_pair_for_a_speculative_request`: 열세 키, upstream 쌍과 확장 두 개, 기본 키들은 원래 값 유지.
-- `a_zero_round_speculative_run_reports_no_draft_block`, `every_drafter_kind_renders_its_canonical_name`: 게이트와 세 정규 이름.
+- `a_zero_round_speculative_run_reports_no_draft_block`, `every_drafter_kind_renders_its_canonical_name`: 게이트와 세 정규 이름. 오늘 기준 도달 가능한 것은 셋 중 둘이다. `internal-mtp`은 classic dispatch로 해석되고 burst 게이트가 그것을 거절하므로, 그 kind로 speculative 처리되는 요청이 없고 블록을 보고하는 요청도 없다.
 - `the_done_result_carries_the_acceptance_counters_of_a_drafted_request`: 실제 2라운드 제너레이터 스크립트를 돌려 `Done` 이벤트가 라운드 루프가 만든 카운터를 싣는지, `draft_rounds > 0`과 `0 < draft_n_accepted <= draft_n`이 성립하는지 확인.
 - `the_done_result_reports_no_acceptance_for_an_undrafted_finish`: classic 경로의 계약.
 - 라우트 레벨: `/completion`, `/completions`, `/v1/chat/completions`의 네 키. drafter 없을 때 두 형태 모두에서의 부재. chat 스트림에서 `finish_reason` 청크만 `timings`를 싣는다는 점.

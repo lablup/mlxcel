@@ -218,7 +218,7 @@ The issue's plan predated the refactor that made `take_generation_result` the si
 
 - `timings_carries_no_draft_keys_without_a_drafter`: nine keys, unchanged, no `draft_*` key present.
 - `timings_carries_the_b10621_draft_pair_for_a_speculative_request`: thirteen keys, upstream's pair plus the two extensions, base keys still reporting what they did.
-- `a_zero_round_speculative_run_reports_no_draft_block` and `every_drafter_kind_renders_its_canonical_name`: the gate and the three canonical names.
+- `a_zero_round_speculative_run_reports_no_draft_block` and `every_drafter_kind_renders_its_canonical_name`: the gate and the three canonical names. Only two of the three are reachable today: `internal-mtp` resolves to the classic dispatch, which the burst gate declines, so no request is served speculatively under it and none reports a block.
 - `the_done_result_carries_the_acceptance_counters_of_a_drafted_request`: drives the real two-round generator script and asserts the `Done` event carries the counters the round loop produced, with `draft_rounds > 0` and `0 < draft_n_accepted <= draft_n`.
 - `the_done_result_reports_no_acceptance_for_an_undrafted_finish`: the classic-path contract.
 - Route level: the four keys on `/completion`, `/completions` and `/v1/chat/completions`; their absence without a drafter on both shapes; and that only the `finish_reason` chunk of a chat stream carries `timings`.
