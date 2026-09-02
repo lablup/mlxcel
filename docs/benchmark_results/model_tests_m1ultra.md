@@ -614,7 +614,7 @@ Ran all 80 local models (45GB threshold) to verify text/image generation.
 
 ## TurboQuant KV cache — M1 Ultra speed gate readings
 
-First dedicated M1 Ultra reading of the epic- KV speed gate matrix.
+First dedicated M1 Ultra reading of the TurboQuant KV speed gate matrix.
 Hardware: Apple M1 Ultra, 128 GB unified memory. Model:
 `Meta-Llama-3.1-8B-Instruct-4bit`. Date: 2026-04-29. Reproducer:
 `./scripts/bench_kv_cache.sh --modes fp16,int8,turbo4-asym,turbo4,turbo4-delegated --contexts 4096 --prefill-contexts 8192`.
