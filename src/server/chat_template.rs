@@ -759,14 +759,34 @@ impl ChatTemplateProcessor {
         // Convert serde_json::Value to minijinja::Value
         let messages_val = minijinja::Value::from_serialize(messages);
 
-        // Always pass `tools` as an iterable (possibly empty) rather than
-        // `None` so that `{% if tools is iterable and tools | length > 0 %}`
-        // works under minijinja — its short-circuit evaluation still tries
-        // to compute `| length` of `none`, which raises an error.
-        let tools_val = match tools {
-            Some(t) => minijinja::Value::from_serialize(t),
-            None => minijinja::Value::from_serialize(Vec::<Tool>::new()),
-        };
+        // Leave `tools` UNDEFINED when the request carries no tools, and count
+        // an explicit empty list as no tools (issue #1597). Three guard shapes
+        // ship in the local template corpus and only an absent key satisfies
+        // all three:
+        //
+        //   1. `tools is defined and tools is not none` (DeepSeek V3 style,
+        //      Youtu-LLM) and `tools is not none` after a
+        //      `{%- if not tools is defined %}{%- set tools = none %}{%- endif %}`
+        //      default (Llama 3.1 / 3.2 / 3.3 / 4) are both TRUE for a defined
+        //      empty list, so the previous always-an-empty-list context
+        //      rendered a tool-calling preamble with an empty function list on
+        //      every plain chat request.
+        //   2. `tools is iterable and tools | length > 0` after a
+        //      `{%- set tools = [] %}` default (Nemotron, MiMo) is why the
+        //      value must not be `none` either: minijinja 2.24's `iterable`
+        //      test is `Value::try_iter().is_ok()`, which succeeds for `none`,
+        //      while `| length` of `none` errors, so the render would abort and
+        //      degrade to the simple fallback prompt. That template family
+        //      defaults an undefined `tools` to `[]` itself, so undefined is
+        //      safe for it.
+        //
+        // This is also llama-server's rule: it builds a null JSON value for an
+        // empty tool array and minja sets the context key only when that value
+        // is non-null. transformers passes `tools=None`, which renders
+        // identically to undefined for every guard shape above.
+        let tools_val = tools
+            .filter(|t| !t.is_empty())
+            .map(minijinja::Value::from_serialize);
 
         let context = build_template_context(
             messages_val,
@@ -836,16 +856,14 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
-        // Many templates conditionally check variables like `tools`,
-        // `enable_thinking`, etc. We must provide them with the right
-        // concrete type to avoid undefined/None errors — in particular,
-        // `tools` must be an iterable (even when empty) so that the common
-        // `{% if tools is iterable and tools | length > 0 %}` guard used by
-        // Qwen/Nemotron templates works correctly under minijinja.
-        let tools_val = match tools {
-            Some(t) => minijinja::Value::from_serialize(t),
-            None => minijinja::Value::from_serialize(Vec::<Tool>::new()),
-        };
+        // Same `tools` rule as `apply_raw_inner`: the key is absent when the
+        // request carries no tools, and an explicit empty list counts as no
+        // tools (issue #1597). See that function for why undefined rather than
+        // `none` or an empty list is the value that every shipped guard shape
+        // agrees on.
+        let tools_val = tools
+            .filter(|t| !t.is_empty())
+            .map(minijinja::Value::from_serialize);
 
         let messages_val = minijinja::Value::from_serialize(messages);
         let context = build_template_context(
@@ -882,9 +900,14 @@ fn compile_chat_template_environment(
 /// caller-provided kwargs.
 ///
 /// Standard fields (`messages`, `bos_token`, `eos_token`,
-/// `add_generation_prompt`, `tools`) are always present and are **reserved**
-/// from kwargs overlay — a request cannot overwrite the canonical conversation
-/// or tool list by smuggling those keys through `chat_template_kwargs`.
+/// `add_generation_prompt`, `tools`) are **reserved** from kwargs overlay: a
+/// request cannot overwrite the canonical conversation or tool list by
+/// smuggling those keys through `chat_template_kwargs`. Four of the five are
+/// also always present; `tools` is passed as `None` and left out of the context
+/// entirely when the request carries no tools, because shipped templates branch
+/// on whether the key is defined at all (issue #1597). It stays reserved in
+/// that case, so a kwargs `tools` entry cannot fill the slot the request left
+/// empty.
 ///
 /// `enable_thinking` defaults to `default_enable_thinking` (upstream PR #1114) — `true` when the underlying tokenizer recognizes a
 /// think marker pair, `false` otherwise.  The default is overridable through
@@ -1013,13 +1036,30 @@ fn build_template_context(
     bos_token: &str,
     eos_token: &str,
     add_generation_prompt: bool,
-    tools: minijinja::Value,
+    tools: Option<minijinja::Value>,
     kwargs: &ChatTemplateKwargs,
     default_enable_thinking: bool,
     bare_thinking_alias: bool,
     thinking_mode_sentinel: Option<&str>,
 ) -> minijinja::Value {
     // Start with the default context fields.
+    //
+    // Invariant for this block (issue #1597): insert a key unconditionally only
+    // when no shipped template can branch on its mere definedness. `messages`,
+    // `bos_token`, `eos_token` and `add_generation_prompt` qualify because
+    // templates read them for their value, never through `is defined`, and a
+    // missing one would change the rendered conversation rather than select a
+    // branch. `enable_thinking` is unconditional by contract (issues #686 and
+    // #1114): it is the tested per-request override point, and the templates
+    // that read it read its boolean value. `tools` is the exception this
+    // invariant was written for: three guard families in the local corpus
+    // select their tool-calling preamble on `tools is defined` or
+    // `tools is not none`, so a defined empty list rendered that preamble on
+    // every plain chat request. A future key that any template tests with
+    // `is defined` belongs on the conditional side as well. Below this block,
+    // `thinking` (issue #512) and `thinking_mode` (issues #775 and #819) are
+    // already conditional, and `tool_choice` and `documents` are never inserted
+    // at all.
     let mut ctx: std::collections::BTreeMap<&str, minijinja::Value> =
         std::collections::BTreeMap::new();
     ctx.insert("messages", messages);
@@ -1029,7 +1069,9 @@ fn build_template_context(
         "add_generation_prompt",
         minijinja::Value::from(add_generation_prompt),
     );
-    ctx.insert("tools", tools);
+    if let Some(tools) = tools {
+        ctx.insert("tools", tools);
+    }
     // Tokenizer-derived default: `has_thinking` for thinking models, `false`
     // otherwise (upstream PR #1114). Overridden below by any
     // matching kwarg from the request / server-default merge.
@@ -1044,6 +1086,11 @@ fn build_template_context(
     // Only `enable_thinking` (an intentional, tested override point) and any
     // non-reserved key (e.g. `preserve_thinking`, future template hints)
     // actually reach the Jinja context.
+    //
+    // `tools` stays reserved even when the request carried none and the key was
+    // therefore left out above (issue #1597): the empty tool set is the
+    // server-managed answer, so a kwargs entry must not be able to define the
+    // key the request deliberately left undefined.
     //
     // We rebuild the map with owned String keys after merging so the final
     // minijinja::Value owns all its entries.
@@ -1820,10 +1867,13 @@ mod tests {
             .with_context(|| "Failed to parse chat template")?;
 
         let tmpl = env.get_template("chat")?;
-        let tools_val = match tools {
-            Some(t) => minijinja::Value::from_serialize(t),
-            None => minijinja::Value::from_serialize(Vec::<Tool>::new()),
-        };
+        // Mirrors the production rule in `apply_raw_inner` / `apply_inner`: no
+        // tools and an explicit empty list both leave `tools` undefined in the
+        // context (issue #1597). Keep this expression identical to theirs, or
+        // these helpers stop reproducing what the server renders.
+        let tools_val = tools
+            .filter(|t| !t.is_empty())
+            .map(minijinja::Value::from_serialize);
         let context = build_template_context(
             messages_val,
             &processor.bos_token,
@@ -2494,6 +2544,202 @@ mod tests {
         }];
         let result = processor.apply(&messages, None).unwrap();
         assert!(result.contains("User: Hi"));
+    }
+
+    /// One `hi` user turn, in both the typed and the raw-JSON shape the two
+    /// render paths take. Shared by the issue #1597 guard-shape tests below.
+    fn one_user_turn() -> (Vec<ChatMessage>, serde_json::Value) {
+        (
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            serde_json::json!([{"role": "user", "content": "hi"}]),
+        )
+    }
+
+    /// A single named function tool, enough to make any guard shape fire.
+    fn one_tool(name: &str) -> Vec<Tool> {
+        vec![Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: name.to_string(),
+                description: Some("test".to_string()),
+                parameters: Some(serde_json::json!({"type": "object"})),
+            },
+        }]
+    }
+
+    /// Issue #1597, guard shape 1 of 3: DeepSeek V3 / Youtu-LLM.
+    ///
+    /// `tools is defined and tools is not none` is true for a defined empty
+    /// list, so passing `tools` as an always-present empty vector rendered the
+    /// tool-calling preamble with an empty function list on every plain chat
+    /// request. An absent key makes the guard false, which is what transformers
+    /// (`tools=None`) and llama-server (key unset) both produce.
+    #[test]
+    fn deepseek_style_tools_guard_stays_false_without_tools() {
+        const TEMPLATE: &str = "{% if tools is defined and tools is not none %}TOOLS{% endif %}\
+{% for m in messages %}{{ m.content }}{% endfor %}";
+        let processor = ChatTemplateProcessor::with_template(TEMPLATE.to_string());
+        let (typed, raw) = one_user_turn();
+
+        assert_eq!(processor.apply(&typed, None).unwrap(), "hi");
+        assert_eq!(processor.apply(&typed, Some(&[])).unwrap(), "hi");
+        assert_eq!(processor.apply_raw(&raw, None).unwrap(), "hi");
+        assert_eq!(processor.apply_raw(&raw, Some(&[])).unwrap(), "hi");
+
+        let tools = one_tool("get_weather");
+        assert_eq!(processor.apply(&typed, Some(&tools)).unwrap(), "TOOLShi");
+        assert_eq!(processor.apply_raw(&raw, Some(&tools)).unwrap(), "TOOLShi");
+    }
+
+    /// Issue #1597, guard shape 2 of 3: Llama 3.1 / 3.2 / 3.3 / 4.
+    ///
+    /// The template defaults `tools` to `none` only when it is undefined and
+    /// then branches on `tools is not none`, so a defined empty list took the
+    /// tool branch and prepended `Environment: ipython` plus the "Given the
+    /// following functions" user preamble to every plain chat request.
+    #[test]
+    fn llama_style_tools_guard_stays_false_without_tools() {
+        const TEMPLATE: &str = "{%- if not tools is defined %}{%- set tools = none %}{%- endif %}\
+{% if tools is not none %}TOOLS{% endif %}\
+{% for m in messages %}{{ m.content }}{% endfor %}";
+        let processor = ChatTemplateProcessor::with_template(TEMPLATE.to_string());
+        let (typed, raw) = one_user_turn();
+
+        assert_eq!(processor.apply(&typed, None).unwrap(), "hi");
+        assert_eq!(processor.apply(&typed, Some(&[])).unwrap(), "hi");
+        assert_eq!(processor.apply_raw(&raw, None).unwrap(), "hi");
+
+        let tools = one_tool("get_weather");
+        assert_eq!(processor.apply(&typed, Some(&tools)).unwrap(), "TOOLShi");
+    }
+
+    /// Issue #1597, guard shape 3 of 3: Nemotron / MiMo.
+    ///
+    /// This is the shape that forbids `none` as the no-tools value. The
+    /// template defaults an undefined `tools` to `[]` itself and then tests
+    /// `tools is iterable and tools | length > 0`; minijinja's `iterable` test
+    /// is true for `none` while `| length` of `none` errors, so a `none` would
+    /// abort the render and silently degrade the prompt to the simple
+    /// fallback. Undefined keeps this family on its normal path.
+    #[test]
+    fn nemotron_style_tools_guard_renders_without_error_when_undefined() {
+        const TEMPLATE: &str = "{%- if not tools is defined %}{%- set tools = [] %}{%- endif %}\
+{% if tools is iterable and tools | length > 0 %}TOOLS{% endif %}\
+{% for m in messages %}{{ m.content }}{% endfor %}";
+        let processor = ChatTemplateProcessor::with_template(TEMPLATE.to_string());
+        let (typed, raw) = one_user_turn();
+
+        assert_eq!(processor.apply(&typed, None).unwrap(), "hi");
+        assert_eq!(processor.apply(&typed, Some(&[])).unwrap(), "hi");
+        assert_eq!(processor.apply_raw(&raw, None).unwrap(), "hi");
+
+        let tools = one_tool("get_weather");
+        assert_eq!(processor.apply(&typed, Some(&tools)).unwrap(), "TOOLShi");
+    }
+
+    /// Issue #1597: the history-boundary render the prompt cache snapshots on
+    /// takes the same rule, so a cached boundary and the prompt it is a prefix
+    /// of cannot disagree about whether the tool preamble is there.
+    #[test]
+    fn history_render_leaves_tools_undefined_without_tools() {
+        const TEMPLATE: &str = "{% if tools is defined and tools is not none %}TOOLS{% endif %}\
+{% for m in messages %}{{ m.content }}{% endfor %}";
+        let processor = ChatTemplateProcessor::with_template(TEMPLATE.to_string());
+        let (typed, raw) = one_user_turn();
+        let kwargs = ChatTemplateKwargs::new();
+
+        assert_eq!(
+            processor
+                .apply_history_with_kwargs(&typed, None, &kwargs)
+                .unwrap(),
+            "hi"
+        );
+        assert_eq!(
+            processor
+                .apply_history_with_kwargs(&typed, Some(&[]), &kwargs)
+                .unwrap(),
+            "hi"
+        );
+        assert_eq!(
+            processor
+                .apply_raw_history_with_kwargs(&raw, None, &kwargs)
+                .unwrap(),
+            "hi"
+        );
+    }
+
+    /// Issue #1597 against the two shipped checkpoints, without loading a
+    /// single weight: `from_model_path` reads only the template files, so this
+    /// reproduces exactly what `/apply-template` answers, and it is the cheap
+    /// gate for the prompt strings that `tests/apply_template_tools_parity.rs`
+    /// re-checks over HTTP. Gated on the local `models/` tree.
+    ///
+    /// The Llama comparison replaces the `Today Date:` line, which the template
+    /// resolves through `strftime_now` at render time. The per-case
+    /// `enable_thinking` default is what `server::startup` derives from the
+    /// tokenizer's think markers (upstream PR #1114): true for Youtu, whose
+    /// template primes an empty `<think></think>` block when the value is
+    /// defined and false, and false for Llama 3.2, whose template never reads
+    /// the variable.
+    #[test]
+    #[ignore = "requires local models/ directory; run with --ignored"]
+    fn local_checkpoint_templates_render_the_transformers_prompt_without_tools() {
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/mlx");
+        let cases: [(&str, bool, &str); 2] = [
+            (
+                "youtu-llm-2b-4bit",
+                true,
+                "<|begin_of_text|><|User|>The Fibonacci sequence begins with<|Assistant|>",
+            ),
+            (
+                "llama-3.2-1b-4bit",
+                false,
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: <DATE>\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nThe Fibonacci sequence begins with<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+            ),
+        ];
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "The Fibonacci sequence begins with".to_string(),
+        }];
+
+        for (name, enable_thinking, oracle) in cases {
+            let directory = models.join(name);
+            if !directory.exists() {
+                eprintln!("skip: {} not found", directory.display());
+                continue;
+            }
+            let mut processor = ChatTemplateProcessor::from_model_path(&directory)
+                .expect("read template")
+                .expect("checkpoint carries a chat template");
+            processor.set_default_enable_thinking(enable_thinking);
+
+            for tools in [None, Some(&[][..])] {
+                let rendered = processor.apply(&messages, tools).expect("render");
+                let normalized = rendered
+                    .split('\n')
+                    .map(|line| match line.starts_with("Today Date: ") {
+                        true => "Today Date: <DATE>".to_string(),
+                        false => line.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(
+                    normalized, oracle,
+                    "{name} must render the transformers prompt for tools = {tools:?}"
+                );
+            }
+
+            let with_tools = processor
+                .apply(&messages, Some(&one_tool("get_weather")))
+                .expect("render with one tool");
+            assert!(
+                with_tools.contains("get_weather"),
+                "{name} must still declare a tool that was actually sent"
+            );
+        }
     }
 
     #[test]

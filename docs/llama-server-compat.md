@@ -412,6 +412,16 @@ clap gives no command-line order, so when `--chat-template-kwargs` names one of 
 
 b10621 accepts either Jinja template text or one of 54 built-in identifiers (`chatml`, `llama3`, `deepseek3`, ...). mlxcel has no built-in template library: an MLX checkpoint carries its own template in `tokenizer_config.json`, which is what mlxcel renders by default. A bare built-in name would become the template itself and every prompt would render to the literal string, so the name set is recognised and refused before the model resolves.
 
+### `tools` is defined only when the request carries tools (#1597)
+
+b10621 builds the template context's `tools` entry from `common_chat_tools_to_json_oaicompat`, which answers a null JSON value for an empty tool array, and minja's `chat-template.hpp` sets the key only when that value is non-null. A request with no `tools`, or with `"tools": []`, therefore renders against a context where `tools` is simply not there. mlxcel does the same since #1597: the key is absent unless the request carries at least one tool, and `tool_choice: "none"` reaches the template as no tools the way it always has.
+
+The definedness is load-bearing, not cosmetic. Published templates gate their tool-calling preamble in three shapes, and two of them are satisfied by a defined empty list: DeepSeek V3 derivatives test `tools is defined and tools is not none`, and Llama 3.1 / 3.2 / 3.3 / 4 default `tools` to `none` only when it is undefined and then test `tools is not none`. Rendering either family with `tools = []`, which is what mlxcel passed before #1597, emitted the whole preamble with an empty function list on every plain chat request: `Environment: ipython` plus the "Given the following functions" block on Llama 3.2, an empty `<|begin_of_tool_description|>` block on Youtu-LLM. transformers passes `tools=None`, which renders identically to undefined for every guard shape mlxcel ships against, so the mlx-lm oracle and llama-server agree with each other and now with mlxcel.
+
+Undefined rather than `none` is deliberate. The third guard shape, used by Nemotron and MiMo, defaults an undefined `tools` to `[]` itself and then tests `tools is iterable and tools | length > 0`; minijinja's `iterable` test succeeds for `none` while `| length` of `none` errors, so a `none` would abort those renders and silently degrade the prompt to the plain-chat fallback.
+
+Upgrading past #1597 changes the rendered prompt for affected models, so the first request per model misses in the prompt cache once and rebuilds it. That is a single cold miss, not a compatibility break: no key digest version changes and no migration is needed.
+
 ### What is left
 
 No entry in this shard is `deferred` any more. `--reasoning-budget-message` became `supported` with #1470's injection, and `--reasoning-format` became `by_design` on the `auto` resolution alone once the streamed delimiters landed. Every native field in this shard other than `echo` is `not_applicable`: mlxcel's `POST /completion` is a raw-prompt endpoint with no chat template and no chat parsing for them to configure.
