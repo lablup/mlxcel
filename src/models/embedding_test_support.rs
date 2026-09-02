@@ -49,6 +49,15 @@ use safetensors::tensor::{Dtype as SafeTensorDtype, View};
 /// raw multi-threaded `cargo test` over a wide filter is not a supported way
 /// to run this suite on either backend.
 ///
+/// One thing it does serialize across modules is the process-global default
+/// device, by holding `mlxcel_core::streams::lock_default_device` for the
+/// test's duration. That is the same lock the modules that move the default
+/// device take, so a gate here cannot be measuring a checkpoint while
+/// `vision::merge` or `multimodal::host_preprocessor` holds the device on the
+/// CPU. Without it those spans overlap under the parallel `cargo test --lib`
+/// in `scripts/run_quality_gate.sh`, and the reranker scores below would come
+/// from the CPU backend with nothing saying so (issue #1421).
+///
 /// The guard also checks that MLX's process-wide default device is still the
 /// GPU when a GPU backend exists. Other test modules move the default device
 /// to the CPU for their own reasons, and libtest runs modules in name order,
@@ -79,20 +88,20 @@ use safetensors::tensor::{Dtype as SafeTensorDtype, View};
 ///
 /// A `DefaultDeviceGuard` that another test is holding *right now* is not a
 /// leak either, so the check is skipped while any guard is alive
-/// (`mlxcel_core::streams::default_device_guards_held`). That exemption costs
-/// the gates nothing: they all pass `--test-threads=1`, where no guard can be
-/// alive while this test runs, so a real leak still fails here. It matters for
-/// the parallel runs the repository also defines, such as the
-/// `cargo test --lib` in `scripts/run_quality_gate.sh`, where a concurrent
-/// `DefaultDeviceGuard::cpu()` in `vision::merge` or
-/// `multimodal::host_preprocessor` is correct code doing its job and would
-/// otherwise trip this assertion.
-pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
+/// (`mlxcel_core::streams::default_device_guards_held`). The default-device
+/// lock above already excludes every in-tree guard, so this is the backstop
+/// for a guard taken without that lock; it costs the gates nothing, since
+/// they all pass `--test-threads=1`, where no guard can be alive while this
+/// test runs and a real leak still fails here.
+pub(crate) fn mlx_test_guard() -> MlxTestGuard {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    let guard = GUARD
+    let serial = GUARD
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Taken after the serial lock and never in the other order, so the two
+    // locks cannot deadlock against a module that takes only this one.
+    let device = mlxcel_core::streams::lock_default_device();
     assert!(
         mlxcel_core::default_device_is_gpu()
             || !mlxcel_core::gpu_backend_available()
@@ -100,7 +109,20 @@ pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
             || mlxcel_core::streams::default_device_guards_held() > 0,
         "MLX's default device is the CPU although a GPU backend is available, MLXCEL_DEVICE=cpu is not set, and no DefaultDeviceGuard is held: an earlier test moved the default device and never restored it. Hold a mlxcel_core::streams::DefaultDeviceGuard for the test's duration instead of calling set_default_device directly."
     );
-    guard
+    MlxTestGuard {
+        _device: device,
+        _serial: serial,
+    }
+}
+
+/// What [`mlx_test_guard`] returns: the process-wide MLX serialization lock
+/// and the default-device lock, both released when the test's binding drops.
+/// Fields drop in declaration order, which is immaterial here because neither
+/// lock is taken while the other is being released anywhere in this crate.
+#[must_use = "the locks are released when the guard drops; bind it to a named local, not `_`"]
+pub(crate) struct MlxTestGuard {
+    _device: mlxcel_core::streams::DefaultDeviceLock,
+    _serial: MutexGuard<'static, ()>,
 }
 
 /// Deterministic xorshift64* generator.

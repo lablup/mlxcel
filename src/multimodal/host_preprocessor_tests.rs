@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::OnceLock;
 
 use image::DynamicImage;
 use mlxcel_core::dtype;
-use mlxcel_core::streams::DefaultDeviceGuard;
+use mlxcel_core::streams::{DefaultDeviceGuard, DefaultDeviceLock, lock_default_device};
 
 use super::{
     CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
@@ -28,32 +28,32 @@ use super::{
 use crate::multimodal::vlm_prompt::ImageTokenBlockError;
 use crate::vision::merge::merge_llava;
 
-/// Serializes the tests here that move MLX's process-wide default device, and
-/// records where it was before the first of them moved it, so
+/// Where MLX's default device was before the first test here moved it, so
 /// [`the_default_device_is_restored_after_the_export_tests`] can check that it
 /// came back.
-static DEVICE_TESTS: Mutex<()> = Mutex::new(());
 static DEFAULT_DEVICE_BEFORE: OnceLock<bool> = OnceLock::new();
 
-fn device_tests_lock() -> MutexGuard<'static, ()> {
-    DEVICE_TESTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Run one export test on the CPU. Bind the result to a named local for the
-/// test's duration: the lock keeps sibling tests from observing a half-moved
+/// test's duration: the lock keeps other tests from observing a half-moved
 /// device, and the guard restores the previous default device when it drops.
 /// The `Once` this replaces moved the process-wide default device for good, so
 /// under `--test-threads=1` every real-checkpoint gate that sorted after this
 /// module measured the CPU backend (issue #1421).
 ///
+/// The lock is `mlxcel_core::streams::lock_default_device`, the one
+/// process-wide lock every default-device mover takes, and not a lock private
+/// to this module. A private lock would exclude only the tests in this file,
+/// while `vision::merge` holds a CPU guard for each of its own four tests and
+/// `mlx_test_guard` measures real checkpoints through the same device; with
+/// two separate locks those spans interleave and the baseline recorded below
+/// is whichever device the other module happened to be holding.
+///
 /// The tuple order is load-bearing. Tuple fields drop in declaration order,
 /// so the device guard must come first: releasing the lock before the device
 /// is restored would let the next test take the lock and record the *moved*
 /// device as its baseline, which is the leak this helper exists to prevent.
-fn cpu_device() -> (DefaultDeviceGuard, MutexGuard<'static, ()>) {
-    let lock = device_tests_lock();
+fn cpu_device() -> (DefaultDeviceGuard, DefaultDeviceLock) {
+    let lock = lock_default_device();
     DEFAULT_DEVICE_BEFORE.get_or_init(mlxcel_core::default_device_is_gpu);
     let device = DefaultDeviceGuard::cpu();
     (device, lock)
@@ -385,11 +385,17 @@ fn qwen2_vl_export_rejects_video_and_cross_image_run_drift() {
 /// `--test-threads=1`), the default device is where it was before the first of
 /// them touched it. The old `Once` left it on the CPU, and the real-checkpoint
 /// gates that sorted after this module scored a reranker on the CPU backend.
-/// Without `--test-threads=1` the lock still makes the check meaningful for
-/// whichever export tests ran before it.
+/// Without `--test-threads=1` the shared lock still makes the check
+/// meaningful for whichever export tests ran before it.
 #[test]
 fn the_default_device_is_restored_after_the_export_tests() {
-    let _lock = device_tests_lock();
+    let _lock = lock_default_device();
+    // A guard taken without the shared lock is somebody else's live span, not
+    // a leak this test can diagnose, so stand down rather than report one.
+    // Same exemption `mlx_test_guard` carries, and for the same reason.
+    if mlxcel_core::streams::default_device_guards_held() > 0 {
+        return;
+    }
     let before = *DEFAULT_DEVICE_BEFORE.get_or_init(mlxcel_core::default_device_is_gpu);
     assert_eq!(
         mlxcel_core::default_device_is_gpu(),

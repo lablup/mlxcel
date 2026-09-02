@@ -2533,7 +2533,11 @@ fn shapeless_compile_audit_harness() {
         "the audit environment must be set before any compiled function is initialized"
     );
     // Pin the audit to the GPU for its duration and put the previous default
-    // device back on exit, even through a failed assertion (issue #1421).
+    // device back on exit, even through a failed assertion (issue #1421). The
+    // shared lock keeps a sibling test in this binary from moving the device
+    // underneath the audit; locals drop in reverse declaration order, so the
+    // device is restored before the lock is released.
+    let _lock = crate::streams::lock_default_device();
     let _device = crate::streams::DefaultDeviceGuard::gpu();
     random_seed(1392);
 

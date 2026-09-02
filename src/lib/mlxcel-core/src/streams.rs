@@ -40,6 +40,7 @@
 //! different threads.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::UniquePtr;
 use crate::ffi;
@@ -178,6 +179,12 @@ impl Drop for DefaultStreamGuard {
 /// MLX rejects `set_default_device(gpu)` there, and the guard must never ask
 /// for a device the backend cannot provide.
 ///
+/// The guard restores, it does not exclude. Creating one does not stop
+/// another thread from moving the same process-global device in the middle
+/// of the span, so every caller that moves the default device, or that
+/// measures something which depends on where it points, holds
+/// [`lock_default_device`] for that span as well.
+///
 /// # Example
 ///
 /// ```ignore
@@ -209,6 +216,47 @@ static LIVE_DEVICE_GUARDS: AtomicUsize = AtomicUsize::new(0);
 #[must_use]
 pub fn default_device_guards_held() -> usize {
     LIVE_DEVICE_GUARDS.load(Ordering::Acquire)
+}
+
+/// The one process-wide lock for code that moves MLX's default device, or
+/// that reads it expecting nobody else to move it.
+///
+/// [`DefaultDeviceGuard`] puts the device back, which is necessary and not
+/// sufficient: the device is process-global while libtest runs one binary's
+/// tests in parallel, so a lock private to one module only excludes that
+/// module's own tests. Two modules holding two different locks still
+/// interleave, and the second one then reads a device the first is
+/// legitimately holding, either as the baseline it will compare against later
+/// or as the backend its measurement lands on. Both happened here:
+/// `multimodal::host_preprocessor`'s restore check read the CPU default that
+/// `vision::merge` was holding and reported it as a leak in 4 of 300 runs of
+/// `cargo test --lib` over the two modules, and any gate holding
+/// `mlx_test_guard` could have scored a real checkpoint on the CPU for the
+/// same reason without saying so. One lock for the one device removes both
+/// (issue #1421).
+///
+/// The lock is not reentrant, so take it once per span. Creating a
+/// [`DefaultDeviceGuard`] deliberately does not take it, so guards still nest
+/// inside a span that holds it. A poisoned lock is recovered rather than
+/// propagated: one panicking test must fail alone, not cascade into every
+/// test after it.
+#[must_use = "the lock is released when the returned value drops; bind it to a named local, not `_`"]
+pub fn lock_default_device() -> DefaultDeviceLock {
+    DefaultDeviceLock {
+        _guard: DEFAULT_DEVICE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    }
+}
+
+/// The lock behind [`lock_default_device`].
+static DEFAULT_DEVICE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The span held by [`lock_default_device`], released on drop, including
+/// while a panic unwinds.
+#[derive(Debug)]
+pub struct DefaultDeviceLock {
+    _guard: MutexGuard<'static, ()>,
 }
 
 impl DefaultDeviceGuard {
@@ -379,21 +427,7 @@ pub fn new_thread_local_stream_on_gpu(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard};
-
     use super::*;
-
-    /// Serializes the tests here that move the process-wide default device,
-    /// so a guard held by one test cannot change what another records as its
-    /// baseline. libtest runs the tests of one binary in parallel unless told
-    /// otherwise.
-    static DEVICE_LOCK: Mutex<()> = Mutex::new(());
-
-    fn device_lock() -> MutexGuard<'static, ()> {
-        DEVICE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     // --- Index-aware multi-GPU helpers (epic #486, sub-issue #487) ---
 
@@ -448,7 +482,7 @@ mod tests {
     /// for sibling tests.
     #[test]
     fn set_default_gpu_device_validates_index() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let _device = DefaultDeviceGuard::capture();
         let count = gpu_device_count();
         assert!(
@@ -499,7 +533,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn trivial_op_runs_on_non_default_gpu_index() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let count = gpu_device_count();
         if count < 2 {
             // Single-GPU CUDA host: no second device to target.
@@ -524,7 +558,7 @@ mod tests {
     /// on a build with neither Metal nor CUDA it is `false`.
     #[test]
     fn gpu_backend_available_does_not_track_the_default_device() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let available = ffi::gpu_backend_available();
         if crate::metal_is_available() {
             assert!(
@@ -560,7 +594,7 @@ mod tests {
     /// value the outer one installed, and the outer returns to the original.
     #[test]
     fn default_device_guards_nest_and_restore_in_order() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let baseline = ffi::default_device_is_gpu();
         {
             let _outer = DefaultDeviceGuard::cpu();
@@ -583,7 +617,7 @@ mod tests {
     /// through another path (here the raw boolean setter) is still put back.
     #[test]
     fn default_device_guard_capture_restores_without_moving() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let baseline = ffi::default_device_is_gpu();
         {
             let _device = DefaultDeviceGuard::capture();
@@ -602,7 +636,7 @@ mod tests {
     /// guard does not leave the CPU default behind for the modules after it.
     #[test]
     fn default_device_guard_restores_while_unwinding() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let baseline = ffi::default_device_is_gpu();
         let outcome = std::panic::catch_unwind(|| {
             let _cpu = DefaultDeviceGuard::cpu();
@@ -624,7 +658,7 @@ mod tests {
     /// concurrent test is legitimately holding.
     #[test]
     fn live_device_guards_are_counted_until_the_device_is_restored() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         let baseline = default_device_guards_held();
         {
             let _outer = DefaultDeviceGuard::capture();
@@ -647,7 +681,7 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn deprecated_is_gpu_available_keeps_the_default_device_meaning() {
-        let _lock = device_lock();
+        let _lock = lock_default_device();
         assert_eq!(crate::is_gpu_available(), ffi::default_device_is_gpu());
         let _cpu = DefaultDeviceGuard::cpu();
         assert!(!crate::is_gpu_available());
