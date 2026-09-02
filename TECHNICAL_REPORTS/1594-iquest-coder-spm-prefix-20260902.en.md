@@ -74,7 +74,7 @@ Worth recording for a different reason: the override lowers the model's own teac
 
 ### 2.4 Code Quality
 
-- **Test coverage**: 16 new tests. Eight cover the protobuf rewrite on synthetic messages, two read the real `tokenizer.model` (and skip through the shared pinned-checkpoint gate when it is absent), six cover detection including the two refusals and the two inert-key cases, one covers `add_prefix_space` parsing, and one asserts the family appears in `mlxcel arch`.
+- **Test coverage**: 22 new tests. Nine cover the protobuf rewrite on synthetic messages, two read the real `tokenizer.model` (and skip through the shared pinned-checkpoint gate when it is absent), ten cover detection including the two refusals, the inert-key cases, the type-variant spellings of the sliding-window keys and the relabelled-architecture route, and one asserts the family appears in `mlxcel arch`.
 - **Complexity**: one new 237-line module with a single public function.
 - **Technical debt**: `parse_special_tokens` returning a growing tuple was replaced by a named struct, which is a small reduction.
 
@@ -130,6 +130,16 @@ The reason is that this `tokenizer.model` is a SentencePiece **BPE** model (`tra
 **Rationale:** The tokenizer that ships with the weights is the tokenizer the weights were trained with. A transcript produced through a lossy conversion is evidence about the conversion, not about mlxcel.
 
 **Trade-offs:** Anyone comparing mlxcel against an mlx-lm run of this family has to be aware that mlx-lm cannot load this checkpoint without either `trust_remote_code` or a relabel, and that the relabel silently changes the tokenizer. Appendix B records what to compare instead.
+
+---
+
+### 3.4 What review changed
+
+The first revision's sliding-window refusal read the window size with `Value::as_u64` and the switch with `Value::as_bool`. The vendor tests `is not None` and Python truthiness, so `"sliding_window": 4096.0`, `"sliding_window": "4096"` and `"use_sliding_window": 1` are all live there, and all three answered `None` on this side and were accepted into a full-attention decode. That is precisely the outcome the guard exists to prevent, arriving through a JSON spelling rather than through a missing check. Both keys are now presence tests. In the same shape, `num_hidden_layers` defaulted to `0` on an unreadable value, which made the `max_window_layers < num_layers` comparison false and opened the guard; it defaults to `u64::MAX` now, so an unknown layer count means "assume a layer reaches the window".
+
+The larger finding was that the guards were attached to the label rather than to the weights. A checkpoint relabelled `"model_type": "llama"` reached the plain Llama arm and skipped both refusals, and relabelling is not hypothetical for this family: it is how the checkpoint is made loadable by a stack that will not run its `auto_map` code, and it is what this PR's own oracle runs did. The `llama` and `mistral` arms now delegate to the same classifier when `architectures` names `IQuestCoderForCausalLM`. Routing is unaffected, since both paths reach the same decoder; what changes is that the refusals travel with the weights.
+
+Review also found that `disable_add_dummy_prefix` collected a span for every field in the message. On a real 76800-piece model that is about 3.7 MB of transient allocation, and on a hostile file of minimum-width fields roughly 24 bytes per input byte. The walk still validates the whole message and now collects only the field it edits.
 
 ---
 
@@ -250,10 +260,10 @@ print(m.trainer_spec.model_type)   # 2 means BPE: a converted fast tokenizer may
 
 | Item | Value |
 |------|-------|
-| Files changed | 11 |
-| Lines added | +950 |
+| Files changed | 13 |
+| Lines added | +1819 |
 | Lines deleted | -11 |
-| Tests added | 16 |
+| Tests added | 22 |
 
 ### Changes by Category
 
@@ -261,7 +271,7 @@ print(m.trainer_spec.model_type)   # 2 means BPE: a converted fast tokenizer may
 |----------|-------|---------|
 | Model routing | 5 files | `ModelType::IQuestCoder`, its registry entry, the detection arm with two refusals, and the two distributed dispatch sites |
 | Tokenizer correctness | 3 files | `add_prefix_space` is read and applied through a `ModelProto` rewrite |
-| Tests | 3 files | 16 tests, two of which read the real checkpoint behind the pinned gate |
+| Tests | 3 files | 22 tests, two of which read the real checkpoint behind the pinned gate |
 | Documentation | 1 file | The family entry in `docs/supported-models.md`, including both refusals and the distributed caveat |
 
 ---
