@@ -811,6 +811,11 @@ impl BatchScheduler {
             return;
         }
 
+        // The forward below covers only `tokens[matched_len..]`, and for a
+        // non-batching family the restored prefix is not reflected in the
+        // scheduler's `KVCache::offset` either, so the pass geometry alone
+        // understates the sequence. Announce the warm-up target's full length.
+        let _span = mlxcel_core::prefill_span::announce(tokens.len() as i32);
         let delta: Vec<i32> = tokens[matched_len..].to_vec();
         let delta_len = delta.len() as i32;
         let input = mlxcel_core::from_slice_i32(&delta, &[1, delta_len]);
@@ -924,6 +929,12 @@ impl BatchScheduler {
         &mut self,
         seq: &mut SequenceInfo,
     ) -> Result<(), String> {
+        // The segment forward below covers `prompt_tokens[start..boundary]`, a
+        // strict prefix of the prompt, so it must resolve a whole-prompt RoPE
+        // table from the prompt and not from its own span. Both callers already
+        // announce; announcing here as well keeps the function correct on its
+        // own if a third caller ever appears.
+        let _span = self.announce_prefill_span(seq);
         if !self.model.supports_snapshot_reuse() || !self.prompt_cache_active() {
             return Ok(());
         }

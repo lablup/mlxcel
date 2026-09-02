@@ -144,12 +144,19 @@ fn table_for(&self, offset: i32, seq_len: i32) -> &SuRopeTable {
 
 ### 4.3 알림 지점
 
-- `mlxcel-core`의 `chunked_prefill_last_logits`는 청크 루프를 감싸 `prompt_tokens.len()`을 한 번 알린다. 그 함수 안에서는 다른 게 돌지 않는다.
-- 서버의 `start_chunked_prefill`과 `continue_chunked_prefill`은 청크 하나의 forward를 수행하는 `let logits = { ... }` 블록 안에서 각각 해당 시퀀스의 `prompt_tokens.len()`을 알린다. 스케줄러가 틱 루프로 돌아가기 전에 알림이 끝난다.
+`mlxcel-core`의 `chunked_prefill_last_logits`는 청크 루프를 감싸 `prompt_tokens.len()`을 한 번 알린다. 그 함수 안에서는 다른 게 돌지 않는다.
 
-단일 패스 prefill(`execute_full_prefill`, `run_padded_batched_prefill`, CLI의 비청크 분기)은 자기 `offset + seq_len`이 이미 시퀀스 길이이므로 아무것도 알리지 않는다. 접두 캐시가 적중해 캐시되지 않은 뒷부분만 넣는 경우에도 캐시 offset이 접두 길이를 반영하므로 그대로 성립한다.
+서버에서는 forward마다가 아니라, 한 시퀀스의 prefill 작업을 수행하는 스케줄러 진입점마다 한 번씩 알린다. `BatchScheduler`의 `announce_prefill_span(&seq)` 헬퍼를 쓰고 가드는 함수 스코프인데, 그게 맞는 수명이다. 스케줄러는 한 프롬프트의 청크 두 개 사이에 다른 시퀀스의 디코드 배치를 돌리지만, 이 함수들 안에서 도는 것은 전부 한 시퀀스의 것이기 때문이다. 지점은 `execute_full_prefill`, `start_chunked_prefill`, `continue_chunked_prefill`, `capture_history_boundary_snapshot`, `run_next_prompt_cache_warmup`이다. `run_padded_batched_prefill`은 prefill이지만 의도적으로 알리지 않는다. offset 0에서 시작해 코호트에서 가장 긴 행만큼을 커버하므로 그 행에 대해서는 패스 자체가 이미 답을 담고 있고, 스칼라 하나로 더 짧은 행들에 다른 말을 할 수도 없다.
 
-### 4.4 스케일 적용
+CLI의 비청크 분기도 자기 `offset + seq_len`이 이미 시퀀스 길이이므로 아무것도 알리지 않는다.
+
+### 4.4 첫 시도는 엉뚱한 곳에 알렸고, 서버만 그걸 잡아냈다
+
+이 변경의 첫 버전은 청크 prefill 두 함수 안, 청크 하나를 돌리는 `let logits = { ... }` 블록에서만 알렸다. CLI 게이트는 전부 통과했다. 4비트 체크포인트가 1078 토큰과 5136 토큰 프롬프트 양쪽에서 위치 선택형 오라클과 30토큰 중 30개 일치했고, bf16 체크포인트도 f16 캐스트 오라클과 일치했으며, phi-3-mini는 무변화였고, `MLXCEL_PREFILL_CHUNK=0`이 2048과 같았다. 그런데 서버는 같은 5136 토큰 프롬프트에 대해 `POST /v1/completions`에서 반복을 뱉었다. 프롬프트 캐시가 기본으로 켜져 있고, 그 경로가 수정이 건드리지 않은 forward 두 개를 더 통과하기 때문이다. `capture_history_boundary_snapshot`은 `prompt_tokens[start..boundary]`를 넘기는데, 이것은 프롬프트는 임계값을 넘어도 자기는 그 아래에서 끝날 수 있는 진부분집합이다. `run_next_prompt_cache_warmup`은 스냅샷 복원 후 delta를 넘기는데, non-batching 계열에서는 복원된 접두가 스케줄러의 `KVCache::offset`에 반영되지 않는다.
+
+대응은 위의 함수 스코프 헬퍼와, `src/server/batch/scheduler/prefill_span_coverage_tests.rs`다. 헬퍼는 저자가 눈으로 본 forward가 아니라 진입점이 도달할 수 있는 모든 forward를 덮고, 후자는 `src/server/batch/scheduler` 아래의 모든 모델 forward를 prefill과 디코드로 분류해 표에 없는 함수에서 forward가 나타나면 실패하는 소스 수준 가드다.
+
+### 4.5 스케일 적용
 
 두 경로 모두 회전 전에 Q와 K의 rotary 앞부분에 테이블의 스케일을 곱한다. 기존 코드가 `su_rope_scale`을 적용하던 자리와 같다. 업스트림은 대신 `cos`와 `sin`에 곱하는데, RoPE는 입력에 대해 선형이므로 둘은 같은 사상이고 입력에 곱하는 쪽이 더 작은 텐서에 곱셈 한 번이다.
 
@@ -159,8 +166,10 @@ fn table_for(&self, offset: i32, seq_len: i32) -> &SuRopeTable {
 
 | 명령 | 결과 |
 |------|------|
-| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 11 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 12 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib server::batch::scheduler::prefill_span_coverage` | 3 passed |
 | `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib prefill_span` | 5 passed |
+| `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib generate::tests` | 36 passed |
 | `cargo test --profile test-fast --features metal,accelerate --lib models::rope_utils` | 28 passed |
 | `cargo clippy --profile test-fast --lib --tests --features metal,accelerate -- -D warnings` (두 크레이트) | clean |
 | `cargo fmt --all -- --check` | clean |
@@ -180,25 +189,27 @@ phi3 테스트가 다루는 것: 두 테이블의 주파수 구성을 닫힌 형
 
 | 항목 | 값 |
 |------|-----|
-| 변경 파일 | 8 |
-| 추가 | 795 |
+| 변경 파일 | 11, 보고서 2개 별도 |
+| 추가 | 1629 (보고서 포함) |
 | 삭제 | 82 |
 | 신규 모듈 | 1 (`mlxcel_core::prefill_span`) |
-| 신규 단위 테스트 | 14 (`phi3_tests.rs` 9개, `prefill_span_tests.rs` 5개) |
+| 신규 단위 테스트 | 19 (`phi3_tests.rs` 10개, `prefill_span_tests.rs` 5개, `prefill_span_coverage_tests.rs` 3개, `generate.rs` 1개) |
 
 ### 카테고리별 변경
 
 | 카테고리 | 파일 |
 |----------|------|
-| 모델 수정 | `src/models/phi3.rs` (226+/79-) |
-| 테스트 | `src/models/phi3_tests.rs` (360+/1-), `src/lib/mlxcel-core/src/prefill_span_tests.rs` (63+/0-) |
-| 코어 메커니즘 | `src/lib/mlxcel-core/src/prefill_span.rs` (110+/0-), `src/lib/mlxcel-core/src/lib.rs` (5+/0-), `src/lib/mlxcel-core/src/generate.rs` (6+/0-) |
-| 서버 배선 | `src/server/batch/scheduler/prefill.rs` (13+/0-) |
-| 문서 | `docs/supported-models.md` (12+/2-) |
+| 모델 수정 | `src/models/phi3.rs` |
+| 코어 메커니즘 | `src/lib/mlxcel-core/src/prefill_span.rs`, `src/lib/mlxcel-core/src/lib.rs`, `src/lib/mlxcel-core/src/generate.rs` |
+| 서버 배선 | `src/server/batch/scheduler/prefill.rs`, `src/server/batch/scheduler/prompt_cache.rs`, `src/server/batch/scheduler/mod.rs` |
+| 테스트 | `src/models/phi3_tests.rs`, `src/lib/mlxcel-core/src/prefill_span_tests.rs`, `src/server/batch/scheduler/prefill_span_coverage_tests.rs` |
+| 문서 | `docs/supported-models.md` |
 
 ### 관련 커밋
 
 - `a770022` fix(phi3): select the LongRoPE table by whole-prompt position
+- `docs: add technical report for PR #1580`
+- `fix(server): announce the prefill span on the prompt-cache forwards`
 
 ### 관련 PR/이슈
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use mlxcel_core::prefill_span::PrefillSpan;
 
 impl BatchScheduler {
     // ------------------------------------------------------------------
@@ -57,6 +58,32 @@ impl BatchScheduler {
             .next()
             .and_then(|seq| seq.lora_scales.as_ref());
         batched_window_admits_lora(true, active, seq_lora)
+    }
+
+    /// Announce, for the duration of the returned guard, how many positions the
+    /// sequence whose prefill is about to run will span.
+    ///
+    /// A model that picks its RoPE frequency table from the length of the whole
+    /// prompt (Phi-3 / Phi-4 LongRoPE) cannot get that from one forward's own
+    /// `(cache_offset, seq_len)`, because the scheduler reaches the model with
+    /// only a piece of the prompt in three separate ways: a `--prefill-chunk-size`
+    /// chunk, the history-boundary segment split off by
+    /// `capture_history_boundary_snapshot`, and the suffix left after a
+    /// prompt-cache hit. Each of those pieces would resolve the table on its own
+    /// and a prompt that straddles the threshold would end up with keys built
+    /// from two tables in one cache.
+    ///
+    /// Every scheduler entry point that runs prefill work for one sequence calls
+    /// this first, so the announcement covers every forward that entry point can
+    /// reach, and it is scoped to the call so it cannot outlive the tick and be
+    /// read by another sequence's decode step. Decode paths deliberately do not
+    /// announce: there the pass's own offset is the position. See
+    /// [`mlxcel_core::prefill_span`].
+    ///
+    /// Used by: `execute_full_prefill`, `start_chunked_prefill`,
+    /// `continue_chunked_prefill`, `capture_history_boundary_snapshot`
+    pub(super) fn announce_prefill_span(&self, seq: &SequenceInfo) -> PrefillSpan {
+        mlxcel_core::prefill_span::announce(seq.prompt_tokens.len() as i32)
     }
 
     /// Prefill a sequence. If `prefill_chunk_size > 0` and the prompt
@@ -566,6 +593,15 @@ impl BatchScheduler {
             return;
         }
 
+        // Prefill, and deliberately NOT covered by `announce_prefill_span`: this
+        // pass starts at offset 0 and spans `padded_len`, the longest row, so a
+        // whole-prompt RoPE table already resolves correctly from the pass
+        // itself for that row. One announcement is a scalar and cannot say
+        // anything different for the shorter rows, which share this cohort's
+        // decision the same way they already share its padded mask geometry.
+        // A cohort can only straddle a table threshold when chunking is off or
+        // its chunk exceeds the threshold, since any longer prompt takes the
+        // chunked path instead. See `mlxcel_core::prefill_span`.
         // Single batched forward pass: [B, padded_len] → [B, padded_len, vocab]
         let raw_logits = self.model.forward_batched_with_context_and_ids(
             &input,
@@ -644,6 +680,7 @@ impl BatchScheduler {
     /// model. The VLM-prefix path deliberately opts out of cache adoption at
     /// the enqueue site, so this branch never has to mix the two.
     pub(super) fn execute_full_prefill(&mut self, mut seq: SequenceInfo) {
+        let _span = self.announce_prefill_span(&seq);
         // Split off the history-boundary segment first (issue #1143). On the
         // vast majority of requests this is an early-return; when it does run
         // it advances `prefill_start_offset`, so everything below sees the
@@ -829,6 +866,7 @@ impl BatchScheduler {
     /// leading tokens that the adopted prompt-cache entry already covers,
     /// so the first chunk starts *after* the cached prefix.
     pub(super) fn start_chunked_prefill(&mut self, mut seq: SequenceInfo) {
+        let _span = self.announce_prefill_span(&seq);
         // Same history-boundary split as `execute_full_prefill` (issue #1143).
         // It advances `prefill_start_offset`, which is exactly the cursor the
         // first chunk starts from, so the chunk loop below needs no changes.
@@ -903,14 +941,6 @@ impl BatchScheduler {
         // reaches the check below assigns it exactly once; the others return.
         let prefill_eval: Option<Result<(), String>>;
         let logits = {
-            // A model that picks its RoPE frequency table from how long the
-            // whole prompt is has to make that choice once for the prompt. Per
-            // chunk it would rotate the head of a threshold-crossing prompt
-            // with one table and the tail with another, into the same cache.
-            // The guard covers this chunk's forward only, because the scheduler
-            // runs other sequences' decode steps between two chunks of this
-            // one. See `mlxcel_core::prefill_span`.
-            let _span = mlxcel_core::prefill_span::announce(seq.prompt_tokens.len() as i32);
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
                 None => {
@@ -1066,6 +1096,7 @@ impl BatchScheduler {
             Some(s) => s,
             None => return false,
         };
+        let _span = self.announce_prefill_span(&seq);
         // Interleaved with decode (a #1011 grant or a #908 mixed step) rather
         // than running against a drained batch.
         let decode_batch_live = !self.active_batch.is_empty();
@@ -1138,11 +1169,6 @@ impl BatchScheduler {
         let eff_len = eff_chunk.len() as i32;
         let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
         let logits = {
-            // Same announcement as the first chunk: every chunk of one prompt
-            // must resolve a position-dependent RoPE table the same way, and
-            // only the total prompt length answers that. See
-            // `mlxcel_core::prefill_span`.
-            let _span = mlxcel_core::prefill_span::announce(total as i32);
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
                 None => {

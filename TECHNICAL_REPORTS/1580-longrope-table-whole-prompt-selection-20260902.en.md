@@ -144,12 +144,19 @@ fn table_for(&self, offset: i32, seq_len: i32) -> &SuRopeTable {
 
 ### 4.3 Announcement sites
 
-- `mlxcel-core`'s `chunked_prefill_last_logits` announces `prompt_tokens.len()` once around its chunk loop; nothing else runs inside that function.
-- The server's `start_chunked_prefill` and `continue_chunked_prefill` each announce the sequence's `prompt_tokens.len()` inside the `let logits = { ... }` block that performs one chunk's forward, so the announcement ends before the scheduler returns to its tick loop.
+`mlxcel-core`'s `chunked_prefill_last_logits` announces `prompt_tokens.len()` once around its chunk loop; nothing else runs inside that function.
 
-Single-pass prefills (`execute_full_prefill`, `run_padded_batched_prefill`, the CLI's unchunked branch) announce nothing, because their own `offset + seq_len` already equals the sequence length. That holds even under a prefix-cache hit, where only the uncached suffix is fed but the cache offset accounts for the prefix.
+On the server the announcement is made once per scheduler entry point that runs prefill work for one sequence, not once per forward, through the `announce_prefill_span(&seq)` helper on `BatchScheduler`. The guard is function-scoped, which is the correct lifetime: the scheduler runs other sequences' decode batches between two chunks of one prompt, but everything inside one of these calls belongs to one sequence. The sites are `execute_full_prefill`, `start_chunked_prefill`, `continue_chunked_prefill`, `capture_history_boundary_snapshot` and `run_next_prompt_cache_warmup`. `run_padded_batched_prefill` is prefill and deliberately does not announce, because its pass starts at offset 0 and spans the longest row of the cohort, so the pass geometry already answers the question for that row and one scalar cannot say anything different for the shorter ones.
 
-### 4.4 Scale application
+The CLI's unchunked branch announces nothing either, because its own `offset + seq_len` already equals the sequence length.
+
+### 4.4 The first attempt announced in the wrong places, and only the server caught it
+
+The first version of this change announced inside the two chunked-prefill functions only, at the `let logits = { ... }` block that runs one chunk. Every CLI gate passed: the 4-bit checkpoint matched a position-selecting oracle 30 out of 30 tokens on both a 1078-token and a 5136-token prompt, the bf16 checkpoint matched an f16-cast oracle, phi-3-mini was unchanged, and `MLXCEL_PREFILL_CHUNK=0` equalled 2048. The server returned repetition for the same 5136-token prompt through `POST /v1/completions`, because the prompt cache is on by default and reaches the model through two more forwards the fix never touched. `capture_history_boundary_snapshot` forwards `prompt_tokens[start..boundary]`, a strict prefix that can end below the threshold while the prompt does not. `run_next_prompt_cache_warmup` forwards the delta after restoring a snapshot, where the restored prefix is not reflected in the scheduler's `KVCache::offset` for a non-batching family.
+
+The response is the function-scoped helper above, which covers every forward an entry point can reach rather than the ones the author happened to look at, plus `src/server/batch/scheduler/prefill_span_coverage_tests.rs`: a source-level guard that classifies every model forward under `src/server/batch/scheduler` as prefill or decode and fails when a forward turns up in a function the table does not name.
+
+### 4.5 Scale application
 
 Both paths multiply the rotary prefix of Q and K by the table's scale before rotation, which is where the old code applied `su_rope_scale`. Upstream scales `cos` and `sin` instead; RoPE is linear in its input, so the two are the same map, and scaling the input costs one multiply on a shorter tensor.
 
@@ -159,8 +166,10 @@ Both paths multiply the rotary prefix of Q and K by the table's scale before rot
 
 | Command | Result |
 |---------|--------|
-| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 11 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib models::phi3::tests` | 12 passed |
+| `cargo test --profile test-fast --features metal,accelerate --lib server::batch::scheduler::prefill_span_coverage` | 3 passed |
 | `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib prefill_span` | 5 passed |
+| `cargo test --profile test-fast --features metal,accelerate -p mlxcel-core --lib generate::tests` | 36 passed |
 | `cargo test --profile test-fast --features metal,accelerate --lib models::rope_utils` | 28 passed |
 | `cargo clippy --profile test-fast --lib --tests --features metal,accelerate -- -D warnings` (both crates) | clean |
 | `cargo fmt --all -- --check` | clean |
@@ -180,25 +189,27 @@ The real-checkpoint gates are outstanding and are run outside the implementation
 
 | Metric | Value |
 |--------|-------|
-| Files changed | 8 |
-| Additions | 795 |
+| Files changed | 11, plus the two report files |
+| Additions | 1629 including the reports |
 | Deletions | 82 |
 | New modules | 1 (`mlxcel_core::prefill_span`) |
-| New unit tests | 14 (9 in `phi3_tests.rs`, 5 in `prefill_span_tests.rs`) |
+| New unit tests | 19 (10 in `phi3_tests.rs`, 5 in `prefill_span_tests.rs`, 3 in `prefill_span_coverage_tests.rs`, 1 in `generate.rs`) |
 
 ### Changes by category
 
 | Category | Files |
 |----------|-------|
-| Model fix | `src/models/phi3.rs` (226+/79-) |
-| Tests | `src/models/phi3_tests.rs` (360+/1-), `src/lib/mlxcel-core/src/prefill_span_tests.rs` (63+/0-) |
-| Core mechanism | `src/lib/mlxcel-core/src/prefill_span.rs` (110+/0-), `src/lib/mlxcel-core/src/lib.rs` (5+/0-), `src/lib/mlxcel-core/src/generate.rs` (6+/0-) |
-| Server wiring | `src/server/batch/scheduler/prefill.rs` (13+/0-) |
-| Docs | `docs/supported-models.md` (12+/2-) |
+| Model fix | `src/models/phi3.rs` |
+| Core mechanism | `src/lib/mlxcel-core/src/prefill_span.rs`, `src/lib/mlxcel-core/src/lib.rs`, `src/lib/mlxcel-core/src/generate.rs` |
+| Server wiring | `src/server/batch/scheduler/prefill.rs`, `src/server/batch/scheduler/prompt_cache.rs`, `src/server/batch/scheduler/mod.rs` |
+| Tests | `src/models/phi3_tests.rs`, `src/lib/mlxcel-core/src/prefill_span_tests.rs`, `src/server/batch/scheduler/prefill_span_coverage_tests.rs` |
+| Docs | `docs/supported-models.md` |
 
 ### Related commits
 
 - `a770022` fix(phi3): select the LongRoPE table by whole-prompt position
+- `docs: add technical report for PR #1580`
+- `fix(server): announce the prefill span on the prompt-cache forwards`
 
 ### Related PRs and issues
 

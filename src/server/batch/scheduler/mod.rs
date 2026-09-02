@@ -937,6 +937,9 @@ mod speculative_finalize;
 mod structure_tests;
 
 #[cfg(test)]
+mod prefill_span_coverage_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_tests.rs"]
 mod tests;
 

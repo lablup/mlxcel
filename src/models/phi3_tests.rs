@@ -202,6 +202,44 @@ fn a_chunked_prefill_pins_one_table_for_the_whole_prompt() {
 }
 
 #[test]
+fn a_server_prefill_pins_one_table_across_the_boundary_segment_and_every_chunk() {
+    // The shape the server actually runs, and the one that regressed after the
+    // first fix for #1358 covered only the two chunked-prefill functions. With
+    // the prompt cache on, one 5136-token prompt reaches the model as a
+    // history-boundary segment (`prompt_tokens[0..boundary]`, forwarded by
+    // `capture_history_boundary_snapshot`) followed by chunks of
+    // `--prefill-chunk-size`, whose default is 512. Both the segment and the
+    // early chunks end below the trained context, so without the announcement
+    // they take the short table while the tail takes the long one, and the
+    // greedy output degenerates into repetition.
+    const SERVER_CHUNK: i32 = 512;
+    let su = su_rope_with(4096, 131072);
+    let prompt_len = 5136;
+    let boundary = 3000;
+
+    // The un-announced geometry really does split this prompt, so the
+    // assertions below are not vacuous.
+    assert!(!picks_long(&su, 0, boundary));
+    assert!(!picks_long(&su, boundary, SERVER_CHUNK));
+    assert!(picks_long(&su, 5120, 16));
+
+    let _span = mlxcel_core::prefill_span::announce(prompt_len);
+    assert!(
+        picks_long(&su, 0, boundary),
+        "the history-boundary segment must resolve the prompt's table, not its own"
+    );
+    let mut offset = boundary;
+    while offset < prompt_len {
+        let chunk_len = SERVER_CHUNK.min(prompt_len - offset);
+        assert!(
+            picks_long(&su, offset, chunk_len),
+            "the 512-token chunk at offset {offset} must use the same table as the boundary segment"
+        );
+        offset += chunk_len;
+    }
+}
+
+#[test]
 fn mscale_override_wins_over_the_default_scale() {
     let args = args_with(serde_json::json!({
         "max_position_embeddings": 128,

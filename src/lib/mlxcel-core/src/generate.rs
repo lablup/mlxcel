@@ -2891,6 +2891,68 @@ mod tests {
         }
     }
 
+    /// A model that records what [`crate::prefill_span`] reported inside each
+    /// forward, so a driver's announcement can be observed from where a real
+    /// model would read it.
+    struct SpanProbeModel {
+        spans: std::cell::RefCell<Vec<Option<i32>>>,
+    }
+
+    impl LanguageModel for SpanProbeModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            self.spans.borrow_mut().push(crate::prefill_span::current());
+            let l = ffi::array_shape(input_ids)[1];
+            ffi::from_slice_f32(&vec![0.0; l as usize * 4], &[1, l, 4])
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new()]
+        }
+
+        fn num_layers(&self) -> usize {
+            1
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+    }
+
+    /// Every chunk of a chunked prefill sees the whole prompt's length, and the
+    /// announcement is gone once the prefill returns.
+    ///
+    /// A model that selects a RoPE frequency table from the prompt length reads
+    /// exactly this (Phi-3 / Phi-4 LongRoPE, #1358). Per chunk it would rotate
+    /// the head of a threshold-crossing prompt with one table and the tail with
+    /// another, into one KV cache.
+    #[test]
+    fn chunked_prefill_announces_the_whole_prompt_to_every_chunk() {
+        let prompt: Vec<i32> = (1..=10).collect();
+        let model = SpanProbeModel {
+            spans: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut caches = model.make_caches();
+
+        let logits = chunked_prefill_last_logits(&model, &mut caches, &prompt, 3);
+        ffi::eval(&logits);
+
+        assert_eq!(
+            model.spans.borrow().as_slice(),
+            &[Some(10), Some(10), Some(10), Some(10)],
+            "four chunks of 3, 3, 3, 1 must each see the prompt length, not their own"
+        );
+        assert_eq!(
+            crate::prefill_span::current(),
+            None,
+            "the announcement must not outlive the prefill; a decode step or another sequence would read it"
+        );
+    }
+
     /// The chunk gate applies only when configured, supported, and useful.
     #[test]
     fn effective_prefill_chunk_gates_correctly() {
