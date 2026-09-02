@@ -202,14 +202,33 @@ fn normalizer_spec_without_dummy_prefix(body: &[u8]) -> Result<Vec<u8>> {
 /// well-formed protobuf message.
 pub(crate) fn disable_add_dummy_prefix(proto: &[u8]) -> Result<Vec<u8>> {
     let fields = scan_fields(proto)?;
-    let normalizer = fields
-        .iter()
-        .find(|field| field.number == MODEL_NORMALIZER_SPEC_FIELD);
 
-    let Some(normalizer) = normalizer else {
+    let mut out = Vec::with_capacity(proto.len() + 2);
+    let mut copied_to = 0usize;
+    let mut rewrote_any = false;
+    // Every occurrence is rewritten, not just the first. `normalizer_spec` is
+    // a singular field, so a well-formed model carries one, but the wire
+    // format permits repeats and protobuf merges them, which means a later
+    // occurrence carrying `add_dummy_prefix = true` would undo a patch applied
+    // only to the first one.
+    for field in &fields {
+        if field.number != MODEL_NORMALIZER_SPEC_FIELD {
+            continue;
+        }
+        let Some((body_start, body_end)) = field.payload else {
+            bail!("ModelProto.normalizer_spec is not a length-delimited field");
+        };
+        let body = normalizer_spec_without_dummy_prefix(&proto[body_start..body_end])?;
+        out.extend_from_slice(&proto[copied_to..field.start]);
+        push_len_field(&mut out, MODEL_NORMALIZER_SPEC_FIELD, &body);
+        copied_to = field.end;
+        rewrote_any = true;
+    }
+    out.extend_from_slice(&proto[copied_to..]);
+
+    if !rewrote_any {
         // No normalizer_spec at all: the proto2 default `add_dummy_prefix =
         // true` is in force, so one has to be appended to override it.
-        let mut out = proto.to_vec();
         let mut body = Vec::with_capacity(2);
         write_varint(
             &mut body,
@@ -217,18 +236,8 @@ pub(crate) fn disable_add_dummy_prefix(proto: &[u8]) -> Result<Vec<u8>> {
         );
         body.push(0);
         push_len_field(&mut out, MODEL_NORMALIZER_SPEC_FIELD, &body);
-        return Ok(out);
-    };
+    }
 
-    let Some((body_start, body_end)) = normalizer.payload else {
-        bail!("ModelProto.normalizer_spec is not a length-delimited field");
-    };
-    let body = normalizer_spec_without_dummy_prefix(&proto[body_start..body_end])?;
-
-    let mut out = Vec::with_capacity(proto.len() + 2);
-    out.extend_from_slice(&proto[..normalizer.start]);
-    push_len_field(&mut out, MODEL_NORMALIZER_SPEC_FIELD, &body);
-    out.extend_from_slice(&proto[normalizer.end..]);
     Ok(out)
 }
 

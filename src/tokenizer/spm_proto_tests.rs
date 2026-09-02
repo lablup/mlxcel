@@ -49,18 +49,24 @@ fn varint_field(number: u32, value: u64) -> Vec<u8> {
     out
 }
 
-/// Return the payload of the (single) `normalizer_spec` field, or `None`.
-fn normalizer_body(proto: &[u8]) -> Option<Vec<u8>> {
-    let fields = scan_fields(proto).expect("scan");
-    let mut found = None;
-    for field in fields {
-        if field.number == MODEL_NORMALIZER_SPEC_FIELD {
-            assert!(found.is_none(), "more than one normalizer_spec emitted");
+/// Return the payload of every `normalizer_spec` field, in wire order.
+fn normalizer_bodies(proto: &[u8]) -> Vec<Vec<u8>> {
+    scan_fields(proto)
+        .expect("scan")
+        .into_iter()
+        .filter(|field| field.number == MODEL_NORMALIZER_SPEC_FIELD)
+        .map(|field| {
             let (start, end) = field.payload.expect("normalizer_spec is length-delimited");
-            found = Some(proto[start..end].to_vec());
-        }
-    }
-    found
+            proto[start..end].to_vec()
+        })
+        .collect()
+}
+
+/// Return the payload of the single `normalizer_spec` field, or `None`.
+fn normalizer_body(proto: &[u8]) -> Option<Vec<u8>> {
+    let mut bodies = normalizer_bodies(proto);
+    assert!(bodies.len() <= 1, "more than one normalizer_spec emitted");
+    bodies.pop()
 }
 
 /// Read every varint field with `number` out of a message body.
@@ -182,6 +188,30 @@ fn every_top_level_field_and_its_order_survives_the_rewrite() {
         })
         .collect();
     assert_eq!(pieces_before, pieces_after);
+}
+
+#[test]
+fn a_repeated_normalizer_spec_is_rewritten_in_every_occurrence() {
+    // `normalizer_spec` is a singular field, but the wire format permits
+    // repeats and protobuf merges them, so a later occurrence carrying
+    // `add_dummy_prefix = true` would undo a patch applied only to the first.
+    let mut proto = len_field(1, b"\x0a\x05<unk>");
+    proto.extend(len_field(
+        MODEL_NORMALIZER_SPEC_FIELD,
+        &sample_normalizer_body(true),
+    ));
+    proto.extend(len_field(2, &varint_field(3, 2)));
+    proto.extend(len_field(
+        MODEL_NORMALIZER_SPEC_FIELD,
+        &sample_normalizer_body(true),
+    ));
+
+    let patched = disable_add_dummy_prefix(&proto).expect("patch");
+    let bodies = normalizer_bodies(&patched);
+    assert_eq!(bodies.len(), 2, "both occurrences must survive");
+    for body in bodies {
+        assert_eq!(varint_values(&body, 3), vec![0]);
+    }
 }
 
 #[test]
