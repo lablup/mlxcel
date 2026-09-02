@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-The Qwen3-Coder and MiniMax M2 tool-call parsers guessed each argument's JSON type from the raw text because they never received the request's `tools`. A `string`-typed parameter carrying `02134` reached the client as the number `2134`, and an `integer`-typed parameter written `5.0` reached it as a float. This PR threads the request tool schema into both parsers, routes their values through the coercion helpers MiniMax M3, GLM-4.7 and LongCat already share, and extends the shared integer rule to accept a zero-fraction float literal.
+The Qwen3-Coder and MiniMax M2 tool-call parsers guessed each argument's JSON type from the raw text because they never received the request's `tools`. A `string`-typed parameter carrying `02134` reached the client as the number `2134`, and an `integer`-typed parameter written `5.0` reached it as a float. This PR threads the request tool schema into both parsers, routes their values through the coercion helpers MiniMax M3, GLM-4.7 and LongCat already share, and grounds every remaining lenient rule (booleans, null, an integer written with a zero fraction) in a declared type instead of in the shape of the text.
 
 ---
 
@@ -27,7 +27,7 @@ Three parsers in the same file already solved this. `try_minimax_m3`, `try_glm47
 
 - **String-typed values were rewritten**: `coerce_minimax_param` tried an `i64` parse, then `f64`, then a boolean word list, before falling back to a string. A US ZIP code `02134` parses as `i64` 2134, so the leading zero was destroyed. A product code `1e5` became `100000.0`. The literal text `true` became a JSON boolean. A tool whose handler expected a string then received a number, and either failed its own validation or silently used the wrong value.
 - **Integer-typed values kept a float form**: a model writing `5.0` for an `integer` parameter produced the JSON float `5.0`. Strict tool implementations reject that, and the schema said unambiguously that the value is an integer.
-- **Guesses with no schema basis**: `yes`, `on`, `no`, `off` were coerced to booleans and `none`, `nil` to null. None of these have any grounding in JSON Schema; they turned legitimate string arguments into wrong-typed ones.
+- **Guesses applied where nothing declared a type**: `yes`, `on`, `no`, `off` were coerced to booleans and `none`, `nil` to null for every parameter, whether or not the request declared anything. With no declaration those are guesses about English words, not about data.
 - **Duplicate coercion logic**: `coerce_minimax_param` was a second, weaker implementation of the same job as `minimax_m3_coerce_leaf`, so schema handling improvements landed in one and not the other.
 
 ### 1.3 Risk Assessment
@@ -38,6 +38,7 @@ Three parsers in the same file already solved this. `try_minimax_m3`, `try_glm47
 | A tool rejects an `integer` argument delivered as `5.0` | Medium | Occasional (depends on the model's spelling) |
 | The two XML grammars diverge further from the three schema-aware ones as coercion evolves | Medium | Certain over time while the logic is duplicated |
 | A parser change drops a tool call outright when a value fails to parse | High | Avoided by design: every path ends at the raw string |
+| The fix silently does nothing for a model that namespaces its call names | High | Certain for such models until the lookup normalizes the name (fixed here) |
 
 ---
 
@@ -55,9 +56,10 @@ Three parsers in the same file already solved this. `try_minimax_m3`, `try_glm47
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| None identified | n/a | n/a |
+| Fractional value rounded into an integer past 2^53 (`9007199254740991.5` became an integer) | Medium | Fixed in the second commit: the rule is textual, with no `f64` round trip |
+| Integer value off by one past 2^53 (`9007199254740993.0` became `...992`) | Medium | Fixed in the same change |
 
-One incidental improvement: `coerce_minimax_param` allocated a lowercase `String` copy of every parameter value to test three null spellings. `coerce_xml_param` uses `eq_ignore_ascii_case`, which allocates nothing.
+Both were introduced by the first commit of this PR and found in review before merge. Two incidental improvements: `coerce_minimax_param` allocated a lowercase `String` copy of every parameter value to test three null spellings, where `coerce_xml_param` uses `eq_ignore_ascii_case` and allocates nothing; and `serde_json` rejects a non-finite parse, so no path can produce a `Value::Number` holding an infinity, which would have serialized as `null`.
 
 ### 2.2 Performance
 
@@ -75,9 +77,9 @@ Tool-call parsing runs once per completion, on a text buffer the size of one mod
 
 ### 2.4 Code Quality
 
-- **Test coverage**: 20 new unit tests; the `server::tool_calls` suite goes from 350 to 370 tests, all passing.
-- **Code complexity**: net simpler. A 37-line hand-rolled coercion ladder is replaced by a 6-line delegation to the shared helper, at the cost of a 2-variant enum in the dispatcher.
-- **Technical debt**: decreased. One of the two duplicate coercion implementations is gone, and two stale comments in `parse_tool_calls` are corrected.
+- **Test coverage**: 26 new unit tests; the `server::tool_calls` suite goes from 350 to 376 tests, all passing.
+- **Code complexity**: roughly even. A 37-line hand-rolled coercion ladder is replaced by a schema-directed `coerce_xml_param` plus two small helpers, and the dispatcher gains a 2-variant enum.
+- **Technical debt**: decreased. One of the two duplicate coercion implementations is gone, two stale comments in `parse_tool_calls` are corrected, and the five shared helpers whose caller set widened now carry the `// Used by:` lines the project convention requires.
 
 ---
 
@@ -105,35 +107,49 @@ The table's meaning is its order, so the option that preserves the order literal
 
 Each entry now carries a `Plain(...)` or `WithTools(...)` wrapper, which is slightly noisier than a bare function name. The dispatch cost is one `match` per format tried, which is irrelevant next to the string scanning each parser performs.
 
-### 3.2 `null` overrides the declared type; nothing else does
+### 3.2 Lenient rules are kept, but only where a declared type justifies them
 
 **Context:**
 
-`coerce_xml_param` keeps exactly one rule ahead of the schema: the bare word `null`, in any casing, becomes JSON null even for a `string`-typed parameter.
+The first commit removed every lenient rule the old guesser had (`yes`/`on` to true, `no`/`off` to false, `none`/`nil` to null) and let `null` override the schema in all cases. Review showed both halves were wrong at the edges: under `{"type": "boolean"}` the model writing `yes` now produced the string `"yes"`, which is worse than the guess it replaced, and under `{"type": "string"}` the text `null` still became JSON null, which is the same kind of type violation this PR exists to fix.
 
 **Rationale:**
 
-These grammars have no other spelling for a JSON null. A `<parameter=x>null</parameter>` element is the only null a model can write, and both parsers have always emitted one there, so removing the rule would have been a regression for every model that uses it. The narrower reading (a string-typed `null` is the four-character string) would also make the null unreachable whenever the client declares a type.
+The distinction that matters is not "lenient versus strict", it is whether the leniency has a declared type behind it. `yes` meaning `true` is a guess about English when nothing declares a type, and a reasonable reading when the schema says `boolean`. So `coerce_xml_param` applies the boolean word list only under a `boolean` declaration, and `null` yields JSON null everywhere except a plain `string` declaration, where the text is what the tool asked for. A nullable declaration (`{"type": ["string", "null"]}`) still takes the null, because there the schema says both are possible and the bare word is the only null these grammars can spell.
 
 **Trade-offs:**
 
-A model that genuinely wants the string `"null"` cannot express it in these grammars. That was already true before this PR, and the schema-aware grammars (MiniMax M3, GLM-4.7) do keep `"null"` as a string under a string schema, so the two families disagree on this one input. The XML behavior was kept because changing it is a regression, not a fix, and it is out of the issue's scope.
+Two behaviors now depend on the declaration rather than being uniform, which is more to hold in one's head than a single rule. The doc comment on `coerce_xml_param` states both, and six tests pin them from both directions (with and without a declaration). A model that wants the literal string `"null"` for a non-string parameter still cannot express it; that was true before this PR and is not worth a new escape syntax.
 
-### 3.3 `integer` normalizes `5.0`, but `number` keeps the written form
+### 3.3 The integer rule strips a zero fraction textually, not through `f64`
 
 **Context:**
 
-The shared `M3Type::Integer` arm previously accepted only `i64` and `u64` literals, so an `integer`-typed `5.0` fell through to the loose fallback and stayed a float. Extending the arm raised the neighbouring question of what `number` should do with an integral literal.
+The shared `M3Type::Integer` arm accepted only `i64` and `u64` literals, so an `integer`-typed `5.0` fell through to the loose fallback and stayed a float. The first commit fixed that by parsing to `f64` and checking `fract() == 0.0` under a 2^53 bound.
 
 **Rationale:**
 
-Under `integer` the declared type settles it: the value is an integer, so `5.0` is `5`, and the float spelling is the model's formatting, not data. Under `number` both spellings are valid and the schema expresses no preference, so the parser preserves what the model wrote (`5` stays `5`, `5.0` stays `5.0`). Preserving it also keeps the XML parsers' pre-existing output for `number`-typed integral values unchanged, which a blanket float conversion would have altered.
+That check cannot work, because the rounding happens inside `parse::<f64>()`, before anything can inspect the result. `9007199254740991.5` parses to `...992.0`, passes the zero-fraction test, and becomes an integer; `9007199254740993.0` comes back off by one and passes the bound. The textual rule (split at `.`, require an all-zero fraction, parse the integer part with the exact `i64`/`u64` parser) is exact at every magnitude and needs no bound at all. It also declines the exponent form, which matters because `minimax_m3_typed_coerce` takes the first `anyOf` alternative that succeeds: with the `f64` path, `anyOf: [integer, string]` and the value `1e5` gave `100000` where the string alternative used to own it.
 
 **Trade-offs:**
 
-The float acceptance is bounded by 2^53. Past that an `f64` cannot represent every integer, so converting would round silently; the rule declines instead, and the value stays a float through the fallback. That is a deliberate refusal to guess rather than a gap.
+An `integer`-declared `1e5` is no longer normalized to `100000`; it stays the float `100000.0` through the fallback. That is the price of not stealing identifiers from a string alternative, and the exponent form is far rarer in a model's tool arguments than a decimal point is.
 
-### 3.4 GLM-4.7 and LongCat take the integer rule, not the whole typed path
+### 3.4 `integer` normalizes `5.0`, but `number` keeps the written form
+
+**Context:**
+
+Extending the integer arm raised the neighbouring question of what `number` should do with an integral literal.
+
+**Rationale:**
+
+Under `integer` the declared type settles it: the value is an integer, so `5.0` is `5`, and the decimal point is formatting. Under `number` both spellings are valid and the schema expresses no preference, so the parser preserves what the model wrote (`5` stays `5`, `5.0` stays `5.0`). Preserving it also keeps the XML parsers' pre-existing output for `number`-typed integral values unchanged, which a blanket float conversion would have altered, and it removes a precision loss for integers past 2^53 that the old `f64`-only arm had.
+
+**Trade-offs:**
+
+`M3Type::Number` is shared, so this changes the wire type MiniMax M3 emits for a `number`/`num`/`float`/`double` parameter written as an integer: `5` instead of `5.0`. JSON Schema accepts an integer as a `number`, so no schema is violated, but it is a visible change outside what the issue asked for and is called out in the PR body for that reason.
+
+### 3.5 GLM-4.7 and LongCat take the integer rule, not the whole typed path
 
 **Context:**
 
@@ -147,6 +163,20 @@ Adding an `Integer` arm to `coerce_kv_value` delivers exactly the requested fix.
 
 GLM-4.7 and LongCat remain less schema-strict than MiniMax M3. That gap is now explicit in the `coerce_kv_value` doc comment rather than implicit, and closing it is a separate, testable change.
 
+### 3.6 The schema lookup normalizes a namespaced call name
+
+**Context:**
+
+`minimax_m3_function_schema` matched `t.function.name == name` exactly. But `filter_by_tools` exists precisely because models emit `functions.get_weather`, and it strips that prefix only after parsing.
+
+**Rationale:**
+
+For a namespacing model the sequence was: schema lookup misses, every value takes the loose rules, `filter_by_tools` then strips the prefix and accepts the call. The client gets a successful tool call carrying the exact bug this PR set out to fix, with nothing to indicate the schema was ignored. The lookup now falls back to the bare name after the first `.`, mirroring `filter_by_tools`. The exact match is still tried first, so a tool genuinely registered as `a.b` is unaffected.
+
+**Trade-offs:**
+
+The fallback runs a second linear scan for a namespaced name. With a realistic tool count this is not measurable; if it ever matters, a `HashMap` hoisted out of the call loop is the answer.
+
 ---
 
 ## 4. Implementation Details
@@ -158,15 +188,21 @@ GLM-4.7 and LongCat remain less schema-strict than MiniMax M3. That gap is now e
 | `{"type":"string"}` | `02134` | `2134` | `"02134"` |
 | `{"type":"string"}` | `true` | `true` | `"true"` |
 | `{"type":"string"}` | `1e5` | `100000.0` | `"1e5"` |
+| `{"type":"string"}` | `null` | `null` | `"null"` |
+| `{"type":["string","null"]}` | `null` | `null` | `null` |
+| `{"type":"boolean"}` | `yes` / `on` / `TRUE` | `true` | `true` |
+| `{"type":"boolean"}` | `maybe` | `"maybe"` | `"maybe"` |
 | `{"type":"integer"}` | `5.0` | `5.0` | `5` |
 | `{"type":"integer"}` | `5.5` | `5.5` | `5.5` (loose fallback, call kept) |
 | `{"type":"number"}` | `5` | `5` | `5` |
 | `{"type":"object"}` | `{not json` | `"{not json"` | `"{not json"` |
+| `{"anyOf":[integer,string]}` | `1e5` | `"1e5"` | `"1e5"` |
 | none | `5` / `true` / `null` | `5` / `true` / `null` | unchanged |
 | none | `yes` / `on` / `none` | `true` / `true` / `null` | `"yes"` / `"on"` / `"none"` |
-| none | `[1, 2]` | `[1, 2]` | `[1, 2]` |
+| none | `TRUE` | `true` | `"TRUE"` |
+| namespaced call `functions.f`, `{"type":"string"}` | `02134` | `2134` | `"02134"` |
 
-One further no-schema difference: the fallback now runs a full JSON parse instead of attempting one only when the text starts with `{` or `[`, so a schema-free value written as a JSON literal is parsed as that literal. This is what MiniMax M3, GLM-4.7 and LongCat already did, so the four grammars now agree.
+Two further no-schema differences follow from reusing the shared fallback: it runs a full JSON parse instead of attempting one only when the text starts with `{` or `[`, so a schema-free value written as a JSON literal (`[1, 2]`, or a quoted string) is parsed as that literal; and its boolean words are case-sensitive, so a schema-free `TRUE` is a string. Both match what MiniMax M3, GLM-4.7 and LongCat already did, and a `boolean` declaration restores the lenient reading where one exists.
 
 ### 4.2 Key code changes
 
@@ -183,14 +219,22 @@ fn coerce_minimax_param(value: &str) -> serde_json::Value {
 
 // After
 fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
-    if raw.eq_ignore_ascii_case("null") {
+    let declared = schema.and_then(minimax_m3_schema_type);
+    let keeps_raw_text =
+        declared == Some(M3Type::Str) && !schema.is_some_and(schema_type_admits_null);
+    if !keeps_raw_text && raw.eq_ignore_ascii_case("null") {
         return serde_json::Value::Null;
+    }
+    if declared == Some(M3Type::Boolean)
+        && let Some(b) = loose_boolean_word(raw)
+    {
+        return serde_json::Value::Bool(b);
     }
     minimax_m3_coerce_leaf(raw, schema)
 }
 ```
 
-**Reason for change:** the type belongs to the schema, not to the shape of the text. `minimax_m3_coerce_leaf` already implements the declared-type path, including `enum`, `anyOf`/`oneOf` and array-item resolution, and already ends at the raw string so an unparseable value never drops the call.
+**Reason for change:** the type belongs to the schema, not to the shape of the text. `minimax_m3_coerce_leaf` already implements the declared-type path, including `enum`, `anyOf`/`oneOf` and array-item resolution, and already ends at the raw string so an unparseable value never drops the call. The two rules ahead of it are the ones a declaration justifies.
 
 ```rust
 // After: the shared integer rule
@@ -198,15 +242,15 @@ fn parse_integer_literal(raw: &str) -> Option<serde_json::Value> {
     if let Some(v) = parse_exact_integer_literal(raw) {
         return Some(v);
     }
-    let f = raw.parse::<f64>().ok()?;
-    if f.is_finite() && f.fract() == 0.0 && f.abs() <= INTEGER_FROM_FLOAT_LIMIT {
-        return Some(serde_json::Value::Number((f as i64).into()));
+    let (int_part, fraction) = raw.split_once('.')?;
+    if fraction.bytes().any(|b| b != b'0') {
+        return None;
     }
-    None
+    parse_exact_integer_literal(int_part)
 }
 ```
 
-**Reason for change:** `integer` should accept the integral value a model spelled as a float, but only where the conversion is exact. `INTEGER_FROM_FLOAT_LIMIT` is 2^53.
+**Reason for change:** `integer` should accept the integral value a model spelled with a decimal point, and the conversion has to be exact. Doing it as text rather than through `f64` removes both rounding failures and keeps the exponent form out of an `anyOf`'s integer alternative.
 
 **File: `src/server/tool_calls/parser.rs`**
 
@@ -253,7 +297,23 @@ The fix is mostly the container change. Once the table can hold a `WithTools` en
 
 The signal is a parser or handler that reimplements information it should have been handed.
 
-### 5.2 Preserving the written form is part of correct coercion
+### 5.2 A validity check placed after a lossy conversion checks nothing
+
+**Concept:**
+
+The first commit read an integer-with-zero-fraction as `raw.parse::<f64>()`, then guarded with `f.fract() == 0.0 && f.abs() <= 2^53`. Both conditions are evaluated on a value that the parse already rounded, so `9007199254740991.5` passes the fraction test it was meant to fail, and `9007199254740993.0` passes the bound while being off by one. The guard reads as protective and is not.
+
+**Application in this PR:**
+
+The rule became textual: split the string at `.`, require every fraction byte to be `0`, and parse the integer part with the exact integer parser. Nothing is rounded, so there is nothing to check afterwards. `integer_literal_rule_is_textual_and_exact` pins both values that the previous form got wrong.
+
+**Where else this pattern shows up:**
+
+- Range checks after a narrowing cast rather than before it.
+- Precision assertions on a value that has already been through a float round trip.
+- Validating a string after it has been normalized, when the normalization is what destroys the property being validated.
+
+### 5.3 Preserving the written form is part of correct coercion
 
 **Concept:**
 
@@ -274,7 +334,8 @@ Coercion is usually framed as "make the value fit the type", but when a type adm
 | `minimax_m3_coerce_leaf` | Schema-directed leaf coercion: typed parse, then JSON parse, then loose literal, then raw string | The single coercion path all four XML grammars now reach |
 | `minimax_m3_typed_coerce` | Strict schema-directed parse that returns `None` when the declared type does not apply | Its `None` is what lets `anyOf` try the next alternative and what keeps a call alive on a bad value |
 | `kv_param_schema` | Looks a parameter up in a function schema's `properties` | The per-parameter half of the lookup, paired with `minimax_m3_function_schema` |
-| 2^53 | Largest magnitude at which an `f64` represents every integer | The bound on the zero-fraction float rule |
+| `filter_by_tools` | Drops calls to unregistered functions and strips a namespace prefix | The reason the schema lookup has to normalize the same prefix |
+| 2^53 | Largest magnitude at which an `f64` represents every integer | The bound the first commit relied on, and the reason the final rule avoids `f64` entirely |
 
 ### Related PRs and issues
 
@@ -289,24 +350,25 @@ Coercion is usually framed as "make the value fit the type", but when a type adm
 
 | Item | Value |
 |------|-------|
-| Files changed | 2 |
-| Lines added | +545 |
-| Lines deleted | -121 |
-| Tests added | 20 |
+| Source files changed | 2 |
+| Lines added (source, excluding this report) | +786 |
+| Lines deleted (source) | -115 |
+| Tests added | 26 |
 
 ### Changes by category
 
 | Category | Count | Summary |
 |----------|-------|---------|
-| Correctness | 2 files | Schema-directed typing for the Qwen3-Coder and MiniMax M2 grammars; the shared integer rule accepts a zero-fraction float |
-| Code quality | 1 | `coerce_minimax_param` removed; two stale comments in `parse_tool_calls` corrected |
-| Tests | 20 | Schema, no-schema, boundary and dispatcher-order coverage in both files |
+| Correctness | 2 files | Schema-directed typing for the Qwen3-Coder and MiniMax M2 grammars; an exact integer rule; a namespace-normalizing schema lookup |
+| Code quality | 1 | `coerce_minimax_param` removed; two stale `parse_tool_calls` comments corrected; `// Used by:` added to five widened helpers |
+| Tests | 26 | Schema, no-schema, boundary, `anyOf`, namespace and dispatcher-order coverage in both files |
 
 ### Related commits
 
 | Hash | Type | Message |
 |------|------|---------|
 | `272afe8` | fix | fix(server): type XML tool-call arguments by the request schema |
+| `f222376` | fix | fix(server): tighten schema-driven XML tool-call coercion |
 
 ---
 
@@ -323,6 +385,9 @@ Coercion is usually framed as "make the value fit the type", but when a type adm
 ### Future improvements
 
 - Decide whether GLM-4.7 and LongCat should run the full `minimax_m3_typed_coerce` path rather than the string and integer rules only. That is a deliberate scope boundary here, documented on `coerce_kv_value`.
+- `minimax_m3_typed_coerce` returns out of its `anyOf`/`oneOf` loop on the first key present, so a schema carrying an `anyOf` that matches nothing never tries `oneOf` or its own `type`. Pre-existing, unchanged here, worth a separate fix.
+- The `minimax_m3_` prefix on the shared helpers is now misleading, since Qwen3-Coder and MiniMax M2 call them too. A rename to `schema_coerce_leaf` and friends belongs in its own `refactor:` PR.
+- An array-typed parameter carrying one bare scalar yields that scalar, not a one-element array, because these grammars cannot spell a repeated element. `xml_array_typed_bare_scalar_takes_the_item_type` documents it; whether it should wrap is a product decision.
 - Incremental per-delta tool-call argument streaming is still out of scope: the stream path parses once at end of stream.
 - Schema validation errors (missing `required` keys, `enum` rejection) are still not surfaced to the client; the parser coerces and never rejects.
 
@@ -334,10 +399,13 @@ Coercion is usually framed as "make the value fit the type", but when a type adm
 
 ```
 cargo test --profile test-fast --features metal,accelerate --lib server::tool_calls
-test result: ok. 370 passed; 0 failed; 0 ignored; 7313 filtered out
+test result: ok. 376 passed; 0 failed; 0 ignored; 7313 filtered out
 
 cargo test --profile test-fast --features metal,accelerate --lib server::muse_atem
-test result: ok. 11 passed; 0 failed; 0 ignored; 7672 filtered out
+test result: ok. 11 passed; 0 failed; 0 ignored; 7678 filtered out
+
+cargo test --profile test-fast --features metal,accelerate --lib server::routes::chat
+test result: ok. 48 passed; 0 failed; 0 ignored; 7641 filtered out
 
 cargo clippy --profile test-fast --lib --tests --features metal,accelerate -- -D warnings
 Finished (no warnings)
@@ -350,5 +418,5 @@ The four cases the issue asked to keep green pass unchanged: `qwen3_coder_single
 
 ### C. References
 
-- `docs/code-guidelines.md`: the `// Used by:` convention applied to `coerce_xml_param` and `parse_integer_literal`.
+- `docs/code-guidelines.md`: the `// Used by:` convention applied to `coerce_xml_param`, `parse_integer_literal` and the five helpers whose caller set widened.
 - JSON Schema type keyword: `integer` is a distinct type from `number`, which is why the two arms differ.

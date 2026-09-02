@@ -11,7 +11,7 @@
 
 ## 요약
 
-Qwen3-Coder와 MiniMax M2 tool-call 파서는 요청의 `tools`를 전달받지 못해 인자의 JSON 타입을 원문 텍스트만 보고 추측했다. 그 결과 `string`으로 선언된 파라미터에 담긴 `02134`가 클라이언트에는 숫자 `2134`로, `integer`로 선언된 파라미터에 모델이 쓴 `5.0`은 실수로 전달됐다. 이 PR은 두 파서에 요청 스키마를 연결하고, MiniMax M3와 GLM-4.7, LongCat이 이미 공유하는 coercion 헬퍼로 값 변환을 일원화했으며, 공유 integer 규칙이 소수부 없는 실수 리터럴도 받도록 확장했다.
+Qwen3-Coder와 MiniMax M2 tool-call 파서는 요청의 `tools`를 전달받지 못해 인자의 JSON 타입을 원문 텍스트만 보고 추측했다. 그 결과 `string`으로 선언된 파라미터에 담긴 `02134`가 클라이언트에는 숫자 `2134`로, `integer`로 선언된 파라미터에 모델이 쓴 `5.0`은 실수로 전달됐다. 이 PR은 두 파서에 요청 스키마를 연결하고, MiniMax M3와 GLM-4.7, LongCat이 이미 공유하는 coercion 헬퍼로 값 변환을 일원화했으며, 남은 관대한 규칙(불리언, null, 소수부가 0인 정수)을 텍스트 모양이 아니라 선언된 타입에 근거하도록 정리했다.
 
 ---
 
@@ -27,7 +27,7 @@ mlxcel이 지원하는 XML tool-call 문법 중 두 가지는 마크업 자체�
 
 - **string 값이 변조됨**: `coerce_minimax_param`은 `i64` 파싱, `f64` 파싱, 불리언 단어 목록을 차례로 시도한 뒤에야 문자열로 떨어뜨렸다. 미국 우편번호 `02134`는 `i64`로 파싱되어 2134가 되면서 앞의 0이 사라진다. 제품 코드 `1e5`는 `100000.0`이 되고, 텍스트 `true`는 JSON 불리언이 된다. 문자열을 기대한 도구 핸들러는 숫자를 받아 자체 검증에서 실패하거나, 조용히 잘못된 값으로 동작한다.
 - **integer 값이 실수 형태로 남음**: 모델이 `integer` 파라미터에 `5.0`을 쓰면 JSON 실수 `5.0`이 그대로 나갔다. 엄격한 도구 구현은 이를 거부하며, 스키마는 이 값이 정수라고 분명히 말하고 있었다.
-- **스키마 근거가 없는 추측**: `yes`, `on`, `no`, `off`를 불리언으로, `none`, `nil`을 null로 바꿨다. JSON Schema 어디에도 근거가 없는 규칙이며, 정상적인 문자열 인자를 잘못된 타입으로 만들었다.
+- **타입 선언이 없는 자리에까지 적용된 추측**: 요청이 무엇을 선언했든 상관없이 `yes`, `on`, `no`, `off`는 불리언으로, `none`, `nil`은 null로 바뀌었다. 선언이 없다면 이는 데이터에 대한 추론이 아니라 영어 단어에 대한 추측이다.
 - **coercion 로직 중복**: `coerce_minimax_param`은 `minimax_m3_coerce_leaf`와 같은 일을 더 약하게 구현한 두 번째 사본이었다. 스키마 처리가 개선되어도 한쪽에만 반영됐다.
 
 ### 1.3 위험성
@@ -38,6 +38,7 @@ mlxcel이 지원하는 XML tool-call 문법 중 두 가지는 마크업 자체�
 | `integer` 인자를 `5.0`으로 받은 도구가 거부함 | Medium | 간헐적 (모델의 표기 방식에 좌우됨) |
 | coercion이 발전할수록 XML 문법 두 개가 스키마 인식 문법 세 개와 더 벌어짐 | Medium | 로직이 중복된 동안에는 시간이 지나면 확정적 |
 | 값 파싱 실패가 tool call 자체를 통째로 버리게 됨 | High | 설계로 회피: 모든 경로의 마지막은 원문 문자열 |
+| 호출 이름에 네임스페이스를 붙이는 모델에서는 수정이 아무 일도 하지 않음 | High | 그런 모델에서는 확정적 (이번에 조회 정규화로 해결) |
 
 ---
 
@@ -55,9 +56,10 @@ mlxcel이 지원하는 XML tool-call 문법 중 두 가지는 마크업 자체�
 
 | 이슈 | 심각도 | 상태 |
 |-----|-------|-----|
-| 없음 | n/a | n/a |
+| 2^53 부근에서 소수값이 반올림되어 정수가 됨 (`9007199254740991.5`가 정수로 변환) | Medium | 두 번째 커밋에서 수정. 규칙을 텍스트 기반으로 바꿔 `f64` 왕복을 제거 |
+| 2^53 부근에서 정수가 1 어긋남 (`9007199254740993.0`이 `...992`로) | Medium | 같은 변경에서 수정 |
 
-부수적 개선이 하나 있다. `coerce_minimax_param`은 null 표기 세 가지를 비교하려고 모든 파라미터 값의 소문자 `String` 사본을 할당했다. `coerce_xml_param`은 `eq_ignore_ascii_case`를 쓰므로 할당이 없다.
+두 건 모두 이 PR의 첫 커밋이 만든 결함이며 머지 전 리뷰에서 발견했다. 부수적 개선도 둘 있다. `coerce_minimax_param`은 null 표기 세 가지를 비교하려고 모든 파라미터 값의 소문자 `String` 사본을 할당했지만 `coerce_xml_param`은 `eq_ignore_ascii_case`를 써서 할당이 없다. 또한 `serde_json`은 무한대 파싱을 거부하므로, 직렬화 시 `null`이 되어버릴 비유한 실수를 담은 `Value::Number`가 만들어지는 경로는 존재하지 않는다.
 
 ### 2.2 성능 관점
 
@@ -75,9 +77,9 @@ tool-call 파싱은 completion당 한 번, 모델 응답 하나 크기의 텍스
 
 ### 2.4 코드 품질 관점
 
-- **테스트 커버리지**: 단위 테스트 20개 추가. `server::tool_calls` 스위트가 350개에서 370개가 되었고 전부 통과한다.
-- **코드 복잡도**: 전체적으로 단순해졌다. 37줄짜리 수제 coercion 사다리가 공유 헬퍼로의 6줄 위임으로 바뀌었고, 대신 디스패처에 변형 2개짜리 enum이 생겼다.
-- **기술 부채**: 감소. 중복 coercion 구현 둘 중 하나가 사라졌고, `parse_tool_calls`의 오래된 주석 두 곳을 바로잡았다.
+- **테스트 커버리지**: 단위 테스트 26개 추가. `server::tool_calls` 스위트가 350개에서 376개가 되었고 전부 통과한다.
+- **코드 복잡도**: 대체로 비슷하다. 37줄짜리 수제 coercion 사다리가 스키마 기반 `coerce_xml_param`과 작은 헬퍼 두 개로 바뀌었고, 디스패처에 변형 2개짜리 enum이 생겼다.
+- **기술 부채**: 감소. 중복 coercion 구현 둘 중 하나가 사라졌고, `parse_tool_calls`의 오래된 주석 두 곳을 바로잡았으며, 호출자 범위가 넓어진 공유 헬퍼 다섯 개에 프로젝트 규약이 요구하는 `// Used by:` 주석을 달았다.
 
 ---
 
@@ -105,35 +107,49 @@ tool-call 파싱은 completion당 한 번, 모델 응답 하나 크기의 텍스
 
 각 항목에 `Plain(...)` 또는 `WithTools(...)` 래퍼가 붙어 함수 이름만 있을 때보다 약간 시끄럽다. 디스패치 비용은 시도하는 포맷마다 `match` 한 번이며, 각 파서가 수행하는 문자열 스캔에 비하면 무시할 수준이다.
 
-### 3.2 선언된 타입을 무시하는 규칙은 `null` 하나뿐
+### 3.2 관대한 규칙은 유지하되 선언된 타입이 뒷받침할 때만
 
 **컨텍스트:**
 
-`coerce_xml_param`은 스키마보다 앞서는 규칙을 정확히 하나만 남겼다. 대소문자를 가리지 않는 `null`이라는 단어는 `string`으로 선언된 파라미터에서도 JSON null이 된다.
+첫 커밋은 기존 추측기의 관대한 규칙(`yes`/`on` → true, `no`/`off` → false, `none`/`nil` → null)을 전부 없애고 `null`은 스키마와 무관하게 null이 되게 했다. 리뷰에서 양쪽 다 경계에서 틀렸음이 드러났다. `{"type": "boolean"}` 아래에서 모델이 쓴 `yes`가 문자열 `"yes"`가 되는데, 이는 대체한 추측보다 나쁘다. 하필 불리언으로 읽을 근거가 가장 확실한 자리이기 때문이다. 반대로 `{"type": "string"}` 아래의 텍스트 `null`은 여전히 JSON null이 되는데, 이는 이 PR이 없애려던 바로 그 타입 위반이다.
 
 **선택 이유:**
 
-이 문법들에는 JSON null을 표기할 다른 방법이 없다. `<parameter=x>null</parameter>`은 모델이 쓸 수 있는 유일한 null이고 두 파서 모두 지금까지 이를 null로 내보냈으므로, 규칙을 없애면 이 표기를 쓰는 모든 모델에 회귀가 된다. 좁게 해석해서 string 타입의 `null`을 네 글자짜리 문자열로 두면, 클라이언트가 타입을 선언하는 순간 null 자체에 도달할 수 없게 된다.
+중요한 구분은 "관대한가 엄격한가"가 아니라 그 관대함에 선언된 타입이라는 근거가 있는가다. `yes`를 `true`로 읽는 것은 아무 타입도 선언되지 않았다면 영어 단어에 대한 추측이지만, 스키마가 `boolean`이라고 말한다면 타당한 해석이다. 그래서 `coerce_xml_param`은 불리언 단어 목록을 `boolean` 선언이 있을 때만 적용하고, `null`은 평범한 `string` 선언을 제외한 모든 곳에서 JSON null이 된다. string 선언 아래에서는 텍스트가 곧 도구가 요구한 값이기 때문이다. `{"type": ["string", "null"]}` 같은 nullable 선언은 여전히 null을 받는다. 스키마가 둘 다 가능하다고 말하고 있고, 그 단어가 이 문법이 표기할 수 있는 유일한 null이기 때문이다.
 
 **트레이드오프:**
 
-문자열 `"null"`을 진짜로 보내고 싶은 모델은 이 문법으로 그것을 표현할 수 없다. 이는 이번 PR 이전에도 마찬가지였고, 스키마 인식 문법(MiniMax M3, GLM-4.7)은 string 스키마 아래에서 `"null"`을 문자열로 유지하므로 이 입력 하나에서 두 계열이 갈린다. XML 쪽 동작을 유지한 이유는 바꾸는 쪽이 수정이 아니라 회귀이고, 이슈의 범위도 아니기 때문이다.
+두 동작이 균일한 규칙이 아니라 선언에 따라 갈리므로 머릿속에 담아야 할 것이 늘었다. `coerce_xml_param`의 문서 주석에 둘 다 적었고, 테스트 6개가 선언이 있을 때와 없을 때 양방향으로 고정한다. string이 아닌 파라미터에 문자열 `"null"`을 넣고 싶은 모델은 여전히 표현할 방법이 없는데, 이는 이 PR 이전에도 마찬가지였고 새 이스케이프 문법을 만들 만한 사안은 아니다.
 
-### 3.3 `integer`는 `5.0`을 정규화하고 `number`는 표기를 보존
+### 3.3 integer 규칙은 `f64`가 아니라 텍스트로 소수부를 떼어낸다
 
 **컨텍스트:**
 
-공유 `M3Type::Integer` 갈래는 `i64`와 `u64` 리터럴만 받았기 때문에 `integer` 타입의 `5.0`은 느슨한 fallback으로 떨어져 실수로 남았다. 이 갈래를 확장하면서 옆의 `number`가 정수 리터럴을 어떻게 다뤄야 하는지가 함께 문제가 됐다.
+공유 `M3Type::Integer` 갈래는 `i64`와 `u64` 리터럴만 받았기 때문에 `integer` 타입의 `5.0`은 느슨한 fallback으로 떨어져 실수로 남았다. 첫 커밋은 이를 `f64`로 파싱한 뒤 2^53 상한 아래에서 `fract() == 0.0`을 확인하는 방식으로 고쳤다.
 
 **선택 이유:**
 
-`integer` 아래에서는 선언된 타입이 답을 정한다. 값은 정수이므로 `5.0`은 `5`이고, 실수 표기는 데이터가 아니라 모델의 서식이다. `number` 아래에서는 두 표기가 모두 유효하고 스키마가 선호를 표현하지 않으므로, 파서는 모델이 쓴 그대로를 유지한다(`5`는 `5`, `5.0`은 `5.0`). 이렇게 두면 `number` 타입 정수값에 대한 XML 파서의 기존 출력도 그대로 유지되는데, 일괄 실수 변환을 택했다면 이 부분이 바뀌었을 것이다.
+그 검사는 성립할 수 없다. 반올림이 `parse::<f64>()` 안에서, 즉 무엇도 결과를 들여다보기 전에 일어나기 때문이다. `9007199254740991.5`는 `...992.0`으로 파싱되어 소수부 0 검사를 통과하고 정수가 된다. `9007199254740993.0`은 1 어긋난 값으로 돌아오면서 상한도 통과한다. 텍스트 규칙(`.`에서 자르고, 소수부가 전부 0인지 확인하고, 정수부를 정확한 정수 파서로 파싱)은 모든 크기에서 정확하며 상한 자체가 필요 없다. 또한 지수 표기를 거절하는데, `minimax_m3_typed_coerce`가 `anyOf` 대안 중 처음 성공한 것을 택하기 때문에 이 점이 중요하다. `f64` 경로에서는 `anyOf: [integer, string]`에 값 `1e5`가 오면 string 대안이 가져가던 것을 integer가 `100000`으로 채갔다.
 
 **트레이드오프:**
 
-실수 허용 범위는 2^53으로 제한된다. 그 너머에서는 `f64`가 모든 정수를 표현하지 못해 변환이 조용히 반올림되므로, 규칙이 거절하고 값은 fallback을 거쳐 실수로 남는다. 이는 빈틈이 아니라 추측하지 않겠다는 의도적 선택이다.
+`integer`로 선언된 `1e5`는 더 이상 `100000`으로 정규화되지 않고 fallback을 거쳐 실수 `100000.0`으로 남는다. 이는 string 대안의 식별자를 빼앗지 않기 위한 대가이며, 모델의 도구 인자에서 지수 표기는 소수점보다 훨씬 드물다.
 
-### 3.4 GLM-4.7과 LongCat에는 typed 경로 전체가 아니라 integer 규칙만 적용
+### 3.4 `integer`는 `5.0`을 정규화하고 `number`는 표기를 보존
+
+**컨텍스트:**
+
+integer 갈래를 확장하면서 옆의 `number`가 정수 리터럴을 어떻게 다뤄야 하는지가 함께 문제가 됐다.
+
+**선택 이유:**
+
+`integer` 아래에서는 선언된 타입이 답을 정한다. 값은 정수이므로 `5.0`은 `5`이고 소수점은 서식일 뿐이다. `number` 아래에서는 두 표기가 모두 유효하고 스키마가 선호를 표현하지 않으므로, 파서는 모델이 쓴 그대로를 유지한다(`5`는 `5`, `5.0`은 `5.0`). 이렇게 두면 `number` 타입 정수값에 대한 XML 파서의 기존 출력도 그대로 유지되고, 기존 `f64` 전용 갈래에 있던 2^53 이상 정수의 정밀도 손실도 사라진다.
+
+**트레이드오프:**
+
+`M3Type::Number`는 공유 코드이므로, MiniMax M3가 `number`/`num`/`float`/`double` 파라미터를 정수로 받았을 때 내보내는 값의 타입이 `5.0`에서 `5`로 바뀐다. JSON Schema는 정수를 `number`로 받아들이므로 스키마 위반은 아니지만, 이슈가 요구한 범위 밖의 눈에 보이는 변화라서 PR 본문에 명시했다.
+
+### 3.5 GLM-4.7과 LongCat에는 typed 경로 전체가 아니라 integer 규칙만 적용
 
 **컨텍스트:**
 
@@ -147,6 +163,20 @@ tool-call 파싱은 completion당 한 번, 모델 응답 하나 크기의 텍스
 
 GLM-4.7과 LongCat은 여전히 MiniMax M3보다 스키마에 덜 엄격하다. 그 간극은 이제 `coerce_kv_value` 문서 주석에 명시되어 있고, 좁히는 작업은 별도의 검증 가능한 변경으로 분리된다.
 
+### 3.6 스키마 조회가 네임스페이스 붙은 호출 이름을 정규화한다
+
+**컨텍스트:**
+
+`minimax_m3_function_schema`는 `t.function.name == name` 완전 일치로만 찾았다. 그런데 `filter_by_tools`가 존재하는 이유 자체가 모델이 `functions.get_weather` 같은 이름을 내보내기 때문이며, 이 접두사는 파싱이 끝난 뒤에야 제거된다.
+
+**선택 이유:**
+
+네임스페이스를 쓰는 모델에서는 순서가 이랬다. 스키마 조회 실패 → 모든 값이 느슨한 규칙을 탐 → `filter_by_tools`가 접두사를 떼고 호출을 승인. 클라이언트는 이 PR이 없애려던 바로 그 버그를 품은 성공한 tool call을 받으며, 스키마가 무시됐다는 표시는 어디에도 없다. 이제 조회는 첫 `.` 뒤의 이름으로 한 번 더 시도하며, 이는 `filter_by_tools`와 같은 정규화다. 완전 일치를 먼저 시도하므로 이름이 실제로 `a.b`인 도구는 영향을 받지 않는다.
+
+**트레이드오프:**
+
+네임스페이스가 붙은 이름에서는 선형 탐색이 한 번 더 돈다. 현실적인 도구 개수에서는 측정되지 않으며, 문제가 된다면 호출 루프 밖으로 `HashMap`을 끌어올리는 것이 답이다.
+
 ---
 
 ## 4. 구현 상세
@@ -158,15 +188,21 @@ GLM-4.7과 LongCat은 여전히 MiniMax M3보다 스키마에 덜 엄격하다. 
 | `{"type":"string"}` | `02134` | `2134` | `"02134"` |
 | `{"type":"string"}` | `true` | `true` | `"true"` |
 | `{"type":"string"}` | `1e5` | `100000.0` | `"1e5"` |
+| `{"type":"string"}` | `null` | `null` | `"null"` |
+| `{"type":["string","null"]}` | `null` | `null` | `null` |
+| `{"type":"boolean"}` | `yes` / `on` / `TRUE` | `true` | `true` |
+| `{"type":"boolean"}` | `maybe` | `"maybe"` | `"maybe"` |
 | `{"type":"integer"}` | `5.0` | `5.0` | `5` |
 | `{"type":"integer"}` | `5.5` | `5.5` | `5.5` (느슨한 fallback, 호출 유지) |
 | `{"type":"number"}` | `5` | `5` | `5` |
 | `{"type":"object"}` | `{not json` | `"{not json"` | `"{not json"` |
+| `{"anyOf":[integer,string]}` | `1e5` | `"1e5"` | `"1e5"` |
 | 없음 | `5` / `true` / `null` | `5` / `true` / `null` | 동일 |
 | 없음 | `yes` / `on` / `none` | `true` / `true` / `null` | `"yes"` / `"on"` / `"none"` |
-| 없음 | `[1, 2]` | `[1, 2]` | `[1, 2]` |
+| 없음 | `TRUE` | `true` | `"TRUE"` |
+| 네임스페이스 호출 `functions.f`, `{"type":"string"}` | `02134` | `2134` | `"02134"` |
 
-스키마가 없을 때의 차이가 하나 더 있다. fallback이 텍스트가 `{` 또는 `[`로 시작할 때만 JSON 파싱을 시도하던 것을 이제 항상 시도하므로, 스키마 없이 JSON 리터럴로 쓰인 값은 그 리터럴로 파싱된다. MiniMax M3와 GLM-4.7, LongCat이 이미 이렇게 동작하고 있었으므로 이제 네 문법의 동작이 일치한다.
+공유 fallback을 재사용하면서 스키마가 없을 때의 차이가 둘 더 생겼다. 텍스트가 `{` 또는 `[`로 시작할 때만 JSON 파싱을 시도하던 것을 이제 항상 시도하므로 JSON 리터럴로 쓰인 값(`[1, 2]`, 따옴표로 감싼 문자열)은 그 리터럴로 파싱된다. 그리고 불리언 단어 비교가 대소문자를 구분하므로 스키마 없는 `TRUE`는 문자열이다. 둘 다 MiniMax M3와 GLM-4.7, LongCat이 이미 하던 동작이며, `boolean` 선언이 있으면 관대한 해석이 되살아난다.
 
 ### 4.2 주요 코드 변경
 
@@ -183,14 +219,22 @@ fn coerce_minimax_param(value: &str) -> serde_json::Value {
 
 // 변경 후
 fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
-    if raw.eq_ignore_ascii_case("null") {
+    let declared = schema.and_then(minimax_m3_schema_type);
+    let keeps_raw_text =
+        declared == Some(M3Type::Str) && !schema.is_some_and(schema_type_admits_null);
+    if !keeps_raw_text && raw.eq_ignore_ascii_case("null") {
         return serde_json::Value::Null;
+    }
+    if declared == Some(M3Type::Boolean)
+        && let Some(b) = loose_boolean_word(raw)
+    {
+        return serde_json::Value::Bool(b);
     }
     minimax_m3_coerce_leaf(raw, schema)
 }
 ```
 
-**변경 이유:** 타입은 텍스트의 생김새가 아니라 스키마에 속한다. `minimax_m3_coerce_leaf`는 `enum`과 `anyOf`/`oneOf`, 배열 item 해석까지 포함한 선언 타입 경로를 이미 구현하고 있고, 마지막이 원문 문자열이므로 파싱 실패가 호출을 버리는 일도 없다.
+**변경 이유:** 타입은 텍스트의 생김새가 아니라 스키마에 속한다. `minimax_m3_coerce_leaf`는 `enum`과 `anyOf`/`oneOf`, 배열 item 해석까지 포함한 선언 타입 경로를 이미 구현하고 있고, 마지막이 원문 문자열이므로 파싱 실패가 호출을 버리는 일도 없다. 그 앞에 놓인 두 규칙은 선언이 정당화하는 것들이다.
 
 ```rust
 // 변경 후: 공유 integer 규칙
@@ -198,15 +242,15 @@ fn parse_integer_literal(raw: &str) -> Option<serde_json::Value> {
     if let Some(v) = parse_exact_integer_literal(raw) {
         return Some(v);
     }
-    let f = raw.parse::<f64>().ok()?;
-    if f.is_finite() && f.fract() == 0.0 && f.abs() <= INTEGER_FROM_FLOAT_LIMIT {
-        return Some(serde_json::Value::Number((f as i64).into()));
+    let (int_part, fraction) = raw.split_once('.')?;
+    if fraction.bytes().any(|b| b != b'0') {
+        return None;
     }
-    None
+    parse_exact_integer_literal(int_part)
 }
 ```
 
-**변경 이유:** `integer`는 모델이 실수로 적은 정수값을 받아들여야 하지만, 변환이 정확한 범위 안에서만 그렇다. `INTEGER_FROM_FLOAT_LIMIT`은 2^53이다.
+**변경 이유:** `integer`는 모델이 소수점을 붙여 쓴 정수값을 받아들여야 하고, 그 변환은 정확해야 한다. `f64` 대신 텍스트로 처리하면 반올림 결함 두 가지가 사라지고 지수 표기가 `anyOf`의 integer 대안에 끼어들지 않는다.
 
 **파일: `src/server/tool_calls/parser.rs`**
 
@@ -253,7 +297,23 @@ for parser in parsers {
 
 신호는 넘겨받았어야 할 정보를 스스로 다시 만들어내는 파서나 핸들러다.
 
-### 5.2 표기 보존도 올바른 coercion의 일부다
+### 5.2 손실이 일어난 뒤에 놓인 검사는 아무것도 검사하지 않는다
+
+**개념:**
+
+첫 커밋은 소수부가 0인 정수를 `raw.parse::<f64>()`로 읽은 뒤 `f.fract() == 0.0 && f.abs() <= 2^53`으로 걸렀다. 두 조건 모두 파싱이 이미 반올림한 값 위에서 평가되므로, `9007199254740991.5`는 걸러져야 할 소수부 검사를 통과하고 `9007199254740993.0`은 1 어긋난 채로 상한을 통과한다. 보호 장치처럼 읽히지만 실제로는 아니다.
+
+**이 PR에서의 적용:**
+
+규칙을 텍스트 기반으로 바꿨다. `.`에서 문자열을 자르고, 소수부 바이트가 전부 `0`인지 확인하고, 정수부를 정확한 정수 파서로 읽는다. 반올림이 없으니 뒤에서 검사할 것도 없다. `integer_literal_rule_is_textual_and_exact`가 이전 형태가 틀렸던 두 값을 모두 고정한다.
+
+**같은 패턴이 나타나는 곳:**
+
+- 축소 캐스팅 이전이 아니라 이후에 놓인 범위 검사
+- 이미 float 왕복을 거친 값에 대한 정밀도 단언
+- 정규화가 파괴하는 속성을 정규화 이후에 검증하는 문자열 검사
+
+### 5.3 표기 보존도 올바른 coercion의 일부다
 
 **개념:**
 
@@ -274,7 +334,8 @@ coercion은 보통 "값을 타입에 맞춘다"로 이해되지만, 하나의 �
 | `minimax_m3_coerce_leaf` | 스키마 기반 leaf coercion: 타입 파싱, JSON 파싱, 느슨한 리터럴, 원문 문자열 순서 | 이제 네 XML 문법이 모두 도달하는 단일 coercion 경로 |
 | `minimax_m3_typed_coerce` | 선언 타입이 맞지 않으면 `None`을 돌려주는 엄격한 스키마 파싱 | 그 `None` 덕분에 `anyOf`가 다음 대안을 시도하고, 잘못된 값에도 호출이 살아남는다 |
 | `kv_param_schema` | 함수 스키마의 `properties`에서 파라미터를 찾는다 | `minimax_m3_function_schema`와 짝을 이루는 파라미터 단위 조회 |
-| 2^53 | `f64`가 모든 정수를 표현하는 최대 크기 | 소수부 없는 실수 규칙의 경계 |
+| `filter_by_tools` | 등록되지 않은 함수 호출을 버리고 네임스페이스 접두사를 제거한다 | 스키마 조회가 같은 접두사를 정규화해야 하는 이유 |
+| 2^53 | `f64`가 모든 정수를 표현하는 최대 크기 | 첫 커밋이 의지했던 상한이자, 최종 규칙이 `f64` 자체를 피한 이유 |
 
 ### 관련 PR/이슈
 
@@ -289,24 +350,25 @@ coercion은 보통 "값을 타입에 맞춘다"로 이해되지만, 하나의 �
 
 | 항목 | 값 |
 |-----|---|
-| 변경된 파일 수 | 2 |
-| 추가된 라인 | +545 |
-| 삭제된 라인 | -121 |
-| 테스트 추가 | 20 |
+| 변경된 소스 파일 수 | 2 |
+| 추가된 라인 (소스, 이 보고서 제외) | +786 |
+| 삭제된 라인 (소스) | -115 |
+| 테스트 추가 | 26 |
 
 ### 카테고리별 변경
 
 | 카테고리 | 변경 수 | 주요 내용 |
 |---------|--------|----------|
-| Correctness | 파일 2개 | Qwen3-Coder / MiniMax M2 문법의 스키마 기반 타이핑, 공유 integer 규칙의 소수부 없는 실수 허용 |
-| Code Quality | 1 | `coerce_minimax_param` 제거, `parse_tool_calls`의 오래된 주석 2곳 수정 |
-| Tests | 20 | 두 파일에 스키마, 무스키마, 경계값, 디스패처 순서 커버리지 추가 |
+| Correctness | 파일 2개 | Qwen3-Coder / MiniMax M2 문법의 스키마 기반 타이핑, 정확한 integer 규칙, 네임스페이스를 정규화하는 스키마 조회 |
+| Code Quality | 1 | `coerce_minimax_param` 제거, `parse_tool_calls`의 오래된 주석 2곳 수정, 범위가 넓어진 헬퍼 5개에 `// Used by:` 추가 |
+| Tests | 26 | 두 파일에 스키마, 무스키마, 경계값, `anyOf`, 네임스페이스, 디스패처 순서 커버리지 추가 |
 
 ### 관련 커밋
 
 | Hash | Type | Message |
 |------|------|---------|
 | `272afe8` | fix | fix(server): type XML tool-call arguments by the request schema |
+| `f222376` | fix | fix(server): tighten schema-driven XML tool-call coercion |
 
 ---
 
@@ -323,6 +385,9 @@ coercion은 보통 "값을 타입에 맞춘다"로 이해되지만, 하나의 �
 ### 향후 개선 사항
 
 - GLM-4.7과 LongCat을 string, integer 규칙만이 아니라 `minimax_m3_typed_coerce` 전체 경로로 태울지 결정. 이번에는 의도적으로 범위를 끊었고 `coerce_kv_value` 주석에 남겼다.
+- `minimax_m3_typed_coerce`는 `anyOf`/`oneOf` 루프에서 키가 존재하면 곧바로 반환하므로, 아무 대안도 맞지 않는 `anyOf`를 가진 스키마는 `oneOf`나 자신의 `type`을 끝내 시도하지 않는다. 기존 동작이며 이번에 건드리지 않았지만 별도 수정 대상이다.
+- 공유 헬퍼의 `minimax_m3_` 접두사는 이제 오해를 부른다. Qwen3-Coder와 MiniMax M2도 호출하기 때문이다. `schema_coerce_leaf` 식의 개명은 별도 `refactor:` PR로 다룬다.
+- array 타입 파라미터가 스칼라 하나를 담고 있으면 1원소 배열이 아니라 그 스칼라가 된다. 이 문법들이 반복 요소를 표기할 수 없기 때문이다. `xml_array_typed_bare_scalar_takes_the_item_type`가 이를 문서화하며, 배열로 감쌀지는 제품 결정 사항이다.
 - 델타 단위 증분 tool-call 인자 스트리밍은 여전히 범위 밖이다. 스트림 경로는 스트림 종료 시점에 한 번 파싱한다.
 - 스키마 검증 오류(`required` 키 누락, `enum` 불일치)는 아직 클라이언트에 전달되지 않는다. 파서는 변환만 하고 거부하지 않는다.
 
@@ -334,10 +399,13 @@ coercion은 보통 "값을 타입에 맞춘다"로 이해되지만, 하나의 �
 
 ```
 cargo test --profile test-fast --features metal,accelerate --lib server::tool_calls
-test result: ok. 370 passed; 0 failed; 0 ignored; 7313 filtered out
+test result: ok. 376 passed; 0 failed; 0 ignored; 7313 filtered out
 
 cargo test --profile test-fast --features metal,accelerate --lib server::muse_atem
-test result: ok. 11 passed; 0 failed; 0 ignored; 7672 filtered out
+test result: ok. 11 passed; 0 failed; 0 ignored; 7678 filtered out
+
+cargo test --profile test-fast --features metal,accelerate --lib server::routes::chat
+test result: ok. 48 passed; 0 failed; 0 ignored; 7641 filtered out
 
 cargo clippy --profile test-fast --lib --tests --features metal,accelerate -- -D warnings
 Finished (no warnings)
@@ -350,5 +418,5 @@ clean
 
 ### C. 참고 자료
 
-- `docs/code-guidelines.md`: `coerce_xml_param`과 `parse_integer_literal`에 적용한 `// Used by:` 규약.
+- `docs/code-guidelines.md`: `coerce_xml_param`, `parse_integer_literal`과 호출자 범위가 넓어진 헬퍼 다섯 개에 적용한 `// Used by:` 규약.
 - JSON Schema type 키워드: `integer`는 `number`와 구분되는 별도 타입이며, 두 갈래가 다르게 동작하는 근거다.
