@@ -348,3 +348,127 @@ fn mamba_rejects_a_config_that_overstates_vocab_size() {
     MambaModel::from_weights(embedding_config(0, 0), padded)
         .expect("a table with more rows than vocab_size must still load");
 }
+
+/// Build a `MambaBlock` with minimal, functionally-inert projections so tests
+/// can drive `mixer_norm` directly without a full checkpoint. Only
+/// `use_bcdt_rms` and `mixer_rms_eps` matter for the assertions below; the
+/// remaining fields exist only to satisfy `MambaBlock`'s shape and type
+/// contract and are never read by `mixer_norm`.
+fn tiny_mamba_block(use_bcdt_rms: bool, mixer_rms_eps: f32) -> super::MambaBlock {
+    use mlxcel_core::layers::{Linear, UnifiedLinear};
+
+    let hidden_size = 4usize;
+    let intermediate_size = 8usize;
+    let state_size = 2usize;
+    let time_step_rank = 2usize;
+    let conv_kernel_size = 4usize;
+
+    let conv_weight = mlxcel_core::zeros(
+        &[intermediate_size as i32, 1, conv_kernel_size as i32],
+        dtype::FLOAT32,
+    );
+    let in_proj = UnifiedLinear::Regular(Linear::new(
+        mlxcel_core::zeros(
+            &[(2 * intermediate_size) as i32, hidden_size as i32],
+            dtype::FLOAT32,
+        ),
+        None,
+    ));
+    let x_proj_out = (time_step_rank + 2 * state_size) as i32;
+    let x_proj = UnifiedLinear::Regular(Linear::new(
+        mlxcel_core::zeros(&[x_proj_out, intermediate_size as i32], dtype::FLOAT32),
+        None,
+    ));
+    let dt_proj = UnifiedLinear::Regular(Linear::new(
+        mlxcel_core::zeros(
+            &[intermediate_size as i32, time_step_rank as i32],
+            dtype::FLOAT32,
+        ),
+        Some(mlxcel_core::zeros(
+            &[intermediate_size as i32],
+            dtype::FLOAT32,
+        )),
+    ));
+    let out_proj = UnifiedLinear::Regular(Linear::new(
+        mlxcel_core::zeros(
+            &[hidden_size as i32, intermediate_size as i32],
+            dtype::FLOAT32,
+        ),
+        None,
+    ));
+    let a_log = mlxcel_core::zeros(
+        &[intermediate_size as i32, state_size as i32],
+        dtype::FLOAT32,
+    );
+    let d_param = mlxcel_core::zeros(&[intermediate_size as i32], dtype::FLOAT32);
+
+    super::MambaBlock {
+        hidden_size,
+        intermediate_size,
+        state_size,
+        conv_kernel_size,
+        time_step_rank,
+        use_bcdt_rms,
+        mixer_rms_eps,
+        conv_weight,
+        conv_bias: None,
+        in_proj,
+        x_proj,
+        dt_proj,
+        out_proj,
+        a_log,
+        d_param,
+    }
+}
+
+/// Issue #1333: `ssm_step` used to run `mixer_norm(mixer_norm(x))`, applying
+/// the weight-less RMS norm twice per tensor. This pins the fix at the
+/// `mixer_norm` boundary: the block must return exactly what a single call to
+/// the bridge's `fast_rms_norm_no_weight` produces, and that value must be
+/// bit-distinct from what a second application on top of it would give. The
+/// double application is numerically close to a no-op (a `1/sqrt(1+eps)`
+/// rescale), so `array_equal` (exact, not tolerance-based) is what actually
+/// distinguishes "once" from "twice" here; a tolerance check would be too
+/// loose to catch a regression back to the double call.
+#[test]
+fn mamba_mixer_norm_applies_the_bridge_norm_exactly_once() {
+    let eps = 1e-6f32;
+    let block = tiny_mamba_block(true, eps);
+    let x = mlxcel_core::from_slice_f32(&[3.0, 4.0, -2.0, 1.0], &[1, 4]);
+
+    let once = block.mixer_norm(&x);
+    let single_bridge_call = mlxcel_core::fast_rms_norm_no_weight(&x, eps);
+    let twice_bridge_call = mlxcel_core::fast_rms_norm_no_weight(&single_bridge_call, eps);
+
+    let matches_single = mlxcel_core::array_equal(&once, &single_bridge_call, false);
+    mlxcel_core::eval(&matches_single);
+    assert!(
+        mlxcel_core::item_bool(&matches_single),
+        "mixer_norm must equal exactly one fast_rms_norm_no_weight call"
+    );
+
+    let matches_double = mlxcel_core::array_equal(&once, &twice_bridge_call, false);
+    mlxcel_core::eval(&matches_double);
+    assert!(
+        !mlxcel_core::item_bool(&matches_double),
+        "mixer_norm must NOT equal a second norm applied on top of the first \
+         (this is the regression #1333 fixed: applying the norm twice)"
+    );
+}
+
+/// With `use_bcdt_rms == false` (every non-falcon_mamba checkpoint),
+/// `mixer_norm` must be a pass-through: `delta`, `B` and `C` are used
+/// unnormalized, matching the Python reference's `if self.use_bcdt_rms:` gate.
+#[test]
+fn mamba_mixer_norm_is_identity_when_bcdt_rms_disabled() {
+    let block = tiny_mamba_block(false, 1e-6);
+    let x = mlxcel_core::from_slice_f32(&[3.0, 4.0, -2.0, 1.0], &[1, 4]);
+
+    let out = block.mixer_norm(&x);
+    let equal = mlxcel_core::array_equal(&out, &x, false);
+    mlxcel_core::eval(&equal);
+    assert!(
+        mlxcel_core::item_bool(&equal),
+        "mixer_norm must pass x through unchanged when use_bcdt_rms is false"
+    );
+}
