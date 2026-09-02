@@ -2671,6 +2671,77 @@ mod tests {
         );
     }
 
+    /// Issue #1597 against the two shipped checkpoints, without loading a
+    /// single weight: `from_model_path` reads only the template files, so this
+    /// reproduces exactly what `/apply-template` answers, and it is the cheap
+    /// gate for the prompt strings that `tests/apply_template_tools_parity.rs`
+    /// re-checks over HTTP. Gated on the local `models/` tree.
+    ///
+    /// The Llama comparison replaces the `Today Date:` line, which the template
+    /// resolves through `strftime_now` at render time. The per-case
+    /// `enable_thinking` default is what `server::startup` derives from the
+    /// tokenizer's think markers (upstream PR #1114): true for Youtu, whose
+    /// template primes an empty `<think></think>` block when the value is
+    /// defined and false, and false for Llama 3.2, whose template never reads
+    /// the variable.
+    #[test]
+    #[ignore = "requires local models/ directory; run with --ignored"]
+    fn local_checkpoint_templates_render_the_transformers_prompt_without_tools() {
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/mlx");
+        let cases: [(&str, bool, &str); 2] = [
+            (
+                "youtu-llm-2b-4bit",
+                true,
+                "<|begin_of_text|><|User|>The Fibonacci sequence begins with<|Assistant|>",
+            ),
+            (
+                "llama-3.2-1b-4bit",
+                false,
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: <DATE>\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nThe Fibonacci sequence begins with<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+            ),
+        ];
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "The Fibonacci sequence begins with".to_string(),
+        }];
+
+        for (name, enable_thinking, oracle) in cases {
+            let directory = models.join(name);
+            if !directory.exists() {
+                eprintln!("skip: {} not found", directory.display());
+                continue;
+            }
+            let mut processor = ChatTemplateProcessor::from_model_path(&directory)
+                .expect("read template")
+                .expect("checkpoint carries a chat template");
+            processor.set_default_enable_thinking(enable_thinking);
+
+            for tools in [None, Some(&[][..])] {
+                let rendered = processor.apply(&messages, tools).expect("render");
+                let normalized = rendered
+                    .split('\n')
+                    .map(|line| match line.starts_with("Today Date: ") {
+                        true => "Today Date: <DATE>".to_string(),
+                        false => line.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(
+                    normalized, oracle,
+                    "{name} must render the transformers prompt for tools = {tools:?}"
+                );
+            }
+
+            let with_tools = processor
+                .apply(&messages, Some(&one_tool("get_weather")))
+                .expect("render with one tool");
+            assert!(
+                with_tools.contains("get_weather"),
+                "{name} must still declare a tool that was actually sent"
+            );
+        }
+    }
+
     #[test]
     fn test_apply_with_tools_passes_to_template() {
         // Template that explicitly uses tools
