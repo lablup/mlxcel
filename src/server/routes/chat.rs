@@ -541,6 +541,34 @@ pub(crate) fn forced_tool_choice_grammar(
     grammar
 }
 
+/// Whether a parsed tool call matches a forced named `tool_choice` filter
+/// (#1319). `None` means every call matches (the `"required"` case, or no
+/// forced choice at all); `Some(name)` restricts matches to that one function
+/// name, mirroring the named-function contract [`ToolChoice::validate`]
+/// enforces at the request boundary.
+fn tool_call_matches_choice(call_name: &str, specific_function: Option<&str>) -> bool {
+    specific_function.is_none_or(|name| call_name == name)
+}
+
+/// Count of parsed tool calls that pass the forced-choice filter and would
+/// therefore reach the client as tool-call deltas (#1319).
+///
+/// Split out of [`stream_chat_completion`]'s end-of-stream block so the "did a
+/// call actually reach the client" gate on `finish_reason` is a plain,
+/// testable function instead of a counter that only exists inside the
+/// streaming task's `spawn_blocking` closure. `finish_reason` may claim
+/// `"tool_calls"` only when this is greater than zero: a named filter that
+/// drops every parsed call must not report a call the client never saw.
+fn count_tool_calls_reaching_client(
+    calls: &[tool_calls::ParsedToolCall],
+    specific_function: Option<&str>,
+) -> usize {
+    calls
+        .iter()
+        .filter(|call| tool_call_matches_choice(&call.name, specific_function))
+        .count()
+}
+
 /// Log a forced `tool_choice` (#1319) that finished without a usable call.
 ///
 /// Only the grammar-capable formats can guarantee a call; on every other
@@ -1802,13 +1830,15 @@ async fn stream_chat_completion(
                     .as_ref()
                     .and_then(|tc| tc.specific_function())
                     .map(|s| s.to_string());
-                let mut emitted = 0usize;
+                // #1319: how many parsed calls will actually reach the client
+                // as tool-call deltas, computed once via the same predicate
+                // the emission loop below applies per call.
+                let emitted =
+                    count_tool_calls_reaching_client(&parsed.tool_calls, specific_fn.as_deref());
 
                 for (idx, call) in parsed.tool_calls.iter().enumerate() {
-                    // Filter by specific function if applicable
-                    if let Some(ref fn_name) = specific_fn
-                        && call.name != *fn_name
-                    {
+                    // Filter by specific function if applicable.
+                    if !tool_call_matches_choice(&call.name, specific_fn.as_deref()) {
                         continue;
                     }
 
@@ -1832,7 +1862,6 @@ async fn stream_chat_completion(
                         call.arguments.clone(),
                     );
                     let _ = finish_events.json(&args_chunk);
-                    emitted += 1;
                 }
 
                 // Only calls that actually reached the client count: when the
@@ -2342,6 +2371,65 @@ mod tests {
             )
             .is_some(),
             "a grammar that compiles still constrains the generation"
+        );
+    }
+
+    /// The streaming finish path may only claim `finish_reason: "tool_calls"`
+    /// when a tool-call delta actually reached the client (#1319). This is the
+    /// pure gate behind that rule, extracted from
+    /// [`stream_chat_completion`]'s `spawn_blocking` closure so it is testable
+    /// on its own rather than only through a live SSE stream.
+    #[test]
+    fn count_tool_calls_reaching_client_counts_every_call_when_choice_is_required() {
+        let calls = [
+            tool_calls::ParsedToolCall {
+                name: "get_time".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_calls::ParsedToolCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+        assert_eq!(count_tool_calls_reaching_client(&calls, None), 2);
+    }
+
+    /// A named `tool_choice` filter must count only the matching call, and the
+    /// streaming loop's per-call predicate must agree with that count so the
+    /// two can never disagree about what reached the client.
+    #[test]
+    fn count_tool_calls_reaching_client_counts_only_the_named_function() {
+        let calls = [
+            tool_calls::ParsedToolCall {
+                name: "get_time".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_calls::ParsedToolCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+        assert_eq!(
+            count_tool_calls_reaching_client(&calls, Some("get_weather")),
+            1
+        );
+        assert!(tool_call_matches_choice("get_weather", Some("get_weather")));
+        assert!(!tool_call_matches_choice("get_time", Some("get_weather")));
+    }
+
+    /// When the named-function filter matches none of the parsed calls, the
+    /// count is zero: this is the exact condition that must keep
+    /// `finish_reason` from claiming `"tool_calls"` in the streaming path,
+    /// since no tool-call delta was sent to the client (#1319).
+    #[test]
+    fn count_tool_calls_reaching_client_is_zero_when_the_named_filter_matches_nothing() {
+        let calls = [tool_calls::ParsedToolCall {
+            name: "get_time".to_string(),
+            arguments: "{}".to_string(),
+        }];
+        assert_eq!(
+            count_tool_calls_reaching_client(&calls, Some("get_weather")),
+            0
         );
     }
 
