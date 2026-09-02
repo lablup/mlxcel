@@ -312,7 +312,7 @@ fn resolve_cli_prompt_returns_template_rejections() {
 
     assert_eq!(
         err.to_string(),
-        "chat template rejected the request: unsupported caller value"
+        "Chat template rejected the request: unsupported caller value"
     );
 }
 

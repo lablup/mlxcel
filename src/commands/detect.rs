@@ -53,11 +53,11 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     let _runtime = initialize_runtime_checked()?;
 
     let predictor = RtDetrV2Predictor::from_pretrained(&args.model, args.threshold)
-        .map_err(|e| anyhow!("failed to load RT-DETRv2 model: {e}"))?;
+        .map_err(|e| anyhow!("Failed to load RT-DETRv2 model: {e}"))?;
 
     let result = predictor
         .predict_path(&args.image)
-        .map_err(|e| anyhow!("detection failed: {e}"))?;
+        .map_err(|e| anyhow!("Detection failed: {e}"))?;
 
     let mut detections = result.detections;
     sort_reading_order(&mut detections);

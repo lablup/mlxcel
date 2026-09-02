@@ -412,7 +412,7 @@ pub(crate) fn run_falcon_ocr_layout_generation(
             .with_context(|| format!("Failed to decode image {image_path:?}"))?;
     let page = images
         .pop()
-        .ok_or_else(|| anyhow!("image decoding returned no image for {image_path:?}"))?;
+        .ok_or_else(|| anyhow!("Image decoding returned no image for {image_path:?}"))?;
 
     // Planned without cropping, then cropped one region at a time below. A crop
     // copies, so materializing the whole plan up front would hold one full-size
