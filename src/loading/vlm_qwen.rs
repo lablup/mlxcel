@@ -25,6 +25,7 @@
 //! about Qwen family details.
 
 use anyhow::Result;
+use mlxcel_core::weights::WeightMap;
 use std::path::Path;
 
 use crate::LoadedModel;
@@ -202,9 +203,46 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
     )
 }
 
+/// Rewrite one raw-HuggingFace Qwen2.5-VL weight key into the names this tree
+/// loads the model under.
+///
+/// A `transformers` export of Qwen2.5-VL names the vision tower `visual.*`
+/// (older exports) or `model.visual.*` (the nested layout newer exports use,
+/// which pairs it with `model.language_model.*`), while the encoder here reads
+/// `vision_tower.*` and the decoder reads `model.*`. mlx-community conversions
+/// already carry both target names, so every rule below misses on them and the
+/// map comes back unchanged.
+///
+/// `lm_head.*` and `vision_tower.merger.*` are deliberately untouched: the head
+/// is already at its final name, and the merger is inside the tower that the
+/// `visual.` rule renames as a whole.
+fn rewrite_qwen2_5_vl_native_key(key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("model.visual.") {
+        format!("vision_tower.{rest}")
+    } else if let Some(rest) = key.strip_prefix("model.language_model.") {
+        format!("model.{rest}")
+    } else if let Some(rest) = key.strip_prefix("visual.") {
+        format!("vision_tower.{rest}")
+    } else {
+        key.to_string()
+    }
+}
+
+/// Apply [`rewrite_qwen2_5_vl_native_key`] to a whole weight map. A no-op on an
+/// mlx-community conversion.
+fn remap_qwen2_5_vl_native_keys(raw_weights: WeightMap) -> WeightMap {
+    let mut weights = WeightMap::new();
+    for (key, value) in raw_weights {
+        weights.insert(rewrite_qwen2_5_vl_native_key(&key), value);
+    }
+    weights
+}
+
 /// Load a Qwen2.5-VL model (windowed ViT + Qwen2 language model with MRoPE)
 pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
-    use vision::encoders::qwen2_5_vl::{Qwen25VLVisionConfig, Qwen25VLVisionEncoder};
+    use vision::encoders::qwen2_5_vl::{
+        Qwen25VLVisionConfig, Qwen25VLVisionEncoder, normalize_patch_embed_layout,
+    };
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
@@ -216,8 +254,18 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
 
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
-    let mut weights = strip_language_model_prefix(load_vlm_weights_common(model_path, None)?);
+    let mut weights = remap_qwen2_5_vl_native_keys(strip_language_model_prefix(
+        load_vlm_weights_common(model_path, None)?,
+    ));
     models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    // A raw `transformers` export keeps `Conv3d`'s native filter layout, which
+    // the encoder would reshape without complaint and then read scrambled.
+    if normalize_patch_embed_layout(&mut weights, "vision_tower", vision_config.in_channels) {
+        tracing::debug!(
+            "Qwen2.5-VL: converted patch_embed.proj.weight from the PyTorch Conv3d layout"
+        );
+    }
 
     let text_model = models::Qwen2VLModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen2.5VL text model: {}", e))?;
@@ -952,6 +1000,10 @@ pub fn load_qwen3_omni_speech(
     Qwen3OmniSpeech::from_weights(&weights, cfg)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni speech stack: {e}"))
 }
+
+#[cfg(test)]
+#[path = "vlm_qwen_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 mod qwen3_omni_speech_loader_tests {

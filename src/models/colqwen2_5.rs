@@ -47,8 +47,10 @@
 //! The raw HuggingFace export stores the vision tower under `visual.*` and
 //! keeps `Conv3d`'s native `[out, in, kT, kH, kW]` patch-embedding layout,
 //! while the encoder in this tree expects the mlx-converted names and the
-//! channels-last filter; [`rewrite_colqwen25_key`] and
-//! [`normalize_patch_embed_layout`] bridge both.
+//! channels-last filter; [`rewrite_colqwen25_key`] and the encoder module's
+//! [`normalize_patch_embed_layout`] bridge both. The layout normalizer is
+//! shared with the Qwen2.5-VL generation loader, which needs it for the same
+//! reason.
 
 use std::path::Path;
 
@@ -69,7 +71,9 @@ use crate::models::col_late_interaction::{
 use crate::models::qwen2_vl::{Qwen2VLConfig, Qwen2VLModel};
 use crate::multimodal::qwen_vl::insert_qwen_vl_image_tokens;
 use crate::vision::Qwen25VLModel;
-use crate::vision::encoders::qwen2_5_vl::{Qwen25VLVisionConfig, Qwen25VLVisionEncoder};
+use crate::vision::encoders::qwen2_5_vl::{
+    Qwen25VLVisionConfig, Qwen25VLVisionEncoder, normalize_patch_embed_layout,
+};
 use crate::vision::processors::qwen2_vl::Qwen2VLProcessor;
 
 /// Checkpoint key of the 128-dimension projection after sanitization.
@@ -130,7 +134,7 @@ impl ColQwen25Model {
         }
 
         let mut weights = sanitize_colqwen25_weights(load_embedding_weights(model_dir, config)?);
-        normalize_patch_embed_layout(&mut weights, vision_config.in_channels);
+        normalize_patch_embed_layout(&mut weights, VISION_PREFIX, vision_config.in_channels);
         apply_dense_projection_override(&mut weights, PROJECTION_PREFIX);
         weights.retain(|key, _| !key.starts_with("lm_head."));
 
@@ -353,38 +357,6 @@ pub(crate) fn sanitize_colqwen25_weights(weights: WeightMap) -> WeightMap {
         .into_iter()
         .map(|(key, value)| (rewrite_colqwen25_key(&key), value))
         .collect()
-}
-
-/// Put the vision patch-embedding convolution into the channels-last layout
-/// the Qwen2.5-VL encoder expects, when the checkpoint stores the PyTorch
-/// one.
-///
-/// `Qwen25VLVisionEncoder` assumes the mlx-vlm conversion's
-/// `[out, kT, kH, kW, in]` and permutes it once more itself. A raw
-/// HuggingFace export (which is what `vidore/colqwen2.5-base` is) stores
-/// `Conv3d`'s native `[out, in, kT, kH, kW]` instead, so it has to be
-/// converted here or the tower silently reads scrambled filters and every
-/// page embeds to nearly the same vectors.
-///
-/// The two layouts are told apart by the channel axis: `in_channels` is 3
-/// and the patch size is 14, so the trailing axis is the channel one only
-/// in the converted layout. Returns `true` when a conversion was applied.
-pub(crate) fn normalize_patch_embed_layout(weights: &mut WeightMap, in_channels: usize) -> bool {
-    let key = format!("{VISION_PREFIX}.patch_embed.proj.weight");
-    let channels = in_channels as i32;
-    let converted = {
-        let Some(weight) = weights.get(&key) else {
-            return false;
-        };
-        let shape = mlxcel_core::array_shape(weight);
-        if shape.len() != 5 || shape[1] != channels || shape[4] == channels {
-            return false;
-        }
-        // [out, in, kT, kH, kW] -> [out, kT, kH, kW, in].
-        mlxcel_core::transpose_axes(weight, &[0, 2, 3, 4, 1])
-    };
-    weights.insert(key, converted);
-    true
 }
 
 /// Build the dynamic-resolution processor, honoring the checkpoint's pixel

@@ -32,8 +32,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde_json::json;
 
 use super::{
-    ColQwen25Model, IMAGE_DOCUMENT_PROMPT, normalize_patch_embed_layout, rewrite_colqwen25_key,
-    sanitize_colqwen25_weights, text_input_embeddings, token_vectors,
+    ColQwen25Model, IMAGE_DOCUMENT_PROMPT, rewrite_colqwen25_key, sanitize_colqwen25_weights,
+    text_input_embeddings, token_vectors,
 };
 use crate::embeddings::model::EmbeddingModel;
 use crate::models::col_late_interaction::QUERY_AUGMENTATION_TOKENS;
@@ -228,50 +228,6 @@ fn sanitize_rewrites_every_key_of_a_native_map() {
             "vision_tower.merger.ln_q.weight"
         ]
     );
-}
-
-#[test]
-fn patch_embed_layout_is_converted_from_the_pytorch_conv3d_form() {
-    let _guard = mlx_test_guard();
-    // Raw HuggingFace: [out, in, kT, kH, kW]. The encoder wants the mlx
-    // conversion's [out, kT, kH, kW, in], so this must be permuted.
-    let (out, channels, kt, k) = (4i32, 3i32, 2i32, 2i32);
-    let count = (out * channels * kt * k * k) as usize;
-    let values: Vec<f32> = (0..count).map(|i| i as f32).collect();
-    let mut weights = WeightMap::new();
-    weights.insert(
-        "vision_tower.patch_embed.proj.weight".to_string(),
-        mlxcel_core::from_slice_f32(&values, &[out, channels, kt, k, k]),
-    );
-    assert!(normalize_patch_embed_layout(&mut weights, 3));
-    let converted = &weights["vision_tower.patch_embed.proj.weight"];
-    assert_eq!(
-        mlxcel_core::array_shape(converted),
-        vec![out, kt, k, k, channels]
-    );
-    // Element count is preserved and the permutation is the transpose, not a
-    // reinterpretation: element [0, 0, 0, 0, 1] of the output is element
-    // [0, 1, 0, 0, 0] of the input, which is `kt * k * k` = 8.
-    mlxcel_core::eval(converted);
-    let flat = to_vec(converted);
-    assert_eq!(flat.len(), count);
-    assert_eq!(flat[1], 8.0);
-
-    // An mlx conversion is already channels-last and is left untouched.
-    let mut already = WeightMap::new();
-    already.insert(
-        "vision_tower.patch_embed.proj.weight".to_string(),
-        mlxcel_core::from_slice_f32(&values, &[out, kt, k, k, channels]),
-    );
-    assert!(!normalize_patch_embed_layout(&mut already, 3));
-    assert_eq!(
-        mlxcel_core::array_shape(&already["vision_tower.patch_embed.proj.weight"]),
-        vec![out, kt, k, k, channels]
-    );
-
-    // A checkpoint without the tower is not an error.
-    let mut empty = WeightMap::new();
-    assert!(!normalize_patch_embed_layout(&mut empty, 3));
 }
 
 #[test]

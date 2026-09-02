@@ -98,6 +98,67 @@ fn default_fullatt_block_indexes() -> Vec<usize> {
     vec![7, 15, 23, 31]
 }
 
+/// Put the vision patch-embedding convolution under `prefix` into the
+/// channels-last layout `PatchEmbed::from_weights` expects, when the
+/// checkpoint stores PyTorch's instead. Returns `true` when a conversion was
+/// applied.
+///
+/// Used by: Qwen2.5-VL generation loader (`load_qwen2_5_vl`), ColQwen2.5
+/// (`ColQwen25Model::load`)
+///
+/// `PatchEmbed::from_weights` accepts exactly one 5-D layout, the mlx-vlm
+/// conversion's `[out, kT, kH, kW, in]`, and permutes it once more itself.
+/// A raw HuggingFace export stores `Conv3d`'s native `[out, in, kT, kH, kW]`,
+/// which has the same element count, so the reshape downstream succeeds and
+/// nothing fails: the tower simply reads scrambled filters. PR #1414 measured
+/// what that costs on the retrieval path, where the unrelated page outranked
+/// the matching one (MaxSim 7.83 against 8.04).
+///
+/// Normalizing here rather than inside `PatchEmbed` is deliberate. The encoder
+/// contract stays "channels-last only" for all three of its consumers
+/// (Qwen2-VL, Qwen2.5-VL, ColQwen2.5), and the loader is the layer that has
+/// `in_channels` on hand to tell the layouts apart.
+///
+/// Detection is by the channel axis: the raw layout has `in_channels` on axis
+/// 1 and a spatial extent on axis 4, the converted layout has `in_channels` on
+/// axis 4. When both axes carry `in_channels` the two layouts are
+/// indistinguishable from shape alone (it would take `in_channels == patch_size`,
+/// which no published Qwen2.5-VL checkpoint has: `in_channels` is 3 and
+/// `patch_size` is 14), so the function refuses to guess and leaves the map
+/// untouched. A 2-D already-flattened weight and a missing weight are both
+/// no-ops as well, the latter so `PatchEmbed::from_weights` still reports the
+/// missing key itself.
+pub(crate) fn normalize_patch_embed_layout(
+    weights: &mut WeightMap,
+    prefix: &str,
+    in_channels: usize,
+) -> bool {
+    let key = format!("{prefix}.patch_embed.proj.weight");
+    let channels = in_channels as i32;
+    let converted = {
+        let Some(weight) = weights.get(&key) else {
+            return false;
+        };
+        let shape = mlxcel_core::array_shape(weight);
+        if shape.len() != 5 {
+            return false;
+        }
+        let leading_is_channel = shape[1] == channels;
+        let trailing_is_channel = shape[4] == channels;
+        if !leading_is_channel || trailing_is_channel {
+            return false;
+        }
+        // [out, in, kT, kH, kW] -> [out, kT, kH, kW, in].
+        mlxcel_core::transpose_axes(weight, &[0, 2, 3, 4, 1])
+    };
+    weights.insert(key, converted);
+    true
+}
+
+#[cfg(test)]
+#[path = "qwen2_5_vl_tests.rs"]
+mod tests;
+
 // RMSNorm for vision encoder.
 struct VisionRMSNorm {
     weight: UniquePtr<MlxArray>,
