@@ -24,9 +24,10 @@ use anyhow::Result;
 use mlxcel_core::MlxArray;
 use mlxcel_core::UniquePtr;
 use mlxcel_core::weights::WeightMap;
+use std::collections::HashMap;
 use std::path::Path;
 
-use super::config::AdapterConfig;
+use super::config::{AdapterConfig, FineTuneType};
 
 /// Load adapter weights from a safetensors file
 pub(crate) fn load_adapter_weights(adapter_path: &Path) -> Result<WeightMap> {
@@ -58,6 +59,181 @@ pub(crate) fn load_adapter_weights(adapter_path: &Path) -> Result<WeightMap> {
     Ok(weights)
 }
 
+/// Refuse an adapter whose `fine_tune_type` this build cannot apply.
+///
+/// DoRA is refused rather than treated as LoRA. A DoRA checkpoint carries a
+/// per-output-row magnitude vector alongside its low-rank pair, and applying
+/// only the pair produces weights that match neither the base model nor the
+/// fine-tune. Accepting it used to be silent because `is_lora()` returned true
+/// for it and the magnitude tensors were dropped as "other weights".
+///
+/// Used by: [`apply_lora_adapters_scaled`], [`apply_stage_lora_adapter`],
+/// [`super::runtime::RuntimeLoraSet::from_specs`]
+pub(super) fn reject_unsupported_fine_tune_type(
+    config: &AdapterConfig,
+    adapter_path: &Path,
+) -> Result<()> {
+    if config.is_fusable_lora() {
+        return Ok(());
+    }
+    if config.fine_tune_type == FineTuneType::DoRA {
+        anyhow::bail!(
+            "DoRA adapters are not supported: {} declares fine_tune_type dora; fuse it with its \
+             own tooling first",
+            adapter_path.display()
+        );
+    }
+    anyhow::bail!(
+        "Adapter {} is not LoRA type: {:?}. Full fine-tuning adapters should be loaded directly.",
+        adapter_path.display(),
+        config.fine_tune_type
+    );
+}
+
+/// One adapter tensor pair that has been checked against the base weights and
+/// can be applied to them.
+///
+/// The adapter's own layer path is carried alongside the resolved base weight
+/// key because the two differ (`...q_proj` against `...q_proj.weight`, and the
+/// HuggingFace PEFT `...q_proj.base_layer` against that same `.weight`), and
+/// the fusion diagnostics name both.
+pub(super) struct FusablePair {
+    /// The `.lora_a` / `.lora_b` key stem, i.e. the adapter's own layer path.
+    pub(super) layer: String,
+    /// The base weight key this pair's delta is applied to.
+    pub(super) base_weight_name: String,
+    pub(super) lora_a: UniquePtr<MlxArray>,
+    pub(super) lora_b: UniquePtr<MlxArray>,
+}
+
+/// The base weight keys a LoRA layer path can resolve to, most specific first.
+///
+/// Used by: [`find_base_weight_name`], [`validate_adapter_tensors`]
+fn base_weight_candidates(lora_name: &str) -> Vec<String> {
+    let mut candidates = vec![format!("{lora_name}.weight"), lora_name.to_string()];
+    // HuggingFace PEFT wraps the frozen projection in a `.base_layer`, which
+    // resolves to the same `.weight` the other conventions name directly.
+    let peft = lora_name.replace(".base_layer", ".weight");
+    if !candidates.contains(&peft) {
+        candidates.push(peft);
+    }
+    candidates
+}
+
+/// Find the base weight name a LoRA layer name resolves to, or `None` when the
+/// checkpoint holds none of the candidates.
+///
+/// This deliberately has no fallback. It used to return `"{name}.weight"` when
+/// nothing matched, which made "resolved" and "exists" indistinguishable to the
+/// caller: that is how an adapter trained for a different architecture reached
+/// the fusion loop, got skipped with a `warn!`, and left the model serving base
+/// weights while every log line said the adapter was loaded (issue #1328).
+///
+/// Used by: [`validate_adapter_tensors`]
+fn find_base_weight_name(lora_name: &str, base_weights: &WeightMap) -> Option<String> {
+    base_weight_candidates(lora_name)
+        .into_iter()
+        .find(|candidate| base_weights.contains_key(candidate))
+}
+
+/// Pair up the adapter's tensors and check every one of them against the base
+/// weights, returning the pairs that can be applied or one error listing every
+/// tensor that cannot.
+///
+/// Three rules, each of which used to be a `warn!` and a `continue` that left
+/// the base weight in place:
+///
+/// 1. Every tensor is one half of a `<layer>.lora_a` / `<layer>.lora_b` pair.
+///    A DoRA magnitude vector, a stray `.weight`, and the HuggingFace PEFT
+///    `.lora_A.weight` spelling this build does not read all land here.
+/// 2. Both halves of every pair are present.
+/// 3. Every pair resolves to a base weight this checkpoint actually holds.
+///
+/// Rank compatibility and the delta-versus-base shape check stay where they
+/// already were, in [`compute_lora_delta`] and the fusion loop's shape guard,
+/// because both need the computed delta.
+///
+/// Violations are collected rather than reported one at a time: an adapter
+/// built for the wrong architecture fails on every layer, and reporting the
+/// first one would need as many load attempts as the model has layers. Both
+/// the violation list and the returned pairs are sorted, because [`WeightMap`]
+/// is a `HashMap` and neither the diagnostic nor the fusion order may depend on
+/// its iteration order.
+///
+/// Used by: [`fuse_lora_weights_into`], [`super::runtime::stage_runtime_adapters`]
+pub(super) fn validate_adapter_tensors(
+    base_weights: &WeightMap,
+    adapter_weights: &WeightMap,
+) -> Result<Vec<FusablePair>> {
+    type Halves<'a> = (
+        Option<&'a UniquePtr<MlxArray>>,
+        Option<&'a UniquePtr<MlxArray>>,
+    );
+
+    let mut halves: HashMap<&str, Halves<'_>> = HashMap::new();
+    let mut violations: Vec<String> = Vec::new();
+
+    for (name, weight) in adapter_weights {
+        if let Some(layer) = name.strip_suffix(".lora_a") {
+            halves.entry(layer).or_default().0 = Some(weight);
+        } else if let Some(layer) = name.strip_suffix(".lora_b") {
+            halves.entry(layer).or_default().1 = Some(weight);
+        } else {
+            violations.push(format!(
+                "{name}: not a LoRA tensor (expected .lora_a or .lora_b)"
+            ));
+        }
+    }
+
+    let mut pairs: Vec<FusablePair> = Vec::with_capacity(halves.len());
+    for (layer, (lora_a, lora_b)) in halves {
+        let (Some(lora_a), Some(lora_b)) = (lora_a, lora_b) else {
+            let (present, missing) = if lora_a.is_some() {
+                ("lora_a", "lora_b")
+            } else {
+                ("lora_b", "lora_a")
+            };
+            violations.push(format!(
+                "{layer}.{present}: incomplete pair (missing {layer}.{missing})"
+            ));
+            continue;
+        };
+        let Some(base_weight_name) = find_base_weight_name(layer, base_weights) else {
+            violations.push(format!(
+                "{layer}.lora_a: no base weight (tried {})",
+                base_weight_candidates(layer).join(", ")
+            ));
+            continue;
+        };
+        pairs.push(FusablePair {
+            layer: layer.to_string(),
+            base_weight_name,
+            lora_a: mlxcel_core::copy(lora_a),
+            lora_b: mlxcel_core::copy(lora_b),
+        });
+    }
+
+    if !violations.is_empty() {
+        violations.sort();
+        let count = violations.len();
+        let noun = if count == 1 { "tensor" } else { "tensors" };
+        anyhow::bail!(
+            "{count} adapter {noun} cannot be applied to this model:\n  {}\n\
+             Every tensor in a fusable adapter has to be one half of a <layer>.lora_a / \
+             <layer>.lora_b pair whose base weight this checkpoint holds; skipping the rest \
+             would serve weights that match neither the base model nor the fine-tune.",
+            violations.join("\n  "),
+        );
+    }
+
+    pairs.sort_by(|a, b| {
+        a.base_weight_name
+            .cmp(&b.base_weight_name)
+            .then_with(|| a.layer.cmp(&b.layer))
+    });
+    Ok(pairs)
+}
+
 /// Fuse LoRA weights into base model weights
 ///
 /// LoRA formula: W_fused = W_base + scale * (lora_b @ lora_a)
@@ -74,12 +250,28 @@ pub fn fuse_lora_weights(
     adapter_weights: &WeightMap,
     scale: f32,
 ) -> Result<WeightMap> {
+    let (fused_weights, _) = fuse_lora_weights_counted(base_weights, adapter_weights, scale)?;
+    Ok(fused_weights)
+}
+
+/// [`fuse_lora_weights`] with the number of pairs that were actually applied.
+///
+/// Only [`apply_lora_adapters_scaled`] needs the count, and it needs it to be
+/// the fused total rather than an adapter key count, so this stays private
+/// instead of widening the public surface.
+///
+/// Used by: [`fuse_lora_weights`], [`apply_lora_adapters_scaled`]
+fn fuse_lora_weights_counted(
+    base_weights: &WeightMap,
+    adapter_weights: &WeightMap,
+    scale: f32,
+) -> Result<(WeightMap, usize)> {
     let mut fused_weights: WeightMap = base_weights
         .iter()
         .map(|(k, v)| (k.clone(), mlxcel_core::copy(v)))
         .collect();
-    fuse_lora_weights_into(&mut fused_weights, adapter_weights, scale)?;
-    Ok(fused_weights)
+    let fused_count = fuse_lora_weights_into(&mut fused_weights, adapter_weights, scale)?;
+    Ok((fused_weights, fused_count))
 }
 
 /// Fuse LoRA adapter weights into an existing base [`WeightMap`] in place.
@@ -91,8 +283,12 @@ pub fn fuse_lora_weights(
 /// allocation of a second weight map).
 ///
 /// If the adapter weight map is stage-filtered, only the layers covered by
-/// the filter will produce fusion updates — `base_weights` entries that are
+/// the filter will produce fusion updates. `base_weights` entries that are
 /// not referenced by any `lora_a` / `lora_b` pair are left untouched.
+///
+/// Returns the number of pairs that were applied. That is the count callers
+/// must log: counting `.lora_a` keys instead reported tensors that had been
+/// skipped as if they had been fused (issue #1328).
 ///
 /// # Layout
 ///
@@ -107,69 +303,51 @@ pub fn fuse_lora_weights(
 ///
 /// # Errors
 ///
-/// Returns an error, leaving `base_weights` untouched, when the base weight map
-/// stores its projections transposed, or when a resolved base weight and its
-/// delta disagree on shape.
+/// Returns an error when any adapter tensor cannot be applied to this base
+/// weight map (see [`validate_adapter_tensors`]) or when the base weight map
+/// stores its projections transposed. Both verdicts are taken before the first
+/// write, so `base_weights` is untouched. A per-pair shape disagreement is
+/// found later, with the computed delta in hand, so it can leave the pairs
+/// sorted ahead of it applied.
 ///
-/// Used by: [`fuse_lora_weights`], [`apply_stage_lora_adapter`]
+/// Used by: [`fuse_lora_weights_counted`], [`apply_stage_lora_adapter`]
 pub fn fuse_lora_weights_into(
     base_weights: &mut WeightMap,
     adapter_weights: &WeightMap,
     scale: f32,
-) -> Result<()> {
-    // Group adapter weights by their base layer name
-    // LoRA weights are typically named like:
-    // - layers.0.self_attn.q_proj.lora_a (rank, in_features)
-    // - layers.0.self_attn.q_proj.lora_b (out_features, rank)
-    let mut lora_pairs: std::collections::HashMap<
-        String,
-        (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>),
-    > = std::collections::HashMap::new();
-
-    for (name, weight) in adapter_weights {
-        if name.ends_with(".lora_a") {
-            let base_name = name.trim_end_matches(".lora_a").to_string();
-            lora_pairs.entry(base_name).or_insert((None, None)).0 = Some(mlxcel_core::copy(weight));
-        } else if name.ends_with(".lora_b") {
-            let base_name = name.trim_end_matches(".lora_b").to_string();
-            lora_pairs.entry(base_name).or_insert((None, None)).1 = Some(mlxcel_core::copy(weight));
-        }
-        // Ignore other weights (like scales for DoRA)
-    }
+) -> Result<usize> {
+    // Pair the adapter tensors up and resolve each pair's base weight before
+    // anything is written. Adapter tensor names look like
+    // `layers.0.self_attn.q_proj.lora_a` / `.lora_b`, and anything that is not
+    // one half of such a pair, or that resolves to no base weight, fails the
+    // whole load here rather than being skipped.
+    let pairs = validate_adapter_tensors(base_weights, adapter_weights)?;
 
     // Refuse up front if the base weight map still stores its projections
     // transposed. This has to be a whole-map verdict taken before the first
     // `add`, because the square `attn.c_proj` is precisely the case where the
     // two shapes agree and the corruption would be silent.
-    if !lora_pairs.is_empty() {
-        let adapter_layers: Vec<&str> = lora_pairs.keys().map(String::as_str).collect();
-        reject_conv1d_layout_fusion(base_weights, &adapter_layers)?;
-    }
+    reject_conv1d_layout_fusion(base_weights, &pairs)?;
 
     // Fuse each LoRA pair with the corresponding base weight
-    for (base_name, (lora_a_opt, lora_b_opt)) in lora_pairs {
-        let (Some(lora_a), Some(lora_b)) = (lora_a_opt, lora_b_opt) else {
-            tracing::warn!(
-                "Incomplete LoRA pair for {}: missing lora_a or lora_b",
-                base_name
-            );
-            continue;
-        };
+    let mut fused_count = 0usize;
+    for pair in &pairs {
+        let FusablePair {
+            layer: base_name,
+            base_weight_name,
+            lora_a,
+            lora_b,
+        } = pair;
 
-        // Find the corresponding base weight
-        let base_weight_name = find_base_weight_name(&base_name, base_weights)?;
-
-        let Some(base_weight) = base_weights.get(&base_weight_name) else {
-            tracing::warn!(
-                "Base weight not found for LoRA layer {}: tried {}",
-                base_name,
-                base_weight_name
+        let Some(base_weight) = base_weights.get(base_weight_name) else {
+            anyhow::bail!(
+                "internal error: base weight {base_weight_name} for adapter layer {base_name} \
+                 was resolved during validation but is no longer in the weight map"
             );
-            continue;
         };
 
         // Compute the LoRA delta: scale * (lora_b @ lora_a)
-        let delta = compute_lora_delta(&lora_a, &lora_b, scale)?;
+        let delta = compute_lora_delta(lora_a, lora_b, scale)?;
 
         // Never hand mismatched operands to `mlxcel_core::add`. MLX broadcasts,
         // so a mismatch is not reliably an error: a base weight that is one
@@ -202,10 +380,11 @@ pub fn fuse_lora_weights_into(
         // Fuse: W_fused = W_base + delta
         let fused = mlxcel_core::add(base_weight, &delta);
 
-        base_weights.insert(base_weight_name, fused);
+        base_weights.insert(base_weight_name.clone(), fused);
+        fused_count += 1;
     }
 
-    Ok(())
+    Ok(fused_count)
 }
 
 /// Suffixes of the transformer-block projections that a HuggingFace GPT-2
@@ -306,31 +485,36 @@ fn detect_conv1d_projection_layout(base_weights: &WeightMap) -> Option<Conv1dLay
 /// Refuse to fuse into a base weight map whose projections are still stored
 /// transposed, before any operand reaches MLX.
 ///
-/// `adapter_layers` are the layer paths the adapter targets, i.e. the
-/// `lora_a` / `lora_b` key stems. Only targets that resolve to a projection
-/// actually stored in `Conv1D` layout are reported; an adapter that touches
-/// nothing transposed (an embedding-only adapter, say) fuses as before.
+/// `pairs` are the adapter pairs [`validate_adapter_tensors`] already resolved
+/// against this map, so every `base_weight_name` is known to exist. Only
+/// targets that land on a projection actually stored in `Conv1D` layout are
+/// reported; an adapter that touches nothing transposed (an embedding-only
+/// adapter, say) fuses as before.
 ///
 /// This deliberately does not repair anything. Transposing the delta would fix
 /// the non-square projections and leave the square `attn.c_proj` just as wrong,
 /// because a square weight gives no evidence about which orientation was
 /// intended. Reporting is the only honest outcome.
-fn reject_conv1d_layout_fusion(base_weights: &WeightMap, adapter_layers: &[&str]) -> Result<()> {
+fn reject_conv1d_layout_fusion(base_weights: &WeightMap, pairs: &[FusablePair]) -> Result<()> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
     let Some(evidence) = detect_conv1d_projection_layout(base_weights) else {
         return Ok(());
     };
 
-    let mut affected: Vec<String> = Vec::new();
-    for layer in adapter_layers {
-        let resolved = find_base_weight_name(layer, base_weights)?;
-        if conv1d_projection_suffix(&resolved).is_some() && base_weights.contains_key(&resolved) {
-            affected.push(resolved);
-        }
-    }
+    let mut affected: Vec<&str> = pairs
+        .iter()
+        .filter(|pair| conv1d_projection_suffix(&pair.base_weight_name).is_some())
+        .map(|pair| pair.base_weight_name.as_str())
+        .collect();
     if affected.is_empty() {
         return Ok(());
     }
-    affected.sort();
+    // Two adapter layers can resolve to one base weight (a `.base_layer`
+    // spelling next to a plain one), so the list is deduplicated as well.
+    affected.sort_unstable();
+    affected.dedup();
 
     let Conv1dLayoutEvidence { key, shape } = evidence;
     anyhow::bail!(
@@ -347,28 +531,6 @@ fn reject_conv1d_layout_fusion(base_weights: &WeightMap, adapter_layers: &[&str]
          the model without the adapter.",
         affected.join(", "),
     );
-}
-
-/// Find the base weight name that corresponds to a LoRA layer name
-pub(crate) fn find_base_weight_name(lora_name: &str, base_weights: &WeightMap) -> Result<String> {
-    // Common patterns to try:
-    // 1. Direct match with .weight suffix
-    // 2. Replace specific LoRA naming conventions
-    let candidates = vec![
-        format!("{}.weight", lora_name),
-        lora_name.to_string(),
-        // HuggingFace PEFT format uses base_layer
-        lora_name.replace(".base_layer", ".weight"),
-    ];
-
-    for candidate in &candidates {
-        if base_weights.contains_key(candidate) {
-            return Ok(candidate.clone());
-        }
-    }
-
-    // If no direct match, return the most likely candidate
-    Ok(format!("{}.weight", lora_name))
 }
 
 /// Compute the LoRA delta: scale * (lora_b @ lora_a)
@@ -462,12 +624,7 @@ pub fn apply_lora_adapters_scaled(
         config.fine_tune_type
     );
 
-    if !config.is_lora() {
-        anyhow::bail!(
-            "Adapter is not LoRA type: {:?}. Full fine-tuning adapters should be loaded directly.",
-            config.fine_tune_type
-        );
-    }
+    reject_unsupported_fine_tune_type(&config, adapter_path)?;
 
     // Load adapter weights
     let adapter_weights = load_adapter_weights(adapter_path)?;
@@ -475,19 +632,26 @@ pub fn apply_lora_adapters_scaled(
     tracing::info!("Loaded {} adapter weight tensors", adapter_weights.len());
 
     // Fuse weights
-    let fused = fuse_lora_weights(
+    let (fused, fused_count) = fuse_lora_weights_counted(
         base_weights,
         &adapter_weights,
         config.effective_scale() * user_scale,
-    )?;
+    )
+    .map_err(|err| anyhow::anyhow!("Adapter at {}: {err}", adapter_path.display()))?;
 
-    // Count how many weights were modified
-    let modified_count = adapter_weights
-        .keys()
-        .filter(|k| k.ends_with(".lora_a"))
-        .count();
+    // An adapter that applies nothing is the failure this path exists to
+    // report: the model would load and serve the base weights unchanged while
+    // every log line said the adapter was in place. The pipeline-stage entry
+    // point deliberately does not take this check, because a stage that owns
+    // none of the adapter's layers applies zero pairs by design.
+    if fused_count == 0 {
+        anyhow::bail!(
+            "Adapter at {} applied no tensors to this model: it holds no lora_a / lora_b pair",
+            adapter_path.display()
+        );
+    }
 
-    tracing::info!("Fused LoRA adapters into {} layers", modified_count);
+    tracing::info!("Fused LoRA adapters into {fused_count} layers");
 
     Ok(fused)
 }
@@ -508,12 +672,18 @@ pub fn apply_lora_adapters_scaled(
 /// `load_model_with_adapter`, but it shares [`fuse_lora_weights_into`], so it
 /// inherits the same layout and shape guards.
 ///
+/// Returns the number of pairs this stage applied. Zero is a valid result and
+/// is never an error here: an adapter may target a subset of the model's
+/// layers, and a stage that owns none of them has nothing to apply. The
+/// whole-model entry point ([`apply_lora_adapters_scaled`]) is the one that
+/// treats zero as a failed load.
+///
 /// Used by: pipeline stage initialization (family stage executors)
 pub fn apply_stage_lora_adapter(
     base_weights: &mut WeightMap,
     adapter_path: &Path,
     filter: &crate::distributed::pipeline::LayerFilter,
-) -> Result<()> {
+) -> Result<usize> {
     let config = AdapterConfig::load(adapter_path)?;
 
     tracing::info!(
@@ -525,34 +695,23 @@ pub fn apply_stage_lora_adapter(
         filter.layer_range.end,
     );
 
-    if !config.is_lora() {
-        anyhow::bail!(
-            "Adapter is not LoRA type: {:?}. Full fine-tuning adapters should be loaded directly.",
-            config.fine_tune_type
-        );
-    }
+    reject_unsupported_fine_tune_type(&config, adapter_path)?;
 
     let adapter_weights =
         crate::distributed::pipeline::load_stage_adapter_weights(adapter_path, filter)?;
-
-    let modified_count = adapter_weights
-        .keys()
-        .filter(|k| k.ends_with(".lora_a"))
-        .count();
 
     tracing::info!(
         "Loaded {} adapter tensors for stage (skipped out-of-range adapter layers)",
         adapter_weights.len(),
     );
 
-    fuse_lora_weights_into(base_weights, &adapter_weights, config.effective_scale())?;
+    let fused_count =
+        fuse_lora_weights_into(base_weights, &adapter_weights, config.effective_scale())
+            .map_err(|err| anyhow::anyhow!("Adapter at {}: {err}", adapter_path.display()))?;
 
-    tracing::info!(
-        "Fused stage-local LoRA adapters into {} layers",
-        modified_count,
-    );
+    tracing::info!("Fused stage-local LoRA adapters into {fused_count} layers");
 
-    Ok(())
+    Ok(fused_count)
 }
 
 #[cfg(test)]

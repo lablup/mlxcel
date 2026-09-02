@@ -24,6 +24,8 @@ mod config;
 mod loader;
 pub mod multi;
 pub mod runtime;
+#[cfg(test)]
+mod test_support;
 
 pub use config::{AdapterConfig, LoRAParameters};
 pub use loader::{

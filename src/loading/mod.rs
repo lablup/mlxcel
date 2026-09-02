@@ -853,10 +853,10 @@ pub fn load_model_with_adapter_specs(
             })?;
             continue;
         }
-        weights =
-            lora::apply_lora_adapters_scaled(&weights, &spec.path, spec.scale).map_err(|e| {
-                anyhow::anyhow!("LoRA adapter {} failed to fuse: {e}", spec.path.display())
-            })?;
+        // Not re-wrapped with the adapter path: every failure inside
+        // `apply_lora_adapters_scaled` already names the directory it came
+        // from, so a wrapper here only printed it twice.
+        weights = lora::apply_lora_adapters_scaled(&weights, &spec.path, spec.scale)?;
     }
     let model = load_model_from_weights(model_path, &mut weights)?;
     let tokenizer = tokenizer::load_tokenizer(model_path)?;

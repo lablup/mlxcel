@@ -135,9 +135,16 @@ impl AdapterConfig {
         Ok(config)
     }
 
-    /// Check if this is a LoRA adapter (not full fine-tuning)
-    pub fn is_lora(&self) -> bool {
-        matches!(self.fine_tune_type, FineTuneType::LoRA | FineTuneType::DoRA)
+    /// Whether this adapter is plain LoRA, the only kind this build can apply.
+    ///
+    /// DoRA is deliberately excluded. This used to be `is_lora()`, which
+    /// answered `true` for DoRA as well, so a DoRA adapter was accepted and
+    /// then applied as if its magnitude vectors did not exist, producing
+    /// weights that match neither the base model nor the fine-tune (issue
+    /// #1328). Rejecting it is [`crate::lora::AdapterConfig`]'s job only in the
+    /// sense of reporting the type; the message lives with the loaders.
+    pub fn is_fusable_lora(&self) -> bool {
+        self.fine_tune_type == FineTuneType::LoRA
     }
 
     /// Get the effective LoRA scale
@@ -178,7 +185,21 @@ mod tests {
     fn test_parse_minimal_config() {
         let json = r#"{"fine_tune_type": "lora"}"#;
         let config: AdapterConfig = serde_json::from_str(json).unwrap();
-        assert!(config.is_lora());
+        assert!(config.is_fusable_lora());
         assert_eq!(config.num_layers, -1);
+    }
+
+    #[test]
+    fn dora_and_full_are_not_fusable_lora() {
+        for json in [
+            r#"{"fine_tune_type": "dora"}"#,
+            r#"{"fine_tune_type": "full"}"#,
+        ] {
+            let config: AdapterConfig = serde_json::from_str(json).unwrap();
+            assert!(
+                !config.is_fusable_lora(),
+                "must not be treated as plain LoRA: {json}"
+            );
+        }
     }
 }

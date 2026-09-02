@@ -42,7 +42,9 @@ use mlxcel_core::runtime_lora::{PendingLoraTerm, SharedLoraScale};
 use mlxcel_core::weights::WeightMap;
 
 use super::config::AdapterConfig;
-use super::loader::{find_base_weight_name, load_adapter_weights};
+use super::loader::{
+    load_adapter_weights, reject_unsupported_fine_tune_type, validate_adapter_tensors,
+};
 use super::multi::LoraAdapterSpec;
 
 /// One adapter's serving state.
@@ -84,14 +86,7 @@ impl RuntimeLoraSet {
             let config = AdapterConfig::load(&spec.path).map_err(|e| {
                 anyhow::anyhow!("LoRA adapter {} failed to load: {e}", spec.path.display())
             })?;
-            if !config.is_lora() {
-                anyhow::bail!(
-                    "Adapter {} is not LoRA type: {:?}. Full fine-tuning adapters should be \
-                     loaded directly.",
-                    spec.path.display(),
-                    config.fine_tune_type
-                );
-            }
+            reject_unsupported_fine_tune_type(&config, &spec.path)?;
             adapters.push(RuntimeLoraAdapter {
                 base_scale: config.effective_scale(),
                 handle: SharedLoraScale::new(spec.reported_scale()),
@@ -230,7 +225,13 @@ fn validate_pair_shapes(
     out_features: i32,
 ) -> Result<()> {
     let Some(base) = base_weights.get(base_weight_name) else {
-        return Ok(()); // caller already warned; nothing to validate against
+        // `validate_adapter_tensors` resolved this key against the same map,
+        // so reaching this arm means the two disagree, not that the adapter
+        // targets something absent.
+        anyhow::bail!(
+            "internal error: base weight {base_weight_name} for LoRA adapter layer {layer} was \
+             resolved during validation but is no longer in the weight map"
+        );
     };
     let base_shape = mlxcel_core::array_shape(base);
     if base_shape.len() != 2 {
@@ -274,61 +275,52 @@ fn validate_pair_shapes(
 
 /// Load every adapter in `set` and stage its per-layer terms for the model
 /// construction about to run on this thread (see
-/// [`mlxcel_core::runtime_lora::stage`]). Unmatched tensors warn with the
-/// same posture as the fused path (#1328 owns making both strict); shape
-/// mismatches are hard errors, as they are when fusing.
+/// [`mlxcel_core::runtime_lora::stage`]).
+///
+/// Tensor validation is the fused path's, shared verbatim through
+/// [`validate_adapter_tensors`]: an unpaired tensor, a leaf that is not a
+/// `lora_a` / `lora_b` half, or a pair with no base weight fails the load with
+/// every offender listed. Both paths used to `warn!` and continue here, which
+/// served the base model under an adapter's name (issue #1328). Shape
+/// mismatches remain hard errors, as they are when fusing.
 pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) -> Result<()> {
     use std::collections::HashMap;
 
     let mut pending: HashMap<String, Vec<PendingLoraTerm>> = HashMap::new();
     for adapter in &set.adapters {
         let adapter_weights = load_adapter_weights(&adapter.spec.path)?;
-        // Group `.lora_a` / `.lora_b` tensors by their base layer name,
-        // the same grouping the fused path applies.
-        let mut pairs: HashMap<String, (Option<&_>, Option<&_>)> = HashMap::new();
-        for (name, weight) in &adapter_weights {
-            if let Some(base) = name.strip_suffix(".lora_a") {
-                pairs.entry(base.to_string()).or_default().0 = Some(weight);
-            } else if let Some(base) = name.strip_suffix(".lora_b") {
-                pairs.entry(base.to_string()).or_default().1 = Some(weight);
-            }
-        }
+        let pairs = validate_adapter_tensors(base_weights, &adapter_weights)
+            .map_err(|err| anyhow::anyhow!("Adapter at {}: {err}", adapter.spec.path.display()))?;
         let mut staged_layers = 0usize;
-        for (layer, (a, b)) in pairs {
-            let (Some(a), Some(b)) = (a, b) else {
-                tracing::warn!(
-                    "Incomplete LoRA pair for {layer}: missing lora_a or lora_b (adapter {})",
-                    adapter.spec.path.display()
-                );
-                continue;
-            };
-            let base_weight_name = find_base_weight_name(&layer, base_weights)?;
-            if !base_weights.contains_key(&base_weight_name) {
-                tracing::warn!(
-                    "Base weight not found for LoRA layer {layer}: tried {base_weight_name} \
-                     (adapter {})",
-                    adapter.spec.path.display()
-                );
-                continue;
-            }
-            let a_shape = mlxcel_core::array_shape(a);
-            let b_shape = mlxcel_core::array_shape(b);
+        for pair in &pairs {
+            let layer = pair.layer.as_str();
+            let a_shape = mlxcel_core::array_shape(&pair.lora_a);
+            let b_shape = mlxcel_core::array_shape(&pair.lora_b);
             let (orientation, in_features, out_features) =
-                detect_orientation(&layer, &a_shape, &b_shape)?;
+                detect_orientation(layer, &a_shape, &b_shape)?;
             validate_pair_shapes(
-                &layer,
+                layer,
                 base_weights,
-                &base_weight_name,
+                &pair.base_weight_name,
                 in_features,
                 out_features,
             )?;
-            let prefix = base_weight_name.trim_end_matches(".weight").to_string();
+            let prefix = pair
+                .base_weight_name
+                .trim_end_matches(".weight")
+                .to_string();
             // Normalize both on-disk orientations into the forward
             // orientation the layers consume: a_t = [in, rank],
             // b_t = [rank, out].
             let (a_t, b_t) = match orientation {
-                PairOrientation::MlxLm => (mlxcel_core::copy(a), mlxcel_core::copy(b)),
-                PairOrientation::Peft => (mlxcel_core::transpose(a), mlxcel_core::transpose(b)),
+                PairOrientation::MlxLm => (
+                    mlxcel_core::copy(&pair.lora_a),
+                    mlxcel_core::copy(&pair.lora_b),
+                ),
+                PairOrientation::Peft => (
+                    mlxcel_core::transpose(&pair.lora_a),
+                    mlxcel_core::transpose(&pair.lora_b),
+                ),
             };
             pending.entry(prefix).or_default().push(PendingLoraTerm {
                 handle: adapter.handle.clone(),
@@ -337,6 +329,12 @@ pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) ->
                 b_t,
             });
             staged_layers += 1;
+        }
+        if staged_layers == 0 {
+            anyhow::bail!(
+                "Adapter at {} applied no tensors to this model: it holds no lora_a / lora_b pair",
+                adapter.spec.path.display()
+            );
         }
         tracing::info!(
             "Staged runtime LoRA adapter {} for {} layers (rank scale {:.3}, user scale {:.2})",
@@ -360,3 +358,7 @@ pub fn finish_runtime_staging() {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
