@@ -418,10 +418,9 @@ impl YoutuVLVisionEncoder {
         h = self.post_layernorm.forward(&h);
         h = self.merger.forward(&h);
 
-        // Reverse the window reordering. Equivalent to `argsort(window_index)`
-        // (Python upstream); we compute the inverse permutation directly so we
-        // can feed it into a flat `mx::take` rather than triggering an extra
-        // 3D reshape inside the encoder body.
+        // Reverse the window reordering with the inverse permutation,
+        // `argsort(window_index)` upstream, built directly so it feeds a flat
+        // `take` rather than an extra 3D reshape inside the encoder body.
         let reverse_indices = window::reverse_window_indices(&window_index);
         let reverse_arr =
             mlxcel_core::from_slice_i32(&reverse_indices, &[reverse_indices.len() as i32]);
