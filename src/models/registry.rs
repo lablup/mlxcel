@@ -105,8 +105,10 @@ const EMBED: &[Runtime] = &[Runtime::Embed];
 const RERANK: &[Runtime] = &[Runtime::Rerank];
 const ASR: &[Runtime] = &[Runtime::Asr];
 const TTS: &[Runtime] = &[Runtime::Tts];
+const DETECT: &[Runtime] = &[Runtime::Detect];
 
 const TEXT: &[Modality] = &[Modality::Text];
+const IMAGE: &[Modality] = &[Modality::Image];
 const AUDIO: &[Modality] = &[Modality::Audio];
 const TEXT_IMAGE: &[Modality] = &[Modality::Text, Modality::Image];
 const TEXT_IMAGE_VIDEO: &[Modality] = &[Modality::Text, Modality::Image, Modality::Video];
@@ -127,6 +129,40 @@ const EMPTY_KEYS: &[&str] = &[];
 const QWEN35_ALIASES: &[&str] = &["Qwen 3.8"];
 const QWEN35_MOE_ALIASES: &[&str] = &["Qwen 3.6"];
 const QWEN35_VLM_ALIASES: &[&str] = &["Qwen 3.8 VL"];
+
+#[derive(Debug, Clone, Copy)]
+struct StandaloneArchitectureFamily {
+    id: &'static str,
+    display_name: &'static str,
+    category: &'static str,
+    model_types: &'static [&'static str],
+    aliases: &'static [&'static str],
+    runtimes: &'static [Runtime],
+    modalities_in: &'static [Modality],
+    output: OutputKind,
+    backends: [BackendStatus; 2],
+    tensor_parallel: bool,
+    pipeline_parallel: bool,
+    drafters: &'static [Drafter],
+    kv_modes: &'static [KvMode],
+}
+
+const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] =
+    &[StandaloneArchitectureFamily {
+        id: "rt_detr_v2",
+        display_name: "RT-DETRv2",
+        category: "detection",
+        model_types: &["rt_detr_v2"],
+        aliases: EMPTY_KEYS,
+        runtimes: DETECT,
+        modalities_in: IMAGE,
+        output: OutputKind::Boxes,
+        backends: [BackendStatus::Supported, BackendStatus::Supported],
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    }];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Llama,
@@ -521,38 +557,63 @@ impl ModelType {
 }
 
 pub fn build_architecture_registry(mlxcel_version: &'static str) -> ArchitectureRegistry {
+    let mut families: Vec<ArchitectureFamily> = ALL_MODEL_TYPES
+        .iter()
+        .copied()
+        .map(|model_type| {
+            let caps = model_type.capabilities();
+            let model_types = if caps.model_types.is_empty() {
+                vec![model_type.registry_id()]
+            } else {
+                caps.model_types.to_vec()
+            };
+            ArchitectureFamily {
+                id: model_type.registry_id(),
+                display_name: model_type.display_name(),
+                category: model_type.category(),
+                model_types,
+                aliases: caps.aliases,
+                runtimes: caps.runtimes,
+                modalities_in: caps.modalities_in,
+                output: caps.output,
+                backends: BackendSupport {
+                    metal: caps.backends[0],
+                    cuda: caps.backends[1],
+                },
+                tensor_parallel: caps.tensor_parallel,
+                pipeline_parallel: caps.pipeline_parallel,
+                drafters: caps.drafters,
+                kv_modes: caps.kv_modes,
+            }
+        })
+        .collect();
+
+    families.extend(
+        STANDALONE_ARCHITECTURE_FAMILIES
+            .iter()
+            .map(|family| ArchitectureFamily {
+                id: family.id,
+                display_name: family.display_name,
+                category: family.category,
+                model_types: family.model_types.to_vec(),
+                aliases: family.aliases,
+                runtimes: family.runtimes,
+                modalities_in: family.modalities_in,
+                output: family.output,
+                backends: BackendSupport {
+                    metal: family.backends[0],
+                    cuda: family.backends[1],
+                },
+                tensor_parallel: family.tensor_parallel,
+                pipeline_parallel: family.pipeline_parallel,
+                drafters: family.drafters,
+                kv_modes: family.kv_modes,
+            }),
+    );
+
     ArchitectureRegistry {
         mlxcel_version,
-        families: ALL_MODEL_TYPES
-            .iter()
-            .copied()
-            .map(|model_type| {
-                let caps = model_type.capabilities();
-                let model_types = if caps.model_types.is_empty() {
-                    vec![model_type.registry_id()]
-                } else {
-                    caps.model_types.to_vec()
-                };
-                ArchitectureFamily {
-                    id: model_type.registry_id(),
-                    display_name: model_type.display_name(),
-                    category: model_type.category(),
-                    model_types,
-                    aliases: caps.aliases,
-                    runtimes: caps.runtimes,
-                    modalities_in: caps.modalities_in,
-                    output: caps.output,
-                    backends: BackendSupport {
-                        metal: caps.backends[0],
-                        cuda: caps.backends[1],
-                    },
-                    tensor_parallel: caps.tensor_parallel,
-                    pipeline_parallel: caps.pipeline_parallel,
-                    drafters: caps.drafters,
-                    kv_modes: caps.kv_modes,
-                }
-            })
-            .collect(),
+        families,
     }
 }
 
@@ -834,7 +895,10 @@ mod tests {
     #[test]
     fn registry_has_one_family_per_model_type_with_unique_ids() {
         let registry = build_architecture_registry("test");
-        assert_eq!(registry.families.len(), ALL_MODEL_TYPES.len());
+        assert_eq!(
+            registry.families.len(),
+            ALL_MODEL_TYPES.len() + STANDALONE_ARCHITECTURE_FAMILIES.len()
+        );
         let mut ids = BTreeSet::new();
         for family in &registry.families {
             assert!(ids.insert(family.id), "duplicate registry id {}", family.id);
@@ -854,7 +918,7 @@ mod tests {
         assert_eq!(value["mlxcel_version"], "test");
         assert_eq!(
             value["families"].as_array().unwrap().len(),
-            ALL_MODEL_TYPES.len()
+            ALL_MODEL_TYPES.len() + STANDALONE_ARCHITECTURE_FAMILIES.len()
         );
     }
 
@@ -875,6 +939,28 @@ mod tests {
         let sequence = family(ModelType::SequenceClassifier);
         assert_eq!(sequence.runtimes, RERANK);
         assert_eq!(sequence.output, OutputKind::Scores);
+    }
+
+    #[test]
+    fn standalone_detection_family_reports_detect_only_capabilities() {
+        let rt_detr = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "rt_detr_v2")
+            .unwrap();
+
+        assert_eq!(rt_detr.display_name, "RT-DETRv2");
+        assert_eq!(rt_detr.category, "detection");
+        assert_eq!(rt_detr.model_types, ["rt_detr_v2"]);
+        assert_eq!(rt_detr.runtimes, DETECT);
+        assert!(!rt_detr.runtimes.contains(&Runtime::Generate));
+        assert!(!rt_detr.runtimes.contains(&Runtime::Serve));
+        assert_eq!(rt_detr.modalities_in, IMAGE);
+        assert_eq!(rt_detr.output, OutputKind::Boxes);
+        assert!(!rt_detr.tensor_parallel);
+        assert!(!rt_detr.pipeline_parallel);
+        assert_eq!(rt_detr.drafters, NO_DRAFTERS);
+        assert_eq!(rt_detr.kv_modes, KV_FP16);
     }
 
     #[test]

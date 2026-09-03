@@ -190,7 +190,7 @@ fn arch_json_output_is_stable_registry_json() {
     let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(value["mlxcel_version"], env!("CARGO_PKG_VERSION"));
     let families = value["families"].as_array().unwrap();
-    assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len());
+    assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len() + 1);
     assert_eq!(families[0]["id"], "llama");
 
     let qwen3 = families
@@ -232,6 +232,19 @@ fn arch_json_output_is_stable_registry_json() {
         .unwrap();
     assert_eq!(sequence["runtimes"], serde_json::json!(["rerank"]));
     assert_eq!(sequence["output"], "scores");
+
+    let rt_detr = families
+        .iter()
+        .find(|family| family["id"] == "rt_detr_v2")
+        .unwrap();
+    assert_eq!(rt_detr["display_name"], "RT-DETRv2");
+    assert_eq!(rt_detr["category"], "detection");
+    assert_eq!(rt_detr["model_types"], serde_json::json!(["rt_detr_v2"]));
+    assert_eq!(rt_detr["runtimes"], serde_json::json!(["detect"]));
+    assert_eq!(rt_detr["modalities_in"], serde_json::json!(["image"]));
+    assert_eq!(rt_detr["output"], "boxes");
+    assert_eq!(rt_detr["tensor_parallel"], false);
+    assert_eq!(rt_detr["pipeline_parallel"], false);
 }
 
 /// Issue #26: the dead `docs/model_implementations.md` reference was
