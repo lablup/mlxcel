@@ -260,11 +260,12 @@ pub(crate) struct ListArgs {
 }
 
 /// Arguments for `mlxcel arch`.
-///
-/// Currently takes no flags; the empty struct lets the verb grow options
-/// later without a breaking signature change.
 #[derive(Args, Debug)]
-pub(crate) struct ArchArgs {}
+pub(crate) struct ArchArgs {
+    /// Emit the machine-readable recipes registry schema as JSON.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
 
 /// Arguments for `mlxcel rm`.
 #[derive(Args, Debug)]
@@ -2806,8 +2807,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Generate(args) => commands::run_generate(args),
         Commands::Serve(args) => commands::run_serve(args),
         Commands::List(args) => commands::run_list_local(args.models_dir.as_deref(), &args),
-        Commands::Arch(_) => {
-            print_supported_models();
+        Commands::Arch(args) => {
+            if args.json {
+                write_supported_models_json(std::io::stdout())?;
+            } else {
+                print_supported_models();
+            }
             Ok(())
         }
         Commands::Inspect(args) => commands::run_inspect(args),
@@ -2974,6 +2979,15 @@ fn write_supported_models<W: std::fmt::Write>(out: &mut W) -> std::fmt::Result {
     )?;
     writeln!(out)?;
 
+    Ok(())
+}
+
+fn write_supported_models_json<W: std::io::Write>(mut out: W) -> anyhow::Result<()> {
+    let registry = mlxcel::models::registry::build_architecture_registry(env!("CARGO_PKG_VERSION"));
+    let mut payload = Vec::new();
+    serde_json::to_writer_pretty(&mut payload, &registry)?;
+    payload.push(b'\n');
+    out.write_all(&payload)?;
     Ok(())
 }
 

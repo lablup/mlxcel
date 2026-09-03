@@ -18,10 +18,20 @@ use std::sync::{Mutex, OnceLock};
 
 use super::{
     Cli, Commands, FAMILY_ORDER, PipelineParallelOptions, TensorParallelOptions,
-    write_supported_models,
+    write_supported_models, write_supported_models_json,
 };
 
 static CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn parse_cli(args: &'static [&'static str]) -> Cli {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || Cli::try_parse_from(args))
+        .expect("spawn CLI parser thread")
+        .join()
+        .expect("CLI parser thread panicked")
+        .expect("CLI args must parse")
+}
 
 struct ScopedEnv(Vec<(&'static str, Option<OsString>)>);
 
@@ -169,6 +179,59 @@ fn supported_models_header_uses_actual_count() {
         "rendered header should start with {expected:?}, got {:?}",
         out.lines().next().unwrap_or("")
     );
+}
+
+#[test]
+fn arch_json_output_is_stable_registry_json() {
+    let mut out = Vec::new();
+    write_supported_models_json(&mut out).unwrap();
+    assert_eq!(out.last().copied(), Some(b'\n'));
+
+    let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(value["mlxcel_version"], env!("CARGO_PKG_VERSION"));
+    let families = value["families"].as_array().unwrap();
+    assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len());
+    assert_eq!(families[0]["id"], "llama");
+
+    let qwen3 = families
+        .iter()
+        .find(|family| family["id"] == "qwen3")
+        .unwrap();
+    assert!(
+        qwen3["runtimes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("generate"))
+    );
+    assert!(
+        qwen3["runtimes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("serve"))
+    );
+    assert!(
+        qwen3["runtimes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("rerank"))
+    );
+    assert_eq!(qwen3["tensor_parallel"], true);
+    assert_eq!(qwen3["pipeline_parallel"], true);
+
+    let whisper = families
+        .iter()
+        .find(|family| family["id"] == "whisper")
+        .unwrap();
+    assert_eq!(whisper["runtimes"], serde_json::json!(["asr"]));
+    assert_eq!(whisper["modalities_in"], serde_json::json!(["audio"]));
+    assert_eq!(whisper["output"], "tokens");
+
+    let sequence = families
+        .iter()
+        .find(|family| family["id"] == "sequence_classifier")
+        .unwrap();
+    assert_eq!(sequence["runtimes"], serde_json::json!(["rerank"]));
+    assert_eq!(sequence["output"], "scores");
 }
 
 /// Issue #26: the dead `docs/model_implementations.md` reference was
@@ -1112,7 +1175,7 @@ fn list_command_rejects_removed_local_flag() {
 
 #[test]
 fn arch_command_parses_to_arch() {
-    let cli = Cli::try_parse_from(["mlxcel", "arch"]).expect("`arch` must parse");
+    let cli = parse_cli(&["mlxcel", "arch"]);
     assert!(
         matches!(cli.command, Commands::Arch(_)),
         "`arch` must map to the Arch command"
@@ -1120,8 +1183,17 @@ fn arch_command_parses_to_arch() {
 }
 
 #[test]
+fn arch_json_flag_parses_to_arch() {
+    let cli = parse_cli(&["mlxcel", "arch", "--json"]);
+    match cli.command {
+        Commands::Arch(args) => assert!(args.json),
+        other => panic!("`arch --json` must map to Arch, got {other:?}"),
+    }
+}
+
+#[test]
 fn arch_supported_alias_parses_to_arch() {
-    let cli = Cli::try_parse_from(["mlxcel", "supported"]).expect("`supported` alias must parse");
+    let cli = parse_cli(&["mlxcel", "supported"]);
     assert!(
         matches!(cli.command, Commands::Arch(_)),
         "`supported` alias must map to the Arch command"
