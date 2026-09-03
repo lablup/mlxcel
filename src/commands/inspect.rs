@@ -26,7 +26,10 @@ use anyhow::{Result, anyhow};
 
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::downloader::resolve_model_source_with_override;
-use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_estimate};
+use mlxcel::memory_estimate::{
+    InspectReport, QuantHint, estimate_total_memory, format_estimate, inspect_family_slug,
+    inspect_per_slot_overhead_bytes, raw_model_type_from_config,
+};
 use mlxcel_core::cache::KVCacheMode;
 
 use crate::InspectArgs;
@@ -64,6 +67,19 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
     let estimate = estimate_total_memory(&args.model, args.max_tokens, args.batch, quant, kv_int8);
+
+    if args.json {
+        let report = InspectReport::from_estimate(
+            &args.model,
+            &estimate,
+            kv_cache_mode.to_string(),
+            raw_model_type_from_config(&args.model),
+            inspect_family_slug(&args.model),
+            inspect_per_slot_overhead_bytes(&args.model, args.batch),
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
 
     let banner = format_estimate(&args.model, &estimate);
     println!("{banner}");

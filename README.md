@@ -75,9 +75,14 @@ mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
 # Read-only memory estimate before loading.
 mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
 
+# Emit the same estimate as machine-readable bytes for recipe builders or schedulers.
+mlxcel inspect --json -m Qwen3.5-0.8B-4bit --max-tokens 32768 | python3 -m json.tool
+
 # Abort before generation if the estimated model and KV cache do not fit.
 mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello" -n 32768 --estimate-memory
 ```
+
+`mlxcel inspect --json` prints a single JSON object with byte-exact `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `headroom_bytes`, `budget_bytes`, `total_bytes`, `fits`, input flags, and per-token FP16/INT8 KV rates when the model config exposes KV geometry. TurboQuant per-token sizing is reported as `null` until the estimator models those widths directly.
 
 ### Start a server
 

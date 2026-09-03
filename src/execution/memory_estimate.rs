@@ -55,9 +55,11 @@ use std::path::Path;
 
 use mlxcel_core::hardware::{HardwareCapabilities, KvCacheParams, get_hardware};
 use mlxcel_core::weights::weight_footprint_bytes;
+use serde::Serialize;
 
 use super::config_fields;
 use super::quant_advisor::estimate_model_params_billions;
+use crate::models::{ModelType, get_model_type};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -210,6 +212,26 @@ impl QuantHint {
             QuantHint::Int4 => "int4",
         }
     }
+
+    /// Stable short label used by machine-readable inspect output.
+    pub fn json_label(self) -> &'static str {
+        match self {
+            QuantHint::Default => "default",
+            QuantHint::Fp16 => "fp16",
+            QuantHint::Int8 => "int8",
+            QuantHint::Int4 => "int4",
+        }
+    }
+}
+
+impl WeightsSource {
+    fn json_label(self) -> &'static str {
+        match self {
+            WeightsSource::ExactSafetensors => "safetensors_header",
+            WeightsSource::AnalyticalConfig => "analytical_config",
+            WeightsSource::Fallback => "fallback",
+        }
+    }
 }
 
 /// How an operator asked the paged KV pool's block budget to be sized
@@ -326,6 +348,100 @@ pub struct MemoryEstimate {
     pub quant: QuantHint,
     /// True when KV bytes were computed with `int8_kv = true`.
     pub kv_dtype_int8: bool,
+}
+
+/// JSON payload emitted by `mlxcel inspect --json`.
+///
+/// The byte fields are copied from [`MemoryEstimate`] so scripts do not have
+/// to scrape the human-readable banner. Optional fields serialize as `null`
+/// when the estimator or model config cannot provide them.
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectReport {
+    pub mlxcel_version: &'static str,
+    pub model: String,
+    pub model_type: Option<String>,
+    pub family: Option<String>,
+    pub inputs: InspectReportInputs,
+    pub weights_bytes: u64,
+    pub weights_source: &'static str,
+    pub kv_bytes_per_token: InspectKvBytesPerToken,
+    pub kv_bytes_total: u64,
+    pub kv_detail: String,
+    pub per_slot_overhead_bytes: Option<u64>,
+    pub activation_bytes: u64,
+    pub headroom_bytes: u64,
+    pub headroom_factor: f64,
+    pub budget_bytes: u64,
+    pub total_bytes: u64,
+    pub fits: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectReportInputs {
+    pub max_tokens: u64,
+    pub batch: u64,
+    pub kv_cache_mode: String,
+    pub quant: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectKvBytesPerToken {
+    pub fp16: Option<u64>,
+    pub int8: Option<u64>,
+    pub turbo4: Option<u64>,
+}
+
+impl InspectReport {
+    /// Build the machine-readable inspect report from the same estimator state
+    /// that backs the text banner.
+    #[must_use]
+    pub fn from_estimate(
+        model_dir: &Path,
+        est: &MemoryEstimate,
+        kv_cache_mode: String,
+        model_type: Option<String>,
+        family: Option<String>,
+        per_slot_overhead_bytes: Option<u64>,
+    ) -> Self {
+        let kv_bytes_per_token = if matches!(est.kv_source, KvSource::Config) {
+            InspectKvBytesPerToken {
+                fp16: Some(kv_cache_bytes_per_token(model_dir, false, 1)),
+                int8: Some(kv_cache_bytes_per_token(model_dir, true, 1)),
+                turbo4: None,
+            }
+        } else {
+            InspectKvBytesPerToken {
+                fp16: None,
+                int8: None,
+                turbo4: None,
+            }
+        };
+
+        Self {
+            mlxcel_version: env!("CARGO_PKG_VERSION"),
+            model: model_dir.display().to_string(),
+            model_type,
+            family,
+            inputs: InspectReportInputs {
+                max_tokens: est.ctx_len,
+                batch: est.batch,
+                kv_cache_mode,
+                quant: est.quant.json_label(),
+            },
+            weights_bytes: est.weights_bytes,
+            weights_source: est.weights_source.json_label(),
+            kv_bytes_per_token,
+            kv_bytes_total: est.kv_cache_bytes,
+            kv_detail: est.kv_detail.clone(),
+            per_slot_overhead_bytes,
+            activation_bytes: est.activation_bytes,
+            headroom_bytes: est.runtime_headroom_bytes,
+            headroom_factor: est.headroom_factor,
+            budget_bytes: est.available_bytes,
+            total_bytes: est.total_bytes,
+            fits: est.fits,
+        }
+    }
 }
 
 impl MemoryEstimate {
@@ -747,6 +863,82 @@ pub fn kv_cache_bytes_per_token(model_dir: &Path, int8_kv: bool, batch: u64) -> 
     crate::execution::kv_arch::estimate_kv_arch(model_dir, 1, int8_kv, batch)
         .map(|a| a.marginal_bytes_per_token)
         .unwrap_or(0)
+}
+
+/// Read the raw top-level `model_type` string from `config.json`.
+#[must_use]
+pub fn raw_model_type_from_config(model_dir: &Path) -> Option<String> {
+    let config = read_model_config(model_dir)?;
+    config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+/// Best-effort family slug for `mlxcel inspect --json`.
+///
+/// TODO(#1508): replace this local fallback with the `mlxcel arch --json`
+/// registry id once that contract is available on `main`.
+#[must_use]
+pub fn inspect_family_slug(model_dir: &Path) -> Option<String> {
+    if let Some(raw) = raw_model_type_from_config(model_dir) {
+        return Some(slugify_identifier(&raw));
+    }
+    get_model_type(model_dir).ok().map(slugify_model_type)
+}
+
+/// Fused paged-decode workspace reserve for families that select the paged
+/// backend by default. Families outside this set keep the field `null`.
+#[must_use]
+pub fn inspect_per_slot_overhead_bytes(model_dir: &Path, batch: u64) -> Option<u64> {
+    let model_type = get_model_type(model_dir).ok()?;
+    if !model_type_uses_default_paged_decode(model_type) {
+        return None;
+    }
+    let num_layers = kv_cache_params_from_path(model_dir, DEFAULT_CTX_LEN, false, 1)?.num_layers;
+    Some(paged_v2_workspace_reserve_bytes(
+        model_dir,
+        num_layers as usize,
+        batch,
+    ))
+}
+
+fn read_model_config(model_dir: &Path) -> Option<serde_json::Value> {
+    let config_str = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
+    serde_json::from_str(&config_str).ok()
+}
+
+fn model_type_uses_default_paged_decode(model_type: ModelType) -> bool {
+    matches!(
+        model_type,
+        ModelType::Llama
+            | ModelType::Llama4
+            | ModelType::Qwen3
+            | ModelType::Qwen35
+            | ModelType::Gemma3
+    )
+}
+
+fn slugify_model_type(model_type: ModelType) -> String {
+    slugify_identifier(&format!("{model_type:?}"))
+}
+
+fn slugify_identifier(input: &str) -> String {
+    let mut out = String::new();
+    let mut prev_was_sep = true;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_was_sep = false;
+        } else if !prev_was_sep {
+            out.push('-');
+            prev_was_sep = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 // ── Paged KV block-budget resolution (epic #116 #122 b3) ──────────────────────
@@ -1233,6 +1425,93 @@ mod tests {
         assert!(format_bytes(2 * 1024 * 1024 * 1024).contains("GiB"));
         assert!(format_bytes(5 * 1024 * 1024).contains("MiB"));
         assert_eq!(format_bytes(42), "42 bytes");
+    }
+
+    #[test]
+    fn inspect_report_copies_estimate_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 4096,
+            "num_hidden_layers": 32,
+            "vocab_size": 32000,
+            "intermediate_size": 11008,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        });
+        write_config(tmp.path(), &cfg);
+        write_safetensors_index(tmp.path(), 2_415_919_104);
+
+        let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+        let report = InspectReport::from_estimate(
+            tmp.path(),
+            &est,
+            "fp16".to_string(),
+            raw_model_type_from_config(tmp.path()),
+            inspect_family_slug(tmp.path()),
+            None,
+        );
+
+        assert_eq!(report.model_type.as_deref(), Some("llama"));
+        assert_eq!(report.family.as_deref(), Some("llama"));
+        assert_eq!(
+            report.weights_bytes + report.kv_bytes_total + report.headroom_bytes,
+            report.total_bytes
+        );
+        assert_eq!(report.budget_bytes, est.available_bytes);
+        assert_eq!(report.fits, report.total_bytes <= report.budget_bytes);
+        assert_eq!(report.inputs.max_tokens, est.ctx_len);
+        assert_eq!(report.inputs.batch, est.batch);
+        assert_eq!(report.inputs.kv_cache_mode, "fp16");
+        assert_eq!(report.inputs.quant, "default");
+        assert_eq!(report.weights_source, "safetensors_header");
+        assert_eq!(
+            report.kv_bytes_per_token.fp16,
+            Some(kv_cache_bytes_per_token(tmp.path(), false, 1))
+        );
+        assert_eq!(
+            report.kv_bytes_per_token.int8,
+            Some(kv_cache_bytes_per_token(tmp.path(), true, 1))
+        );
+        assert_eq!(report.kv_bytes_per_token.turbo4, None);
+        assert!(format_estimate(tmp.path(), &est).contains(&format_bytes(report.total_bytes)));
+    }
+
+    #[test]
+    fn inspect_report_serializes_nulls_and_stable_key_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let est = MemoryEstimate {
+            weights_bytes: 100,
+            kv_cache_bytes: 0,
+            runtime_headroom_bytes: 20,
+            activation_bytes: 4,
+            total_bytes: 120,
+            available_bytes: 128,
+            fits: true,
+            weights_source: WeightsSource::Fallback,
+            kv_source: KvSource::Unavailable,
+            kv_detail: "unavailable".to_string(),
+            headroom_factor: DEFAULT_HEADROOM_FACTOR,
+            ctx_len: 256,
+            batch: 2,
+            quant: QuantHint::Int8,
+            kv_dtype_int8: true,
+        };
+        let report =
+            InspectReport::from_estimate(tmp.path(), &est, "int8".to_string(), None, None, None);
+        let json = serde_json::to_string_pretty(&report).unwrap();
+
+        assert!(json.contains(r#""model_type": null"#));
+        assert!(json.contains(r#""family": null"#));
+        assert!(json.contains(r#""turbo4": null"#));
+        assert!(json.contains(r#""per_slot_overhead_bytes": null"#));
+        assert!(json.find(r#""mlxcel_version""#).unwrap() < json.find(r#""model""#).unwrap());
+        assert!(json.find(r#""model""#).unwrap() < json.find(r#""model_type""#).unwrap());
+        assert!(
+            json.find(r#""weights_bytes""#).unwrap() < json.find(r#""kv_bytes_total""#).unwrap()
+        );
+        assert_eq!(report.kv_bytes_per_token.fp16, None);
+        assert_eq!(report.kv_bytes_per_token.int8, None);
     }
 
     #[test]
