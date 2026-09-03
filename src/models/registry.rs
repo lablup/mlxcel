@@ -912,6 +912,50 @@ mod tests {
     }
 
     #[test]
+    fn standalone_registry_extensions_do_not_collide_with_model_registry() {
+        let model_registry_ids: BTreeSet<_> = ALL_MODEL_TYPES
+            .iter()
+            .copied()
+            .map(ModelType::registry_id)
+            .collect();
+        let model_registry_keys: BTreeSet<_> = ALL_MODEL_TYPES
+            .iter()
+            .copied()
+            .flat_map(model_type_keys)
+            .collect();
+        let mut standalone_ids = BTreeSet::new();
+        let mut standalone_keys = BTreeSet::new();
+
+        for family in STANDALONE_ARCHITECTURE_FAMILIES {
+            assert!(
+                standalone_ids.insert(family.id),
+                "duplicate standalone registry id {}",
+                family.id
+            );
+            assert!(
+                !model_registry_ids.contains(family.id),
+                "standalone registry id {} collides with ALL_MODEL_TYPES",
+                family.id
+            );
+            assert!(
+                !family.model_types.is_empty(),
+                "{} has no model_type key",
+                family.id
+            );
+            for key in family.model_types {
+                assert!(
+                    standalone_keys.insert(*key),
+                    "duplicate standalone model_type key {key}"
+                );
+                assert!(
+                    !model_registry_keys.contains(key),
+                    "standalone model_type key {key} collides with ALL_MODEL_TYPES"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_json_round_trips() {
         let registry = build_architecture_registry("test");
         let value = serde_json::to_value(&registry).unwrap();
