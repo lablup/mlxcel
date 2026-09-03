@@ -198,6 +198,26 @@ pub fn resolve_model_source_with_options(
     value: &Path,
     opts: ModelSourceOptions<'_>,
 ) -> Result<PathBuf> {
+    resolve_model_source_with_options_inner(value, opts, false)
+}
+
+/// Quiet options-aware entry point for machine-readable command surfaces.
+///
+/// Suppresses resolver informational stdout. Callers that require stdout to
+/// carry only structured data should also set [`ModelSourceOptions::offline`]
+/// so a cache miss cannot invoke the downloader's progress output.
+pub fn resolve_model_source_quietly_with_options(
+    value: &Path,
+    opts: ModelSourceOptions<'_>,
+) -> Result<PathBuf> {
+    resolve_model_source_with_options_inner(value, opts, true)
+}
+
+fn resolve_model_source_with_options_inner(
+    value: &Path,
+    opts: ModelSourceOptions<'_>,
+    quiet: bool,
+) -> Result<PathBuf> {
     // Format gate first: a `.gguf` path exists on disk and would otherwise be
     // returned verbatim by step 1 below, then fail inside the loader with a
     // message that never mentions the format.
@@ -227,7 +247,7 @@ pub fn resolve_model_source_with_options(
     // 2. `owner/name` repo-id shape → reuse-or-download. An explicit
     //    `owner/name` always wins over the bare-name default org below.
     if is_repo_id_shape(value_str) {
-        return resolve_repo_id(value_str, opts);
+        return resolve_repo_id(value_str, opts, quiet);
     }
 
     // 3. Bare, prefix-less model name (issue #112): a single valid segment with
@@ -237,8 +257,8 @@ pub fn resolve_model_source_with_options(
     //    `mlx-community/gemma-4-e4b-it-4bit`. Steps 1 and 2 take precedence, so
     //    an existing local path and an explicit `owner/name` are unaffected.
     if is_repo_segment(value_str) {
-        let repo_id = expand_bare_name(value_str)?;
-        return resolve_repo_id(&repo_id, opts);
+        let repo_id = expand_bare_name(value_str, quiet)?;
+        return resolve_repo_id(&repo_id, opts, quiet);
     }
 
     // 4. Neither an existing path, a valid repo-id, nor a bare model name.
@@ -307,7 +327,7 @@ pub fn resolve_model_source_with_override(
 /// reuse location is still consulted in the same order, and a miss becomes
 /// [`offline_cache_miss_error`] rather than a download. `opts.token`
 /// (`--hf-token`) is forwarded to the downloader as the explicit token.
-fn resolve_repo_id(repo_id: &str, opts: ModelSourceOptions<'_>) -> Result<PathBuf> {
+fn resolve_repo_id(repo_id: &str, opts: ModelSourceOptions<'_>, quiet: bool) -> Result<PathBuf> {
     let ModelSourceOptions {
         models_dir,
         revision,
@@ -360,9 +380,12 @@ fn resolve_repo_id(repo_id: &str, opts: ModelSourceOptions<'_>) -> Result<PathBu
     match store_dest.as_deref().map(classify_snapshot) {
         Some(SnapshotState::Incomplete { missing }) => {
             // `store_dest` is Some in this arm, so the unwrap cannot panic.
-            report_incomplete_snapshot(store_dest.as_deref().unwrap_or(&cwd_models), &missing);
+            if !quiet {
+                report_incomplete_snapshot(store_dest.as_deref().unwrap_or(&cwd_models), &missing);
+            }
         }
-        _ => announce_fresh_download(repo_id),
+        _ if !quiet => announce_fresh_download(repo_id),
+        _ => {}
     }
 
     download_repo(download_options(
@@ -685,13 +708,15 @@ fn bad_default_org_error(org: &str, name: &str) -> anyhow::Error {
 /// Returns [`bad_default_org_error`] when `$MLXCEL_DEFAULT_ORG` expands the
 /// name into something that is not a valid `owner/name` repo-id (e.g. the org
 /// contains a `/` or an illegal character).
-fn expand_bare_name(name: &str) -> Result<String> {
+fn expand_bare_name(name: &str, quiet: bool) -> Result<String> {
     let org = default_org();
     let repo_id = format!("{org}/{name}");
     if !is_repo_id_shape(&repo_id) {
         return Err(bad_default_org_error(&org, name));
     }
-    println!("[mlxcel] '{name}' -> {repo_id}");
+    if !quiet {
+        println!("[mlxcel] '{name}' -> {repo_id}");
+    }
     Ok(repo_id)
 }
 
@@ -724,7 +749,7 @@ fn expand_bare_name(name: &str) -> Result<String> {
 /// invalid repo-id under a malformed `$MLXCEL_DEFAULT_ORG`.
 pub fn normalize_repo_id(value: &str) -> Result<String> {
     if is_repo_segment(value) {
-        expand_bare_name(value)
+        expand_bare_name(value, false)
     } else {
         Ok(value.to_string())
     }

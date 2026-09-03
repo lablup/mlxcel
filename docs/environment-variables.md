@@ -139,6 +139,8 @@ and `--estimate-memory` preflight reads `MLXCEL_MEMORY_LIMIT` through that same
 parser, so the availability figure it prints matches the cap the allocator will
 actually apply (issue #1317).
 
+When `mlxcel inspect --json` is used, the same availability figure is exposed as raw bytes in `budget_bytes`; `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `headroom_bytes`, and `total_bytes` are also raw byte counts so downstream recipe tooling can compare model and hardware fits without scraping the text banner.
+
 ## Server context sizing
 
 `mlxcel serve` and `mlxcel-server` follow llama.cpp server semantics for the

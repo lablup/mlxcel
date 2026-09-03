@@ -618,6 +618,11 @@ pub(crate) struct InspectArgs {
     #[arg(long, default_value = "default", value_name = "MODE")]
     pub(crate) quant: String,
 
+    /// Emit the estimate as one JSON object instead of the banner; every
+    /// number is the same the banner prints.
+    #[arg(long)]
+    pub(crate) json: bool,
+
     // Shared TurboQuant KV-cache flag group, gives `inspect` the same
     // `--cache-type-k` / `--cache-type-v` surface as `generate` so the
     // estimate matches what the loaded model would actually allocate.
