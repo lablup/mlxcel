@@ -948,7 +948,9 @@ pub fn paged_v2_workspace_reserve_bytes(model_dir: &Path, num_layers: usize, bat
 /// `0` pins the pool default ([`mlxcel_core::cache::POOL_SLAB_BLOCKS`]), which
 /// keeps the pre-#899 allocation behaviour and, as a side effect, keeps the
 /// fused decode path unreachable for anything past one slab. Any other positive
-/// integer is used verbatim, which is how a benchmark sweeps the setting.
+/// integer is used verbatim, neither floored nor budget-capped, which is how
+/// a benchmark sweeps the setting. Anything else warns and is ignored, so the
+/// slab is derived exactly as if the variable were unset (#1137).
 pub const PAGED_SLAB_BLOCKS_ENV: &str = "MLXCEL_PAGED_SLAB_BLOCKS";
 
 /// Resolve the paged pool's slab size in blocks (issue #899).
@@ -1006,17 +1008,16 @@ pub fn resolve_paged_slab_blocks(
         return None;
     }
     if let Ok(raw) = std::env::var(PAGED_SLAB_BLOCKS_ENV) {
-        return match raw.trim().parse::<usize>() {
-            Ok(0) => None,
-            Ok(n) => Some(n),
-            Err(_) => {
-                tracing::warn!(
-                    "{PAGED_SLAB_BLOCKS_ENV}={raw:?} is not a non-negative integer; \
-                     using the derived slab size"
-                );
-                None
-            }
-        };
+        match raw.trim().parse::<usize>() {
+            Ok(0) => return None,
+            Ok(n) => return Some(n),
+            Err(_) => tracing::warn!(
+                env_var = PAGED_SLAB_BLOCKS_ENV,
+                value = raw,
+                "{PAGED_SLAB_BLOCKS_ENV} must be a non-negative integer; ignoring it and \
+                 deriving the slab as if unset (0 pins the pool default)",
+            ),
+        }
     }
     // The geometry probe doubles as the "is this model pool-eligible at all"
     // check: without it the byte clamp below would be meaningless.
@@ -1167,6 +1168,13 @@ mod tests {
             // SAFETY: callers hold crate::test_support::env_lock() while this
             // guard is alive, serializing process-global environment mutation.
             unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: as for `set`.
+            unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
     }
@@ -1444,6 +1452,36 @@ mod tests {
 
         let est = estimate_total_memory(tmp.path(), 1024, 1, QuantHint::Default, false);
         assert_eq!(est.available_bytes, 512 * 1024 * 1024);
+    }
+
+    /// Issue #1137: the warning for a malformed `MLXCEL_PAGED_SLAB_BLOCKS`
+    /// says the derived slab size is used, and the code used to return the
+    /// `0` pin instead. The three arms must stay distinct: unset and
+    /// malformed derive, `0` pins the pool default (`None`), a number wins
+    /// verbatim.
+    #[test]
+    fn paged_slab_blocks_malformed_env_derives_like_unset() {
+        let _env = crate::test_support::env_lock::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let resolve = || resolve_paged_slab_blocks(tmp.path(), 32, 32, 4, 8192, false, None);
+
+        let derived = {
+            let _unset = EnvRestore::unset(PAGED_SLAB_BLOCKS_ENV);
+            resolve()
+        };
+        assert_eq!(derived, Some(8192 / 32 * 4));
+
+        let _malformed = EnvRestore::set(PAGED_SLAB_BLOCKS_ENV, "lots");
+        assert_eq!(resolve(), derived);
+
+        let _zero = EnvRestore::set(PAGED_SLAB_BLOCKS_ENV, "0");
+        assert_eq!(resolve(), None);
+
+        // Trimmed and verbatim: not floored at the 32-block pool default the
+        // derived path applies.
+        let _explicit = EnvRestore::set(PAGED_SLAB_BLOCKS_ENV, " 8 ");
+        assert_eq!(resolve(), Some(8));
     }
 
     #[test]
