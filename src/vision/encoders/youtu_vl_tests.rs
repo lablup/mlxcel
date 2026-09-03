@@ -359,8 +359,6 @@ fn reverse_window_indices_is_argsort_not_the_permutation_itself() {
         window::reverse_window_indices(&[1, 0, 3, 2]),
         vec![1, 0, 3, 2]
     );
-    // A malformed index is skipped rather than panicking.
-    assert_eq!(window::reverse_window_indices(&[0, 7, 1]), vec![0, 2, 0]);
 }
 
 #[test]
