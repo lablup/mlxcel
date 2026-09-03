@@ -182,7 +182,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mlxcel_core::drafter::dflash::{DFlashBatchedGenerator, DFlashGenerator, SpeculativeTarget};
 use mlxcel_core::drafter::{Drafter, DrafterKind, load_drafter};
@@ -280,7 +280,11 @@ impl WorkerDrafterSlot {
     /// caller's next step is typically [`Self::take`], which itself
     /// borrows `self` mutably. Splitting "load" from "take" keeps the
     /// borrow checker simple.
-    pub(crate) fn ensure_loaded(&mut self) -> Result<(), String> {
+    ///
+    /// Returns `Some(elapsed)` when this call loaded the drafter from disk and
+    /// `None` when it was already resident, so a caller can keep a
+    /// once-per-process load out of the request's `timings` (issue #1592).
+    pub(crate) fn ensure_loaded(&mut self) -> Result<Option<Duration>, String> {
         if self.drafter.is_none() {
             let path = self
                 .draft_model_path
@@ -295,13 +299,15 @@ impl WorkerDrafterSlot {
             let load_start = Instant::now();
             let (loaded, resolved_kind) = load_drafter(path, kind)
                 .map_err(|e| format!("Drafter load failed for {}: {e}", path.display()))?;
+            let elapsed = load_start.elapsed();
             tracing::info!(
                 "Drafter loaded (kind={resolved_kind}, {} ms)",
-                load_start.elapsed().as_millis()
+                elapsed.as_millis()
             );
             self.drafter = Some(loaded);
+            return Ok(Some(elapsed));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Take ownership of the loaded drafter, leaving the slot empty. The
@@ -869,8 +875,7 @@ pub(crate) fn try_run_burst_b1(
         Ok(BurstSuccess {
             tokens,
             logprobs,
-            prefill_time_ms,
-            decode_time_ms,
+            prefill_end,
             profile,
             speculative,
         }) => {
@@ -902,15 +907,8 @@ pub(crate) fn try_run_burst_b1(
             // path's prompt-cache donate. `logprobs` is
             // forwarded so a speculative response carries the same
             // `TokenWithLogprobs` payload as the classic decode path
-            let finalized = finalize_burst_success(
-                ctx,
-                seq,
-                tokens,
-                logprobs,
-                prefill_time_ms,
-                decode_time_ms,
-                speculative,
-            );
+            let finalized =
+                finalize_burst_success(ctx, seq, tokens, logprobs, prefill_end, speculative);
             let wall_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
             Ok(BurstFinalized {
                 seq_id,
@@ -977,8 +975,11 @@ struct BurstSuccess {
     /// so speculative responses carry the same logprob payload as the
     /// classic decode path.
     logprobs: Vec<Option<TokenLogprobData>>,
-    prefill_time_ms: f64,
-    decode_time_ms: f64,
+    /// When the target prefill finished and verify round 0 began. The
+    /// sequence's first-token stamp is set to this instant, so `prompt_ms`
+    /// covers the prefill and `predicted_ms` covers the verify rounds
+    /// instead of both landing in `prompt_ms` (issue #1592).
+    prefill_end: Instant,
     /// Coarse per-pairing MTP profile (issue #333), `Some` only for the MTP
     /// B=1 burst when a speculative round ran. `None` for DFlash and for MTP
     /// runs that produced no round. The scheduler feeds it to the adaptive
@@ -1179,9 +1180,13 @@ fn run_mtp_burst(
     // the drafter by value below). Releasing the `&mut` borrow before
     // the `take()` call is what lets `take` re-borrow `ctx.drafter_slot`
     // mutably without overlap.
-    ctx.drafter_slot
+    if let Some(load) = ctx
+        .drafter_slot
         .ensure_loaded()
-        .map_err(BurstOutcome::Error)?;
+        .map_err(BurstOutcome::Error)?
+    {
+        seq.created_at += load;
+    }
     let mut owned_drafter = ctx
         .drafter_slot
         .take()
@@ -1244,6 +1249,7 @@ fn run_mtp_burst(
     // while profiling (0 otherwise). Copied out before the match borrows
     // `ctx.model`.
     let profile_probe_rounds = ctx.profile_probe_rounds;
+    let generation_start = Instant::now();
     let (output, stats) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
@@ -1434,8 +1440,8 @@ fn run_mtp_burst(
     Ok(BurstSuccess {
         tokens: output.emitted,
         logprobs: output.logprobs,
-        prefill_time_ms: stats.prefill_time_ms,
-        decode_time_ms: stats.decode_time_ms,
+        // `MtpGenerator` times its prefill and its rounds separately.
+        prefill_end: generation_start + Duration::from_secs_f64(stats.prefill_time_ms / 1000.0),
         profile,
         speculative,
     })
@@ -1604,9 +1610,13 @@ fn run_dflash_burst(
         }
     }
 
-    ctx.drafter_slot
+    if let Some(load) = ctx
+        .drafter_slot
         .ensure_loaded()
-        .map_err(BurstOutcome::Error)?;
+        .map_err(BurstOutcome::Error)?
+    {
+        seq.created_at += load;
+    }
     let owned_drafter = ctx
         .drafter_slot
         .take()
@@ -1690,12 +1700,13 @@ fn run_dflash_burst(
     };
 
     let total_burst = prefill_start.elapsed().as_secs_f64() * 1000.0;
+    // The round loop's `decode_elapsed` spans every verify round, so what is
+    // left of the burst is the target prefill.
     let prefill_time_ms = (total_burst - decode_time_ms).max(0.0);
     Ok(BurstSuccess {
         tokens,
         logprobs,
-        prefill_time_ms,
-        decode_time_ms,
+        prefill_end: prefill_start + Duration::from_secs_f64(prefill_time_ms / 1000.0),
         // The adaptive MTP policy (issue #333) governs the MTP path only;
         // DFlash carries no profile.
         profile: None,
@@ -2028,10 +2039,13 @@ fn finalize_burst_success(
     mut seq: SequenceInfo,
     tokens: Vec<i32>,
     logprobs: Vec<Option<TokenLogprobData>>,
-    _prefill_time_ms: f64,
-    _decode_time_ms: f64,
+    prefill_end: Instant,
     speculative: Option<SpeculativeStats>,
 ) -> FinalizeOutcome {
+    // The burst ran to completion before any token reached the sequence, so
+    // the first-token stamp must be the prefill's end, not the replay below;
+    // the replay's own `mark_first_token` is then a no-op (issue #1592).
+    seq.mark_first_token_at(prefill_end);
     let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
     finalize_burst_stream(ctx.tokenizer, seq, &stream, speculative)
@@ -2464,7 +2478,7 @@ pub(crate) fn try_run_burst_batched(
     };
 
     match result {
-        Ok(rows_tokens) => {
+        Ok((rows_tokens, prefill_end)) => {
             debug_assert_eq!(rows_tokens.len(), batch_size);
             let mut finalized_rows = Vec::with_capacity(batch_size);
             for (seq, tokens) in seqs.into_iter().zip(rows_tokens) {
@@ -2502,8 +2516,8 @@ pub(crate) fn try_run_burst_batched(
                     seq,
                     tokens,
                     Vec::new(),
-                    /* prefill_time_ms */ 0.0,
-                    /* decode_time_ms */ 0.0,
+                    // Every row shares the one batched prefill.
+                    prefill_end,
                     // The batched round loops return per-row tokens and no
                     // per-row acceptance counters, so this arm reports no
                     // `draft_*` block rather than an invented or a
@@ -2574,7 +2588,7 @@ fn run_mtp_burst_batched(
     ctx: BurstContext<'_>,
     seqs: &mut [SequenceInfo],
     block_size: u32,
-) -> Result<BatchedBurstTokens, BurstOutcome> {
+) -> Result<(BatchedBurstTokens, Instant), BurstOutcome> {
     let block_size = block_size as usize;
     if block_size < 2 {
         return Err(BurstOutcome::Error(format!(
@@ -2603,9 +2617,15 @@ fn run_mtp_burst_batched(
         }
     };
 
-    ctx.drafter_slot
+    if let Some(load) = ctx
+        .drafter_slot
         .ensure_loaded()
-        .map_err(BurstOutcome::Error)?;
+        .map_err(BurstOutcome::Error)?
+    {
+        for seq in seqs.iter_mut() {
+            seq.created_at += load;
+        }
+    }
     let mut owned_drafter = ctx
         .drafter_slot
         .take()
@@ -2637,7 +2657,7 @@ fn run_mtp_burst_batched(
     let sampling = seqs[0].sampling.clone();
     let max_tokens = seqs[0].max_tokens.max(1);
 
-    let (tokens_per_row, recovered_drafter) = match ctx.model {
+    let (tokens_per_row, decode_ms, recovered_drafter) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
                 Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size);
@@ -2683,9 +2703,15 @@ fn run_mtp_burst_batched(
         }
     };
 
+    // The batched round loop reports only its decode slice, so the prefill
+    // ended that long before now.
+    let now = Instant::now();
+    let prefill_end = now
+        .checked_sub(Duration::from_secs_f64(decode_ms / 1000.0))
+        .unwrap_or(now);
     ctx.drafter_slot
         .return_drafter(recovered_drafter, target_lm);
-    Ok(tokens_per_row)
+    Ok((tokens_per_row, prefill_end))
 }
 
 /// Generator-shape-agnostic helper that drives an [`MtpBatchedGenerator`]
@@ -2701,7 +2727,7 @@ fn drive_mtp_batched_generator<T>(
     max_tokens: usize,
     sampling: &SamplingConfig,
     block_size: usize,
-) -> Result<(BatchedBurstTokens, Box<dyn Drafter>), BurstOutcome>
+) -> Result<(BatchedBurstTokens, f64, Box<dyn Drafter>), BurstOutcome>
 where
     T: mlxcel_core::speculative::mtp::target::MtpTarget,
 {
@@ -2714,7 +2740,7 @@ where
     // is consumed by value. We recover it via the `into_parts`-style
     // accessor added alongside this issue.
     let recovered = generator.into_drafter();
-    Ok((run.tokens, recovered))
+    Ok((run.tokens, run.stats.decode_time_ms, recovered))
 }
 
 /// DFlash batched burst — Qwen 3.5 text target or Qwen 3.5 VLM wrapper serving
@@ -2728,7 +2754,7 @@ fn run_dflash_burst_batched(
     ctx: BurstContext<'_>,
     seqs: &mut [SequenceInfo],
     block_size: u32,
-) -> Result<BatchedBurstTokens, BurstOutcome> {
+) -> Result<(BatchedBurstTokens, Instant), BurstOutcome> {
     if let Some(seq) = seqs
         .iter()
         .find(|seq| seq.vlm_embeddings.is_some() || !seq.images.is_empty() || !seq.audio.is_empty())
@@ -2758,9 +2784,15 @@ fn run_dflash_burst_batched(
         }
     }
 
-    ctx.drafter_slot
+    if let Some(load) = ctx
+        .drafter_slot
         .ensure_loaded()
-        .map_err(BurstOutcome::Error)?;
+        .map_err(BurstOutcome::Error)?
+    {
+        for seq in seqs.iter_mut() {
+            seq.created_at += load;
+        }
+    }
     let owned_drafter = ctx
         .drafter_slot
         .take()
@@ -2823,7 +2855,7 @@ fn run_dflash_batched_on_qwen35<T>(
     block_size: u32,
     max_tokens: usize,
     drafter_slot: &mut WorkerDrafterSlot,
-) -> Result<BatchedBurstTokens, BurstOutcome>
+) -> Result<(BatchedBurstTokens, Instant), BurstOutcome>
 where
     T: Qwen35DFlashTarget,
 {
@@ -2864,6 +2896,8 @@ where
         mlxcel_core::sampling::sample_token_optimized(&last_logits, sampling, &[]);
     mlxcel_core::eval(&first_bonus_arr);
     let first_bonus_per_row = scalar_tokens_from_array(&first_bonus_arr, batch_size);
+    // Target prefill done, first bonus sampled: round 0 starts here.
+    let prefill_end = Instant::now();
 
     // Build `first_hidden` = concat(hidden_states, axis=-1)[:, last:last+1, :]
     // at shape `[B, 1, num_layers * hidden_size]`.
@@ -2930,7 +2964,7 @@ where
                 full.extend(row_tokens);
                 rows.push(full);
             }
-            Ok(rows)
+            Ok((rows, prefill_end))
         }
         Err(e) => Err(BurstOutcome::Error(format!(
             "DFlash batched round loop failed: {e}"
