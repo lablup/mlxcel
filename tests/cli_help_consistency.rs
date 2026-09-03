@@ -1478,7 +1478,12 @@ fn mlxcel_subcommands() -> Vec<String> {
             if !line.starts_with(' ') {
                 break;
             }
-            if let Some(name) = line.split_whitespace().next().filter(|n| *n != "help") {
+            // Name column only: a wrapped description is indented deeper and
+            // must not be spawned as a subcommand.
+            if line.starts_with("  ")
+                && !line.starts_with("   ")
+                && let Some(name) = line.split_whitespace().next().filter(|n| *n != "help")
+            {
                 names.push(name.to_string());
             }
         }
@@ -1516,20 +1521,30 @@ fn dumped_long_flags(bin_name: &str, args: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn long_flags_extracts_flag_tokens_and_ignores_separators_and_values() {
+    let text = "use --ctx-size 4096 or --pp-layers=1,2 --- not ---- nor -- alone; \
+                see https://x.test/a--b and `--Upper`; trailing --";
+    assert_eq!(long_flags(text), vec!["--ctx-size", "--pp-layers", "--b"]);
+    assert!(long_flags("").is_empty());
+    assert!(long_flags("--").is_empty());
+}
+
+#[test]
 fn every_flag_named_in_command_source_exists_in_some_help() {
+    // Signature lines and alias annotations only, never prose: a flag named
+    // in a description must not whitelist itself, and a wrapped description
+    // must not contribute a fragment such as `--embedding-`.
     let mut known: BTreeSet<String> = BTreeSet::new();
     for sub in mlxcel_subcommands() {
-        known.extend(
-            long_flags(&help_output("mlxcel", &[&sub, "--help"]))
-                .iter()
-                .map(|f| f.to_string()),
-        );
+        known.extend(all_documented_spellings(&help_output(
+            "mlxcel",
+            &[&sub, "--help"],
+        )));
     }
-    known.extend(
-        long_flags(&help_output("mlxcel-server", &["--help"]))
-            .iter()
-            .map(|f| f.to_string()),
-    );
+    known.extend(all_documented_spellings(&help_output(
+        "mlxcel-server",
+        &["--help"],
+    )));
     known.extend(dumped_long_flags(
         "mlxcel",
         &["serve", "--dump-flag-surface"],
