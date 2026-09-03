@@ -4891,6 +4891,32 @@
       "kv_modes": [
         "fp16"
       ]
+    },
+    {
+      "id": "rt_detr_v2",
+      "display_name": "RT-DETRv2",
+      "category": "detection",
+      "model_types": [
+        "rt_detr_v2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "detect"
+      ],
+      "modalities_in": [
+        "image"
+      ],
+      "output": "boxes",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
     }
   ]
 }

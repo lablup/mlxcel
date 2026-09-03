@@ -231,7 +231,7 @@ mlxcel arch
 mlxcel arch --json
 ```
 
-for the architecture catalog compiled into the current binary. The `--json` form emits the stable recipes registry snapshot used by downstream site builds and automation. [Supported models](docs/supported-models.md) maintains the family table, quantization support, distributed coverage, checkpoint qualifications, and known caveats.
+for the architecture catalog compiled into the current binary. The `--json` form emits the stable recipes registry snapshot used by downstream site builds and automation, including standalone runtime families such as detector-only checkpoints. [Supported models](docs/supported-models.md) maintains the family table, quantization support, distributed coverage, checkpoint qualifications, and known caveats.
 
 ## Python
 
