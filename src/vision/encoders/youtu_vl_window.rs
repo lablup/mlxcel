@@ -141,19 +141,19 @@ pub(super) fn get_window_index(
     (window_index, deduped)
 }
 
-/// Compute the inverse permutation of `window_index` so the encoder can
-/// restore the original spatial token order after the merger projects
-/// window-grouped tokens.
+/// `argsort(window_index)`, so the encoder can restore raster order after the
+/// merger. Applying `window_index` itself a second time only works for an
+/// involution, which Youtu-VL's 8-wide window almost never produces (#1600).
 pub(super) fn reverse_window_indices(window_index: &[i32]) -> Vec<i32> {
-    let mut indexed: Vec<(i32, usize)> = window_index
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (v, i))
-        .collect();
-    indexed.sort_by_key(|&(v, _)| v);
-    let mut reverse = vec![0i32; window_index.len()];
-    for (rank, &(_, orig_idx)) in indexed.iter().enumerate() {
-        reverse[orig_idx] = rank as i32;
+    let mut inverse = vec![0i32; window_index.len()];
+    for (rank, &raster_idx) in window_index.iter().enumerate() {
+        // Bounds-checked so a malformed grid cannot panic.
+        if let Some(slot) = usize::try_from(raster_idx)
+            .ok()
+            .and_then(|i| inverse.get_mut(i))
+        {
+            *slot = rank as i32;
+        }
     }
-    reverse
+    inverse
 }
