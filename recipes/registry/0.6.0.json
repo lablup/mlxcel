@@ -1,0 +1,4900 @@
+{
+  "mlxcel_version": "0.6.0",
+  "families": [
+    {
+      "id": "llama",
+      "display_name": "Llama 1/2/3",
+      "category": "dense",
+      "model_types": [
+        "llama",
+        "mistral"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "iquest_coder",
+      "display_name": "IQuest-Coder V1",
+      "category": "dense",
+      "model_types": [
+        "iquestcoder"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "llama4",
+      "display_name": "Llama 4 (MoE)",
+      "category": "moe",
+      "model_types": [
+        "llama4"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "llama4_vlm",
+      "display_name": "Llama 4 VLM",
+      "category": "vlm",
+      "model_types": [
+        "llama4"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "mllama_vlm",
+      "display_name": "Llama 3.2 Vision (tiled ViT + gated cross-attention)",
+      "category": "vlm",
+      "model_types": [
+        "mllama"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "qwen2",
+      "display_name": "Qwen 2 / 2.5",
+      "category": "dense",
+      "model_types": [
+        "qwen2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3",
+      "display_name": "Qwen 3",
+      "category": "dense",
+      "model_types": [
+        "qwen3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve",
+        "rerank"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_moe",
+      "display_name": "Qwen 3 MoE",
+      "category": "moe",
+      "model_types": [
+        "qwen3_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_next",
+      "display_name": "Qwen 3 Next (Attention + GatedDeltaNet + MoE)",
+      "category": "linear_attention",
+      "model_types": [
+        "qwen3_next",
+        "qwen3next"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "qwen3_5",
+      "display_name": "Qwen 3.5 / 3.8 (Attention + GatedDeltaNet hybrid)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "qwen3_5"
+      ],
+      "aliases": [
+        "Qwen 3.8"
+      ],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [
+        "mtp",
+        "dflash"
+      ],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_5_vlm",
+      "display_name": "Qwen 3.5 / 3.8 VLM",
+      "category": "vlm",
+      "model_types": [
+        "qwen3_5"
+      ],
+      "aliases": [
+        "Qwen 3.8 VL"
+      ],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [
+        "mtp",
+        "dflash"
+      ],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_5_moe",
+      "display_name": "Qwen 3.5 / 3.6 MoE (hybrid)",
+      "category": "moe",
+      "model_types": [
+        "qwen3_5_moe"
+      ],
+      "aliases": [
+        "Qwen 3.6"
+      ],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [
+        "mtp",
+        "dflash"
+      ],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_5_moe_vlm",
+      "display_name": "Qwen 3.5 / 3.6 MoE VLM",
+      "category": "vlm",
+      "model_types": [
+        "qwen3_5_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [
+        "mtp",
+        "dflash"
+      ],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gemma",
+      "display_name": "Gemma 1",
+      "category": "dense",
+      "model_types": [
+        "gemma"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gemma2",
+      "display_name": "Gemma 2",
+      "category": "dense",
+      "model_types": [
+        "gemma2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gemma3",
+      "display_name": "Gemma 3",
+      "category": "dense",
+      "model_types": [
+        "gemma3",
+        "gemma3_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gemma4",
+      "display_name": "Gemma 4",
+      "category": "dense",
+      "model_types": [
+        "gemma4",
+        "gemma4_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "partial"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [
+        "mtp"
+      ],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "diffusion_gemma",
+      "display_name": "DiffusionGemma (block-diffusion, Gemma 4 MoE backbone)",
+      "category": "diffusion",
+      "model_types": [
+        "diffusion_gemma",
+        "diffusion_gemma_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "llada2_moe",
+      "display_name": "LLaDA-2 MoE (masked-diffusion LM, DeepSeek-V3-style MoE)",
+      "category": "diffusion",
+      "model_types": [
+        "llada2_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "gemma3_vlm",
+      "display_name": "Gemma 3 VLM",
+      "category": "vlm",
+      "model_types": [
+        "gemma3",
+        "gemma3_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gemma4_vlm",
+      "display_name": "Gemma 4 VLM",
+      "category": "vlm",
+      "model_types": [
+        "gemma4",
+        "gemma4_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": true,
+      "drafters": [
+        "mtp"
+      ],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gemma4_unified",
+      "display_name": "Gemma 4 Unified (encoder-free text + vision + audio)",
+      "category": "vlm",
+      "model_types": [
+        "gemma4_unified"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [
+        "mtp"
+      ],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "llava_vlm",
+      "display_name": "LLaVA (CLIP/SigLIP + Llama/Qwen2)",
+      "category": "vlm",
+      "model_types": [
+        "llava",
+        "llava_next"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "granite_vision_vlm",
+      "display_name": "Granite Vision (SigLIP + Granite)",
+      "category": "vlm",
+      "model_types": [
+        "granite_vision"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "granite4_vision_vlm",
+      "display_name": "Granite 4 Vision (SigLIP + Granite 4 hybrid)",
+      "category": "vlm",
+      "model_types": [
+        "granite4_vision"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "deepseek_ocr_vlm",
+      "display_name": "DeepSeek-OCR (SAM + CLIP + DeepSeek MoE)",
+      "category": "vlm",
+      "model_types": [
+        "deepseekocr"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "deepseek_ocr2_vlm",
+      "display_name": "DeepSeek-OCR 2 (SAM + Qwen2 resampler + DeepSeek MoE)",
+      "category": "vlm",
+      "model_types": [
+        "deepseekocr_2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "unlimited_ocr_vlm",
+      "display_name": "Unlimited-OCR (SAM + CLIP + DeepSeek MoE, ring sliding decode)",
+      "category": "vlm",
+      "model_types": [
+        "unlimited-ocr",
+        "unlimited_ocr"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "deepseek_vl2",
+      "display_name": "DeepSeek-VL2 (SigLIP + downsample MLP + DeepSeek-V2 MoE)",
+      "category": "vlm",
+      "model_types": [
+        "deepseek_vl_v2",
+        "deepseek_vl2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "llava_bunny_vlm",
+      "display_name": "LLaVA-Bunny (SigLIP + Qwen2)",
+      "category": "vlm",
+      "model_types": [
+        "llava_bunny",
+        "bunny-llama",
+        "llava-qwen2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "fast_vlm",
+      "display_name": "FastVLM (FastViTHD + Qwen2)",
+      "category": "vlm",
+      "model_types": [
+        "fastvlm",
+        "llava_qwen2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "ernie4_5_moe_vlm",
+      "display_name": "ERNIE 4.5 MoE VL (DFNRope + MoE)",
+      "category": "dense",
+      "model_types": [
+        "ernie4_5_moe_vl",
+        "ernie4.5_moe_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "hunyuan_vlm",
+      "display_name": "Hunyuan-VL (ViT + XD-RoPE)",
+      "category": "vlm",
+      "model_types": [
+        "hunyuan_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "aya_vision_vlm",
+      "display_name": "Aya Vision (SigLIP + Cohere2)",
+      "category": "vlm",
+      "model_types": [
+        "aya_vision"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "paligemma_vlm",
+      "display_name": "PaliGemma (SigLIP + Gemma)",
+      "category": "vlm",
+      "model_types": [
+        "paligemma"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "pixtral_vlm",
+      "display_name": "Pixtral (2D-RoPE ViT + Mistral)",
+      "category": "vlm",
+      "model_types": [
+        "pixtral"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "mistral3_vlm",
+      "display_name": "Mistral 3 VLM (Pixtral ViT + Mistral)",
+      "category": "vlm",
+      "model_types": [
+        "mistral3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen2_vl",
+      "display_name": "Qwen2-VL",
+      "category": "vlm",
+      "model_types": [
+        "qwen2_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "qwen2_5_vl",
+      "display_name": "Qwen2.5-VL",
+      "category": "vlm",
+      "model_types": [
+        "qwen2_5_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "qwen3_vl",
+      "display_name": "Qwen3-VL",
+      "category": "vlm",
+      "model_types": [
+        "qwen3_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve",
+        "rerank"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_vl_moe",
+      "display_name": "Qwen3-VL MoE",
+      "category": "vlm",
+      "model_types": [
+        "qwen3_vl_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen3_omni_moe",
+      "display_name": "Qwen3-Omni MoE (thinker)",
+      "category": "vlm",
+      "model_types": [
+        "qwen3_omni_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "paddleocr_vl",
+      "display_name": "PaddleOCR-VL",
+      "category": "vlm",
+      "model_types": [
+        "paddleocr_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "dots_ocr_vl",
+      "display_name": "dots.ocr (dots_vit + Qwen2)",
+      "category": "vlm",
+      "model_types": [
+        "dots_ocr"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "falcon_ocr_vl",
+      "display_name": "Falcon-OCR (early fusion)",
+      "category": "vlm",
+      "model_types": [
+        "falcon_ocr"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "jina_vlm",
+      "display_name": "Jina VLM (SigLIP-so400m + 2x2 attention pooling + Qwen2 text)",
+      "category": "vlm",
+      "model_types": [
+        "jvlm",
+        "jina_vlm"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "glm4v",
+      "display_name": "GLM-4V",
+      "category": "vlm",
+      "model_types": [
+        "glm4v"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "glm4v_moe",
+      "display_name": "GLM-4V MoE",
+      "category": "vlm",
+      "model_types": [
+        "glm4v_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "glm_ocr",
+      "display_name": "GLM-OCR",
+      "category": "vlm",
+      "model_types": [
+        "glm_ocr"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "youtu_llm",
+      "display_name": "Youtu-LLM (DeepSeek-V2-style MLA decoder, text-only)",
+      "category": "dense",
+      "model_types": [
+        "youtu",
+        "youtu_llm"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "youtu_vlm",
+      "display_name": "Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3 MLA)",
+      "category": "vlm",
+      "model_types": [
+        "youtu_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "internvl_chat_vlm",
+      "display_name": "InternVL (InternViT + pixel-shuffle + Qwen2)",
+      "category": "vlm",
+      "model_types": [
+        "internvl_chat"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "locateanything_vlm",
+      "display_name": "LocateAnything (MoonViT + MLP connector + Qwen2, grounding)",
+      "category": "vlm",
+      "model_types": [
+        "locateanything"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "smolvlm",
+      "display_name": "SmolVLM (SigLIP + pixel-shuffle + SmolLM2)",
+      "category": "vlm",
+      "model_types": [
+        "smolvlm",
+        "smolvlm2",
+        "idefics3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "idefics2",
+      "display_name": "Idefics2 (SigLIP + perceiver resampler + Mistral)",
+      "category": "vlm",
+      "model_types": [
+        "idefics2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minicpmo_vlm",
+      "display_name": "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
+      "category": "vlm",
+      "model_types": [
+        "minicpmo"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minicpmv4_6_vlm",
+      "display_name": "MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)",
+      "category": "vlm",
+      "model_types": [
+        "minicpmv4_6"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "moondream3_vlm",
+      "display_name": "Moondream 3 (custom ViT + custom decoder)",
+      "category": "vlm",
+      "model_types": [
+        "moondream3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "moondream2_vlm",
+      "display_name": "Moondream 2 (SigLIP-style ViT + Phi text)",
+      "category": "vlm",
+      "model_types": [
+        "moondream2",
+        "moondream1"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "florence2_vlm",
+      "display_name": "Florence-2 (DaViT + BART seq2seq, task prompts)",
+      "category": "vlm",
+      "model_types": [
+        "florence2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "gemma3n",
+      "display_name": "Gemma 3n",
+      "category": "dense",
+      "model_types": [
+        "gemma3n",
+        "gemma3n_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "gemma3n_vlm",
+      "display_name": "Gemma 3n VLM (MobileNetV5 + Gemma3n)",
+      "category": "vlm",
+      "model_types": [
+        "gemma3n",
+        "gemma3n_text"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "phi",
+      "display_name": "Phi 1 / 2",
+      "category": "dense",
+      "model_types": [
+        "phi",
+        "phi-msft"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "phixtral",
+      "display_name": "Phixtral (Phi-2 backbone + sparse MoE)",
+      "category": "moe",
+      "model_types": [
+        "phi",
+        "phi-msft"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "phi3",
+      "display_name": "Phi 3",
+      "category": "dense",
+      "model_types": [
+        "phi3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "phi4_mm_vlm",
+      "display_name": "Phi-4 Multimodal (SigLIP2 NaFlex + Phi4)",
+      "category": "vlm",
+      "model_types": [
+        "phi4mm"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "phi4_siglip_vlm",
+      "display_name": "Phi-4 SigLIP Vision (SigLIP2 NaFlex + Phi3 text)",
+      "category": "vlm",
+      "model_types": [
+        "phi4-siglip"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "phi3_vlm",
+      "display_name": "Phi 3.5 Vision (CLIP + Phi3)",
+      "category": "vlm",
+      "model_types": [
+        "phi3_v"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "molmo_vlm",
+      "display_name": "Molmo (CLIP ViT + OLMo-style text)",
+      "category": "vlm",
+      "model_types": [
+        "molmo"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "molmo2_vlm",
+      "display_name": "Molmo 2 (custom ViT + Molmo2 text)",
+      "category": "vlm",
+      "model_types": [
+        "molmo2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "molmo_point_vlm",
+      "display_name": "Molmo-Point (point prediction + Molmo2 text)",
+      "category": "vlm",
+      "model_types": [
+        "molmo_point"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "phi3small",
+      "display_name": "Phi 3 Small",
+      "category": "dense",
+      "model_types": [
+        "phi3small"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "phimoe",
+      "display_name": "Phi MoE",
+      "category": "moe",
+      "model_types": [
+        "phimoe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "gpt_oss",
+      "display_name": "gpt-oss (MoE)",
+      "category": "moe",
+      "model_types": [
+        "gpt_oss"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minimax",
+      "display_name": "MiniMax-M2 (MoE, 256 experts)",
+      "category": "moe",
+      "model_types": [
+        "minimax"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minimax_m3",
+      "display_name": "MiniMax-M3 (hybrid dense/MoE, block-sparse attention)",
+      "category": "moe",
+      "model_types": [
+        "minimax_m3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minimax_m3_vl",
+      "display_name": "MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE)",
+      "category": "vlm",
+      "model_types": [
+        "minimax_m3_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "muse_glimmer_vlm",
+      "display_name": "Muse Glimmer 30B VLM",
+      "category": "vlm",
+      "model_types": [
+        "muse_glimmer"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "mixtral",
+      "display_name": "Mixtral (MoE)",
+      "category": "moe",
+      "model_types": [
+        "mixtral"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "qwen2_moe",
+      "display_name": "Qwen 2 MoE",
+      "category": "moe",
+      "model_types": [
+        "qwen2_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "olmoe",
+      "display_name": "OLMoE (MoE)",
+      "category": "moe",
+      "model_types": [
+        "olmoe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "dbrx",
+      "display_name": "Databricks DBRX (MoE)",
+      "category": "moe",
+      "model_types": [
+        "dbrx"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "deepseek",
+      "display_name": "DeepSeek v1",
+      "category": "moe",
+      "model_types": [
+        "deepseek"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "deepseek_v2",
+      "display_name": "DeepSeek v2",
+      "category": "moe",
+      "model_types": [
+        "deepseek_v2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "deepseek_v3",
+      "display_name": "DeepSeek v3 / R1",
+      "category": "moe",
+      "model_types": [
+        "deepseek_v3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "deepseek_v32",
+      "display_name": "DeepSeek v3.2",
+      "category": "moe",
+      "model_types": [
+        "deepseek_v32",
+        "deepseek_v3.2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "deepseek_v4",
+      "display_name": "DeepSeek v4",
+      "category": "moe",
+      "model_types": [
+        "deepseek_v4"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "dots1",
+      "display_name": "dots.llm1 (MoE)",
+      "category": "moe",
+      "model_types": [
+        "dots1"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "cohere",
+      "display_name": "Command R (Cohere)",
+      "category": "dense",
+      "model_types": [
+        "cohere"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "cohere2",
+      "display_name": "Command R+ (Cohere2)",
+      "category": "dense",
+      "model_types": [
+        "cohere2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "cohere2_moe",
+      "display_name": "Command MoE (Cohere2 MoE)",
+      "category": "moe",
+      "model_types": [
+        "cohere2_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "internlm2",
+      "display_name": "InternLM 2",
+      "category": "dense",
+      "model_types": [
+        "internlm2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "internlm3",
+      "display_name": "InternLM 3",
+      "category": "dense",
+      "model_types": [
+        "internlm3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "baichuan",
+      "display_name": "Baichuan",
+      "category": "dense",
+      "model_types": [
+        "baichuan_m1"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "glm4",
+      "display_name": "GLM 4",
+      "category": "dense",
+      "model_types": [
+        "glm4"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "glm4_moe",
+      "display_name": "GLM 4 MoE",
+      "category": "moe",
+      "model_types": [
+        "glm4_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "glm4_moe_lite",
+      "display_name": "GLM 4 MoE Lite",
+      "category": "moe",
+      "model_types": [
+        "glm4_moe_lite"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "glm_moe_dsa",
+      "display_name": "GLM MoE DSA",
+      "category": "moe",
+      "model_types": [
+        "glm_moe_dsa"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "ernie4_5",
+      "display_name": "ERNIE 4.5",
+      "category": "dense",
+      "model_types": [
+        "ernie4_5",
+        "ernie4.5"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "ernie4_5_moe",
+      "display_name": "ERNIE 4.5 MoE",
+      "category": "moe",
+      "model_types": [
+        "ernie4_5_moe",
+        "ernie4.5_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "hunyuan_moe",
+      "display_name": "Hunyuan MoE",
+      "category": "moe",
+      "model_types": [
+        "hunyuan"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "hunyuan_v1_dense",
+      "display_name": "Hunyuan v1 Dense",
+      "category": "dense",
+      "model_types": [
+        "hunyuan_v1_dense",
+        "hunyuan_dense"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": true,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "mimo",
+      "display_name": "MiMo (multi-token prediction)",
+      "category": "moe",
+      "model_types": [
+        "mimo"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "bailing_moe",
+      "display_name": "Ling / Bailing MoE (shared + routed experts)",
+      "category": "moe",
+      "model_types": [
+        "bailing_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "bailing_moe_linear",
+      "display_name": "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
+      "category": "linear_attention",
+      "model_types": [
+        "bailing_moe_linear"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "afmoe",
+      "display_name": "Arcee AFMoE / Trinity (sliding + full hybrid MoE)",
+      "category": "moe",
+      "model_types": [
+        "afmoe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "klear",
+      "display_name": "Klear MoE (coefficient-blended shared expert)",
+      "category": "moe",
+      "model_types": [
+        "klear"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "apertus",
+      "display_name": "Apertus (dense)",
+      "category": "dense",
+      "model_types": [
+        "apertus"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "seed_oss",
+      "display_name": "Seed-OSS",
+      "category": "dense",
+      "model_types": [
+        "seed_oss"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "granite",
+      "display_name": "Granite (dense)",
+      "category": "dense",
+      "model_types": [
+        "granite"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "bitnet",
+      "display_name": "BitNet b1.58 (ternary)",
+      "category": "dense",
+      "model_types": [
+        "bitnet"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "exaone",
+      "display_name": "ExaOne 3",
+      "category": "dense",
+      "model_types": [
+        "exaone"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "exaone4",
+      "display_name": "ExaOne 4",
+      "category": "dense",
+      "model_types": [
+        "exaone4"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "exaone_moe",
+      "display_name": "ExaOne MoE",
+      "category": "moe",
+      "model_types": [
+        "exaone_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "solar_open",
+      "display_name": "Solar Open",
+      "category": "dense",
+      "model_types": [
+        "solar_open"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "olmo",
+      "display_name": "OLMo 1",
+      "category": "dense",
+      "model_types": [
+        "olmo"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "olmo2",
+      "display_name": "OLMo 2",
+      "category": "dense",
+      "model_types": [
+        "olmo2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "olmo3",
+      "display_name": "OLMo 3",
+      "category": "dense",
+      "model_types": [
+        "olmo3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "openelm",
+      "display_name": "Apple OpenELM (layer-wise scaling)",
+      "category": "dense",
+      "model_types": [
+        "openelm"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "gpt2",
+      "display_name": "GPT-2 (learned absolute positions, Conv1D weights)",
+      "category": "dense",
+      "model_types": [
+        "gpt2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gpt_bigcode",
+      "display_name": "GPT-BigCode (StarCoder / SantaCoder, multi-query attention)",
+      "category": "dense",
+      "model_types": [
+        "gpt_bigcode"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "gpt_neox",
+      "display_name": "GPT-NeoX (EleutherAI Pythia, partial RoPE, parallel residual)",
+      "category": "dense",
+      "model_types": [
+        "gpt_neox"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "starcoder2",
+      "display_name": "StarCoder 2",
+      "category": "dense",
+      "model_types": [
+        "starcoder2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "mellum",
+      "display_name": "Mellum 2 (JetBrains code)",
+      "category": "dense",
+      "model_types": [
+        "mellum"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "helium",
+      "display_name": "Kyutai Helium (dense Llama shape, traditional RoPE)",
+      "category": "dense",
+      "model_types": [
+        "helium"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "telechat3",
+      "display_name": "TeleAI TeleChat3 (dense Llama shape, YaRN RoPE)",
+      "category": "dense",
+      "model_types": [
+        "telechat3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minicpm",
+      "display_name": "MiniCPM 1",
+      "category": "dense",
+      "model_types": [
+        "minicpm"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "minicpm3",
+      "display_name": "MiniCPM 3",
+      "category": "dense",
+      "model_types": [
+        "minicpm3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "stablelm",
+      "display_name": "StableLM",
+      "category": "dense",
+      "model_types": [
+        "stablelm"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "smollm3",
+      "display_name": "SmolLM 3",
+      "category": "dense",
+      "model_types": [
+        "smollm3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "ministral3",
+      "display_name": "Ministral 3",
+      "category": "dense",
+      "model_types": [
+        "ministral3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "mistral3",
+      "display_name": "Mistral 3",
+      "category": "dense",
+      "model_types": [
+        "mistral3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16",
+        "int8",
+        "turbo4"
+      ]
+    },
+    {
+      "id": "mistral4",
+      "display_name": "Mistral 4 (MLA)",
+      "category": "dense",
+      "model_types": [
+        "mistral4"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "nemotron",
+      "display_name": "Nemotron-4",
+      "category": "dense",
+      "model_types": [
+        "nemotron"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "mamba",
+      "display_name": "Mamba 1 / Falcon Mamba",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "mamba",
+        "falcon_mamba"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "mamba2",
+      "display_name": "Mamba 2",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "mamba2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "jamba",
+      "display_name": "Jamba (Mamba + Transformer + MoE)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "jamba"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "nemotron_h",
+      "display_name": "Nemotron-H (Mamba2 + Attention + MLP/MoE hybrid)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "nemotron_h"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": true,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "nemotron_h_nano_omni_vlm",
+      "display_name": "Nemotron-H Nano Omni VLM",
+      "category": "vlm",
+      "model_types": [
+        "nemotron_h_nano_omni",
+        "nemotronh_nano_omni_reasoning_v3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "nemotron_nas",
+      "display_name": "Nemotron-NAS",
+      "category": "dense",
+      "model_types": [
+        "nemotron-nas"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "falcon_h1",
+      "display_name": "Falcon-H1 (Mamba2 + Attention parallel hybrid)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "falcon_h1"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "lfm2",
+      "display_name": "LFM2 (short-conv + attention hybrid)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "lfm2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "lfm2_moe",
+      "display_name": "LFM2-MoE (sigmoid-gated experts)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "lfm2_moe"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "lfm2_vl",
+      "display_name": "LFM2-VL (packed-patch ViT + LFM2 hybrid text)",
+      "category": "dense",
+      "model_types": [
+        "lfm2_vl",
+        "lfm2-vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "inkling",
+      "display_name": "Inkling (relative-bias attention + shared-expert MoE)",
+      "category": "dense",
+      "model_types": [
+        "inkling_mm_model",
+        "inkling"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [
+        "mtp"
+      ],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "inkling_vlm",
+      "display_name": "Inkling VLM (HMLP vision + relative-bias MoE text)",
+      "category": "dense",
+      "model_types": [
+        "inkling_mm_model",
+        "inkling"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [
+        "mtp"
+      ],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "plamo2",
+      "display_name": "PLaMo 2 (Mamba + attention hybrid)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "plamo2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "granitemoehybrid",
+      "display_name": "Granite 4 (Mamba2 + attention hybrid)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "granitemoehybrid"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "kimi_linear",
+      "display_name": "Kimi Linear (MLA + GatedDeltaNet hybrid)",
+      "category": "linear_attention",
+      "model_types": [
+        "kimi_linear"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "kimi_vl",
+      "display_name": "Kimi-VL (MoonViT + DeepSeek-V3 MoE)",
+      "category": "vlm",
+      "model_types": [
+        "kimi_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "kimi_k25",
+      "display_name": "Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)",
+      "category": "vlm",
+      "model_types": [
+        "kimi_k25"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "longcat_flash",
+      "display_name": "LongCat Flash (MLA + MoE, dual sublayer)",
+      "category": "linear_attention",
+      "model_types": [
+        "longcat_flash"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "longcat_flash_ngram",
+      "display_name": "LongCat Flash + N-gram embedding",
+      "category": "linear_attention",
+      "model_types": [
+        "longcat_flash_ngram"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "step3p5",
+      "display_name": "Step-3.5 (Sigmoid MoE gate + SwitchGLU)",
+      "category": "moe",
+      "model_types": [
+        "step3p5"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "step3p7",
+      "display_name": "Step-3.7 (ViT + Step-3.5 MoE)",
+      "category": "vlm",
+      "model_types": [
+        "step3p7"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "rwkv7",
+      "display_name": "RWKV v7",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "rwkv7"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "recurrent_gemma",
+      "display_name": "RecurrentGemma (Griffin: RGLRU + attention)",
+      "category": "hybrid_ssm",
+      "model_types": [
+        "recurrent_gemma",
+        "griffin"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "generate",
+        "serve"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "whisper",
+      "display_name": "Whisper (encoder-decoder ASR)",
+      "category": "asr",
+      "model_types": [
+        "whisper"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "asr"
+      ],
+      "modalities_in": [
+        "audio"
+      ],
+      "output": "tokens",
+      "backends": {
+        "metal": "supported",
+        "cuda": "partial"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "kokoro",
+      "display_name": "Kokoro (StyleTTS2 + iSTFTNet)",
+      "category": "tts",
+      "model_types": [
+        "kokoro"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "tts"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "audio",
+      "backends": {
+        "metal": "supported",
+        "cuda": "partial"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "bert",
+      "display_name": "BERT / MiniLM encoder",
+      "category": "embedding",
+      "model_types": [
+        "bert"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "xlm_roberta",
+      "display_name": "XLM-RoBERTa encoder",
+      "category": "embedding",
+      "model_types": [
+        "xlm-roberta",
+        "xlm_roberta"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "modernbert",
+      "display_name": "ModernBERT encoder",
+      "category": "embedding",
+      "model_types": [
+        "modernbert"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "siglip",
+      "display_name": "SigLIP text tower",
+      "category": "embedding",
+      "model_types": [
+        "siglip",
+        "siglip_text_model"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "gemma3_embedding",
+      "display_name": "EmbeddingGemma (bidirectional Gemma 3)",
+      "category": "embedding",
+      "model_types": [
+        "gemma3_text",
+        "gemma3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "qwen3_embedding",
+      "display_name": "Qwen3-Embedding (last-token)",
+      "category": "embedding",
+      "model_types": [
+        "qwen3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "qwen3_vl_embedding",
+      "display_name": "Qwen3-VL-Embedding (multimodal)",
+      "category": "embedding",
+      "model_types": [
+        "qwen3_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "lfm2_embedding",
+      "display_name": "LFM2.5-Embedding (bidirectional LFM2)",
+      "category": "embedding",
+      "model_types": [
+        "lfm2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "ministral3_embedding",
+      "display_name": "Nemotron-3-Embed (bidirectional Ministral 3)",
+      "category": "embedding",
+      "model_types": [
+        "ministral3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "llama_bidirec",
+      "display_name": "Bidirectional Llama / LLM2Vec embedder",
+      "category": "embedding",
+      "model_types": [
+        "llama",
+        "llama_bidirec"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "llama_nemotron_vl_embedding",
+      "display_name": "Llama-Nemotron-VL-Embed (multimodal)",
+      "category": "embedding",
+      "model_types": [
+        "llama_nemotron_vl"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "colidefics3",
+      "display_name": "ColIdefics3 (late-interaction, multimodal)",
+      "category": "embedding",
+      "model_types": [
+        "idefics3"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "colqwen2_5",
+      "display_name": "ColQwen2.5 (late-interaction, multimodal)",
+      "category": "embedding",
+      "model_types": [
+        "qwen2_5_vl",
+        "colqwen2"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "embed"
+      ],
+      "modalities_in": [
+        "text",
+        "image"
+      ],
+      "output": "embeddings",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    },
+    {
+      "id": "sequence_classifier",
+      "display_name": "Cross-encoder sequence classifier (BERT / XLM-RoBERTa / ModernBERT)",
+      "category": "reranker",
+      "model_types": [
+        "bert",
+        "xlm-roberta",
+        "xlm_roberta",
+        "modernbert"
+      ],
+      "aliases": [],
+      "runtimes": [
+        "rerank"
+      ],
+      "modalities_in": [
+        "text"
+      ],
+      "output": "scores",
+      "backends": {
+        "metal": "supported",
+        "cuda": "supported"
+      },
+      "tensor_parallel": false,
+      "pipeline_parallel": false,
+      "drafters": [],
+      "kv_modes": [
+        "fp16"
+      ]
+    }
+  ]
+}

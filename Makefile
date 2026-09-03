@@ -141,6 +141,14 @@ release-cli: ## Build CLI in release mode
 	@echo "$(CYAN)Building CLI in release mode...$(RESET)"
 	$(RUSTFLAGS) $(CARGO) build --release $(RELEASE_FEATURE_FLAG) --bin $(BIN_CLI)
 
+.PHONY: recipes-registry
+recipes-registry: release-cli ## Rebuild the committed recipes architecture registry snapshot
+	@mkdir -p recipes/registry
+	@version="$$(./target/release/$(BIN_CLI) --version | awk '{print $$2}')" ; \
+	./target/release/$(BIN_CLI) arch --json > "recipes/registry/$${version}.json" ; \
+	printf '%s\n' "$${version}" > recipes/registry/CURRENT ; \
+	echo "recipes/registry/$${version}.json"
+
 .PHONY: release-server
 release-server: ## Build server in release mode
 	@echo "$(CYAN)Building server in release mode...$(RESET)"
