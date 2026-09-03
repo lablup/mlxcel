@@ -881,10 +881,9 @@ pub fn raw_model_type_from_config(model_dir: &Path) -> Option<String> {
 /// registry id once that contract is available on `main`.
 #[must_use]
 pub fn inspect_family_slug(model_dir: &Path) -> Option<String> {
-    if let Some(raw) = raw_model_type_from_config(model_dir) {
-        return Some(slugify_identifier(&raw));
-    }
-    get_model_type(model_dir).ok().map(slugify_model_type)
+    get_model_type(model_dir)
+        .ok()
+        .map(|model_type| inspect_registry_id(model_type).to_string())
 }
 
 /// Fused paged-decode workspace reserve for families that select the paged
@@ -919,26 +918,182 @@ fn model_type_uses_default_paged_decode(model_type: ModelType) -> bool {
     )
 }
 
-fn slugify_model_type(model_type: ModelType) -> String {
-    slugify_identifier(&format!("{model_type:?}"))
-}
-
-fn slugify_identifier(input: &str) -> String {
-    let mut out = String::new();
-    let mut prev_was_sep = true;
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_was_sep = false;
-        } else if !prev_was_sep {
-            out.push('-');
-            prev_was_sep = true;
-        }
+fn inspect_registry_id(model_type: ModelType) -> &'static str {
+    match model_type {
+        ModelType::Llama => "llama",
+        ModelType::IQuestCoder => "iquest_coder",
+        ModelType::Llama4 => "llama4",
+        ModelType::Llama4VLM => "llama4_vlm",
+        ModelType::MllamaVLM => "mllama_vlm",
+        ModelType::Qwen2 => "qwen2",
+        ModelType::Qwen3 => "qwen3",
+        ModelType::Qwen3Moe => "qwen3_moe",
+        ModelType::Qwen3Next => "qwen3_next",
+        ModelType::Qwen35 => "qwen3_5",
+        ModelType::Qwen35VLM => "qwen3_5_vlm",
+        ModelType::Qwen35Moe => "qwen3_5_moe",
+        ModelType::Qwen35MoeVLM => "qwen3_5_moe_vlm",
+        ModelType::Gemma => "gemma",
+        ModelType::Gemma2 => "gemma2",
+        ModelType::Gemma3 => "gemma3",
+        ModelType::Gemma4 => "gemma4",
+        ModelType::DiffusionGemma => "diffusion_gemma",
+        ModelType::Llada2Moe => "llada2_moe",
+        ModelType::Gemma3VLM => "gemma3_vlm",
+        ModelType::Gemma4VLM => "gemma4_vlm",
+        ModelType::Gemma4Unified => "gemma4_unified",
+        ModelType::LlavaVLM => "llava_vlm",
+        ModelType::GraniteVisionVLM => "granite_vision_vlm",
+        ModelType::Granite4VisionVLM => "granite4_vision_vlm",
+        ModelType::DeepSeekOcrVLM => "deepseek_ocr_vlm",
+        ModelType::DeepSeekOcr2VLM => "deepseek_ocr2_vlm",
+        ModelType::UnlimitedOcrVLM => "unlimited_ocr_vlm",
+        ModelType::DeepSeekVL2 => "deepseek_vl2",
+        ModelType::LlavaBunnyVLM => "llava_bunny_vlm",
+        ModelType::FastVLM => "fast_vlm",
+        ModelType::Ernie45MoeVLM => "ernie4_5_moe_vlm",
+        ModelType::HunyuanVLM => "hunyuan_vlm",
+        ModelType::AyaVisionVLM => "aya_vision_vlm",
+        ModelType::PaliGemmaVLM => "paligemma_vlm",
+        ModelType::PixtralVLM => "pixtral_vlm",
+        ModelType::Mistral3VLM => "mistral3_vlm",
+        ModelType::Qwen2VL => "qwen2_vl",
+        ModelType::Qwen25VL => "qwen2_5_vl",
+        ModelType::Qwen3VL => "qwen3_vl",
+        ModelType::Qwen3VLMoe => "qwen3_vl_moe",
+        ModelType::Qwen3OmniMoe => "qwen3_omni_moe",
+        ModelType::PaddleOcrVL => "paddleocr_vl",
+        ModelType::DotsOcrVL => "dots_ocr_vl",
+        ModelType::FalconOcrVL => "falcon_ocr_vl",
+        ModelType::JinaVLM => "jina_vlm",
+        ModelType::Glm4v => "glm4v",
+        ModelType::Glm4vMoe => "glm4v_moe",
+        ModelType::GlmOcr => "glm_ocr",
+        ModelType::YoutuLLM => "youtu_llm",
+        ModelType::YoutuVLM => "youtu_vlm",
+        ModelType::InternVLChatVLM => "internvl_chat_vlm",
+        ModelType::LocateAnythingVLM => "locateanything_vlm",
+        ModelType::SmolVLM => "smolvlm",
+        ModelType::Idefics2 => "idefics2",
+        ModelType::MiniCPMOVLM => "minicpmo_vlm",
+        ModelType::MiniCPMV46VLM => "minicpmv4_6_vlm",
+        ModelType::Moondream3VLM => "moondream3_vlm",
+        ModelType::Moondream2VLM => "moondream2_vlm",
+        ModelType::Florence2VLM => "florence2_vlm",
+        ModelType::Gemma3n => "gemma3n",
+        ModelType::Gemma3nVLM => "gemma3n_vlm",
+        ModelType::Phi => "phi",
+        ModelType::Phixtral => "phixtral",
+        ModelType::Phi3 => "phi3",
+        ModelType::Phi4MMVLM => "phi4_mm_vlm",
+        ModelType::Phi4SigLipVLM => "phi4_siglip_vlm",
+        ModelType::Phi3VLM => "phi3_vlm",
+        ModelType::MolmoVLM => "molmo_vlm",
+        ModelType::Molmo2VLM => "molmo2_vlm",
+        ModelType::MolmoPointVLM => "molmo_point_vlm",
+        ModelType::Phi3Small => "phi3small",
+        ModelType::PhiMoe => "phimoe",
+        ModelType::GptOss => "gpt_oss",
+        ModelType::MiniMax => "minimax",
+        ModelType::MiniMaxM3 => "minimax_m3",
+        ModelType::MiniMaxM3VL => "minimax_m3_vl",
+        ModelType::MuseGlimmerVLM => "muse_glimmer_vlm",
+        ModelType::Mixtral => "mixtral",
+        ModelType::Qwen2Moe => "qwen2_moe",
+        ModelType::OLMoE => "olmoe",
+        ModelType::Dbrx => "dbrx",
+        ModelType::DeepSeek => "deepseek",
+        ModelType::DeepSeekV2 => "deepseek_v2",
+        ModelType::DeepSeekV3 => "deepseek_v3",
+        ModelType::DeepSeekV32 => "deepseek_v32",
+        ModelType::DeepSeekV4 => "deepseek_v4",
+        ModelType::Dots1 => "dots1",
+        ModelType::Cohere => "cohere",
+        ModelType::Cohere2 => "cohere2",
+        ModelType::Cohere2Moe => "cohere2_moe",
+        ModelType::InternLM2 => "internlm2",
+        ModelType::InternLM3 => "internlm3",
+        ModelType::Baichuan => "baichuan",
+        ModelType::Glm4 => "glm4",
+        ModelType::Glm4Moe => "glm4_moe",
+        ModelType::Glm4MoeLite => "glm4_moe_lite",
+        ModelType::GlmMoeDsa => "glm_moe_dsa",
+        ModelType::Ernie45 => "ernie4_5",
+        ModelType::Ernie45Moe => "ernie4_5_moe",
+        ModelType::HunyuanMoe => "hunyuan_moe",
+        ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
+        ModelType::MiMo => "mimo",
+        ModelType::BailingMoe => "bailing_moe",
+        ModelType::BailingMoeLinear => "bailing_moe_linear",
+        ModelType::Afmoe => "afmoe",
+        ModelType::Klear => "klear",
+        ModelType::Apertus => "apertus",
+        ModelType::SeedOss => "seed_oss",
+        ModelType::Granite => "granite",
+        ModelType::BitNet => "bitnet",
+        ModelType::ExaOne => "exaone",
+        ModelType::ExaOne4 => "exaone4",
+        ModelType::ExaOneMoe => "exaone_moe",
+        ModelType::SolarOpen => "solar_open",
+        ModelType::Olmo => "olmo",
+        ModelType::Olmo2 => "olmo2",
+        ModelType::Olmo3 => "olmo3",
+        ModelType::OpenElm => "openelm",
+        ModelType::Gpt2 => "gpt2",
+        ModelType::GptBigCode => "gpt_bigcode",
+        ModelType::GptNeoX => "gpt_neox",
+        ModelType::StarCoder2 => "starcoder2",
+        ModelType::Mellum => "mellum",
+        ModelType::Helium => "helium",
+        ModelType::TeleChat3 => "telechat3",
+        ModelType::MiniCPM => "minicpm",
+        ModelType::MiniCPM3 => "minicpm3",
+        ModelType::StableLM => "stablelm",
+        ModelType::SmolLM3 => "smollm3",
+        ModelType::Ministral3 => "ministral3",
+        ModelType::Mistral3 => "mistral3",
+        ModelType::Mistral4 => "mistral4",
+        ModelType::Nemotron => "nemotron",
+        ModelType::Mamba => "mamba",
+        ModelType::Mamba2 => "mamba2",
+        ModelType::Jamba => "jamba",
+        ModelType::NemotronH => "nemotron_h",
+        ModelType::NemotronHNanoOmniVLM => "nemotron_h_nano_omni_vlm",
+        ModelType::NemotronNAS => "nemotron_nas",
+        ModelType::FalconH1 => "falcon_h1",
+        ModelType::Lfm2 => "lfm2",
+        ModelType::Lfm2Moe => "lfm2_moe",
+        ModelType::Lfm2VL => "lfm2_vl",
+        ModelType::Inkling => "inkling",
+        ModelType::InklingVLM => "inkling_vlm",
+        ModelType::Plamo2 => "plamo2",
+        ModelType::GraniteMoeHybrid => "granitemoehybrid",
+        ModelType::KimiLinear => "kimi_linear",
+        ModelType::KimiVL => "kimi_vl",
+        ModelType::KimiK25 => "kimi_k25",
+        ModelType::LongcatFlash => "longcat_flash",
+        ModelType::LongcatFlashNgram => "longcat_flash_ngram",
+        ModelType::Step3p5 => "step3p5",
+        ModelType::Step3p7 => "step3p7",
+        ModelType::Rwkv7 => "rwkv7",
+        ModelType::RecurrentGemma => "recurrent_gemma",
+        ModelType::Whisper => "whisper",
+        ModelType::Kokoro => "kokoro",
+        ModelType::Bert => "bert",
+        ModelType::XlmRoberta => "xlm_roberta",
+        ModelType::ModernBert => "modernbert",
+        ModelType::SiglipText => "siglip",
+        ModelType::Gemma3Embedding => "gemma3_embedding",
+        ModelType::Qwen3Embedding => "qwen3_embedding",
+        ModelType::Qwen3VLEmbedding => "qwen3_vl_embedding",
+        ModelType::Lfm2Embedding => "lfm2_embedding",
+        ModelType::Ministral3Embedding => "ministral3_embedding",
+        ModelType::LlamaBidirec => "llama_bidirec",
+        ModelType::LlamaNemotronVLEmbedding => "llama_nemotron_vl_embedding",
+        ModelType::ColIdefics3 => "colidefics3",
+        ModelType::ColQwen25 => "colqwen2_5",
+        ModelType::SequenceClassifier => "sequence_classifier",
     }
-    if out.ends_with('-') {
-        out.pop();
-    }
-    out
 }
 
 // ── Paged KV block-budget resolution (epic #116 #122 b3) ──────────────────────
@@ -1475,6 +1630,48 @@ mod tests {
         );
         assert_eq!(report.kv_bytes_per_token.turbo4, None);
         assert!(format_estimate(tmp.path(), &est).contains(&format_bytes(report.total_bytes)));
+    }
+
+    #[test]
+    fn inspect_family_slug_matches_arch_registry_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({
+            "model_type": "qwen3_5",
+            "hidden_size": 4096,
+            "num_hidden_layers": 32,
+            "vocab_size": 32000,
+            "intermediate_size": 11008,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        });
+        write_config(tmp.path(), &cfg);
+
+        assert_eq!(
+            raw_model_type_from_config(tmp.path()).as_deref(),
+            Some("qwen3_5")
+        );
+        assert_eq!(inspect_family_slug(tmp.path()).as_deref(), Some("qwen3_5"));
+    }
+
+    #[test]
+    fn inspect_family_slug_is_classifier_derived_not_raw_model_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({
+            "model_type": "gemma3_text",
+            "hidden_size": 2048,
+            "num_hidden_layers": 18,
+            "vocab_size": 256000,
+            "intermediate_size": 8192,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 4,
+        });
+        write_config(tmp.path(), &cfg);
+
+        assert_eq!(
+            raw_model_type_from_config(tmp.path()).as_deref(),
+            Some("gemma3_text")
+        );
+        assert_eq!(inspect_family_slug(tmp.path()).as_deref(), Some("gemma3"));
     }
 
     #[test]
