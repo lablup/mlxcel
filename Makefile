@@ -144,9 +144,16 @@ release-cli: ## Build CLI in release mode
 .PHONY: recipes-registry
 recipes-registry: release-cli ## Rebuild the committed recipes architecture registry snapshot
 	@mkdir -p recipes/registry
-	@version="$$(./target/release/$(BIN_CLI) --version | awk '{print $$2}')" ; \
-	./target/release/$(BIN_CLI) arch --json > "recipes/registry/$${version}.json" ; \
-	printf '%s\n' "$${version}" > recipes/registry/CURRENT ; \
+	@set -e; \
+	version="$$(./target/release/$(BIN_CLI) --version | awk '{print $$2}')" ; \
+	test -n "$${version}" ; \
+	tmp_json="$$(mktemp "recipes/registry/$${version}.json.XXXXXX")" ; \
+	tmp_current="$$(mktemp "recipes/registry/CURRENT.XXXXXX")" ; \
+	trap 'rm -f "$${tmp_json}" "$${tmp_current}"' EXIT ; \
+	./target/release/$(BIN_CLI) arch --json > "$${tmp_json}" ; \
+	printf '%s\n' "$${version}" > "$${tmp_current}" ; \
+	mv "$${tmp_json}" "recipes/registry/$${version}.json" ; \
+	mv "$${tmp_current}" recipes/registry/CURRENT ; \
 	echo "recipes/registry/$${version}.json"
 
 .PHONY: release-server
