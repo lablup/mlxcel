@@ -801,8 +801,6 @@ fn supports_turbo_kv(model_type: ModelType) -> bool {
             | ModelType::Mixtral
             | ModelType::DeepSeek
             | ModelType::DeepSeekV2
-            | ModelType::DeepSeekV3
-            | ModelType::DeepSeekV32
             | ModelType::Cohere
             | ModelType::Cohere2
             | ModelType::InternLM2
@@ -827,6 +825,9 @@ fn supports_turbo_kv(model_type: ModelType) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    use mlxcel_core::cache::KVCacheMode;
+    use mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model;
 
     use super::*;
 
@@ -905,6 +906,51 @@ mod tests {
             assert!(
                 registry_set.contains(id),
                 "{model_type:?} is not PP-enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn kv_modes_do_not_advertise_runtime_fp16_downgrades() {
+        for model_type in ALL_MODEL_TYPES {
+            let family = model_type.capabilities();
+            for config_key in family.model_types {
+                if family.kv_modes.contains(&KvMode::Int8) {
+                    let (effective, _) =
+                        resolve_kv_cache_mode_for_model(KVCacheMode::Int8, config_key);
+                    assert_ne!(
+                        effective,
+                        KVCacheMode::Fp16,
+                        "{model_type:?} advertises int8 for {config_key}, but runtime resolves to fp16"
+                    );
+                }
+                if family.kv_modes.contains(&KvMode::Turbo4) {
+                    let (effective, _) =
+                        resolve_kv_cache_mode_for_model(KVCacheMode::Turbo4, config_key);
+                    assert_ne!(
+                        effective,
+                        KVCacheMode::Fp16,
+                        "{model_type:?} advertises turbo4 for {config_key}, but runtime resolves to fp16"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mla_latent_cache_families_report_fp16_only_kv_modes() {
+        for model_type in [
+            ModelType::DeepSeekV3,
+            ModelType::DeepSeekV32,
+            ModelType::Glm4MoeLite,
+            ModelType::GlmMoeDsa,
+            ModelType::KimiLinear,
+            ModelType::LongcatFlashNgram,
+        ] {
+            assert_eq!(
+                family(model_type).kv_modes,
+                KV_FP16,
+                "{model_type:?} should not advertise quantized KV cache modes"
             );
         }
     }

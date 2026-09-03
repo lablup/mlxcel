@@ -2464,9 +2464,7 @@
       "pipeline_parallel": true,
       "drafters": [],
       "kv_modes": [
-        "fp16",
-        "int8",
-        "turbo4"
+        "fp16"
       ]
     },
     {
@@ -2494,9 +2492,7 @@
       "pipeline_parallel": false,
       "drafters": [],
       "kv_modes": [
-        "fp16",
-        "int8",
-        "turbo4"
+        "fp16"
       ]
     },
     {
