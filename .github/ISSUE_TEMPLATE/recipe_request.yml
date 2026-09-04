@@ -1,0 +1,75 @@
+name: Recipe request
+description: Ask for a new model recipe on mlxcel.ai/recipes, or a change to an existing one
+title: "recipe: <org>/<repo>"
+labels: ["type:docs", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Recipes live at https://mlxcel.ai/recipes. A recipe needs a checkpoint mlxcel loads today; if the architecture is not supported yet, file a feature request instead.
+
+  - type: input
+    id: model_id
+    attributes:
+      label: Hugging Face model id
+      description: The canonical id, for example `Qwen/Qwen3-4B`. The recipe URL mirrors it.
+      placeholder: org/repo
+    validations:
+      required: true
+
+  - type: input
+    id: checkpoints
+    attributes:
+      label: Checkpoints mlxcel should load
+      description: The mlx-community or original repositories, comma separated (for example `mlx-community/Qwen3-4B-4bit, mlx-community/Qwen3-4B-8bit`).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Request kind
+      options:
+        - New recipe
+        - Fix a command or flag
+        - Add or fix measurements
+        - Korean guide
+        - Other change
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware you ran it on
+      multiple: true
+      options:
+        - Apple Silicon 16 to 36 GB
+        - Apple Silicon 48 to 128 GB
+        - Apple Silicon 192 GB or more
+        - NVIDIA DGX Spark (GB10)
+        - NVIDIA discrete GPU
+        - Not run yet
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command that worked (or failed)
+      description: Paste the exact `mlxcel` or `mlxcel-server` command and the mlxcel version from `mlxcel --version`.
+      render: shell
+
+  - type: textarea
+    id: details
+    attributes:
+      label: What should the recipe say?
+      description: Tasks, features that matter (thinking, tool calling, KV quantization, speculative decoding), caveats, and links to the model card.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched https://mlxcel.ai/recipes/browse/ and the existing issues for this model
+          required: true
+        - label: The checkpoint is public, or I noted that it is gated
+          required: true
