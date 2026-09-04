@@ -260,11 +260,12 @@ pub(crate) struct ListArgs {
 }
 
 /// Arguments for `mlxcel arch`.
-///
-/// Currently takes no flags; the empty struct lets the verb grow options
-/// later without a breaking signature change.
 #[derive(Args, Debug)]
-pub(crate) struct ArchArgs {}
+pub(crate) struct ArchArgs {
+    /// Emit the machine-readable recipes registry schema as JSON.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
 
 /// Arguments for `mlxcel rm`.
 #[derive(Args, Debug)]
@@ -618,6 +619,11 @@ pub(crate) struct InspectArgs {
     #[arg(long, default_value = "default", value_name = "MODE")]
     pub(crate) quant: String,
 
+    /// Emit the estimate as one JSON object instead of the banner; every
+    /// number is the same the banner prints.
+    #[arg(long)]
+    pub(crate) json: bool,
+
     // Shared TurboQuant KV-cache flag group, gives `inspect` the same
     // `--cache-type-k` / `--cache-type-v` surface as `generate` so the
     // estimate matches what the loaded model would actually allocate.
@@ -949,6 +955,23 @@ fn parse_kv_cache_budget(s: &str) -> Result<mlxcel::memory_estimate::PagedBudget
 // on this struct instead (#1448).
 #[command(disable_help_flag = true)]
 #[command(after_help = "\
+Model store:
+  -m/--model accepts either a local path or a HuggingFace owner/name repo-id.
+  Repo-ids resolve to legacy ./models/<name>, then the HuggingFace cache, then
+  the mlxcel store, with auto-download on miss.
+  Use --model-store-root (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
+  volume; snapshots live at <root>/<owner>/<name> under that root.
+
+Embeddings and Reranking:
+  -m <embedding checkpoint> serves POST /v1/embeddings without a chat model.
+  --embedding-model <checkpoint> adds embeddings beside the chat model in -m.
+  -m <cross-encoder checkpoint> serves POST /v1/rerank without a chat model.
+  --reranker-model <checkpoint> adds reranking beside chat and is required for
+  generative rerankers. Queue depth and timeout use the --embedding-* worker
+  flags for both endpoints.
+  Full request schemas, examples, and supported families:
+    https://github.com/lablup/mlxcel/blob/main/docs/embeddings.md
+
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
        CLUSTER_NAME=studio-pp \\
@@ -2801,8 +2824,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Generate(args) => commands::run_generate(args),
         Commands::Serve(args) => commands::run_serve(args),
         Commands::List(args) => commands::run_list_local(args.models_dir.as_deref(), &args),
-        Commands::Arch(_) => {
-            print_supported_models();
+        Commands::Arch(args) => {
+            if args.json {
+                write_supported_models_json(std::io::stdout())?;
+            } else {
+                print_supported_models();
+            }
             Ok(())
         }
         Commands::Inspect(args) => commands::run_inspect(args),
@@ -2969,6 +2996,15 @@ fn write_supported_models<W: std::fmt::Write>(out: &mut W) -> std::fmt::Result {
     )?;
     writeln!(out)?;
 
+    Ok(())
+}
+
+fn write_supported_models_json<W: std::io::Write>(mut out: W) -> anyhow::Result<()> {
+    let registry = mlxcel::models::registry::build_architecture_registry(env!("CARGO_PKG_VERSION"));
+    let mut payload = Vec::new();
+    serde_json::to_writer_pretty(&mut payload, &registry)?;
+    payload.push(b'\n');
+    out.write_all(&payload)?;
     Ok(())
 }
 

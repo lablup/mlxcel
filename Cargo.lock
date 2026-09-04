@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "mlxcel"
-version = "0.6.0"
+version = "0.7.0-beta.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "mlxcel-core"
-version = "0.6.0"
+version = "0.7.0-beta.1"
 dependencies = [
  "cmake",
  "ctor",
@@ -2131,14 +2131,14 @@ dependencies = [
 
 [[package]]
 name = "mlxcel-mlx-pin"
-version = "0.6.0"
+version = "0.7.0-beta.1"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "mlxcel-surgery"
-version = "0.6.0"
+version = "0.7.0-beta.1"
 dependencies = [
  "anyhow",
  "globset",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "mlxcel-xla"
-version = "0.6.0"
+version = "0.7.0-beta.1"
 dependencies = [
  "cc",
  "memmap2",

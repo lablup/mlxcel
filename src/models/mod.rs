@@ -28,6 +28,7 @@ pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
 pub(crate) mod qwen_mrope_state;
 mod recurrent_snapshot;
+pub mod registry;
 mod sanitize;
 
 // Shared modules

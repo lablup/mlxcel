@@ -14,7 +14,7 @@ Apple Silicon is the primary target. Linux/CUDA is supported as a secondary targ
 
 ## Current main highlights
 
-The current `main` branch contains v0.6.0 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
+The current `main` branch is v0.7.0-beta.1 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
 
 - **Verified `llama-server` compatibility.** A frozen b10621 manifest classifies all 376 pinned options, routes, and native request fields, with no deferred entries. Native completion, embedding, tokenization, template, infill, props, slots, metrics, resumable-stream, router, and LoRA surfaces are implemented or explicitly classified instead of being silently ignored.
 - **OpenAI, Anthropic, and Vertex-compatible serving.** Chat Completions, Completions, Responses, Embeddings, Reranking, Audio, and Anthropic Messages are available alongside the native `llama-server` routes. Optional Vertex AI custom-container routing is supported through the standard `AIP_*` variables.
@@ -24,6 +24,7 @@ The current `main` branch contains v0.6.0 plus unreleased work. Install from sou
 - **Measured speculative decoding.** Gemma 4 and Qwen MTP paths probe greedy exactness before enabling the fast path, and the server exposes the adaptive decision at `GET /v1/internal/mtp-policy`.
 - **Operational controls.** Optional authenticated live settings, prompt/cache and slot observability, bounded response stores, idle model sleep/wake, GBNF grammars, expanded sampling controls, runtime reasoning placement, and API-key/CORS/TLS controls are available.
 - **DeepSeek-V4 support.** The `deepseek_v4` architecture includes HyperConnections, rotating shared-KV attention, per-layer compression, HiSA sparse selection, and hash-routed early MoE layers.
+- **Inkling across four modalities.** The text backbone runs hybrid sliding/global NoPE attention with per-layer short-convolution state and logsigmoid-normalized experts, and carries HMLP image tiling, adjacent-frame video, dMel audio, and a native MTP drafter.
 
 See [Server features](docs/server-features.md) for the route and deployment map and [llama-server compatibility](docs/llama-server-compat.md) for the exact b10621 boundary.
 
@@ -75,9 +76,14 @@ mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello, world!" -n 100
 # Read-only memory estimate before loading.
 mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
 
+# Emit the same estimate as machine-readable bytes for recipe builders or schedulers.
+mlxcel inspect --json -m Qwen3.5-0.8B-4bit --max-tokens 32768 | python3 -m json.tool
+
 # Abort before generation if the estimated model and KV cache do not fit.
 mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello" -n 32768 --estimate-memory
 ```
+
+`mlxcel inspect --json` prints a single JSON object with byte-exact `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `headroom_bytes`, `budget_bytes`, `total_bytes`, `fits`, input flags, and per-token FP16/INT8 KV rates when the model config exposes KV geometry. TurboQuant per-token sizing is reported as `null` until the estimator models those widths directly.
 
 ### Start a server
 
@@ -223,9 +229,10 @@ Model support is architecture- and checkpoint-dependent. Run:
 
 ```bash
 mlxcel arch
+mlxcel arch --json
 ```
 
-for the architecture catalog compiled into the current binary. [Supported models](docs/supported-models.md) maintains the family table, quantization support, distributed coverage, checkpoint qualifications, and known caveats.
+for the architecture catalog compiled into the current binary. The `--json` form emits the stable recipes registry snapshot used by downstream site builds and automation, including standalone runtime families such as detector-only checkpoints. [Supported models](docs/supported-models.md) maintains the family table, quantization support, distributed coverage, checkpoint qualifications, and known caveats.
 
 ## Python
 

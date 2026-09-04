@@ -154,3 +154,76 @@ fn normalization_matches_siglip_default() {
         mlxcel_core::item_f32(&max_abs)
     );
 }
+
+/// Pins the emitted row order and inner feature order against
+/// `convert_image_to_patches` in this checkpoint's own processor,
+/// https://huggingface.co/tencent/Youtu-VL-4B-Instruct/blob/main/image_processing_siglip2_fast.py
+///
+/// The grid size is the entire point of the test. With `spatial_merge_size=2`,
+/// a 2x2 patch grid is a single merge block, and block-major and raster order
+/// are then the same sequence, so such a fixture cannot fail on the defect this
+/// test exists to catch. 64x64 at `patch_size=16` gives a 4x4 patch grid, which
+/// is 2x2 blocks: the minimum that separates the two orders.
+///
+/// The RGB channels carry three independent, non-overlapping codes so a single
+/// row also pins `(dy, dx, c)` against Qwen2-VL's `(c, dy, dx)`: red identifies
+/// the patch, green identifies the row within the patch, blue the column.
+#[test]
+fn patches_are_emitted_merge_block_major_with_channel_last_features() {
+    let p = synthetic_processor();
+    let patch_size = 16u32;
+    let grid = 4u32; // 4x4 patches == 2x2 merge blocks
+
+    let mut img = RgbImage::new(grid * patch_size, grid * patch_size);
+    for py in 0..grid {
+        for px in 0..grid {
+            let patch_id = (py * grid + px) as u8;
+            for dy in 0..patch_size {
+                for dx in 0..patch_size {
+                    img.put_pixel(
+                        px * patch_size + dx,
+                        py * patch_size + dy,
+                        image::Rgb([patch_id * 10, 100 + dy as u8 * 5, 20 + dx as u8 * 3]),
+                    );
+                }
+            }
+        }
+    }
+    let img = DynamicImage::ImageRgb8(img);
+
+    let (pixel_values, spatial_shapes) = p.preprocess_with_spatial(&[img]);
+    assert_eq!(spatial_shapes, vec![(4, 4)]);
+    mlxcel_core::eval(&pixel_values);
+    let values = mlxcel_core::utils::array_to_vec_f32(&pixel_values);
+
+    let features_per_patch = (patch_size * patch_size * 3) as usize;
+    assert_eq!(values.len(), 16 * features_per_patch);
+
+    let norm = |v: u8| (v as f32 / 255.0 - 0.5) / 0.5;
+
+    // Rows run (block_y, block_x, inner_y, inner_x). For a 4x4 grid of patches
+    // numbered in raster order that is 0,1,4,5, 2,3,6,7, 8,9,12,13, 10,11,14,15,
+    // deliberately not 0..15, which is what plain raster emission produces.
+    let expected_rows = [0u8, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+    for (row, patch_id) in expected_rows.into_iter().enumerate() {
+        let row_start = row * features_per_patch;
+        for dy in 0..patch_size {
+            for dx in 0..patch_size {
+                let base = row_start + ((dy * patch_size + dx) * 3) as usize;
+                let expected = [
+                    norm(patch_id * 10),
+                    norm(100 + dy as u8 * 5),
+                    norm(20 + dx as u8 * 3),
+                ];
+                for (c, want) in expected.into_iter().enumerate() {
+                    let got = values[base + c];
+                    assert!(
+                        (got - want).abs() < 1e-6,
+                        "row {row} (patch {patch_id}) feature (dy={dy}, dx={dx}, c={c}): \
+                         expected {want}, saw {got}"
+                    );
+                }
+            }
+        }
+    }
+}
