@@ -1432,3 +1432,173 @@ fn flag_help_entry_ignores_hyphen_bulleted_prose() {
     );
     assert_eq!(documented_aliases(entry), vec!["--draft".to_string()]);
 }
+
+// ── Flag names in command source must exist in some `--help` (issue #1131) ──
+//
+// `validate_pipeline_parallel_args` once told the user to pass
+// `--tensor-parallel-size`, a flag no binary accepts (#1112). The sweep that
+// found it lived only in a PR description, so this pins it: every `--flag`
+// literal in `src/commands/*.rs` (error strings, hints, comments alike) must
+// appear in the help of some `mlxcel` subcommand or of `mlxcel-server`.
+
+/// Every `--flag` token in `text`, in order, with duplicates. clap prints
+/// long flags as `--name`, and the source names them the same way inside
+/// strings and comments, so one scanner serves both sides.
+fn long_flags(text: &str) -> Vec<&str> {
+    let mut flags = Vec::new();
+    let mut i = 0;
+    while let Some(off) = text[i..].find("--") {
+        let start = i + off;
+        let name_start = start + 2;
+        let name_end = name_start
+            + text[name_start..]
+                .bytes()
+                .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+                .count();
+        if name_end > name_start && text.as_bytes()[name_start].is_ascii_lowercase() {
+            flags.push(&text[start..name_end]);
+        }
+        i = name_end.max(start + 2);
+    }
+    flags
+}
+
+/// Subcommand names from the top-level `mlxcel --help` `Commands:` block:
+/// the first word of every indented line until the next heading.
+fn mlxcel_subcommands() -> Vec<String> {
+    let help = help_output("mlxcel", &["--help"]);
+    let mut in_block = false;
+    let mut names = Vec::new();
+    for line in help.lines() {
+        if line.starts_with("Commands:") {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            if !line.starts_with(' ') {
+                break;
+            }
+            // Name column only: a wrapped description is indented deeper and
+            // must not be spawned as a subcommand.
+            if line.starts_with("  ")
+                && !line.starts_with("   ")
+                && let Some(name) = line.split_whitespace().next().filter(|n| *n != "help")
+            {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Long spellings and aliases from a binary's `--dump-flag-surface` JSON,
+/// which lists hidden arguments too. The llama-server compatibility groups
+/// `mlxcel serve` and `mlxcel-server` accept are `hide = true`, so `--help`
+/// alone would call every one of them unknown.
+fn dumped_long_flags(bin_name: &str, args: &[&str]) -> Vec<String> {
+    let (path, resolution) = resolve_repo_binary(bin_name);
+    let output = Command::new(&path)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {bin_name} from {path:?}: {e}\n{resolution}"));
+    assert!(
+        output.status.success(),
+        "{bin_name} {args:?} exited with {:?}",
+        output.status
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--dump-flag-surface emits JSON");
+    let mut flags = Vec::new();
+    for arg in doc["args"].as_array().expect("args array") {
+        if let Some(long) = arg["long"].as_str() {
+            flags.push(format!("--{long}"));
+        }
+        for alias in arg["long_aliases"].as_array().expect("aliases array") {
+            flags.push(format!("--{}", alias.as_str().expect("alias str")));
+        }
+    }
+    flags
+}
+
+#[test]
+fn long_flags_extracts_flag_tokens_and_ignores_separators_and_values() {
+    let text = "use --ctx-size 4096 or --pp-layers=1,2 --- not ---- nor -- alone; \
+                see https://x.test/a--b and `--Upper`; trailing --";
+    assert_eq!(long_flags(text), vec!["--ctx-size", "--pp-layers", "--b"]);
+    assert!(long_flags("").is_empty());
+    assert!(long_flags("--").is_empty());
+}
+
+/// Every non-test `.rs` under `dir`, recursively. `src/commands` is flat
+/// today, so a `read_dir` would pass; it is walked anyway because the day a
+/// subcommand grows a submodule directory is the day a shallow scan starts
+/// silently covering less than it says it does, with a green test to say so.
+fn collect_command_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_command_sources(&path, out);
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.ends_with(".rs") && !name.ends_with("_tests.rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn every_flag_named_in_command_source_exists_in_some_help() {
+    // Signature lines and alias annotations only, never prose: a flag named
+    // in a description must not whitelist itself, and a wrapped description
+    // must not contribute a fragment such as `--embedding-`.
+    let mut known: BTreeSet<String> = BTreeSet::new();
+    for sub in mlxcel_subcommands() {
+        known.extend(all_documented_spellings(&help_output(
+            "mlxcel",
+            &[&sub, "--help"],
+        )));
+    }
+    known.extend(all_documented_spellings(&help_output(
+        "mlxcel-server",
+        &["--help"],
+    )));
+    known.extend(dumped_long_flags(
+        "mlxcel",
+        &["serve", "--dump-flag-surface"],
+    ));
+    known.extend(dumped_long_flags("mlxcel-server", &["--dump-flag-surface"]));
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let commands_dir = manifest_dir.join("src/commands");
+    let mut sources = Vec::new();
+    collect_command_sources(&commands_dir, &mut sources);
+    sources.sort();
+    assert!(
+        !sources.is_empty(),
+        "no command sources under {}",
+        commands_dir.display()
+    );
+
+    let mut unknown = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path).unwrap();
+        for (lineno, line) in text.lines().enumerate() {
+            for flag in long_flags(line) {
+                if !known.contains(flag) {
+                    unknown.push(format!(
+                        "{}:{}: {flag}",
+                        path.strip_prefix(manifest_dir).unwrap().display(),
+                        lineno + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        unknown.is_empty(),
+        "flags named in src/commands that no `mlxcel <subcommand> --help`, `mlxcel-server --help`, or \
+         server flag-surface dump knows (a user told to pass one of these gets a clap error):\n{}",
+        unknown.join("\n")
+    );
+}
