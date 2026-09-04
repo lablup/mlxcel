@@ -89,6 +89,19 @@ DATE=$(date '+%Y-%m-%d')
 # 2026-06-12.
 MLX_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 [[ -n "$MLX_VERSION" ]] || MLX_VERSION="unknown"
+# Source commit the measured binary was built from. `mlx_version` reads
+# Cargo.toml, which does not move between releases, so every sweep taken during
+# a development cycle records the same version no matter how far main has
+# travelled. Without this column a cross-host comparison assembled over weeks
+# cannot tell a hardware difference from a code difference. Appended last so the
+# positional readers of column 11 (`mlx_version`) keep working.
+SOURCE_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
+# Only tracked modifications make the measured binary differ from the commit.
+# Untracked files (stray notes, scratch CSVs) do not, and flagging them would
+# mark almost every real sweep dirty.
+if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+  SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+fi
 BUILD_TYPE="release"
 # Optional overhead multiplier applied to the weight-size estimate in
 # model_fits_in_memory(). Default 1.0 preserves the existing pass/skip
@@ -429,7 +442,7 @@ bench_one() {
     effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
     limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
     >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},SKIP:oom_estimate"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${SOURCE_COMMIT},SKIP:oom_estimate"
     return
   fi
 
@@ -438,7 +451,7 @@ bench_one() {
   if [[ "$VLM_MODE" -eq 1 ]]; then
     prompt="$VLM_PROMPT"
     if [[ ! -f "$VLM_IMAGE" ]]; then
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},SKIP:vlm_image_not_found"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},SKIP:vlm_image_not_found"
       return
     fi
     extra_args+=(--image "$VLM_IMAGE")
@@ -474,10 +487,10 @@ bench_one() {
   if [[ "$rc" -ne 0 ]]; then
     if is_oom_failure "$rc" "$raw"; then
       >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},SKIP:oom"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},SKIP:oom"
     else
       >&2 printf '    benchmark failed (exit %d)\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},FAIL:bench"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},FAIL:bench"
     fi
     return
   fi
@@ -489,10 +502,10 @@ bench_one() {
 
   if [[ -z "$decode_tps" ]]; then
     >&2 echo "    no decode output"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},FAIL:no_output"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},FAIL:no_output"
   else
     >&2 printf '    decode: %s tok/s\n' "$decode_tps"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl}"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT}"
   fi
 }
 
@@ -583,7 +596,7 @@ fi
 # ---------------------------------------------------------------------------
 # CSV header
 # ---------------------------------------------------------------------------
-CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len"
+CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len,commit"
 
 mkdir -p "$(dirname "$OUTPUT")"
 echo "$CSV_HEADER" > "$OUTPUT"

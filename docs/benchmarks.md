@@ -54,6 +54,20 @@ ladder, driven by `scripts/bench_embeddings.py`:
 - [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/embeddings-rerank-gb10-2026-08-26.md)
 - [Embedding and rerank throughput on M5 Max - 2026-09-04](benchmark_results/embeddings-rerank-m5max-2026-09-04.md)
 
+### Record the source revision, not just the version
+
+`bench_decode.sh` and `bench_embeddings.py` both write an 8-character `commit`
+column (`-dirty` appended when tracked files were modified). Do not drop it when
+transcribing the speculative or batched-serving tables by hand.
+
+The version column alone is not enough to date a measurement. `mlx_version`
+reads `Cargo.toml`, which does not move between releases, so every sweep taken
+across a whole development cycle records the same version however far `main`
+has travelled in between. A cross-hardware table assembled over weeks then
+cannot distinguish a hardware difference from a code difference. Before
+attributing a gap to hardware, check that the hosts share a `commit`; when they
+do not, say so where the table is published.
+
 ## Suggested benchmark commands
 
 The repository contains benchmark helper scripts under `scripts/`. The exact

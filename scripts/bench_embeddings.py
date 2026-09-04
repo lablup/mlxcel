@@ -241,7 +241,7 @@ def main():
     args.logdir = Path(args.logdir or Path(args.out).parent / "perf_logs").resolve()
     args.logdir.mkdir(parents=True, exist_ok=True)
     args.bin = str(Path(args.bin).resolve())
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=args.cwd).stdout.strip()
+    commit = subprocess.run(["git", "rev-parse", "--short=8", "HEAD"], capture_output=True, text=True, cwd=args.cwd).stdout.strip()
     version = subprocess.run([args.bin.replace("mlxcel-server", "mlxcel"), "--version"], capture_output=True, text=True).stdout.strip().split()[-1]
     meta = {"date": time.strftime("%Y-%m-%d"), "hardware": detect_hardware(), "mlx_version": version,
             "build_type": args.build_type, "commit": commit}
