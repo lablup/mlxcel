@@ -14,9 +14,55 @@
 
 //! Unit tests for the continuous-batching KV quantization flag group.
 
+use std::ffi::OsString;
+
 use clap::Parser;
 
 use super::*;
+
+const ENV_KEYS: [&str; 4] = [
+    "LLAMA_ARG_KV_BITS",
+    "LLAMA_ARG_KV_GROUP_SIZE",
+    "LLAMA_ARG_KV_QUANT_SCHEME",
+    "LLAMA_ARG_KV_SKIP_LAST_LAYER",
+];
+
+/// Restores clap's KV environment bindings when a parse completes or panics.
+struct EnvMask(Vec<(&'static str, Option<OsString>)>);
+
+impl EnvMask {
+    fn clear() -> Self {
+        let previous = ENV_KEYS
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
+        for key in ENV_KEYS {
+            // SAFETY: `parse` holds the crate-wide environment lock for this
+            // guard's entire lifetime.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+        Self(previous)
+    }
+}
+
+impl Drop for EnvMask {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            // SAFETY: `parse` declares its lock guard before this mask, so the
+            // lock outlives restoration during reverse-order drop.
+            #[allow(unsafe_code)]
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(allow_negative_numbers = true)]
@@ -27,12 +73,12 @@ struct Probe {
 
 /// Parse an argv, with the process environment held still.
 ///
-/// Every field in this group except `--kv-quant-scheme`'s absence carries a
-/// `LLAMA_ARG_*` binding, so clap reads the process environment on each
-/// parse; the crate-wide env lock keeps concurrent tests from deciding what
-/// this one parsed.
+/// Every field in this group carries a `LLAMA_ARG_*` binding, so an ambient
+/// deployment environment could otherwise decide what these CLI-only tests
+/// parse. The crate-wide lock makes clearing and restoring those keys safe.
 fn parse(argv: &[&str]) -> BatchKvQuantArgs {
     let _env_guard = crate::test_support::env_lock::env_lock();
+    let _env_mask = EnvMask::clear();
     let mut full = vec!["probe"];
     full.extend_from_slice(argv);
     Probe::try_parse_from(full)
