@@ -29,9 +29,16 @@ between documents. The current Apple Silicon benchmark report is:
 
 - [Benchmark Report - 2026-05-19](benchmark_results/benchmark-report.md)
 
-Use that report and its linked raw per-hardware tables for release notes,
-README updates, or capacity planning. This page should stay focused on
-methodology, required metadata, and caveats.
+That combined report is the cross-hardware surface, but it is older than the
+per-host tables it summarizes. The newest full sweep is M5 Max on mlxcel 0.6.0
+(2026-09-03/04), covering text, VLM, speculative and batched serving, in
+[model_tests_m5max.md](benchmark_results/model_tests_m5max.md); M1 Ultra and
+GB10 are still at 0.4.0-rc.1, so cross-host ratios currently mix versions. Take
+per-host numbers from the per-hardware tables and the combined report only for
+the comparison shape, until the other hosts are re-measured.
+
+Use those tables for release notes, README updates, or capacity planning. This
+page should stay focused on methodology, required metadata, and caveats.
 
 Decode-gap investigations (root-cause analyses of where mlxcel trails the
 reference runtime) live alongside the snapshot:
@@ -45,18 +52,52 @@ Embedding and rerank throughput (`/v1/embeddings`, `/v1/rerank`) has its own
 ladder, driven by `scripts/bench_embeddings.py`:
 
 - [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/embeddings-rerank-gb10-2026-08-26.md)
+- [Embedding and rerank throughput on M5 Max - 2026-09-04](benchmark_results/embeddings-rerank-m5max-2026-09-04.md)
 
 ## Suggested benchmark commands
 
 The repository contains benchmark helper scripts under `scripts/`. The exact
 arguments may evolve, so inspect each script before publishing results.
 
-```bash
-# Single-model decode benchmark shape.
-./scripts/bench_decode.sh -m models/<checkpoint> --runs 3
+The commands below are the ones the 2026-09-03/04 M5 Max campaign actually ran,
+so they reproduce on another host as written. `bench_decode.sh` takes the model
+path as a POSITIONAL argument and auto-names its CSV from the detected hardware
+and date; it has no `-m` and no `--runs`.
 
-# Multi-model suite shape.
-./scripts/bench_all_models.sh --hardware <name> --cooldown 45 --big-cooldown 60
+```bash
+# Single-model decode benchmark. Writes
+# benchmarks/{backend}_{hw}_{date}_single_{model}.csv
+./scripts/bench_decode.sh --cooldown 30 --big-cooldown 30 models/<checkpoint>
+
+# Full text suite. Writes benchmarks/{backend}_{hw}_{date}.csv
+./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
+
+# Full VLM suite. Writes benchmarks/{backend}_{hw}_vlm_{date}.csv
+./scripts/bench_decode.sh all --vlm --cooldown 30 --big-cooldown 30
+
+# Cap the weight budget so checkpoints that cannot fit are classified
+# SKIP:oom_estimate up front instead of being launched and recorded as
+# FAIL:bench. The factor is (0.85 * system_memory) / desired_budget; on a
+# 128 GB host 1.209 yields a ~90 GB budget.
+BENCH_MEM_OVERHEAD_FACTOR=1.209 ./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
+
+# Speculative / MTP sweep. Prints a Markdown table on stdout and writes no CSV;
+# transcribe it into benchmarks/{backend}_{hw}_spec_{date}.csv.
+./target/release/speculative_bench --sweep --max-tokens 128
+
+# Batched serving ladder, against a server started with
+# --parallel 4 --max-batch-prefill 4. Writes no CSV; transcribe into
+# benchmarks/{backend}_{hw}_batch_{date}.csv.
+python3 scripts/bench_serving_concurrency.py --port <port> \
+    --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128
+
+# Embedding and rerank ladder. One server per checkpoint; writes its own CSV.
+python3 scripts/bench_embeddings.py --bin target/release/mlxcel-server \
+    --out benchmarks/{backend}_{hw}_embeddings_{date}.csv --repeats 5 --port 18091
+
+# Continuous-batching sweep over every model dir. Takes ONE positional
+# argument, the output log path, and no flags.
+./scripts/bench_all_models.sh <output_file>
 
 # Sampling step, no model attached. Gumbel-max (#900) covers the no-filter
 # path; the rejection kernel (#901) covers top-k / top-p / min-p.

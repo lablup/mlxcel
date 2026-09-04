@@ -207,7 +207,7 @@ A plain Linux build has no CUDA feature and runs on the CPU, which is not a vali
 
 ## Performance
 
-The last full same-host reference campaign measured faster short-prompt prefill and near-reference decode throughput. These are aggregate results, not guarantees for an individual checkpoint:
+The last full same-host reference campaign against `mlx-lm` and `mlx-vlm` ran on mlxcel 0.0.28 (2026-05-19) and has not been repeated since. These are aggregate results from that campaign, not guarantees for an individual checkpoint, and not current-release figures:
 
 | Workload | Host | Reference | Result |
 |----------|------|-----------|-------:|
@@ -216,9 +216,11 @@ The last full same-host reference campaign measured faster short-prompt prefill 
 | Text decode, 67 comparable pairs | M5 Max 128 GB | `mlx-lm` | **99% average, 100% median** |
 | VLM decode, 24 comparable pairs | M5 Max 128 GB | `mlx-vlm` | **98% average, 98% median** |
 
-The multi-host v0.4.0 sweep covers Apple Silicon and GB10 CUDA systems, while focused reports cover paged attention, MoE, KV compression, embeddings, and speculative decoding. Read [Benchmark results](docs/benchmark_results/model_tests.md), the [benchmark report](docs/benchmark_results/benchmark-report.md), and the [methodology](docs/benchmarks.md) before comparing hosts or planning capacity.
+Treat the prefill row above with particular care. `prefill_tok_s` is prompt tokens divided by prefill time, so it moves whenever the prompt length moves, and the chat-template rendering has changed on the mlxcel side since that campaign: the Llama family's rendering of the standard test prompt is 42 tokens on 0.6.0 against 98 previously, which matches the canonical template tokenization exactly. The prefill ratio therefore needs a fresh same-host run before it is quoted for the current release.
 
-MTP performance depends on the target/drafter pair, prompt, verify width, and hardware generation. With the v0.6.0 exactness policy, Gemma 4 12B plus its 4-bit assistant measured 93.2 tok/s against 43.8 tok/s classic decode on M5 Max (**2.13x**, greedy output byte-identical). The faster inexact kernel measured 120.4 tok/s but is not the default. The runtime measures exactness and profitability instead of treating either speedup as universal; see [Speculative-decoding acceptance](docs/speculative-acceptance.md), [MTP policy API](docs/mtp-policy-api.md), and the benchmark records under `docs/benchmark_results/`.
+Per-host sweeps are more current than the combined report. M5 Max is measured on v0.6.0 (2026-09-03/04) across text, VLM, speculative decoding, batched serving, and the embedding and rerank ladder; M1 Ultra and GB10 are still on v0.4.0-rc.1, so cross-host ratios currently mix versions. Focused reports cover paged attention, MoE, KV compression, embeddings, and speculative decoding. Read [Benchmark results](docs/benchmark_results/model_tests.md), the [benchmark report](docs/benchmark_results/benchmark-report.md), and the [methodology](docs/benchmarks.md) before comparing hosts or planning capacity.
+
+MTP performance depends on the target/drafter pair, prompt, verify width, and hardware generation. With the v0.6.0 exactness policy, Gemma 4 12B plus its 4-bit assistant measured 93.2 tok/s against 43.8 tok/s classic decode on M5 Max (**2.13x**, greedy output byte-identical). The faster inexact kernel measured 120.4 tok/s but is not the default. How much that is worth depends heavily on the prompt: on the same host and release, the `speculative_bench --sweep` default 14-token prompt measures the same pairing at 70.9 tok/s against a 45.3 tok/s baseline (**1.57x** at K=4, 35.0% acceptance), against the 2.13x above on a code prompt. The runtime measures exactness and profitability instead of treating either speedup as universal; see [Speculative-decoding acceptance](docs/speculative-acceptance.md), [MTP policy API](docs/mtp-policy-api.md), and the benchmark records under `docs/benchmark_results/`.
 
 Re-run the supplied harnesses on the target checkpoint, prompt shape, context length, and hardware before treating any published number as a deployment expectation.
 
