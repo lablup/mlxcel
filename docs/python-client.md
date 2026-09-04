@@ -58,8 +58,8 @@ Start a matching server with the CLI:
 # TCP
 mlxcel serve -m mlx-community/Qwen3-4B-4bit --host 127.0.0.1 --port 8080
 
-# Unix domain socket: --port 0 reinterprets --host as the socket path
-mlxcel serve -m mlx-community/Qwen3-4B-4bit --host /tmp/mlxcel.sock --port 0
+# Unix domain socket: a --host ending in .sock selects socket mode
+mlxcel serve -m mlx-community/Qwen3-4B-4bit --host /tmp/mlxcel.sock
 ```
 
 Passing both a model and a connect target raises `MlxcelError`, because the mode would be ambiguous.
@@ -78,7 +78,7 @@ with mlxcel.LLM("mlx-community/Qwen3-4B-4bit", socket=str(runtime_dir / "mlxcel.
     print(llm.generate("hello"))
 ```
 
-The CLI equivalent is `mlxcel serve --host "$XDG_RUNTIME_DIR/mlxcel.sock" --port 0`.
+The CLI equivalent is `mlxcel serve --host "$XDG_RUNTIME_DIR/mlxcel.sock"`.
 
 On macOS, `$TMPDIR` already expands to a per-user path under `/var/folders`, so the default socket is private there. On Linux without an active login session, `$XDG_RUNTIME_DIR` may be absent; fall back to a `0700` subdirectory under your home directory if needed.
 
