@@ -322,10 +322,7 @@ impl BatchKvQuantConfig {
     /// `Int4Affine` path lands.
     pub fn validate(&self) -> Result<(), String> {
         if self.bits < 0 {
-            return Err(format!(
-                "BatchKvQuantConfig: bits must be non-negative (got {})",
-                self.bits
-            ));
+            return Err(format!("--kv-bits must be non-negative, got {}", self.bits));
         }
         if self.group_size <= 0 {
             return Err(format!(
@@ -1023,13 +1020,10 @@ mod tests {
     fn config_rejects_negative_bits() {
         for &b in &[-1i32, -4, -8, i32::MIN] {
             let err = BatchKvQuantConfig::new(KvQuantScheme::Uniform, b, 64, true).unwrap_err();
-            assert!(
-                err.contains("bits must be non-negative"),
-                "expected 'bits must be non-negative' in error for bits={b}, got: {err}"
-            );
-            assert!(
-                err.contains(&b.to_string()),
-                "error must include the bad value {b}, got: {err}"
+            assert_eq!(
+                err,
+                format!("--kv-bits must be non-negative, got {b}"),
+                "the diagnostic must name the CLI flag and preserve its punctuation"
             );
         }
     }
@@ -1044,7 +1038,7 @@ mod tests {
             skip_last_layer: true,
         };
         let err = cfg.validate().unwrap_err();
-        assert!(err.contains("bits must be non-negative"));
+        assert_eq!(err, "--kv-bits must be non-negative, got -1");
     }
 
     // ── Layer-mode resolution + last-layer skip ──────────────────────
