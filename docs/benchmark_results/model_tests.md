@@ -11,7 +11,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 | Hardware | File | Status | Last Updated |
 |----------|------|--------|-------------|
 | Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-07-12 |
-| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-09-03/04 (mlxcel 0.6.0, cooldown-30 full text + VLM sweep, 90 GB weight budget; plus speculative and batched-serving passes) |
+| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-09-03/04 at `b2ff1eee`, which is code-identical to `v0.7.0-beta.1` (cooldown-30 full text + VLM sweep, 90 GB weight budget; plus speculative, batched-serving and embedding passes). CSVs record `mlx_version` 0.6.0 because the tag came one commit later |
 | NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-07-12 (mlxcel 0.4.0-rc.1, full 159-dir sweep; 7 memory-gated skips) |
 
 ## Benchmark CSVs
