@@ -123,3 +123,7 @@ impl Default for BatchKvQuantArgs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "batch_quant_args_tests.rs"]
+mod tests;
