@@ -107,6 +107,8 @@ with mlxcel.LLM("mlx-community/Qwen3-4B-4bit") as llm:
         print(delta, end="", flush=True)
 ```
 
+A runnable version of this example lives at [`python/examples/streaming.py`](../python/examples/streaming.py).
+
 ## Chat
 
 `chat` returns the assistant message content as a string.
@@ -158,6 +160,8 @@ reply = llm.chat(
 )
 person = json.loads(reply)
 ```
+
+A runnable version of this example lives at [`python/examples/structured_output.py`](../python/examples/structured_output.py); it also issues the same request through the raw `openai_client`.
 
 ## The `openai_client` escape hatch
 

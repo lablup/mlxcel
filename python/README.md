@@ -43,6 +43,14 @@ llm = mlxcel.LLM(socket="/tmp/mlxcel.sock")  # Unix socket
 
 Async usage mirrors the sync API via `mlxcel.AsyncLLM` (`await llm.generate(...)`, `async for delta in llm.stream(...)`).
 
+## Examples
+
+Runnable scripts live in [`examples/`](examples/). Each expects the `mlxcel` binary on `PATH` (or `MLXCEL_BIN`) and a model available locally or downloadable from Hugging Face; run them from the repo root:
+
+- [`quickstart.py`](examples/quickstart.py) — managed-mode tour: spawn a local server, then `generate`, `chat`, `models`, and `tokenize`/`detokenize`. `python python/examples/quickstart.py`
+- [`streaming.py`](examples/streaming.py) — print `stream` and `chat_stream` deltas as they arrive. `python python/examples/streaming.py`
+- [`structured_output.py`](examples/structured_output.py) — schema-constrained JSON via `response_format`, plus the same request through the raw `openai_client`. `python python/examples/structured_output.py`
+
 ## Modes
 
 - **Managed mode** (default when `model=` is given): the client spawns `mlxcel serve`, waits until `/health` returns ready, forwards server logs to the `mlxcel.server` Python logger, and stops the process on exit.
