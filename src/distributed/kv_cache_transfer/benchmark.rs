@@ -105,7 +105,14 @@ impl TransferBenchConfig {
         self.bytes_per_layer() * self.num_layers
     }
 
-    /// Human-readable total size.
+    /// Human-readable total size, in this file's `format_bytes` spelling.
+    ///
+    /// That spelling is unspaced (`256.0MiB`, `500B`) and carries a `< 1024`
+    /// arm, where the copy this used to inline was spaced (`256.0 MiB`) and
+    /// bottomed out at `KiB`. Delegating settled the two on the unspaced form
+    /// (issue #1626), which is the one the rest of the benchmark output already
+    /// used; do not "fix" the missing space back in without moving
+    /// `format_bytes_ranges` and this type's test with it.
     pub fn total_size_str(&self) -> String {
         format_bytes(self.total_bytes())
     }
