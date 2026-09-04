@@ -37,6 +37,18 @@ The context manager (`with`) is the recommended form; it guarantees shutdown. Th
 
 Useful managed-mode arguments: `binary=`, `host=`/`port=` (forces TCP and binds there), `socket=` (an explicit Unix socket path), `api_key=`, `ctx_size=`, `n_predict=`, `alias=`, `warmup=`, `extra_args=[...]` (forwarded verbatim to `mlxcel serve`), and `startup_timeout=`.
 
+The last group (`ctx_size=`, `n_predict=`, `alias=`, `warmup=`, `extra_args=`) travels through `**server_kwargs`: any extra keyword argument configures the spawned `mlxcel serve` process rather than the client.
+
+```python
+with mlxcel.LLM(
+    "mlx-community/Qwen3-4B-4bit",
+    ctx_size=8192,
+    warmup=False,
+    extra_args=["--parallel", "1"],
+) as llm:
+    print(llm.generate("hello", max_tokens=32))
+```
+
 ## Connect mode
 
 Pass `base_url=` or `socket=` (but not a model) to talk to a server you started yourself. No subprocess is launched or managed.
