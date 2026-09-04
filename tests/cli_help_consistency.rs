@@ -1529,6 +1529,24 @@ fn long_flags_extracts_flag_tokens_and_ignores_separators_and_values() {
     assert!(long_flags("--").is_empty());
 }
 
+/// Every non-test `.rs` under `dir`, recursively. `src/commands` is flat
+/// today, so a `read_dir` would pass; it is walked anyway because the day a
+/// subcommand grows a submodule directory is the day a shallow scan starts
+/// silently covering less than it says it does, with a green test to say so.
+fn collect_command_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_command_sources(&path, out);
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.ends_with(".rs") && !name.ends_with("_tests.rs") {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
 fn every_flag_named_in_command_source_exists_in_some_help() {
     // Signature lines and alias annotations only, never prose: a flag named
@@ -1553,14 +1571,8 @@ fn every_flag_named_in_command_source_exists_in_some_help() {
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let commands_dir = manifest_dir.join("src/commands");
-    let mut sources: Vec<_> = std::fs::read_dir(&commands_dir)
-        .unwrap_or_else(|e| panic!("read {}: {e}", commands_dir.display()))
-        .map(|entry| entry.unwrap().path())
-        .filter(|p| {
-            let name = p.file_name().unwrap().to_string_lossy();
-            name.ends_with(".rs") && !name.ends_with("_tests.rs")
-        })
-        .collect();
+    let mut sources = Vec::new();
+    collect_command_sources(&commands_dir, &mut sources);
     sources.sort();
     assert!(
         !sources.is_empty(),
