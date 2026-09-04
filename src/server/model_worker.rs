@@ -3546,6 +3546,15 @@ impl StreamingDecodeState {
         }
     }
 
+    /// Record when the first token existed, if not already stamped. The
+    /// classic path stamps through [`on_token`](Self::on_token); the
+    /// speculative burst supplies its prefill end instead (issue #1592).
+    pub(crate) fn stamp_first_token(&mut self, at: Instant) {
+        if self.first_token_time.is_none() {
+            self.first_token_time = Some(at);
+        }
+    }
+
     pub fn on_token(&mut self, token_id: i32, tokenizer: &MlxcelTokenizer) -> Option<String> {
         if self.first_token_time.is_none() {
             self.first_token_time = Some(Instant::now());

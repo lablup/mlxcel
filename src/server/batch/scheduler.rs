@@ -137,9 +137,13 @@ impl BatchScheduler {
         // Drafter: lazy-load, take, compat-check, bind, the identical
         // contracts as `run_mtp_burst` (bind is NOT called inside the
         // generator; omitting it silently yields one seed-bonus token).
-        if let Err(e) = self.speculative_drafter_slot.ensure_loaded() {
-            self.fail_speculative_slice_start(seq, &e, burst_start);
-            return None;
+        match self.speculative_drafter_slot.ensure_loaded() {
+            Ok(Some(load)) => seq.created_at += load,
+            Ok(None) => {}
+            Err(e) => {
+                self.fail_speculative_slice_start(seq, &e, burst_start);
+                return None;
+            }
         }
         let Some(mut drafter) = self.speculative_drafter_slot.take() else {
             self.fail_speculative_slice_start(

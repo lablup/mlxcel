@@ -51,7 +51,20 @@ fn bench_config_total_bytes() {
 fn bench_config_total_size_str() {
     let config = TransferBenchConfig::for_model(32, 8, 128, 2048);
     let size = config.total_size_str();
-    assert_eq!(size, "256.0 MiB");
+    // Unspaced, and identical to calling the file-local formatter directly:
+    // that identity is what makes the delegation (issue #1626) observable, so
+    // an accidental re-inlining of a differently spelled copy fails here.
+    assert_eq!(size, "256.0MiB");
+    assert_eq!(size, format_bytes(config.total_bytes()));
+    // The `< 1024` arm the old inline copy did not have. It reported
+    // "0.0 KiB" for a sub-KiB total; the shared formatter reports bytes.
+    let tiny = TransferBenchConfig::for_model(1, 1, 1, 1);
+    assert_eq!(tiny.total_size_str(), format_bytes(tiny.total_bytes()));
+    assert!(
+        tiny.total_size_str().ends_with('B') && !tiny.total_size_str().contains("KiB"),
+        "sub-KiB totals must use the bytes arm, got {}",
+        tiny.total_size_str()
+    );
 }
 
 // --- generate_synthetic_entries ---

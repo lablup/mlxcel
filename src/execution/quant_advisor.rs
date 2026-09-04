@@ -26,6 +26,7 @@ use crate::execution::config_fields;
 use crate::execution::kv_cache_advisor::{
     KvCacheModeAdvice, advise_kv_cache_modes, print_kv_cache_advice,
 };
+use crate::execution::memory_estimate::format_bytes;
 
 // ── Model-size estimation ─────────────────────────────────────────────────────
 
@@ -284,19 +285,6 @@ pub fn advise_quantization(
         model_uses_bfloat16: uses_bf16,
         kv_cache_bytes: kv_bytes,
         kv_cache_advice,
-    }
-}
-
-/// Format a byte count as a human-readable string (GiB, MiB, or exact bytes).
-fn format_bytes(bytes: u64) -> String {
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const MIB: u64 = 1024 * 1024;
-    if bytes >= GIB {
-        format!("{:.2} GiB ({bytes} bytes)", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB ({bytes} bytes)", bytes as f64 / MIB as f64)
-    } else {
-        format!("{bytes} bytes")
     }
 }
 
