@@ -154,6 +154,7 @@ Detailed setup instructions are in [`docs/installation.md`](docs/installation.md
 Minimum:
 
 - Rust **1.97+** (project uses edition 2024)
+- CMake available on `PATH` on both platforms (required by the `mlxcel-core` and `sentencepiece-sys` build scripts)
 - macOS: Apple Silicon Mac on macOS Sonoma+; Xcode Command Line Tools
 - Linux: CUDA 13+ toolchain, OpenBLAS, LAPACK (see [`docs/installation.md`](docs/installation.md) for the package list)
 
