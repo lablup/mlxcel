@@ -107,14 +107,7 @@ impl TransferBenchConfig {
 
     /// Human-readable total size.
     pub fn total_size_str(&self) -> String {
-        let bytes = self.total_bytes();
-        if bytes >= 1024 * 1024 * 1024 {
-            format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        } else if bytes >= 1024 * 1024 {
-            format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-        } else {
-            format!("{:.1} KiB", bytes as f64 / 1024.0)
-        }
+        format_bytes(self.total_bytes())
     }
 }
 

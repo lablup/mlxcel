@@ -51,7 +51,7 @@ fn bench_config_total_bytes() {
 fn bench_config_total_size_str() {
     let config = TransferBenchConfig::for_model(32, 8, 128, 2048);
     let size = config.total_size_str();
-    assert_eq!(size, "256.0 MiB");
+    assert_eq!(size, "256.0MiB");
 }
 
 // --- generate_synthetic_entries ---
