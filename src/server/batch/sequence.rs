@@ -409,15 +409,26 @@ impl SequenceInfo {
     /// `finish_with_cache`, so the streamed prefill figures and the final
     /// frame's cannot disagree.
     pub(crate) fn mark_first_token(&mut self) {
+        self.mark_first_token_at(Instant::now());
+    }
+
+    /// [`mark_first_token`](Self::mark_first_token) with a supplied instant,
+    /// for a producer whose first token existed before it reached the
+    /// sequence: the speculative burst runs every verify round before
+    /// streaming, so it stamps the instant its target prefill finished
+    /// (issue #1592). The same instant is handed to the decode state, so the
+    /// streamed `prompt_ms` and the final `prompt_eval_ms` derive from one
+    /// origin. Clamped at zero if `at` precedes `created_at`.
+    pub(crate) fn mark_first_token_at(&mut self, at: Instant) {
         if self.first_token_time.is_some() {
             return;
         }
-        let now = Instant::now();
-        self.first_token_time = Some(now);
+        self.first_token_time = Some(at);
+        self.decode_state.stamp_first_token(at);
         let _ = self.response_tx.send(GenerateEvent::Prefill(PrefillStats {
             prompt_tokens: self.prompt_tokens.len(),
             cached_tokens: self.already_cached_tokens,
-            prompt_ms: now.duration_since(self.created_at).as_millis() as u64,
+            prompt_ms: at.saturating_duration_since(self.created_at).as_millis() as u64,
             processed: self.prompt_tokens.len(),
             first_token: true,
         }));
