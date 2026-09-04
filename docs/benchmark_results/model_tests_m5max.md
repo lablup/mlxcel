@@ -8,8 +8,8 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 |------|-------|
 | **Hardware** | MacBook Pro M5 Max, 128GB RAM |
 | **OS** | macOS 26.6.2 (build 25G83) |
-| **mlxcel version** | 0.6.0 as recorded, but the code is `v0.7.0-beta.1` (see below) |
-| **Source revision** | `b2ff1eee`, recorded in the `commit` column of every CSV from this campaign |
+| **mlxcel version** | 0.7.0-beta.1 (`mlxcel_version`) |
+| **Source revision** | `b2ff1eee` (`mlxcel_commit`); MLX pin `9a795735` (`mlx_commit`) |
 | **MLX version** | upstream main (via mlxcel-core; pinned commit `9a795735`) |
 | **mlx-lm baseline** | 0.31.3 (dev checkout https://github.com/ml-explore/mlx-lm, commit `ed1fca4`); not re-run for the 0.6.0 sweep, see note below |
 | **mlx-vlm baseline** | 0.4.4; not re-run for the 0.6.0 sweep |
@@ -18,23 +18,34 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **Test Date** | 2026-09-03/04 full text + VLM re-benchmark (0.6.0); prior: 2026-07-11/12 full sweep (0.4.0-rc.1), 2026-06-15 full sweep (0.2.1), 2026-05-27 full sweep (0.1.0) |
 | **Benchmark Status** | Full text + VLM sweep on mlxcel 0.6.0 using `mlxcel-bench-decode`: 175 text model dirs via `bench_decode.sh all` (161 with decode numbers) plus the VLM-mode pass `all --vlm` (77 with decode numbers). Both runs used `--cooldown 30 --big-cooldown 30`, which remain required on this host: without them the sweep accumulates enough heat to thermally throttle the mid-sweep Qwen cluster. Time Machine was stopped and its automatic backups disabled for the whole campaign, since a running backup starves both disk and unified-memory bandwidth; a 3.9 TB copy was in fact active when the campaign started. This round also raised the up-front memory guard to a 90 GB weight budget (`BENCH_MEM_OVERHEAD_FACTOR=1.209` against the 108.8 GB default limit), so `deepseek-v3-4bit` (99.96 GiB) now records `SKIP:oom_estimate` instead of consuming a slot and failing; `qwen3-coder-480b-a35b-instruct-4bit` (251.54 GiB) was already skipped. **Decode is comparable to the 0.4.0-rc.1 sweep; prefill is not comparable for every model.** Two correctness fixes landed after 2026-07-12 that change the measured *condition* rather than speed: #792 (aspect-ratio image processing for Pixtral/Mistral3, merged 2026-07-13) stopped upscaling every image to a fixed square, and the chat-template path now renders Llama's official template exactly. Affected rows therefore run at a much shorter prompt, and `prefill_tok_s` at the shorter length is arithmetically lower because the fixed per-call overhead is amortized over fewer tokens. See "Condition changes since 0.4.0-rc.1" below before reading any prefill delta. The `vs M1 Ultra` column is a **cross-version** ratio this round: 0.6.0 M5 Max decode over the 2026-07-12 **0.4.0-rc.1** M1 Ultra sweep (`benchmarks/metal_m1ultra_2026-07-12.csv`), because that host had not been re-measured at 0.6.0 when this campaign ran. It will be refreshed by the pending 0.6.0 M1 Ultra sweep. The `mlxcel vs mlx-lm` / `vs mlx-vlm` percentages further down still carry the 2026-05-18 Python baselines; those sweeps were not re-run this round. |
 
-### Why the CSVs say 0.6.0 on a v0.7.0-beta.1 branch
+### Which version each CSV column records
 
-The sweep ran at `b2ff1eee`, when `Cargo.toml` still read `0.6.0`, and the
-`mlx_version` column faithfully records that. The `v0.7.0-beta.1` tag
-(`64f5d9b4`) is exactly one commit later, and that commit changes no compiled
-source: the diff is manifests, `Cargo.lock`, `CHANGELOG.md`, `CITATION.cff`,
-`README.md`, `docs/environment-variables.md`, the recipes registry, and an issue
-template. Verify with:
+One column used to carry three different meanings across the corpus, which is
+why it has been split. Every CSV from this campaign records all of:
+
+| Column | Value here | Meaning |
+|--------|-----------|---------|
+| `mlxcel_version` | `0.7.0-beta.1` | this repository's crate version |
+| `mlxcel_commit` | `b2ff1eee` | the source revision measured, 8 characters, `-dirty` when tracked files were modified |
+| `mlx_commit` | `9a795735` | the pinned MLX C++ revision the binary links |
+
+The sweep ran at `b2ff1eee`, when `Cargo.toml` still read `0.6.0`. The rows are
+labelled `0.7.0-beta.1` anyway because the tag (`64f5d9b4`) is exactly one commit
+later and that commit changes no compiled source: the diff is manifests,
+`Cargo.lock`, `CHANGELOG.md`, `CITATION.cff`, `README.md`,
+`docs/environment-variables.md`, the recipes registry and an issue template.
+Verify with:
 
 ```bash
 git diff --name-only b2ff1eee v0.7.0-beta.1 | grep -E '\.(rs|cpp|metal|cu|h|hpp)$'
 ```
 
-which returns nothing. These are therefore the v0.7.0-beta.1 numbers, not stale
-0.6.0 ones. Sweeps taken from here on will record `0.7.0-beta.1` in
-`mlx_version`, so the `commit` column stays the reliable discriminator within
-the cycle.
+which returns nothing. `mlxcel_commit` pins the exact revision either way, so
+nothing is lost by the label.
+
+`mlx_commit` exists because an MLX pin bump changes kernels without moving
+either mlxcel field, so a sweep taken across one would otherwise look identical
+to a sweep taken before it.
 
 ## Legend
 

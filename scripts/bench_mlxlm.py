@@ -44,7 +44,7 @@ BIG_MODEL_GB = 20
 CSV_HEADER = (
     "model,model_path,prompt_tokens,generated_tokens,"
     "prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,"
-    "date,hardware,mlx_version,build_type,max_tokens,prompt"
+    "date,hardware,baseline_version,build_type,max_tokens,prompt"
 )
 
 

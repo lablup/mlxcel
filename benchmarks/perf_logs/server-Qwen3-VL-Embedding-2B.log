@@ -1,0 +1,30 @@
+2026-09-03T18:08:20.707746Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-09-03T18:08:20.707893Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-09-03T18:08:20.708534Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=4 n_parallel=4 prefill_chunk_size=512 max_kv_size=None
+2026-09-03T18:08:20.742370Z  INFO mlxcel::server::startup: Runtime device: Apple GPU (Metal)
+2026-09-03T18:08:20.742403Z  INFO mlxcel::server::startup: Wired memory limit: 107.5 GB
+2026-09-03T18:08:20.825788Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-09-03T18:08:20.825827Z  INFO mlxcel::server::startup: Tokenizer recognizes a think marker pair; defaulting chat_template kwarg `enable_thinking=true` (upstream PR #1114) think_start=Some("<think>") think_end=Some("</think>") think_start_tokens_len=1 think_end_tokens_len=1
+2026-09-03T18:08:20.832733Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=536870912 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-09-03T18:08:20.901763Z  INFO mlxcel::server::startup: Warming up model...
+2026-09-03T18:08:20.901788Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-09-03T18:08:20.901873Z ERROR mlxcel::server::model_provider::model_worker: Failed to load model: Qwen3-VL-Embedding (multimodal) is an embedding model served through /v1/embeddings (and `mlxcel embed`), not a text-generation model. Start mlxcel-server with -m <this checkpoint> or --embedding-model <path> to serve it; chat generation is not available from it.
+2026-09-03T18:08:20.901904Z  WARN mlxcel::server::startup: Warmup failed (non-fatal): the chat worker has exited; check the server log
+2026-09-03T18:08:20.901999Z  INFO mlxcel::server::startup: Loading embedding model for /v1/embeddings path=/Users/inureyes/.cache/mlxcel/models/Qwen/Qwen3-VL-Embedding-2B model_id=Qwen3-VL-Embedding-2B batch_size=16
+Converting 625 bf16 weight tensors to f16 for Apple Silicon fp16 optimization.
+Note: This model uses bf16 weights. On Apple Silicon, quantized models (4bit/8bit) are significantly faster. Consider using a quantized variant from mlx-community.
+2026-09-03T18:08:21.566438Z  INFO mlxcel::embeddings: embedding pooling mode: lasttoken source="1_Pooling/config.json"
+2026-09-03T18:08:21.640652Z  INFO mlxcel::embeddings: embedding model loaded model_type=Qwen3VLEmbedding dim=2048 max_length=8192 multi_vector=false pad_token_id=151643 vocab_size=151936
+2026-09-03T18:08:21.640705Z  INFO mlxcel::server::startup: Embedding model ready on /v1/embeddings model_type=Qwen3VLEmbedding dim=2048 max_length=8192 multi_vector=false supports_images=true batch_size=16
+2026-09-03T18:08:21.641034Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18091
+2026-09-03T18:08:21.641041Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-09-03T18:08:21.641046Z  INFO mlxcel::server::startup: Endpoints:
+2026-09-03T18:08:21.641050Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-09-03T18:08:21.641054Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-09-03T18:08:21.641058Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-09-03T18:08:21.641061Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-09-03T18:08:21.641064Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-09-03T18:08:21.641068Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-09-03T18:08:21.641078Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-09-03T18:08:21.641081Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-09-03T18:08:21.641084Z  INFO mlxcel::server::startup:   GET  /health               - Health check

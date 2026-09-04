@@ -1,4 +1,4 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len
 qwen2.5-0.5b-bf16,models/qwen2.5-0.5b-bf16,36,100,9.53,3778.49,479.08,208.73,2026-07-09,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
 llama-3.2-1b-4bit,models/llama-3.2-1b-4bit,99,31,12.43,7963.86,117.19,264.53,2026-07-09,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",
 llama-3.1-8b-4bit,models/llama-3.1-8b-4bit,98,100,74.37,1317.78,1932.88,51.74,2026-07-09,NVIDIA_GB10_122GB,0.4.0-rc.1,release,100,"Hello, how are you today?",

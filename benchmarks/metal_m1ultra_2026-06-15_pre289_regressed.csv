@@ -1,4 +1,4 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt
 Apertus-8B-Instruct-2509-4bit,./models/Apertus-8B-Instruct-2509-4bit/,66,40,216.72,304.54,611.04,65.46,2026-06-15,Apple_M1_Ultra_128GB,0.2.1,release,100,"Hello, how are you today?"
 aya-expanse-8b-4bit,./models/aya-expanse-8b-4bit/,8,100,85.53,93.53,956.26,104.57,2026-06-15,Apple_M1_Ultra_128GB,0.2.1,release,100,"Hello, how are you today?"
 aya-vision-8b,./models/aya-vision-8b/,8,87,81.59,98.05,820.07,106.09,2026-06-15,Apple_M1_Ultra_128GB,0.2.1,release,100,"Hello, how are you today?"

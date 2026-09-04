@@ -1,4 +1,4 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len
 gemma-4-12B-it-4bit,./models/mlx-community/gemma-4-12B-it-4bit/,20,27,2983.99,6.70,3142.68,8.59,2026-08-31,NVIDIA_Tesla_V100-PCIE-32GB_CUDA12.9_755GB,0.6.0,release,100,"Hello, how are you today?",
 gemma-4-12b-it-8bit,./models/mlx-community/gemma-4-12b-it-8bit/,20,41,3083.27,6.49,2356.64,17.40,2026-08-31,NVIDIA_Tesla_V100-PCIE-32GB_CUDA12.9_755GB,0.6.0,release,100,"Hello, how are you today?",
 gemma-4-26b-a4b-it-4bit,./models/mlx-community/gemma-4-26b-a4b-it-4bit/,20,26,2178.67,9.18,980.47,26.52,2026-08-31,NVIDIA_Tesla_V100-PCIE-32GB_CUDA12.9_755GB,0.6.0,release,100,"Hello, how are you today?",

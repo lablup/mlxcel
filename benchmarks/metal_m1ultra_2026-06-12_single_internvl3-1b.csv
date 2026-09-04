@@ -1,2 +1,2 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt
 internvl3-1b,models/internvl3-1b,36,37,31.54,1141.30,108.70,340.38,2026-06-12,Apple_M1_Ultra_128GB,0.1.4,release,100,"Hello, how are you today?"

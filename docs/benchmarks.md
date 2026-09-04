@@ -54,19 +54,34 @@ ladder, driven by `scripts/bench_embeddings.py`:
 - [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/embeddings-rerank-gb10-2026-08-26.md)
 - [Embedding and rerank throughput on M5 Max - 2026-09-04](benchmark_results/embeddings-rerank-m5max-2026-09-04.md)
 
-### Record the source revision, not just the version
+### Record every version the measurement depends on
 
-`bench_decode.sh` and `bench_embeddings.py` both write an 8-character `commit`
-column (`-dirty` appended when tracked files were modified). Do not drop it when
-transcribing the speculative or batched-serving tables by hand.
+A benchmark row depends on three moving parts, and one column used to carry all
+three depending on which script wrote it. They are now separate:
 
-The version column alone is not enough to date a measurement. `mlx_version`
-reads `Cargo.toml`, which does not move between releases, so every sweep taken
-across a whole development cycle records the same version however far `main`
-has travelled in between. A cross-hardware table assembled over weeks then
-cannot distinguish a hardware difference from a code difference. Before
-attributing a gap to hardware, check that the hosts share a `commit`; when they
-do not, say so where the table is published.
+| Column | Written by | Holds |
+|--------|-----------|-------|
+| `mlxcel_version` | `bench_decode.sh`, `bench_embeddings.py` | this repository's crate version, from `Cargo.toml` |
+| `mlxcel_commit` | the same two | the 8-character source revision measured, `-dirty` when tracked files were modified |
+| `mlx_commit` | the same two | the 8-character pinned MLX C++ revision the binary links |
+| `mlx_version` | historical CSVs only | the MLX library version, back when the column was hardcoded to it |
+| `baseline_version` | `bench_mlxlm.py` | the Python baseline, as `mlx-lm-<v>` or `mlx-vlm-<v>` |
+
+Do not drop these when transcribing the speculative or batched-serving tables by
+hand.
+
+Each column answers a question the others cannot. `mlxcel_version` reads
+`Cargo.toml`, which does not move between releases, so every sweep taken across a
+development cycle records the same value however far `main` has travelled;
+`mlxcel_commit` is what dates it. An MLX pin bump changes kernels without moving
+either, so `mlx_commit` is what catches that. Before attributing a cross-hardware
+gap to hardware, check that the hosts agree on all three; when they do not, say
+so where the table is published.
+
+Historical CSVs predating the split keep whichever name matches what they
+actually hold: 88 carry `mlxcel_version`, 15 pre-2026-06-12 files carry a real
+`mlx_version` (the column was hardcoded to the MLX release then), and 26 Python
+baseline files carry `baseline_version`.
 
 ## Suggested benchmark commands
 

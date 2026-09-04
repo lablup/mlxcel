@@ -50,7 +50,7 @@ MODELS = [
 
 CSV_HEADER = ["model", "model_path", "kind", "input_kind", "batch", "inputs", "prompt_tokens", "repeats",
               "p50_ms", "mean_ms", "min_ms", "inputs_per_s", "tokens_per_s", "load_ms", "date", "hardware",
-              "mlx_version", "build_type", "commit", "notes"]
+              "mlxcel_version", "build_type", "mlxcel_commit", "mlx_commit", "notes"]
 
 
 def detect_hardware():
@@ -199,7 +199,7 @@ def run_model(name, path, kind, args, meta, writer, fh):
                 toks.append(int(data.get("usage", {}).get("prompt_tokens", 0)))
             if not times:
                 writer.writerow([name, str(path), kind, input_kind, batch, batch, "", 0, "", "", "", "", "", f"{load_ms:.1f}",
-                                 meta["date"], meta["hardware"], meta["mlx_version"], meta["build_type"], meta["commit"], note])
+                                 meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], note])
                 fh.flush()
                 continue
             p50 = statistics.median(times)
@@ -208,13 +208,13 @@ def run_model(name, path, kind, args, meta, writer, fh):
             ptoks = toks[0]
             writer.writerow([name, str(path), kind, input_kind, batch, batch, ptoks, len(times), f"{p50:.2f}", f"{mean:.2f}",
                              f"{mn:.2f}", f"{batch / (p50 / 1000.0):.2f}", f"{ptoks / (p50 / 1000.0):.1f}" if ptoks else "",
-                             f"{load_ms:.1f}", meta["date"], meta["hardware"], meta["mlx_version"], meta["build_type"],
+                             f"{load_ms:.1f}", meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"],
                              meta["commit"], note])
             fh.flush()
             print(f"  {name} {input_kind} b={batch}: p50={p50:.1f}ms tokens={ptoks}", flush=True)
     except Exception as e:
         writer.writerow([name, str(path), kind, "", "", "", "", 0, "", "", "", "", "", "", meta["date"], meta["hardware"],
-                         meta["mlx_version"], meta["build_type"], meta["commit"], f"ERROR: {e}"])
+                         meta["mlxcel_version"], meta["build_type"], meta["commit"], f"ERROR: {e}"])
         fh.flush()
         print(f"[error] {name}: {e}", flush=True)
     finally:
@@ -242,9 +242,12 @@ def main():
     args.logdir.mkdir(parents=True, exist_ok=True)
     args.bin = str(Path(args.bin).resolve())
     commit = subprocess.run(["git", "rev-parse", "--short=8", "HEAD"], capture_output=True, text=True, cwd=args.cwd).stdout.strip()
+    # An MLX pin bump changes kernels without moving the mlxcel version or commit.
+    mlx_commit = subprocess.run(["scripts/ci/mlx_pinned_commit.sh"], capture_output=True, text=True, cwd=args.cwd).stdout.strip()[:8] or "unknown"
     version = subprocess.run([args.bin.replace("mlxcel-server", "mlxcel"), "--version"], capture_output=True, text=True).stdout.strip().split()[-1]
-    meta = {"date": time.strftime("%Y-%m-%d"), "hardware": detect_hardware(), "mlx_version": version,
-            "build_type": args.build_type, "commit": commit}
+    meta = {"date": time.strftime("%Y-%m-%d"), "hardware": detect_hardware(), "mlxcel_version": version,
+            "build_type": args.build_type, "commit": commit,
+            "mlx_commit": mlx_commit}
     out = Path(args.out)
     new = not out.exists()
     with open(out, "a", newline="") as fh:

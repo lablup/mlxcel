@@ -1,4 +1,4 @@
-model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlx_version,build_type,notes
+model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlxcel_version,build_type,notes
 gemma-4-12b-it-4bit,512,64,,430.18,1190.20,4374.57,14.63,11.60,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,op-at-a-time MLP (MLXCEL_COMPILED_QGELU_MLP=0)
 gemma-4-12b-it-4bit,512,64,,430.03,1190.61,4347.83,14.72,11.60,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,decode-gated compiled 8-bit MLP (#680; default on)
 gemma-4-12b-it-4bit,2048,64,,2119.14,966.43,4447.53,14.39,13.00,,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,op-at-a-time MLP (MLXCEL_COMPILED_QGELU_MLP=0)

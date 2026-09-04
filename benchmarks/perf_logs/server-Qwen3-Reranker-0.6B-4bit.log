@@ -1,0 +1,27 @@
+2026-09-03T18:08:59.731191Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-09-03T18:08:59.731541Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-09-03T18:08:59.732383Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=4 n_parallel=4 prefill_chunk_size=512 max_kv_size=None
+2026-09-03T18:08:59.831067Z  INFO mlxcel::server::startup: Runtime device: Apple GPU (Metal)
+2026-09-03T18:08:59.831144Z  INFO mlxcel::server::startup: Wired memory limit: 107.5 GB
+2026-09-03T18:09:00.237319Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-09-03T18:09:00.237452Z  INFO mlxcel::server::startup: Tokenizer recognizes a think marker pair; defaulting chat_template kwarg `enable_thinking=true` (upstream PR #1114) think_start=Some("<think>") think_end=Some("</think>") think_start_tokens_len=1 think_end_tokens_len=1
+2026-09-03T18:09:00.241724Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=536870912 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-09-03T18:09:00.619106Z  INFO mlxcel::server::model_provider: Chat generation is disabled: /Users/inureyes/.cache/mlxcel/models/mlx-community/Qwen3-Reranker-0.6B-4bit is served as a reranker on /v1/rerank, so the chat worker did not load a second copy of its weights
+2026-09-03T18:09:00.632677Z  INFO mlxcel::server::startup: Warming up model...
+2026-09-03T18:09:00.632799Z  WARN mlxcel::server::startup: Warmup failed (non-fatal): the chat worker has exited; check the server log
+2026-09-03T18:09:00.633329Z  INFO mlxcel::server::startup: Loading reranker for /v1/rerank path=/Users/inureyes/.cache/mlxcel/models/mlx-community/Qwen3-Reranker-0.6B-4bit model_id=Qwen3-Reranker-0.6B-4bit batch_size=0
+2026-09-03T18:09:01.029161Z  INFO mlxcel::rerank: Qwen3 generative reranker loaded yes_id=9693 no_id=2152 prefix_tokens=39 suffix_tokens=9 max_length=8192 pad_token_id=151643 batch_size=8
+2026-09-03T18:09:01.029259Z  INFO mlxcel::rerank: reranker loaded path=/Users/inureyes/.cache/mlxcel/models/mlx-community/Qwen3-Reranker-0.6B-4bit kind="generative_text" model_type=qwen3 max_length=8192 batch_size=8 supports_images=false
+2026-09-03T18:09:01.029355Z  INFO mlxcel::server::startup: Reranker ready on /v1/rerank kind="generative_text" model_type=qwen3 max_length=8192 batch_size=8 supports_images=false
+2026-09-03T18:09:01.030761Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18091
+2026-09-03T18:09:01.030812Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-09-03T18:09:01.030841Z  INFO mlxcel::server::startup: Endpoints:
+2026-09-03T18:09:01.030869Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-09-03T18:09:01.030897Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-09-03T18:09:01.030924Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-09-03T18:09:01.030948Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-09-03T18:09:01.030971Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-09-03T18:09:01.030992Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-09-03T18:09:01.031025Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-09-03T18:09:01.031047Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-09-03T18:09:01.031068Z  INFO mlxcel::server::startup:   GET  /health               - Health check

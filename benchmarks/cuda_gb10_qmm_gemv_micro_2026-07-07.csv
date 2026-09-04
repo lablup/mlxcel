@@ -1,4 +1,4 @@
-shape,bits,out_dim,in_dim,mb_per_call,us_per_call,gb_per_s,t_per_batch,rounds,date,hardware,mlx_version,build_type,notes
+shape,bits,out_dim,in_dim,mb_per_call,us_per_call,gb_per_s,t_per_batch,rounds,date,hardware,mlxcel_version,build_type,notes
 g12b_mlp_gate_8b,8,15360,3840,62.67,293.1,213.8,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b MLP gate/up as shipped (8-bit mixed checkpoint)
 g12b_mlp_down_8b,8,3840,15360,62.67,292.9,214.0,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,gemma-4-12b MLP down as shipped (8-bit)
 g12b_mlp_gate_4b,4,15360,3840,33.18,160.9,206.2,64,5,2026-07-07,NVIDIA_GB10_122GB,0.3.3,release,requantization counterfactual (uniform 4-bit)
