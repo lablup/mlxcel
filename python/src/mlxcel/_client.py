@@ -67,6 +67,46 @@ class LLM:
         transport: Optional[httpx.BaseTransport] = None,
         **server_kwargs: Any,
     ) -> None:
+        """Create a client in managed or connect mode.
+
+        Passing ``model`` selects managed mode: a local ``mlxcel serve`` process is
+        spawned and supervised, and the constructor blocks until it reports ready.
+        Passing ``base_url``, ``socket`` without a model, or ``transport`` selects
+        connect mode: no subprocess, the client talks to an already-running server.
+        Combining a model with ``base_url`` or ``transport`` raises
+        :class:`~mlxcel.errors.MlxcelError`.
+
+        Args:
+            model: Model to serve in managed mode (passed to ``mlxcel serve -m``): a
+                HuggingFace repo id or a local checkpoint path.
+            base_url: Base URL of a running server for connect mode, e.g.
+                ``"http://localhost:8080/v1"`` (a missing ``/v1`` suffix is added).
+            socket: Unix domain socket path. With ``model`` it is the bind path for the
+                spawned server (default: a short unique path under ``/tmp``); without
+                one it is the connect target.
+            api_key: API key sent as the bearer token on every request. In managed mode
+                it is also handed to the spawned server via the ``LLAMA_API_KEY``
+                environment variable (never argv).
+            binary: Path to (or name of) the ``mlxcel`` executable. Falls back to the
+                ``MLXCEL_BIN`` environment variable, then ``mlxcel`` on ``PATH``.
+                Managed mode only.
+            host: TCP host for the spawned server. Setting it (or ``port``) forces TCP
+                instead of the default Unix socket. Managed mode only.
+            port: TCP port for the spawned server; defaults to a free ephemeral port
+                when TCP is in use. Managed mode only.
+            timeout: httpx timeout for requests. Defaults to
+                :data:`~mlxcel._common.DEFAULT_TIMEOUT` (generous 600-second read so a
+                slow first token does not abort a long generation).
+            startup_timeout: Seconds to wait for the spawned server's ``/health`` to
+                report ready before raising
+                :class:`~mlxcel.errors.MlxcelTimeoutError`. Managed mode only.
+            transport: Injected httpx transport (e.g. ``httpx.MockTransport`` in
+                tests); implies connect mode.
+            **server_kwargs: Extra options for the spawned ``mlxcel serve`` process:
+                ``ctx_size``, ``n_predict``, ``alias``, ``warmup`` (map to the
+                matching CLI flags), ``extra_args`` (a list of raw CLI arguments
+                appended verbatim), and ``shutdown_grace``. Managed mode only.
+        """
         managed = is_managed(model, base_url, socket, transport)
 
         self._server: Optional[ManagedServer] = None

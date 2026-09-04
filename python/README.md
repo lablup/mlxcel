@@ -51,6 +51,20 @@ Async usage mirrors the sync API via `mlxcel.AsyncLLM` (`await llm.generate(...)
 
 On POSIX, managed mode defaults to a Unix domain socket for low-overhead local IPC. Keep socket paths short (`sun_path` is about 104 bytes on macOS, 108 on Linux); the default lives under `/tmp`. Pass `socket=` to override. Windows uses TCP.
 
+## Server options (`**server_kwargs`)
+
+In managed mode, extra keyword arguments to `LLM` / `AsyncLLM` are forwarded to the spawned `mlxcel serve` process: `ctx_size`, `n_predict`, `alias`, and `warmup` map to the matching CLI flags, `extra_args=[...]` appends raw CLI arguments verbatim, and `shutdown_grace` sets the termination grace period on close.
+
+```python
+with mlxcel.LLM(
+    "mlx-community/Qwen3-4B-4bit",
+    ctx_size=8192,
+    warmup=False,
+    extra_args=["--parallel", "1"],
+) as llm:
+    print(llm.generate("hello", max_tokens=32))
+```
+
 ## Sampling parameters
 
 `generate`, `stream`, `chat`, and `chat_stream` accept OpenAI sampling fields directly: `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `response_format`. Server-specific knobs (`top_k`, `min_p`, `repetition_penalty`, DRY settings) are forwarded in the request body; you can also pass an explicit `extra_body={...}`.
