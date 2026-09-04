@@ -39,9 +39,30 @@
 #   FAIL:bench           benchmark process exited with a non-OOM failure
 #   FAIL:no_output       benchmark succeeded but produced no decode numbers
 #   SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
+#   SKIP:duplicate_of=<name>  `all` mode only: this directory holds the same
+#                        checkpoint as an earlier directory <name>, which was
+#                        measured instead. See "Checkpoint dedup in `all`
+#                        mode" below; disable with --no-dedup.
 #
 # Both SKIP:oom_estimate and SKIP:oom share the SKIP: prefix, so downstream
 # consumers that filter on SKIP: treat them identically as capacity exclusions.
+#
+# Checkpoint dedup in `all` mode (issue #1615):
+#   `all` enumerates "$MODELS_DIR"/*/ and, by default, first collapses
+#   directories that are the same checkpoint under different names. Identity
+#   is sha256(config.json) plus the sorted (basename, byte size) of every
+#   *.safetensors shard -- cheap, no weight hashing, and it does NOT collapse
+#   checkpoints that differ only in quantization or dtype, because their
+#   config.json differs in the quantization block. Directories that resolve
+#   (via realpath) to the same physical path are also collapsed, so a symlink
+#   into a shared model store never doubles a row. A directory without a
+#   config.json is never grouped and is always measured, exactly as before
+#   this dedup pass existed. Within a duplicate group the first name in sort
+#   order is measured; the rest are emitted as SKIP:duplicate_of=<name> rows
+#   so the CSV row count still equals the directory count. The collapsed
+#   groups are printed to stderr before the first model is measured.
+#   --no-dedup restores the pre-#1615 behavior exactly (every directory
+#   measured, no alias rows). Single-model mode is never affected by dedup.
 #
 # Filename convention:
 #   {backend}_{hardware}_{YYYY-MM-DD}.csv                (text suite, 'all')
@@ -80,6 +101,9 @@ JIT_PREHEAT_TIMEOUT=600
 VLM_IMAGE="tests/fixtures/test_image.png"
 VLM_MODE=0
 NO_CHAT_TEMPLATE=0
+# Checkpoint dedup in `all` mode (issue #1615). Default ON; --no-dedup
+# restores the pre-#1615 behavior of measuring every directory unconditionally.
+NO_DEDUP=0
 OUTPUT=""
 SUFFIX=""
 DATE=$(date '+%Y-%m-%d')
@@ -298,6 +322,171 @@ is_oom_failure() {
 }
 
 # ---------------------------------------------------------------------------
+# Checkpoint dedup for `all` mode (issue #1615)
+# ---------------------------------------------------------------------------
+# sha256 of a small file. Tries sha256sum first (Linux, and any macOS host
+# with GNU coreutils on PATH), then shasum -a 256 (macOS ships this by
+# default). Returns non-zero, with no output, if neither is available -- the
+# caller treats that as "no identity key" rather than aborting the sweep.
+sha256_file() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# Resolve a directory to its canonical physical path, so a symlink into a
+# shared model store compares equal to the real directory it points at.
+# Prefers realpath (present on both macOS and Linux here); falls back to
+# `cd && pwd -P`, which resolves symlinks the same way and needs no
+# additional binary, for a minimal host without realpath on PATH.
+canonical_path() {
+  local dir="$1"
+  local resolved
+  if command -v realpath >/dev/null 2>&1; then
+    resolved=$(realpath "$dir" 2>/dev/null) && [[ -n "$resolved" ]] && { echo "$resolved"; return; }
+  fi
+  (cd "$dir" 2>/dev/null && pwd -P)
+}
+
+# Cheap checkpoint identity key for one candidate directory: sha256(config.json)
+# plus the sorted "basename:size" list of every *.safetensors shard. No weight
+# hashing, one small file read plus a stat per shard. Two checkpoints that
+# differ only in quantization or weight dtype have different config.json
+# content (the quantization block differs), so they never collapse. Prints
+# nothing (empty key) when config.json is absent or unreadable -- the caller
+# must treat an empty key as "never group this directory by content".
+checkpoint_identity_key() {
+  local dir="$1"
+  [[ -f "$dir/config.json" ]] || return 0
+  local cfg_hash
+  cfg_hash=$(sha256_file "$dir/config.json") || return 0
+  [[ -n "$cfg_hash" ]] || return 0
+  local f size
+  local shards=()
+  for f in "$dir"/*.safetensors; do
+    [[ -f "$f" ]] || continue
+    size=$(stat --format='%s' "$f" 2>/dev/null || stat -f'%z' "$f" 2>/dev/null || echo 0)
+    shards+=("$(basename "$f"):${size}")
+  done
+  local shard_list=""
+  if [[ "${#shards[@]}" -gt 0 ]]; then
+    shard_list=$(printf '%s\n' "${shards[@]}" | sort | tr '\n' '|')
+  fi
+  echo "cfg=${cfg_hash};shards=${shard_list}"
+}
+
+# Populates two parallel arrays covering every directory in "$MODELS_DIR"/*/,
+# in the same sorted glob order the `all` sweep already iterates:
+#   DEDUP_DIR[i]        the directory path (trailing slash, as the glob yields)
+#   DEDUP_ALIAS_OF[i]   "" if DEDUP_DIR[i] is the group survivor (measured),
+#                       otherwise the basename of the surviving directory this
+#                       one duplicates.
+# Grouping is two-tier: directories that resolve to the same canonical path
+# always collapse first (symlink into a shared store); remaining directories
+# then collapse by content identity key when both have one. A directory with
+# no config.json only ever collapses via the canonical-path tier, so it is
+# measured like every other ungrouped directory. Sort order means the first
+# directory encountered in a group is always its survivor.
+DEDUP_DIR=()
+DEDUP_ALIAS_OF=()
+
+compute_dedup_groups() {
+  DEDUP_DIR=()
+  DEDUP_ALIAS_OF=()
+  local seen_real_paths=() seen_real_owner=()
+  local seen_keys=() seen_key_owner=()
+  local dir name real key owner i
+
+  for dir in "$MODELS_DIR"/*/; do
+    [[ -d "$dir" ]] || continue
+    DEDUP_DIR+=("$dir")
+    name=$(basename "${dir%/}")
+    real=$(canonical_path "$dir")
+    [[ -n "$real" ]] || real="$dir"
+
+    owner=""
+    for ((i = 0; i < ${#seen_real_paths[@]}; i++)); do
+      if [[ "${seen_real_paths[$i]}" == "$real" ]]; then
+        owner="${seen_real_owner[$i]}"
+        break
+      fi
+    done
+
+    if [[ -z "$owner" ]]; then
+      seen_real_paths+=("$real")
+      seen_real_owner+=("$name")
+
+      key=$(checkpoint_identity_key "$dir")
+      if [[ -n "$key" ]]; then
+        for ((i = 0; i < ${#seen_keys[@]}; i++)); do
+          if [[ "${seen_keys[$i]}" == "$key" ]]; then
+            owner="${seen_key_owner[$i]}"
+            break
+          fi
+        done
+        if [[ -z "$owner" ]]; then
+          seen_keys+=("$key")
+          seen_key_owner+=("$name")
+        fi
+      fi
+    fi
+
+    DEDUP_ALIAS_OF+=("$owner")
+  done
+}
+
+# Prints every collapsed duplicate group to stderr, before any model runs.
+# A survivor with no aliases produces no output, so an `all` sweep over a
+# model store with no duplicates prints nothing here.
+print_dedup_groups() {
+  local printed_any=0
+  local i j owner_name alias_name has_aliases
+  for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
+    [[ -z "${DEDUP_ALIAS_OF[$i]}" ]] || continue
+    owner_name=$(basename "${DEDUP_DIR[$i]%/}")
+    has_aliases=0
+    for ((j = 0; j < ${#DEDUP_DIR[@]}; j++)); do
+      [[ "${DEDUP_ALIAS_OF[$j]}" == "$owner_name" ]] || continue
+      if [[ "$has_aliases" -eq 0 ]]; then
+        if [[ "$printed_any" -eq 0 ]]; then
+          >&2 echo "=== Checkpoint dedup: collapsed duplicate groups ==="
+          printed_any=1
+        fi
+        >&2 printf '  %s (measured)\n' "$owner_name"
+        has_aliases=1
+      fi
+      alias_name=$(basename "${DEDUP_DIR[$j]%/}")
+      >&2 printf '    <- %s (SKIP:duplicate_of=%s)\n' "$alias_name" "$owner_name"
+    done
+  done
+  if [[ "$printed_any" -eq 1 ]]; then
+    >&2 echo "===================================================="
+    >&2 echo ""
+  fi
+}
+
+# Emits a SKIP:duplicate_of row for a directory the dedup pass collapsed,
+# without invoking bench_one (the model is never loaded, prefilled, or
+# decoded). Mirrors the exact 17-field row shape bench_one's other SKIP:*
+# branches emit (see bench_one above), with the trailing status token set to
+# SKIP:duplicate_of=<owner> instead of SKIP:oom_estimate/SKIP:oom/etc.
+emit_duplicate_row() {
+  local dir="$1" owner="$2"
+  local model_name
+  model_name=$(basename "${dir%/}")
+  local prompt="$TEXT_PROMPT"
+  [[ "$VLM_MODE" -eq 1 ]] && prompt="$VLM_PROMPT"
+  local ptl="$PROMPT_TOKENS"
+  >&2 printf '>>> [skip]   %s duplicate of %s (SKIP:duplicate_of)\n' "$model_name" "$owner"
+  echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:duplicate_of=${owner}"
+}
+
+# ---------------------------------------------------------------------------
 usage() {
   cat <<'EOF'
 Usage: bench_decode.sh <model_path|all> [options]
@@ -338,6 +527,11 @@ Options:
   --pre-warm-settle N Settle sleep after the pre-warm pass (default: 30)
   --no-cooldown       Force --cooldown=0 and --big-cooldown=0, overriding
                       any earlier values on the same command line.
+  --no-dedup          Disable checkpoint dedup in `all` mode (default: dedup
+                      is on). Measures every directory under MODELS_DIR
+                      unconditionally, reproducing pre-#1615 behavior exactly
+                      (no SKIP:duplicate_of rows, no collapsed-group report).
+                      Has no effect on single-model mode, which never dedups.
   --help              Show this help
 
 Environment variables:
@@ -363,6 +557,8 @@ Result classifications (trailing CSV token):
   FAIL:bench           non-OOM process failure
   FAIL:no_output       process succeeded but produced no decode numbers
   SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
+  SKIP:duplicate_of=<name>  `all` mode only: same checkpoint as directory
+                       <name>, which was measured instead. --no-dedup disables.
 
 Filename convention:
   {backend}_{hardware}_{YYYY-MM-DD}.csv                text suite ('all')
@@ -561,6 +757,7 @@ while [[ $# -gt 0 ]]; do
                       BIG_MODEL_THRESHOLD_BYTES=$(( $2 * 1024 * 1024 * 1024 ))
                       shift 2 ;;
     --no-cooldown)    COOLDOWN_SECS=0; BIG_MODEL_COOLDOWN_SECS=0; shift ;;
+    --no-dedup)       NO_DEDUP=1; shift ;;
     --no-pre-warm)    PRE_WARM=0; shift ;;
     --pre-warm-settle) PRE_WARM_SETTLE_SECS="$2"; shift 2 ;;
     --help)           usage; exit 0 ;;
@@ -672,22 +869,52 @@ if [[ "$PRE_WARM" == "1" && "$MODEL_ARG" == "all" ]]; then
 fi
 
 if [[ "$MODEL_ARG" == "all" ]]; then
-  # First pass: run all models except known GPU-crash models
-  for dir in "$MODELS_DIR"/*/; do
-    [[ -d "$dir" ]] || continue
-    is_gpu_crash_model "$dir" && continue
-    result=$(bench_one "$dir")
-    emit "$result"
-    cooldown_after "$dir"
-  done
-  # Second pass: run known GPU-crash models last
-  for dir in "$MODELS_DIR"/*/; do
-    [[ -d "$dir" ]] || continue
-    is_gpu_crash_model "$dir" || continue
-    result=$(bench_one "$dir")
-    emit "$result"
-    cooldown_after "$dir"
-  done
+  if [[ "$NO_DEDUP" -eq 1 ]]; then
+    # --no-dedup: pre-#1615 behavior, byte-for-byte. Every directory is
+    # measured; no identity key is computed, no alias rows are emitted.
+    # First pass: run all models except known GPU-crash models
+    for dir in "$MODELS_DIR"/*/; do
+      [[ -d "$dir" ]] || continue
+      is_gpu_crash_model "$dir" && continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+    # Second pass: run known GPU-crash models last
+    for dir in "$MODELS_DIR"/*/; do
+      [[ -d "$dir" ]] || continue
+      is_gpu_crash_model "$dir" || continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+  else
+    compute_dedup_groups
+    print_dedup_groups
+    # First pass: measured (non-alias) models except known GPU-crash models,
+    # plus every alias row (order among aliases doesn't matter -- nothing
+    # runs for them). Second pass: measured GPU-crash models, run last.
+    for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
+      dir="${DEDUP_DIR[$i]}"
+      if [[ -n "${DEDUP_ALIAS_OF[$i]}" ]]; then
+        result=$(emit_duplicate_row "$dir" "${DEDUP_ALIAS_OF[$i]}")
+        emit "$result"
+        continue
+      fi
+      is_gpu_crash_model "$dir" && continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+    for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
+      dir="${DEDUP_DIR[$i]}"
+      [[ -z "${DEDUP_ALIAS_OF[$i]}" ]] || continue
+      is_gpu_crash_model "$dir" || continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+  fi
 else
   # Path validation already happened before $OUTPUT was generated.
   result=$(bench_one "$MODEL_ARG")

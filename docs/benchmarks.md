@@ -167,6 +167,43 @@ anything. `the_production_sampling_call_never_synchronizes` in
 same check: it enqueues a large chain of matmuls and asserts the sampler returns
 before that chain drains, so a regression fails a test rather than a benchmark.
 
+### Checkpoint dedup in `bench_decode.sh all` (issue #1615)
+
+`all` mode enumerates `"$MODELS_DIR"/*/`, and one checkpoint routinely sits
+under more than one directory name: an alias from a re-download, or a symlink
+into a shared model store. Without dedup, each alias is loaded, prefilled,
+decoded, and cooled down separately, and lands in the CSV as a distinct row.
+On the M1 Ultra host this repository is developed against, `models/mlx` holds
+15 duplicate groups covering 16 redundant directories and 124.5 GB of
+redundant weights, and the duplication was present in every committed sweep
+back to `metal_m5max_2026-04-04.csv`. Three of the groups reached
+`docs/benchmark_results/model_tests_m1ultra.md` and
+`docs/benchmark_results/model_tests_m5max.md` as separate table rows.
+
+`all` mode now dedups by checkpoint identity before the first model runs. The
+identity key is `sha256(config.json)` plus the sorted `(basename, byte size)`
+list of every `*.safetensors` shard: one small file read plus a `stat` per
+shard, no weight hashing. This deliberately does not collapse checkpoints
+that differ only in quantization or weight dtype, since their `config.json`
+differs in the `quantization` block; `bitnet-b1.58-2b-4t` and
+`bitnet-b1.58-2b-4t-4bit` hash to different keys on this host. A directory
+that resolves (via `realpath`, falling back to `cd && pwd -P`) to the same
+physical path as another candidate is also collapsed, so a symlink into a
+shared model store never doubles a row, independent of the content key. A
+directory with no `config.json` is never grouped by content and is always
+measured, exactly as it was before this dedup pass existed.
+
+Within a duplicate group the survivor is the first directory the sweep's own
+enumeration order reaches; every other member is skipped and recorded as its
+own CSV row with the trailing status `SKIP:duplicate_of=<survivor-name>`, so
+the row count for an `all` sweep still equals the directory count and the
+alias set stays visible in the CSV rather than silently disappearing. The
+collapsed groups are also printed to stderr once, before the first model is
+measured. `--no-dedup` restores the pre-#1615 behavior exactly: every
+directory is measured, no alias rows are emitted, and nothing is printed
+before the sweep starts. Single-model mode (`bench_decode.sh models/<name>`)
+never dedups; an explicit path always measures exactly the directory named.
+
 ## Fused decode kernels: the measure-then-keep gate (issue #905)
 
 The two fused decode kernels from issue #905, residual-add + RMSNorm and q/k
@@ -1063,3 +1100,9 @@ that describes methodology, exclusions, and known failures.
   image resolution, and prompt construction differ by family.
 - **CUDA numbers are not interchangeable across GPUs.** Publish the SM target
   and driver/toolkit versions with the result.
+- **Duplicate checkpoints in `models/` are a per-host artifact.** `bench_decode.sh
+  all` now dedups by checkpoint identity (see above), so the group a symlink or
+  a re-downloaded alias falls into depends on what the local `MODELS_DIR`
+  actually holds. A CSV row's survivor name is not a claim about which alias
+  is canonical upstream, only about which directory this particular sweep
+  measured.
