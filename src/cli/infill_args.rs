@@ -43,3 +43,7 @@ pub struct InfillArgs {
     #[arg(long = "spm-infill", action = clap::ArgAction::SetTrue)]
     pub spm_infill: bool,
 }
+
+#[cfg(test)]
+#[path = "infill_args_tests.rs"]
+mod tests;
