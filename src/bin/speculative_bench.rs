@@ -23,15 +23,21 @@
 //! in `docs/model_tests.md::Speculative drafters` and can be
 //! captured today against real on-disk checkpoints.
 //!
-//! ## MTP speculative path (active for the Gemma 4 Unified pair)
+//! ## MTP speculative path (Gemma 4 and Qwen 3.5 families)
 //!
-//! The `--kind mtp` path is wired for the Gemma 4 Unified target
-//! (`gemma4_unified`) + `gemma4_unified_assistant` drafter (issue #154). It
-//! loads the target, binds the MTP assistant drafter, drives
-//! `MtpGenerator` through `Gemma4UnifiedMtpTargetAdapter`, and records the
-//! real decode tok/s + speedup vs the no-drafter baseline. Mean acceptance
-//! length per verification round is emitted by the round loop's tracing
-//! diagnostics (`MtpRoundDiagnostics`) during the run.
+//! The `--kind mtp` path loads the target, binds the MTP drafter, drives
+//! `MtpGenerator` through the target family's `MtpTarget` adapter, and
+//! records the real decode tok/s + speedup vs the no-drafter baseline. Mean
+//! acceptance length per verification round is emitted by the round loop's
+//! tracing diagnostics (`MtpRoundDiagnostics`) during the run.
+//!
+//! Target selection mirrors the server burst path
+//! (`src/server/batch/speculative_burst.rs`): the Gemma 4 text, VLM and
+//! Unified wrappers pair with a `gemma4*_assistant` drafter (issue #154), and
+//! the Qwen 3.5 text, MoE and VLM wrappers pair with a `qwen3_5_mtp` head
+//! (issue #1165, Metal-only). Any other variant is reported as a row status
+//! naming the loaded variant and the supported families, not as a sweep
+//! abort.
 //!
 //! ## Scope still deferred
 //!
@@ -67,7 +73,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
 use mlxcel::tokenizer::MlxcelTokenizer;
-use mlxcel::{LanguageModel, SamplingConfig, initialize_runtime, load_model};
+use mlxcel::{LanguageModel, LoadedModel, SamplingConfig, initialize_runtime, load_model};
 use mlxcel_core::generate::{CxxGenerator, GenerationStats};
 use mlxcel_core::speculative::mtp::MtpAcceptanceSummary;
 
@@ -87,9 +93,10 @@ enum BenchKind {
     /// No-drafter baseline. The denominator of the speedup column. Always
     /// reachable today via `LanguageModel::forward`.
     None,
-    /// MTP speculative path (Gemma 4 assistant). Active for the Gemma 4
-    /// Unified target + `gemma4_unified_assistant` drafter (issue #154):
-    /// records real decode tok/s + speedup vs the no-drafter baseline.
+    /// MTP speculative path. Active for the Gemma 4 family +
+    /// `gemma4*_assistant` drafter (issue #154) and the Qwen 3.5 family +
+    /// `qwen3_5_mtp` head (issue #1165): records real decode tok/s + speedup
+    /// vs the no-drafter baseline.
     Mtp,
     /// DFlash speculative path (Qwen 3.5 DFlash). DEFERRED: requires
     /// (a) public cache-construction API on `Qwen35Model` and (b) lazy-bind
@@ -281,6 +288,24 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
         kind: BenchKind::Mtp,
         block_size: Some(4),
     },
+    // Qwen 3.8 27B family — baseline + `qwen3_5_mtp` head (#1165). Reachable
+    // since #1613 lifted the bench's Gemma-4-Unified-only target gate; the
+    // target loads as a Qwen 3.5 variant and pairs with the MTP head split
+    // from the same checkpoint family.
+    Pairing {
+        name: "Qwen 3.8 27B (no drafter)",
+        target_subdir: "qwen3.8-27b-4bit",
+        draft_subdir: None,
+        kind: BenchKind::None,
+        block_size: None,
+    },
+    Pairing {
+        name: "Qwen 3.8 27B + MTP head",
+        target_subdir: "qwen3.8-27b-4bit",
+        draft_subdir: Some("qwen3.8-27b-mtp-4bit"),
+        kind: BenchKind::Mtp,
+        block_size: Some(4),
+    },
 ];
 
 /// Resolve a model directory against the canonical `models/` layout,
@@ -288,18 +313,29 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
 /// `mlxcel-internal` checkout (`../mlxcel-internal/models/<name>`) so the
 /// binary can be run from a `git worktree`-created secondary working tree
 /// even though `target/` and `models/` live in the primary tree.
+///
+/// A third and fourth probe cover the `models/mlx/<name>` store layout
+/// (#1613). Hosts that keep every checkpoint directly under `models/` are
+/// unaffected because the flat probes still run first; hosts that group MLX
+/// checkpoints under `models/mlx/` would otherwise resolve nothing and every
+/// sweep row would fall through to the "checkpoint missing on disk" skip,
+/// producing a sweep that measures nothing while reporting no error.
 fn resolve_model_dir(name: &str) -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let primary = manifest_dir.join("models").join(name);
-    if primary.exists() {
-        return primary;
-    }
-    let shared = manifest_dir
-        .parent()
-        .map(|p| p.join("mlxcel-internal").join("models").join(name))
-        .unwrap_or_else(|| primary.clone());
-    if shared.exists() {
-        return shared;
+    let sibling_root = manifest_dir.parent().map(|p| p.join("mlxcel-internal"));
+    let candidates = [
+        Some(primary.clone()),
+        sibling_root.as_ref().map(|p| p.join("models").join(name)),
+        Some(manifest_dir.join("models").join("mlx").join(name)),
+        sibling_root
+            .as_ref()
+            .map(|p| p.join("models").join("mlx").join(name)),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.exists() {
+            return candidate;
+        }
     }
     primary
 }
@@ -384,17 +420,56 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
     Ok((stats.decode_time_ms, generated))
 }
 
-/// Run the MTP speculative path against a real on-disk Gemma 4 Unified
-/// target + `gemma4_unified_assistant` drafter (issue #154). Returns the
-/// decode wall-clock (ms) and the number of generated tokens so the caller
-/// can fill in a `Row`.
+/// MTP target families this bench can drive, named in the unsupported-variant
+/// error so an operator sees which checkpoints the harness accepts instead of
+/// an opaque discriminant. Kept in step with the server burst path's variant
+/// gate in `src/server/batch/speculative_burst.rs`.
+///
+/// The variant name in that error comes from `mlxcel::model_variant_label`,
+/// the same table the burst path uses. It covers the speculative-capable
+/// variants and reports every other one as `other`, so the message also names
+/// the target directory to identify the checkpoint.
+const MTP_SUPPORTED_FAMILIES: &str = "Gemma 4 (Gemma4, Gemma4VLM, Gemma4Unified) \
+     and Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM)";
+
+/// Whether [`run_mtp`] can build an `MtpTarget` adapter for this variant.
+///
+/// Checked before the drafter is loaded, the same ordering the server burst
+/// path uses, and for the same reason: an unsupported target must report the
+/// target problem rather than surface it later as a drafter message. Without
+/// the hoist a `validate_target_compat` hidden-size mismatch fires first and
+/// describes the drafter, which is not the actual fault. The match in
+/// [`run_mtp`] repeats this list because it also binds the inner model; the
+/// two must stay in step.
+fn mtp_target_supported(model: &LoadedModel) -> bool {
+    matches!(
+        model,
+        LoadedModel::Gemma4(_)
+            | LoadedModel::Gemma4VLM(_)
+            | LoadedModel::Gemma4Unified(_)
+            | LoadedModel::Qwen35(_)
+            | LoadedModel::Qwen35Moe(_)
+            | LoadedModel::Qwen35VLM(_)
+            | LoadedModel::Qwen35MoeVLM(_)
+    )
+}
+
+/// Run the MTP speculative path against a real on-disk target + MTP drafter.
+/// Returns the decode wall-clock (ms), the number of generated tokens and the
+/// run's acceptance summary so the caller can fill in a `Row`.
 ///
 /// Mirrors [`run_baseline`]: same runtime init, warm-up, and streaming
-/// progress, but drives the MTP round loop through
-/// [`Gemma4UnifiedMtpTargetAdapter`] + `MtpGenerator` instead of the plain
-/// `CxxGenerator`. The drafter is bound after a compatibility check that
-/// rejects a mismatched target↔drafter pair (the same guard the server burst
-/// path runs).
+/// progress, but drives the MTP round loop through the target family's
+/// `MtpTarget` adapter + `MtpGenerator` instead of the plain `CxxGenerator`.
+///
+/// Variant dispatch mirrors the server burst path
+/// (`src/server/batch/speculative_burst.rs`): the Gemma 4 text, VLM and
+/// Unified wrappers and the Qwen 3.5 text, MoE and VLM wrappers each select
+/// their own adapter, and any other variant fails with a message naming the
+/// loaded variant and the supported families (#1613). The drafter is bound
+/// against the `LoadedModel` enum's own `LanguageModel` impl, which delegates
+/// to the inner model, so only the adapter construction needs a match; the
+/// timed run itself lives once in [`run_mtp_timed`].
 ///
 /// `block_size` is the effective MTP block size (defaults to the drafter's
 /// configured 4 when the caller passes `None`).
@@ -405,14 +480,11 @@ fn run_mtp(
     max_tokens: usize,
     block_size: Option<u32>,
 ) -> Result<(f64, usize, Option<MtpAcceptanceSummary>)> {
-    use std::sync::atomic::AtomicBool;
-
-    use mlxcel::LoadedModel;
-    use mlxcel::models::gemma4_mtp_target::Gemma4UnifiedMtpTargetAdapter;
+    use mlxcel::models::gemma4_mtp_target::{
+        Gemma4MtpTargetAdapter, Gemma4UnifiedMtpTargetAdapter, Gemma4VLMtpTargetAdapter,
+    };
+    use mlxcel::models::qwen3_5_mtp_target::{Qwen35MtpTargetAdapter, Qwen35VLMtpTargetAdapter};
     use mlxcel_core::drafter::{DrafterKind, load_drafter};
-    use mlxcel_core::generate::LanguageModel as _;
-    use mlxcel_core::sampling::LogprobsConfig;
-    use mlxcel_core::speculative::mtp::MtpGenerator;
 
     let block_size = block_size.unwrap_or(4) as usize;
     if block_size < 2 {
@@ -430,17 +502,36 @@ fn run_mtp(
 
     let (model, tokenizer) = load_model(target_dir).context("load_model failed")?;
 
-    // The MTP bench targets the Gemma 4 Unified decode path. Accept the
-    // Gemma 4 family broadly so a future text-only/VLM pairing reuses this
-    // harness, but the issue's measured pair is the Unified 12B target.
-    let unified = match &model {
-        LoadedModel::Gemma4Unified(u) => u,
-        other => anyhow::bail!(
-            "MTP bench currently supports a Gemma 4 Unified target; \
-             load_model returned a different variant ({:?})",
-            std::mem::discriminant(other)
-        ),
-    };
+    // Qwen 3.5 MTP exactness rests on the Metal chain-parity gated-delta
+    // kernel, so the server burst path declines the pairing when Metal is
+    // unavailable. Mirror that here: a CUDA sweep records the reason as this
+    // row's status instead of emitting a number the runtime cannot vouch for.
+    if matches!(
+        &model,
+        LoadedModel::Qwen35(_)
+            | LoadedModel::Qwen35Moe(_)
+            | LoadedModel::Qwen35VLM(_)
+            | LoadedModel::Qwen35MoeVLM(_)
+    ) && !mlxcel_core::metal_is_available()
+    {
+        anyhow::bail!(
+            "MTP bench: Qwen 3.5 MTP requires the Metal backend (its temperature-0 \
+             exactness rests on the Metal chain-parity gated-delta kernel); target \
+             loaded as {}",
+            mlxcel::model_variant_label(&model)
+        );
+    }
+
+    // Reject an unsupported target before any drafter IO, so the operator sees
+    // which variant loaded and which families the harness drives instead of a
+    // drafter compat message about a hidden size.
+    anyhow::ensure!(
+        mtp_target_supported(&model),
+        "MTP bench: target {} loaded as {}, which has no MTP target adapter; \
+         supported families are {MTP_SUPPORTED_FAMILIES}",
+        target_dir.display(),
+        mlxcel::model_variant_label(&model)
+    );
 
     let prompt_tokens = encode_prompt(&tokenizer, prompt);
     eprintln!(
@@ -449,8 +540,13 @@ fn run_mtp(
         max_tokens
     );
 
-    // Load + compat-check + bind the MTP assistant drafter. The compat guard
-    // rejects a mismatched backbone_hidden_size / vocab pairing before bind.
+    // Bind against the enum's own `LanguageModel` impl, which delegates every
+    // method to the inner model, so the compat guard, the bind and the
+    // per-sequence release are all variant-agnostic.
+    let target_lm: &dyn LanguageModel = &model;
+
+    // Load + compat-check + bind the MTP drafter. The compat guard rejects a
+    // mismatched backbone_hidden_size / vocab pairing before bind.
     eprintln!("[bench/mtp] Loading drafter from {:?}", draft_dir);
     let (mut drafter, kind) =
         load_drafter(draft_dir, Some(DrafterKind::Mtp)).context("MTP drafter load failed")?;
@@ -458,11 +554,103 @@ fn run_mtp(
         kind == DrafterKind::Mtp,
         "drafter did not resolve to MTP (got {kind:?})"
     );
-    let target_lm: &dyn mlxcel_core::generate::LanguageModel = unified;
     drafter
         .validate_target_compat(target_lm)
         .context("MTP drafter incompatible with target")?;
     drafter.bind(target_lm).context("MTP drafter bind failed")?;
+
+    // Only the `MtpTarget` construction is variant-specific. Gemma 4 adapters
+    // take the block size because their rotating-cache buffer is armed from
+    // it; the Qwen 3.5 attention caches are plain growing KVCaches, so their
+    // adapters take none (same split as the burst path).
+    match &model {
+        LoadedModel::Gemma4(wrapper) => run_mtp_timed(
+            |seq| Gemma4MtpTargetAdapter::new_with_block_size(wrapper, Some(seq), block_size),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        LoadedModel::Gemma4VLM(vlm) => run_mtp_timed(
+            |seq| Gemma4VLMtpTargetAdapter::new_with_block_size(vlm, Some(seq), block_size),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        LoadedModel::Gemma4Unified(unified) => run_mtp_timed(
+            |seq| {
+                Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(seq), block_size)
+            },
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_mtp_timed(
+            |seq| Qwen35MtpTargetAdapter::new(qwen, Some(seq)),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => run_mtp_timed(
+            |seq| Qwen35VLMtpTargetAdapter::new(vlm, Some(seq)),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
+        // Unreachable while `mtp_target_supported` above covers the same
+        // list; kept so a variant added to one place and not the other fails
+        // with the same operator-facing message rather than a panic.
+        other => anyhow::bail!(
+            "MTP bench: target {} loaded as {}, which has no MTP target adapter; \
+             supported families are {MTP_SUPPORTED_FAMILIES}",
+            target_dir.display(),
+            mlxcel::model_variant_label(other)
+        ),
+    }
+}
+
+/// Warm-up burst + timed MTP run for one already-bound target adapter.
+///
+/// `MtpGenerator` is generic over `MtpTarget`, so the warm-up, the timed
+/// generate, the acceptance capture and the per-sequence release live here
+/// once and every `LoadedModel` arm in [`run_mtp`] calls it with its own
+/// adapter constructor instead of carrying a copy of the body (#1613).
+///
+/// `make_adapter` is invoked twice with two distinct sequence ids, once for
+/// the warm-up and once for the timed run, so the timed run never inherits
+/// the warm-up's per-sequence cache state.
+fn run_mtp_timed<T, F>(
+    make_adapter: F,
+    drafter: Box<dyn mlxcel_core::drafter::Drafter>,
+    target_lm: &dyn LanguageModel,
+    draft_dir: &Path,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    block_size: usize,
+) -> Result<(f64, usize, Option<MtpAcceptanceSummary>)>
+where
+    T: mlxcel_core::speculative::mtp::MtpTarget,
+    F: Fn(mlxcel_core::cache::SequenceId) -> T,
+{
+    use std::sync::atomic::AtomicBool;
+
+    use mlxcel_core::drafter::{DrafterKind, load_drafter};
+    use mlxcel_core::sampling::LogprobsConfig;
+    use mlxcel_core::speculative::mtp::MtpGenerator;
 
     let sampling = SamplingConfig::greedy();
     let logprobs = LogprobsConfig::default();
@@ -479,22 +667,18 @@ fn run_mtp(
             .bind(target_lm)
             .context("warm-up drafter bind")?;
         let warm_seq = mlxcel_core::cache::SequenceId::from_raw(99_000);
-        let warm_adapter =
-            Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(warm_seq), block_size);
-        let mut warm_gen = MtpGenerator::new(warm_adapter, warm_drafter, block_size);
-        let _ = warm_gen.generate(&prompt_tokens, 4, &sampling, &[], &cancel, &logprobs);
-        unified.release_sequence_state_by_id(warm_seq);
+        let mut warm_gen = MtpGenerator::new(make_adapter(warm_seq), warm_drafter, block_size);
+        let _ = warm_gen.generate(prompt_tokens, 4, &sampling, &[], &cancel, &logprobs);
+        target_lm.release_sequence_state_by_id(warm_seq);
         mlxcel_core::synchronize_default();
     }
 
     eprintln!("[bench/mtp] Timed run starts");
     let seq_id = mlxcel_core::cache::SequenceId::from_raw(99_001);
-    let adapter =
-        Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, Some(seq_id), block_size);
-    let mut generator = MtpGenerator::new(adapter, drafter, block_size);
+    let mut generator = MtpGenerator::new(make_adapter(seq_id), drafter, block_size);
     let started = Instant::now();
     let (tokens, _logprobs, stats) = generator.generate(
-        &prompt_tokens,
+        prompt_tokens,
         max_tokens,
         &sampling,
         &[],
@@ -509,7 +693,7 @@ fn run_mtp(
     // signal. The mean accepted length per round is
     // `accepted_draft_tokens / rounds`.
     let acceptance = generator.last_acceptance();
-    unified.release_sequence_state_by_id(seq_id);
+    target_lm.release_sequence_state_by_id(seq_id);
 
     let generated = tokens.len();
     let (acc_rate, acc_len, rounds) = acceptance
@@ -591,8 +775,8 @@ fn print_markdown_table(rows: &[Row]) {
         );
     }
     println!();
-    println!("Note: MTP rows (Gemma 4 Unified + gemma4_unified_assistant) are real");
-    println!("decode numbers captured on the host this binary ran on; the speedup");
+    println!("Note: MTP rows (Gemma 4 + gemma4*_assistant, Qwen 3.5 + qwen3_5_mtp) are");
+    println!("real decode numbers captured on the host this binary ran on; the speedup");
     println!("column is MTP tok/s ÷ the matching no-drafter baseline; acceptance rate");
     println!("and mean accepted length come from the run's MtpAcceptanceSummary. The");
     println!("DFlash row remains deferred, see `docs/benchmark_results/model_tests.md`.");
