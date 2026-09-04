@@ -22,7 +22,7 @@ Current source-of-truth data lives in `benchmarks/`:
 |-----|----------|------|------|
 | `metal_m5max_2026-09-03.csv` | M5 Max | 2026-09-03 (mlxcel 0.6.0, MLX pin `9a795735`, `--cooldown 30 --big-cooldown 30`, `BENCH_MEM_OVERHEAD_FACTOR=1.209` for a 90 GB weight budget; version-change full text re-benchmark, 175 dirs, 161 measured; 0 decode regressions vs 0.4.0-rc.1) | Text |
 | `metal_m5max_vlm_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0, MLX pin `9a795735`, same cooldowns and budget; version-change full VLM re-benchmark, 77 measured rows; Pixtral/Mistral3 image-token counts drop by design after #792) | VLM |
-| `metal_m5max_spec_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `speculative_bench --sweep --max-tokens 128`, 12 rows: 3 baselines, 3 measured Gemma 4 Unified 12B MTP rows at K=2/4/8, 3 DFlash deferred, 3 Gemma 4 31B MTP unsupported-target failures) | Speculative |
+| `metal_m5max_spec_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `speculative_bench --sweep --max-tokens 128`, 12 rows: 3 baselines, 3 measured Gemma 4 Unified 12B MTP rows at K=2/4/8, 3 DFlash deferred, 3 Gemma 4 31B MTP rows that the harness could not drive. That harness restriction was lifted by #1613; an M5 Max re-run against a binary carrying it has not been made) | Speculative |
 | `metal_m5max_batch_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_serving_concurrency.py` at `--parallel 4 --max-batch-prefill 4`, `--prompt-tokens 512 --max-tokens 128`; 3 models x B=1/2/4, 0 failed requests) | Batch |
 | `metal_m5max_embeddings_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_embeddings.py`, 18 of the 20-model roster present on disk, 90 cells, 0 failures; report in [`embeddings-rerank-m5max-2026-09-04.md`](embeddings-rerank-m5max-2026-09-04.md)) | Embeddings/Rerank |
 | `metal_m5max_2026-07-12.csv` | M5 Max | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30 --big-cooldown 30`; version-change full text re-benchmark, 175 dirs, 160 measured; no code regressions) | Text |
@@ -34,6 +34,7 @@ Current source-of-truth data lives in `benchmarks/`:
 | `metal_m5max_vlm_2026-05-20.csv` | M5 Max | 2026-05-20 (mlxcel 0.0.28, MLX 0.31.2; Gemma3n + Molmo v1 + Phi-3.5 vision + Gemma3 4B VLM entries) | VLM |
 | `pylm_m5max_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-lm 0.31.3 baseline; CSV date crossed midnight) | Text |
 | `pylm_m5max_vlm_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-vlm 0.4.4 baseline; CSV date crossed midnight) | VLM |
+| `metal_m1ultra_spec_2026-09-04.csv` | M1 Ultra | 2026-09-04 (mlxcel 0.7.0-beta.1, MLX pin `9a795735`; `speculative_bench --sweep --batch 1 --max-tokens 128`, 16 rows: 4 baselines, 9 measured MTP rows at K=2/4/8 across Gemma 4 31B, Gemma 4 Unified 12B and Qwen 3.8 27B, 3 DFlash deferred; first sweep with #1613's per-variant MTP dispatch) | Speculative |
 | `metal_m1ultra_2026-07-12.csv` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30`; version-change full text re-benchmark, 168 rows; decode median 98% vs mlx-lm, flat vs 0.3.3, nvfp4/minicpm-mxfp4 recovered) | Text |
 | `metal_m1ultra_vlm_2026-07-12.csv` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30`; version-change full VLM re-benchmark, 168 rows) | VLM |
 | `metal_m1ultra_2026-07-12_cooldown0.csv` + `_vlm_` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1; `--cooldown 0` pass of the same build, kept for the thermal-offset comparison: decode reads ~2% lower than the cooldown-30 canonical) | Text/VLM |
@@ -107,7 +108,8 @@ For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure;
 | VLM models tested (GB10, 2026-07-12) | 63 measured image rows + 1 carried (llama-4-scout, memory-gate skip); gemma-4-31b-it-nvfp4 image-input FAIL since fixed by #749 (0.4.0-rc.1) |
 | VLM models tested (M5 Max, 2026-09-04) | 77 measured VLM rows (0.6.0 cooldown-30 full VLM re-sweep). Pixtral/Mistral3 image-token counts fall sharply by design after #792 (aspect-ratio processing, no upscaling), so their prefill and decode are not comparable with the 0.4.0-rc.1 rows |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |
-| Speculative MTP on M5 Max (2026-09-04) | Gemma 4 Unified 12B + MTP assistant: 1.39x / **1.57x** / 1.55x at K=2/4/8, acceptance 55.6% / 35.0% / 34.6%. Gemma 4 31B MTP and all DFlash rows produce no number (harness limits, not missing checkpoints) |
+| Speculative MTP on M5 Max (2026-09-04) | Gemma 4 Unified 12B + MTP assistant: 1.39x / **1.57x** / 1.55x at K=2/4/8, acceptance 55.6% / 35.0% / 34.6%. Gemma 4 31B MTP produced no number on this run because the harness drove only a Gemma 4 Unified target; #1613 lifted that and the pairing is measured on M1 Ultra below, but this host has not been re-run. The DFlash rows stay deferred on their own blocker |
+| Speculative MTP on M1 Ultra (2026-09-04) | First sweep past the harness's Gemma-4-Unified-only target gate (#1613). Every MTP pairing reads below 1.00x on this Apple GPU generation: Gemma 4 31B + assistant 0.93x / 0.75x / 0.75x, Gemma 4 Unified 12B + assistant 0.94x / 0.74x / 0.76x, Qwen 3.8 27B + MTP head 0.91x / 0.69x / 0.37x at K=2/4/8. Acceptance is not the cause; see the matrix for the round-cost reading |
 | Batched serving on M5 Max (2026-09-04) | Aggregate scaling at B=4 vs B=1: qwen2.5-0.5b-bf16 3.17x, llama-3.1-8b-4bit 3.25x, qwen3-30b-a3b-4bit (MoE) 1.55x. 0 failed requests across all 9 cells |
 | Embedding / rerank on M5 Max (2026-09-04) | 18 checkpoints (11 text embedders, 2 VL embedders, 5 rerankers), 90 cells, 0 failures. The 2 `local/*-merged` multi-vector entries are merge artifacts and are not fetchable, so they stay unmeasured |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 24/74 (32%, 6-15 vs pinned 5-19 baseline) |
@@ -253,9 +255,14 @@ Invocations:
 
 These are the pairings whose target + drafter checkpoints are present on
 the M1 Ultra reference host. The no-drafter baseline rows are real numbers
-captured on the host; the speculative numerator (tok/s) rows remain a
-perf-bench follow-up, but **correctness parity is verified** end-to-end
-by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
+captured on the host; the speculative numerator (tok/s) rows were a perf-bench
+follow-up when this table was written, and **correctness parity is verified**
+end-to-end by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
+
+The follow-up has since been measured: the M1 Ultra matrix below carries real
+tok/s for every MTP pairing, and the catalog has grown a Qwen 3.8 27B baseline
+and MTP pairing (#1613). The table immediately below is kept as the older
+reading it was; read the matrix for current numbers.
 
 | Pairing                       | Kind   | B | block_size | tok/s | speedup vs no-drafter | status                                                                |
 |-------------------------------|--------|---|------------|-------|------------------------|-----------------------------------------------------------------------|
@@ -263,6 +270,61 @@ by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
 | Qwen 3.5 4B + DFlash          | dflash | 1 | 16         | —     | —                      | parity verified; tok/s row is a perf-bench follow-up                  |
 | Gemma 4 31B (no drafter)      | none   | 1 | —          | 20.4  | 1.00×                  | ok                                                                    |
 | Gemma 4 31B + MTP assistant   | mtp    | 1 | 4          | —     | —                      | parity verified; tok/s row is a perf-bench follow-up                  |
+
+### M1 Ultra pairing matrix (2026-09-04, mlxcel 0.7.0-beta.1)
+
+Measured on the Mac Studio M1 Ultra 128 GB (Metal) with
+`speculative_bench --sweep --batch 1 --max-tokens 128`. Greedy, decode-only
+tok/s, the `DEFAULT_PROMPT` (14 tokens under the Gemma tokenizer, 13 under
+Qwen's). Source CSV: `benchmarks/metal_m1ultra_spec_2026-09-04.csv`.
+
+This is the first sweep on any host to carry Gemma 4 31B and Qwen 3.8 27B MTP
+rows. #1613 replaced the harness's `LoadedModel::Gemma4Unified` match with
+per-variant adapter selection and added the Qwen 3.8 baseline and MTP pairing
+to `REACHABLE_PAIRINGS`, so the Gemma 4 31B pairing that reads as a blank in
+the M5 Max matrix below, and the Qwen 3.8 pairing that is absent from it
+entirely, are both measured here.
+
+| Pairing (M1 Ultra Metal)                | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
+|-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
+| Qwen 3.5 4B (no drafter)                | none | — | 106.1 | 1.00×                 | —          | —                 | ok |
+| Qwen 3.5 4B + DFlash                    | dflash | 2/4/8 | — | —                 | —          | —                 | DEFERRED (DFlash loader + public Qwen3NextCache API) |
+| Gemma 4 31B (no drafter)                | none | — | 19.9  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 2 | 18.4  | 0.93×                 | 74.0%      | 0.74              | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 4 | 14.9  | 0.75×                 | 52.9%      | 1.59              | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 8 | 14.9  | 0.75×                 | 52.9%      | 1.59              | ok (effective K=4) |
+| Gemma 4 Unified 12B (no drafter)        | none | — | 38.4  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 36.0  | 0.94×                 | 54.5%      | 0.55              | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 28.5  | 0.74×                 | 39.6%      | 1.19              | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 29.3  | 0.76×                 | 39.6%      | 1.19              | ok (effective K=4) |
+| Qwen 3.8 27B (no drafter)               | none | — | 24.9  | 1.00×                 | —          | —                 | ok |
+| Qwen 3.8 27B + MTP head                 | mtp  | 2 | 22.5  | 0.91×                 | 76.1%      | 0.76              | ok |
+| Qwen 3.8 27B + MTP head                 | mtp  | 4 | 17.2  | 0.69×                 | 50.4%      | 1.51              | ok |
+| Qwen 3.8 27B + MTP head                 | mtp  | 8 | 9.3   | 0.37×                 | 21.6%      | 1.51              | ok (proposals past the fourth are all rejected) |
+
+**Every MTP pairing reads below 1.00x on this host, and acceptance is not the
+reason.** Gemma 4 Unified 12B accepts *more* here than on M5 Max at the same K
+(39.6% and mean accepted length 1.19 at K=4, against 35.0% and 1.05), and still
+lands at 0.74x where M5 Max reads 1.57x. The difference is the verify round:
+`speculative-decoding-m1ultra-2026-08-19.md` measures a block-4 round at 2.70
+classic decode steps on M1 Ultra against 1.27 on M5 Max, so break-even needs
+about 2.7 emitted tokens per verify here and roughly 1.3 there. A mean accepted
+length near 1.2 emits about 2.2 per verify, which clears the M5 Max bar and not
+this one. This is the same reading behind the static `MLXCEL_ENABLE_MTP_B1`
+gate declining B=1 MTP on Apple GPU generation 13, so the rows confirm the
+shipped default rather than contradicting it.
+
+**K=8 splits by drafter family.** The Gemma 4 assistants clamp to their
+configured block size of 4: acceptance and mean accepted length are identical
+at K=4 and K=8, so the wider request is a no-op. The `qwen3_5_mtp` head honors
+it instead, proposing 7 per round against 3 at K=4 while accepting the same
+1.51, which drops acceptance to 21.6% and throughput to 9.3 tok/s (0.37x).
+K=4 or narrower is the operating point for that pairing.
+
+Two baselines appear in both this matrix and the older reachable-pairings table
+above: Qwen 3.5 4B at 106.1 tok/s against 95.4, and Gemma 4 31B at 19.9 against
+20.4. Those older rows were captured at a different mlxcel version and MLX pin,
+so read them as context rather than as a controlled run-over-run comparison.
 
 ### GB10 CUDA pairing matrix (2026-07-10, issue #638)
 
@@ -317,7 +379,7 @@ Measured on the MacBook Pro M5 Max (Metal) with
 | Qwen 3.5 4B (no drafter)                | none | — | 171.8 | 1.00×                 | —          | —                 | ok |
 | Qwen 3.5 4B + DFlash                    | dflash | 2/4/8 | — | —                 | —          | —                 | DEFERRED (DFlash loader + public Qwen3NextCache API) |
 | Gemma 4 31B (no drafter)                | none | — | 28.3  | 1.00×                 | —          | —                 | ok |
-| Gemma 4 31B + MTP assistant             | mtp  | 2/4/8 | — | —                   | —          | —                 | unsupported target (see below) |
+| Gemma 4 31B + MTP assistant             | mtp  | 2/4/8 | — | —                   | —          | —                 | harness target gate, lifted by #1613; re-run pending |
 | Gemma 4 Unified 12B (no drafter)        | none | — | 45.3  | 1.00×                 | —          | —                 | ok |
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 62.9  | 1.39×                 | 55.6%      | 0.56              | ok |
 | Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 70.9  | **1.57×**             | 35.0%      | 1.05              | ok |
@@ -334,19 +396,25 @@ K=4 is the operating point: K=8 buys nothing (34.6% acceptance, mean accepted
 length 1.07, so the extra proposals past the fourth are discarded) and reads
 marginally below K=4.
 
-**Two pairings on this host produce no number, for different reasons.** The
-`dflash` rows are the known harness deferral. The Gemma 4 31B MTP rows fail with
-`MTP bench currently supports a Gemma 4 Unified target; load_model returned a
-different variant`, because `run_mtp` hard-matches `LoadedModel::Gemma4Unified`
-and the 31B checkpoint loads as another variant. The `gemma-4-31b-it-assistant-bf16`
-drafter is present on disk, so this is a harness limitation rather than a missing
-checkpoint.
+**Two pairings on this host produced no number, for different reasons.** The
+`dflash` rows are the known harness deferral and still are. The Gemma 4 31B MTP
+rows failed with `MTP bench currently supports a Gemma 4 Unified target;
+load_model returned a different variant`, because `run_mtp` hard-matched
+`LoadedModel::Gemma4Unified` and the 31B checkpoint loads as another variant.
+The `gemma-4-31b-it-assistant-bf16` drafter was on disk throughout, so this was
+a harness limitation rather than a missing checkpoint. **That restriction is
+gone**: #1613 replaced the match with per-variant adapter selection, and the
+pairing is measured in the M1 Ultra matrix above. The three cells here stay
+empty because this M5 Max sweep predates the fix and the host has not been
+re-run; they are not a statement about the pairing.
 
-The same limitation covers a coverage gap worth recording: `qwen3.8-27b-mtp-4bit`
-and `qwen3.8-27b-mtp-bf16` are on disk and their target `qwen3.8-27b-4bit` is
-measured in the text sweep, but `REACHABLE_PAIRINGS` carries no Qwen 3.8 entry.
-Adding one would not help on its own, since the same `Gemma4Unified` match would
-reject the target. Extending MTP past Gemma 4 Unified is the prerequisite. Tracked as issue #1613.
+The same limitation covered a coverage gap: `qwen3.8-27b-mtp-4bit` and
+`qwen3.8-27b-mtp-bf16` were on disk and their target `qwen3.8-27b-4bit` was
+measured in the text sweep, but `REACHABLE_PAIRINGS` carried no Qwen 3.8 entry,
+and adding one alone would not have helped because the same `Gemma4Unified`
+match rejected the target. #1613 closed both halves: the catalog now carries a
+Qwen 3.8 27B baseline and an MTP pairing against the `qwen3_5_mtp` head, and
+both are measured in the M1 Ultra matrix above. This M5 Max sweep predates them.
 
 ### Deferred pairings
 
