@@ -33,7 +33,12 @@
 //!    `<root>//etc/passwd`, not `/etc/passwd`. A Rust [`Path::join`] with a
 //!    leading-slash relative part would replace the root instead of extending
 //!    it, so leading separators are stripped before joining. Getting this wrong
-//!    turns a compatibility feature into an arbitrary-file read.
+//!    turns a compatibility feature into an arbitrary-file read. That
+//!    concatenation stays the primary resolution here; issue #1612 adds a
+//!    fallback on top of it so an absolute path naming a file *inside* the root
+//!    resolves instead of being probed at `<root>/<absolute path>`, and one
+//!    naming a file outside the root is refused as an escape rather than as a
+//!    missing file. Both are recorded as divergences on the manifest entry.
 //! 2. **It never percent-decodes.** `%2e%2e` names a file literally called
 //!    `%2e%2e`. Not decoding is therefore both compatible and safe, and this
 //!    module additionally refuses the traversal-shaped escapes outright so the
@@ -73,7 +78,17 @@ pub(crate) enum MediaPathError {
     #[error("file path is not allowed: {path}")]
     NotAllowed { path: String },
     /// The path does not resolve to an existing file under the root.
-    #[error("file does not exist or cannot be opened: {path}")]
+    ///
+    /// The trailing clause is mlxcel's, not b10621's (issue #1612). Upstream
+    /// ends the sentence at the path, which leaves an operator whose file is
+    /// present and readable with no way to tell that the reference was probed
+    /// somewhere else. The candidate actually probed is logged at `debug`
+    /// rather than named here, because it discloses the configured root to
+    /// whoever sent the request.
+    #[error(
+        "file does not exist or cannot be opened: {path} (paths are resolved relative to the \
+         --media-path root)"
+    )]
     Unresolvable { path: String },
     /// The resolved path left the configured root.
     #[error("file path escapes the --media-path root: {path}")]
@@ -186,7 +201,8 @@ fn relative_component(path: &str) -> &str {
 /// `reference` is either the whole `file://...` URL or a bare relative path;
 /// both are resolved identically, because a bare path is what an operator who
 /// configured `--media-path` most naturally writes and neither may leave the
-/// root.
+/// root. An absolute path naming a file inside the root also resolves, through
+/// the fallback described on [`resolve_media_file_in`].
 ///
 /// # Errors
 ///
@@ -200,12 +216,44 @@ pub(crate) async fn resolve_media_file(reference: &str) -> Result<PathBuf, Media
     resolve_media_file_in(root, reference).await
 }
 
+/// The [`MediaPathError::Unresolvable`] refusal, with the probed candidate
+/// logged instead of returned.
+///
+/// The candidate spells out the configured root, so a client that can send a
+/// `file://` URL must not learn it from the error text. An operator reading the
+/// server log at `debug` gets the one fact the message cannot carry: where the
+/// reference was actually looked for (issue #1612).
+fn unresolvable(raw: &str, probed: &Path) -> MediaPathError {
+    tracing::debug!(
+        reference = raw,
+        probed = %probed.display(),
+        "local media reference did not resolve under the --media-path root"
+    );
+    MediaPathError::Unresolvable {
+        path: raw.to_owned(),
+    }
+}
+
 /// [`resolve_media_file`] against an explicit root.
 ///
 /// The root must already be canonical; [`crate::cli::multimodal_compat_args::resolve_media_root_path`]
 /// is what makes it so at startup. Separated from the global-reading wrapper so
 /// the containment rules can be tested against a temporary directory without
 /// installing a process-wide root.
+///
+/// Resolution has two steps. The first is upstream's: strip the leading
+/// separators and join onto the root, so b10621's `media_path + file_path` is
+/// reproduced exactly and every containment property already asserted here is
+/// unchanged. The second is mlxcel's (issue #1612): when that candidate does
+/// not resolve and the reference is itself absolute, the absolute path is
+/// canonicalized and put through the same containment check, so
+/// `file:///srv/media/cat.png` under `--media-path /srv/media` reads the file
+/// the operator named instead of failing at `<root>/srv/media/cat.png`. The
+/// fallback is gated strictly on [`Path::is_absolute`], so a relative reference
+/// can never canonicalize against the server's working directory, and it only
+/// ever converts a previous refusal into an acceptance or into a more accurate
+/// refusal: an absolute path outside the root reaches the same
+/// `starts_with(root)` test and surfaces as [`MediaPathError::Escape`].
 pub(crate) async fn resolve_media_file_in(
     root: &Path,
     reference: &str,
@@ -219,25 +267,27 @@ pub(crate) async fn resolve_media_file_in(
         });
     }
 
-    let canonical = tokio::fs::canonicalize(root.join(relative))
-        .await
-        .map_err(|_| MediaPathError::Unresolvable {
-            path: raw.to_owned(),
-        })?;
+    let joined = root.join(relative);
+    let canonical = match tokio::fs::canonicalize(&joined).await {
+        Ok(canonical) => canonical,
+        Err(_) if Path::new(raw).is_absolute() => tokio::fs::canonicalize(raw)
+            .await
+            .map_err(|_| unresolvable(raw, &joined))?,
+        Err(_) => return Err(unresolvable(raw, &joined)),
+    };
     // The root was canonicalized at startup, so this prefix test compares two
     // fully resolved paths: a symlink anywhere in `relative` has already been
-    // followed and shows up here as a canonical path outside the root.
+    // followed and shows up here as a canonical path outside the root. The
+    // absolute fallback lands here too, which is why it needs no containment
+    // path of its own.
     if !canonical.starts_with(root) {
         return Err(MediaPathError::Escape {
             path: raw.to_owned(),
         });
     }
-    let metadata =
-        tokio::fs::metadata(&canonical)
-            .await
-            .map_err(|_| MediaPathError::Unresolvable {
-                path: raw.to_owned(),
-            })?;
+    let metadata = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|_| unresolvable(raw, &canonical))?;
     if !metadata.is_file() {
         return Err(MediaPathError::NotRegular {
             path: raw.to_owned(),
