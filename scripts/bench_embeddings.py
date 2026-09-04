@@ -103,15 +103,18 @@ def wait_ready(port, proc, timeout=900):
 def _image_data_uri():
     """The fixture as a base64 `data:` URI.
 
-    A `file://` URL also works, but only when it is relative to the server's
-    --media-path root: an absolute path is concatenated onto the root rather
-    than replacing it (llama-server b10621 compatibility, pinned by
-    `an_absolute_looking_path_is_concatenated_not_joined`), so the absolute
-    form this harness used to send was probed under the root and reported as
-    "file does not exist or cannot be opened". A data URI is used instead
-    because it needs no server flag, which keeps the ladder reproducible on a
-    host where --media-path was never set. The fixture is 679 bytes, so
-    inlining it costs nothing.
+    A `file://` URL works too, in either spelling. Until #1612 only the
+    relative form resolved: an absolute path was concatenated onto the
+    --media-path root rather than replacing it (llama-server b10621
+    compatibility, pinned by `an_absolute_looking_path_is_concatenated_not_joined`),
+    so the absolute form this harness used to send was probed under the root
+    and reported as "file does not exist or cannot be opened". #1612 kept that
+    concatenation primary and added a fallback that canonicalizes an absolute
+    reference and puts it through the same containment check, so both spellings
+    now read the fixture. A data URI is still used because it needs no server
+    flag at all, which keeps the ladder reproducible on a host where
+    --media-path was never set. The fixture is 679 bytes, so inlining it costs
+    nothing.
     """
     import base64
     return "data:image/png;base64," + base64.b64encode(IMAGE.read_bytes()).decode()
@@ -171,9 +174,10 @@ def run_model(name, path, kind, args, meta, writer, fh):
         cmd = [args.bin, "-m", str(path), "--reranker-model", str(path), "--host", "127.0.0.1", "--port", str(port)]
     else:
         cmd = [args.bin, "-m", str(path), "--host", "127.0.0.1", "--port", str(port)]
-    # Kept so a relative `file://` URL would resolve if the image request shape
-    # is ever switched back from the data URI in `_image_data_uri`. Since #1481
-    # the server refuses `file://` media unless a root is allow-listed.
+    # Kept so a `file://` URL would resolve if the image request shape is ever
+    # switched back from the data URI in `_image_data_uri`. Since #1481 the
+    # server refuses `file://` media unless a root is allow-listed, and since
+    # #1612 either the relative or the absolute spelling resolves under it.
     cmd += ["--media-path", str(IMAGE.parent)]
     print(f"[start] {name}: {' '.join(cmd)}", flush=True)
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=args.cwd)
