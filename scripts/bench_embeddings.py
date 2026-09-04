@@ -53,6 +53,31 @@ CSV_HEADER = ["model", "model_path", "kind", "input_kind", "batch", "inputs", "p
               "mlx_version", "build_type", "commit", "notes"]
 
 
+def detect_hardware():
+    """Host string for the CSV `hardware` column, matching bench_decode.sh.
+
+    Was hardcoded to the GB10 box, which silently mislabels every CSV produced
+    on another host and breaks cross-hardware comparison after the fact.
+    """
+    import platform
+    if platform.system() == "Darwin":
+        chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                              capture_output=True, text=True).stdout.strip()
+        mem = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                             capture_output=True, text=True).stdout.strip()
+        gb = f"{round(int(mem) / 1024**3)}GB" if mem.isdigit() else ""
+        return f"{chip.replace(' ', '_')}_{gb}".strip("_") or "unknown"
+    name = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+                           "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
+    if name:
+        first = name.splitlines()[0]
+        gpu, _, total = first.partition(",")
+        mib = "".join(ch for ch in total if ch.isdigit())
+        gb = f"{round(int(mib) / 1024)}GB" if mib else ""
+        return f"{gpu.strip().replace(' ', '_')}_{gb}".strip("_")
+    return "unknown"
+
+
 def post(url, body, timeout=600):
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.perf_counter()
@@ -75,12 +100,29 @@ def wait_ready(port, proc, timeout=900):
     raise RuntimeError("server did not become ready")
 
 
+def _image_data_uri():
+    """The fixture as a base64 `data:` URI.
+
+    A `file://` URL also works, but only when it is relative to the server's
+    --media-path root: an absolute path is concatenated onto the root rather
+    than replacing it (llama-server b10621 compatibility, pinned by
+    `an_absolute_looking_path_is_concatenated_not_joined`), so the absolute
+    form this harness used to send was probed under the root and reported as
+    "file does not exist or cannot be opened". A data URI is used instead
+    because it needs no server flag, which keeps the ladder reproducible on a
+    host where --media-path was never set. The fixture is 679 bytes, so
+    inlining it costs nothing.
+    """
+    import base64
+    return "data:image/png;base64," + base64.b64encode(IMAGE.read_bytes()).decode()
+
+
 def image_item():
-    return {"type": "image_url", "image_url": {"url": f"file://{IMAGE}"}}
+    return {"type": "image_url", "image_url": {"url": _image_data_uri()}}
 
 
 def rerank_doc_image():
-    return {"image_url": f"file://{IMAGE}"}
+    return {"image_url": _image_data_uri()}
 
 
 def embed_body(kind, input_kind, batch):
@@ -129,6 +171,10 @@ def run_model(name, path, kind, args, meta, writer, fh):
         cmd = [args.bin, "-m", str(path), "--reranker-model", str(path), "--host", "127.0.0.1", "--port", str(port)]
     else:
         cmd = [args.bin, "-m", str(path), "--host", "127.0.0.1", "--port", str(port)]
+    # Kept so a relative `file://` URL would resolve if the image request shape
+    # is ever switched back from the data URI in `_image_data_uri`. Since #1481
+    # the server refuses `file://` media unless a root is allow-listed.
+    cmd += ["--media-path", str(IMAGE.parent)]
     print(f"[start] {name}: {' '.join(cmd)}", flush=True)
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=args.cwd)
     try:
@@ -197,7 +243,7 @@ def main():
     args.bin = str(Path(args.bin).resolve())
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=args.cwd).stdout.strip()
     version = subprocess.run([args.bin.replace("mlxcel-server", "mlxcel"), "--version"], capture_output=True, text=True).stdout.strip().split()[-1]
-    meta = {"date": time.strftime("%Y-%m-%d"), "hardware": "NVIDIA_GB10_122GB", "mlx_version": version,
+    meta = {"date": time.strftime("%Y-%m-%d"), "hardware": detect_hardware(), "mlx_version": version,
             "build_type": args.build_type, "commit": commit}
     out = Path(args.out)
     new = not out.exists()
