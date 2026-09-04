@@ -194,7 +194,12 @@ directory with no `config.json` is never grouped by content and is always
 measured, exactly as it was before this dedup pass existed.
 
 Within a duplicate group the survivor is the first directory the sweep's own
-enumeration order reaches; every other member is skipped and recorded as its
+enumeration order reaches. That order is the glob over paths carrying a
+trailing slash, so where one name is a prefix of another the longer name wins:
+`pixtral-12b-4bit` survives over `pixtral-12b`, and `qwen2.5-7b-4bit` over both
+`qwen2.5-7b` and `qwen2.5-7b-instruct-4bit`. This is deterministic and stable,
+and it happens to keep the names the published comparison tables already use.
+Every other member is skipped and recorded as its
 own CSV row with the trailing status `SKIP:duplicate_of=<survivor-name>`, so
 the row count for an `all` sweep still equals the directory count and the
 alias set stays visible in the CSV rather than silently disappearing. The

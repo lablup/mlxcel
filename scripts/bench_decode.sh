@@ -57,9 +57,12 @@
 #   (via realpath) to the same physical path are also collapsed, so a symlink
 #   into a shared model store never doubles a row. A directory without a
 #   config.json is never grouped and is always measured, exactly as before
-#   this dedup pass existed. Within a duplicate group the first name in sort
-#   order is measured; the rest are emitted as SKIP:duplicate_of=<name> rows
-#   so the CSV row count still equals the directory count. The collapsed
+#   this dedup pass existed. Within a duplicate group the survivor is the
+#   first directory the sweep's own enumeration order reaches, which is the
+#   glob over paths carrying a trailing slash: where one name is a prefix of
+#   another the LONGER name wins, so pixtral-12b-4bit survives over
+#   pixtral-12b. The rest are emitted as SKIP:duplicate_of=<name> rows so the
+#   CSV row count still equals the directory count. The collapsed
 #   groups are printed to stderr before the first model is measured.
 #   --no-dedup restores the pre-#1615 behavior exactly (every directory
 #   measured, no alias rows). Single-model mode is never affected by dedup.
