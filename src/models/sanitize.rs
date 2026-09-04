@@ -1017,17 +1017,18 @@ fn tensor_view_to_array(
                 // from_f32 -> astype(bf16/f16) loader subgraph for every
                 // tensor use.
                 mlxcel_core::from_bytes_f16(tensor.data(), &shape, true)
-            } else if bf16_to_f16_at_load(false, None) {
-                // Fourth site that touches the load-time dtype, and the only one
-                // that picks a leaf dtype during materialization rather than
-                // converting a finished WeightMap. Producing f16 directly here
-                // avoids a bf16 leaf that `convert_bf16_weights` would rewrite a
-                // moment later; the end state is the same either way, so this is
-                // an efficiency choice, not a correctness one. `is_quantized` is
-                // passed as false because at this point the decision is per
-                // tensor and the packed planes never reach this arm.
+            } else if should_convert_bf16_to_f16() {
+                // Deliberately NOT `bf16_to_f16_at_load`, even though this is a
+                // load-time dtype choice. This function has no `config`, so it
+                // cannot honor the f16-fragile family exception, and calling the
+                // shared policy from here would convert an Apertus or BitNet
+                // checkpoint on pre-Ampere that the policy means to leave alone.
                 //
-                // Policy itself lives in `bf16_to_f16_at_load`; see its doc.
+                // The Apple Silicon predicate is safe here because it depends on
+                // nothing but the host. On CUDA this arm leaves a bf16 leaf and
+                // `convert_bf16_weights` applies the real policy a moment later,
+                // with the config in hand. That costs one extra pass over the
+                // bf16 tensors and is the correct trade.
                 let values = tensor
                     .data()
                     .chunks_exact(std::mem::size_of::<u16>())
@@ -1794,19 +1795,16 @@ fn bf16_conversion_reason() -> &'static str {
 }
 
 pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
-    let fragile = config.is_some_and(is_f16_fragile_family);
     if pre_ampere_cuda() {
-        return !env_flag_disabled("MLXCEL_CUDA_F16_NORMALIZE") && !fragile;
+        // Quantized checkpoints included, unlike every other arm: the packed
+        // planes are u32 and do not move, so only the bf16 side-data converts,
+        // and that side-data is what the pre-Ampere penalty is paid on.
+        return cuda_f16_normalize_for_config(config);
     }
-    if mlxcel_core::hardware::get_hardware().silicon_gen
-        != mlxcel_core::hardware::AppleSiliconGen::Unknown
-    {
+    if should_convert_bf16_to_f16() {
         return !is_quantized;
     }
-    mlxcel_core::cuda_is_available()
-        && env_flag_enabled("MLXCEL_CUDA_F16_NORMALIZE")
-        && !is_quantized
-        && !fragile
+    cuda_f16_normalize_for_config(config) && !is_quantized
 }
 
 /// True when opt-in CUDA load-time bf16 -> f16 normalization applies to this
