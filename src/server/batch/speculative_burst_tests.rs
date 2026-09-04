@@ -2185,3 +2185,44 @@ fn ensure_loaded_on_a_resident_drafter_reports_no_load() {
     slot.restore_unused(Box::new(TrackingMockDrafter::new(Vec::new(), events)));
     assert_eq!(slot.ensure_loaded(), Ok(None));
 }
+
+/// The classic path calls `mark_first_token()` (no instant) in
+/// `scheduler/prefill.rs` and only afterwards feeds the prefill's token into
+/// `decode_state.on_token`. Since `mark_first_token` now delegates to
+/// `mark_first_token_at`, that call also stamps the decode state, which is
+/// what makes the streamed snapshot and the final frame share one origin on
+/// the classic path too (#1441). Pinning it here because #1592 changed the
+/// classic path in exactly this one way and covered only the burst path: a
+/// later reordering that let `on_token` win the stamp would move classic
+/// `prompt_eval_ms` with nothing to catch it.
+#[test]
+fn classic_mark_first_token_stamps_the_decode_state_and_on_token_does_not_restamp() {
+    use std::time::Duration;
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let (mut seq, rx) = backdated_sequence(Duration::from_millis(200));
+
+    // Classic ordering: publish the snapshot, then stream the prefill token.
+    seq.mark_first_token();
+    std::thread::sleep(Duration::from_millis(60));
+    seq.decode_state.on_token(5, &tokenizer);
+    let result = seq.take_generation_result(&tokenizer, 0, None);
+
+    let streamed = match rx.try_recv() {
+        Ok(GenerateEvent::Prefill(stats)) => stats,
+        _ => panic!("expected the prefill snapshot first"),
+    };
+    assert_eq!(
+        streamed.prompt_ms, result.prompt_eval_ms,
+        "classic path: the streamed snapshot and the final frame must share one origin (#1441)"
+    );
+    assert!(
+        (200..230).contains(&result.prompt_eval_ms),
+        "prompt_eval_ms must come from the mark, not from the later on_token, got {}",
+        result.prompt_eval_ms
+    );
+    assert!(
+        result.generation_only_ms >= 55,
+        "the gap between the mark and on_token belongs to generation, got {}",
+        result.generation_only_ms
+    );
+}
