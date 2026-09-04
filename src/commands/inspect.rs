@@ -25,8 +25,14 @@
 use anyhow::{Result, anyhow};
 
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::resolve_model_source_with_override;
-use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_estimate};
+use mlxcel::downloader::{
+    ModelSourceOptions, resolve_model_source_quietly_with_options,
+    resolve_model_source_with_options,
+};
+use mlxcel::memory_estimate::{
+    InspectReport, QuantHint, estimate_total_memory, format_estimate, inspect_family_slug,
+    inspect_per_slot_overhead_bytes, raw_model_type_from_config,
+};
 use mlxcel_core::cache::KVCacheMode;
 
 use crate::InspectArgs;
@@ -36,15 +42,23 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     // Resolve `-m` into a concrete model directory (epic #92, issue #94): an
     // existing path is used as-is (byte-identical to the pre-#94 behavior),
     // while an `owner/name` HuggingFace repo-id is reused from the legacy CWD /
-    // HF cache / mlxcel store or auto-downloaded into the mlxcel store. On a
-    // miss-and-error this returns a clear message; on success `args.model` is
-    // guaranteed to name an existing snapshot, so the downstream estimator
-    // path is unchanged.
-    args.model = resolve_model_source_with_override(
-        &args.model,
-        args.models_dir.as_deref(),
-        args.revision.as_deref(),
-    )?;
+    // HF cache / mlxcel store or, for the human-readable banner path, auto-
+    // downloaded into the mlxcel store. JSON mode is offline and quiet so stdout
+    // remains a single JSON object; a cache miss is reported through the normal
+    // error path instead of interleaving downloader progress with the report. On
+    // success `args.model` is guaranteed to name an existing snapshot, so the
+    // downstream estimator path is unchanged.
+    let source_options = ModelSourceOptions {
+        models_dir: args.models_dir.as_deref(),
+        revision: args.revision.as_deref(),
+        offline: args.json,
+        ..ModelSourceOptions::default()
+    };
+    args.model = if args.json {
+        resolve_model_source_quietly_with_options(&args.model, source_options)?
+    } else {
+        resolve_model_source_with_options(&args.model, source_options)?
+    };
 
     // Translate the user-facing `--quant` label into the typed hint.
     let quant = parse_quant_hint(&args.quant)?;
@@ -64,6 +78,19 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
     let estimate = estimate_total_memory(&args.model, args.max_tokens, args.batch, quant, kv_int8);
+
+    if args.json {
+        let report = InspectReport::from_estimate(
+            &args.model,
+            &estimate,
+            kv_cache_mode.to_string(),
+            raw_model_type_from_config(&args.model),
+            inspect_family_slug(&args.model),
+            inspect_per_slot_overhead_bytes(&args.model, args.batch),
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
 
     let banner = format_estimate(&args.model, &estimate);
     println!("{banner}");

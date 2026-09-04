@@ -43,6 +43,14 @@ llm = mlxcel.LLM(socket="/tmp/mlxcel.sock")  # Unix socket
 
 Async usage mirrors the sync API via `mlxcel.AsyncLLM` (`await llm.generate(...)`, `async for delta in llm.stream(...)`).
 
+## Examples
+
+Runnable scripts live in [`examples/`](examples/). Each expects the `mlxcel` binary on `PATH` (or `MLXCEL_BIN`) and a model available locally or downloadable from Hugging Face; run them from the repo root:
+
+- [`quickstart.py`](examples/quickstart.py) — managed-mode tour: spawn a local server, then `generate`, `chat`, `models`, and `tokenize`/`detokenize`. `python python/examples/quickstart.py`
+- [`streaming.py`](examples/streaming.py) — print `stream` and `chat_stream` deltas as they arrive. `python python/examples/streaming.py`
+- [`structured_output.py`](examples/structured_output.py) — schema-constrained JSON via `response_format`, plus the same request through the raw `openai_client`. `python python/examples/structured_output.py`
+
 ## Modes
 
 - **Managed mode** (default when `model=` is given): the client spawns `mlxcel serve`, waits until `/health` returns ready, forwards server logs to the `mlxcel.server` Python logger, and stops the process on exit.
@@ -50,6 +58,20 @@ Async usage mirrors the sync API via `mlxcel.AsyncLLM` (`await llm.generate(...)
 - Passing both a model and a connect target raises `MlxcelError`.
 
 On POSIX, managed mode defaults to a Unix domain socket for low-overhead local IPC. Keep socket paths short (`sun_path` is about 104 bytes on macOS, 108 on Linux); the default lives under `/tmp`. Pass `socket=` to override. Windows uses TCP.
+
+## Server options (`**server_kwargs`)
+
+In managed mode, extra keyword arguments to `LLM` / `AsyncLLM` are forwarded to the spawned `mlxcel serve` process: `ctx_size`, `n_predict`, `alias`, and `warmup` map to the matching CLI flags, `extra_args=[...]` appends raw CLI arguments verbatim, and `shutdown_grace` sets the termination grace period on close.
+
+```python
+with mlxcel.LLM(
+    "mlx-community/Qwen3-4B-4bit",
+    ctx_size=8192,
+    warmup=False,
+    extra_args=["--parallel", "1"],
+) as llm:
+    print(llm.generate("hello", max_tokens=32))
+```
 
 ## Sampling parameters
 

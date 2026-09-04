@@ -316,3 +316,81 @@ fn merger_window_size_rejects_zero_divisor_config() {
         "error should mention window_size"
     );
 }
+
+// ── Window inverse (issue #1600) ─────────────────────────────────────────────
+//
+// Upstream defaults: `patch_size` 16, `spatial_merge_size` 2, `window_size`
+// 256, so a window is 8x8 merged tokens. `get_window_index` is a permutation of
+// `0..N`; the encoder must un-reorder the merger output with its inverse.
+
+/// `window_index` for a batch of `(h_patches, w_patches)` grids at the
+/// upstream defaults.
+fn window_index_at_defaults(spatial_shapes: &[(i32, i32)]) -> Vec<i32> {
+    window::get_window_index(spatial_shapes, 2, 256, 16, 4).0
+}
+
+fn is_identity(permutation: &[i32]) -> bool {
+    permutation.iter().enumerate().all(|(i, &v)| v == i as i32)
+}
+
+/// Apply `window_index` and then its inverse, as the encoder does around the
+/// merger. Returns the composed permutation, which must be the identity.
+fn round_trip(window_index: &[i32]) -> Vec<i32> {
+    let inverse = window::reverse_window_indices(window_index);
+    inverse.iter().map(|&i| window_index[i as usize]).collect()
+}
+
+/// How many positions `window_index` applied twice leaves out of place, which
+/// is what the pre-#1600 un-reorder did.
+fn misplaced_when_applied_twice(window_index: &[i32]) -> usize {
+    window_index
+        .iter()
+        .enumerate()
+        .filter(|&(i, &v)| window_index[v as usize] != i as i32)
+        .count()
+}
+
+#[test]
+fn reverse_window_indices_is_argsort_not_the_permutation_itself() {
+    // The minimal non-involution: the old construction returned [2, 0, 1].
+    assert_eq!(window::reverse_window_indices(&[2, 0, 1]), vec![1, 2, 0]);
+    // An involution is its own inverse, which is the case that hid the defect.
+    assert_eq!(
+        window::reverse_window_indices(&[1, 0, 3, 2]),
+        vec![1, 0, 3, 2]
+    );
+}
+
+#[test]
+fn reverse_window_indices_restores_raster_order_on_a_non_involution_grid() {
+    // 512x512 pixels: a 32x32 patch grid, a 16x16 merged grid, 2x2 windows of
+    // 8x8 merged tokens. Unlike Qwen2.5-VL's 4-wide window, where 16x16 is an
+    // involution, this permutation is not one, so applying it twice scrambles
+    // most of the image.
+    let window_index = window_index_at_defaults(&[(32, 32)]);
+    assert_eq!(window_index.len(), 256);
+    assert_eq!(misplaced_when_applied_twice(&window_index), 192);
+    assert!(is_identity(&round_trip(&window_index)));
+}
+
+#[test]
+fn reverse_window_indices_is_the_identity_case_that_hid_the_defect() {
+    // 256x256 pixels: one 8x8 window, so `window_index` is the identity and
+    // the old construction was accidentally right. Keep the case so a change
+    // to the window bookkeeping that breaks it is caught too.
+    let window_index = window_index_at_defaults(&[(16, 16)]);
+    assert_eq!(window_index.len(), 64);
+    assert!(is_identity(&window_index));
+    assert!(is_identity(&round_trip(&window_index)));
+}
+
+#[test]
+fn reverse_window_indices_round_trips_a_multi_image_batch() {
+    // Two images of different sizes; the second grid needs padding on both
+    // edges. The inverse must respect the per-image offset `get_window_index`
+    // adds.
+    let window_index = window_index_at_defaults(&[(32, 32), (24, 16)]);
+    assert_eq!(window_index.len(), 256 + 96);
+    assert_eq!(misplaced_when_applied_twice(&window_index), 192);
+    assert!(is_identity(&round_trip(&window_index)));
+}

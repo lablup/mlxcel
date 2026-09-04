@@ -1,6 +1,6 @@
 # Example surgery config: scale every attention output projection
-# weight by 1.2.  See `mlxcel-surgery` (+) for the
-# schema and operation semantics.
+# weight by 1.2.  Schema and operation semantics are documented in
+# `src/lib/mlxcel-surgery/src/config.rs`.
 #
 # Quantized-tensor handling:
 #   For affine-quantized layers (4bit / 8bit), the `weight` key holds
@@ -9,8 +9,7 @@
 #   `weight` key transparently rewrites the multiplication to operate
 #   on `scales` (and `biases`, if present) instead of the packed
 #   codes — the user-observable result is `factor * effective_weight`
-#   regardless of layout. See `docs/apple-silicon-precision.md` for
-#   the quantization layout rationale.
+#   regardless of layout.
 #
 # All paths in this file (none here, but see add / replace /
 # interpolate examples for usage) are resolved relative to this YAML

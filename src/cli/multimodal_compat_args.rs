@@ -202,6 +202,14 @@ pub struct MultimodalCompatArgs {
     /// refused. The value is canonicalized once at startup, and every resolved
     /// file must stay inside it, symlink targets included. llama-server spells
     /// this `--media-path` too.
+    ///
+    /// A request's path is resolved relative to this directory first, as
+    /// llama-server does, and an absolute path is accepted when it names a file
+    /// inside it. With `--media-path /srv/media`, both `file://cat.png` (the
+    /// relative form) and `file:///srv/media/cat.png` (the absolute form) read
+    /// `/srv/media/cat.png`, while `file:///etc/passwd` is refused as an
+    /// escape. llama-server's own name validation runs first and caps the whole
+    /// path at 255 bytes, so a deeper file has to be named relative to the root.
     #[arg(
         long = "media-path",
         value_name = "PATH",

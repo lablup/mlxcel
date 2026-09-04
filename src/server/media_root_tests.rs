@@ -76,13 +76,21 @@ async fn an_absolute_looking_path_is_concatenated_not_joined() {
     // `<root>//etc/passwd` and reads nothing. A `Path::join` would have
     // replaced the root with `/etc/passwd`, which is the arbitrary-file read
     // this test exists to keep out.
+    //
+    // Since issue #1612 the refusal arrives one step later and under a
+    // different name: the concatenated candidate still fails, and the absolute
+    // fallback then canonicalizes `/etc/passwd` itself and hands it to the same
+    // `starts_with(root)` test, which refuses it as an `Escape`. The file is
+    // still never opened, so the security property is unchanged; only the error
+    // kind and the operator-visible sentence moved, which is recorded as a
+    // divergence on the `--media-path` manifest entry.
     let f = fixture();
     let err = resolve_media_file_in(&f.root, "file:///etc/passwd")
         .await
         .expect_err("an absolute path may not escape");
     assert!(
-        matches!(err, MediaPathError::Unresolvable { .. }),
-        "expected an unresolvable path under the root, got {err:?}"
+        matches!(err, MediaPathError::Escape { .. }),
+        "expected an escape from the root, got {err:?}"
     );
 
     // The same absolute-looking form *inside* the root still resolves, which is
@@ -91,6 +99,135 @@ async fn an_absolute_looking_path_is_concatenated_not_joined() {
         .await
         .expect("a leading separator is stripped, not rejected");
     assert_eq!(resolved, f.root.join("ok.png"));
+}
+
+#[tokio::test]
+async fn an_absolute_path_inside_the_root_resolves_like_the_relative_form() {
+    // Issue #1612: upstream's concatenation probes `<root>/<absolute path>`,
+    // which cannot exist, so the form every other tool accepts used to be the
+    // one form that never worked. The fallback resolves it to exactly what the
+    // relative spelling resolves to, with no second containment path.
+    let f = fixture();
+    let absolute = f.root.join("ok.png");
+    let relative = resolve_media_file_in(&f.root, "file://ok.png")
+        .await
+        .expect("the relative form resolves");
+
+    for reference in [
+        format!("file://{}", absolute.display()),
+        absolute.display().to_string(),
+    ] {
+        let resolved = resolve_media_file_in(&f.root, &reference)
+            .await
+            .unwrap_or_else(|err| panic!("{reference} must resolve inside the root, got {err:?}"));
+        assert_eq!(
+            resolved, relative,
+            "{reference} must equal the relative form"
+        );
+    }
+
+    let nested = f.root.join("sub/nested.png");
+    let resolved = resolve_media_file_in(&f.root, &format!("file://{}", nested.display()))
+        .await
+        .expect("an absolute path into a subdirectory resolves too");
+    assert_eq!(resolved, nested);
+}
+
+#[tokio::test]
+async fn an_absolute_path_outside_the_root_is_an_escape() {
+    // The fallback hands its candidate to the same `starts_with(root)` test the
+    // concatenated candidate goes through, so an absolute path outside the root
+    // is refused there and is reported as what it is rather than as a missing
+    // file.
+    let f = fixture();
+    for reference in [
+        format!("file://{}", f.outside.display()),
+        f.outside.display().to_string(),
+    ] {
+        let err = resolve_media_file_in(&f.root, &reference)
+            .await
+            .expect_err("an absolute path outside the root may not resolve");
+        assert!(
+            matches!(err, MediaPathError::Escape { .. }),
+            "expected an escape for {reference}, got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_relative_reference_never_falls_back_to_the_working_directory() {
+    // The fallback is gated strictly on `Path::is_absolute`. Without that gate
+    // a bare relative name would canonicalize against the server's working
+    // directory, which is a second, unconfined resolution root. `Cargo.toml`
+    // exists in the directory cargo hands the test binary and does not exist in
+    // the media root, so it must stay unresolvable.
+    let f = fixture();
+    let cwd = std::env::current_dir().expect("a working directory");
+    assert!(
+        cwd.join("Cargo.toml").is_file(),
+        "the gate is only meaningful when the reference really exists in the working directory"
+    );
+    for reference in ["Cargo.toml", "file://Cargo.toml"] {
+        let err = resolve_media_file_in(&f.root, reference)
+            .await
+            .expect_err("a relative reference may not reach the working directory");
+        assert!(
+            matches!(err, MediaPathError::Unresolvable { .. }),
+            "expected an unresolvable path for {reference}, got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_three_short_forms_still_resolve_to_the_same_file() {
+    // The forms that already worked before issue #1612 keep working and keep
+    // agreeing with each other, which is what makes the fallback additive.
+    let f = fixture();
+    let expected = f.root.join("ok.png");
+    for reference in ["file://ok.png", "ok.png", "file:///ok.png"] {
+        let resolved = resolve_media_file_in(&f.root, reference)
+            .await
+            .unwrap_or_else(|err| panic!("{reference} must still resolve, got {err:?}"));
+        assert_eq!(resolved, expected, "{reference} must resolve to ok.png");
+    }
+}
+
+#[tokio::test]
+async fn an_absolute_path_over_255_bytes_is_refused_before_the_fallback() {
+    // b10621's `fs_validate_filename` caps the whole path at 255 bytes and runs
+    // before any resolution, so a long-enough absolute path is `NotAllowed` and
+    // never reaches the fallback. That is upstream-faithful and deliberate:
+    // relaxing the cap for the absolute form would be a second divergence for
+    // no gain, since the deep file can always be named relative to the root.
+    let f = fixture();
+    // 248 + "/ok.png" is exactly the 255-byte maximum relative to the root, so
+    // the relative spelling is accepted and the absolute one, longer by the
+    // root itself, cannot be.
+    let directory = "d".repeat(255 - "/ok.png".len());
+    let relative = format!("{directory}/ok.png");
+    assert_eq!(relative.len(), 255, "the relative spelling sits on the cap");
+    std::fs::create_dir(f.root.join(&directory)).expect("create the long directory");
+    std::fs::write(f.root.join(&relative), b"PNG-BYTES").expect("write the long-named file");
+
+    let long = f.root.join(&relative);
+    assert!(
+        long.as_os_str().len() > 255,
+        "the fixture must exceed the cap"
+    );
+    let err = resolve_media_file_in(&f.root, &format!("file://{}", long.display()))
+        .await
+        .expect_err("an over-long absolute path is refused by the name validation");
+    assert!(
+        matches!(err, MediaPathError::NotAllowed { .. }),
+        "expected the name validation to refuse it, got {err:?}"
+    );
+
+    // The same file named relative to the root is under the cap and resolves,
+    // so the refusal is about the 255-byte rule and not about depth.
+    let resolved = resolve_media_file_in(&f.root, &relative)
+        .await
+        .expect("the relative spelling of the same file is within the cap");
+    assert_eq!(resolved, long);
 }
 
 #[tokio::test]
@@ -233,10 +370,22 @@ async fn a_missing_file_reports_upstreams_wording() {
     let err = resolve_media_file_in(&f.root, "file://absent.png")
         .await
         .expect_err("a missing file is refused");
+    let message = err.to_string();
     assert!(
-        err.to_string()
-            .contains("file does not exist or cannot be opened"),
+        message.contains("file does not exist or cannot be opened"),
         "{err}"
+    );
+    // Issue #1612: upstream ends the sentence at the path, which told an
+    // operator whose file is present and readable nothing at all. The trailing
+    // clause names the rule; the candidate actually probed stays in the debug
+    // log, so the message may not carry the root.
+    assert!(
+        message.contains("paths are resolved relative to the --media-path root"),
+        "the refusal must state the resolution rule: {err}"
+    );
+    assert!(
+        !message.contains(&f.root.display().to_string()),
+        "the refusal must not disclose the configured root: {err}"
     );
 }
 
