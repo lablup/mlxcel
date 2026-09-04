@@ -202,8 +202,8 @@ fn patches_are_emitted_merge_block_major_with_channel_last_features() {
     let norm = |v: u8| (v as f32 / 255.0 - 0.5) / 0.5;
 
     // Rows run (block_y, block_x, inner_y, inner_x). For a 4x4 grid of patches
-    // numbered in raster order that is 0,1,4,5, 2,3,6,7, 8,9,12,13, 10,11,14,15
-    // — deliberately not 0..15, which is what plain raster emission produces.
+    // numbered in raster order that is 0,1,4,5, 2,3,6,7, 8,9,12,13, 10,11,14,15,
+    // deliberately not 0..15, which is what plain raster emission produces.
     let expected_rows = [0u8, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
     for (row, patch_id) in expected_rows.into_iter().enumerate() {
         let row_start = row * features_per_patch;
