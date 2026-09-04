@@ -343,7 +343,7 @@ pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
     Gemma4WeightBacking, config_has_quantization_metadata, load_gemma4_text_weights_with_backing,
     load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
-    sanitize_gemma4_nvfp4_weights, should_convert_bf16_to_f16, strip_gemma4_kv_shared_weights,
+    sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
 };
 // The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
 // reference loader, so an unconditional re-export is dead in a default build
@@ -351,9 +351,9 @@ pub(crate) use sanitize::{
 #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub(crate) use sanitize::load_weights_from_dir_with_filter;
 pub use sanitize::{
-    convert_bf16_weights, convert_bf16_weights_with_keep, gemma3n_language_mlp_bf16_key,
-    load_and_sanitize_weights, load_text_weights, sanitize_config_json, sanitize_tied_embeddings,
-    warn_bf16_precision,
+    bf16_to_f16_at_load, convert_bf16_weights, convert_bf16_weights_with_keep,
+    gemma3n_language_mlp_bf16_key, load_and_sanitize_weights, load_text_weights,
+    sanitize_config_json, sanitize_tied_embeddings, warn_bf16_precision,
 };
 pub use seed_oss::SeedOssModel;
 pub use siglip_text::{SigLipTextArgs, SigLipTextModel};

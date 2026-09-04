@@ -1017,7 +1017,17 @@ fn tensor_view_to_array(
                 // from_f32 -> astype(bf16/f16) loader subgraph for every
                 // tensor use.
                 mlxcel_core::from_bytes_f16(tensor.data(), &shape, true)
-            } else if should_convert_bf16_to_f16() {
+            } else if bf16_to_f16_at_load(false, None) {
+                // Fourth site that touches the load-time dtype, and the only one
+                // that picks a leaf dtype during materialization rather than
+                // converting a finished WeightMap. Producing f16 directly here
+                // avoids a bf16 leaf that `convert_bf16_weights` would rewrite a
+                // moment later; the end state is the same either way, so this is
+                // an efficiency choice, not a correctness one. `is_quantized` is
+                // passed as false because at this point the decision is per
+                // tensor and the packed planes never reach this arm.
+                //
+                // Policy itself lives in `bf16_to_f16_at_load`; see its doc.
                 let values = tensor
                     .data()
                     .chunks_exact(std::mem::size_of::<u16>())
@@ -1710,9 +1720,15 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // experiment, gated by MLXCEL_CUDA_F16_NORMALIZE and skipped for
     // f16-fragile families (see `cuda_f16_normalize_for_config`). The default
     // stays bf16 so bf16 models remain available unchanged.
-    let convert_bf16 =
-        should_convert_bf16_to_f16() || cuda_f16_normalize_for_config(parsed_config.as_ref());
-    if convert_bf16 && !is_bitnet && !is_quantized {
+    // The quantized guard is lifted for pre-Ampere CUDA only. A quantized
+    // checkpoint keeps its packed planes as u32 and is untouched here; what
+    // moves is the bf16 side-data (scales, biases, norm weights, embeddings),
+    // and moving it is what lets `qmv` instantiate on half_t and `qmm_naive`
+    // stop converting every operand. Measured on qwen3.8-27B-4bit: prefill
+    // 85.3 s to 4.8 s, decode 118.1 to 49.2 ms/token, with 17 * 23 answered
+    // identically and the same token count generated in both dtypes. Ampere and
+    // later keep the guard, so their behavior is unchanged.
+    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet {
         let had_bf16 = if keep_gemma3n_mlp_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
         } else {
@@ -1724,6 +1740,73 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     }
 
     Ok(weights)
+}
+
+/// Whether bf16 tensors should be cast to f16 when loading this checkpoint.
+///
+/// Single source of truth for the load-time dtype policy. Every load path calls
+/// this: `load_text_weights` here, `loading::vlm::finish_vlm_weights_common`
+/// for every VLM family, and `embeddings::loader::load_embedding_weights`. Do
+/// not re-implement the rule at a call site. Each site that previously owned a
+/// copy drifted, which is how CUDA stayed on bf16 for VLM and embedding models
+/// long after the text path gained an opt-in.
+///
+/// The one predicate underneath all three arms is "does this device execute
+/// bf16 natively", not "which vendor is this". That is worth stating because
+/// the arms do not look alike, and the reason is historical rather than
+/// technical: this conversion was originally written for the Apple Silicon
+/// generations that cannot execute bf16, back when the project targeted Apple
+/// Silicon only. CUDA, VLM, and embedding support each arrived later and each
+/// grew its own copy of the decision. So the Apple arm is the original rule
+/// preserved verbatim, and the CUDA arms are the same question asked of
+/// hardware the original author had no reason to consider. Read the ordering
+/// as sediment, not as a hierarchy.
+///
+/// Apple Silicon keeps its long-standing behavior: no Apple GPU has a native
+/// bf16 ALU, Metal's `bfloat` is storage-only, so bf16 is converted unless the
+/// checkpoint is quantized.
+///
+/// Pre-Ampere CUDA (sm_70 Volta, sm_75 Turing) is the same hardware situation
+/// and is converted by default, quantized checkpoints included. Those parts
+/// have no bf16 ALU, no bf16 tensor-core atom, and no cuBLAS bf16 GEMM, so a
+/// bf16 operand is converted rather than executed. Measured on a Tesla V100
+/// with qwen3.8-27B-4bit: prefill 85.3 s against 4.8 s, decode 118.1 against
+/// 49.2 ms per token, with `qmm_naive` spending 199.1 s against 11.4 s over an
+/// identical 994 launches. A quantized checkpoint keeps its packed planes as
+/// u32; only the bf16 side-data moves. `MLXCEL_CUDA_F16_NORMALIZE=0` opts out.
+///
+/// Ampere and later keep the opt-in behavior from issue #636, because there
+/// bf16 is native and the promotion patch already yields a single-dtype graph.
+/// Human-readable reason for a load-time bf16 -> f16 conversion, for the
+/// message printed to the user. Mirrors the arms of [`bf16_to_f16_at_load`].
+fn bf16_conversion_reason() -> &'static str {
+    match mlxcel_core::hardware::cuda_compute_capability() {
+        Some((major, minor)) if major < 8 => {
+            if major == 7 && minor >= 5 {
+                "Turing (sm_75), which has no native bf16"
+            } else {
+                "Volta (sm_70), which has no native bf16"
+            }
+        }
+        Some(_) => "CUDA f16 normalization (MLXCEL_CUDA_F16_NORMALIZE)",
+        None => "Apple Silicon fp16 optimization",
+    }
+}
+
+pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
+    let fragile = config.is_some_and(is_f16_fragile_family);
+    if pre_ampere_cuda() {
+        return !env_flag_disabled("MLXCEL_CUDA_F16_NORMALIZE") && !fragile;
+    }
+    if mlxcel_core::hardware::get_hardware().silicon_gen
+        != mlxcel_core::hardware::AppleSiliconGen::Unknown
+    {
+        return !is_quantized;
+    }
+    mlxcel_core::cuda_is_available()
+        && env_flag_enabled("MLXCEL_CUDA_F16_NORMALIZE")
+        && !is_quantized
+        && !fragile
 }
 
 /// True when opt-in CUDA load-time bf16 -> f16 normalization applies to this
@@ -1739,10 +1822,52 @@ fn cuda_f16_normalize_for_config(config: Option<&Value>) -> bool {
     if !mlxcel_core::cuda_is_available() {
         return false;
     }
+    // Pre-Ampere CUDA flips the default. The comment above says the base CUDA
+    // policy keeps bf16 because the hardware has "native bf16 ALUs", and that
+    // premise is false below compute capability 8.0: sm_70 and sm_75 have no
+    // bf16 ALU, no bf16 tensor-core atom, and no cuBLAS bf16 GEMM, so every
+    // bf16 operand is converted rather than executed. Measured on a Tesla V100
+    // (see docs/benchmark_results/): `qmm_naive` spends 199.1 s against 11.4 s
+    // over an identical 994 launches purely on operand conversion in its inner
+    // loop, a 17.5x penalty, and end-to-end prefill on qwen3.8-27B-4bit goes
+    // from 85.3 s to 4.8 s. Decode gains 2.40x through `qmv`. Ampere and later
+    // are untouched: they keep the opt-in behavior this function shipped with.
+    if pre_ampere_cuda() {
+        return !env_flag_disabled("MLXCEL_CUDA_F16_NORMALIZE")
+            && !config.is_some_and(is_f16_fragile_family);
+    }
     if !env_flag_enabled("MLXCEL_CUDA_F16_NORMALIZE") {
         return false;
     }
     !config.is_some_and(is_f16_fragile_family)
+}
+
+/// True on a CUDA device below compute capability 8.0 (Volta, Turing), which
+/// have no bf16 hardware of any kind.
+///
+/// The boundary is 8.0 rather than 7.0 because Turing shares Volta's situation
+/// here: `cute/arch/mma_sm70.hpp` and `mma_sm75.hpp` carry no BF16 MMA atom and
+/// CUDA's own `cuda_bf16.hpp` guards its arithmetic on `__CUDA_ARCH__ >= 800`.
+/// The tensor-core *atom* boundary is a different, three-way split and is not
+/// this predicate's business; see the Turing follow-up issue.
+fn pre_ampere_cuda() -> bool {
+    matches!(
+        mlxcel_core::hardware::cuda_compute_capability(),
+        Some((major, _)) if major < 8
+    )
+}
+
+/// Parse a boolean-ish environment flag as an explicit *opt out*. Unlike
+/// [`env_flag_enabled`], an unset variable is false here, so a default-on
+/// policy stays on until someone turns it off.
+fn env_flag_disabled(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|raw| {
+        let v = raw.trim();
+        v == "0"
+            || v.eq_ignore_ascii_case("false")
+            || v.eq_ignore_ascii_case("off")
+            || v.eq_ignore_ascii_case("no")
+    })
 }
 
 /// Parse a boolean-ish environment flag. Unset, empty, `0`, `false`, `off`, and
@@ -1900,9 +2025,15 @@ where
         bf16_keys.into_iter().partition(|key| keep_bf16(key));
 
     if !convert_keys.is_empty() {
+        // The message used to say "for Apple Silicon fp16 optimization"
+        // unconditionally, which dates from when that was the only backend
+        // this conversion ran on. It now also runs on pre-Ampere CUDA, where
+        // that wording is simply wrong, so name the device that actually
+        // triggered it.
         eprintln!(
-            "Converting {} bf16 weight tensors to f16 for Apple Silicon fp16 optimization.",
-            convert_keys.len()
+            "Converting {} bf16 weight tensors to f16 for {}.",
+            convert_keys.len(),
+            bf16_conversion_reason()
         );
         for key in convert_keys {
             if let Some(tensor) = weights.get(&key) {

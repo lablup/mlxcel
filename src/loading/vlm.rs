@@ -293,12 +293,13 @@ fn finish_vlm_weights_common(
     transform: Option<&dyn mlxcel_core::weights::WeightTransform>,
     allow_active_pipeline: bool,
 ) -> Result<()> {
-    // On Apple Silicon, convert bf16 → f16 for performance (no Apple GPU has
-    // native bf16 ALU).  Quantized models keep bf16 scales/biases as-is.
-    let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
-        let is_quantized = is_model_quantized(model_path);
-        if !is_quantized {
+    // Load-time dtype policy is owned by `models::bf16_to_f16_at_load`; see its
+    // doc comment for the hardware rule and the measurements behind it. Do not
+    // re-derive it here: this site used to own a copy, and the copy is why every
+    // VLM family stayed on bf16 under CUDA after the text path gained an opt-in.
+    let vlm_config = read_sanitized_vlm_config(model_path).ok().map(|(_, c)| c);
+    if crate::models::bf16_to_f16_at_load(is_model_quantized(model_path), vlm_config.as_ref()) {
+        {
             let had_bf16 = if is_gemma3n_model(model_path) {
                 crate::models::convert_bf16_weights_with_keep(
                     weights,
