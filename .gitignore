@@ -48,3 +48,7 @@ webpage/site/node_modules/
 # Raw qmv-wide-pin measurement runs written by scripts/bench_qmv_wide_pin.sh
 # (issue #1261). Curated results belong in docs/benchmark_results/.
 /bench-results/
+
+# Cluster TOMLs written at runtime by scripts/benchmark_pipeline_remote_rollout.sh write-config.
+# The checked-in templates beside them (pipeline_remote_2node_*.toml) are not covered.
+examples/distributed/generated_*.toml
