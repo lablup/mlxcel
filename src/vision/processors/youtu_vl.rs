@@ -59,6 +59,15 @@ pub enum YoutuVLPreprocessError {
         patches: usize,
         max_patches: usize,
     },
+    #[error(
+        "image {image_index} has a {h_patches}x{w_patches} patch grid that is not divisible by spatial_merge_size {spatial_merge_size}"
+    )]
+    UnalignedPatchGrid {
+        image_index: usize,
+        h_patches: usize,
+        w_patches: usize,
+        spatial_merge_size: usize,
+    },
     #[error("Youtu-VL patch tensor allocation would overflow usize arithmetic")]
     AllocationOverflow,
     #[error("Youtu-VL patch tensor dimension {dimension} exceeds i32::MAX")]
@@ -281,29 +290,73 @@ impl YoutuVLProcessor {
             }
 
             // Emit one row per spatial patch in the layout
-            // `[h_patches * w_patches, channels * patch_size * patch_size]`,
-            // with the inner ordering `(c, dy, dx)` to match how upstream
-            // unfolds patches via `unfold` over the (C, H, W) image tensor.
-            let total_patches_img = (h_patches as usize) * (w_patches as usize);
-            for patch_idx in 0..total_patches_img {
-                let py = patch_idx / w_patches as usize;
-                let px = patch_idx % w_patches as usize;
-                let y_start = py * self.patch_size;
-                let x_start = px * self.patch_size;
+            // `[h_patches * w_patches, patch_size * patch_size * channels]`.
+            //
+            // Rows are merge-block-major, not raster: they run
+            // `(block_y, block_x, inner_y, inner_x)`, so each consecutive run
+            // of `spatial_merge_size ** 2` rows is exactly one spatial-merge
+            // block. Inner features are channel-last, `(dy, dx, c)`.
+            //
+            // Both orders come from this checkpoint's own processor,
+            // `convert_image_to_patches` in
+            // https://huggingface.co/tencent/Youtu-VL-4B-Instruct/blob/main/image_processing_siglip2_fast.py
+            // which reshapes the image to `(C, nh/m, m, ps, nw/m, m, ps)` and
+            // permutes `(1, 4, 2, 5, 3, 6, 0)`.
+            // `Siglip2VisionEmbeddings.patch_embedding` is an `nn.Linear` over
+            // those rows and `remap_youtu_vl_weights` only renames that weight,
+            // so any other order feeds the trained projection a permuted
+            // vector. `YoutuVLVisionEncoder::rot_pos_emb` and the merge-unit
+            // gather in `forward_with_spatial` independently assume the same
+            // block-major grouping, so raster rows also mislabel every token's
+            // rotary position. This is not Qwen2-VL's `(c, dy, dx)` layout:
+            // that family unfolds and this one does not.
+            let merge = self.spatial_merge_size;
+            let hp = h_patches as usize;
+            let wp = w_patches as usize;
+            // `smart_resize` rounds both edges up to a multiple of
+            // `patch_size * spatial_merge_size`, so the grid is always
+            // divisible and the block loops never need padding. Check it
+            // rather than relying on that invariant silently: a future change
+            // to the resize policy would otherwise drop patches here.
+            if !hp.is_multiple_of(merge) || !wp.is_multiple_of(merge) {
+                return Err(YoutuVLPreprocessError::UnalignedPatchGrid {
+                    image_index: img_idx,
+                    h_patches: hp,
+                    w_patches: wp,
+                    spatial_merge_size: merge,
+                });
+            }
 
-                let row_start = (write_offset + patch_idx) * features_per_patch;
-                let mut k = 0usize;
-                for c in 0..in_channels {
-                    for dy in 0..self.patch_size {
-                        for dx in 0..self.patch_size {
-                            let y = y_start + dy;
-                            let x = x_start + dx;
-                            all_patches[row_start + k] = normalized[c * h * w + y * w + x];
-                            k += 1;
+            let total_patches_img = hp * wp;
+            let mut row = 0usize;
+            for block_y in 0..hp / merge {
+                for block_x in 0..wp / merge {
+                    for inner_y in 0..merge {
+                        for inner_x in 0..merge {
+                            let py = block_y * merge + inner_y;
+                            let px = block_x * merge + inner_x;
+                            let y_start = py * self.patch_size;
+                            let x_start = px * self.patch_size;
+
+                            let row_start = (write_offset + row) * features_per_patch;
+                            let mut k = 0usize;
+                            for dy in 0..self.patch_size {
+                                for dx in 0..self.patch_size {
+                                    let y = y_start + dy;
+                                    let x = x_start + dx;
+                                    for c in 0..in_channels {
+                                        all_patches[row_start + k] =
+                                            normalized[c * h * w + y * w + x];
+                                        k += 1;
+                                    }
+                                }
+                            }
+                            row += 1;
                         }
                     }
                 }
             }
+            debug_assert_eq!(row, total_patches_img);
 
             write_offset += total_patches_img;
         }

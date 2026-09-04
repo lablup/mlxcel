@@ -948,7 +948,14 @@ rather than stale and it keeps declining. Full record and method:
 
 The pairing is also wired into `speculative_bench` (`REACHABLE_PAIRINGS`), which
 runs once the `gemma-4-31b-it-4bit` and `gemma-4-31B-it-assistant-bf16`
-checkpoints are present in the model store.
+checkpoints are present in the model store. Checkpoint presence alone was not
+enough until #1613: `run_mtp` matched `LoadedModel::Gemma4Unified` only, so the
+31B target (which loads as `Gemma4VLM`) was rejected after load with both
+checkpoints on disk. The harness now selects the adapter per variant the way
+`src/server/batch/speculative_burst.rs` does, so the Gemma 4 text, VLM and
+Unified wrappers and the Qwen 3.5 text, MoE and VLM wrappers are all
+benchable, and the catalog carries a Qwen 3.8 27B pairing against the
+`qwen3_5_mtp` head as well.
 
 ### Adaptive B=1 MTP policy
 

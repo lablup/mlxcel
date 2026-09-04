@@ -25,7 +25,8 @@
 
 use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::BatchedAttentionMetadata;
+use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -384,6 +385,32 @@ impl SwitchGLU {
     }
 }
 
+/// Phase timings of one [`SparseMoeBlock::forward_profiled`] call.
+///
+/// `path` names the expert path the production dispatch takes on the same
+/// input (`"fused"` or `"gather_qmm"`) and `tokens` the number of routed rows,
+/// so a `[B, 1]` batched step and a single-token step are distinguishable in
+/// the trace (#1616).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoeProfile {
+    pub gate_ms: f64,
+    pub expert_ms: f64,
+    pub combine_ms: f64,
+    pub path: &'static str,
+    pub tokens: i32,
+}
+
+impl MoeProfile {
+    /// The `[QWEN3_MOE_SPARSE]` trace line shared by the single-sequence and
+    /// batched decode paths.
+    fn print(&self) {
+        eprintln!(
+            "[QWEN3_MOE_SPARSE] path={} tokens={} gate={:.2}ms expert={:.2}ms combine={:.2}ms",
+            self.path, self.tokens, self.gate_ms, self.expert_ms, self.combine_ms
+        );
+    }
+}
+
 // Sparse MoE Block.
 /// Qwen3 sparse mixture of experts layer
 pub struct SparseMoeBlock {
@@ -396,7 +423,7 @@ pub struct SparseMoeBlock {
 impl SparseMoeBlock {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         if std::env::var("MLXCEL_PROFILE_QWEN3_MOE_DETAIL").is_ok() {
-            let (out, _, _, _) = self.forward_profiled(x);
+            let (out, _) = self.forward_profiled(x);
             return out;
         }
 
@@ -473,7 +500,18 @@ impl SparseMoeBlock {
         }
     }
 
-    pub fn forward_profiled(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, f64, f64, f64) {
+    /// Device-synchronizing phase split of one MoE call, for
+    /// `MLXCEL_PROFILE_QWEN3_MOE_DETAIL=1`.
+    ///
+    /// Takes the same expert path [`Self::forward`] would take on the same
+    /// input: the fused kernel at one routed token, `gather_qmm` plus
+    /// [`crate::models::switch_layers::moe_weighted_sum`] otherwise. Before
+    /// #1616 it always ran the gather path, so a single-token trace attributed
+    /// a kernel the production step never launched. The eval after each phase
+    /// is what makes the split readable, and it also makes every number here a
+    /// synchronization-inflated attribution figure rather than throughput;
+    /// compare phases within one run and re-measure unsynchronized afterwards.
+    pub fn forward_profiled(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, MoeProfile) {
         let orig_shape = mlxcel_core::array_shape(x);
         let hidden_dim = orig_shape[orig_shape.len() - 1];
 
@@ -483,6 +521,7 @@ impl SparseMoeBlock {
         } else {
             mlxcel_core::copy(x)
         };
+        let tokens = mlxcel_core::array_shape(&x_flat)[0];
 
         let gate_start = std::time::Instant::now();
         let logits = self.router.forward(&x_flat);
@@ -502,26 +541,57 @@ impl SparseMoeBlock {
         mlxcel_core::eval(&scores);
         let gate_ms = gate_start.elapsed().as_secs_f64() * 1000.0;
 
-        let expert_start = std::time::Instant::now();
-        let expert_out = self.experts.forward(&x_flat, &topk_indices);
-        mlxcel_core::eval(&expert_out);
-        let expert_ms = expert_start.elapsed().as_secs_f64() * 1000.0;
+        // Same dispatch as `forward`: the fused kernel only ever sees one
+        // routed token, and it declines any config it does not support.
+        let fused = if tokens == 1 && crate::models::switch_layers::fused_moe_enabled() {
+            self.experts
+                .forward_fused_kernel(&x_flat, &topk_indices, &scores)
+                .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+        } else {
+            None
+        };
 
-        let combine_start = std::time::Instant::now();
-        let result = crate::models::switch_layers::moe_weighted_sum(
-            &expert_out,
-            &scores,
-            mlxcel_core::array_dtype(&x_flat),
-        );
+        let expert_start = std::time::Instant::now();
+        let (result, path, expert_ms, combine_ms) = match fused {
+            Some(out) => {
+                // The kernel pair folds the score-weighted K-sum into its
+                // second launch, so there is no separate combine phase.
+                mlxcel_core::eval(&out);
+                let expert_ms = expert_start.elapsed().as_secs_f64() * 1000.0;
+                (out, "fused", expert_ms, 0.0)
+            }
+            None => {
+                let expert_out = self.experts.forward(&x_flat, &topk_indices);
+                mlxcel_core::eval(&expert_out);
+                let expert_ms = expert_start.elapsed().as_secs_f64() * 1000.0;
+
+                let combine_start = std::time::Instant::now();
+                let result = crate::models::switch_layers::moe_weighted_sum(
+                    &expert_out,
+                    &scores,
+                    mlxcel_core::array_dtype(&x_flat),
+                );
+                mlxcel_core::eval(&result);
+                let combine_ms = combine_start.elapsed().as_secs_f64() * 1000.0;
+                (result, "gather_qmm", expert_ms, combine_ms)
+            }
+        };
         let result = if orig_shape.len() > 2 {
             mlxcel_core::reshape(&result, &orig_shape)
         } else {
             result
         };
-        mlxcel_core::eval(&result);
-        let combine_ms = combine_start.elapsed().as_secs_f64() * 1000.0;
 
-        (result, gate_ms, expert_ms, combine_ms)
+        (
+            result,
+            MoeProfile {
+                gate_ms,
+                expert_ms,
+                combine_ms,
+                path,
+                tokens,
+            },
+        )
     }
 }
 
@@ -656,6 +726,170 @@ impl Attention {
                 ),
             ),
         }
+    }
+
+    /// Batched-decode RoPE: the same rotation as [`Self::apply_rope`] with one
+    /// cache offset per batch row instead of a single offset for the whole
+    /// tensor. Frequency-table schemes go through the table launcher and the
+    /// YaRN magnitude multiply is applied exactly as on the single-sequence
+    /// path, so a row decoded here matches the same row decoded alone.
+    ///
+    /// Used by: Qwen3MoE batched decode (Attention::forward_split_attention)
+    fn apply_rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match self.rope_freqs.as_ref() {
+            Some(freqs) => {
+                let (q_scaled, k_scaled);
+                let (q, k): (&MlxArray, &MlxArray) = if self.rope_mscale != 1.0 {
+                    q_scaled = mlxcel_core::multiply_scalar(q, self.rope_mscale);
+                    k_scaled = mlxcel_core::multiply_scalar(k, self.rope_mscale);
+                    (&q_scaled, &k_scaled)
+                } else {
+                    (q, k)
+                };
+                (
+                    mlxcel_core::fast_rope_batched_with_freqs(
+                        q,
+                        self.rope_dims,
+                        false,
+                        self.rope_scale,
+                        offsets,
+                        freqs,
+                    ),
+                    mlxcel_core::fast_rope_batched_with_freqs(
+                        k,
+                        self.rope_dims,
+                        false,
+                        self.rope_scale,
+                        offsets,
+                        freqs,
+                    ),
+                )
+            }
+            None => (
+                mlxcel_core::fast_rope_batched(
+                    q,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    k,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offsets,
+                ),
+            ),
+        }
+    }
+
+    /// Split-attention forward for batched decode (#1616).
+    ///
+    /// Receives the fused QKV projection of the whole batch as three
+    /// `[B, T, proj_dim]` tensors, applies Q/K RMSNorm and per-row RoPE while
+    /// still batched, then runs the KV-cache update and SDPA per sequence
+    /// (each row owns its cache) and concatenates back to
+    /// `[B, T, num_heads * head_dim]`. This is the dense-cache loop of the
+    /// Qwen3 dense port; the paged-pool fast paths are not reproduced because
+    /// this family does not opt into `supports_paged_decode_backend()`.
+    ///
+    /// Used by: Qwen3MoE batched decode (DecoderLayer::forward_batched)
+    pub fn forward_split_attention(
+        &self,
+        q_batched: &MlxArray,
+        k_batched: &MlxArray,
+        v_batched: &MlxArray,
+        caches: &mut [&mut KVCache],
+        metadata: &BatchedAttentionMetadata,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let b = caches.len();
+        let seq_len = mlxcel_core::array_shape(q_batched)[1];
+        debug_assert_eq!(metadata.len(), b);
+
+        let q_batched = mlxcel_core::reshape(
+            q_batched,
+            &[b as i32, seq_len, self.num_heads, self.head_dim],
+        );
+        let k_batched = mlxcel_core::reshape(
+            k_batched,
+            &[b as i32, seq_len, self.num_kv_heads, self.head_dim],
+        );
+        let v_batched = mlxcel_core::reshape(
+            v_batched,
+            &[b as i32, seq_len, self.num_kv_heads, self.head_dim],
+        );
+
+        // Q/K norm before the head transpose, then RoPE, as in `forward`.
+        let q_batched = self.q_norm.forward(&q_batched);
+        let k_batched = self.k_norm.forward(&k_batched);
+
+        let q_batched = mlxcel_core::transpose_axes(&q_batched, &[0, 2, 1, 3]);
+        let k_batched = mlxcel_core::transpose_axes(&k_batched, &[0, 2, 1, 3]);
+        let v_batched = mlxcel_core::transpose_axes(&v_batched, &[0, 2, 1, 3]);
+
+        let (q_batched, k_batched) =
+            self.apply_rope_batched(&q_batched, &k_batched, &metadata.rope_offsets);
+
+        let mut attn_outputs: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(b);
+        for (i, cache) in caches.iter_mut().enumerate() {
+            let q_i = mlxcel_core::slice(
+                &q_batched,
+                &[i as i32, 0, 0, 0],
+                &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+            );
+            let k_i = mlxcel_core::slice(
+                &k_batched,
+                &[i as i32, 0, 0, 0],
+                &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+            );
+            let v_i = mlxcel_core::slice(
+                &v_batched,
+                &[i as i32, 0, 0, 0],
+                &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+            );
+
+            let (cache_k, cache_v) = cache.update_and_fetch(k_i, v_i);
+
+            let mask_i = mask.map(|m| {
+                let sliced =
+                    mlxcel_core::slice(m, &[i as i32, 0, 0], &[i as i32 + 1, seq_len, i32::MAX]);
+                mlxcel_core::squeeze_axis(&sliced, 0)
+            });
+
+            let attn_out = if seq_len > 1 && mask_i.is_none() {
+                mlxcel_core::causal_attention(&q_i, &cache_k, &cache_v, self.scale, 0.0, 0)
+            } else {
+                let mask_ptr = mask_i
+                    .as_ref()
+                    .map(|m| m.as_ref().unwrap() as *const _)
+                    .unwrap_or(std::ptr::null());
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_i, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
+                    )
+                }
+            };
+
+            let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+            let attn_out =
+                mlxcel_core::reshape(&attn_out, &[1, seq_len, self.num_heads * self.head_dim]);
+            attn_outputs.push(attn_out);
+        }
+
+        let mut result = attn_outputs.remove(0);
+        for attn_out in attn_outputs {
+            result = mlxcel_core::concatenate(&result, &attn_out, 0);
+        }
+        result
     }
 
     pub fn forward(
@@ -881,8 +1115,8 @@ impl DecoderLayer {
             MLPType::Dense(mlp) => mlp.forward(&normed),
             MLPType::MoE(moe) => {
                 if std::env::var("MLXCEL_PROFILE_QWEN3_MOE_DETAIL").is_ok() {
-                    let (out, gate_ms, expert_ms, combine_ms) = moe.forward_profiled(&normed);
-                    moe_detail = Some((gate_ms, expert_ms, combine_ms));
+                    let (out, profile) = moe.forward_profiled(&normed);
+                    moe_detail = Some(profile);
                     out
                 } else {
                     moe.forward(&normed)
@@ -893,13 +1127,93 @@ impl DecoderLayer {
         mlxcel_core::eval(&out);
         let mlp_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-        if let Some((gate_ms, expert_ms, combine_ms)) = moe_detail {
-            eprintln!(
-                "[QWEN3_MOE_SPARSE] gate={:.2}ms expert={:.2}ms combine={:.2}ms",
-                gate_ms, expert_ms, combine_ms
-            );
+        if let Some(p) = moe_detail {
+            p.print();
         }
 
+        (out, attn_ms, mlp_ms)
+    }
+
+    /// Batched decode step (#1616): the norms, the fused QKV projection, the
+    /// output projection and the MoE / MLP block run once over
+    /// `[B, T, hidden]`, while attention runs per sequence against each row's
+    /// own cache.
+    ///
+    /// The MoE block flattens the input to `[B, hidden]`, so from B=2 its
+    /// single-token fused-kernel gate declines and the experts run through
+    /// `gather_qmm` over `B * top_k` slots in one launch chain. Before this
+    /// method existed the `LanguageModel` default ran `forward` once per
+    /// sequence, so a B=4 tick was four serialized single-token graphs; the
+    /// op-level profile in
+    /// `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` is
+    /// what justified replacing it.
+    ///
+    /// Used by: Qwen3MoeModel::forward_batched_impl
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_timed(x, caches, mask, false).0
+    }
+
+    /// [`Self::forward_batched`] with the `MLXCEL_PROFILE_BLOCKS` phase split.
+    /// With `profile` set the graph is evaluated at the attention residual and
+    /// at the block output so the two wall-clock spans can be attributed, which
+    /// also makes them synchronization-inflated attribution numbers rather
+    /// than throughput. With `profile` unset no eval is issued and both spans
+    /// are reported as zero.
+    pub fn forward_batched_timed(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        profile: bool,
+    ) -> (UniquePtr<MlxArray>, f64, f64) {
+        if profile {
+            mlxcel_core::eval(x);
+        }
+        let t0 = std::time::Instant::now();
+        let normed = self.input_layernorm.forward(x);
+        let (q, k, v) = self.self_attn.qkv_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+            .expect("valid qwen3_moe batched attention metadata");
+        let attn_concat = self
+            .self_attn
+            .forward_split_attention(&q, &k, &v, caches, &metadata, mask);
+        let attn_out = self.self_attn.o_proj.forward(&attn_concat);
+        let h = mlxcel_core::add(x, &attn_out);
+        let attn_ms = if profile {
+            mlxcel_core::eval(&h);
+            t0.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+
+        let t1 = std::time::Instant::now();
+        let normed = self.post_attention_layernorm.forward(&h);
+        // Same `MLXCEL_PROFILE_QWEN3_MOE_DETAIL` phase line as the
+        // single-sequence path, so a batched tick reports the expert path it
+        // took (`gather_qmm` at `tokens=B`) instead of staying silent.
+        let mlp_out = match &self.mlp {
+            MLPType::MoE(moe)
+                if profile && std::env::var_os("MLXCEL_PROFILE_QWEN3_MOE_DETAIL").is_some() =>
+            {
+                let (out, p) = moe.forward_profiled(&normed);
+                p.print();
+                out
+            }
+            _ => self.mlp.forward(&normed),
+        };
+        let out = mlxcel_core::add(&h, &mlp_out);
+        let mlp_ms = if profile {
+            mlxcel_core::eval(&out);
+            t1.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
         (out, attn_ms, mlp_ms)
     }
 
@@ -1027,6 +1341,69 @@ impl Qwen3MoeModel {
         } else {
             self.embed_tokens.as_linear(&h)
         }
+    }
+
+    /// Batched decode (#1616): `[B, 1]` token ids against `B` per-sequence
+    /// cache slices, returning `[B, 1, vocab]` logits. The embedding, every
+    /// layer's projections and MoE block, the final norm and the LM head run
+    /// once over the batch; attention runs per sequence inside each layer.
+    /// `MLXCEL_PROFILE_BLOCKS=1` prints the same per-layer attention / MLP
+    /// split as the single-sequence path, tagged with the batch size.
+    ///
+    /// Used by: LanguageModel::forward_batched for Qwen3MoeModel
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let b = batch_caches.len();
+        let profile_blocks = std::env::var_os("MLXCEL_PROFILE_BLOCKS").is_some();
+
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        let mut attn_ms_total = 0.0f64;
+        let mut mlp_ms_total = 0.0f64;
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            let (next_h, attn_ms, mlp_ms) = self.layers[layer_idx].forward_batched_timed(
+                &h,
+                &mut layer_caches,
+                mask,
+                profile_blocks,
+            );
+            h = next_h;
+            if profile_blocks {
+                attn_ms_total += attn_ms;
+                mlp_ms_total += mlp_ms;
+                eprintln!(
+                    "[QWEN3_MOE_BLOCK {layer_idx}] b={b} attn={attn_ms:.2}ms mlp={mlp_ms:.2}ms"
+                );
+            }
+        }
+        if profile_blocks {
+            let total = (attn_ms_total + mlp_ms_total).max(1e-9);
+            eprintln!(
+                "[QWEN3_MOE_BLOCKS] b={b} A:{:.1}ms({:.0}%) M:{:.1}ms({:.0}%) T:{:.1}ms",
+                attn_ms_total,
+                attn_ms_total * 100.0 / total,
+                mlp_ms_total,
+                mlp_ms_total * 100.0 / total,
+                total
+            );
+        }
+
+        let h = self.norm.forward(&h);
+        let logits = if let Some(ref lm_head) = self.lm_head {
+            lm_head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        };
+        debug_assert_eq!(mlxcel_core::array_shape(&logits)[0], b as i32);
+        logits
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
@@ -1196,6 +1573,37 @@ impl LanguageModel for Qwen3MoeModel {
 
     fn supports_maskless_padded_prefill(&self) -> bool {
         true
+    }
+
+    /// One row keeps the exact single-sequence graph (fused MoE kernel
+    /// included, mask dropped as the trait default did); two or more rows take
+    /// the batched forward (#1616). Zero rows return the trait default's empty
+    /// logits so the scheduler's guard step stays a no-op.
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match batch_caches.len() {
+            0 => mlxcel_core::zeros(&[0, 1, 1], mlxcel_core::dtype::FLOAT32),
+            1 => Qwen3MoeModel::forward(self, input_ids, batch_caches[0], None),
+            _ => self.forward_batched_impl(input_ids, batch_caches, mask),
+        }
+    }
+
+    /// The context only carries paged-decode state, which this family does
+    /// not opt into (`supports_paged_decode_backend` stays false), so it is
+    /// ignored and the dense batched forward runs.
+    fn forward_batched_with_context(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+        context: Option<&DecodeBatchContext>,
+    ) -> UniquePtr<MlxArray> {
+        let _ = context;
+        LanguageModel::forward_batched(self, input_ids, batch_caches, mask)
     }
 }
 

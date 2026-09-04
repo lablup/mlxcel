@@ -3065,7 +3065,13 @@ pub(crate) fn sampling_config_eq(a: &SamplingConfig, b: &SamplingConfig) -> bool
 /// Best-effort diagnostic name for a [`LoadedModel`] variant, used in
 /// burst error messages so the operator can see which model variant the
 /// scheduler refused to speculatively-drive.
-fn model_variant_label(model: &LoadedModel) -> &'static str {
+///
+/// `pub` (and re-exported at the crate root as
+/// `mlxcel::model_variant_label`) so the `speculative_bench` binary, which
+/// is a separate crate from this library, can name the same labels in its
+/// unsupported-target message instead of carrying a second copy of the
+/// table (#1613).
+pub fn model_variant_label(model: &LoadedModel) -> &'static str {
     // Avoid pulling in `std::mem::discriminant` String formatting which
     // doesn't yield variant names by default. Returning a hand-picked
     // label per common variant keeps error messages stable and Greppable.
