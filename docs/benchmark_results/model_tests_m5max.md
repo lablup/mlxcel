@@ -591,6 +591,9 @@ No requests failed at any level for any model (0 fail across all 9 cells).
 SSM / hybrid / mixed-cache families are intentionally absent: the server
 serializes their slots, so a B-ladder over them measures nothing.
 
+
+**Attribution was done on M1 Ultra, and the M5 Max re-run is pending.** Issue #1616 read these rows as the MoE decode path declining the fused kernel at B>=2. Profiling on M1 Ultra found a different cause: `Qwen3MoeModel` never overrode `forward_batched`, so every batching family without that override ran the single-sequence `forward` once per row and got its aggregate only from overlapping independent graphs. The fix and the full attribution, including an op-level measurement showing the batched fused kernel the issue proposed loses to `gather_qmm` from n=4, are in [moe-batched-decode-m1ultra-2026-09-04.md](moe-batched-decode-m1ultra-2026-09-04.md) and in the M1 Ultra document. These M5 Max numbers predate that change and are left as measured; re-running this ladder on M5 Max is what would show its effect here.
+
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 
 > **Stale baseline.** This section is the 2026-05-19 campaign (mlxcel 0.0.28 vs
