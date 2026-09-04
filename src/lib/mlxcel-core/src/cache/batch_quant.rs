@@ -322,10 +322,7 @@ impl BatchKvQuantConfig {
     /// `Int4Affine` path lands.
     pub fn validate(&self) -> Result<(), String> {
         if self.bits < 0 {
-            return Err(format!(
-                "BatchKvQuantConfig: bits must be non-negative (got {})",
-                self.bits
-            ));
+            return Err(format!("--kv-bits must be non-negative, got {}", self.bits));
         }
         if self.group_size <= 0 {
             return Err(format!(
