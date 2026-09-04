@@ -55,3 +55,7 @@ webpage/site/node_modules/
 
 # mlx-lm baseline benchmark environment (uv-created, local only)
 /.venv-mlxlm/
+
+# Cluster TOMLs written at runtime by scripts/benchmark_pipeline_remote_rollout.sh write-config.
+# The checked-in templates beside them (pipeline_remote_2node_*.toml) are not covered.
+examples/distributed/generated_*.toml
