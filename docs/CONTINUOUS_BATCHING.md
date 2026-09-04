@@ -37,6 +37,15 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   for families that cannot batch (SSM / hybrid / mixed-cache, i.e. any model
   where `supports_batching()` is false), so the default is safe for every
   architecture.
+  `supports_batching()` being true does not by itself mean a family runs one
+  forward per tick: only families that override `forward_batched()` (Llama 3,
+  Llama 4, Qwen 3, Qwen 3.5, Gemma 3, Helium, Muse Glimmer, and Qwen3-MoE
+  since #1616) do. Every other batching family runs the `LanguageModel`
+  default, which calls the single-sequence `forward()` once per row and
+  evaluates the B graphs together, so its aggregate scaling comes only from
+  overlapping independent single-token graphs. The 2026-09-04 M1 Ultra profile
+  in `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` measured
+  that fallback on `qwen3-30b-a3b-4bit` before the override landed.
 - `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
   Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,
   Qwen 3.5, and aliases such as Qwen 2.5) use it; others fall back to sequential
