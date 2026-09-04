@@ -11,11 +11,11 @@ We provide security updates for the following versions:
 | Version              | Supported          | End of Support              |
 | -------------------- | ------------------ | --------------------------- |
 | 0.7.x                | :white_check_mark: | Current release line        |
-| < 0.7.0              | :x:                | Unsupported                  |
+| < 0.7.0              | :x:                | Unsupported                 |
 
 > **Note**: mlxcel's current release line is 0.7.x (tags v0.1.4 through v0.7.0-beta.1 have shipped). The latest published `0.7.x` release is the only supported version and security fixes ship as a new patch release. End-of-support dates for older lines will be defined as the project approaches 1.0.
 
-We strongly recommend always running the latest stable release to ensure you have the most recent security fixes.
+We strongly recommend always running the latest published release to ensure you have the most recent security fixes. The current line's latest tag is a beta (`v0.7.0-beta.1`); the last tag without a pre-release suffix is `v0.6.0`.
 
 ## Reporting a Vulnerability
 
