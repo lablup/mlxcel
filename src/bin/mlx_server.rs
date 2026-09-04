@@ -400,11 +400,11 @@ struct ServerArgs {
     #[arg(long = "lora-fuse")]
     lora_fuse: bool,
 
-    /// Host address to bind to (or Unix socket path when --port 0)
+    /// Host address to bind to (a value ending in .sock is served as a Unix domain socket)
     #[arg(long, env = "LLAMA_ARG_HOST", default_value = "127.0.0.1")]
     host: String,
 
-    /// Port number to listen on (0 = Unix socket mode using --host as socket path)
+    /// Port number to listen on (0 = bind an ephemeral port; ignored when --host ends in .sock)
     #[arg(long, env = "LLAMA_ARG_PORT", default_value_t = 8080)]
     port: u16,
 
