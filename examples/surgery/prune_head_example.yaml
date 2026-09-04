@@ -8,8 +8,9 @@
 # silently kill more Q heads than the user asked for). See
 # `src/lib/mlxcel-surgery/src/ops/prune.rs` for the full policy.
 #
-# Use this YAML with the (in-progress) `--surgery` CLI flag (A4, #) or programmatically by passing the parsed pipeline as
-# the `WeightTransform` argument to `load_text_weights`.
+# Use this YAML with the `--surgery` CLI flag or programmatically
+# by passing the parsed pipeline as the `WeightTransform` argument
+# to `load_text_weights`.
 #
 # Equivalent variants:
 #   granularity: layer        with `layer_ids:   [12]`
