@@ -288,7 +288,7 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
         kind: BenchKind::Mtp,
         block_size: Some(4),
     },
-    // Qwen 3.8 27B family — baseline + `qwen3_5_mtp` head (#1165). Reachable
+    // Qwen 3.8 27B family: baseline + `qwen3_5_mtp` head (#1165). Reachable
     // since #1613 lifted the bench's Gemma-4-Unified-only target gate; the
     // target loads as a Qwen 3.5 variant and pairs with the MTP head split
     // from the same checkpoint family.
