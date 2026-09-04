@@ -955,6 +955,23 @@ fn parse_kv_cache_budget(s: &str) -> Result<mlxcel::memory_estimate::PagedBudget
 // on this struct instead (#1448).
 #[command(disable_help_flag = true)]
 #[command(after_help = "\
+Model store:
+  -m/--model accepts either a local path or a HuggingFace owner/name repo-id.
+  Repo-ids resolve to legacy ./models/<name>, then the HuggingFace cache, then
+  the mlxcel store, with auto-download on miss.
+  Use --model-store-root (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
+  volume; snapshots live at <root>/<owner>/<name> under that root.
+
+Embeddings and Reranking:
+  -m <embedding checkpoint> serves POST /v1/embeddings without a chat model.
+  --embedding-model <checkpoint> adds embeddings beside the chat model in -m.
+  -m <cross-encoder checkpoint> serves POST /v1/rerank without a chat model.
+  --reranker-model <checkpoint> adds reranking beside chat and is required for
+  generative rerankers. Queue depth and timeout use the --embedding-* worker
+  flags for both endpoints.
+  Full request schemas, examples, and supported families:
+    https://github.com/lablup/mlxcel/blob/main/docs/embeddings.md
+
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
        CLUSTER_NAME=studio-pp \\
