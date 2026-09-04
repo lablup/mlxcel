@@ -108,6 +108,12 @@ pub use mlxcel_core::session::{
     PreparedTensorDType, SessionCapabilities,
 };
 pub use server::ImageInputLimits;
+// Diagnostic variant name for a `LoadedModel`, shared with the
+// `speculative_bench` binary so an unsupported speculative target reports the
+// same label the server burst path reports (#1613). The defining module is
+// `pub(crate)`, so the re-export here is what makes the function reachable
+// from a separate binary crate.
+pub use server::batch::speculative_burst::model_variant_label;
 
 /// Return the image admission limits shared by CLI and server requests.
 #[must_use]
