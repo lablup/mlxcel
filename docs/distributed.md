@@ -88,13 +88,13 @@ A minimal shape looks like this:
 ```bash
 # Stage process.
 mlxcel-server -m models/<checkpoint> \
-    --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \
+    --distributed-config examples/distributed/pipeline_remote_2node_tcp.toml \
     --node-id stage-1 \
     --host 0.0.0.0 --port 18081 --no-warmup
 
 # Coordinator / serving process.
 mlxcel-server -m models/<checkpoint> \
-    --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \
+    --distributed-config examples/distributed/pipeline_remote_2node_tcp.toml \
     --node-id coordinator \
     --host 0.0.0.0 --port 18080 \
     --parallel 2 --max-batch-size 2 --pp-micro-batch-size 2
