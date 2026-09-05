@@ -59,7 +59,7 @@ const PPL_CHUNKS_LARGE: usize = 4;
 /// cause as capacity rather than dtype, and the f16 arm holds strictly less
 /// weight memory than the bf16 arm it fails alongside. Deep-context behavior at
 /// this model size is therefore untested here and would need a larger card.
-const PPL_WINDOWS_LARGE: [usize; 2] = [128, 512];
+const PPL_WINDOWS_LARGE: [usize; 1] = [128];
 
 /// Relative PPL increase the f16 arm may show against the bf16 arm before the
 /// conversion is not worth its throughput. Applied by the reader across two
@@ -80,12 +80,19 @@ fn compute_ppl_at(
     window_len: usize,
     chunks_wanted: usize,
 ) -> (f64, usize, usize) {
-    let corpus_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("wikitext2_excerpt.txt");
+    // `MLXCEL_PPL_CORPUS` scores a different file. An instruction-tuned model on
+    // raw wikitext is out of its own distribution, and a low score there is a
+    // domain statement, not a defect; pointing this at the model's own greedy
+    // output separates the two.
+    let corpus_path = match std::env::var_os("MLXCEL_PPL_CORPUS") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("wikitext2_excerpt.txt"),
+    };
     let corpus = fs::read_to_string(&corpus_path)
-        .unwrap_or_else(|e| panic!("wikitext2 corpus missing at {corpus_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("corpus missing at {corpus_path:?}: {e}"));
 
     // Each window is prefixed with the model's BOS when it declares one, and
     // the BOS position is then excluded from the score below. Without it a
@@ -127,6 +134,13 @@ fn compute_ppl_at(
         } else {
             &logprobs[..]
         };
+        if std::env::var_os("MLXCEL_PPL_PER_CHUNK").is_some() {
+            let n: f64 = logprobs.iter().map(|&lp| -(lp as f64)).sum();
+            eprintln!(
+                "  [chunk {chunk}] ppl={:.4}",
+                (n / logprobs.len() as f64).exp()
+            );
+        }
 
         for (pos, &lp) in logprobs.iter().enumerate() {
             if !lp.is_finite() {
@@ -208,52 +222,45 @@ fn test_pre_ampere_f16_ppl() {
     );
 }
 
+// Gemma is deliberately absent from this file, and the reason is the useful
+// part of a long investigation, so it is recorded rather than left for the next
+// person to repeat.
+//
+// `gemma-4-26b-a4b-it` scores a perplexity here between 255 and 88553 depending
+// on the chunk, against Llama's 15.67 on the same corpus and the same code, and
+// top-1 next-token accuracy of 20.5% against Llama's 59.1%. That looks exactly
+// like a broken evaluation path, and it was chased as one through six
+// hypotheses: cache reuse across chunks (the caches are reset, and chunk 0
+// scores identically whether run alone or as the first of four), a missing
+// sliding-window mask (the window is 1024 and the collapse is already total at
+// 32), a missing final-logit softcap (it is applied), a tokenizer fault (the
+// round trip is exact), a logits-shape mismatch (`[1, T, V]`, rows match the
+// input), and an off-by-one (row `i` predicts token `i+1` at 20.5% against 2.3%
+// for token `i`). All six are wrong.
+//
+// The actual explanation is that this checkpoint cannot continue raw text at
+// all. Asked to continue "The printing press was invented in Europe during the
+// fifteenth century. Its most important consequence was" with
+// `--no-chat-template`, it emits "ownce of consequence-wise-wise-wise-wise-..."
+// and never recovers, while Llama-3.1-8B-Instruct on the identical invocation
+// continues fluently and correctly through Gutenberg and the 1440s. Inside its
+// chat template Gemma answers the same question well. It is a chat-only model
+// that has lost raw continuation, and wikitext perplexity measures precisely
+// the ability it no longer has.
+//
+// So perplexity is not an inaccurate measurement for this family; it is an
+// inapplicable one, and a dtype comparison computed inside it means nothing.
+// Judge this family on generation under its chat template instead.
+
 /// Second family: a large quantized checkpoint.
 ///
-/// #1542 asks for a dense family and an MoE one. `gemma-4-26b-a4b-it-4bit` is
-/// the only MoE checkpoint on this host and it now has its own test above,
-/// because until the Gemma 4 loader was wired into the policy it could not
-/// exercise this code path at all.
+/// #1542 asks for a dense family and an MoE one. The MoE slot stays open: the
+/// only MoE checkpoint on this host is Gemma, which the comment above explains
+/// cannot be scored this way at all.
 ///
-/// A quantized checkpoint is kept here as well. It covers a different axis than
-/// MoE, and the axis it covers is the one where this change does the most: on a
-/// quantized model the packed planes stay u32 and only the bf16 side-data
-/// converts, which is what moves decode by 2.40x.
-/// Gemma on the pre-Ampere path.
-///
-/// This model reached the load-time dtype policy through no call site at all
-/// until `load_gemma4_family_weights_with_backing` was wired up: `models::gemma4`
-/// and `loading::vlm_gemma_unified` both call that loader directly, bypassing
-/// `load_text_weights` and `finish_vlm_weights_common`. The symptom was that
-/// perplexity came back bit-identical across three arms, default, explicit
-/// opt-out, and conversion forced past the f16-fragile list, which is what a
-/// policy nobody consults looks like from outside. It is worth stating plainly
-/// because the fragile list would have produced the same observation, and
-/// reading the identical tables as evidence of the exclusion working was the
-/// wrong call once already.
-///
-/// With the policy wired in, the arms separate and the fragile question becomes
-/// answerable. Gemma is on that list twice, by the `"gemma"` substring and by
-/// `text_config.final_logit_softcapping = 30.0`. The list arrived in #732 for
-/// Ampere and later, where that commit records f16 as yielding "no AsType
-/// reduction and no throughput gain": with no upside, excluding a family on a
-/// suspicion is free, and its test plan ran no fragile family in f16. Below
-/// sm_80 the same exclusion costs 17.9x on prefill, so it has to be earned.
-///
-/// Run the third arm with `MLXCEL_CUDA_F16_FRAGILE=1` to force conversion and
-/// compare against the default and the explicit opt-out. Non-finite values are
-/// the thing being looked for, and they fail the run on their own.
-#[test]
-#[ignore = "requires gemma-4-26b-a4b-it-4bit weights and a CUDA device — \
-            run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_fragile --nocapture"]
-fn test_pre_ampere_f16_ppl_fragile() {
-    run_ppl_sweep(
-        "mlx-community/gemma-4-26b-a4b-it-4bit",
-        PPL_CHUNKS_LARGE,
-        &PPL_WINDOWS_LARGE,
-    );
-}
-
+/// A quantized checkpoint covers the remaining axis, and it is the one where
+/// this change does the most: on a quantized model the packed planes stay u32
+/// and only the bf16 side-data converts, which is what moves decode by 2.40x.
 #[test]
 #[ignore = "requires qwen3.8-27B-4bit weights and a CUDA device — \
             run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_quantized --nocapture"]
