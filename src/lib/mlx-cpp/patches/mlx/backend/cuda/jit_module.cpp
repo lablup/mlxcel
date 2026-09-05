@@ -15,6 +15,7 @@
 
 #include "cuda_jit_sources.h"
 
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -520,6 +521,23 @@ std::pair<CUfunction, uint32_t> JitModule::get_kernel_and_dims(
         fmt::format("There is no kernel named {}.", kernel_name));
   }
 
+  // [mlxcel #1566] Serialize the lazy fill below. Upstream published the
+  // configured flag before max_block_dim, so a second thread could observe the
+  // flag set, skip the block, and read max_block_dim while it was still zero.
+  // That zero reaches get_launch_args as max_block_dim, which computes
+  // block_dim = min(max_block_dim, nthreads) = 0 and then divides nthreads by
+  // it, raising SIGFPE. Reproduced on a Tesla V100 with
+  // `mlxcel_core ffi_tests::compiled --test-threads=4`, which dies in the grid
+  // computation for a compiled kernel; the same fault predates this repository's
+  // Volta work and is upstream's, not the overlay's.
+  //
+  // The lock is held across configure_kernel, which is safe: every call site
+  // passes a lambda that only calls cuFuncSetAttribute and never re-enters this
+  // function. kernels_.find above needs no lock because the map is filled once
+  // in the constructor, under the write lock in get_jit_module, and is never
+  // restructured afterwards; only the two mapped fields are mutated here.
+  std::lock_guard<std::mutex> lock(kernels_mtx_);
+
   // If it is the first time we run this kernel then configure it. Do it only
   // once!
   auto kernel = std::get<0>(it->second);
@@ -527,8 +545,10 @@ std::pair<CUfunction, uint32_t> JitModule::get_kernel_and_dims(
     if (configure_kernel) {
       configure_kernel(kernel);
     }
-    std::get<1>(it->second) = true;
+    // Publish max_block_dim before the flag, so that even without the lock a
+    // reader that sees the flag set cannot observe a zero dimension.
     std::get<2>(it->second) = max_occupancy_block_dim(kernel);
+    std::get<1>(it->second) = true;
   }
 
   return {kernel, std::get<2>(it->second)};
