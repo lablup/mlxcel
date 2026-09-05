@@ -43,6 +43,19 @@
 #                        checkpoint as an earlier directory <name>, which was
 #                        measured instead. See "Checkpoint dedup in `all`
 #                        mode" below; disable with --no-dedup.
+#   SKIP:not_a_checkpoint  no config.json, so the directory is not a model at
+#                        all. Typically a container holding other checkpoints
+#                        (models/mlx/large_models parks the ones too big for
+#                        the host). Decided before any model load.
+#   SKIP:missing_weights  config.json is present but no readable *.safetensors
+#                        is, which is what a pruned HuggingFace blob behind a
+#                        dangling symlink looks like, or an aborted download
+#                        that only fetched the metadata. Decided before any
+#                        model load.
+#
+# The last two exist so a sweep can tell a local data problem from an mlxcel
+# defect. Before them both landed as FAIL:bench, the same token a genuine code
+# failure produces, and separating the two took a manual pass over every row.
 #
 # Both SKIP:oom_estimate and SKIP:oom share the SKIP: prefix, so downstream
 # consumers that filter on SKIP: treat them identically as capacity exclusions.
@@ -94,11 +107,30 @@ MODELS_DIR="${MODELS_DIR:-./models}"
 BENCHMARKS_DIR="${BENCHMARKS_DIR:-./benchmarks}"
 TEXT_PROMPT="Hello, how are you today?"
 VLM_PROMPT="What is in this image?"
-MAX_TOKENS=100
+# Fixed measurement shape: a deterministic 512-token synthetic prompt and
+# exactly 128 generated tokens with every end-of-generation token suppressed.
+#
+# This replaces the old shape (a 6-token chat prompt, up to 100 tokens, stopping
+# at EOS), which measured every model over a different number of tokens. On the
+# 2026-09-04 M1 Ultra sweep only 25% of models reached the budget and 16%
+# stopped under 20 tokens, and the resulting bias is not even one-directional:
+# re-measuring with --ignore-eos moved granite-4.1-8b-4bit +117% (1 token) and
+# gemma2-2b-4bit -45% (18 tokens), because a very short run charges first-token
+# latency to throughput while a merely short one enjoys an almost-empty KV
+# cache. Fixing both the prompt and the generated length is what makes
+# per-model decode tok/s comparable at all.
+#
+# 512/128 is llama-bench's pp512/tg128 default and is already what this
+# repository's own scripts/bench_serving_concurrency.py uses, so the
+# single-stream and batched harnesses now agree on the condition.
+MAX_TOKENS=128
 WARMUP_TOKENS=20
-# Optional deterministic long-prompt length (--prompt-tokens N). Empty keeps the
-# short-prompt default so historical CSV rows are byte-compatible.
-PROMPT_TOKENS=""
+# Deterministic synthetic prompt length (--prompt-tokens N), capped per model at
+# the context window by the bench binary. Set empty to fall back to the short
+# --prompt path.
+PROMPT_TOKENS=512
+# Suppress end-of-generation tokens so every model spends the full budget.
+IGNORE_EOS=1
 TIMEOUT=300
 JIT_PREHEAT_TIMEOUT=600
 VLM_IMAGE="tests/fixtures/test_image.png"
@@ -376,10 +408,18 @@ checkpoint_identity_key() {
     size=$(stat --format='%s' "$f" 2>/dev/null || stat -f'%z' "$f" 2>/dev/null || echo 0)
     shards+=("$(basename "$f"):${size}")
   done
-  local shard_list=""
-  if [[ "${#shards[@]}" -gt 0 ]]; then
-    shard_list=$(printf '%s\n' "${shards[@]}" | sort | tr '\n' '|')
+  # No readable shard means the directory is broken (weights absent, or behind
+  # a dangling symlink into a pruned HuggingFace cache), not that it matches
+  # some other directory. Returning an empty key keeps it ungrouped, so it
+  # reaches bench_one and is reported as SKIP:missing_weights on its own row.
+  # Grouping on an empty shard list instead would collapse two independently
+  # broken directories into "duplicate of each other" and hide both, which is
+  # what this branch previously did.
+  if [[ "${#shards[@]}" -eq 0 ]]; then
+    return 0
   fi
+  local shard_list
+  shard_list=$(printf '%s\n' "${shards[@]}" | sort | tr '\n' '|')
   echo "cfg=${cfg_hash};shards=${shard_list}"
 }
 
@@ -637,6 +677,32 @@ bench_one() {
   # the short-prompt default so historical rows stay byte-compatible.
   local ptl="$PROMPT_TOKENS"
 
+  # Classify a directory that cannot be a checkpoint before spending a model
+  # load and a cooldown on a guaranteed failure. Both cases previously landed
+  # as an undifferentiated FAIL:bench, which is the status a real mlxcel defect
+  # also produces, so a sweep could not distinguish "our code broke" from
+  # "this directory is not a model". On the 2026-09-04 M1 Ultra sweep that
+  # ambiguity covered 5 of 21 failures: two container directories holding other
+  # checkpoints (`models`, `large_models`, the latter parking models too large
+  # for the host) and three checkpoints whose weights were absent or behind a
+  # dangling symlink into a pruned HuggingFace cache.
+  if [[ ! -f "$model_path/config.json" ]]; then
+    >&2 printf '>>> [skip]   %s (no config.json; not a checkpoint)\n' "$model_name"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:not_a_checkpoint"
+    return
+  fi
+  local _w _have_weights=0
+  for _w in "$model_path"/*.safetensors; do
+    # A dangling symlink fails -f, which is the case that matters: the
+    # directory looks complete but the weights blob is gone.
+    [[ -f "$_w" ]] && { _have_weights=1; break; }
+  done
+  if [[ "$_have_weights" -eq 0 ]]; then
+    >&2 printf '>>> [skip]   %s (config.json present but no readable *.safetensors)\n' "$model_name"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:missing_weights"
+    return
+  fi
+
   # Skip models that won't fit in memory
   if ! model_fits_in_memory "$model_path"; then
     local est_bytes effective_mb limit_mb
@@ -683,9 +749,12 @@ bench_one() {
   local raw rc=0
   # Capture combined stdout+stderr and exit code. The || suppresses set -e so
   # a non-zero exit code is captured in rc rather than aborting the script.
+  local eos_args=()
+  [[ "$IGNORE_EOS" == "1" ]] && eos_args+=(--ignore-eos)
   raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
       --warmup-tokens "$WARMUP_TOKENS" \
+      ${eos_args[@]+"${eos_args[@]}"} \
       ${extra_args[@]+"${extra_args[@]}"} 2>&1) || rc=$?
 
   if [[ "$rc" -ne 0 ]]; then
@@ -761,6 +830,7 @@ while [[ $# -gt 0 ]]; do
                       shift 2 ;;
     --no-cooldown)    COOLDOWN_SECS=0; BIG_MODEL_COOLDOWN_SECS=0; shift ;;
     --no-dedup)       NO_DEDUP=1; shift ;;
+    --no-ignore-eos)  IGNORE_EOS=0; shift ;;
     --no-pre-warm)    PRE_WARM=0; shift ;;
     --pre-warm-settle) PRE_WARM_SETTLE_SECS="$2"; shift 2 ;;
     --help)           usage; exit 0 ;;

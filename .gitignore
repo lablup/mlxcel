@@ -52,3 +52,6 @@ webpage/site/node_modules/
 # Per-run server logs from scripts/bench_embeddings.py (its default --logdir).
 # Transient run artifacts, not results, and they embed absolute local paths.
 /benchmarks/perf_logs/
+
+# mlx-lm baseline benchmark environment (uv-created, local only)
+/.venv-mlxlm/

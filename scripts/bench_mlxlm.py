@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -25,9 +26,34 @@ from pathlib import Path
 
 TEXT_PROMPT = "Hello, how are you today?"
 VLM_PROMPT = "What is in this image?"
+
+# Deterministic long-prompt corpus, byte-identical to LONG_PROMPT_CORPUS in
+# src/bin/bench_decode.rs. Both harnesses must synthesize the same prompt from
+# the same text or the "vs mlx-lm" columns compare different inputs.
+LONG_PROMPT_CORPUS = (
+    "The measurement of large language model inference performance depends on "
+    "both prefill and decode throughput. During prefill the entire prompt is "
+    "processed in a single forward pass, so its cost grows with the prompt "
+    "length and exercises the matrix-multiply kernels at large batch widths. "
+    "During decode each new token is generated one step at a time, which "
+    "stresses memory bandwidth and kernel launch overhead instead. A benchmark "
+    "that only uses short prompts cannot separate these two regimes, because a "
+    "few dozen prompt tokens are dominated by fixed launch costs. To study "
+    "prefill behaviour honestly we therefore need prompts that are hundreds or "
+    "thousands of tokens long, repeated deterministically so that every run "
+    "observes the same input and the numbers stay comparable over time.\n\n"
+)
 VLM_IMAGE = "tests/fixtures/test_image.png"
-MAX_TOKENS = 100
-WARMUP_TOKENS = 4
+# Fixed measurement shape, matching scripts/bench_decode.sh: a deterministic
+# 512-token synthetic prompt and exactly 128 generated tokens with every
+# end-of-generation token suppressed. The previous shape stopped at EOS, so each
+# model was timed over a different number of tokens and the resulting bias was
+# not one-directional (measured on mlxcel: +117% for a 1-token run, -45% for an
+# 18-token one). A parity column is only meaningful when both sides measure the
+# same interval.
+MAX_TOKENS = 128
+WARMUP_TOKENS = 20
+PROMPT_TOKENS = 512
 MODELS_DIR = Path("./models")
 BENCHMARKS_DIR = Path("./benchmarks")
 # Memory budget: 85% of 128 GB. Override with PYLM_BENCH_MAX_GB env var to
@@ -124,6 +150,8 @@ model_path = sys.argv[1]
 prompt = sys.argv[2]
 warmup_tokens = int(sys.argv[3])
 max_tokens = int(sys.argv[4])
+prompt_tokens_target = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+corpus = sys.argv[6] if len(sys.argv) > 6 else ''
 
 try:
     model, tokenizer = load(model_path, tokenizer_config={'trust_remote_code': True})
@@ -131,9 +159,43 @@ except Exception as e:
     print('ERROR load:', repr(e), file=sys.stderr)
     sys.exit(2)
 
+# Deterministic synthetic prompt, mirroring synthesize_prompt_tokens() in
+# src/bin/bench_decode.rs: repeat the shared corpus, tokenize once with the
+# model's own tokenizer, truncate to exactly N tokens, then decode back to text
+# because mlx-lm's stream_generate takes a string.
+if prompt_tokens_target > 0 and corpus:
+    per_copy = max(1, len(tokenizer.encode(corpus)))
+    repeats = prompt_tokens_target // per_copy + 4
+    ids = tokenizer.encode(corpus * repeats)[:prompt_tokens_target]
+    prompt = tokenizer.decode(ids)
+
+# EOS suppression, the mlx-lm equivalent of mlxcel's --ignore-eos. stream_generate
+# stops when it samples a token in tokenizer.eos_token_ids, so driving those
+# logits to -inf makes the stop unreachable and every model spends the whole
+# budget. logits_processors is forwarded to generate_step through **kwargs and
+# runs on every step, including the first generated token.
+import mlx.core as mx
+_eos = set()
+for _attr in ('eos_token_ids', 'eos_token_id'):
+    _v = getattr(tokenizer, _attr, None)
+    if _v is None:
+        continue
+    _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
+_eos = sorted(int(i) for i in _eos if i is not None)
+if not _eos:
+    print('ERROR no_eos_ids', file=sys.stderr)
+    sys.exit(6)
+_eos_idx = mx.array(_eos)
+
+def _suppress_eos(tokens, logits):
+    return logits.at[..., _eos_idx].add(-float('inf'))
+
+_procs = [_suppress_eos]
+
 # Warmup
 try:
-    for _ in stream_generate(model, tokenizer, prompt=prompt, max_tokens=warmup_tokens):
+    for _ in stream_generate(model, tokenizer, prompt=prompt, max_tokens=warmup_tokens,
+                             logits_processors=_procs):
         pass
 except Exception as e:
     print('ERROR warmup:', repr(e), file=sys.stderr)
@@ -142,7 +204,8 @@ except Exception as e:
 # Measured pass
 last = None
 try:
-    for r in stream_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens):
+    for r in stream_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens,
+                             logits_processors=_procs):
         last = r
 except Exception as e:
     print('ERROR bench:', repr(e), file=sys.stderr)
@@ -187,9 +250,29 @@ except Exception as e:
     # Fallback: use raw prompt
     formatted_prompt = prompt_text
 
+# EOS suppression, matching the text path and mlxcel's --ignore-eos. The VLM
+# prompt is fixed by the image, so only the generated length is normalized here;
+# without this a VLM that answers in three words is timed over three tokens.
+import mlx.core as mx
+_tok = getattr(processor, 'tokenizer', processor)
+_eos = set()
+for _attr in ('eos_token_ids', 'eos_token_id'):
+    _v = getattr(_tok, _attr, None)
+    if _v is None:
+        continue
+    _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
+_eos = sorted(int(i) for i in _eos if i is not None)
+_procs = None
+if _eos:
+    _eos_idx = mx.array(_eos)
+    def _suppress_eos(tokens, logits):
+        return logits.at[..., _eos_idx].add(-float('inf'))
+    _procs = [_suppress_eos]
+_kw = {'logits_processors': _procs} if _procs else {}
+
 # Warmup
 try:
-    for _ in stream_generate(model, processor, prompt=formatted_prompt, image=image_path, max_tokens=warmup_tokens):
+    for _ in stream_generate(model, processor, prompt=formatted_prompt, image=image_path, max_tokens=warmup_tokens, **_kw):
         pass
 except Exception as e:
     print('ERROR warmup:', repr(e), file=sys.stderr)
@@ -197,7 +280,7 @@ except Exception as e:
 
 last = None
 try:
-    for r in stream_generate(model, processor, prompt=formatted_prompt, image=image_path, max_tokens=max_tokens):
+    for r in stream_generate(model, processor, prompt=formatted_prompt, image=image_path, max_tokens=max_tokens, **_kw):
         last = r
 except Exception as e:
     print('ERROR bench:', repr(e), file=sys.stderr)
@@ -218,6 +301,29 @@ print('RESULT', json.dumps(result))
 """
 
 
+def resolve_python() -> list[str]:
+    """Interpreter that has mlx-lm / mlx-vlm importable.
+
+    Resolution order: an explicit MLXLM_PYTHON, then the repo-local uv venv, then
+    `uv run` against that venv, then bare python3. The bare interpreter is last
+    because the system Python here is 3.14, which has no mlx wheels; the venv is
+    created with `uv venv --python 3.12 .venv-mlxlm` and populated with
+    `uv pip install --python .venv-mlxlm/bin/python mlx-lm mlx-vlm`.
+    """
+    explicit = os.environ.get("MLXLM_PYTHON")
+    if explicit:
+        return [explicit]
+    venv = Path(__file__).resolve().parent.parent / ".venv-mlxlm" / "bin" / "python"
+    if venv.exists():
+        return [str(venv)]
+    if shutil.which("uv"):
+        return ["uv", "run", "--python", "3.12", "--with", "mlx-lm", "--with", "mlx-vlm", "python"]
+    return ["python3"]
+
+
+PYTHON_CMD = resolve_python()
+
+
 def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
               warmup_tokens: int, timeout: int):
     """Returns (status, fields_dict_or_None)."""
@@ -225,15 +331,16 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
         prompt = VLM_PROMPT
         code = SUBPROCESS_VLM_CODE
         args = [
-            "python3", "-c", code,
+            *PYTHON_CMD, "-c", code,
             str(model_path), prompt, str(warmup_tokens), str(max_tokens), vlm_image,
         ]
     else:
         prompt = TEXT_PROMPT
         code = SUBPROCESS_TEXT_CODE
         args = [
-            "python3", "-c", code,
+            *PYTHON_CMD, "-c", code,
             str(model_path), prompt, str(warmup_tokens), str(max_tokens),
+            str(PROMPT_TOKENS), LONG_PROMPT_CORPUS,
         ]
 
     try:
