@@ -1898,52 +1898,63 @@ fn env_flag_enabled(name: &str) -> bool {
 /// default-off. Extend the list when a new fragile family surfaces.
 /// The f16-fragile verdict as it applies below compute capability 8.0.
 ///
-/// Same list as [`is_f16_fragile_family`] with Gemma removed, and removed on
-/// evidence rather than on the general argument that the list is unmeasured.
+/// A positive list rather than the sm_80+ list minus exemptions, because every
+/// family on that list has now been measured here and only one of them breaks.
 ///
 /// The list arrived in #732 for Ampere and later, where that commit records f16
 /// as yielding "no AsType reduction and no throughput gain". With no upside,
 /// excluding a family on a suspicion costs nothing, and that PR's test plan ran
-/// no fragile family in f16 at all. Below sm_80 the same exclusion costs 1.60x
-/// on decode, so it has to be earned.
+/// no fragile family in f16 at all. Below sm_80 the exclusion costs about 1.6x
+/// on decode, so each entry was measured on a Tesla V100 against wikitext-2,
+/// f16 against bf16, at the sample sizes noted:
 ///
-/// Measured on a Tesla V100 with `gemma-4-26b-a4b-it-4bit`, converting its 1370
-/// bf16 tensors: decode goes from 6.12 to 9.79 tok/s, no window of a perplexity
-/// sweep produces a non-finite value, and output holds across four prompts at
-/// 200 greedy tokens, including the arithmetic one where both arms derive 396.
-/// The mechanism also points this way: Gemma's trigger is softcapping, and
-/// `tanh(x / c) * c` bounds a value rather than growing it, which is the
-/// opposite of what exhausts an f16 exponent.
+/// - **Apertus** (`apertus`, xIELU squares its input): f16 produces NaN at
+///   every one of 508 scored positions from the first token, while bf16 scores
+///   24.27 with none. This is the entry the list was right about, and the
+///   mechanism is the reason: squaring grows a value past f16's 65504 into inf,
+///   and a subtraction of infinities is NaN. **Stays fragile.**
+/// - **Gemma** (`gemma*`, final-logit softcapping): perplexity moves +0.09% over
+///   10208 tokens with no non-finite value, decode goes 6.12 to 9.79 tok/s, and
+///   output holds across four prompts at 200 greedy tokens. Softcapping is
+///   `tanh(x / c) * c`, which bounds a value rather than growing it, the
+///   opposite of what exhausts an f16 exponent. **Not fragile.**
+/// - **gpt-oss** (`gpt_oss`, "wide dynamic range"): over 10208 tokens the two
+///   window sizes disagree in sign, +3.92% at 128 and -0.95% at 512, for a
+///   token-weighted -0.02% and no non-finite value. A 508-token sample had
+///   shown +3.83% and looked systematic; it was one short window. **Not
+///   fragile.**
+/// - **Cohere/Command-R** (`cohere*`, `command*`, `logit_scale`): the argument
+///   here needs no conversion at all. `c4ai-command-r7b-12-2024-4bit` ships 483
+///   F16 tensors and zero bf16, so it already executes in f16 on every backend
+///   while the list claims f16 is unsafe for it, and it scores 20.25 and 13.15
+///   at the two windows with no non-finite value. The shipping configuration
+///   contradicts the entry. **Not fragile.**
 ///
-/// Cohere/Command-R, Apertus and gpt-oss stay fragile here. They are a
-/// different case: Apertus squares through xIELU and gpt-oss carries a wide
-/// dynamic range, so the argument that acquitted Gemma does not transfer, and
-/// no measurement has been taken for them. `MLXCEL_CUDA_F16_FRAGILE` forces
-/// conversion for whoever wants to take one.
+/// The generic `softcap` / `logit_scale` config triggers are dropped here too.
+/// Both families that carry them, Gemma and Cohere, measured clean, and the
+/// mechanism explains why: a cap bounds the value it is applied to.
+///
+/// A family this list does not know, whose activations genuinely grow, would
+/// convert and could produce the Apertus failure. `MLXCEL_CUDA_F16_NORMALIZE=0`
+/// is the way out, and the perplexity harness fails on a single non-finite
+/// value precisely so that such a family is caught rather than shipped.
 fn is_f16_fragile_below_ampere(config: &Value) -> bool {
-    if is_gemma_family(config) {
-        return false;
-    }
-    is_f16_fragile_family(config)
-}
-
-/// True when the config names a Gemma text or multimodal model.
-///
-/// Checked at the top level and under `text_config`, mirroring the lookup in
-/// [`is_f16_fragile_family`], because a multimodal Gemma carries `gemma4` at the
-/// top and `gemma4_text` underneath.
-fn is_gemma_family(config: &Value) -> bool {
-    let names = [
-        config.get("model_type").and_then(Value::as_str),
-        config
-            .get("text_config")
-            .and_then(|c| c.get("model_type"))
-            .and_then(Value::as_str),
-    ];
-    names
+    let model_type = config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            config
+                .get("text_config")
+                .and_then(|c| c.get("model_type"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    // Squaring activations are the one measured failure. BitNet's relu^2 is not
+    // listed because the text loader excludes it separately through `is_bitnet`.
+    const MEASURED_FRAGILE: &[&str] = &["apertus"];
+    MEASURED_FRAGILE
         .iter()
-        .flatten()
-        .any(|model_type| model_type.contains("gemma"))
+        .any(|needle| model_type.contains(needle))
 }
 
 fn is_f16_fragile_family(config: &Value) -> bool {

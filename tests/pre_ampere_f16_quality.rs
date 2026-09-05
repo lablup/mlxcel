@@ -48,7 +48,7 @@ const PPL_CHUNKS: usize = 16;
 /// Chunks for a large quantized checkpoint. Fewer, because the bf16 control arm
 /// on a 27B runs at roughly 122 ms per prefill token on this class of hardware,
 /// which puts sixteen 2048-token windows over an hour for that arm alone.
-const PPL_CHUNKS_LARGE: usize = 4;
+const PPL_CHUNKS_LARGE: usize = 16;
 
 /// Windows for a large quantized checkpoint on a 32 GB card.
 ///
@@ -59,7 +59,7 @@ const PPL_CHUNKS_LARGE: usize = 4;
 /// cause as capacity rather than dtype, and the f16 arm holds strictly less
 /// weight memory than the bf16 arm it fails alongside. Deep-context behavior at
 /// this model size is therefore untested here and would need a larger card.
-const PPL_WINDOWS_LARGE: [usize; 1] = [128];
+const PPL_WINDOWS_LARGE: [usize; 2] = [128, 512];
 
 /// Relative PPL increase the f16 arm may show against the bf16 arm before the
 /// conversion is not worth its throughput. Applied by the reader across two
@@ -222,9 +222,9 @@ fn test_pre_ampere_f16_ppl() {
     );
 }
 
-// Gemma is deliberately absent from this file, and the reason is the useful
-// part of a long investigation, so it is recorded rather than left for the next
-// person to repeat.
+// The instruction-tuned Gemma is deliberately absent from this file, and the
+// reason is the useful part of a long investigation, so it is recorded rather
+// than left for the next person to repeat.
 //
 // `gemma-4-26b-a4b-it` scores a perplexity here between 255 and 88553 depending
 // on the chunk, against Llama's 15.67 on the same corpus and the same code, and
@@ -238,19 +238,96 @@ fn test_pre_ampere_f16_ppl() {
 // input), and an off-by-one (row `i` predicts token `i+1` at 20.5% against 2.3%
 // for token `i`). All six are wrong.
 //
-// The actual explanation is that this checkpoint cannot continue raw text at
-// all. Asked to continue "The printing press was invented in Europe during the
-// fifteenth century. Its most important consequence was" with
-// `--no-chat-template`, it emits "ownce of consequence-wise-wise-wise-wise-..."
-// and never recovers, while Llama-3.1-8B-Instruct on the identical invocation
-// continues fluently and correctly through Gutenberg and the 1440s. Inside its
-// chat template Gemma answers the same question well. It is a chat-only model
-// that has lost raw continuation, and wikitext perplexity measures precisely
-// the ability it no longer has.
+// The explanation is that the instruction-tuned checkpoint cannot continue raw
+// text at all. Asked to continue "The printing press was invented in Europe
+// during the fifteenth century. Its most important consequence was" with
+// `--no-chat-template`, it emits "ownce of consequence-wise-wise-wise-..." and
+// never recovers, while Llama-3.1-8B-Instruct on the identical invocation
+// continues fluently through Gutenberg and the 1440s. Inside its chat template
+// it answers the same question well. Wikitext perplexity measures precisely the
+// ability it no longer has, so it is an inapplicable metric rather than an
+// inaccurate one, and a dtype comparison computed inside it means nothing.
 //
-// So perplexity is not an inaccurate measurement for this family; it is an
-// inapplicable one, and a dtype comparison computed inside it means nothing.
-// Judge this family on generation under its chat template instead.
+// The base checkpoint below does not have that problem, which is why it, and
+// not the instruction-tuned one, fills the MoE slot.
+
+/// MoE family, on the base checkpoint rather than the instruction-tuned one.
+///
+/// `gemma-4-26b-a4b-4bit` continues raw text correctly on the same prompt where
+/// its `-it` sibling collapses, so perplexity is a metric it can actually be
+/// held to. It is also the checkpoint that makes the f16-fragile exemption in
+/// `is_f16_fragile_below_ampere` testable: it carries the same two triggers,
+/// the `gemma4` model_type and `final_logit_softcapping = 30.0`, so a
+/// regression here would say the exemption was wrong.
+#[test]
+#[ignore = "requires gemma-4-26b-a4b-4bit weights and a CUDA device — \
+            run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_moe --nocapture"]
+fn test_pre_ampere_f16_ppl_moe() {
+    run_ppl_sweep(
+        "mlx-community/gemma-4-26b-a4b-4bit",
+        PPL_CHUNKS_LARGE,
+        &PPL_WINDOWS_LARGE,
+    );
+}
+
+/// The families still on the f16-fragile list below sm_80, under test.
+///
+/// Gemma was removed from that list on evidence; these two are what is left of
+/// it that this host can measure, and they are a different case. Apertus squares
+/// through xIELU and gpt-oss carries a wide dynamic range, so the argument that
+/// acquitted Gemma, that `tanh(x / c) * c` bounds a value rather than growing
+/// it, does not transfer. Both continue raw text well enough to be scored,
+/// unlike `gemma-4-26b-a4b-it`, so perplexity is a metric they can be held to.
+///
+/// Run with `MLXCEL_CUDA_F16_FRAGILE=1` for the f16 arm, since the list still
+/// keeps them on bf16 by default, and against the plain default for the control.
+///
+/// Cohere is absent: `c4ai-command-r7b-12-2024-4bit` ships F16 weights with zero
+/// bf16 tensors, so the exclusion is a no-op on it and measuring it here would
+/// establish nothing about the families that do carry bf16.
+#[test]
+#[ignore = "requires Apertus-8B-Instruct-2509-4bit weights and a CUDA device — \
+            run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_apertus --nocapture"]
+fn test_pre_ampere_f16_ppl_apertus() {
+    run_ppl_sweep(
+        "mlx-community/Apertus-8B-Instruct-2509-4bit",
+        PPL_CHUNKS_LARGE,
+        &PPL_WINDOWS_LARGE,
+    );
+}
+
+#[test]
+#[ignore = "requires gpt-oss-20b-MXFP4-Q8 weights and a CUDA device — \
+            run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_gpt_oss --nocapture"]
+fn test_pre_ampere_f16_ppl_gpt_oss() {
+    run_ppl_sweep(
+        "mlx-community/gpt-oss-20b-MXFP4-Q8",
+        PPL_CHUNKS_LARGE,
+        &PPL_WINDOWS_LARGE,
+    );
+}
+
+/// Cohere, which ships f16 weights and therefore answers the fragile question
+/// without a conversion.
+///
+/// `c4ai-command-r7b-12-2024-4bit` carries 483 F16 tensors and zero bf16, so
+/// `MLXCEL_CUDA_F16_NORMALIZE` has nothing to convert and both arms are the same
+/// run. That makes a before/after comparison impossible and was first written
+/// off here as unmeasurable, which was the wrong reading: the fragile list
+/// claims f16 is unsafe for this family, and this checkpoint already executes in
+/// f16 on every backend. If it scores normally, the claim is contradicted by the
+/// shipping configuration rather than by an experiment, which is stronger
+/// evidence than a conversion delta would have been.
+#[test]
+#[ignore = "requires c4ai-command-r7b-12-2024-4bit weights and a CUDA device — \
+            run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_cohere --nocapture"]
+fn test_pre_ampere_f16_ppl_cohere() {
+    run_ppl_sweep(
+        "mlx-community/c4ai-command-r7b-12-2024-4bit",
+        PPL_CHUNKS_LARGE,
+        &PPL_WINDOWS_LARGE,
+    );
+}
 
 /// Second family: a large quantized checkpoint.
 ///
