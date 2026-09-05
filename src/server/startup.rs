@@ -416,9 +416,14 @@ pub struct ServerStartupConfig {
     /// [`super::thinking_budget::ThinkingBudget::from_raw_i32`]. `None` means
     /// "unrestricted reasoning" (llama.cpp `-1` semantics); per-request body
     /// fields may still impose or lift a cap on a per-request basis. Applies
-    /// only to Qwen3-family thinking models — for models that lack
-    /// `<think>` / `</think>` token IDs the scheduler resolves the token pair
-    /// to `None` and the budget is silently ignored.
+    /// to reasoning models whose delimiter pair
+    /// [`super::thinking_budget::resolve_thinking_token_ids`] recognizes, which
+    /// today is `<think>` / `</think>`, `<|content_thinking|>` /
+    /// `<|end_message|>`, and Gemma 4's `<|channel>` / `<channel|>`. For a
+    /// tokenizer carrying none of those the pair resolves to `None` and the
+    /// budget is silently ignored, and note that a checkpoint can carry the
+    /// tokens without emitting a block for a given prompt, in which case the
+    /// budget is a no-op rather than a failure.
     pub reasoning_budget: Option<super::thinking_budget::ThinkingBudget>,
 
     /// server-wide default chat-template kwargs.

@@ -692,3 +692,52 @@ limited by L2 bandwidth and is documented but not gated.
   the M5 Max dev box; the script is hardware-agnostic and writes
   `benchmarks/turbo_kv/<date>_<hw>_<model>.csv` keyed off
   `sysctl -n machdep.cpu.brand_string`.
+
+## Batched serving (B = 1/2/4)
+
+Source: `benchmarks/metal_m1ultra_batch_2026-09-04.csv` (main at `bf1cdb72`, the before-baseline) and `benchmarks/metal_m1ultra_batch_2026-09-04_pr1616.csv` (the #1616 code PR), both produced by `scripts/bench_serving_concurrency.py --prompt-tokens 512 --max-tokens 128 --concurrency 1,2,4` against one fresh `mlxcel-server -m models/mlx/<name> --parallel 4 --max-batch-prefill 4` per model, levels ascending, Time Machine stopped. Under continuous batching N concurrent streaming clients occupy N decode slots, so the concurrency level is the effective decode batch size. This is the M1 Ultra counterpart of the M5 Max section in [model_tests_m5max.md](model_tests_m5max.md); the attribution behind it is [moe-batched-decode-m1ultra-2026-09-04.md](moe-batched-decode-m1ultra-2026-09-04.md).
+
+**Reading the TTFT column.** Levels run ascending and share the prompt, so the dense llama rows adopt the prompt cache from B=2 on and TTFT falls. The MoE rows do not get that help: dense (non-paged) prompt-cache entries are consumed on adoption, so only as many rows adopt as entries were donated by the previous level and the rest pay a cold 440-token prefill serialized ahead of the first decode tick (one at B=2, two at B=4). That, not the decode tick, is the MoE TTFT column. A second full before-pass reproduced every B=4 aggregate within 0.3%.
+
+### qwen2.5-0.5b-bf16 (small dense bf16, no `forward_batched` override)
+
+| B | ok/fail | TTFT mean (ms) | TTFT p95 (ms) | decode tok/s per request | aggregate tok/s | scaling vs B=1 |
+|---|---------|----------------|---------------|--------------------------|-----------------|----------------|
+| 1 | 1 / 0 | 90.5 | 90.5 | 253.2 | 216.2 | 1.00x |
+| 2 | 2 / 0 | 25.0 | 31.5 | 87.9 | 174.2 | 0.81x |
+| 4 | 4 / 0 | 39.8 | 59.8 | 93.9 | 367.5 | **1.70x** |
+
+After the #1616 PR (untouched family): 209.2 / 202.8 / 369.5 aggregate at B=1/2/4.
+
+### llama-3.1-8b-4bit (canonical dense 4-bit, real batched forward)
+
+| B | ok/fail | TTFT mean (ms) | TTFT p95 (ms) | decode tok/s per request | aggregate tok/s | scaling vs B=1 |
+|---|---------|----------------|---------------|--------------------------|-----------------|----------------|
+| 1 | 1 / 0 | 773.7 | 773.7 | 86.8 | 57.2 | 1.00x |
+| 2 | 2 / 0 | 100.2 | 132.5 | 54.7 | 105.6 | 1.85x |
+| 4 | 4 / 0 | 167.6 | 264.3 | 31.1 | 120.5 | **2.11x** |
+
+After the #1616 PR (untouched family): 56.8 / 106.2 / 118.9 aggregate at B=1/2/4.
+
+### qwen3-30b-a3b-4bit (MoE), before: per-row single-token forwards
+
+| B | ok/fail | TTFT mean (ms) | TTFT p95 (ms) | decode tok/s per request | aggregate tok/s | scaling vs B=1 |
+|---|---------|----------------|---------------|--------------------------|-----------------|----------------|
+| 1 | 1 / 0 | 799.3 | 799.3 | 81.5 | 54.3 | 1.00x |
+| 2 | 2 / 0 | 611.2 | 611.4 | 55.2 | 88.0 | 1.62x |
+| 4 | 4 / 0 | 1223.8 | 1224.2 | 29.8 | 93.3 | **1.72x** |
+
+### qwen3-30b-a3b-4bit (MoE), after the #1616 PR: batched forward, experts on `gather_qmm` from B=2
+
+| B | ok/fail | TTFT mean (ms) | TTFT p95 (ms) | decode tok/s per request | aggregate tok/s | scaling vs B=1 |
+|---|---------|----------------|---------------|--------------------------|-----------------|----------------|
+| 1 | 1 / 0 | 745.4 | 745.4 | 81.0 | 55.3 | 1.00x |
+| 2 | 2 / 0 | 608.8 | 608.9 | 52.9 | 85.0 | 1.54x |
+| 4 | 4 / 0 | 1232.6 | 1232.9 | 33.9 | 102.9 | **1.86x** |
+
+### Reading
+
+On this host the dense-versus-MoE gap the M5 Max numbers show is much narrower: llama-3.1-8b reaches 2.11x rather than 3.25x, and the MoE model 1.72x rather than 1.55x. Both `qwen2.5-0.5b` and, before the PR, `qwen3-30b-a3b` ran the `LanguageModel` default at B>=2 (the single-sequence `forward` once per row, evaluated together), so neither was on a batched kernel path; the MoE model's B=4 tick was four serialized single-token graphs that still took the fused MoE kernel, overlapping by about 30%. The PR gives `Qwen3MoeModel` a real batched forward, which lifts B=4 aggregate by 10.3% (93.3 to 102.9) and per-request decode by 13.8% (29.8 to 33.9) while leaving B=1 and the dense rows inside the run-to-run band; B=2 is unchanged within noise because at 16 expert slots `gather_qmm` and two fused launches cost about the same. The batched fused MoE kernel the issue proposed was prototyped at the op level and is slower than `gather_qmm` from n=4, so it was not built; details, including why expert-plane deduplication would buy nothing here, are in the attribution document.
+
+No requests failed at any level for any model (0 fail across all cells, both passes).
+

@@ -826,7 +826,7 @@ pub struct ServerConfig {
     /// policy per batch; per-request overrides reserved for B12).
     pub lang_bias_config: Option<LangBiasConfig>,
 
-    /// server-wide default thinking-token budget for Qwen3-family
+    /// server-wide default thinking-token budget for reasoning
     /// models. `None` = unrestricted reasoning (default, bit-exact baseline).
     /// Per-request `thinking_budget_tokens` overrides this value (including
     /// a per-request `-1` reverting to unbounded for that one request).

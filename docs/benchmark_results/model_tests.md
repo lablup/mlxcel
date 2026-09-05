@@ -11,7 +11,7 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 | Hardware | File | Status | Last Updated |
 |----------|------|--------|-------------|
 | Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-07-12 |
-| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-07-12 (mlxcel 0.4.0-rc.1, cooldown-30 full sweep) |
+| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-09-03/04 at `b2ff1eee`, which is code-identical to `v0.7.0-beta.1` (cooldown-30 full text + VLM sweep, 90 GB weight budget; plus speculative, batched-serving and embedding passes). CSVs record `mlxcel_version` 0.7.0-beta.1, with `mlxcel_commit` `b2ff1eee` and `mlx_commit` `9a795735` |
 | NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-07-12 (mlxcel 0.4.0-rc.1, full 159-dir sweep; 7 memory-gated skips) |
 
 ## Benchmark CSVs
@@ -20,6 +20,11 @@ Current source-of-truth data lives in `benchmarks/`:
 
 | CSV | Hardware | Date | Type |
 |-----|----------|------|------|
+| `metal_m5max_2026-09-03.csv` | M5 Max | 2026-09-03 (mlxcel 0.6.0, MLX pin `9a795735`, `--cooldown 30 --big-cooldown 30`, `BENCH_MEM_OVERHEAD_FACTOR=1.209` for a 90 GB weight budget; version-change full text re-benchmark, 175 dirs, 161 measured; 0 decode regressions vs 0.4.0-rc.1) | Text |
+| `metal_m5max_vlm_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0, MLX pin `9a795735`, same cooldowns and budget; version-change full VLM re-benchmark, 77 measured rows; Pixtral/Mistral3 image-token counts drop by design after #792) | VLM |
+| `metal_m5max_spec_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `speculative_bench --sweep --max-tokens 128`, 12 rows: 3 baselines, 3 measured Gemma 4 Unified 12B MTP rows at K=2/4/8, 3 DFlash deferred, 3 Gemma 4 31B MTP rows that the harness could not drive. That harness restriction was lifted by #1613; an M5 Max re-run against a binary carrying it has not been made) | Speculative |
+| `metal_m5max_batch_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_serving_concurrency.py` at `--parallel 4 --max-batch-prefill 4`, `--prompt-tokens 512 --max-tokens 128`; 3 models x B=1/2/4, 0 failed requests) | Batch |
+| `metal_m5max_embeddings_2026-09-04.csv` | M5 Max | 2026-09-04 (mlxcel 0.6.0; `bench_embeddings.py`, 18 of the 20-model roster present on disk, 90 cells, 0 failures; report in [`embeddings-rerank-m5max-2026-09-04.md`](embeddings-rerank-m5max-2026-09-04.md)) | Embeddings/Rerank |
 | `metal_m5max_2026-07-12.csv` | M5 Max | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30 --big-cooldown 30`; version-change full text re-benchmark, 175 dirs, 160 measured; no code regressions) | Text |
 | `metal_m5max_vlm_2026-07-12.csv` | M5 Max | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30 --big-cooldown 30`; version-change full VLM re-benchmark, 75 measured rows) | VLM |
 | `metal_m5max_2026-06-15.csv` | M5 Max | 2026-06-15 (mlxcel 0.2.1, MLX pin a6ec7123; full text re-benchmark, 151 rows, 135 measured) | Text |
@@ -29,6 +34,7 @@ Current source-of-truth data lives in `benchmarks/`:
 | `metal_m5max_vlm_2026-05-20.csv` | M5 Max | 2026-05-20 (mlxcel 0.0.28, MLX 0.31.2; Gemma3n + Molmo v1 + Phi-3.5 vision + Gemma3 4B VLM entries) | VLM |
 | `pylm_m5max_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-lm 0.31.3 baseline; CSV date crossed midnight) | Text |
 | `pylm_m5max_vlm_2026-05-18.csv` | M5 Max | 2026-05-19 benchmark campaign (mlx-vlm 0.4.4 baseline; CSV date crossed midnight) | VLM |
+| `metal_m1ultra_spec_2026-09-04.csv` | M1 Ultra | 2026-09-04 (mlxcel 0.7.0-beta.1, MLX pin `9a795735`; `speculative_bench --sweep --batch 1 --max-tokens 128`, 16 rows: 4 baselines, 9 measured MTP rows at K=2/4/8 across Gemma 4 31B, Gemma 4 Unified 12B and Qwen 3.8 27B, 3 DFlash deferred; first sweep with #1613's per-variant MTP dispatch) | Speculative |
 | `metal_m1ultra_2026-07-12.csv` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30`; version-change full text re-benchmark, 168 rows; decode median 98% vs mlx-lm, flat vs 0.3.3, nvfp4/minicpm-mxfp4 recovered) | Text |
 | `metal_m1ultra_vlm_2026-07-12.csv` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1, MLX pin 57c66cac, `--cooldown 30`; version-change full VLM re-benchmark, 168 rows) | VLM |
 | `metal_m1ultra_2026-07-12_cooldown0.csv` + `_vlm_` | M1 Ultra | 2026-07-12 (mlxcel 0.4.0-rc.1; `--cooldown 0` pass of the same build, kept for the thermal-offset comparison: decode reads ~2% lower than the cooldown-30 canonical) | Text/VLM |
@@ -63,22 +69,22 @@ The table below summarizes the current cross-hardware decode readings for select
 
 | Model | Params | M1 Ultra | M5 Max | GB10 |
 |-------|--------|----------|--------|------|
-| SmolLM-135M | 135M | 418.85 | 879.03 | 656.73 |
-| ERNIE-4.5-0.3B | 300M | 522.31 | 1062.39 | 625.30 |
-| Qwen2.5-0.5B (4bit) | 500M | 381.94 | 674.71 | 492.60 |
-| Llama-3.2-1B | 1B | 421.40 | 550.85 | 266.04 |
-| Qwen3-0.6B | 600M | 228.37 | 571.80 | 283.90* |
-| StableLM-1.6B | 1.6B | 263.88 | 425.92 | 203.75 |
-| Gemma-3-1B | 1B | 227.38 | 395.02 | 278.52 |
-| EXAONE-3.5-2.4B | 2.4B | 199.11 | 287.66 | 141.83 |
-| SmolLM3-3B | 3B | 131.45 | 234.21 | 104.24 |
-| Nemotron-H-30B | 30B | 91.75 | 176.95 | 87.41¶ |
-| Qwen3-MoE-30B | 30B | 83.42 | 175.48 | 89.06† |
-| Llama-3.1-8B | 8B | 106.63 | 117.46 | 50.53 |
-| Qwen2.5-7B | 7B | 108.47 | 126.20 | 54.56 |
-| Mixtral-8x7B | 47B | 51.81 | 65.69 | 28.42 |
-| GPT-OSS-120B | 120B (MoE) | 59.29 | 113.90 | 50.48§ |
-| Solar-Open-100B | 100B (MoE) | 35.02 | 65.40 | 18.37§ |
+| SmolLM-135M | 135M | 418.85 | 926.25 | 656.73 |
+| ERNIE-4.5-0.3B | 300M | 522.31 | 1068.37 | 625.30 |
+| Qwen2.5-0.5B (4bit) | 500M | 381.94 | 660.77 | 492.60 |
+| Llama-3.2-1B | 1B | 421.40 | 556.36 | 266.04 |
+| Qwen3-0.6B | 600M | 228.37 | 601.12 | 283.90* |
+| StableLM-1.6B | 1.6B | 263.88 | 428.36 | 203.75 |
+| Gemma-3-1B | 1B | 227.38 | 391.42 | 278.52 |
+| EXAONE-3.5-2.4B | 2.4B | 199.11 | 284.14 | 141.83 |
+| SmolLM3-3B | 3B | 131.45 | 231.61 | 104.24 |
+| Nemotron-H-30B | 30B | 91.75 | 176.01 | 87.41¶ |
+| Qwen3-MoE-30B | 30B | 83.42 | 173.61 | 89.06† |
+| Llama-3.1-8B | 8B | 106.63 | 114.92 | 50.53 |
+| Qwen2.5-7B | 7B | 108.47 | 124.11 | 54.56 |
+| Mixtral-8x7B | 47B | 51.81 | 65.56 | 28.42 |
+| GPT-OSS-120B | 120B (MoE) | 59.29 | 112.83 | 50.48§ |
+| Solar-Open-100B | 100B (MoE) | 35.02 | 65.51 | 18.37§ |
 
 *Qwen3-0.6B on GB10 again stopped at 9 tokens before EOS (2026-07-12); the 283.90 tok/s figure is from that short window and is not directly comparable to full-length runs.
 †Qwen3-MoE-30B (`qwen3-moe-4bit`) **failed** on GB10 at 0.3.0 (Metal-only fused-MoE kernel aborted on CUDA); the CUDA fused decode-MoE kernel (#319) restored it at 0.3.1, and at 89.06 tok/s it stays ahead of M1 Ultra (83.75).
@@ -86,29 +92,33 @@ The table below summarizes the current cross-hardware decode readings for select
 ¶Nemotron-H-30B doubled vs the 2026-06-17 record (40.32) because the fused single-token SSM decode kernel was ported to CUDA on 2026-07-10 (#727); the post-reboot re-verification (#755) confirmed the gain on a fresh host (87.41, post-reboot single). The whole SSM/hybrid cluster carries the same attribution (see the GB10 file's notable-changes list).
 
 M1 Ultra column is from 2026-07-12 with mlxcel 0.4.0-rc.1 / MLX pin `57c66cac` / `--cooldown 30 --big-cooldown 30`, using the `mlxcel-bench-decode` same-process harness.
-M5 Max column is from the 2026-07-11/12 full re-sweep with mlxcel 0.4.0-rc.1 / MLX pin `57c66cac` / `--cooldown 30 --big-cooldown 30`, same-process `mlxcel-bench-decode` harness.
+M5 Max column is from the 2026-09-03/04 full re-sweep with mlxcel **0.6.0** / MLX pin `9a795735` / `--cooldown 30 --big-cooldown 30`, same-process `mlxcel-bench-decode` harness.
 GB10 column is from 2026-07-12 with mlxcel 0.4.0-rc.1 / MLX pin `57c66cac` (0.32.1) / CUDA 13.0 (SM 12.1) / `--cooldown 15 --big-cooldown 45`, using the `mlxcel-bench-decode` same-process warm harness, except the two `§`-marked memory-gated rows carried from 2026-06-17 / 0.3.1 and the `¶`-marked Nemotron-H row, which is the post-reboot single from the same day (#755, `--cooldown 30`).
-All three columns now share mlxcel 0.4.0-rc.1 and the MLX pin `57c66cac`, so the Apple Silicon gap reflects hardware delta. M5 Max stays roughly 1.73x faster than M1 Ultra on the selected 16 rows (avg ~1.73x, median ~1.77x). The largest MoE rows show the M5 Max advantage: qwen3-moe-30b runs at 175.48 vs 83.42 tok/s (2.10x), gpt-oss-120b at 113.90 vs 59.29 (1.92x), and solar-open-100b at 65.40 vs 35.02 (1.87x). On GB10 the CUDA fused decode-MoE kernel (#319) keeps qwen3-moe-30b (89.06) just ahead of M1 Ultra (83.42).
-For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure; the bf16 variant runs at 295.65 tok/s on M1 Ultra and 401.49 tok/s on M5 Max.
+**The columns no longer share a version.** M5 Max is mlxcel 0.6.0 / MLX pin `9a795735`; M1 Ultra and GB10 are still 0.4.0-rc.1 / `57c66cac`, pending their own re-sweeps. The cross-hardware ratios below therefore mix versions and should be read as indicative until those hosts are re-measured. The mixing is mild in practice: across these 16 rows M5 Max moved between -2.2% and +5.4% from 0.4.0-rc.1 to 0.6.0 (13 of 16 within +/-2%), so the hardware delta still dominates. M5 Max stays roughly 1.73x faster than M1 Ultra on the selected 16 rows (avg ~1.73x, median ~1.77x). The largest MoE rows show the M5 Max advantage: qwen3-moe-30b runs at 175.48 vs 83.42 tok/s (2.10x), gpt-oss-120b at 113.90 vs 59.29 (1.92x), and solar-open-100b at 65.40 vs 35.02 (1.87x). On GB10 the CUDA fused decode-MoE kernel (#319) keeps qwen3-moe-30b (89.06) just ahead of M1 Ultra (83.42).
+For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure; the bf16 variant runs at 295.65 tok/s on M1 Ultra (0.4.0-rc.1) and 400.41 tok/s on M5 Max (0.6.0).
 
-## Overall Status (mlxcel 0.4.0-rc.1 across M1 Ultra, M5 Max, and GB10)
+## Overall Status (M5 Max at mlxcel 0.6.0; M1 Ultra and GB10 still at 0.4.0-rc.1)
 
 | Metric | Count |
 |--------|-------|
 | Supported model architectures | 89+ ModelType variants |
 | Text models tested (M1 Ultra, 2026-06-15) | 136 pass, 2 partial, 4 fail, 9 skip/non-standalone (151 dirs; adds apertus, seed-oss, dots.llm1, granite family, lfm2, plamo-2, falcon-h1, BitNet; diffusiongemma loads via #291) |
-| Text models tested (M5 Max, 2026-07-12) | 155 pass, 6 partial, 14 fail/skip (0.4.0-rc.1 cooldown-30 full sweep, 175 dirs / 160 measured; no code regressions vs 0.2.1) |
+| Text models tested (M5 Max, 2026-09-03) | 144 pass, 6 partial, 4 fail/skip across 154 table rows (0.6.0 cooldown-30 full sweep, 175 dirs / 161 measured, 90 GB weight budget; 0 decode regressions vs 0.4.0-rc.1). Table rows are below the dir count because 12 duplicate directories, 4 non-text checkpoints and 6 drafter/dflash variants are benchmarked but not listed separately |
 | Text models tested (GB10, 2026-07-12) | 141 pass measured + 5 pass carried (memory-gate skips), 0 code failures, 13 not-tested/N.A. (glm-5 pair incomplete/absent; paligemma2 image-only; docling/granite-speech/whisper/kokoro non-text-gen; 4 MTP/DFlash drafters; glm-4.5v + mistral-small-4-119b memory-gated, never measured) (159 dirs; 0.4.0-rc.1 full sweep) |
 | VLM models tested (GB10, 2026-07-12) | 63 measured image rows + 1 carried (llama-4-scout, memory-gate skip); gemma-4-31b-it-nvfp4 image-input FAIL since fixed by #749 (0.4.0-rc.1) |
-| VLM models tested (M5 Max, 2026-07-12) | 75 measured VLM rows (0.4.0-rc.1 cooldown-30 full VLM re-sweep; adds deepseek-ocr, idefics2/3, kimi-vl, lfm2-vl, granite-vision, paddleocr-vl, smolvlm, and more; one intermittent pixtral VLM slow-read on M5, not consistently reproducible) |
+| VLM models tested (M5 Max, 2026-09-04) | 77 measured VLM rows (0.6.0 cooldown-30 full VLM re-sweep). Pixtral/Mistral3 image-token counts fall sharply by design after #792 (aspect-ratio processing, no upscaling), so their prefill and decode are not comparable with the 0.4.0-rc.1 rows |
 | VLM models tested (M1 Ultra, 2026-06-15) | 55 measured VLM rows (53 pass + 2 partial) |
+| Speculative MTP on M5 Max (2026-09-04) | Gemma 4 Unified 12B + MTP assistant: 1.39x / **1.57x** / 1.55x at K=2/4/8, acceptance 55.6% / 35.0% / 34.6%. Gemma 4 31B MTP produced no number on this run because the harness drove only a Gemma 4 Unified target; #1613 lifted that and the pairing is measured on M1 Ultra below, but this host has not been re-run. The DFlash rows stay deferred on their own blocker |
+| Speculative MTP on M1 Ultra (2026-09-04) | First sweep past the harness's Gemma-4-Unified-only target gate (#1613). Every MTP pairing reads below 1.00x on this Apple GPU generation: Gemma 4 31B + assistant 0.93x / 0.75x / 0.75x, Gemma 4 Unified 12B + assistant 0.94x / 0.74x / 0.76x, Qwen 3.8 27B + MTP head 0.91x / 0.69x / 0.37x at K=2/4/8. Acceptance is not the cause; see the matrix for the round-cost reading |
+| Batched serving on M5 Max (2026-09-04) | Aggregate scaling at B=4 vs B=1: qwen2.5-0.5b-bf16 3.17x, llama-3.1-8b-4bit 3.25x, qwen3-30b-a3b-4bit (MoE) 1.55x. 0 failed requests across all 9 cells |
+| Embedding / rerank on M5 Max (2026-09-04) | 18 checkpoints (11 text embedders, 2 VL embedders, 5 rerankers), 90 cells, 0 failures. The 2 `local/*-merged` multi-vector entries are merge artifacts and are not fetchable, so they stay unmeasured |
 | Beating mlx-lm on M1 Ultra (text, >=100%) | 24/74 (32%, 6-15 vs pinned 5-19 baseline) |
 | At 90%+ parity on M1 Ultra (text) | 59/74 (80%, 6-15 vs pinned 5-19 baseline) |
 | Average vs mlx-lm on M1 Ultra (text) | 96% decode speed (median 98%, 6-15 vs pinned 5-19 baseline) |
-| Beating mlx-lm on M5 Max (text, >=100%) | 27/67 (40%) — **prior 0.0.28 campaign; mlx-lm baseline not re-run for the 0.4.0-rc.1 sweep** |
-| At 90%+ parity on M5 Max (text) | 62/67 (93%) — prior 0.0.28 campaign; pending a 0.4.0-rc.1 baseline |
-| Average vs mlx-lm on M5 Max (text) | 98% decode speed (median 99%) — prior 0.0.28 campaign; pending a 0.4.0-rc.1 baseline |
-| Average vs mlx-vlm on M5 Max (VLM) | 100% decode speed (median 100%; 17 pairs) — prior 0.0.28 campaign; pending a 0.4.0-rc.1 baseline |
+| Beating mlx-lm on M5 Max (text, >=100%) | 27/67 (40%) — **prior 0.0.28 campaign; the mlx-lm baseline has not been re-run since, and is now two mlxcel releases stale** |
+| At 90%+ parity on M5 Max (text) | 62/67 (93%) — prior 0.0.28 campaign; pending a fresh baseline |
+| Average vs mlx-lm on M5 Max (text) | 98% decode speed (median 99%) — prior 0.0.28 campaign; pending a fresh baseline |
+| Average vs mlx-vlm on M5 Max (VLM) | 100% decode speed (median 100%; 17 pairs) — prior 0.0.28 campaign; pending a fresh baseline |
 
 ## Generating Benchmarks
 
@@ -245,9 +255,14 @@ Invocations:
 
 These are the pairings whose target + drafter checkpoints are present on
 the M1 Ultra reference host. The no-drafter baseline rows are real numbers
-captured on the host; the speculative numerator (tok/s) rows remain a
-perf-bench follow-up, but **correctness parity is verified** end-to-end
-by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
+captured on the host; the speculative numerator (tok/s) rows were a perf-bench
+follow-up when this table was written, and **correctness parity is verified**
+end-to-end by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
+
+The follow-up has since been measured: the M1 Ultra matrix below carries real
+tok/s for every MTP pairing, and the catalog has grown a Qwen 3.8 27B baseline
+and MTP pairing (#1613). The table immediately below is kept as the older
+reading it was; read the matrix for current numbers.
 
 | Pairing                       | Kind   | B | block_size | tok/s | speedup vs no-drafter | status                                                                |
 |-------------------------------|--------|---|------------|-------|------------------------|-----------------------------------------------------------------------|
@@ -255,6 +270,61 @@ by the `#[ignore]`-gated tests in `tests/speculative_parity.rs`.
 | Qwen 3.5 4B + DFlash          | dflash | 1 | 16         | —     | —                      | parity verified; tok/s row is a perf-bench follow-up                  |
 | Gemma 4 31B (no drafter)      | none   | 1 | —          | 20.4  | 1.00×                  | ok                                                                    |
 | Gemma 4 31B + MTP assistant   | mtp    | 1 | 4          | —     | —                      | parity verified; tok/s row is a perf-bench follow-up                  |
+
+### M1 Ultra pairing matrix (2026-09-04, mlxcel 0.7.0-beta.1)
+
+Measured on the Mac Studio M1 Ultra 128 GB (Metal) with
+`speculative_bench --sweep --batch 1 --max-tokens 128`. Greedy, decode-only
+tok/s, the `DEFAULT_PROMPT` (14 tokens under the Gemma tokenizer, 13 under
+Qwen's). Source CSV: `benchmarks/metal_m1ultra_spec_2026-09-04.csv`.
+
+This is the first sweep on any host to carry Gemma 4 31B and Qwen 3.8 27B MTP
+rows. #1613 replaced the harness's `LoadedModel::Gemma4Unified` match with
+per-variant adapter selection and added the Qwen 3.8 baseline and MTP pairing
+to `REACHABLE_PAIRINGS`, so the Gemma 4 31B pairing that reads as a blank in
+the M5 Max matrix below, and the Qwen 3.8 pairing that is absent from it
+entirely, are both measured here.
+
+| Pairing (M1 Ultra Metal)                | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
+|-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
+| Qwen 3.5 4B (no drafter)                | none | — | 106.1 | 1.00×                 | —          | —                 | ok |
+| Qwen 3.5 4B + DFlash                    | dflash | 2/4/8 | — | —                 | —          | —                 | DEFERRED (DFlash loader + public Qwen3NextCache API) |
+| Gemma 4 31B (no drafter)                | none | — | 19.9  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 2 | 18.4  | 0.93×                 | 74.0%      | 0.74              | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 4 | 14.9  | 0.75×                 | 52.9%      | 1.59              | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 8 | 14.9  | 0.75×                 | 52.9%      | 1.59              | ok (effective K=4) |
+| Gemma 4 Unified 12B (no drafter)        | none | — | 38.4  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 36.0  | 0.94×                 | 54.5%      | 0.55              | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 28.5  | 0.74×                 | 39.6%      | 1.19              | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 29.3  | 0.76×                 | 39.6%      | 1.19              | ok (effective K=4) |
+| Qwen 3.8 27B (no drafter)               | none | — | 24.9  | 1.00×                 | —          | —                 | ok |
+| Qwen 3.8 27B + MTP head                 | mtp  | 2 | 22.5  | 0.91×                 | 76.1%      | 0.76              | ok |
+| Qwen 3.8 27B + MTP head                 | mtp  | 4 | 17.2  | 0.69×                 | 50.4%      | 1.51              | ok |
+| Qwen 3.8 27B + MTP head                 | mtp  | 8 | 9.3   | 0.37×                 | 21.6%      | 1.51              | ok (proposals past the fourth are all rejected) |
+
+**Every MTP pairing reads below 1.00x on this host, and acceptance is not the
+reason.** Gemma 4 Unified 12B accepts *more* here than on M5 Max at the same K
+(39.6% and mean accepted length 1.19 at K=4, against 35.0% and 1.05), and still
+lands at 0.74x where M5 Max reads 1.57x. The difference is the verify round:
+`speculative-decoding-m1ultra-2026-08-19.md` measures a block-4 round at 2.70
+classic decode steps on M1 Ultra against 1.27 on M5 Max, so break-even needs
+about 2.7 emitted tokens per verify here and roughly 1.3 there. A mean accepted
+length near 1.2 emits about 2.2 per verify, which clears the M5 Max bar and not
+this one. This is the same reading behind the static `MLXCEL_ENABLE_MTP_B1`
+gate declining B=1 MTP on Apple GPU generation 13, so the rows confirm the
+shipped default rather than contradicting it.
+
+**K=8 splits by drafter family.** The Gemma 4 assistants clamp to their
+configured block size of 4: acceptance and mean accepted length are identical
+at K=4 and K=8, so the wider request is a no-op. The `qwen3_5_mtp` head honors
+it instead, proposing 7 per round against 3 at K=4 while accepting the same
+1.51, which drops acceptance to 21.6% and throughput to 9.3 tok/s (0.37x).
+K=4 or narrower is the operating point for that pairing.
+
+Two baselines appear in both this matrix and the older reachable-pairings table
+above: Qwen 3.5 4B at 106.1 tok/s against 95.4, and Gemma 4 31B at 19.9 against
+20.4. Those older rows were captured at a different mlxcel version and MLX pin,
+so read them as context rather than as a controlled run-over-run comparison.
 
 ### GB10 CUDA pairing matrix (2026-07-10, issue #638)
 
@@ -283,7 +353,7 @@ which measures 7.7 tok/s at K=4 on the same binary):
 The pre-#725 regression came from the verify `[1, K]` forward hitting the CUDA
 quantized dispatch's `M*B < 8` per-row qmv fallback, which costs roughly K
 classic forwards instead of amortizing to one the way it does on Apple Silicon
-(the same pairing measures ~1.87× on M5 Max). The multirow qmv path (#725,
+(the same pairing measured ~1.87× on M5 Max at the time; the 2026-09-04 0.6.0 re-measurement reads 1.57× at K=4, at unchanged acceptance, so the two hosts have converged somewhat since). The multirow qmv path (#725,
 `MLXCEL_QMV_MULTIROW`) removes that fallback's weight re-reads, and B=1 MTP on
 GB10 now clears the 1.4× target from issue #638 at K=4/K=8 at unchanged
 acceptance (see `qmv-multirow-gb10-2026-07-11.md`). K=8 collapses onto K=4
@@ -297,6 +367,54 @@ pairing profiles to an enable verdict in serving without a manual override
 (`sqrt(K)` remains only as a fallback for windows with no probe signal). The
 DFlash and 31B rows remain deferred (no checkpoint / wrong target family, see
 the dated note).
+
+### M5 Max pairing matrix (2026-09-04, mlxcel 0.6.0)
+
+Measured on the MacBook Pro M5 Max (Metal) with
+`speculative_bench --sweep --max-tokens 128`. Greedy, decode-only tok/s, the
+14-token `DEFAULT_PROMPT`. Source CSV: `benchmarks/metal_m5max_spec_2026-09-04.csv`.
+
+| Pairing (M5 Max Metal)                  | Kind | K | tok/s | speedup vs no-drafter | acceptance | mean accepted len | status |
+|-----------------------------------------|------|---|------:|----------------------:|-----------:|------------------:|--------|
+| Qwen 3.5 4B (no drafter)                | none | — | 171.8 | 1.00×                 | —          | —                 | ok |
+| Qwen 3.5 4B + DFlash                    | dflash | 2/4/8 | — | —                 | —          | —                 | DEFERRED (DFlash loader + public Qwen3NextCache API) |
+| Gemma 4 31B (no drafter)                | none | — | 28.3  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 31B + MTP assistant             | mtp  | 2/4/8 | — | —                   | —          | —                 | harness target gate, lifted by #1613; re-run pending |
+| Gemma 4 Unified 12B (no drafter)        | none | — | 45.3  | 1.00×                 | —          | —                 | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 2 | 62.9  | 1.39×                 | 55.6%      | 0.56              | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 4 | 70.9  | **1.57×**             | 35.0%      | 1.05              | ok |
+| Gemma 4 Unified 12B + MTP assistant     | mtp  | 8 | 70.0  | 1.55×                 | 34.6%      | 1.07              | ok (effective K=4) |
+
+**Acceptance matches GB10 exactly** (55.6% / 0.56 at K=2 and 35.0% / 1.05 at
+K=4 on both hosts). Acceptance is a drafter-quality property and the run is
+greedy over a fixed prompt, so identical figures across two very different
+backends are the expected result and confirm the drafter path is doing the same
+work. Any difference in the speedup column between hosts is therefore a
+kernel-dispatch effect, not a drafter effect.
+
+K=4 is the operating point: K=8 buys nothing (34.6% acceptance, mean accepted
+length 1.07, so the extra proposals past the fourth are discarded) and reads
+marginally below K=4.
+
+**Two pairings on this host produced no number, for different reasons.** The
+`dflash` rows are the known harness deferral and still are. The Gemma 4 31B MTP
+rows failed with `MTP bench currently supports a Gemma 4 Unified target;
+load_model returned a different variant`, because `run_mtp` hard-matched
+`LoadedModel::Gemma4Unified` and the 31B checkpoint loads as another variant.
+The `gemma-4-31b-it-assistant-bf16` drafter was on disk throughout, so this was
+a harness limitation rather than a missing checkpoint. **That restriction is
+gone**: #1613 replaced the match with per-variant adapter selection, and the
+pairing is measured in the M1 Ultra matrix above. The three cells here stay
+empty because this M5 Max sweep predates the fix and the host has not been
+re-run; they are not a statement about the pairing.
+
+The same limitation covered a coverage gap: `qwen3.8-27b-mtp-4bit` and
+`qwen3.8-27b-mtp-bf16` were on disk and their target `qwen3.8-27b-4bit` was
+measured in the text sweep, but `REACHABLE_PAIRINGS` carried no Qwen 3.8 entry,
+and adding one alone would not have helped because the same `Gemma4Unified`
+match rejected the target. #1613 closed both halves: the catalog now carries a
+Qwen 3.8 27B baseline and an MTP pairing against the `qwen3_5_mtp` head, and
+both are measured in the M1 Ultra matrix above. This M5 Max sweep predates them.
 
 ### Deferred pairings
 

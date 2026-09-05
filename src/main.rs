@@ -2424,7 +2424,7 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     lang_bias: LangBiasCliArgs,
 
-    /// Default thinking-token budget for Qwen3-family models.
+    /// Default thinking-token budget for reasoning models.
     ///
     /// Caps the number of tokens generated inside the `<think>...</think>`
     /// reasoning block. Matches llama.cpp `--reasoning-budget` semantics:

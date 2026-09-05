@@ -56,6 +56,20 @@ struct Args {
     #[arg(short = 'n', long, default_value_t = 100)]
     max_tokens: usize,
 
+    /// Suppress every end-of-generation token so the measured pass always runs
+    /// the full `--max-tokens` budget (b10621 `--ignore-eos`, the same
+    /// mechanism the server uses for #1436: a `-inf` token bias rather than a
+    /// cleared stop set, because the generator merges the model's own
+    /// `eos_token_ids()` with `SamplingConfig::stop_token_ids` and emptying the
+    /// latter would not reach the former).
+    ///
+    /// Without this, decode throughput is measured over a model-dependent
+    /// number of tokens: on the 2026-09-04 M1 Ultra sweep only 25% of models
+    /// reached a 100-token budget and 16% stopped under 20 tokens, which makes
+    /// per-model decode tok/s incomparable across the table.
+    #[arg(long)]
+    ignore_eos: bool,
+
     /// Generated tokens in the warmup pass.
     #[arg(long, default_value_t = 20)]
     warmup_tokens: usize,
@@ -279,8 +293,17 @@ fn prepare_prompt(
     })
 }
 
-fn sampling_config(model_path: &Path) -> SamplingConfig {
-    build_sampling_config(ResolvedSamplingParams {
+/// Greedy sampling for the measured pass.
+///
+/// When `ignore_eos` is set, every end-of-generation token gets a `-inf` bias
+/// so it can never be sampled and the run always spends the full token budget.
+/// The set biased here is the union the generator itself stops on,
+/// `merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids)`, so
+/// both the model's built-in ids and the ones read from the checkpoint config
+/// are covered; biasing only one of the two leaves the other able to end the
+/// run early.
+fn sampling_config(model_path: &Path, model: &LoadedModel, ignore_eos: bool) -> SamplingConfig {
+    let mut config = build_sampling_config(ResolvedSamplingParams {
         temperature: 0.0,
         top_k: 0,
         top_p: 1.0,
@@ -308,7 +331,18 @@ fn sampling_config(model_path: &Path) -> SamplingConfig {
         adaptive_target: -1.0,
         adaptive_decay: 0.9,
         min_keep: 0,
-    })
+    });
+    if ignore_eos {
+        for id in model
+            .eos_token_ids()
+            .into_iter()
+            .chain(config.stop_token_ids.iter().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            config.token_bias.insert(id, f32::NEG_INFINITY);
+        }
+    }
+    config
 }
 
 fn warmup(
@@ -421,7 +455,7 @@ fn main() -> Result<()> {
     );
     io::stdout().flush()?;
     let tokenizer = load_tokenizer(&args.model).unwrap_or(loaded_tokenizer);
-    let sampling = sampling_config(&args.model);
+    let sampling = sampling_config(&args.model, &model, args.ignore_eos);
 
     // `--prompt-tokens N` synthesizes a deterministic long prompt for prefill
     // benchmarking; otherwise the short-prompt `--prompt` path runs unchanged.

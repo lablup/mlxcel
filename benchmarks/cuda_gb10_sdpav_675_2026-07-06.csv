@@ -1,4 +1,4 @@
-model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlx_version,build_type,notes
+model,prompt_tokens,generated_tokens,prefill_chunk,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,mlx_peak_gb,sys_peak_gb,date,hardware,mlxcel_version,build_type,notes
 gemma-4-12b-it-4bit,512,64,,,,4377.57,14.62,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); 1-pass kernel; decode_ms derived from tok/s
 gemma-4-12b-it-4bit,512,64,,,,4347.83,14.72,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,materializing fallback (MLXCEL_SDPA_VECTOR_LARGE_D=0); decode_ms derived from tok/s
 gemma-4-12b-it-4bit,2048,64,,,,4466.15,14.33,,,2026-07-06,NVIDIA_GB10_122GB,0.3.3,release,sdpa_vector path (#675 overlay); 2-pass kernel; decode_ms derived from tok/s

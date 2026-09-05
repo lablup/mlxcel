@@ -33,8 +33,8 @@ use crate::models::bert::BertVariant;
 use crate::models::bert_heads::BertEmbeddingModel;
 use crate::models::siglip_text::load_siglip_text_model;
 use crate::models::{
-    ModelType, config_has_quantization_metadata, convert_bf16_weights, get_model_type,
-    sanitize_config_json, should_convert_bf16_to_f16, warn_bf16_precision,
+    ModelType, bf16_to_f16_at_load, config_has_quantization_metadata, convert_bf16_weights,
+    get_model_type, sanitize_config_json, warn_bf16_precision,
 };
 use crate::tokenizer::{MlxcelTokenizer, load_tokenizer};
 
@@ -102,8 +102,9 @@ pub fn read_embedding_config(model_dir: &Path) -> Result<Value> {
 pub fn load_embedding_weights(model_dir: &Path, config: &Value) -> Result<WeightMap> {
     let mut weights = load_weights_from_dir_with_subfolders(model_dir)
         .map_err(|e| anyhow::anyhow!("failed to load embedding weights: {e}"))?;
-    if should_convert_bf16_to_f16()
-        && !config_has_quantization_metadata(config)
+    // Load-time dtype policy is owned by `models::bf16_to_f16_at_load`; see its
+    // doc comment. Do not re-derive the rule here.
+    if bf16_to_f16_at_load(config_has_quantization_metadata(config), Some(config))
         && convert_bf16_weights(&mut weights)
     {
         warn_bf16_precision();

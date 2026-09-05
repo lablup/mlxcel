@@ -230,15 +230,40 @@ pub fn apply_token_bias(logits: &MlxArray, bias: &TokenBiasMap) -> UniquePtr<Mlx
     }
     let shape = ffi::array_shape(logits);
     let vocab_size = *shape.last().unwrap() as usize;
-    let mut bias_vec = vec![0.0f32; vocab_size];
+
+    // Scatter only the biased ids. The previous implementation allocated a
+    // vocab-sized f32 vector, filled it, uploaded it, and broadcast-added it on
+    // EVERY decode step, so suppressing two EOS tokens cost a 150k-element
+    // host-to-device transfer per token. Measured on this path: +65% decode
+    // time on qwen3-0.6b-4bit and +24% on qwen3-30b-a3b-4bit, which is enough
+    // to invert benchmark rankings and to tax every production request that
+    // sets `logit_bias` or `ignore_eos`. The work is now O(biased ids).
+    let mut idx: Vec<i32> = Vec::with_capacity(bias.len());
+    let mut vals: Vec<f32> = Vec::with_capacity(bias.len());
     for (&tok, &b) in bias.iter() {
         if tok >= 0 && (tok as usize) < vocab_size {
-            bias_vec[tok as usize] = b;
+            idx.push(tok);
+            vals.push(b);
         }
     }
-    let bias_arr = ffi::from_slice_f32(&bias_vec, &[1, vocab_size as i32]);
-    let bias_broadcast = ffi::broadcast_to(&bias_arr, &shape);
-    ffi::add(logits, &bias_broadcast)
+    if idx.is_empty() {
+        return ffi::copy(logits);
+    }
+    // Read the biased positions, add, write them back: three ops sized by the
+    // number of biased ids instead of one sized by the vocabulary. Addition is
+    // preserved because `logit_bias` is additive in general (`ignore_eos`
+    // happens to use -inf, where set and add coincide).
+    let rows: i32 = shape[..shape.len() - 1].iter().product();
+    let n = idx.len() as i32;
+    let idx_row = ffi::from_slice_i32(&idx, &[1, n]);
+    let idx2d = ffi::broadcast_to(&idx_row, &[rows, n]);
+    let upd_row = ffi::from_slice_f32(&vals, &[1, n]);
+    let upd = ffi::broadcast_to(&upd_row, &[rows, n]);
+    let flat = ffi::reshape(logits, &[rows, vocab_size as i32]);
+    let current = ffi::take_along_axis(&flat, &idx2d, -1);
+    let updated = ffi::add(&current, &upd);
+    let biased = ffi::put_along_axis(&flat, &idx2d, &updated, -1);
+    ffi::reshape(&biased, &shape)
 }
 
 /// Optimized sampling that returns arrays for pipelining.
@@ -560,6 +585,21 @@ fn preprocess_logits_for_sampling(
 /// mirostat bypass path (#1485): applies [`SamplingConfig::token_bias`] with
 /// the B9 observability counters, or returns the input unchanged (no new
 /// graph nodes) when the map is empty.
+/// Whether the B9 pre-bias suppression counters are collected.
+///
+/// Off by default: reading the pre-bias argmax id requires an `eval` plus a
+/// device-to-host read on every decode step, which breaks the async lookahead
+/// pipeline the decode loop depends on. `LANG_BIAS_APPLIED_TOTAL` is unaffected
+/// and stays always-on, since incrementing it costs nothing.
+fn lang_bias_counters_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MLXCEL_LANG_BIAS_COUNTERS")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 fn apply_token_bias_stage(
     last_logits: UniquePtr<MlxArray>,
     config: &SamplingConfig,
@@ -570,23 +610,31 @@ fn apply_token_bias_stage(
     // B9 — increment applied counter (zero overhead when bias is empty).
     LANG_BIAS_APPLIED_TOTAL.fetch_add(1, Ordering::Relaxed);
 
-    // B9 — check if the pre-bias argmax token was `-inf`-suppressed.
-    // Evaluation is required to extract the integer id; the argmax is a
-    // lightweight reduction over the last logits slice already in memory.
-    let top_arr = ffi::argmax_last_axis(&last_logits);
-    ffi::eval(&top_arr);
-    let top_id = ffi::item_i32(&top_arr);
-    if config
-        .token_bias
-        .get(&top_id)
-        .is_some_and(|b| b.is_infinite() && b.is_sign_negative())
-    {
-        LANG_BIAS_TOKENS_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
-        // separate counter for suppressions that originated
-        // from the opt-in byte-fragment classifier. Strict subset of the
-        // total-suppressed counter above.
-        if config.token_bias.is_byte_fragment(top_id) {
-            LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    // B9 — the pre-bias top-1 suppression counters are opt-in, because reading
+    // the argmax id back costs a device synchronization on every decode step.
+    // The decode loop is built on async lookahead pipelining (see
+    // `sample_token_optimized`, which deliberately returns unevaluated arrays),
+    // and this `eval` + `item_i32` breaks it once per token. Measured cost of
+    // leaving it always-on: +13% decode on llama-3.1-8b-4bit, +27% on
+    // qwen3-30b-a3b-4bit and +78% on qwen3-0.6b-4bit, paid by every request
+    // that sets `logit_bias` or `ignore_eos`. The counters stay available for
+    // diagnosing suppression behaviour via MLXCEL_LANG_BIAS_COUNTERS=1.
+    if lang_bias_counters_enabled() {
+        let top_arr = ffi::argmax_last_axis(&last_logits);
+        ffi::eval(&top_arr);
+        let top_id = ffi::item_i32(&top_arr);
+        if config
+            .token_bias
+            .get(&top_id)
+            .is_some_and(|b| b.is_infinite() && b.is_sign_negative())
+        {
+            LANG_BIAS_TOKENS_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+            // separate counter for suppressions that originated
+            // from the opt-in byte-fragment classifier. Strict subset of the
+            // total-suppressed counter above.
+            if config.token_bias.is_byte_fragment(top_id) {
+                LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
