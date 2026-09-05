@@ -20,7 +20,7 @@
 # CSV columns (15):
 #   model, model_path, prompt_tokens, generated_tokens,
 #   prefill_ms, prefill_tok_s, decode_ms, decode_tok_s,
-#   date, hardware, mlx_version, build_type, max_tokens, prompt,
+#   date, hardware, mlxcel_version, build_type, max_tokens, prompt,
 #   prompt_target_len
 #
 # The first 14 columns are unchanged from the historical schema so older CSVs
@@ -39,9 +39,46 @@
 #   FAIL:bench           benchmark process exited with a non-OOM failure
 #   FAIL:no_output       benchmark succeeded but produced no decode numbers
 #   SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
+#   SKIP:duplicate_of=<name>  `all` mode only: this directory holds the same
+#                        checkpoint as an earlier directory <name>, which was
+#                        measured instead. See "Checkpoint dedup in `all`
+#                        mode" below; disable with --no-dedup.
+#   SKIP:not_a_checkpoint  no config.json, so the directory is not a model at
+#                        all. Typically a container holding other checkpoints
+#                        (models/mlx/large_models parks the ones too big for
+#                        the host). Decided before any model load.
+#   SKIP:missing_weights  config.json is present but no readable *.safetensors
+#                        is, which is what a pruned HuggingFace blob behind a
+#                        dangling symlink looks like, or an aborted download
+#                        that only fetched the metadata. Decided before any
+#                        model load.
+#
+# The last two exist so a sweep can tell a local data problem from an mlxcel
+# defect. Before them both landed as FAIL:bench, the same token a genuine code
+# failure produces, and separating the two took a manual pass over every row.
 #
 # Both SKIP:oom_estimate and SKIP:oom share the SKIP: prefix, so downstream
 # consumers that filter on SKIP: treat them identically as capacity exclusions.
+#
+# Checkpoint dedup in `all` mode (issue #1615):
+#   `all` enumerates "$MODELS_DIR"/*/ and, by default, first collapses
+#   directories that are the same checkpoint under different names. Identity
+#   is sha256(config.json) plus the sorted (basename, byte size) of every
+#   *.safetensors shard -- cheap, no weight hashing, and it does NOT collapse
+#   checkpoints that differ only in quantization or dtype, because their
+#   config.json differs in the quantization block. Directories that resolve
+#   (via realpath) to the same physical path are also collapsed, so a symlink
+#   into a shared model store never doubles a row. A directory without a
+#   config.json is never grouped and is always measured, exactly as before
+#   this dedup pass existed. Within a duplicate group the survivor is the
+#   first directory the sweep's own enumeration order reaches, which is the
+#   glob over paths carrying a trailing slash: where one name is a prefix of
+#   another the LONGER name wins, so pixtral-12b-4bit survives over
+#   pixtral-12b. The rest are emitted as SKIP:duplicate_of=<name> rows so the
+#   CSV row count still equals the directory count. The collapsed
+#   groups are printed to stderr before the first model is measured.
+#   --no-dedup restores the pre-#1615 behavior exactly (every directory
+#   measured, no alias rows). Single-model mode is never affected by dedup.
 #
 # Filename convention:
 #   {backend}_{hardware}_{YYYY-MM-DD}.csv                (text suite, 'all')
@@ -70,25 +107,65 @@ MODELS_DIR="${MODELS_DIR:-./models}"
 BENCHMARKS_DIR="${BENCHMARKS_DIR:-./benchmarks}"
 TEXT_PROMPT="Hello, how are you today?"
 VLM_PROMPT="What is in this image?"
-MAX_TOKENS=100
+# Fixed measurement shape: a deterministic 512-token synthetic prompt and
+# exactly 128 generated tokens with every end-of-generation token suppressed.
+#
+# This replaces the old shape (a 6-token chat prompt, up to 100 tokens, stopping
+# at EOS), which measured every model over a different number of tokens. On the
+# 2026-09-04 M1 Ultra sweep only 25% of models reached the budget and 16%
+# stopped under 20 tokens, and the resulting bias is not even one-directional:
+# re-measuring with --ignore-eos moved granite-4.1-8b-4bit +117% (1 token) and
+# gemma2-2b-4bit -45% (18 tokens), because a very short run charges first-token
+# latency to throughput while a merely short one enjoys an almost-empty KV
+# cache. Fixing both the prompt and the generated length is what makes
+# per-model decode tok/s comparable at all.
+#
+# 512/128 is llama-bench's pp512/tg128 default and is already what this
+# repository's own scripts/bench_serving_concurrency.py uses, so the
+# single-stream and batched harnesses now agree on the condition.
+MAX_TOKENS=128
 WARMUP_TOKENS=20
-# Optional deterministic long-prompt length (--prompt-tokens N). Empty keeps the
-# short-prompt default so historical CSV rows are byte-compatible.
-PROMPT_TOKENS=""
+# Deterministic synthetic prompt length (--prompt-tokens N), capped per model at
+# the context window by the bench binary. Set empty to fall back to the short
+# --prompt path.
+PROMPT_TOKENS=512
+# Suppress end-of-generation tokens so every model spends the full budget.
+IGNORE_EOS=1
 TIMEOUT=300
 JIT_PREHEAT_TIMEOUT=600
 VLM_IMAGE="tests/fixtures/test_image.png"
 VLM_MODE=0
 NO_CHAT_TEMPLATE=0
+# Checkpoint dedup in `all` mode (issue #1615). Default ON; --no-dedup
+# restores the pre-#1615 behavior of measuring every directory unconditionally.
+NO_DEDUP=0
 OUTPUT=""
 SUFFIX=""
 DATE=$(date '+%Y-%m-%d')
-# Version recorded in the CSV `mlx_version` column. This is the MLXCEL
+# Version recorded in the CSV `mlxcel_version` column. This is the mlxcel
 # version from Cargo.toml (the /update-benchmarks staleness check compares
 # this column against Cargo.toml); it was a stale hardcoded "0.31.2" until
 # 2026-06-12.
-MLX_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-[[ -n "$MLX_VERSION" ]] || MLX_VERSION="unknown"
+MLXCEL_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+[[ -n "$MLXCEL_VERSION" ]] || MLXCEL_VERSION="unknown"
+# Source commit the measured binary was built from. `mlxcel_version` reads
+# Cargo.toml, which does not move between releases, so every sweep taken during
+# a development cycle records the same version no matter how far main has
+# travelled. Without this column a cross-host comparison assembled over weeks
+# cannot tell a hardware difference from a code difference. Appended last so the
+# positional readers of column 11 (`mlxcel_version`) keep working.
+SOURCE_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
+# Only tracked modifications make the measured binary differ from the commit.
+# Untracked files (stray notes, scratch CSVs) do not, and flagging them would
+# mark almost every real sweep dirty.
+if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+  SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+fi
+# Pinned MLX C++ revision the binary links, 8 characters. `mlxcel_version` and
+# `mlxcel_commit` describe this repository; an MLX pin bump changes kernels
+# without moving either, so it needs its own column.
+MLX_COMMIT=$(scripts/ci/mlx_pinned_commit.sh 2>/dev/null | cut -c1-8)
+[[ -n "$MLX_COMMIT" ]] || MLX_COMMIT="unknown"
 BUILD_TYPE="release"
 # Optional overhead multiplier applied to the weight-size estimate in
 # model_fits_in_memory(). Default 1.0 preserves the existing pass/skip
@@ -280,6 +357,179 @@ is_oom_failure() {
 }
 
 # ---------------------------------------------------------------------------
+# Checkpoint dedup for `all` mode (issue #1615)
+# ---------------------------------------------------------------------------
+# sha256 of a small file. Tries sha256sum first (Linux, and any macOS host
+# with GNU coreutils on PATH), then shasum -a 256 (macOS ships this by
+# default). Returns non-zero, with no output, if neither is available -- the
+# caller treats that as "no identity key" rather than aborting the sweep.
+sha256_file() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# Resolve a directory to its canonical physical path, so a symlink into a
+# shared model store compares equal to the real directory it points at.
+# Prefers realpath (present on both macOS and Linux here); falls back to
+# `cd && pwd -P`, which resolves symlinks the same way and needs no
+# additional binary, for a minimal host without realpath on PATH.
+canonical_path() {
+  local dir="$1"
+  local resolved
+  if command -v realpath >/dev/null 2>&1; then
+    resolved=$(realpath "$dir" 2>/dev/null) && [[ -n "$resolved" ]] && { echo "$resolved"; return; }
+  fi
+  (cd "$dir" 2>/dev/null && pwd -P)
+}
+
+# Cheap checkpoint identity key for one candidate directory: sha256(config.json)
+# plus the sorted "basename:size" list of every *.safetensors shard. No weight
+# hashing, one small file read plus a stat per shard. Two checkpoints that
+# differ only in quantization or weight dtype have different config.json
+# content (the quantization block differs), so they never collapse. Prints
+# nothing (empty key) when config.json is absent or unreadable -- the caller
+# must treat an empty key as "never group this directory by content".
+checkpoint_identity_key() {
+  local dir="$1"
+  [[ -f "$dir/config.json" ]] || return 0
+  local cfg_hash
+  cfg_hash=$(sha256_file "$dir/config.json") || return 0
+  [[ -n "$cfg_hash" ]] || return 0
+  local f size
+  local shards=()
+  for f in "$dir"/*.safetensors; do
+    [[ -f "$f" ]] || continue
+    size=$(stat --format='%s' "$f" 2>/dev/null || stat -f'%z' "$f" 2>/dev/null || echo 0)
+    shards+=("$(basename "$f"):${size}")
+  done
+  # No readable shard means the directory is broken (weights absent, or behind
+  # a dangling symlink into a pruned HuggingFace cache), not that it matches
+  # some other directory. Returning an empty key keeps it ungrouped, so it
+  # reaches bench_one and is reported as SKIP:missing_weights on its own row.
+  # Grouping on an empty shard list instead would collapse two independently
+  # broken directories into "duplicate of each other" and hide both, which is
+  # what this branch previously did.
+  if [[ "${#shards[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  local shard_list
+  shard_list=$(printf '%s\n' "${shards[@]}" | sort | tr '\n' '|')
+  echo "cfg=${cfg_hash};shards=${shard_list}"
+}
+
+# Populates two parallel arrays covering every directory in "$MODELS_DIR"/*/,
+# in the same sorted glob order the `all` sweep already iterates:
+#   DEDUP_DIR[i]        the directory path (trailing slash, as the glob yields)
+#   DEDUP_ALIAS_OF[i]   "" if DEDUP_DIR[i] is the group survivor (measured),
+#                       otherwise the basename of the surviving directory this
+#                       one duplicates.
+# Grouping is two-tier: directories that resolve to the same canonical path
+# always collapse first (symlink into a shared store); remaining directories
+# then collapse by content identity key when both have one. A directory with
+# no config.json only ever collapses via the canonical-path tier, so it is
+# measured like every other ungrouped directory. Sort order means the first
+# directory encountered in a group is always its survivor.
+DEDUP_DIR=()
+DEDUP_ALIAS_OF=()
+
+compute_dedup_groups() {
+  DEDUP_DIR=()
+  DEDUP_ALIAS_OF=()
+  local seen_real_paths=() seen_real_owner=()
+  local seen_keys=() seen_key_owner=()
+  local dir name real key owner i
+
+  for dir in "$MODELS_DIR"/*/; do
+    [[ -d "$dir" ]] || continue
+    DEDUP_DIR+=("$dir")
+    name=$(basename "${dir%/}")
+    real=$(canonical_path "$dir")
+    [[ -n "$real" ]] || real="$dir"
+
+    owner=""
+    for ((i = 0; i < ${#seen_real_paths[@]}; i++)); do
+      if [[ "${seen_real_paths[$i]}" == "$real" ]]; then
+        owner="${seen_real_owner[$i]}"
+        break
+      fi
+    done
+
+    if [[ -z "$owner" ]]; then
+      seen_real_paths+=("$real")
+      seen_real_owner+=("$name")
+
+      key=$(checkpoint_identity_key "$dir")
+      if [[ -n "$key" ]]; then
+        for ((i = 0; i < ${#seen_keys[@]}; i++)); do
+          if [[ "${seen_keys[$i]}" == "$key" ]]; then
+            owner="${seen_key_owner[$i]}"
+            break
+          fi
+        done
+        if [[ -z "$owner" ]]; then
+          seen_keys+=("$key")
+          seen_key_owner+=("$name")
+        fi
+      fi
+    fi
+
+    DEDUP_ALIAS_OF+=("$owner")
+  done
+}
+
+# Prints every collapsed duplicate group to stderr, before any model runs.
+# A survivor with no aliases produces no output, so an `all` sweep over a
+# model store with no duplicates prints nothing here.
+print_dedup_groups() {
+  local printed_any=0
+  local i j owner_name alias_name has_aliases
+  for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
+    [[ -z "${DEDUP_ALIAS_OF[$i]}" ]] || continue
+    owner_name=$(basename "${DEDUP_DIR[$i]%/}")
+    has_aliases=0
+    for ((j = 0; j < ${#DEDUP_DIR[@]}; j++)); do
+      [[ "${DEDUP_ALIAS_OF[$j]}" == "$owner_name" ]] || continue
+      if [[ "$has_aliases" -eq 0 ]]; then
+        if [[ "$printed_any" -eq 0 ]]; then
+          >&2 echo "=== Checkpoint dedup: collapsed duplicate groups ==="
+          printed_any=1
+        fi
+        >&2 printf '  %s (measured)\n' "$owner_name"
+        has_aliases=1
+      fi
+      alias_name=$(basename "${DEDUP_DIR[$j]%/}")
+      >&2 printf '    <- %s (SKIP:duplicate_of=%s)\n' "$alias_name" "$owner_name"
+    done
+  done
+  if [[ "$printed_any" -eq 1 ]]; then
+    >&2 echo "===================================================="
+    >&2 echo ""
+  fi
+}
+
+# Emits a SKIP:duplicate_of row for a directory the dedup pass collapsed,
+# without invoking bench_one (the model is never loaded, prefilled, or
+# decoded). Mirrors the exact 17-field row shape bench_one's other SKIP:*
+# branches emit (see bench_one above), with the trailing status token set to
+# SKIP:duplicate_of=<owner> instead of SKIP:oom_estimate/SKIP:oom/etc.
+emit_duplicate_row() {
+  local dir="$1" owner="$2"
+  local model_name
+  model_name=$(basename "${dir%/}")
+  local prompt="$TEXT_PROMPT"
+  [[ "$VLM_MODE" -eq 1 ]] && prompt="$VLM_PROMPT"
+  local ptl="$PROMPT_TOKENS"
+  >&2 printf '>>> [skip]   %s duplicate of %s (SKIP:duplicate_of)\n' "$model_name" "$owner"
+  echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:duplicate_of=${owner}"
+}
+
+# ---------------------------------------------------------------------------
 usage() {
   cat <<'EOF'
 Usage: bench_decode.sh <model_path|all> [options]
@@ -320,6 +570,11 @@ Options:
   --pre-warm-settle N Settle sleep after the pre-warm pass (default: 30)
   --no-cooldown       Force --cooldown=0 and --big-cooldown=0, overriding
                       any earlier values on the same command line.
+  --no-dedup          Disable checkpoint dedup in `all` mode (default: dedup
+                      is on). Measures every directory under MODELS_DIR
+                      unconditionally, reproducing pre-#1615 behavior exactly
+                      (no SKIP:duplicate_of rows, no collapsed-group report).
+                      Has no effect on single-model mode, which never dedups.
   --help              Show this help
 
 Environment variables:
@@ -345,6 +600,8 @@ Result classifications (trailing CSV token):
   FAIL:bench           non-OOM process failure
   FAIL:no_output       process succeeded but produced no decode numbers
   SKIP:vlm_image_not_found  VLM run skipped because the test image is absent
+  SKIP:duplicate_of=<name>  `all` mode only: same checkpoint as directory
+                       <name>, which was measured instead. --no-dedup disables.
 
 Filename convention:
   {backend}_{hardware}_{YYYY-MM-DD}.csv                text suite ('all')
@@ -420,6 +677,32 @@ bench_one() {
   # the short-prompt default so historical rows stay byte-compatible.
   local ptl="$PROMPT_TOKENS"
 
+  # Classify a directory that cannot be a checkpoint before spending a model
+  # load and a cooldown on a guaranteed failure. Both cases previously landed
+  # as an undifferentiated FAIL:bench, which is the status a real mlxcel defect
+  # also produces, so a sweep could not distinguish "our code broke" from
+  # "this directory is not a model". On the 2026-09-04 M1 Ultra sweep that
+  # ambiguity covered 5 of 21 failures: two container directories holding other
+  # checkpoints (`models`, `large_models`, the latter parking models too large
+  # for the host) and three checkpoints whose weights were absent or behind a
+  # dangling symlink into a pruned HuggingFace cache.
+  if [[ ! -f "$model_path/config.json" ]]; then
+    >&2 printf '>>> [skip]   %s (no config.json; not a checkpoint)\n' "$model_name"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:not_a_checkpoint"
+    return
+  fi
+  local _w _have_weights=0
+  for _w in "$model_path"/*.safetensors; do
+    # A dangling symlink fails -f, which is the case that matters: the
+    # directory looks complete but the weights blob is gone.
+    [[ -f "$_w" ]] && { _have_weights=1; break; }
+  done
+  if [[ "$_have_weights" -eq 0 ]]; then
+    >&2 printf '>>> [skip]   %s (config.json present but no readable *.safetensors)\n' "$model_name"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:missing_weights"
+    return
+  fi
+
   # Skip models that won't fit in memory
   if ! model_fits_in_memory "$model_path"; then
     local est_bytes effective_mb limit_mb
@@ -429,7 +712,7 @@ bench_one() {
     effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
     limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
     >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},SKIP:oom_estimate"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:oom_estimate"
     return
   fi
 
@@ -438,7 +721,7 @@ bench_one() {
   if [[ "$VLM_MODE" -eq 1 ]]; then
     prompt="$VLM_PROMPT"
     if [[ ! -f "$VLM_IMAGE" ]]; then
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},SKIP:vlm_image_not_found"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:vlm_image_not_found"
       return
     fi
     extra_args+=(--image "$VLM_IMAGE")
@@ -466,18 +749,21 @@ bench_one() {
   local raw rc=0
   # Capture combined stdout+stderr and exit code. The || suppresses set -e so
   # a non-zero exit code is captured in rc rather than aborting the script.
+  local eos_args=()
+  [[ "$IGNORE_EOS" == "1" ]] && eos_args+=(--ignore-eos)
   raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
       --warmup-tokens "$WARMUP_TOKENS" \
+      ${eos_args[@]+"${eos_args[@]}"} \
       ${extra_args[@]+"${extra_args[@]}"} 2>&1) || rc=$?
 
   if [[ "$rc" -ne 0 ]]; then
     if is_oom_failure "$rc" "$raw"; then
       >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},SKIP:oom"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:oom"
     else
       >&2 printf '    benchmark failed (exit %d)\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},FAIL:bench"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},FAIL:bench"
     fi
     return
   fi
@@ -489,10 +775,10 @@ bench_one() {
 
   if [[ -z "$decode_tps" ]]; then
     >&2 echo "    no decode output"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},FAIL:no_output"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},FAIL:no_output"
   else
     >&2 printf '    decode: %s tok/s\n' "$decode_tps"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLX_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl}"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT}"
   fi
 }
 
@@ -543,6 +829,8 @@ while [[ $# -gt 0 ]]; do
                       BIG_MODEL_THRESHOLD_BYTES=$(( $2 * 1024 * 1024 * 1024 ))
                       shift 2 ;;
     --no-cooldown)    COOLDOWN_SECS=0; BIG_MODEL_COOLDOWN_SECS=0; shift ;;
+    --no-dedup)       NO_DEDUP=1; shift ;;
+    --no-ignore-eos)  IGNORE_EOS=0; shift ;;
     --no-pre-warm)    PRE_WARM=0; shift ;;
     --pre-warm-settle) PRE_WARM_SETTLE_SECS="$2"; shift 2 ;;
     --help)           usage; exit 0 ;;
@@ -583,7 +871,7 @@ fi
 # ---------------------------------------------------------------------------
 # CSV header
 # ---------------------------------------------------------------------------
-CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len"
+CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit"
 
 mkdir -p "$(dirname "$OUTPUT")"
 echo "$CSV_HEADER" > "$OUTPUT"
@@ -654,22 +942,52 @@ if [[ "$PRE_WARM" == "1" && "$MODEL_ARG" == "all" ]]; then
 fi
 
 if [[ "$MODEL_ARG" == "all" ]]; then
-  # First pass: run all models except known GPU-crash models
-  for dir in "$MODELS_DIR"/*/; do
-    [[ -d "$dir" ]] || continue
-    is_gpu_crash_model "$dir" && continue
-    result=$(bench_one "$dir")
-    emit "$result"
-    cooldown_after "$dir"
-  done
-  # Second pass: run known GPU-crash models last
-  for dir in "$MODELS_DIR"/*/; do
-    [[ -d "$dir" ]] || continue
-    is_gpu_crash_model "$dir" || continue
-    result=$(bench_one "$dir")
-    emit "$result"
-    cooldown_after "$dir"
-  done
+  if [[ "$NO_DEDUP" -eq 1 ]]; then
+    # --no-dedup: pre-#1615 behavior, byte-for-byte. Every directory is
+    # measured; no identity key is computed, no alias rows are emitted.
+    # First pass: run all models except known GPU-crash models
+    for dir in "$MODELS_DIR"/*/; do
+      [[ -d "$dir" ]] || continue
+      is_gpu_crash_model "$dir" && continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+    # Second pass: run known GPU-crash models last
+    for dir in "$MODELS_DIR"/*/; do
+      [[ -d "$dir" ]] || continue
+      is_gpu_crash_model "$dir" || continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+  else
+    compute_dedup_groups
+    print_dedup_groups
+    # First pass: measured (non-alias) models except known GPU-crash models,
+    # plus every alias row (order among aliases doesn't matter -- nothing
+    # runs for them). Second pass: measured GPU-crash models, run last.
+    for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
+      dir="${DEDUP_DIR[$i]}"
+      if [[ -n "${DEDUP_ALIAS_OF[$i]}" ]]; then
+        result=$(emit_duplicate_row "$dir" "${DEDUP_ALIAS_OF[$i]}")
+        emit "$result"
+        continue
+      fi
+      is_gpu_crash_model "$dir" && continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+    for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
+      dir="${DEDUP_DIR[$i]}"
+      [[ -z "${DEDUP_ALIAS_OF[$i]}" ]] || continue
+      is_gpu_crash_model "$dir" || continue
+      result=$(bench_one "$dir")
+      emit "$result"
+      cooldown_after "$dir"
+    done
+  fi
 else
   # Path validation already happened before $OUTPUT was generated.
   result=$(bench_one "$MODEL_ARG")

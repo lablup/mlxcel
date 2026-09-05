@@ -1,4 +1,4 @@
-model,model_path,kind,input_kind,batch,inputs,prompt_tokens,repeats,p50_ms,mean_ms,min_ms,inputs_per_s,tokens_per_s,load_ms,date,hardware,mlx_version,build_type,commit,notes
+model,model_path,kind,input_kind,batch,inputs,prompt_tokens,repeats,p50_ms,mean_ms,min_ms,inputs_per_s,tokens_per_s,load_ms,date,hardware,mlxcel_version,build_type,mlxcel_commit,notes
 all-MiniLM-L6-v2,/home/inureyes/.cache/mlxcel/models/sentence-transformers/all-MiniLM-L6-v2,text,short,1,1,18,5,2.66,2.90,2.59,376.48,6776.6,1026.1,2026-08-26,NVIDIA_GB10_122GB,0.6.0,release,19cccf50,
 all-MiniLM-L6-v2,/home/inureyes/.cache/mlxcel/models/sentence-transformers/all-MiniLM-L6-v2,text,short,8,8,144,5,3.81,4.45,3.42,2097.54,37755.6,1026.1,2026-08-26,NVIDIA_GB10_122GB,0.6.0,release,19cccf50,
 all-MiniLM-L6-v2,/home/inureyes/.cache/mlxcel/models/sentence-transformers/all-MiniLM-L6-v2,text,short,32,32,576,5,9.21,9.81,8.66,3474.38,62538.8,1026.1,2026-08-26,NVIDIA_GB10_122GB,0.6.0,release,19cccf50,

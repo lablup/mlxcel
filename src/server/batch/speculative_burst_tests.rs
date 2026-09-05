@@ -2090,3 +2090,139 @@ fn every_mtp_dispatch_site_covers_every_capable_variant() {
         missing.join("\n  "),
     );
 }
+
+// ── Burst timings (issue #1592) ───────────────────────────────────────────────
+//
+// The burst runs every verify round before a token reaches the sequence, so
+// the first-token stamp must be supplied (the prefill's end), not taken when
+// the finished vector is replayed. These pin the bookkeeping that
+// `finalize_burst_success` relies on; the drivers' derivation of
+// `prefill_end` is arithmetic on timers the round loops already keep.
+
+/// Backdate `created_at` so the split is measurable without sleeping.
+fn backdated_sequence(age: std::time::Duration) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
+    let (mut seq, rx) = make_test_sequence();
+    seq.created_at = Instant::now() - age;
+    (seq, rx)
+}
+
+#[test]
+fn mark_first_token_at_splits_prompt_time_from_generation_time() {
+    use std::time::Duration;
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let (mut seq, rx) = backdated_sequence(Duration::from_millis(300));
+    let prefill_end = seq.created_at + Duration::from_millis(100);
+
+    seq.mark_first_token_at(prefill_end);
+    // The replay's own stamp must not move it.
+    seq.mark_first_token();
+    for token in [5, 6, 7] {
+        seq.decode_state.on_token(token, &tokenizer);
+    }
+    let result = seq.take_generation_result(&tokenizer, 0, None);
+
+    assert!(
+        (100..130).contains(&result.prompt_eval_ms),
+        "prompt_eval_ms must be the prefill span, got {}",
+        result.prompt_eval_ms
+    );
+    assert!(
+        result.generation_only_ms >= 170,
+        "generation_only_ms must cover the verify rounds, got {}",
+        result.generation_only_ms
+    );
+    let streamed = match rx.try_recv() {
+        Ok(GenerateEvent::Prefill(stats)) => stats,
+        _ => panic!("expected the prefill snapshot first"),
+    };
+    assert!(streamed.first_token);
+    assert_eq!(
+        streamed.prompt_ms, result.prompt_eval_ms,
+        "the streamed snapshot and the final frame must share one origin (#1441)"
+    );
+}
+
+#[test]
+fn shifting_created_at_by_a_cold_load_leaves_generation_time_alone() {
+    use std::time::Duration;
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let (mut seq, _rx) = backdated_sequence(Duration::from_millis(300));
+    let prefill_end = seq.created_at + Duration::from_millis(150);
+    // What every burst driver does with `ensure_loaded`'s `Some(elapsed)`.
+    seq.created_at += Duration::from_millis(50);
+    seq.mark_first_token_at(prefill_end);
+    seq.decode_state.on_token(5, &tokenizer);
+    let result = seq.take_generation_result(&tokenizer, 0, None);
+
+    assert!(
+        (100..130).contains(&result.prompt_eval_ms),
+        "the load must leave prompt_eval_ms, got {}",
+        result.prompt_eval_ms
+    );
+    assert!(
+        result.generation_only_ms >= 140 && result.generation_only_ms < 170,
+        "generation_only_ms must be unchanged by the shift, got {}",
+        result.generation_only_ms
+    );
+}
+
+#[test]
+fn mark_first_token_at_clamps_an_instant_before_created_at() {
+    use std::time::Duration;
+    let (mut seq, rx) = make_test_sequence();
+    seq.mark_first_token_at(seq.created_at - Duration::from_millis(10));
+    match rx.try_recv() {
+        Ok(GenerateEvent::Prefill(stats)) => assert_eq!(stats.prompt_ms, 0),
+        _ => panic!("expected the prefill snapshot"),
+    }
+}
+
+#[test]
+fn ensure_loaded_on_a_resident_drafter_reports_no_load() {
+    let dispatch = make_mtp_dispatch();
+    let mut slot = WorkerDrafterSlot::from_dispatch(&dispatch);
+    let events = Rc::new(RefCell::new(Vec::new()));
+    slot.restore_unused(Box::new(TrackingMockDrafter::new(Vec::new(), events)));
+    assert_eq!(slot.ensure_loaded(), Ok(None));
+}
+
+/// The classic path calls `mark_first_token()` (no instant) in
+/// `scheduler/prefill.rs` and only afterwards feeds the prefill's token into
+/// `decode_state.on_token`. Since `mark_first_token` now delegates to
+/// `mark_first_token_at`, that call also stamps the decode state, which is
+/// what makes the streamed snapshot and the final frame share one origin on
+/// the classic path too (#1441). Pinning it here because #1592 changed the
+/// classic path in exactly this one way and covered only the burst path: a
+/// later reordering that let `on_token` win the stamp would move classic
+/// `prompt_eval_ms` with nothing to catch it.
+#[test]
+fn classic_mark_first_token_stamps_the_decode_state_and_on_token_does_not_restamp() {
+    use std::time::Duration;
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let (mut seq, rx) = backdated_sequence(Duration::from_millis(200));
+
+    // Classic ordering: publish the snapshot, then stream the prefill token.
+    seq.mark_first_token();
+    std::thread::sleep(Duration::from_millis(60));
+    seq.decode_state.on_token(5, &tokenizer);
+    let result = seq.take_generation_result(&tokenizer, 0, None);
+
+    let streamed = match rx.try_recv() {
+        Ok(GenerateEvent::Prefill(stats)) => stats,
+        _ => panic!("expected the prefill snapshot first"),
+    };
+    assert_eq!(
+        streamed.prompt_ms, result.prompt_eval_ms,
+        "classic path: the streamed snapshot and the final frame must share one origin (#1441)"
+    );
+    assert!(
+        (200..230).contains(&result.prompt_eval_ms),
+        "prompt_eval_ms must come from the mark, not from the later on_token, got {}",
+        result.prompt_eval_ms
+    );
+    assert!(
+        result.generation_only_ms >= 55,
+        "the gap between the mark and on_token belongs to generation, got {}",
+        result.generation_only_ms
+    );
+}

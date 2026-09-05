@@ -1,4 +1,4 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt
 aya-expanse-8b-4bit,./models/aya-expanse-8b-4bit/,,,,,,,2026-06-12,Apple_M1_Ultra_128GB,0.1.4,release,100,"What is in this image?",FAIL:bench
 aya-vision-8b,./models/aya-vision-8b/,176,100,409.38,429.92,905.42,110.45,2026-06-12,Apple_M1_Ultra_128GB,0.1.4,release,100,"What is in this image?"
 baichuan-m1-14b-4bit,./models/baichuan-m1-14b-4bit/,,,,,,,2026-06-12,Apple_M1_Ultra_128GB,0.1.4,release,100,"What is in this image?",FAIL:bench

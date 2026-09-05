@@ -216,6 +216,20 @@ and a mid-stream frame reporting a running `draft_n` would be reporting a total
 that is not one yet. For the same reason the native route's per-token
 `timings_per_token` frames carry the nine base keys and none of the four.
 
+The base keys mean the same thing on a drafted request as on a classic one
+(#1592). `prompt_ms` covers queue wait plus the target prefill, and
+`predicted_ms` covers every verify round from the moment the prefill finished,
+so `predicted_per_second` is the drafted decode rate and is comparable to the
+classic figure for the same prompt. The burst runs to completion before it
+streams, so it stamps the first-token instant at its prefill end rather than
+when the finished tokens are replayed; before the fix that replay was the
+stamp, `prompt_ms` absorbed the whole burst, and `predicted_ms` reported the
+sub-millisecond replay (95000 tokens per second on a 96-token request). The
+first drafted request after startup also pays the drafter's disk load, which
+is a once-per-process cost and is excluded from every `timings` field; it
+stays on the `Drafter loaded` log line. See the `timings` note in
+[`docs/llama-server-compat.md`](llama-server-compat.md#completions-and-embeddings-are-native-routes-not-openai-aliases-1441).
+
 The mean accepted length per round is `(draft_n_accepted + draft_rounds) /
 draft_rounds`: every round emits its accepted drafts plus one bonus token. It
 is left to the client rather than reported, so a client that wants a different

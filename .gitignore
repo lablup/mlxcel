@@ -49,6 +49,13 @@ webpage/site/node_modules/
 # (issue #1261). Curated results belong in docs/benchmark_results/.
 /bench-results/
 
+# Per-run server logs from scripts/bench_embeddings.py (its default --logdir).
+# Transient run artifacts, not results, and they embed absolute local paths.
+/benchmarks/perf_logs/
+
+# mlx-lm baseline benchmark environment (uv-created, local only)
+/.venv-mlxlm/
+
 # Cluster TOMLs written at runtime by scripts/benchmark_pipeline_remote_rollout.sh write-config.
 # The checked-in templates beside them (pipeline_remote_2node_*.toml) are not covered.
 examples/distributed/generated_*.toml

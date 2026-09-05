@@ -1,4 +1,4 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
 gemma-2b-4bit,./models/gemma-2b-4bit/,8,32,31.37,254.99,153.44,208.54,2026-06-16,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?"
 gemma-3-4b-it-4bit,./models/gemma-3-4b-it-4bit/,8,100,58.96,135.68,909.52,109.95,2026-06-16,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?"
 gemma-4-26b-a4b-it-4bit,./models/gemma-4-26b-a4b-it-4bit/,7,100,74.90,93.46,1366.69,73.17,2026-06-16,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,100,"Hello, how are you today?"
