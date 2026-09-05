@@ -1839,7 +1839,7 @@ fn cuda_f16_normalize_for_config(config: Option<&Value>) -> bool {
         if env_flag_enabled("MLXCEL_CUDA_F16_FRAGILE") {
             return true;
         }
-        return !config.is_some_and(is_f16_fragile_family);
+        return !config.is_some_and(is_f16_fragile_below_ampere);
     }
     if !env_flag_enabled("MLXCEL_CUDA_F16_NORMALIZE") {
         return false;
@@ -1896,6 +1896,56 @@ fn env_flag_enabled(name: &str) -> bool {
 /// known-family substring list): families it does not recognize are treated
 /// as healthy and normalized, which is why the whole path stays opt-in and
 /// default-off. Extend the list when a new fragile family surfaces.
+/// The f16-fragile verdict as it applies below compute capability 8.0.
+///
+/// Same list as [`is_f16_fragile_family`] with Gemma removed, and removed on
+/// evidence rather than on the general argument that the list is unmeasured.
+///
+/// The list arrived in #732 for Ampere and later, where that commit records f16
+/// as yielding "no AsType reduction and no throughput gain". With no upside,
+/// excluding a family on a suspicion costs nothing, and that PR's test plan ran
+/// no fragile family in f16 at all. Below sm_80 the same exclusion costs 1.60x
+/// on decode, so it has to be earned.
+///
+/// Measured on a Tesla V100 with `gemma-4-26b-a4b-it-4bit`, converting its 1370
+/// bf16 tensors: decode goes from 6.12 to 9.79 tok/s, no window of a perplexity
+/// sweep produces a non-finite value, and output holds across four prompts at
+/// 200 greedy tokens, including the arithmetic one where both arms derive 396.
+/// The mechanism also points this way: Gemma's trigger is softcapping, and
+/// `tanh(x / c) * c` bounds a value rather than growing it, which is the
+/// opposite of what exhausts an f16 exponent.
+///
+/// Cohere/Command-R, Apertus and gpt-oss stay fragile here. They are a
+/// different case: Apertus squares through xIELU and gpt-oss carries a wide
+/// dynamic range, so the argument that acquitted Gemma does not transfer, and
+/// no measurement has been taken for them. `MLXCEL_CUDA_F16_FRAGILE` forces
+/// conversion for whoever wants to take one.
+fn is_f16_fragile_below_ampere(config: &Value) -> bool {
+    if is_gemma_family(config) {
+        return false;
+    }
+    is_f16_fragile_family(config)
+}
+
+/// True when the config names a Gemma text or multimodal model.
+///
+/// Checked at the top level and under `text_config`, mirroring the lookup in
+/// [`is_f16_fragile_family`], because a multimodal Gemma carries `gemma4` at the
+/// top and `gemma4_text` underneath.
+fn is_gemma_family(config: &Value) -> bool {
+    let names = [
+        config.get("model_type").and_then(Value::as_str),
+        config
+            .get("text_config")
+            .and_then(|c| c.get("model_type"))
+            .and_then(Value::as_str),
+    ];
+    names
+        .iter()
+        .flatten()
+        .any(|model_type| model_type.contains("gemma"))
+}
+
 fn is_f16_fragile_family(config: &Value) -> bool {
     // Softcap / logit-scaling config keys imply wide dynamic range. Checked
     // at the top level and under `text_config`, mirroring the `model_type`
