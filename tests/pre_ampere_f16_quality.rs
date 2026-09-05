@@ -87,10 +87,17 @@ fn compute_ppl_at(
     let corpus = fs::read_to_string(&corpus_path)
         .unwrap_or_else(|e| panic!("wikitext2 corpus missing at {corpus_path:?}: {e}"));
 
-    // No special tokens: a BOS repeated once per window would contribute a
-    // near-zero-information position to every window and bias short windows most.
+    // Each window is prefixed with the model's BOS when it declares one, and
+    // the BOS position is then excluded from the score below. Without it a
+    // window starts mid-stream in a state the model was never trained to see,
+    // and families that depend on BOS land far outside their normal operating
+    // range: Gemma scores 438 to 5550 unprefixed, which is not a number a 26B
+    // model produces on wikitext. That matters here beyond tidiness, because
+    // this file exists to find f16 exponent overflow, and overflow has to be
+    // looked for in the activation distribution the model actually runs in.
     let all_ids = tokenizer.encode(&corpus, false).expect("tokenize corpus");
     let ids: Vec<i32> = all_ids.iter().map(|&id| id as i32).collect();
+    let bos = tokenizer.bos_token_id().map(|id| id as i32);
 
     let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), KVCacheMode::Fp16);
     let mut total_nll = 0.0_f64;
@@ -99,8 +106,27 @@ fn compute_ppl_at(
 
     let chunks = chunks_wanted.min(ids.len() / window_len);
     for chunk in 0..chunks {
-        let window = &ids[chunk * window_len..(chunk + 1) * window_len];
+        let slice = &ids[chunk * window_len..(chunk + 1) * window_len];
+        // Prepend BOS and drop the corpus token it predicts, so every arm
+        // scores exactly the same `window_len - 1` corpus positions whether or
+        // not the family has a BOS. Otherwise adding BOS would silently change
+        // the denominator and make windows incomparable across models.
+        let owned;
+        let window: &[i32] = match bos {
+            Some(bos_id) => {
+                owned = std::iter::once(bos_id)
+                    .chain(slice.iter().copied())
+                    .collect::<Vec<i32>>();
+                &owned
+            }
+            None => slice,
+        };
         let logprobs = generator.evaluate_loglikelihoods(model, window);
+        let logprobs = if bos.is_some() {
+            &logprobs[1..]
+        } else {
+            &logprobs[..]
+        };
 
         for (pos, &lp) in logprobs.iter().enumerate() {
             if !lp.is_finite() {
@@ -143,6 +169,9 @@ fn run_ppl_sweep(model_dir_name: &str, chunks: usize, windows: &[usize]) {
 
     let arm = match std::env::var("MLXCEL_CUDA_F16_NORMALIZE").as_deref() {
         Ok("0") | Ok("false") | Ok("off") => "bf16 (conversion opted out)",
+        _ if std::env::var("MLXCEL_CUDA_F16_FRAGILE").is_ok_and(|v| v != "0") => {
+            "f16 (forced past the fragile list)"
+        }
         _ => "f16 (default on pre-Ampere)",
     };
     eprintln!("\n=== {model_dir_name} :: {arm} ===");
@@ -181,19 +210,50 @@ fn test_pre_ampere_f16_ppl() {
 
 /// Second family: a large quantized checkpoint.
 ///
-/// #1542 asks for a dense family and an MoE one. The MoE slot is deliberately
-/// NOT filled by `gemma-4-26b-a4b-it-4bit`, the only MoE checkpoint on this
-/// host, because Gemma is on the f16-fragile list twice over: by the `"gemma"`
-/// family substring and by `text_config.final_logit_softcapping = 30.0`. The
-/// policy therefore declines to convert it, both arms run identical bf16, and
-/// the two PPL tables agree to four decimal places while testing nothing. That
-/// is the policy behaving correctly and it is worthless as evidence.
+/// #1542 asks for a dense family and an MoE one. `gemma-4-26b-a4b-it-4bit` is
+/// the only MoE checkpoint on this host and it now has its own test above,
+/// because until the Gemma 4 loader was wired into the policy it could not
+/// exercise this code path at all.
 ///
-/// A quantized checkpoint is substituted instead. It covers a different axis
-/// than MoE, and the axis it covers is the one where this change does the most:
-/// on a quantized model the packed planes stay u32 and only the bf16 side-data
-/// converts, which is what moves decode by 2.40x. The MoE criterion stays
-/// unmet until a non-fragile MoE checkpoint is available.
+/// A quantized checkpoint is kept here as well. It covers a different axis than
+/// MoE, and the axis it covers is the one where this change does the most: on a
+/// quantized model the packed planes stay u32 and only the bf16 side-data
+/// converts, which is what moves decode by 2.40x.
+/// Gemma on the pre-Ampere path.
+///
+/// This model reached the load-time dtype policy through no call site at all
+/// until `load_gemma4_family_weights_with_backing` was wired up: `models::gemma4`
+/// and `loading::vlm_gemma_unified` both call that loader directly, bypassing
+/// `load_text_weights` and `finish_vlm_weights_common`. The symptom was that
+/// perplexity came back bit-identical across three arms, default, explicit
+/// opt-out, and conversion forced past the f16-fragile list, which is what a
+/// policy nobody consults looks like from outside. It is worth stating plainly
+/// because the fragile list would have produced the same observation, and
+/// reading the identical tables as evidence of the exclusion working was the
+/// wrong call once already.
+///
+/// With the policy wired in, the arms separate and the fragile question becomes
+/// answerable. Gemma is on that list twice, by the `"gemma"` substring and by
+/// `text_config.final_logit_softcapping = 30.0`. The list arrived in #732 for
+/// Ampere and later, where that commit records f16 as yielding "no AsType
+/// reduction and no throughput gain": with no upside, excluding a family on a
+/// suspicion is free, and its test plan ran no fragile family in f16. Below
+/// sm_80 the same exclusion costs 17.9x on prefill, so it has to be earned.
+///
+/// Run the third arm with `MLXCEL_CUDA_F16_FRAGILE=1` to force conversion and
+/// compare against the default and the explicit opt-out. Non-finite values are
+/// the thing being looked for, and they fail the run on their own.
+#[test]
+#[ignore = "requires gemma-4-26b-a4b-it-4bit weights and a CUDA device — \
+            run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_fragile --nocapture"]
+fn test_pre_ampere_f16_ppl_fragile() {
+    run_ppl_sweep(
+        "mlx-community/gemma-4-26b-a4b-it-4bit",
+        PPL_CHUNKS_LARGE,
+        &PPL_WINDOWS_LARGE,
+    );
+}
+
 #[test]
 #[ignore = "requires qwen3.8-27B-4bit weights and a CUDA device — \
             run with --release --features cuda -- --ignored test_pre_ampere_f16_ppl_quantized --nocapture"]
