@@ -1325,51 +1325,13 @@ fn load_gemma4_text_weights<P: AsRef<Path>>(
 pub(crate) fn load_gemma4_text_weights_with_backing<P: AsRef<Path>>(
     model_dir: P,
 ) -> Result<(mlxcel_core::weights::WeightMap, Gemma4WeightBacking), String> {
-    let model_dir = model_dir.as_ref();
-    let mut weights = mlxcel_core::weights::WeightMap::new();
-    let mut backing = Gemma4WeightBacking::default();
-
-    let mut shard_paths: Vec<_> = std::fs::read_dir(model_dir)
-        .map_err(|e| format!("Failed to read directory: {e}"))?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "safetensors") {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .collect();
-    shard_paths.sort();
-
-    for path in shard_paths {
-        load_filtered_shard(
-            &path,
-            &mut weights,
-            is_gemma4_text_weight,
-            false,
-            SelectiveLoadMode::DeferredMaterialize,
-            Some(&mut backing.mmaps),
-            Some(&mut backing.owned_buffers),
-        )?;
-    }
-
-    // Used by: Gemma4 quantized text loader. The backing mmaps are retained in
-    // `Gemma4WeightBacking`, so we can delay realization until all selected
-    // tensors are present and ask MLX to evaluate the whole weight set at once.
-    // This avoids the per-tensor eval pattern that inflates load-time Metal
-    // command-buffer and GPU-interval counts compared with mlx-lm.
-    let ptrs: Vec<*const mlxcel_core::MlxArray> = weights
-        .values()
-        .filter_map(|v| v.as_ref().map(|arr| arr as *const mlxcel_core::MlxArray))
-        .collect();
-    if !ptrs.is_empty() {
-        unsafe { mlxcel_core::eval_all(&ptrs) };
-        unsafe { mlxcel_core::detach_all(&ptrs) };
-    }
-
-    Ok((weights, backing))
+    // This used to carry its own copy of the family loader's body, differing
+    // only in the `keep` filter. The copies then drifted, and the drift was not
+    // theoretical: the load-time dtype policy was added to this one while the
+    // VLM and unified variants, which delegate, went without it. Diagnosing
+    // that cost three wrong guesses about where Gemma 4 loads, because both
+    // functions look right when read on their own.
+    load_gemma4_family_weights_with_backing(model_dir, is_gemma4_text_weight)
 }
 
 pub(crate) fn load_gemma4_vlm_weights_with_backing<P: AsRef<Path>>(
@@ -1485,6 +1447,38 @@ where
             Some(&mut backing.mmaps),
             Some(&mut backing.owned_buffers),
         )?;
+    }
+
+    // The Gemma 4 family reaches none of the call sites that own the load-time
+    // dtype policy: `models::gemma4`, `loading::vlm_gemma`,
+    // `loading::vlm_gemma_unified`, and the tensor-parallel runtime all arrive
+    // here instead of at `load_text_weights` or `finish_vlm_weights_common`,
+    // because MLX's native `load_safetensors` crashes on these shards and the
+    // family needs the selective loader above. So the policy is applied here,
+    // in the one function every Gemma 4 variant shares.
+    //
+    // Without it the family keeps bf16 unconditionally on every backend, and on
+    // pre-Ampere CUDA that means paying the full emulation penalty with no way
+    // to opt out: `MLXCEL_CUDA_F16_NORMALIZE` in either direction changes
+    // nothing, because nothing on this path reads it. That was measured, not
+    // inferred. Forcing conversion past the f16-fragile list left the
+    // perplexity of `gemma-4-26b-a4b-it-4bit` bit-identical across all three
+    // arms, which is what a policy nobody consults looks like from outside, and
+    // is easy to misread as the fragile exclusion doing its job.
+    //
+    // Conversion runs before the eval so the f16 arrays are what gets evaluated
+    // and detached, rather than evaluating bf16 leaves and then replacing them.
+    let parsed_config = std::fs::read_to_string(model_dir.join("config.json"))
+        .ok()
+        .map(|config_str| sanitize_config_json(&config_str))
+        .and_then(|config_str| serde_json::from_str::<Value>(&config_str).ok());
+    let is_quantized = parsed_config
+        .as_ref()
+        .is_some_and(config_has_quantization_metadata);
+    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref())
+        && convert_bf16_weights(&mut weights)
+    {
+        warn_bf16_precision();
     }
 
     let ptrs: Vec<*const mlxcel_core::MlxArray> = weights
@@ -1831,8 +1825,21 @@ fn cuda_f16_normalize_for_config(config: Option<&Value>) -> bool {
     // from 85.3 s to 4.8 s. Decode gains 2.40x through `qmv`. Ampere and later
     // are untouched: they keep the opt-in behavior this function shipped with.
     if pre_ampere_cuda() {
-        return !env_flag_disabled("MLXCEL_CUDA_F16_NORMALIZE")
-            && !config.is_some_and(is_f16_fragile_family);
+        if env_flag_disabled("MLXCEL_CUDA_F16_NORMALIZE") {
+            return false;
+        }
+        // Measurement instrument for the pre-Ampere fragile-list question, not
+        // a shipping knob. The list arrived in #732 for Ampere and later, where
+        // the commit's own words are that f16 yields "no AsType reduction and
+        // no throughput gain": with zero upside, excluding a family on a
+        // suspicion costs nothing, and no fragile family was ever actually run
+        // in f16 there. Below sm_80 the upside is 17.9x on prefill, so the
+        // same suspicion has to be paid for. This flag forces conversion so the
+        // suspicion can be tested instead of inherited.
+        if env_flag_enabled("MLXCEL_CUDA_F16_FRAGILE") {
+            return true;
+        }
+        return !config.is_some_and(is_f16_fragile_family);
     }
     if !env_flag_enabled("MLXCEL_CUDA_F16_NORMALIZE") {
         return false;
