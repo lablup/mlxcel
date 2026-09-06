@@ -54,7 +54,9 @@ VLM_IMAGE = "tests/fixtures/test_image.png"
 MAX_TOKENS = 128
 WARMUP_TOKENS = 20
 PROMPT_TOKENS = 512
-MODELS_DIR = Path("./models")
+# Root the sweep enumerates. Overridable so a host whose checkpoint store is
+# `models/mlx` works without symlinks, matching scripts/bench_decode.sh.
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", "./models"))
 BENCHMARKS_DIR = Path("./benchmarks")
 # Memory budget: 85% of 128 GB. Override with PYLM_BENCH_MAX_GB env var to
 # enforce a tighter cap (e.g. PYLM_BENCH_MAX_GB=65 to skip very large MoE
@@ -386,12 +388,19 @@ def main():
     hw_short, hw_full = detect_hardware()
     today = date.today().isoformat()
     # Get versions
+    # Ask the interpreter that actually runs the benchmark, not the one running
+    # this script. They differ whenever PYTHON_CMD resolves to the uv venv,
+    # which is the normal case here: the system Python has no mlx wheels, so an
+    # in-process import would always fail and record "unknown".
+    pkg = "mlx_vlm" if args.vlm else "mlx_lm"
+    label = "mlx-vlm" if args.vlm else "mlx-lm"
     try:
-        import mlx_lm, mlx_vlm
-        if args.vlm:
-            mlx_version = f"mlx-vlm-{mlx_vlm.__version__}"
-        else:
-            mlx_version = f"mlx-lm-{mlx_lm.__version__}"
+        probe = subprocess.run(
+            [*PYTHON_CMD, "-c", f"import {pkg}; print({pkg}.__version__)"],
+            capture_output=True, text=True, timeout=120,
+        )
+        ver = probe.stdout.strip().splitlines()[-1] if probe.returncode == 0 else ""
+        mlx_version = f"{label}-{ver}" if ver else "unknown"
     except Exception:
         mlx_version = "unknown"
 
@@ -410,7 +419,18 @@ def main():
 
     # Discover models
     if args.model == "all":
-        model_dirs = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir())
+        # Same checkpoint test as scripts/bench_decode.sh: a directory is a
+        # model only if it has a config.json and at least one readable
+        # *.safetensors. This drops container directories (models/mlx holds a
+        # `large_models` parking area) and checkpoints whose weights are absent
+        # or behind a dangling symlink, instead of charging a load attempt and
+        # a cooldown to each.
+        def _is_checkpoint(d: Path) -> bool:
+            if not (d / "config.json").is_file():
+                return False
+            return any(f.is_file() for f in d.glob("*.safetensors"))
+
+        model_dirs = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir() and _is_checkpoint(p))
     else:
         p = Path(args.model)
         if not p.is_dir():
