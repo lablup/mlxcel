@@ -157,6 +157,38 @@ fma_tile(const T* x, const cutlass::Array<T, N>& w_dq, float* out) {
   *out_vec = cutlass::fma(x_f, w_f, *out_vec);
 }
 
+// [mlxcel] fma against a pre-loaded activation tile.
+//
+// `fma_tile` above takes `const T* x` and loads it, which is right when one
+// warp owns one output row and reads the activation vector once per row. The
+// row-blocked kernel loads the activation tile once and applies it to several
+// weight rows, so it needs the same arithmetic with the tile already in
+// registers. Same converter, same operand order, same `cutlass::fma`, so a
+// row-blocked launch produces bit-identical per-row results.
+template <int N, typename T>
+__device__ __forceinline__ void fma_tile_loaded(
+    const cutlass::Array<T, N>& x_vec,
+    const cutlass::Array<T, N>& w_dq,
+    T* out) {
+  auto* out_vec = reinterpret_cast<cutlass::Array<T, N>*>(out);
+  *out_vec = cutlass::fma(x_vec, w_dq, *out_vec);
+}
+
+template <
+    int N,
+    typename T,
+    typename = cuda::std::enable_if_t<!cuda::std::is_same_v<T, float>>>
+__device__ __forceinline__ void fma_tile_loaded(
+    const cutlass::Array<T, N>& x_vec,
+    const cutlass::Array<T, N>& w_dq,
+    float* out) {
+  auto* out_vec = reinterpret_cast<cutlass::Array<float, N>*>(out);
+  cutlass::NumericArrayConverter<float, T, N> converter_ft;
+  cutlass::Array<float, N> x_f = converter_ft(x_vec);
+  cutlass::Array<float, N> w_f = converter_ft(w_dq);
+  *out_vec = cutlass::fma(x_f, w_f, *out_vec);
+}
+
 // [mlxcel #1539] Accumulator width for the qmv family.
 //
 // Upstream selects it from the weight bit width alone: float at bits >= 8,
@@ -394,6 +426,167 @@ __device__ __forceinline__ void qmv_multirow_kernel_impl(
   }
 }
 
+// [mlxcel] Row-blocked qmv: one warp owns `rows_per_warp` output rows and
+// loads the activation tile once for all of them.
+//
+// Why. `qmv_kernel` gives each warp one output row and has that warp read the
+// whole activation vector, so a launch moves `n * k * 2` bytes of activations
+// against `n * k / 2` bytes of 4-bit weights: four bytes of activation per byte
+// of weight. Measured on a V100 over a controlled pair of gemma-4-12B-it
+// checkpoints with identical launch counts (49021), 4-bit qmv takes 52.1 us per
+// launch and 8-bit takes 60.4 us. The weight bytes double and the time rises
+// 1.159x, which pins the activation term at 84% of a 4-bit launch. Blocking R
+// output rows into one warp divides that term by R while leaving the weight
+// traffic alone.
+//
+// What it costs. Warp-level parallelism drops by R, since the same output rows
+// are covered by R times fewer warps, and the accumulator array grows to
+// `rows_per_warp * elems_per_thread`. For 4-bit the accumulator element is T,
+// so 16 halves is 8 registers per row. Whether the reuse or the lost occupancy
+// wins is not predictable, so `MLXCEL_QMV_ROWS_PER_WARP` selects R at runtime
+// and 1 (the stock kernel) stays the default.
+template <
+    int rows_per_warp,
+    int elems_per_thread,
+    int group_size,
+    bool has_bias,
+    bool has_residue_k,
+    typename T,
+    typename Q,
+    typename S>
+__device__ __forceinline__ void qmv_rowblock_kernel_impl(
+    const T* x,
+    const Q* w,
+    const S* scales,
+    const T* biases,
+    const float* global_scale,
+    T* out,
+    int row0,
+    int w_batch,
+    int n,
+    int k) {
+  auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+
+  constexpr int bits = cute::sizeof_bits_v<Q>;
+  auto w_step = [&](int idx) { return idx * cuda::std::min(8, bits) / 8; };
+  int groups_per_row = k / group_size;
+
+  // Per-row bases. An out-of-range row is clamped to row 0 so its loads stay
+  // in bounds; its result is simply not stored. `row0 + r < n` depends only on
+  // the block and warp index, so every lane agrees and the warp collective
+  // below stays uniform.
+  const Q* w_row[rows_per_warp];
+  const S* scales_row[rows_per_warp];
+  const T* biases_row[rows_per_warp];
+  bool active[rows_per_warp];
+#pragma unroll
+  for (int r = 0; r < rows_per_warp; ++r) {
+    active[r] = (row0 + r) < n;
+    int64_t off =
+        static_cast<int64_t>(active[r] ? row0 + r : 0) + int64_t(n) * w_batch;
+    w_row[r] = w + off * w_step(k);
+    scales_row[r] = scales + off * groups_per_row;
+    if constexpr (has_bias) {
+      biases_row[r] = biases + off * groups_per_row;
+    }
+  }
+
+  qmv_accumulator_t<bits, T> sums[rows_per_warp][elems_per_thread] = {};
+
+  auto step = [&](int idx) {
+    auto x_vec =
+        *(reinterpret_cast<const cutlass::Array<T, elems_per_thread>*>(x + idx));
+#pragma unroll
+    for (int r = 0; r < rows_per_warp; ++r) {
+      S scale = scales_row[r][idx / group_size];
+      T bias{0};
+      if constexpr (has_bias) {
+        bias = biases_row[r][idx / group_size];
+      }
+      auto w_dq = dequant_tile<elems_per_thread, has_bias, T, Q, S>(
+          w_row[r] + w_step(idx), scale, bias);
+      fma_tile_loaded<elems_per_thread>(x_vec, w_dq, sums[r]);
+    }
+  };
+
+  constexpr int elems_per_warp = WARP_SIZE * elems_per_thread;
+  for (int t = 0; t < k / elems_per_warp; ++t) {
+    step(warp.thread_rank() * elems_per_thread + t * elems_per_warp);
+  }
+  if constexpr (has_residue_k) {
+    int rest = k % elems_per_warp;
+    int idx = warp.thread_rank() * elems_per_thread + k - rest;
+    if (idx < k) {
+      step(idx);
+    }
+  }
+
+#pragma unroll
+  for (int r = 0; r < rows_per_warp; ++r) {
+    float sum{0};
+#pragma unroll
+    for (int i = 0; i < elems_per_thread; ++i) {
+      sum += sums[r][i];
+    }
+    sum = cg::reduce(warp, sum, cg::plus<float>{});
+    if (warp.thread_rank() == 0 && active[r]) {
+      if constexpr (
+          cuda::std::is_same_v<Q, cutlass::float_e2m1_t> &&
+          cuda::std::is_same_v<S, cutlass::float_e4m3_t>) {
+        if (global_scale) {
+          sum *= (*global_scale / (F8E4M3_MAX * F4E2M1_MAX));
+        }
+      }
+      out[row0 + r] = static_cast<T>(sum);
+    }
+  }
+}
+
+template <
+    int rows_per_block,
+    int rows_per_warp,
+    int elems_per_thread,
+    int group_size,
+    bool has_bias,
+    bool has_residue_k,
+    typename T,
+    typename Q,
+    typename S>
+__global__ void qmv_rowblock_kernel(
+    const T* x,
+    const Q* w,
+    const S* scales,
+    const T* biases,
+    const float* global_scale,
+    T* out,
+    int n,
+    int k,
+    bool broadcast_w) {
+  auto grid = cg::this_grid();
+  auto block = cg::this_thread_block();
+  auto warp = cg::tiled_partition<WARP_SIZE>(block);
+
+  int warp_index = block.group_index().x * rows_per_block + warp.meta_group_rank();
+  int row0 = warp_index * rows_per_warp;
+  if (row0 >= n) {
+    return;
+  }
+
+  int m = grid.dim_blocks().y;
+  int l = block.group_index().z;
+  x += block.group_index().y * k + m * k * l;
+  out += block.group_index().y * n + m * n * l;
+  int w_batch = broadcast_w ? 0 : l;
+
+  qmv_rowblock_kernel_impl<
+      rows_per_warp,
+      elems_per_thread,
+      group_size,
+      has_bias,
+      has_residue_k>(
+      x, w, scales, biases, global_scale, out, row0, w_batch, n, k);
+}
+
 template <
     int rows_per_block,
     int elems_per_thread,
@@ -550,6 +743,76 @@ inline int qmv_multirow_max_rows(int hard_max) {
   return configured;
 }
 
+// [mlxcel] Output rows per warp for the row-blocked qmv.
+//
+// `MLXCEL_QMV_ROWS_PER_WARP` overrides `fallback`, which the caller derives
+// from the compute capability. Accepted values are 1, 2 and 4; anything else is
+// ignored and the fallback stands, because the value picks a compiled
+// instantiation and a silent substitution would make an A/B read the wrong arm.
+// 1 routes to the stock `qmv_kernel` with the stock grid. Read once per
+// process, since the kernel selection is not per-call state.
+inline int qmv_rows_per_warp(int fallback) {
+  static const int configured = []() {
+    const char* e = std::getenv("MLXCEL_QMV_ROWS_PER_WARP");
+    if (e == nullptr) {
+      return 0;
+    }
+    int v = std::atoi(e);
+    return (v == 1 || v == 2 || v == 4) ? v : 0;
+  }();
+  return configured != 0 ? configured : fallback;
+}
+
+// [mlxcel] Compile-time row count for `qmv_rowblock_kernel`, mirroring
+// `dispatch_multirow_width`. Only the values `qmv_rows_per_warp` can return are
+// instantiated.
+template <typename F>
+inline void dispatch_rows_per_warp(int rows, F&& f) {
+  if (rows == 4) {
+    f(std::integral_constant<int, 4>{});
+  } else {
+    f(std::integral_constant<int, 2>{});
+  }
+}
+
+// [mlxcel] Compile-time accumulator width for the multirow kernel.
+//
+// `max_x_rows` sizes `sums[max_x_rows][elems_per_thread]`, which lives in
+// registers, so pinning it to 8 made every launch pay eight rows of
+// accumulators no matter how many rows it actually had. Measured on a V100 with
+// `cuobjdump -res-usage` at `elems_per_thread` 16: `qmv_kernel` takes 61
+// registers and `qmv_multirow_kernel<..., 8>` takes 168, nothing spilled. With
+// 65536 registers per SM and a 256-thread block that is 4 resident blocks
+// against 1, and dropping from 32 resident warps to 8 leaves too few in flight
+// to hide the k-loop's load latency: a 4-row speculative verify block measured
+// only 4.5% faster than the per-row path it replaced, where saving three
+// quarters of the weight traffic should have been worth far more.
+//
+// So round the row count up to the next instantiated width instead. The kernel
+// already bounds its unrolled j-loop by the runtime `x_rows`, so a width above
+// the actual count stays correct; it only wastes registers. Three widths keep
+// the instantiation count down and bound the waste at one power of two.
+//
+// `Cap` is the largest width the caller instantiates, so a narrowed
+// `MLXCEL_QMV_MULTIROW_MAX_ROWS` never selects a width the caller did not
+// intend to compile.
+template <int Cap, typename F>
+inline void dispatch_multirow_width(int x_rows, F&& f) {
+  if constexpr (Cap >= 4) {
+    if (x_rows <= 2) {
+      f(std::integral_constant<int, 2>{});
+      return;
+    }
+  }
+  if constexpr (Cap >= 8) {
+    if (x_rows <= 4) {
+      f(std::integral_constant<int, 4>{});
+      return;
+    }
+  }
+  f(std::integral_constant<int, Cap>{});
+}
+
 template <
     int group_size,
     bool has_bias,
@@ -569,6 +832,7 @@ void qmv(
     int k,
     int l,
     bool broadcast_w,
+    int default_rows_per_warp,
     F&& launch_kernel) {
   constexpr int rows_per_block = 8;
   constexpr int elems_per_thread =
@@ -579,8 +843,9 @@ void qmv(
   // warp can apply each dequantized weight tile to every row instead of
   // launching one weight-rereading block column per row. Bounded at 8 rows to
   // match the M*B < 8 qmv dispatch window (and keep accumulators in registers).
-  // `max_x_rows` stays the compile-time accumulator width; `window` is the
-  // runtime dispatch ceiling, which #906 lets the autotuner narrow.
+  // `max_rows` is the compile-time accumulator width, picked per launch by
+  // `dispatch_multirow_width`; `window` is the runtime dispatch ceiling, which
+  // #906 lets the autotuner narrow.
   constexpr int max_x_rows = 8;
   const int window = qmv_multirow_max_rows(max_x_rows);
   int x_rows = m * l;
@@ -590,19 +855,56 @@ void qmv(
     dim3 block_dims{WARP_SIZE, rows_per_block};
     void* args[] = {
         &x, &w, &scales, &biases, &global_scale, &out, &n, &k, &x_rows};
-    dispatch_bool(k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
-      auto* kernel = &qmv_multirow_kernel<
-          rows_per_block,
-          elems_per_thread,
-          group_size,
-          has_bias,
-          has_residue_k.value,
-          max_x_rows,
-          T,
-          Q,
-          S>;
-      launch_kernel(
-          reinterpret_cast<void*>(kernel), num_blocks, block_dims, args);
+    dispatch_multirow_width<max_x_rows>(x_rows, [&](auto max_rows) {
+      dispatch_bool(
+          k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
+            auto* kernel = &qmv_multirow_kernel<
+                rows_per_block,
+                elems_per_thread,
+                group_size,
+                has_bias,
+                has_residue_k.value,
+                decltype(max_rows)::value,
+                T,
+                Q,
+                S>;
+            launch_kernel(
+                reinterpret_cast<void*>(kernel),
+                num_blocks,
+                block_dims,
+                args);
+          });
+    });
+    return;
+  }
+
+  // [mlxcel] Row blocking, off by default. R = 1 keeps the stock kernel and
+  // the stock grid, so an unset `MLXCEL_QMV_ROWS_PER_WARP` changes nothing.
+  const int rows_per_warp = qmv_rows_per_warp(default_rows_per_warp);
+  if (rows_per_warp > 1) {
+    dim3 num_blocks{
+        uint32_t(cuda::ceil_div(n, rows_per_block * rows_per_warp)),
+        uint32_t(m),
+        uint32_t(l)};
+    dim3 block_dims{WARP_SIZE, rows_per_block};
+    void* args[] = {
+        &x, &w, &scales, &biases, &global_scale, &out, &n, &k, &broadcast_w};
+    dispatch_rows_per_warp(rows_per_warp, [&](auto rows) {
+      dispatch_bool(
+          k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
+            auto* kernel = &qmv_rowblock_kernel<
+                rows_per_block,
+                decltype(rows)::value,
+                elems_per_thread,
+                group_size,
+                has_bias,
+                has_residue_k.value,
+                T,
+                Q,
+                S>;
+            launch_kernel(
+                reinterpret_cast<void*>(kernel), num_blocks, block_dims, args);
+          });
     });
     return;
   }
@@ -756,6 +1058,18 @@ void qmv(
   int l = out.size() / (m * n);
   bool broadcast_w = (w.ndim() <= 2) || (w.size() != w.data_size());
 
+  // [mlxcel] Row blocking is on by default only where it was measured. On a
+  // V100, R = 2 moves decode from 44.7 to 57.4 tok/s on gemma-4-12B-it-4bit and
+  // from 20.6 to 24.9 on qwen3.8-27B-4bit, with byte-identical output at
+  // temperature 0. R = 4 gives it all back on the 12B, because at 96 to 142
+  // registers it fits one or two blocks per SM against the stock kernel's four
+  // or five. Turing is left at 1: sm_75 has a different register file per SM
+  // and no Turing device was available to measure, and guessing here would be
+  // guessing about the exact tradeoff that already reversed once at R = 4.
+  int cc_major = encoder.device().compute_capability_major();
+  int cc_minor = encoder.device().compute_capability_minor();
+  int default_rows_per_warp = (cc_major == 7 && cc_minor == 0) ? 2 : 1;
+
   dispatch_element_types(out.dtype(), tag, [&]<typename T>() {
     dispatch_quant_types<T>(
         bits,
@@ -786,6 +1100,7 @@ void qmv(
               k,
               l,
               broadcast_w,
+              default_rows_per_warp,
               [&](auto* kernel, dim3 num_blocks, dim3 block_dims, void** args) {
                 encoder.add_kernel_node_raw(
                     kernel, num_blocks, block_dims, {}, 0, args);
