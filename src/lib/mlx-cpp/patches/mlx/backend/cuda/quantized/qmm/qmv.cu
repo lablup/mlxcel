@@ -32,6 +32,7 @@
 #include <cooperative_groups/reduce.h>
 
 #include <cstdlib>
+#include <string>
 
 namespace mlx::core {
 
@@ -429,6 +430,13 @@ __device__ __forceinline__ void qmv_multirow_kernel_impl(
 // [mlxcel] Row-blocked qmv: one warp owns `rows_per_warp` output rows and
 // loads the activation tile once for all of them.
 //
+// The pointers are `__restrict__` here and not in the stock kernel. Every buffer
+// this kernel touches is distinct and the outputs never alias the inputs, so
+// telling the compiler that lets it keep the activation tile live across the R
+// weight rows instead of reloading it after each store, and opens the read-only
+// path for the weight and scale streams. The stock kernel is left alone on
+// purpose: R = 1 has to stay a true rollback to what was measured before.
+//
 // Why. `qmv_kernel` gives each warp one output row and has that warp read the
 // whole activation vector, so a launch moves `n * k * 2` bytes of activations
 // against `n * k / 2` bytes of 4-bit weights: four bytes of activation per byte
@@ -455,12 +463,12 @@ template <
     typename Q,
     typename S>
 __device__ __forceinline__ void qmv_rowblock_kernel_impl(
-    const T* x,
-    const Q* w,
-    const S* scales,
-    const T* biases,
-    const float* global_scale,
-    T* out,
+    const T* __restrict__ x,
+    const Q* __restrict__ w,
+    const S* __restrict__ scales,
+    const T* __restrict__ biases,
+    const float* __restrict__ global_scale,
+    T* __restrict__ out,
     int row0,
     int w_batch,
     int n,
@@ -475,9 +483,9 @@ __device__ __forceinline__ void qmv_rowblock_kernel_impl(
   // in bounds; its result is simply not stored. `row0 + r < n` depends only on
   // the block and warp index, so every lane agrees and the warp collective
   // below stays uniform.
-  const Q* w_row[rows_per_warp];
-  const S* scales_row[rows_per_warp];
-  const T* biases_row[rows_per_warp];
+  const Q* __restrict__ w_row[rows_per_warp];
+  const S* __restrict__ scales_row[rows_per_warp];
+  const T* __restrict__ biases_row[rows_per_warp];
   bool active[rows_per_warp];
 #pragma unroll
   for (int r = 0; r < rows_per_warp; ++r) {
@@ -509,6 +517,15 @@ __device__ __forceinline__ void qmv_rowblock_kernel_impl(
     }
   };
 
+  // Scale and bias cost as many memory transactions per step as the weights do,
+  // four bytes against 256, so batching them looked like a quarter of the launch
+  // waiting to be reclaimed. It is not: a warp step spans exactly
+  // `group_size / elems_per_thread` lanes per group, so four consecutive steps
+  // span one group per lane and a single coalesced load plus `__shfl_sync` can
+  // serve all four. Measured on a V100 that arm lost everywhere, 60.1 to 51.5
+  // tok/s at R = 2 and 58.8 to 46.7 at R = 3, at identical register counts and
+  // identical residency. The shuffles and the pack/unpack cost more than the six
+  // transactions they save, so the per-step loads stay.
   constexpr int elems_per_warp = WARP_SIZE * elems_per_thread;
   for (int t = 0; t < k / elems_per_warp; ++t) {
     step(warp.thread_rank() * elems_per_thread + t * elems_per_warp);
@@ -542,9 +559,19 @@ __device__ __forceinline__ void qmv_rowblock_kernel_impl(
   }
 }
 
+// `min_blocks` reaches `__launch_bounds__` as the resident-block floor, which is
+// how ptxas is told to cap the register count. The R sweep on a V100 is a
+// straight line in occupancy, not in loads: R = 2 takes 64 to 72 registers and 3
+// to 4 blocks per SM and wins at 56.0 tok/s, R = 3 takes 80 to 110 and 2 to 3
+// blocks and falls to 53.4, R = 4 takes 96 to 142 and 1 to 2 blocks and falls to
+// 45.2, all while each step up cuts transactions per output row. So the register
+// budget is the thing to set, and the row count is what fits inside it. A value
+// of 1 is the unconstrained case, since 65536 / (1 * 256) exceeds the 255-register
+// hardware ceiling anyway.
 template <
     int rows_per_block,
     int rows_per_warp,
+    int min_blocks,
     int elems_per_thread,
     int group_size,
     bool has_bias,
@@ -552,13 +579,13 @@ template <
     typename T,
     typename Q,
     typename S>
-__global__ void qmv_rowblock_kernel(
-    const T* x,
-    const Q* w,
-    const S* scales,
-    const T* biases,
-    const float* global_scale,
-    T* out,
+__global__ __launch_bounds__(WARP_SIZE* rows_per_block, min_blocks) void qmv_rowblock_kernel(
+    const T* __restrict__ x,
+    const Q* __restrict__ w,
+    const S* __restrict__ scales,
+    const T* __restrict__ biases,
+    const float* __restrict__ global_scale,
+    T* __restrict__ out,
     int n,
     int k,
     bool broadcast_w) {
@@ -746,11 +773,18 @@ inline int qmv_multirow_max_rows(int hard_max) {
 // [mlxcel] Output rows per warp for the row-blocked qmv.
 //
 // `MLXCEL_QMV_ROWS_PER_WARP` overrides `fallback`, which the caller derives
-// from the compute capability. Accepted values are 1, 2 and 4; anything else is
-// ignored and the fallback stands, because the value picks a compiled
+// from the compute capability. Accepted values are 1, 2, 3, 4 and 6; anything
+// else is ignored and the fallback stands, because the value picks a compiled
 // instantiation and a silent substitution would make an A/B read the wrong arm.
 // 1 routes to the stock `qmv_kernel` with the stock grid. Read once per
 // process, since the kernel selection is not per-call state.
+//
+// Measured on a V100 at 4 bits, decode as the slope between -n 60 and -n 200 on
+// gemma-4-12B-it-4bit: R = 1 gives 44.7 tok/s, R = 2 gives 56.0, R = 3 gives
+// 53.4, R = 4 gives 45.2, R = 6 gives 42.7. Every step up cuts transactions per
+// output row and every step up past 2 costs a resident block per SM, and the
+// occupancy wins. So the peak sits where the register budget puts it, which is
+// what `MLXCEL_QMV_MIN_BLOCKS` exists to move.
 inline int qmv_rows_per_warp(int fallback) {
   static const int configured = []() {
     const char* e = std::getenv("MLXCEL_QMV_ROWS_PER_WARP");
@@ -758,9 +792,44 @@ inline int qmv_rows_per_warp(int fallback) {
       return 0;
     }
     int v = std::atoi(e);
-    return (v == 1 || v == 2 || v == 4) ? v : 0;
+    return (v == 1 || v == 2 || v == 3 || v == 4) ? v : 0;
   }();
   return configured != 0 ? configured : fallback;
+}
+
+// [mlxcel] Resident-block floor handed to `__launch_bounds__`, from
+// `MLXCEL_QMV_MIN_BLOCKS`.
+//
+// The R sweep is a curve in occupancy, so the register budget is the knob that
+// actually moves it. 1 is the unconstrained case and is what the R numbers in
+// `dispatch_rows_per_warp` were measured under; 3 and 4 cap ptxas at 85 and 64
+// registers per thread for a 256-thread block, which is what lets a wider R keep
+// the residency that made R = 2 win. Anything else is ignored.
+inline int qmv_min_blocks(int fallback) {
+  static const int configured = []() {
+    const char* e = std::getenv("MLXCEL_QMV_MIN_BLOCKS");
+    if (e == nullptr) {
+      return 0;
+    }
+    int v = std::atoi(e);
+    return (v == 1 || v == 3 || v == 4) ? v : 0;
+  }();
+  return configured != 0 ? configured : fallback;
+}
+
+template <typename F>
+inline void dispatch_min_blocks(int blocks, F&& f) {
+  switch (blocks) {
+    case 4:
+      f(std::integral_constant<int, 4>{});
+      return;
+    case 3:
+      f(std::integral_constant<int, 3>{});
+      return;
+    default:
+      f(std::integral_constant<int, 1>{});
+      return;
+  }
 }
 
 // [mlxcel] Compile-time row count for `qmv_rowblock_kernel`, mirroring
@@ -768,10 +837,16 @@ inline int qmv_rows_per_warp(int fallback) {
 // instantiated.
 template <typename F>
 inline void dispatch_rows_per_warp(int rows, F&& f) {
-  if (rows == 4) {
-    f(std::integral_constant<int, 4>{});
-  } else {
-    f(std::integral_constant<int, 2>{});
+  switch (rows) {
+    case 4:
+      f(std::integral_constant<int, 4>{});
+      return;
+    case 3:
+      f(std::integral_constant<int, 3>{});
+      return;
+    default:
+      f(std::integral_constant<int, 2>{});
+      return;
   }
 }
 
@@ -833,6 +908,7 @@ void qmv(
     int l,
     bool broadcast_w,
     int default_rows_per_warp,
+    int default_min_blocks,
     F&& launch_kernel) {
   constexpr int rows_per_block = 8;
   constexpr int elems_per_thread =
@@ -890,21 +966,27 @@ void qmv(
     void* args[] = {
         &x, &w, &scales, &biases, &global_scale, &out, &n, &k, &broadcast_w};
     dispatch_rows_per_warp(rows_per_warp, [&](auto rows) {
-      dispatch_bool(
-          k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
-            auto* kernel = &qmv_rowblock_kernel<
-                rows_per_block,
-                decltype(rows)::value,
-                elems_per_thread,
-                group_size,
-                has_bias,
-                has_residue_k.value,
-                T,
-                Q,
-                S>;
-            launch_kernel(
-                reinterpret_cast<void*>(kernel), num_blocks, block_dims, args);
-          });
+      dispatch_min_blocks(qmv_min_blocks(default_min_blocks), [&](auto blocks) {
+        dispatch_bool(
+            k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
+              auto* kernel = &qmv_rowblock_kernel<
+                  rows_per_block,
+                  decltype(rows)::value,
+                  decltype(blocks)::value,
+                  elems_per_thread,
+                  group_size,
+                  has_bias,
+                  has_residue_k.value,
+                  T,
+                  Q,
+                  S>;
+              launch_kernel(
+                  reinterpret_cast<void*>(kernel),
+                  num_blocks,
+                  block_dims,
+                  args);
+            });
+      });
     });
     return;
   }
@@ -1068,7 +1150,17 @@ void qmv(
   // guessing about the exact tradeoff that already reversed once at R = 4.
   int cc_major = encoder.device().compute_capability_major();
   int cc_minor = encoder.device().compute_capability_minor();
-  int default_rows_per_warp = (cc_major == 7 && cc_minor == 0) ? 2 : 1;
+  bool volta = cc_major == 7 && cc_minor == 0;
+  int default_rows_per_warp = volta ? 2 : 1;
+  // Pinning the resident-block floor is worth more than the row count past 2.
+  // Measured on a V100 at 4 bits on gemma-4-12B-it, decode as the slope between
+  // -n 60 and -n 200: R = 2 unconstrained gives 56.0 tok/s at 92 to 95 registers
+  // and 2 blocks per SM, and the same R = 2 under a floor of 3 gives 60.1 at 80
+  // registers and 3 blocks. A floor of 4 caps at 64 registers and falls to 54.9,
+  // so the budget can be set too tight as well as too loose. R = 3 under the same
+  // floor of 3 lands at 58.8 despite moving 17% fewer transactions per output
+  // row, which is why the floor is the knob here and the row count is not.
+  int default_min_blocks = volta ? 3 : 1;
 
   dispatch_element_types(out.dtype(), tag, [&]<typename T>() {
     dispatch_quant_types<T>(
@@ -1101,6 +1193,7 @@ void qmv(
               l,
               broadcast_w,
               default_rows_per_warp,
+              default_min_blocks,
               [&](auto* kernel, dim3 num_blocks, dim3 block_dims, void** args) {
                 encoder.add_kernel_node_raw(
                     kernel, num_blocks, block_dims, {}, 0, args);
