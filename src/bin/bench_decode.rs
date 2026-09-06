@@ -408,6 +408,17 @@ fn measured(
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // `--prompt-tokens` synthesizes a text-only prompt, so the image arguments
+    // below would be dropped on the floor. Refusing the combination is what
+    // makes that visible: as a silent ignore it turned a whole `all --vlm`
+    // sweep into a duplicate of the text sweep without a single warning line.
+    if args.prompt_tokens.is_some() && !args.image.is_empty() {
+        anyhow::bail!(
+            "--prompt-tokens synthesizes a text-only prompt and cannot be combined \
+             with --image; drop one of them"
+        );
+    }
+
     // Match the production binaries: apply the hardware-gated
     // MLX_MAX_OPS_PER_BUFFER default (#353) before any model/generator
     // construction so decode benchmarks reflect the shipped default. A
