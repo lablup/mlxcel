@@ -9,7 +9,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **Hardware** | MacBook Pro M5 Max, 128GB RAM |
 | **OS** | macOS 26.6.2 (build 25G83) |
 | **mlxcel version** | 0.7.0-beta.1 (`mlxcel_version`) |
-| **Source revision** | `a50ff440` (`mlxcel_commit`); MLX pin `9a795735` (`mlx_commit`). The VLM pass and the re-check runs record `a50ff440-dirty`: they ran with the harness fix below applied but not yet committed. |
+| **Source revision** | `a50ff440` (`mlxcel_commit`); MLX pin `9a795735` (`mlx_commit`). The VLM pass and two re-checked text rows record `a50ff440-dirty`. That working tree is exactly `a50ff440` plus the diff committed as `34455e42`, so those rows are reproducible from `34455e42` and the rest from `a50ff440`. |
 | **MLX version** | upstream main (via mlxcel-core; pinned commit `9a795735`) |
 | **mlx-lm baseline** | 0.31.3 (dev checkout https://github.com/ml-explore/mlx-lm, commit `ed1fca4`); not re-run for the 0.6.0 sweep, see note below |
 | **mlx-vlm baseline** | 0.4.4; not re-run for the 0.6.0 sweep |
@@ -124,8 +124,11 @@ sweep passed both and the image was dropped without a warning. The tell was that
 all 147 rows reported `prompt_tokens=512` and text-only checkpoints such as
 `llama-3.1-8b-4bit` were "passing" a VLM sweep. The harness now omits
 `--prompt-tokens` in VLM mode and the runner rejects the combination outright
-rather than ignoring half of it. The VLM table below is the corrected re-run;
-its prompt token counts vary per checkpoint, as they should.
+rather than ignoring half of it (`34455e42`). The VLM table below is the
+corrected re-run, taken after that fix was applied and the binary rebuilt; its
+prompt token counts vary per checkpoint, as they should. The defective first
+pass was discarded rather than recorded, so no committed CSV carries a row from
+it.
 
 ## Legend
 
