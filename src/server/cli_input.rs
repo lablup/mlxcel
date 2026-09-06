@@ -338,7 +338,7 @@ pub struct ServerStartupInput {
     /// the env-var and CLI paths share a single normalization point.
     pub lang_bias_config: Option<LangBiasConfig>,
 
-    /// server-wide thinking-token budget for Qwen3-family models.
+    /// server-wide thinking-token budget for reasoning models.
     ///
     /// Raw `i32` value preserving llama.cpp semantics:
     /// - `-1` (default) — unrestricted reasoning (bit-exact baseline).

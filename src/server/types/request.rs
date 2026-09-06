@@ -791,7 +791,7 @@ pub struct SamplingParams {
     /// (must be `>= 2`).
     pub min_count: Option<usize>,
 
-    // thinking-token budget (Qwen3-family reasoning cap).
+    // thinking-token budget (reasoning cap).
     //
     // Three aliases accepted, first non-None wins (see
     // `thinking_budget::pick_budget_alias`). llama.cpp-compatible primary
@@ -1588,7 +1588,7 @@ pub struct NativeCompletionRequest {
     #[serde(default)]
     pub echo: Option<bool>,
 
-    // thinking-token budget (Qwen3-family reasoning cap).
+    // thinking-token budget (reasoning cap).
     /// Primary / llama.cpp-compatible name for the reasoning-token cap.
     #[serde(alias = "reasoning_budget_tokens")]
     pub thinking_budget_tokens: Option<i32>,

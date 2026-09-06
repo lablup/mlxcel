@@ -910,7 +910,7 @@ impl ModelProvider {
     /// path (no sampling changes, no tokenizer-vocab scan).
     ///
     /// `reasoning_budget` is the server-wide default
-    /// thinking-token budget for Qwen3-family models. Pass `None` for
+    /// thinking-token budget for reasoning models. Pass `None` for
     /// unrestricted reasoning (bit-exact baseline); per-request
     /// `thinking_budget_tokens` still takes precedence.
     #[allow(clippy::too_many_arguments)]

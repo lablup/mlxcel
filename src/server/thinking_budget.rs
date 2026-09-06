@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Thinking-token budget enforcement for Qwen3-family reasoning models.
+//! Thinking-token budget enforcement for reasoning models.
 //!
 //! Qwen3/Qwen3.5/Qwen3.6 generate a `<think>...</think>` reasoning block before
 //! producing the final answer. This module adds a per-request/per-server cap on
@@ -227,7 +227,7 @@ pub struct ThinkingTokenIds {
 
 /// Resolve the reasoning-block open/close token IDs from the tokenizer.
 ///
-/// Prefers the Qwen3-family `<think>` / `</think>` pair when present; falls
+/// Prefers the `<think>` / `</think>` pair when present; falls
 /// back to the Gemma 4 `<|channel>` / `<channel|>` pair when the Qwen tokens
 /// are absent. Both pairs are non-special added tokens that the tokenizer
 /// exposes through `token_to_id` (`<think>` / `</think>` for Qwen3/Qwen3.5;
