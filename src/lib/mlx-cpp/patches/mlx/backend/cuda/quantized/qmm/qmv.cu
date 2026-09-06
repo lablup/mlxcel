@@ -459,6 +459,7 @@ template <
     int group_size,
     bool has_bias,
     bool has_residue_k,
+    bool probe_no_scale,
     typename T,
     typename Q,
     typename S>
@@ -501,20 +502,49 @@ __device__ __forceinline__ void qmv_rowblock_kernel_impl(
 
   qmv_accumulator_t<bits, T> sums[rows_per_warp][elems_per_thread] = {};
 
-  auto step = [&](int idx) {
-    auto x_vec =
-        *(reinterpret_cast<const cutlass::Array<T, elems_per_thread>*>(x + idx));
+  auto accumulate =
+      [&](int idx, const cutlass::Array<T, elems_per_thread>& x_vec) {
 #pragma unroll
     for (int r = 0; r < rows_per_warp; ++r) {
-      S scale = scales_row[r][idx / group_size];
+      // [mlxcel] `probe_no_scale` is a measurement instrument, not a feature: it
+      // reads the scale and the bias from group 0 instead of from the group the
+      // step is actually in, which makes the output wrong on purpose. Of the
+      // four loads a step issues per output row at R = 2, two are these, for
+      // four bytes of metadata, and section 10.19 of the Volta notes established
+      // that this kernel is bound by the load instructions its warps issue
+      // rather than by the traffic they move. Before paying for a layout change
+      // that interleaves the pair into one 32-bit word, this prices what
+      // removing one of them could be worth at all.
+      //
+      // Group 0 rather than a literal, deliberately. Literal `1` and `0` would
+      // let the compiler fold `w_dq * 1 + 0` away and delete eight HFMA2 per
+      // step per row along with the two loads, pricing the arithmetic too and
+      // overstating what a load-only change can buy. A group-0 read is
+      // loop-invariant, so it hoists out of the k-loop and leaves every multiply
+      // and add exactly where it was.
+      S scale;
       T bias{0};
-      if constexpr (has_bias) {
-        bias = biases_row[r][idx / group_size];
+      if constexpr (probe_no_scale) {
+        scale = scales_row[r][0];
+        if constexpr (has_bias) {
+          bias = biases_row[r][0];
+        }
+      } else {
+        scale = scales_row[r][idx / group_size];
+        if constexpr (has_bias) {
+          bias = biases_row[r][idx / group_size];
+        }
       }
       auto w_dq = dequant_tile<elems_per_thread, has_bias, T, Q, S>(
           w_row[r] + w_step(idx), scale, bias);
       fma_tile_loaded<elems_per_thread>(x_vec, w_dq, sums[r]);
     }
+  };
+
+  auto step = [&](int idx) {
+    accumulate(
+        idx,
+        *(reinterpret_cast<const cutlass::Array<T, elems_per_thread>*>(x + idx)));
   };
 
   // Scale and bias cost as many memory transactions per step as the weights do,
@@ -527,7 +557,9 @@ __device__ __forceinline__ void qmv_rowblock_kernel_impl(
   // identical residency. The shuffles and the pack/unpack cost more than the six
   // transactions they save, so the per-step loads stay.
   constexpr int elems_per_warp = WARP_SIZE * elems_per_thread;
-  for (int t = 0; t < k / elems_per_warp; ++t) {
+  const int total_steps = k / elems_per_warp;
+  int t = 0;
+  for (; t < total_steps; ++t) {
     step(warp.thread_rank() * elems_per_thread + t * elems_per_warp);
   }
   if constexpr (has_residue_k) {
@@ -572,6 +604,7 @@ template <
     int rows_per_block,
     int rows_per_warp,
     int min_blocks,
+    bool probe_no_scale,
     int elems_per_thread,
     int group_size,
     bool has_bias,
@@ -610,7 +643,8 @@ __global__ __launch_bounds__(WARP_SIZE* rows_per_block, min_blocks) void qmv_row
       elems_per_thread,
       group_size,
       has_bias,
-      has_residue_k>(
+      has_residue_k,
+      probe_no_scale>(
       x, w, scales, biases, global_scale, out, row0, w_batch, n, k);
 }
 
@@ -817,6 +851,22 @@ inline int qmv_min_blocks(int fallback) {
   return configured != 0 ? configured : fallback;
 }
 
+// [mlxcel] Measurement probe, from `MLXCEL_QMV_PROBE_NO_SCALE`. Replaces the
+// per-step scale and bias loads with constants, which makes the output WRONG.
+// It exists to price those two loads before a layout change is designed around
+// removing one of them; never enable it for anything but an A/B on throughput.
+inline bool qmv_probe_no_scale() {
+  static const bool configured = []() {
+    const char* e = std::getenv("MLXCEL_QMV_PROBE_NO_SCALE");
+    if (e == nullptr) {
+      return false;
+    }
+    std::string v(e);
+    return !(v.empty() || v == "0" || v == "false" || v == "off" || v == "no");
+  }();
+  return configured;
+}
+
 template <typename F>
 inline void dispatch_min_blocks(int blocks, F&& f) {
   switch (blocks) {
@@ -967,25 +1017,28 @@ void qmv(
         &x, &w, &scales, &biases, &global_scale, &out, &n, &k, &broadcast_w};
     dispatch_rows_per_warp(rows_per_warp, [&](auto rows) {
       dispatch_min_blocks(qmv_min_blocks(default_min_blocks), [&](auto blocks) {
-        dispatch_bool(
-            k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
-              auto* kernel = &qmv_rowblock_kernel<
-                  rows_per_block,
-                  decltype(rows)::value,
-                  decltype(blocks)::value,
-                  elems_per_thread,
-                  group_size,
-                  has_bias,
-                  has_residue_k.value,
-                  T,
-                  Q,
-                  S>;
-              launch_kernel(
-                  reinterpret_cast<void*>(kernel),
-                  num_blocks,
-                  block_dims,
-                  args);
-            });
+        dispatch_bool(qmv_probe_no_scale(), [&](auto probe) {
+          dispatch_bool(
+              k % (WARP_SIZE * elems_per_thread), [&](auto has_residue_k) {
+                auto* kernel = &qmv_rowblock_kernel<
+                    rows_per_block,
+                    decltype(rows)::value,
+                    decltype(blocks)::value,
+                    probe.value,
+                    elems_per_thread,
+                    group_size,
+                    has_bias,
+                    has_residue_k.value,
+                    T,
+                    Q,
+                    S>;
+                launch_kernel(
+                    reinterpret_cast<void*>(kernel),
+                    num_blocks,
+                    block_dims,
+                    args);
+              });
+        });
       });
     });
     return;
