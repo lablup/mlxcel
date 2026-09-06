@@ -78,14 +78,26 @@ namespace mlx::core {
 
 namespace {
 
-// [mlxcel #1543] Largest CTA tile_m the Volta tensor-core arm can take before
-// accumulator fragments spill. Measured with MLXCEL_TRACE_QMM_TILE on a V100:
-// at tile_m 16 the kernel takes 255 registers and spills nothing, while at
-// tile_m 64 it drops to 64 registers with 11304 bytes of spill and the launch
-// then fails with `cuGraphAddKernelNode ... invalid argument`. Volta's atom is
-// half the M and a quarter the K of sm_80's, so a tall CTA tile needs far more
-// accumulator fragments per thread to cover.
-constexpr int kVoltaMaxTileM = 16;
+// [mlxcel #1543] Largest CTA tile the Volta tensor-core arm can take before
+// accumulator fragments spill to local memory and the launch fails with
+// `cuGraphAddKernelNode ... invalid argument`.
+//
+// The bound is on tile_m times tile_n, not on tile_m alone, because the
+// accumulator a thread holds scales with the output tile's area. Measured with
+// MLXCEL_TRACE_QMM_TILE on a V100:
+//
+//   16 x 128 = 2048   registers 255   spill 0       runs
+//   64 x  64 = 4096   registers 226   spill 0       runs
+//   64 x 128 = 8192   registers  64   spill 11304   fails
+//
+// A tile_m-only cap was tried first and is a bad proxy: raising it from 16 to
+// 32 changed nothing observable, because the 27B's tile_m is 64 either way, so
+// the shape kept falling back while looking like it had been given room.
+//
+// Volta's atom is half the M and a quarter the K of sm_80's, so covering the
+// same output tile needs far more accumulator fragments per thread, which is
+// why sm_80 carries 64 x 128 without trouble and sm_70 cannot.
+constexpr int kVoltaMaxTileArea = 4096;
 
 // Forces the scalar arm regardless of architecture. This exists so the Volta
 // tensor-core arm can be checked against the scalar one on the same prompt,
@@ -233,18 +245,34 @@ void qmm_naive(
       /* tensor_core_mma = */ sm80,
       forced_tile_n());
 
-  // Above the cap the scalar arm is the faster of the two available options,
-  // so fall back rather than refusing the shape.
-  if (volta_tc && tile.tile_m > kVoltaMaxTileM) {
-    volta_tc = false;
-    sm80 = false;
-    tile = mlxcel::qmm_naive_choose_tile(
+  // Over the area bound, narrow the N tile before giving up on tensor cores:
+  // 64 x 128 spills and fails, while the same shape at 64 x 64 runs with 226
+  // registers and no spill, so the 27B reaches the Volta arm through a
+  // narrower tile rather than through the scalar fallback. Only if that still
+  // does not fit does the scalar arm take over, which is the faster of the two
+  // options remaining at that point.
+  if (volta_tc && tile.tile_m * tile.tile_n > kVoltaMaxTileArea) {
+    auto narrowed = mlxcel::qmm_naive_choose_tile(
         x.itemsize(),
         m,
         group_size,
         max_smem_per_block_optin(encoder.device().cuda_device()),
-        /* tensor_core_mma = */ false,
-        forced_tile_n());
+        /* tensor_core_mma = */ true,
+        /* forced_tile_n = */ 64);
+    if (narrowed.fits &&
+        narrowed.tile_m * narrowed.tile_n <= kVoltaMaxTileArea) {
+      tile = narrowed;
+    } else {
+      volta_tc = false;
+      sm80 = false;
+      tile = mlxcel::qmm_naive_choose_tile(
+          x.itemsize(),
+          m,
+          group_size,
+          max_smem_per_block_optin(encoder.device().cuda_device()),
+          /* tensor_core_mma = */ false,
+          forced_tile_n());
+    }
   }
   if (!tile.fits) {
     throw std::runtime_error(fmt::format(
