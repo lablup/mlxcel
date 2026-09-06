@@ -525,6 +525,7 @@ emit_duplicate_row() {
   local prompt="$TEXT_PROMPT"
   [[ "$VLM_MODE" -eq 1 ]] && prompt="$VLM_PROMPT"
   local ptl="$PROMPT_TOKENS"
+  [[ "$VLM_MODE" -eq 1 ]] && ptl=""
   >&2 printf '>>> [skip]   %s duplicate of %s (SKIP:duplicate_of)\n' "$model_name" "$owner"
   echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:duplicate_of=${owner}"
 }
@@ -674,8 +675,10 @@ bench_one() {
   model_name=$(basename "$model_path")
 
   # Long-prompt target recorded in the prompt_target_len CSV column; empty for
-  # the short-prompt default so historical rows stay byte-compatible.
+  # the short-prompt default so historical rows stay byte-compatible, and empty
+  # in VLM mode because the synthetic long prompt is never used there.
   local ptl="$PROMPT_TOKENS"
+  [[ "$VLM_MODE" -eq 1 ]] && ptl=""
 
   # Classify a directory that cannot be a checkpoint before spending a model
   # load and a cooldown on a guaranteed failure. Both cases previously landed
@@ -728,7 +731,12 @@ bench_one() {
   fi
 
   # Long-prompt prefill mode: synthesize an exactly-N-token prompt in the runner.
-  if [[ -n "$PROMPT_TOKENS" ]]; then
+  # Never in VLM mode: the synthetic prompt is text-only and the runner ignores
+  # --image whenever --prompt-tokens is set, which silently turns the VLM sweep
+  # into a second text sweep. The VLM pass keeps the fixed --max-tokens budget
+  # and --ignore-eos, so decode stays comparable across models; prefill varies
+  # with each checkpoint's image token count, which is inherent to VLM prefill.
+  if [[ -n "$PROMPT_TOKENS" && "$VLM_MODE" -ne 1 ]]; then
     extra_args+=(--prompt-tokens "$PROMPT_TOKENS")
   fi
 
