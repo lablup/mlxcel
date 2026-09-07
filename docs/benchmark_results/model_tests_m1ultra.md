@@ -38,13 +38,19 @@ Three classes of row look like measurements but are not, and each is now rejecte
 
 ### A stale shard index is an upstream property, not local damage
 
-Twelve checkpoints here carry a `model.safetensors.index.json` that names shards which do not exist, and the loss is total rather than partial: none of the shards the index lists is present. `qwen3-vl-32b-4bit` is the widest case, with the index declaring 14 shards and 62 GB against 4 shards and 18 GB on disk.
+Twelve checkpoints here carry a `model.safetensors.index.json` that names shards which do not exist, and the loss is total rather than partial: none of the shards the index lists is present. `qwen3-vl-32b-4bit` is the widest on this host, with the index declaring 14 shards and 66.71 GB against 4 shards and 19.62 GB on disk. Sizes here are decimal GB throughout, matching the `total_size` byte counts the indexes carry.
 
 They are not damaged downloads. The local copies match their repositories file for file, M1 Ultra and M5 Max independently hold the same twelve in the same state, and the index is the *pre-quantization* original's index carried through unchanged: `gemma-3-4b-it-4bit` declares the 2 shards and 8.60 GB of `google/gemma-3-4b-it`, `qwen3-vl-32b-4bit` the 14 shards and 66.71 GB of `Qwen/Qwen3-VL-32B-Instruct`. The conversion wrote new weights and copied the old index.
 
 The scope is VLM conversions, at roughly 12% of the most-downloaded image-text-to-text repositories, concentrated in the gemma-3 and Qwen3-VL families. mlx-lm text conversions are unaffected. The mlx-vlm version recorded in each repository does not predict it: 0.3.2 appears on both the healthy and the stale side.
 
-These load and measure correctly because **mlxcel globs `*.safetensors` and does not read the index**, which in this ecosystem is tolerance rather than a shortcut: a loader that trusted the index would refuse all twelve outright. `scripts/checkpoint_fingerprint.py` reports which path a checkpoint took in its `shard_source` field.
+They load and measure correctly because mlxcel reads the index and falls back to a glob when the shards it names are absent, printing a warning when it does:
+
+```
+Warning: model.safetensors.index.json in models/mlx/gemma-3-4b-it-4bit references shards that don't match the on-disk files (likely a repackaged mlx-community quant). Falling back to all *.safetensors files in the directory.
+```
+
+The distinction between that and ignoring the index matters, because the index is load-bearing elsewhere: the pipeline-parallel partial loader picks each rank's shards from it, and that path does not have this fallback, so a stale-index checkpoint cannot be run pipeline-parallel. `docs/adr/0006-safetensors-shard-discovery-globs-past-a-stale-index.md` records why the fallback exists and what reverting it would break. `scripts/checkpoint_fingerprint.py` reports which path a checkpoint took in its `shard_source` field, and `scripts/audit_hf_index.py` checks a repository before it is fetched.
 
 ## Coverage
 
