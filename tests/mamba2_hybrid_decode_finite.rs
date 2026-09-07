@@ -32,12 +32,14 @@
 //! the dangerous state, because that is a machine where the risk exists and
 //! nothing checked it, so it is printed loudly.
 //!
-//! **CI cannot run these.** The `self-hosted-macos-26-arm64` pool is M1 and M4,
-//! so every CI run reports NOT APPLICABLE and this file protects nothing there.
-//! It is only meaningful when run on an M5 host that has the two checkpoints:
+//! **Both tests are `#[ignore]`d.** The `self-hosted-macos-26-arm64` pool is M1
+//! and M4, so in CI they could only ever report NOT APPLICABLE, and a green run
+//! that verified nothing is worse than no run at all. Select them explicitly on
+//! an M5 host that has the two checkpoints:
 //!
 //! ```text
-//! cargo test --release --features metal,accelerate --test mamba2_hybrid_decode_finite
+//! cargo test --release --features metal,accelerate \
+//!     --test mamba2_hybrid_decode_finite -- --ignored
 //! ```
 //!
 //! Treat that as a manual step before shipping a change to the Mamba2 hybrid
@@ -122,11 +124,13 @@ fn assert_decode_is_finite(model_name: &str, max_tokens: usize) {
 }
 
 #[test]
+#[ignore = "M5-only: the guarded failure cannot occur on the M1/M4 CI runners"]
 fn falcon_h1_decode_is_finite() {
     assert_decode_is_finite("falcon-h1-tiny-90m-instruct-4bit", 64);
 }
 
 #[test]
+#[ignore = "M5-only: the guarded failure cannot occur on the M1/M4 CI runners"]
 fn granitemoehybrid_decode_is_finite() {
     assert_decode_is_finite("granite-4.0-h-tiny-4bit", 64);
 }
