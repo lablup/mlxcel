@@ -103,13 +103,24 @@ Quantization is not a factor. Non-quantized checkpoints have a median of 98% aga
 
 ### Open performance gaps
 
-Three checkpoints fall far outside the distribution, and prefill is down with decode on all three, which points at something earlier than the decode loop. They have no architecture, quantization or family in common, so each needs its own investigation.
+Two checkpoints fall far outside the distribution:
 
 | Model | Decode | Prefill | mlxcel | Baseline |
 |---|--:|--:|--:|--:|
-| `qwen2.5-vl-3b-hf` | 26% | 81% | 18.5 | 71.0 |
 | `gpt_bigcode-santacoder` | 28% | 50% | 51.2 | 183.4 |
 | `pythia-1b` | 31% | 53% | 61.3 | 195.8 |
+
+A third, `qwen2.5-vl-3b-hf`, was here at 26% decode and 81% prefill until #1686. It is not an outlier any more, which is worth recording because the reasoning that put it here was wrong: the gap survived both the text and the VLM path, so it was read as a property of the checkpoint. The cause was a GQA KV expansion in the shared decode attention, and removing it takes the model past parity.
+
+The two that remain have a different signature, and the difference is the useful part. The #1686 models lost decode while prefill held up (`qwen2.5-vl-3b-hf` at 26% decode against 81% prefill, `qwen2.5-vl-3b-4bit` at 59% against 78%), which is what a per-decode-step attention cost looks like. These two are down in both stages by a similar factor, which points at something spanning the whole forward rather than at the decode loop.
+
+Ruled out so far, so the next investigation does not repeat it:
+
+- **The #1686 defect.** Neither `src/models/gpt_bigcode.rs` nor `src/models/gpt_neox.rs` calls `repeat_kv`. GPT-BigCode already passes MQA-shaped K and V straight to the attention call and lets MLX broadcast across query heads, which is the pattern #1686 introduced elsewhere.
+- **Weight dtype.** Both are already F16 on disk, not F32, so there is no promotion to pay for. `gpt2` is the F32 one here and sits at 96%.
+- **Being non-quantized as such.** Non-quantized checkpoints have a median of 98%, and `llama-3.2-1b-instruct` and `qwen2.5-0.5b-bf16` are both above parity at comparable size.
+
+What has not been checked is the MLP and linear path, and the two architecture features these share with each other and with little else: GPT-NeoX's partial rotary (`rotary_pct`) and GPT-BigCode's fused `c_attn`. That needs a profile on a quiet host rather than more reading.
 
 The Qwen VL family forms a second, milder band: `qwen2.5-vl-3b-4bit` at 59% and `qwen2-vl-2b-4bit` at 60%, with the qwen3-vl checkpoints at 83-92%. The 4-bit Qwen 2.5 VL checkpoint is more than twice as fast relative to baseline as its bf16 sibling above, so whatever the bf16 row hits is not what the 4-bit rows hit.
 
@@ -197,7 +208,6 @@ M5 Max measured at `a50ff440`, M1 Ultra at `30ab5a39`, eight commits later on th
 
 | Item | State |
 |---|---|
-| `qwen2.5-vl-3b-hf` at 26% text and 27% VLM | Unexplained. The gap survives both modes, so it belongs to the checkpoint rather than to either path. Its 4-bit sibling is at 70% VLM |
 | `gpt_bigcode-santacoder` 28%, `pythia-1b` 31% | Unexplained. Prefill is down with decode on both (50% and 53%), so the cost is earlier than the decode loop |
 | Qwen VL band, 59-92% | `qwen2.5-vl-3b-4bit` 59% and `qwen2-vl-2b-4bit` 60% on text, qwen3-vl 83-92% |
 | `granite-vision-3.2-2b-4bit` refuses descriptive prompts | lablup/mlxcel#1683. The image does reach the model: it answers colour questions correctly on three different solid images. Only descriptive prompts draw a refusal, and mlx-vlm answers those |
