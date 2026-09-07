@@ -178,6 +178,15 @@ if prompt_tokens_target > 0 and corpus:
 # runs on every step, including the first generated token.
 import mlx.core as mx
 _eos = set()
+# Same superset problem as the VLM path: the stopping set can be wider than the
+# tokenizer's eos_token_ids attribute (Gemma 4 reports 1 but stops on
+# [1, 106, 50]), so read the criteria object first.
+_sc = getattr(tokenizer, 'stopping_criteria', None)
+if _sc is not None:
+    for _attr in ('eos_token_ids', '_eos_token_ids', 'stop_ids'):
+        _v = getattr(_sc, _attr, None)
+        if _v is not None:
+            _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
 for _attr in ('eos_token_ids', 'eos_token_id'):
     _v = getattr(tokenizer, _attr, None)
     if _v is None:
@@ -258,6 +267,17 @@ except Exception as e:
 import mlx.core as mx
 _tok = getattr(processor, 'tokenizer', processor)
 _eos = set()
+# The set mlx_vlm actually stops on is stopping_criteria.eos_token_ids, which is
+# a superset of the tokenizer's own eos_token_ids attribute: Gemma 4 reports 1
+# there but stops on [1, 106, 50]. Reading only the attribute left 106 and 50
+# unbiased, so the whole Gemma 4 family terminated early (11 to 115 tokens
+# instead of 128) while single-id families like Qwen looked fine.
+_sc = getattr(_tok, 'stopping_criteria', None)
+if _sc is not None:
+    for _attr in ('eos_token_ids', '_eos_token_ids', 'stop_ids'):
+        _v = getattr(_sc, _attr, None)
+        if _v is not None:
+            _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
 for _attr in ('eos_token_ids', 'eos_token_id'):
     _v = getattr(_tok, _attr, None)
     if _v is None:
