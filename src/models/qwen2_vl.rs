@@ -276,6 +276,8 @@ struct Attention {
     num_kv_heads: i32,
     head_dim: i32,
     scale: f32,
+    /// `rope_theta`, kept for the text-only path's plain 1-D RoPE.
+    rope_base: f32,
 }
 
 impl Attention {
@@ -322,6 +324,7 @@ impl Attention {
             num_kv_heads: config.num_kv_heads() as i32,
             head_dim: head_dim as i32,
             scale: (head_dim as f32).powf(-0.5),
+            rope_base: config.rope_theta,
         })
     }
 
@@ -393,6 +396,52 @@ impl Attention {
         };
 
         // [B, heads, L, head_dim] -> [B, L, dim]
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+        self.o_proj.forward(&output)
+    }
+
+    /// Text-only fast path: plain 1-D RoPE, no MRoPE tables, no causal mask
+    /// built by the caller. For a sequence with no vision tokens the three
+    /// MRoPE sections all carry the same position, so this is numerically the
+    /// multimodal path; `qwen3_vl.rs` splits the same way for the same reason.
+    fn forward_text_only(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offset = cache.offset;
+        let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
+        let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+
+        let (k, v) = cache.update_and_fetch(k, v);
+
+        // K and V stay GQA-shaped; see the note in `forward`.
+        let output = if l > 1 && mask.is_none() {
+            mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+            }
+        };
+
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         self.o_proj.forward(&output)
@@ -485,6 +534,20 @@ impl DecoderLayer {
         let r = self
             .attn
             .forward(&self.input_layernorm.forward(x), cache, mask, cos, sin);
+        let h = mlxcel_core::add(x, &r);
+        let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
+        mlxcel_core::add(&h, &r)
+    }
+
+    fn forward_text_only(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let r = self
+            .attn
+            .forward_text_only(&self.input_layernorm.forward(x), cache, mask);
         let h = mlxcel_core::add(x, &r);
         let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
         mlxcel_core::add(&h, &r)
@@ -654,6 +717,10 @@ impl Qwen2VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
+            return self.forward_text_only_hidden(input_ids, caches, mask);
+        }
+
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -748,6 +815,34 @@ impl Qwen2VLModel {
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask, &cos, &sin);
+        }
+
+        self.norm.forward(&h)
+    }
+
+    /// True when this sequence has never carried image positions, so the
+    /// MRoPE machinery has nothing to encode that plain RoPE would not.
+    /// `Qwen2VLModel` has no DeepStack or visual-mask state, so the MRoPE
+    /// entry is the whole test (`qwen3_vl.rs` checks two more for that reason).
+    fn can_use_text_only_fast_path(&self, seq_id: Option<SequenceId>) -> bool {
+        !self.mrope_state.with_entry(seq_id, |entry| {
+            entry.position_ids.is_some() || entry.rope_deltas.unwrap_or(0) != 0
+        })
+    }
+
+    /// Text-only fast path. Skips the MRoPE table build and the auto causal
+    /// mask entirely: `Attention::forward_text_only` uses plain 1-D RoPE and
+    /// lets `causal_attention` supply prefill causality.
+    fn forward_text_only_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward_text_only(&h, &mut caches[i], mask);
         }
 
         self.norm.forward(&h)
