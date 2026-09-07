@@ -322,7 +322,19 @@ def resolve_python() -> list[str]:
     `uv run` against that venv, then bare python3. The bare interpreter is last
     because the system Python here is 3.14, which has no mlx wheels; the venv is
     created with `uv venv --python 3.12 .venv-mlxlm` and populated with
-    `uv pip install --python .venv-mlxlm/bin/python mlx-lm mlx-vlm`.
+
+        uv pip install --python .venv-mlxlm/bin/python \
+            mlx-lm mlx-vlm torch torchvision timm numba addict matplotlib einops
+
+    The packages past `mlx-vlm` are not optional. Several checkpoints reach a
+    processor or a `trust_remote_code` module that imports them, and without
+    them the model does not load at all, so the sweep records `FAIL:warmup` and
+    the row looks like a runtime defect rather than a missing dependency. On
+    2026-09-07 that was 4 VLM checkpoints for `torchvision` (idefics2, idefics3,
+    smolvlm, fastvlm), `timm` for fastvlm, and `numba` for plamo2, which had no
+    baseline on either host until it was installed and then measured at 106% of
+    mlx-lm. `addict`, `matplotlib` and `einops` are imported by the DeepSeek-OCR
+    remote code.
     """
     explicit = os.environ.get("MLXLM_PYTHON")
     if explicit:
