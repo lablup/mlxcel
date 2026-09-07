@@ -24,7 +24,26 @@ def fp(model_dir):
     except Exception: return {"cfg_sha": h}
     t = d.get("text_config") or d
     q = d.get("quantization") or {}
-    shards = sorted((f.name, os.stat(f).st_size) for f in p.glob("*.safetensors") if f.is_file())
+    # Sum the shards the checkpoint actually loads, not every file in the
+    # directory. Two directories on this host disagree with a plain glob:
+    # `gemma-4-12b-it-4bit` keeps a superseded 2-shard export beside the
+    # 3-shard set its index names, which inflated the total by 6.3 GB, and 12
+    # others carry an index left over from a pre-quantization export that
+    # names shards no longer present. mlxcel globs, so both load; a bytes
+    # figure taken from the glob is a property of the directory rather than of
+    # the model, and two hosts holding the same model then disagree.
+    on_disk = {f.name: os.stat(f).st_size for f in p.glob("*.safetensors") if f.is_file()}
+    named = set()
+    idx = p / "model.safetensors.index.json"
+    if idx.exists():
+        try: named = set(json.load(open(idx)).get("weight_map", {}).values())
+        except Exception: named = set()
+    if named and named <= set(on_disk):
+        shards = sorted((n, on_disk[n]) for n in named)
+        source = "index"
+    else:
+        shards = sorted(on_disk.items())
+        source = "glob-stale-index" if named else "glob"
     total = sum(s for _, s in shards)
     return {
         "cfg_sha": h,
@@ -36,6 +55,7 @@ def fp(model_dir):
         "group": q.get("group_size"),
         "shards": len(shards),
         "bytes": total,
+        "shard_source": source,
     }
 
 if __name__ == "__main__":
