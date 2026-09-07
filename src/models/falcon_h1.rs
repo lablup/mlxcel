@@ -561,9 +561,13 @@ impl FalconH1Mixer {
 
         let y = mlxcel_core::astype(&y, mlxcel_core::array_dtype(hidden_states));
 
-        mlxcel_core::eval(&y);
-        mlxcel_core::eval(&next_state);
-
+        // No `eval` boundary here. The two that used to sit at this point came
+        // in with the original port (#259) with no recorded reason, and they
+        // only ever fire on the graph path, which serves prefill and the first
+        // token; steady-state decode takes `ssm_step_kernel`. Forcing a
+        // materialization once per layer per prefill chunk is what the
+        // measurement below charges them for. The NaN risk this family does
+        // carry is covered by `tests/mamba2_hybrid_decode_finite.rs` (#1685).
         (y, next_state)
     }
 
