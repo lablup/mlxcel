@@ -1738,7 +1738,16 @@ namespace {
             if (const char* v = std::getenv("MLXCEL_ENABLE_SOFTCAP_GQA_DECODE_GROUPED")) {
                 return std::string_view(v) != "0";
             }
-            return false;
+            // On by default since #1686's measurement. The grouped path keeps
+            // K and V at `[B, H_kv, S, D]` and broadcasts n_rep inside the
+            // matmul; the fallback below it calls `do_repeat_kv`, which writes
+            // an n_rep-sized copy of the whole live cache on every decode step.
+            // Measured on M5 Max at 512 prompt tokens: gemma2-2b-4bit decode
+            // 195.59 to 221.69 tok/s and gemma-2-9b-8bit 40.51 to 47.34, with
+            // greedy output byte-identical either way on both. Set
+            // MLXCEL_DISABLE_SOFTCAP_GQA_DECODE_GROUPED=1 to restore the
+            // repeat-based path.
+            return true;
         }();
         return enabled;
     }
