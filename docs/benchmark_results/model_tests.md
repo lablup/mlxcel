@@ -87,32 +87,36 @@ This is the runtime claim, and it holds equally on both machines. Decode, mlxcel
 
 Across the 86 models both hosts share, the per-model difference between the two advantages has a median of -1 percentage point. The advantage is a property of the runtime, not of the machine it runs on.
 
-### 2. Where that advantage does not carry over
+### 2. Where that advantage did not carry over, and what it took to see it
 
-Three checkpoints break the pattern, and they are the reason the two tables have to be read together:
+Three checkpoints broke the pattern in the 2026-09-06 sweeps, and they are the reason the two comparisons have to be read together. All three are fixed as of `c07826df`; the numbers are kept here because the way they were found is the reusable part.
 
-| Checkpoint | Architecture | M1 Ultra | M5 Max |
-|---|---|--:|--:|
-| `falcon-h1-tiny-90m-instruct-4bit` | FalconH1 | 108% | 31% |
-| `granite-4.0-h-350m-4bit` | GraniteMoeHybrid | 100% | 23% |
-| `granite-4.0-h-tiny-4bit` | GraniteMoeHybrid | 93% | 33% |
+| Checkpoint | Architecture | M1 Ultra | M5 Max before | M5 Max after |
+|---|---|--:|--:|--:|
+| `falcon-h1-tiny-90m-instruct-4bit` | FalconH1 | 108% | 31% | 112% |
+| `granite-4.0-h-350m-4bit` | GraniteMoeHybrid | 100% | 23% | 84% |
+| `granite-4.0-h-tiny-4bit` | GraniteMoeHybrid | 93% | 33% | 90% |
 
-mlxcel runs these at roughly half its own M1 Ultra throughput on the newer machine, while mlx-lm on the same M5 Max is 1.7x to 2.2x faster than mlx-lm on M1 Ultra. The hardware is fine; the runtime is not using it. Every other SSM and hybrid family is healthy on M5 Max (NemotronH 100%, Qwen3Next 115%, FalconMamba 101%, Jamba 98%, Lfm2 98%), so this is two architectures rather than a class of model.
+The cause was a per-mixer `eval` that both families ran at the end of every mixer forward on M5 Max, a NaN workaround from #266. It is a per-layer GPU sync on every decode token. The gate was present and correct; what had never been measured was its M5 arm. `nemotron_h` carries the same construct and was healthy throughout because single-token decode returns early into `forward_fused` and never reaches it.
 
-In the hardware table below these three read as "M1 Ultra is faster on these models", which is the wrong conclusion. They are excluded from its aggregate.
+Neither comparison alone would have surfaced this. The same-machine median is 100% on both hosts, so the runtime table hides it. Read only as hardware, the three say "M1 Ultra is faster on these models", which is the wrong conclusion and the one a cross-hardware table invites. They appear only when the same-machine ratio is computed on both machines and the two are compared.
+
+`plamo-2-1b` carries the same construct and was briefly suspected on the strength of its 0.81x M5-over-M1 ratio. That was the wrong quantity: 0.81x is hardware against hardware, not mlxcel against mlx-lm, and the two cannot corroborate each other. It had no baseline on either host at the time, which turned out to be a missing `numba` in the baseline environment rather than anything about the model. With the baseline measured it is ahead on both machines, at 100% of mlx-lm on M1 Ultra (107.47 against 107.04) and 106% on M5 Max (86.83 against 82.10), and it gains nothing from removing the boundary, so it keeps its gate.
 
 ### 3. Machine against machine
 
-Across the 135 models both hosts measured at an identical prompt length, after excluding the three above:
+Across the 138 models both hosts measured at an identical prompt length, with the fix above in place on M5 Max:
 
 | | Median | Quartiles | Range |
 |---|--:|---|---|
-| Decode, M5 Max / M1 Ultra | 1.45x | 1.24 / 1.78 | 0.81 - 2.24x |
-| Prefill, M5 Max / M1 Ultra | 4.68x | | 1.07 - 7.59x |
+| Decode, M5 Max / M1 Ultra | 1.46x | 1.24 / 1.81 | 0.81 - 2.24x |
+| Prefill, M5 Max / M1 Ultra | 4.65x | | 1.07 - 7.59x |
 
 Prefill separates the two machines far more than decode does, which is the expected shape: prefill is matmul-bound and decode is bandwidth-bound.
 
-Three rows remain below 1.0x: `plamo-2-1b` at 0.81x, `llama-3.1-8b-bf16` at 0.92x and `qwen3.5-9b-bf16` at 0.99x. `plamo-2-1b` has no mlx-lm baseline on either host, so it cannot be placed in section 1 and it is not yet known whether it belongs with the three above; the other two are within the noise of a bf16 checkpoint that neither machine is optimised for.
+Three rows sit below 1.0x and none is a runtime gap. `plamo-2-1b` at 0.81x is the clearest case: mlx-lm is slower on M5 Max too, at 0.77x, so both runtimes lose on this model going from M1 Ultra to M5 Max and the ratio is a property of the hardware pair. `llama-3.1-8b-bf16` at 0.92x and `qwen3.5-9b-bf16` at 0.99x are bf16 checkpoints, which neither machine is optimised for and both runtimes handle the same way.
+
+That `plamo-2-1b` row is also the shape of the reading error worth guarding against. A sub-1.0x entry here is a claim about two machines, and turning it into a claim about mlxcel needs the baseline on both, which is section 1's job.
 
 ### Decode and prefill, selected models (tok/s)
 

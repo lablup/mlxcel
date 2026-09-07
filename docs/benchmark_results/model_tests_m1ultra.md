@@ -17,7 +17,7 @@ Every number here comes from the 2026-09-06 and 2026-09-07 sweep. Earlier sweeps
 | mlxcel harness | `mlxcel-bench-decode` (load, warmup and measured pass in one process) |
 | mlx-lm baseline | 0.31.3 |
 | mlx-vlm baseline | 0.6.17 |
-| Baseline stack | mlx 0.32.2, transformers 5.16.1, torch 2.14.0, torchvision 0.29.0, timm 1.0.29 |
+| Baseline stack | mlx 0.32.2, transformers 5.16.1, torch 2.14.0, torchvision 0.29.0, timm 1.0.29, numba 0.67.0 |
 | CSVs | `metal_m1ultra_2026-09-06.csv`, `pylm_m1ultra_2026-09-06.csv`, `metal_m1ultra_vlm_2026-09-07.csv`, `pylm_m1ultra_vlm_2026-09-07.csv` |
 
 ## Measurement shape
@@ -65,17 +65,17 @@ All 15 text-sweep failures resolve to something other than a runtime bug, so the
 
 The first six rows are not text-generation models and cannot produce a decode figure; the drafters and speculative variants are components of a pairing rather than standalone targets, and belong in the speculative sweep instead. `afm-4.5b` is the only real coverage gap: `mlxcel generate` reports `Unsupported model type: arcee` and `arcee` is absent from `mlxcel list`.
 
-The Python baseline measured 123 of the same set, so parity is computed over the 106 models both sides measured. Its own failures are not analysed here; they say what mlx-lm loads, not what mlxcel does.
+The Python baseline measured 124 of the same set, so parity is computed over the 107 models both sides measured. One of those, `plamo-2-1b`, was added on 2026-09-07 after `numba` was installed; its earlier `FAIL:warmup` was a missing dependency of the checkpoint's remote code, not a property of the model. Its own failures are not analysed here; they say what mlx-lm loads, not what mlxcel does.
 
 ## Performance against the Python baselines
 
-Parity is `mlxcel decode tok/s / baseline decode tok/s`, over the 106 text models both sides measured. Values above 100% mean mlxcel is faster.
+Parity is `mlxcel decode tok/s / baseline decode tok/s`, over the 107 text models both sides measured at prompt lengths agreeing within 10%, the same rule the VLM section uses. Values above 100% mean mlxcel is faster.
 
 | Population | n | Median | Quartiles | Range |
 |---|--:|--:|---|---|
-| All text models | 106 | 100% | 98 / 105 | 26-140% |
+| All text models | 107 | 100% | 98 / 105 | 26-140% |
 | MoE | 24 | 106% | 101 / 110 | 78-140% |
-| Dense | 82 | 100% | 97 / 102 | 26-115% |
+| Dense | 83 | 100% | 97 / 102 | 26-115% |
 
 The overall median sits at parity, which is the expected result for two runtimes calling the same MLX kernels on the same weights.
 
@@ -96,6 +96,17 @@ Three checkpoints fall far outside the distribution, and prefill is down with de
 | `pythia-1b` | 31% | 53% | 61.3 | 195.8 |
 
 The Qwen VL family forms a second, milder band: `qwen2.5-vl-3b-4bit` at 59% and `qwen2-vl-2b-4bit` at 60%, with the qwen3-vl checkpoints at 83-92%. The 4-bit Qwen 2.5 VL checkpoint is more than twice as fast relative to baseline as its bf16 sibling above, so whatever the bf16 row hits is not what the 4-bit rows hit.
+
+A single ratio understates this one. Measured on M5 Max across prompt lengths, `qwen2.5-vl-3b-4bit` loses throughput as context grows and the baseline does not:
+
+| Prompt tokens | mlxcel | mlx-lm | Ratio |
+|--:|--:|--:|--:|
+| 64 | 160.5 | 225.5 | 71% |
+| 128 | 156.2 | 224.4 | 70% |
+| 512 | 137.8 | 218.0 | 63% |
+| 2048 | 95.8 | 206.1 | 46% |
+
+Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and mlx-lm gives up 9%. The sweep figure is one point on that curve at 512, and production contexts are longer, so this is a structural gap that widens rather than a fixed deficit.
 
 ## Vision-language models
 
