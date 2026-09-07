@@ -352,17 +352,9 @@ impl Attention {
 
         let (k, v) = cache.update_and_fetch(k, v);
 
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&k, n_rep)
-        } else {
-            mlxcel_core::copy(&k)
-        };
-        let v = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&v, n_rep)
-        } else {
-            mlxcel_core::copy(&v)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy of
+        // the whole live cache on every decode step (#1686).
 
         let mask_ptr = mask
             .map(|m| m as *const MlxArray)
@@ -594,9 +586,17 @@ impl HunyuanVlTextModel {
         let auto_mask;
         let mask = if mask.is_some() {
             mask
-        } else {
+        } else if seq_len > 1 {
             auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
             Some(auto_mask.as_ref().unwrap() as &MlxArray)
+        } else {
+            // Decode width. The one query row sits at logical position
+            // `live_len`, so every key column is permitted: the mask would be
+            // uniformly zero, constrain nothing, and only force the masked arm
+            // of the fused SDPA. mlx-lm returns None here as well
+            // (`create_attention_mask`), and `qwen3_5.rs` carries the same
+            // `seq_len > 1` guard (#1686).
+            None
         };
 
         for (i, layer) in self.layers.iter().enumerate() {
