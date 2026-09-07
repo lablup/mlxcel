@@ -68,6 +68,7 @@
 #include "cuda_jit_sources.h"
 
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <mutex>
 #include <stdexcept>
@@ -76,6 +77,41 @@
 namespace mlx::core {
 
 namespace {
+
+// [mlxcel #1543] Largest CTA tile the Volta tensor-core arm can take before
+// accumulator fragments spill to local memory and the launch fails with
+// `cuGraphAddKernelNode ... invalid argument`.
+//
+// The bound is on tile_m times tile_n, not on tile_m alone, because the
+// accumulator a thread holds scales with the output tile's area. Measured with
+// MLXCEL_TRACE_QMM_TILE on a V100:
+//
+//   16 x 128 = 2048   registers 255   spill 0       runs
+//   64 x  64 = 4096   registers 226   spill 0       runs
+//   64 x 128 = 8192   registers  64   spill 11304   fails
+//
+// A tile_m-only cap was tried first and is a bad proxy: raising it from 16 to
+// 32 changed nothing observable, because the 27B's tile_m is 64 either way, so
+// the shape kept falling back while looking like it had been given room.
+//
+// Volta's atom is half the M and a quarter the K of sm_80's, so covering the
+// same output tile needs far more accumulator fragments per thread, which is
+// why sm_80 carries 64 x 128 without trouble and sm_70 cannot.
+constexpr int kVoltaMaxTileArea = 4096;
+
+// Forces the scalar arm regardless of architecture. This exists so the Volta
+// tensor-core arm can be checked against the scalar one on the same prompt,
+// which is the only comparison that isolates the arithmetic: an absolute check
+// ("does the answer contain 396") reads a reasoning model's suppressed channel
+// as a wrong result and misattributes it to the kernel.
+inline bool qmm_force_scalar() {
+  const char* v = std::getenv("MLXCEL_QMM_FORCE_SCALAR");
+  if (v == nullptr) {
+    return false;
+  }
+  std::string sv(v);
+  return !(sv.empty() || sv == "0" || sv == "false" || sv == "off" || sv == "no");
+}
 
 // `cudaDevAttrMaxSharedMemoryPerBlockOptin` for one device, queried once.
 //
@@ -185,11 +221,22 @@ void qmm_naive(
     QuantizationMode mode,
     cu::CommandEncoder& encoder) {
   auto [m, n, k, l, broadcast_b] = make_problem_shape(x, w, out);
-  // Unchanged: this is the kernel's `SM80` template parameter, which
-  // `make_tiled_mma` reads to choose between an `SM80_16x8x16` tensor-core atom
-  // and `UniversalFMA`. The tile selector takes it under that meaning rather
-  // than as a shared-memory proxy.
-  bool sm80 = encoder.device().compute_capability_major() >= 8;
+  // [mlxcel #1543] This was a bool feeding a two-way choice between an
+  // `SM80_16x8x16` atom and `UniversalFMA`. Volta needs a third answer: it has
+  // tensor cores, but only the 8x8x4 quad-pair atom, so a bool left it on the
+  // scalar arm. `MmaPath` carries the third case.
+  //
+  // The Volta arm is f16 only: there is no Volta bf16 MMA atom, and none is
+  // needed because the pre-Ampere load policy converts bf16 weights to f16
+  // before the graph is built. Turing stays scalar here pending its own atom
+  // and its own measurement (#1654).
+  int cc_major = encoder.device().compute_capability_major();
+  int cc_minor = encoder.device().compute_capability_minor();
+  bool volta_tc = cc_major == 7 && cc_minor == 0 && x.dtype() == float16 &&
+      !qmm_force_scalar();
+  // The tile selector asks "does this launch use a tensor-core MMA", true on
+  // both tensor-core arms and false on the scalar one.
+  bool sm80 = (cc_major >= 8 && !qmm_force_scalar()) || volta_tc;
   auto tile = mlxcel::qmm_naive_choose_tile(
       x.itemsize(),
       m,
@@ -197,6 +244,36 @@ void qmm_naive(
       max_smem_per_block_optin(encoder.device().cuda_device()),
       /* tensor_core_mma = */ sm80,
       forced_tile_n());
+
+  // Over the area bound, narrow the N tile before giving up on tensor cores:
+  // 64 x 128 spills and fails, while the same shape at 64 x 64 runs with 226
+  // registers and no spill, so the 27B reaches the Volta arm through a
+  // narrower tile rather than through the scalar fallback. Only if that still
+  // does not fit does the scalar arm take over, which is the faster of the two
+  // options remaining at that point.
+  if (volta_tc && tile.tile_m * tile.tile_n > kVoltaMaxTileArea) {
+    auto narrowed = mlxcel::qmm_naive_choose_tile(
+        x.itemsize(),
+        m,
+        group_size,
+        max_smem_per_block_optin(encoder.device().cuda_device()),
+        /* tensor_core_mma = */ true,
+        /* forced_tile_n = */ 64);
+    if (narrowed.fits &&
+        narrowed.tile_m * narrowed.tile_n <= kVoltaMaxTileArea) {
+      tile = narrowed;
+    } else {
+      volta_tc = false;
+      sm80 = false;
+      tile = mlxcel::qmm_naive_choose_tile(
+          x.itemsize(),
+          m,
+          group_size,
+          max_smem_per_block_optin(encoder.device().cuda_device()),
+          /* tensor_core_mma = */ false,
+          forced_tile_n());
+    }
+  }
   if (!tile.fits) {
     throw std::runtime_error(fmt::format(
         "[qmm_naive] no CTA tile fits this device: a {}x{}x{} tile at "
@@ -219,7 +296,8 @@ void qmm_naive(
   // module cached under a name that does not pin tile_n would be handed back
   // with no kernel matching the requested instantiation.
   std::string module_name = fmt::format(
-      "qmm_naive_t{}_{}_{}_m{}_n{}_b{}_g{}_{}",
+      "qmm_naive_{}_t{}_{}_{}_m{}_n{}_b{}_g{}_{}",
+      cc_major >= 8 ? "sm80" : (volta_tc ? "sm70" : "scalar"),
       transpose ? "n" : "t",
       has_k_residue ? "residue" : "aligned",
       dtype_to_string(x.dtype()),
@@ -229,13 +307,17 @@ void qmm_naive(
       group_size,
       quantization_mode_to_string(mode));
 
+  const char* mma_path = cc_major >= 8 ? "mlx::core::cu::MmaPath::Sm80"
+      : volta_tc                       ? "mlx::core::cu::MmaPath::Sm70"
+                                       : "mlx::core::cu::MmaPath::Scalar";
+
   auto [ctype_x, ctype_q, ctype_s] = get_qmm_cutlass_types(x, bits, mode);
   std::string kernel_name = fmt::format(
       "mlx::core::cu::qmm_naive_kernel<{}, {}, {}, {}, {}, {}, {}, {}>",
       group_size,
       transpose,
       has_k_residue,
-      sm80,
+      mma_path,
       ctype_x,
       ctype_q,
       ctype_s,
