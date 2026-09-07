@@ -98,6 +98,9 @@ trap 'echo "Interrupted (signal received)" >&2; exit 130' INT TERM
 
 MLXCEL="./target/release/mlxcel"
 MLXCEL_BENCH="./target/release/mlxcel-bench-decode"
+# Resolved from this script's own location so the VLM filter works regardless
+# of the caller's working directory.
+VLM_DETECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vlm_detect.py"
 # Overridable so `all` mode can sweep a checkout whose models live under a
 # nested store root (e.g. `./models/mlx-community`), which is what the mlxcel
 # model store produces when it downloads by `owner/name` repo-id. The Makefile's
@@ -907,6 +910,22 @@ is_gpu_crash_model() {
   return 1
 }
 
+# In --vlm mode, exclude checkpoints that have no vision tower. Running one
+# under an image prompt produces FAIL:bench here, which is the same status a
+# real mlxcel defect produces, so a sweep's failure count stops meaning
+# anything: on the 2026-09-07 M1 Ultra run 100 of 109 VLM-sweep failures were
+# just text-only checkpoints. The Python baseline had the opposite symptom --
+# mlx-vlm loads them, silently drops the image, and records a text-only row as
+# a VLM measurement. Both harnesses call scripts/vlm_detect.py so their model
+# sets match; see that module's docstring.
+#
+# Text mode filters nothing: a VLM's decoder is a real text workload.
+skip_for_vlm_mode() {
+  [[ "$VLM_MODE" -eq 1 ]] || return 1
+  python3 "$VLM_DETECT" "$1" && return 1
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
@@ -956,6 +975,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     # First pass: run all models except known GPU-crash models
     for dir in "$MODELS_DIR"/*/; do
       [[ -d "$dir" ]] || continue
+      skip_for_vlm_mode "$dir" && continue
       is_gpu_crash_model "$dir" && continue
       result=$(bench_one "$dir")
       emit "$result"
@@ -964,6 +984,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     # Second pass: run known GPU-crash models last
     for dir in "$MODELS_DIR"/*/; do
       [[ -d "$dir" ]] || continue
+      skip_for_vlm_mode "$dir" && continue
       is_gpu_crash_model "$dir" || continue
       result=$(bench_one "$dir")
       emit "$result"
@@ -977,6 +998,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     # runs for them). Second pass: measured GPU-crash models, run last.
     for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
       dir="${DEDUP_DIR[$i]}"
+      skip_for_vlm_mode "$dir" && continue
       if [[ -n "${DEDUP_ALIAS_OF[$i]}" ]]; then
         result=$(emit_duplicate_row "$dir" "${DEDUP_ALIAS_OF[$i]}")
         emit "$result"
@@ -989,6 +1011,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     done
     for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
       dir="${DEDUP_DIR[$i]}"
+      skip_for_vlm_mode "$dir" && continue
       [[ -z "${DEDUP_ALIAS_OF[$i]}" ]] || continue
       is_gpu_crash_model "$dir" || continue
       result=$(bench_one "$dir")

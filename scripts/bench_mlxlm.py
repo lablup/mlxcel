@@ -111,33 +111,10 @@ def estimate_model_size(model_path: Path) -> int:
     return total
 
 
-def is_vlm(model_path: Path) -> bool:
-    """Detect VLM by config.json contents or preprocessor presence."""
-    cfg = model_path / "config.json"
-    if not cfg.exists():
-        return False
-    try:
-        with open(cfg) as f:
-            data = json.load(f)
-    except Exception:
-        return False
-    if "vision_config" in data or "image_processor_type" in data:
-        return True
-    archs = data.get("architectures", []) or []
-    VLM_ARCH_SUBSTR = (
-        "Llava", "PaliGemma", "Qwen2VL", "Qwen2_5_VL", "Qwen3VL",
-        "Idefics", "Pixtral", "Bunny", "Phi3V", "Phi35V", "AyaVision",
-        "Gemma3ForConditional", "Gemma4ForConditional", "Mllama",
-        "Mistral3", "Llama4", "MolmoForCausalLM", "Molmo", "InternVL",
-        "GotOcr", "Smolvlm", "Florence", "Kimi",
-    )
-    for a in archs:
-        if any(sub in a for sub in VLM_ARCH_SUBSTR):
-            return True
-    # Has image preprocessor → likely VLM
-    if (model_path / "preprocessor_config.json").exists():
-        return True
-    return False
+# VLM detection lives in scripts/vlm_detect.py so bench_decode.sh applies the
+# identical rule; see that module's docstring for why they must agree.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vlm_detect import is_vlm  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +428,20 @@ def main():
             return any(f.is_file() for f in d.glob("*.safetensors"))
 
         model_dirs = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir() and _is_checkpoint(p))
+
+        # Restrict the sweep to checkpoints that match the requested modality.
+        # mlx-vlm loads a text-only checkpoint without complaint and silently
+        # drops the image, so an unfiltered --vlm sweep records text-only rows
+        # (prompt 11-15 tokens, the bare question) as if they were VLM
+        # measurements. On the 2026-09-07 M1 Ultra run that was 49 of 95
+        # measured rows. Text mode drops nothing: a VLM's decoder is a real
+        # text workload and mlx-lm loads it fine.
+        if args.vlm:
+            skipped = [p for p in model_dirs if not is_vlm(p)]
+            model_dirs = [p for p in model_dirs if is_vlm(p)]
+            if skipped:
+                print(f">>> [filter] {len(skipped)} non-VLM checkpoints excluded "
+                      f"from the --vlm sweep", file=sys.stderr)
     else:
         p = Path(args.model)
         if not p.is_dir():
