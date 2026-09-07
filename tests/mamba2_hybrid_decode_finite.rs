@@ -25,8 +25,24 @@
 //! output token is unusable. A silent NaN would otherwise reach a user as
 //! garbage text rather than a failing build.
 //!
-//! Gated on real checkpoints under the shared model directory; they skip with
-//! a message when absent, matching the other real-model tests.
+//! The guarded failure mode is M5-only, so a green result off M5 says nothing
+//! about it. These tests therefore report three distinct states rather than
+//! collapsing them into "pass": verified, not-applicable on this host, and
+//! applicable but unverified because the checkpoint is absent. The last one is
+//! the dangerous state, because that is a machine where the risk exists and
+//! nothing checked it, so it is printed loudly.
+//!
+//! **CI cannot run these.** The `self-hosted-macos-26-arm64` pool is M1 and M4,
+//! so every CI run reports NOT APPLICABLE and this file protects nothing there.
+//! It is only meaningful when run on an M5 host that has the two checkpoints:
+//!
+//! ```text
+//! cargo test --release --features metal,accelerate --test mamba2_hybrid_decode_finite
+//! ```
+//!
+//! Treat that as a manual step before shipping a change to the Mamba2 hybrid
+//! mixers. Adding an M5 machine to the runner pool is what would make this
+//! automatic; until then a green CI badge is not evidence about this code.
 
 mod common;
 
@@ -39,10 +55,24 @@ use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, lo
 /// degenerate token, or replacement characters, so the assertions cover all
 /// three rather than only checking for a literal "NaN".
 fn assert_decode_is_finite(model_name: &str, max_tokens: usize) {
+    // The eval boundary this test replaces only ever fired on M5 Max, so the NaN
+    // it prevented cannot arise elsewhere. Passing on another chip would be a
+    // vacuous green, so say plainly that nothing was verified here.
+    if !mlxcel_core::hardware::is_m5_neural_accelerator() {
+        eprintln!(
+            "{model_name}: NOT APPLICABLE on this host. The removed eval boundary was \
+             M5-only (has_neural_accelerator && macos_supports_na), so this host cannot \
+             exhibit the failure and this result verifies nothing about it."
+        );
+        return;
+    }
+
     let model_dir = repo_model_dir(model_name);
     if !model_dir.join("config.json").exists() {
         eprintln!(
-            "Skipping {model_name}: checkpoint not found at {}.",
+            "{model_name}: NOT VERIFIED. This host is M5, so the failure this test guards \
+             CAN occur here, but the checkpoint is missing at {}. Fetch it to make this \
+             test meaningful.",
             model_dir.display()
         );
         return;
