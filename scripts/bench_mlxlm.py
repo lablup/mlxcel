@@ -248,6 +248,15 @@ except Exception as e:
 # without this a VLM that answers in three words is timed over three tokens.
 import mlx.core as mx
 _tok = getattr(processor, 'tokenizer', processor)
+
+# Token count of the formatted prompt as plain text, with no image expanded into
+# it. The parent compares the measured prompt_tokens against this: an image that
+# reached the model always adds tokens, so equality means it did not.
+try:
+    _text_only_tokens = len(_tok.encode(formatted_prompt))
+except Exception:
+    _text_only_tokens = None
+
 _eos = set()
 # The set mlx_vlm actually stops on is stopping_criteria.eos_token_ids, which is
 # a superset of the tokenizer's own eos_token_ids attribute: Gemma 4 reports 1
@@ -300,6 +309,7 @@ result = {
     'prefill_tps': getattr(last, 'prompt_tps', None),
     'gen_tokens': getattr(last, 'generation_tokens', None),
     'decode_tps': getattr(last, 'generation_tps', None),
+    'text_only_prompt_tokens': _text_only_tokens,
 }
 print('RESULT', json.dumps(result))
 """
@@ -363,9 +373,23 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
             if line.startswith("RESULT "):
                 try:
                     data = json.loads(line[len("RESULT "):])
-                    return ("OK", data)
                 except json.JSONDecodeError:
-                    pass
+                    continue
+                # mlx-vlm loads a checkpoint, accepts an `image=` it cannot use,
+                # and generates from the text alone, so the run looks like a
+                # successful VLM measurement while timing a text-only decode.
+                # An image that reached the model always expands the prompt
+                # beyond the plain-text template, so no expansion means no
+                # image. Found by hand on llava-next-mistral-7b (7 prompt
+                # tokens, the bare question) and confirmed identical on two
+                # hosts; bunny-llama3-8b and fastvlm-0.5b hid in the same way
+                # behind a template that made their counts look plausible.
+                if vlm:
+                    got = data.get("prompt_tokens")
+                    text_only = data.get("text_only_prompt_tokens")
+                    if got is not None and text_only is not None and got <= text_only:
+                        return ("FAIL:image_not_applied", None)
+                return ("OK", data)
         return ("FAIL:no_result", None)
 
     # Map exit codes to FAIL types matching bench_decode.sh
