@@ -101,6 +101,14 @@ MoE is the one population that separates. Its lower quartile (101%) is above the
 
 Quantization is not a factor. Non-quantized checkpoints have a median of 98% against 100% for quantized, and 11 of the 14 sit between 89% and 109%. An earlier reading that the slowest three models were all non-quantized was a coincidence of a three-model sample, not a property of the non-quantized path.
 
+### The same redundancy, found switched off
+
+`compiled_softcap_sdpa_gqa` already carried a decode branch that keeps K and V at `[B, H_kv, S, D]` and broadcasts `n_rep` inside the matmul, which is what #1686 went on to do by hand in the VL decoders. It sat behind `MLXCEL_ENABLE_SOFTCAP_GQA_DECODE_GROUPED` and was off, so every Gemma 2 decode step fell through to `do_repeat_kv` instead. Turning it on by default moves `gemma2-2b-4bit` from 99% of mlx-lm to 107% and `gemma-2-9b-8bit` from 43.66 to 46.76 tok/s.
+
+The gain is smaller here than on M5 Max, where the same change is worth 1.12x and 1.17x against 1.07x on both here. That is the direction bandwidth predicts: this host was already at 99% because the copy it removes weighs less against a wider memory bus, so there was less to recover.
+
+The attribution is checked rather than assumed. `MLXCEL_DISABLE_SOFTCAP_GQA_DECODE_GROUPED=1` restores the old path and measures 146.25 and 43.45, back at the recorded 144.91 and 43.66. A background-load artefact would not respond to that flag.
+
 ### Open performance gaps
 
 Two checkpoints fall far outside the distribution:
@@ -270,7 +278,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `falcon-ocr` | FalconOCRForCausalLM | 512 | 9792.6 | 241.2 | - |
 | `florence-2-base-ft-4bit` | Florence2ForConditionalGeneration | 512 | 10215.5 | 416.8 | - |
 | `florence-2-large-ft-4bit` | Florence2ForConditionalGeneration | 512 | 6275.9 | 230.0 | - |
-| `gemma-2-9b-8bit` | Gemma2ForCausalLM | 512 | 599.5 | 43.7 | - |
+| `gemma-2-9b-8bit` | Gemma2ForCausalLM | 512 | 598.2 | 46.8 | - |
 | `gemma-2b-4bit` | GemmaForCausalLM | 512 | 2095.2 | 186.3 | 99% |
 | `gemma-3-1b-it-4bit` | Gemma3ForCausalLM | 512 | 4137.0 | 222.9 | 113% |
 | `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 512 | 968.8 | 100.5 | 107% |
@@ -287,7 +295,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `gemma-4-e4b-it-4bit` | Gemma4ForConditionalGeneration | 512 | 768.6 | 76.3 | - |
 | `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 512 | 757.4 | 62.8 | - |
 | `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 512 | 745.6 | 68.6 | 101% |
-| `gemma2-2b-4bit` | Gemma2ForCausalLM | 512 | 1912.6 | 144.9 | 99% |
+| `gemma2-2b-4bit` | Gemma2ForCausalLM | 512 | 1955.8 | 154.4 | 106% |
 | `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 512 | 1359.8 | 82.2 | - |
 | `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 512 | 761.7 | 62.3 | - |
 | `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 512 | 928.1 | 33.6 | 89% |
