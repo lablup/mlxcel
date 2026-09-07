@@ -16,7 +16,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **Test Prompt** | Text: a deterministic synthetic 512-token prompt (`--prompt-tokens 512`). VLM: "What is in this image?" plus `tests/fixtures/test_image.png`, at the checkpoint's own image token count. |
 | **Max Tokens** | 128, with every end-of-generation token suppressed (`--ignore-eos`), so every row spends the full budget |
 | **Test Date** | 2026-09-06 full re-benchmark (text, VLM, speculative, batched serving, embeddings) on the pp512/tg128 condition; prior: 2026-09-03/04 full text + VLM sweep (0.6.0), 2026-07-11/12 (0.4.0-rc.1), 2026-06-15 (0.2.1), 2026-05-27 (0.1.0) |
-| **Benchmark Status** | Full re-benchmark on mlxcel 0.7.0-beta.1. Text: 176 directories via `bench_decode.sh all`, 147 with decode numbers. VLM: `all --vlm`, 71 with decode numbers. Both used `--cooldown 30 --big-cooldown 30`, which remain required on this host, and `BENCH_MEM_OVERHEAD_FACTOR=1.209` (a 90 GB weight budget). Time Machine was confirmed idle for the whole campaign. **The measurement condition changed this round and the prefill column is not comparable to any earlier sweep**; see "Measurement condition: pp512/tg128" below before reading any delta. The `vs M1 Ultra` column is populated again as of 2026-09-07: M1 Ultra was re-swept at pp512/tg128 on the same mlxcel version and MLX pin, so the ratio is a hardware comparison rather than one spanning a version and a condition change. It is M5 Max decode over M1 Ultra decode, filled where both hosts measured the same checkpoint at prompt lengths agreeing within 10%. `n/a` now means one thing only: that checkpoint is not present on M1 Ultra. Nine models are in that state (`glm-4.1v-9b-thinking-4bit`, `glm-4.5v-4bit`, `kimi-vl-a3b-thinking-4bit`, `llama-3.2-11b-vision-instruct-4bit`, `moondream2`, `smolvlm-instruct-bf16`, `dots.llm1.inst-mixed-4-6bit`, `gemma-2-9b-8bit`, `MiniMax-M2-3bit`). Rows are matched by checkpoint basename, and this document's display names do not always equal it; `scripts/checkpoint_fingerprint.py` and `benchmarks/fingerprints_m1ultra_2026-09-07.json` exist so that pairing can be checked against the weights rather than the name. The `mlxcel vs mlx-lm` / `vs mlx-vlm` percentages further down still carry the 2026-05-18 Python baselines and are likewise on the old condition. |
+| **Benchmark Status** | Full re-benchmark on mlxcel 0.7.0-beta.1. Text: 178 directories via `bench_decode.sh all`, 149 with decode numbers. VLM: `all --vlm`, 71 with decode numbers. Both used `--cooldown 30 --big-cooldown 30`, which remain required on this host, and `BENCH_MEM_OVERHEAD_FACTOR=1.209` (a 90 GB weight budget). Time Machine was confirmed idle for the whole campaign. **The measurement condition changed this round and the prefill column is not comparable to any earlier sweep**; see "Measurement condition: pp512/tg128" below before reading any delta. The `vs M1 Ultra` column is populated again as of 2026-09-07: M1 Ultra was re-swept at pp512/tg128 on the same mlxcel version and MLX pin, so the ratio is a hardware comparison rather than one spanning a version and a condition change. It is M5 Max decode over M1 Ultra decode, filled where both hosts measured the same checkpoint at prompt lengths agreeing within 10%. `n/a` now means one thing only: that checkpoint is not present on M1 Ultra. Nine models are in that state (`glm-4.1v-9b-thinking-4bit`, `glm-4.5v-4bit`, `kimi-vl-a3b-thinking-4bit`, `llama-3.2-11b-vision-instruct-4bit`, `moondream2`, `smolvlm-instruct-bf16`, `dots.llm1.inst-mixed-4-6bit`, `gemma-2-9b-8bit`, `MiniMax-M2-3bit`). Rows are matched by checkpoint basename, and this document's display names do not always equal it; `scripts/checkpoint_fingerprint.py` and `benchmarks/fingerprints_m1ultra_2026-09-07.json` exist so that pairing can be checked against the weights rather than the name. The `mlxcel vs mlx-lm` / `vs mlx-vlm` percentages further down still carry the 2026-05-18 Python baselines and are likewise on the old condition. |
 
 ### Which version each CSV column records
 
@@ -599,15 +599,15 @@ per directory:
 
 | | Count |
 |---|---|
-| Directories enumerated by `all` | 176 |
-| ...measured (decode numbers) | 147 |
+| Directories enumerated by `all` | 178 |
+| ...measured (decode numbers) | 149 |
 | ...collapsed as duplicate checkpoints (#1615, see the alias table above) | 14 |
 | ...`FAIL:bench` | 10 |
 | ...`SKIP:oom_estimate` (over the 90 GB weight budget) | 2 |
 | ...`SKIP:not_a_checkpoint` (no `config.json`) | 2 |
 | ...`SKIP:missing_weights` (`config.json` but no readable shard) | 1 |
 
-Of the 147 measured checkpoints, 146 have a row in the text or VLM tables above;
+Of the 149 measured checkpoints, 146 have a row in the text or VLM tables above; `hunyuanocr-mlx-4bit` and `ernie-4.5-vl-28b-a3b-thinking-4bit` arrived after the tables were written and are in the CSV only;
 `qwen2.5-1.5b-4bit` is measured but unlisted, being a second quantization of a
 listed checkpoint rather than a distinct family. Of the 154 text table rows, 153
 map to a measured checkpoint and one (`MiniMax-M2-3bit`) does not, because that
