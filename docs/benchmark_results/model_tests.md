@@ -10,8 +10,8 @@ M5 Max, and mlx-lm / mlx-vlm baselines, see
 
 | Hardware | File | Status | Last Updated |
 |----------|------|--------|-------------|
-| Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-07-12 |
-| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-09-06 at `a50ff440` (mlxcel 0.7.0-beta.1, MLX pin `9a795735`). First sweep on the fixed pp512/tg128 interval, so **prefill is not comparable to any earlier sweep and the `vs M1 Ultra` column is blanked** until that host is re-swept on the same condition. Full text + VLM + speculative + batched-serving + embeddings campaign |
+| Mac Studio M1 Ultra 128GB | [model_tests_m1ultra.md](model_tests_m1ultra.md) | Active | 2026-09-06 and 2026-09-07 at `30ab5a39` (mlxcel 0.7.0-beta.1, MLX pin `9a795735`). Full text and VLM re-measurement on the pp512/tg128 shape against same-day mlx-lm 0.31.3 and mlx-vlm 0.6.17 baselines, so this host is now directly comparable to M5 Max. Earlier sweeps used a different shape and were not carried forward. Speculative and batched-serving families not yet re-run |
+| MacBook Pro M5 Max 128GB | [model_tests_m5max.md](model_tests_m5max.md) | Active | 2026-09-06 at `a50ff440` (mlxcel 0.7.0-beta.1, MLX pin `9a795735`). First sweep on the fixed pp512/tg128 interval; prefill is not comparable to any earlier sweep on this host. M1 Ultra has since been re-swept on the same shape, so the two hosts are compared under Cross-Hardware Comparison below. Full text, VLM, speculative, batched-serving and embeddings campaign |
 | NVIDIA GB10 (DGX Spark) | [model_tests_gb10.md](model_tests_gb10.md) | Active | 2026-07-12 (mlxcel 0.4.0-rc.1, full 159-dir sweep; 7 memory-gated skips) |
 
 ## Benchmark CSVs
@@ -20,6 +20,10 @@ Current source-of-truth data lives in `benchmarks/`:
 
 | CSV | Hardware | Date | Type |
 |-----|----------|------|------|
+| `metal_m1ultra_2026-09-06.csv` | M1 Ultra | 2026-09-06 (mlxcel 0.7.0-beta.1 at `30ab5a39`, MLX pin `9a795735`, `--cooldown 30 --big-cooldown 30`; 199 directories, 165 measured, 16 collapsed by checkpoint dedup #1615. The 15 failures are all non-targets or one unsupported architecture, none a runtime defect) | Text |
+| `pylm_m1ultra_2026-09-06.csv` | M1 Ultra | 2026-09-06 (mlx-lm 0.31.3, same host and day; 123 measured, giving 106 models both sides ran. Median decode parity 100%, quartiles 98 and 105; MoE median 106% against dense 100%) | Text baseline |
+| `metal_m1ultra_vlm_2026-09-07.csv` | M1 Ultra | 2026-09-07 (mlxcel 0.7.0-beta.1 at `30ab5a39`; 87 VLM checkpoints after the non-VLM filter, 70 measured. Every row has 128 generated tokens) | VLM |
+| `pylm_m1ultra_vlm_2026-09-07.csv` | M1 Ultra | 2026-09-07 (mlx-vlm 0.6.17; 67 measured. **Single-environment re-run from an empty file**: installing torch, torchvision and timm partway through the first pass changed image preprocessing, moving `granite-vision-3.2-2b-4bit` from 56 prompt tokens to 1540. 3 rows rejected as `FAIL:image_not_applied`) | VLM baseline |
 | `metal_m5max_2026-09-06.csv` | M5 Max | 2026-09-06 (mlxcel 0.7.0-beta.1, MLX pin `9a795735`, `--cooldown 30 --big-cooldown 30`, `BENCH_MEM_OVERHEAD_FACTOR=1.209`; first pp512/tg128 sweep after the interval fix `3a746ea8`, 176 dirs, 147 measured, 14 collapsed by checkpoint dedup #1615. Median decode 0.982 vs 2026-09-03; the 4 models that gained >10% all had 1-7 token samples in the old condition. All 12 models down >10% were re-measured in isolation and reproduced within 3%) | Text |
 | `metal_m5max_vlm_2026-09-06.csv` | M5 Max | 2026-09-06 (mlxcel 0.7.0-beta.1 at `a50ff440-dirty`, which is `a50ff440` plus the fix committed as `34455e42`; same cooldowns and budget; 71 measured rows. **This is the corrected re-run**: the first pass of the day was a byte-for-byte duplicate of the text sweep because `--prompt-tokens` silently discards `--image`, fixed in-campaign) | VLM |
 | `metal_m5max_spec_2026-09-06.csv` | M5 Max | 2026-09-06 (mlxcel 0.7.0-beta.1; `speculative_bench --sweep --max-tokens 128`, 16 rows: 4 baselines, 9 measured MTP rows at K=2/4/8 across Gemma 4 31B, Gemma 4 Unified 12B and Qwen 3.8 27B, 3 DFlash deferred. First M5 Max sweep carrying #1621's per-variant MTP dispatch, so the Gemma 4 31B rows exist here for the first time; Gemma 4 Unified reproduces 2026-09-04 within noise) | Speculative |
@@ -68,41 +72,40 @@ Current source-of-truth data lives in `benchmarks/`:
 
 ## Cross-Hardware Comparison
 
-The table below summarizes the current cross-hardware decode readings for selected models.
+M1 Ultra and M5 Max are directly comparable as of the 2026-09-06 sweeps: same mlxcel version (0.7.0-beta.1), same MLX pin (`9a795735`), same pp512/tg128 shape, same cooldowns. Their mlxcel commits differ by eight (`30ab5a39` against `a50ff440`), of which one touches shared inference code (#1656, pre-Ampere CUDA bf16 handling) and is inert on Metal, so the gap below is hardware. GB10 is still on 0.4.0-rc.1 and the old measurement shape, so it is not in this table; see [model_tests_gb10.md](model_tests_gb10.md) until it is re-swept.
 
-### Decode Speed Summary (tok/s, selected models)
+Across the 138 models both hosts measured at an identical prompt length:
 
-| Model | Params | M1 Ultra | M5 Max | GB10 |
-|-------|--------|----------|--------|------|
-| SmolLM-135M | 135M | 418.85 | 926.25 | 656.73 |
-| ERNIE-4.5-0.3B | 300M | 522.31 | 1068.37 | 625.30 |
-| Qwen2.5-0.5B (4bit) | 500M | 381.94 | 660.77 | 492.60 |
-| Llama-3.2-1B | 1B | 421.40 | 556.36 | 266.04 |
-| Qwen3-0.6B | 600M | 228.37 | 601.12 | 283.90* |
-| StableLM-1.6B | 1.6B | 263.88 | 428.36 | 203.75 |
-| Gemma-3-1B | 1B | 227.38 | 391.42 | 278.52 |
-| EXAONE-3.5-2.4B | 2.4B | 199.11 | 284.14 | 141.83 |
-| SmolLM3-3B | 3B | 131.45 | 231.61 | 104.24 |
-| Nemotron-H-30B | 30B | 91.75 | 176.01 | 87.41¶ |
-| Qwen3-MoE-30B | 30B | 83.42 | 173.61 | 89.06† |
-| Llama-3.1-8B | 8B | 106.63 | 114.92 | 50.53 |
-| Qwen2.5-7B | 7B | 108.47 | 124.11 | 54.56 |
-| Mixtral-8x7B | 47B | 51.81 | 65.56 | 28.42 |
-| GPT-OSS-120B | 120B (MoE) | 59.29 | 112.83 | 50.48§ |
-| Solar-Open-100B | 100B (MoE) | 35.02 | 65.51 | 18.37§ |
+| | Median | Quartiles | Range |
+|---|--:|---|---|
+| Decode, M5 Max / M1 Ultra | 1.44x | 1.21 / 1.78 | 0.49 - 2.24x |
+| Prefill, M5 Max / M1 Ultra | 4.65x | | 1.07 - 7.59x |
 
-*Qwen3-0.6B on GB10 again stopped at 9 tokens before EOS (2026-07-12); the 283.90 tok/s figure is from that short window and is not directly comparable to full-length runs.
-†Qwen3-MoE-30B (`qwen3-moe-4bit`) **failed** on GB10 at 0.3.0 (Metal-only fused-MoE kernel aborted on CUDA); the CUDA fused decode-MoE kernel (#319) restored it at 0.3.1, and at 89.06 tok/s it stays ahead of M1 Ultra (83.75).
-§GPT-OSS-120B and Solar-Open-100B were excluded from the 2026-07-12 GB10 sweep by the memory gate (weights > ~51 GiB, `SKIP:oom_estimate`); their figures are carried from the 2026-06-17 / 0.3.1 sweep.
-¶Nemotron-H-30B doubled vs the 2026-06-17 record (40.32) because the fused single-token SSM decode kernel was ported to CUDA on 2026-07-10 (#727); the post-reboot re-verification (#755) confirmed the gain on a fresh host (87.41, post-reboot single). The whole SSM/hybrid cluster carries the same attribution (see the GB10 file's notable-changes list).
+Prefill separates the two machines far more than decode does, which is the expected shape: prefill is matmul-bound and decode is bandwidth-bound.
 
-M1 Ultra column is from 2026-07-12 with mlxcel 0.4.0-rc.1 / MLX pin `57c66cac` / `--cooldown 30 --big-cooldown 30`, using the `mlxcel-bench-decode` same-process harness.
-M5 Max column is from the 2026-09-03/04 full re-sweep with mlxcel **0.6.0** / MLX pin `9a795735` / `--cooldown 30 --big-cooldown 30`, same-process `mlxcel-bench-decode` harness.
-GB10 column is from 2026-07-12 with mlxcel 0.4.0-rc.1 / MLX pin `57c66cac` (0.32.1) / CUDA 13.0 (SM 12.1) / `--cooldown 15 --big-cooldown 45`, using the `mlxcel-bench-decode` same-process warm harness, except the two `§`-marked memory-gated rows carried from 2026-06-17 / 0.3.1 and the `¶`-marked Nemotron-H row, which is the post-reboot single from the same day (#755, `--cooldown 30`).
-**The columns no longer share a version.** M5 Max is mlxcel 0.6.0 / MLX pin `9a795735`; M1 Ultra and GB10 are still 0.4.0-rc.1 / `57c66cac`, pending their own re-sweeps. The cross-hardware ratios below therefore mix versions and should be read as indicative until those hosts are re-measured. The mixing is mild in practice: across these 16 rows M5 Max moved between -2.2% and +5.4% from 0.4.0-rc.1 to 0.6.0 (13 of 16 within +/-2%), so the hardware delta still dominates. M5 Max stays roughly 1.73x faster than M1 Ultra on the selected 16 rows (avg ~1.73x, median ~1.77x). The largest MoE rows show the M5 Max advantage: qwen3-moe-30b runs at 175.48 vs 83.42 tok/s (2.10x), gpt-oss-120b at 113.90 vs 59.29 (1.92x), and solar-open-100b at 65.40 vs 35.02 (1.87x). On GB10 the CUDA fused decode-MoE kernel (#319) keeps qwen3-moe-30b (89.06) just ahead of M1 Ultra (83.42).
-For Qwen2.5-0.5B the 4-bit row is the directly comparable cross-hardware figure; the bf16 variant runs at 295.65 tok/s on M1 Ultra (0.4.0-rc.1) and 400.41 tok/s on M5 Max (0.6.0).
+M1 Ultra is ahead on six of the 138. Four are SSM or hybrid checkpoints (`falcon-h1-tiny-90m-instruct-4bit` 0.49x, `granite-4.0-h-350m-4bit` 0.50x, `granite-4.0-h-tiny-4bit` 0.70x, `plamo-2-1b` 0.81x), but that is not a family property: the SSM and hybrid group as a whole has a median of 1.61x, above the 1.43x of everything else, with `qwen3-next-80b-a3b-instruct-4bit` at 2.02x and `mamba2-130m` at 1.61x. These are six individual models, not a cluster.
 
-## Overall Status (M5 Max at mlxcel 0.6.0; M1 Ultra and GB10 still at 0.4.0-rc.1)
+### Decode and prefill, selected models (tok/s)
+
+| Model | M1 Ultra decode | M5 Max decode | M5 / M1 | M1 Ultra prefill | M5 Max prefill | M5 / M1 |
+|---|--:|--:|--:|--:|--:|--:|
+| SmolLM-135M | 370.7 | 812.2 | 2.19x | 12605.1 | 95618.3 | 7.59x |
+| ERNIE-4.5-0.3B | 464.2 | 949.3 | 2.05x | 7224.0 | 51892.8 | 7.18x |
+| Qwen2.5-0.5B | 331.6 | 624.5 | 1.88x | 6816.2 | 41900.1 | 6.15x |
+| Qwen3-0.6B | 249.9 | 519.0 | 2.08x | 4754.1 | 33266.0 | 7.00x |
+| Llama-3.2-1B | 402.9 | 524.0 | 1.30x | 4140.0 | 19674.8 | 4.75x |
+| StableLM-1.6B | 245.4 | 394.9 | 1.61x | 3287.0 | 16343.7 | 4.97x |
+| SmolLM3-3B | 128.4 | 226.5 | 1.76x | 1210.9 | 7475.0 | 6.17x |
+| Qwen2.5-7B | 105.3 | 124.0 | 1.18x | 779.2 | 3646.4 | 4.68x |
+| Llama-3.1-8B | 105.0 | 114.6 | 1.09x | 750.9 | 3421.1 | 4.56x |
+| Qwen3-MoE-30B | 82.3 | 170.5 | 2.07x | 858.4 | 3727.8 | 4.34x |
+| Nemotron-H-30B | 96.1 | 178.4 | 1.86x | 349.2 | 762.4 | 2.18x |
+| Mixtral-8x7B | 54.5 | 65.8 | 1.21x | 333.4 | 1307.1 | 3.92x |
+| Solar-Open-100B | 35.7 | 63.5 | 1.78x | 255.6 | 1113.4 | 4.36x |
+| GPT-OSS-120B | 61.2 | 113.6 | 1.85x | 452.6 | 1585.0 | 3.50x |
+
+
+## Overall Status (M1 Ultra and M5 Max at mlxcel 0.7.0-beta.1; GB10 still at 0.4.0-rc.1)
 
 | Metric | Count |
 |--------|-------|
