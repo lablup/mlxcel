@@ -36,6 +36,16 @@ Three classes of row look like measurements but are not, and each is now rejecte
 - **A VLM whose image never reached the prompt.** The child reports the token count of the formatted prompt as plain text; an image that arrived always expands the prompt past it, so `prompt_tokens <= text_only_prompt_tokens` is recorded as `FAIL:image_not_applied`. Three checkpoints here were affected, and `llava-next-mistral-7b-4bit` reported the same 7 tokens on both M1 Ultra and M5 Max across three runs.
 - **A duplicate checkpoint.** Identity is `sha256(config.json)` plus the sorted shard names and sizes, not the directory name. Sixteen directories on this host are byte-identical copies of another, several of them named as though they were unquantized when they hold 4-bit weights. They are recorded as aliases and measured once.
 
+### A stale shard index is an upstream property, not local damage
+
+Twelve checkpoints here carry a `model.safetensors.index.json` that names shards which do not exist, and the loss is total rather than partial: none of the shards the index lists is present. `qwen3-vl-32b-4bit` is the widest case, with the index declaring 14 shards and 62 GB against 4 shards and 18 GB on disk.
+
+They are not damaged downloads. The local copies match their repositories file for file, M1 Ultra and M5 Max independently hold the same twelve in the same state, and the index is the *pre-quantization* original's index carried through unchanged: `gemma-3-4b-it-4bit` declares the 2 shards and 8.60 GB of `google/gemma-3-4b-it`, `qwen3-vl-32b-4bit` the 14 shards and 66.71 GB of `Qwen/Qwen3-VL-32B-Instruct`. The conversion wrote new weights and copied the old index.
+
+The scope is VLM conversions, at roughly 12% of the most-downloaded image-text-to-text repositories, concentrated in the gemma-3 and Qwen3-VL families. mlx-lm text conversions are unaffected. The mlx-vlm version recorded in each repository does not predict it: 0.3.2 appears on both the healthy and the stale side.
+
+These load and measure correctly because **mlxcel globs `*.safetensors` and does not read the index**, which in this ecosystem is tolerance rather than a shortcut: a loader that trusted the index would refuse all twelve outright. `scripts/checkpoint_fingerprint.py` reports which path a checkpoint took in its `shard_source` field.
+
 ## Coverage
 
 The sweep walks every checkpoint directory under `models/mlx`. What it does with each one:
