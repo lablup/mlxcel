@@ -79,6 +79,8 @@ Parity is `mlxcel decode tok/s / baseline decode tok/s`, over the 106 text model
 
 The overall median sits at parity, which is the expected result for two runtimes calling the same MLX kernels on the same weights.
 
+This ratio is the runtime claim and it is the one to read first. It is measured on one machine against a baseline run on that same machine, so it is independent of the hardware. The hardware question is separate and lives in the cross-hardware section of [model_tests.md](model_tests.md); a ratio taken between two machines on mlxcel alone cannot distinguish a hardware gap from a place where mlxcel fails to exploit the hardware. On M5 Max three checkpoints turn out to be exactly that, and they are only visible when the same-machine ratio is computed on both machines and the two are compared.
+
 MoE is the one population that separates. Its lower quartile (101%) is above the dense median, so three quarters of MoE checkpoints are ahead rather than a few large wins pulling an average. The direction matches the fused decode-MoE kernel, which replaces `gather_qmm` on small-expert families and gains in proportion to how much of the model is MoE. `trinity-nano-preview-4bit` at 140%, `qwen3-30b-a3b-4bit` at 125% and `klear-46b-a2.5b-instruct-4bit` at 123% are the largest.
 
 Quantization is not a factor. Non-quantized checkpoints have a median of 98% against 100% for quantized, and 11 of the 14 sit between 89% and 109%. An earlier reading that the slowest three models were all non-quantized was a coincidence of a three-model sample, not a property of the non-quantized path.
