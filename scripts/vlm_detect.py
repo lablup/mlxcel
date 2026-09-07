@@ -20,7 +20,7 @@ VLM_ARCH_SUBSTR = (
     "Idefics", "Pixtral", "Bunny", "Phi3V", "Phi35V", "AyaVision",
     "Gemma3ForConditional", "Gemma4ForConditional", "Mllama",
     "Mistral3", "Llama4", "MolmoForCausalLM", "Molmo", "InternVL",
-    "GotOcr", "Smolvlm", "Florence", "Kimi",
+    "GotOcr", "Smolvlm", "Florence", "Kimi", "Moondream",
 )
 
 

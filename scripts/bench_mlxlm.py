@@ -226,7 +226,12 @@ max_tokens = int(sys.argv[4])
 image_path = sys.argv[5]
 
 try:
-    model, processor = load(model_path)
+    # The text child already loads with trust_remote_code; without the same here a
+    # checkpoint carrying custom code stops on an interactive "Do you wish to run
+    # the custom code? [y/N]" prompt. mlx_vlm.load forwards this to the processor
+    # loader as a direct kwarg; `tokenizer_config={'trust_remote_code': True}`
+    # does not reach it.
+    model, processor = load(model_path, trust_remote_code=True)
 except Exception as e:
     print('ERROR load:', repr(e), file=sys.stderr)
     sys.exit(2)
@@ -345,6 +350,10 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
     try:
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout,
+            # A child that asks something on stdin would otherwise inherit the
+            # terminal and hang until `timeout`, turning one prompt into a lost
+            # sweep slot. With no stdin it fails immediately and is classified.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return ("FAIL:timeout", None)
