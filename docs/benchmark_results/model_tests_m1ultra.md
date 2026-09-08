@@ -117,7 +117,7 @@ One checkpoint sits below 90%:
 |---|--:|--:|--:|--:|
 | `gpt_bigcode-santacoder` | 89% | 87% | 163.9 | 183.4 |
 
-Three others were here and are not any more. `qwen2.5-vl-3b-hf` at 26% decode was #1686, a GQA KV expansion in the shared decode attention. `pythia-1b` at 31% and `phixtral-4x2_8-4bit` at 78%, along with santacoder's own 28%, were lablup/mlxcel#1709: five activation helpers in the cxx bridge built their constants as f32 scalars and returned f32 for a half-precision input, which widened the residual stream at the first MLP and made every later matmul promote its own weight to match.
+Three others were here and are not any more. `qwen2.5-vl-3b-instruct` at 26% decode was #1686, a GQA KV expansion in the shared decode attention. `pythia-1b` at 31% and `phixtral-4x2_8-4bit` at 78%, along with santacoder's own 28%, were lablup/mlxcel#1709: five activation helpers in the cxx bridge built their constants as f32 scalars and returned f32 for a half-precision input, which widened the residual stream at the first MLP and made every later matmul promote its own weight to match.
 
 Two things about how that one was found are worth carrying forward.
 
@@ -141,7 +141,7 @@ The two fixes land in different places, which is why the gains look uneven:
 |---|--:|--:|---|
 | `qwen2-vl-2b-4bit` | 1.20x | 1.71x | both |
 | `qwen2.5-vl-3b-4bit` | 1.20x | 1.67x | both |
-| `qwen2.5-vl-3b-hf` | 1.43x | 4.07x | both |
+| `qwen2.5-vl-3b-instruct` | 1.43x | 4.07x | both |
 | `qwen3-vl-2b-4bit` | 1.02x | 1.09x | KV only |
 | `qwen3-vl-4b-4bit` | 1.00x | 1.23x | KV only |
 | `qwen3-vl-8b-4bit` | 1.01x | 1.15x | KV only |
@@ -151,7 +151,7 @@ The two fixes land in different places, which is why the gains look uneven:
 
 Prefill moves only where the text-only path was added, and the KV-only rows gain modestly at this prompt length because the term removed grows with context: 512 tokens is near the flat end of the curve above.
 
-One difference inside the `qwen2*` group is not explained. `qwen2.5-vl-3b-hf` and `qwen2.5-vl-3b-4bit` are the same architecture with the same head counts and the same two fixes, and gain 4.07x against 1.67x. The obvious account, that a KV cache is f16 regardless of weight quantization so the removed copy is a larger share of a shorter 4-bit decode step, predicts the opposite ordering. Recorded as measured, unexplained.
+One difference inside the `qwen2*` group is not explained. `qwen2.5-vl-3b-instruct` and `qwen2.5-vl-3b-4bit` are the same architecture with the same head counts and the same two fixes, and gain 4.07x against 1.67x. The obvious account, that a KV cache is f16 regardless of weight quantization so the removed copy is a larger share of a shorter 4-bit decode step, predicts the opposite ordering. Recorded as measured, unexplained.
 
 Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and mlx-lm gives up 9%. The sweep figure is one point on that curve at 512, and production contexts are longer, so this is a structural gap that widens rather than a fixed deficit.
 
@@ -167,7 +167,7 @@ mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than 
 
 Fourteen rows moved by more than 3% when this sweep was re-run on the fixed build, and the largest are `glm-ocr-4bit` at 1.35x, `hunyuanocr-mlx-4bit` at 1.23x and `paligemma2-3b-6bit` at 1.19x. The gains here are smaller than the text table's because the term removed grows with context and an image prompt is short: 8 to 1543 tokens against a fixed 512.
 
-`qwen2.5-vl-3b-hf` is the clearest demonstration of that. It gains 4.07x on a 512-token text prompt and 1.02x here on a 91-token image prompt, which is the same binary and the same weights. A gap that behaves that way is a context-scaling term, not a property of the checkpoint.
+`qwen2.5-vl-3b-instruct` is the clearest demonstration of that. It gains 4.07x on a 512-token text prompt and 1.02x here on a 91-token image prompt, which is the same binary and the same weights. A gap that behaves that way is a context-scaling term, not a property of the checkpoint.
 
 Two low rows are left that this does not explain. `qwen2.5-vl-3b-4bit` at 80% and `qwen2-vl-2b-4bit` at 82% sit at 99% and 102% in the text table, so they are worse on the shorter prompt, which is the opposite of what a context-scaling cost predicts. Whatever remains is specific to the image path. `mistral-small-4-119b-2603-4bit` was here at 37% and is now at 113%: its Llama-4 attention scale was built in f32 and promoted the query, which widened the residual stream for all 36 layers (lablup/mlxcel#1711).
 
@@ -247,7 +247,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 
 ## Text results
 
-173 models, 512-token prompt, 128 generated tokens. `vs baseline` is mlx-lm 0.31.3 on the same host; `-` means mlx-lm did not measure that model.
+172 models, 512-token prompt, 128 generated tokens. `vs baseline` is mlx-lm 0.31.3 on the same host; `-` means mlx-lm did not measure that model.
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
@@ -263,7 +263,6 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `command-r7b-4bit` | Cohere2ForCausalLM | 512 | 694.9 | 107.1 | 111% |
 | `aya-expanse-8b-4bit` | CohereForCausalLM | 512 | 696.8 | 104.9 | 95% |
 | `dbrx-instruct-4bit` | DbrxForCausalLM | 512 | 90.3 | 23.9 | - |
-| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 512 | 532.1 | 111.7 | - |
 | `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 512 | 4469.7 | 284.5 | - |
 | `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 512 | 4430.4 | 278.5 | - |
 | `deepseek-v2-lite-4bit` | DeepseekV2ForCausalLM | 512 | 537.1 | 110.8 | 100% |
@@ -276,16 +275,19 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `exaone-3.5-2.4b-4bit` | ExaoneForCausalLM | 512 | 2097.2 | 181.5 | 98% |
 | `falcon-h1-tiny-90m-instruct-4bit` | FalconH1ForCausalLM | 512 | 9680.0 | 351.1 | 115% |
 | `falcon-mamba-7b-4bit` | FalconMambaForCausalLM | 512 | 198.5 | 71.8 | 113% |
-| `falcon-ocr` | FalconOCRForCausalLM | 512 | 9792.6 | 241.2 | - |
+| `falcon-ocr` | FalconOCRForCausalLM | 512 | 10125.8 | 235.1 | - |
 | `florence-2-base-ft-4bit` | Florence2ForConditionalGeneration | 512 | 10215.5 | 416.8 | - |
 | `florence-2-large-ft-4bit` | Florence2ForConditionalGeneration | 512 | 6275.9 | 230.0 | - |
+| `gpt2` | GPT2LMHeadModel | 512 | 13982.3 | 210.5 | 97% |
+| `gpt_bigcode-santacoder` | GPTBigCodeForCausalLM | 512 | 4149.1 | 163.9 | 89% |
+| `pythia-1b` | GPTNeoXForCausalLM | 512 | 4996.9 | 191.2 | 98% |
 | `gemma-2-9b-8bit` | Gemma2ForCausalLM | 512 | 598.2 | 46.8 | - |
 | `gemma2-2b-4bit` | Gemma2ForCausalLM | 512 | 1955.8 | 154.4 | 106% |
 | `gemma-3-1b-it-4bit` | Gemma3ForCausalLM | 512 | 4137.0 | 222.9 | 113% |
 | `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 512 | 968.8 | 100.5 | 107% |
-| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 512 | 1377.0 | 79.6 | - |
-| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 512 | 807.6 | 62.0 | - |
-| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 512 | 944.9 | 34.2 | 91% |
+| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 512 | 1380.5 | 79.6 | - |
+| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 512 | 804.5 | 61.8 | - |
+| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 512 | 908.2 | 40.1 | 107% |
 | `gemma-4-26b-a4b-it-4bit` | Gemma4ForConditionalGeneration | 512 | 739.2 | 74.5 | 111% |
 | `gemma-4-26b-a4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 512 | 749.1 | 72.9 | 108% |
 | `gemma-4-31b-4bit` | Gemma4ForConditionalGeneration | 512 | 129.8 | 19.3 | 99% |
@@ -301,12 +303,9 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `gemma-4-12b-it-4bit` | Gemma4UnifiedForConditionalGeneration | 512 | 331.3 | 36.5 | - |
 | `gemma-2b-4bit` | GemmaForCausalLM | 512 | 2095.2 | 186.3 | 99% |
 | `glm4-flash-4bit` | Glm4MoeLiteForCausalLM | 512 | 718.2 | 50.3 | 105% |
-| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 512 | 536.9 | 55.5 | - |
-| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 512 | 234.0 | 17.7 | - |
+| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 512 | 454.3 | 60.7 | - |
+| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 512 | 229.6 | 33.3 | - |
 | `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 512 | 5423.4 | 309.3 | - |
-| `gpt2` | GPT2LMHeadModel | 512 | 13982.3 | 210.5 | 97% |
-| `gpt_bigcode-santacoder` | GPTBigCodeForCausalLM | 512 | 4149.1 | 163.9 | 89% |
-| `pythia-1b` | GPTNeoXForCausalLM | 512 | 4996.9 | 191.2 | 98% |
 | `gpt-oss-120b-4bit` | GptOssForCausalLM | 512 | 452.6 | 61.2 | 105% |
 | `gpt-oss-20b-mxfp4` | GptOssForCausalLM | 512 | 787.2 | 91.7 | 102% |
 | `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 512 | 1103.1 | 128.1 | - |
@@ -320,21 +319,21 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `hunyuan-1.8b-4bit` | HunYuanDenseV1ForCausalLM | 512 | 1965.2 | 173.1 | 94% |
 | `hunyuan-13b` | HunYuanMoEV1ForCausalLM | 512 | 244.0 | 44.1 | - |
 | `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 512 | 5007.0 | 232.6 | - |
+| `iquest-coder-v1-7b-instruct-8bit` | IQuestCoderForCausalLM | 512 | 563.6 | 70.7 | 100% |
 | `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 512 | 786.9 | 109.0 | - |
 | `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 512 | 749.4 | 104.5 | - |
 | `smolvlm-instruct-bf16` | Idefics3ForConditionalGeneration | 512 | 3231.4 | 128.0 | - |
 | `internlm2-7b-4bit` | InternLM2ForCausalLM | 512 | 764.2 | 105.4 | 99% |
 | `internlm3-8b-4bit` | InternLM3ForCausalLM | 512 | 671.4 | 84.2 | - |
 | `internvl3-1b` | InternVLChatModel | 512 | 6982.6 | 331.9 | - |
-| `iquest-coder-v1-7b-instruct-8bit` | IQuestCoderForCausalLM | 512 | 563.6 | 70.7 | 100% |
 | `jamba-v0.1-4bit` | JambaForCausalLM | 512 | 213.9 | 131.0 | 100% |
 | `jina-vlm-mlx` | JinaVLMForConditionalGeneration | 512 | 2478.9 | 168.4 | - |
 | `kimi-vl-a3b-thinking-4bit` | KimiVLForConditionalGeneration | 512 | 528.2 | 98.4 | - |
 | `klear-46b-a2.5b-instruct-4bit` | KlearMoeForCausalLM | 512 | 963.7 | 93.1 | 123% |
+| `llada2.0-mini-preview-4bit` | LLaDA2MoeModelLM | 512 | 2120.1 | 147.4 | - |
 | `lfm2-350m-8bit` | Lfm2ForCausalLM | 512 | 7711.8 | 568.1 | 105% |
 | `lfm2-8b-a1b-4bit` | Lfm2MoeForCausalLM | 512 | 2128.4 | 195.2 | 106% |
 | `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 512 | 8722.9 | 574.8 | - |
-| `llada2.0-mini-preview-4bit` | LLaDA2MoeModelLM | 512 | 2120.1 | 147.4 | - |
 | `llama-4-scout-17b-4bit` | Llama4ForConditionalGeneration | 512 | 281.6 | 35.2 | - |
 | `deepseek-coder-1.3b-4bit` | LlamaForCausalLM | 512 | 3739.6 | 146.1 | - |
 | `llama-3.1-8b-4bit` | LlamaForCausalLM | 512 | 750.9 | 105.0 | 99% |
@@ -349,8 +348,6 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `granite-vision-3.2-2b-4bit` | LlavaNextForConditionalGeneration | 512 | 1448.1 | 150.2 | - |
 | `llava-next-mistral-7b-4bit` | LlavaNextForConditionalGeneration | 512 | 789.3 | 109.4 | - |
 | `fastvlm-0.5b-bf16` | LlavaQwen2ForCausalLM | 512 | 7681.3 | 266.2 | - |
-| `mamba2-1.3b-4bit` | mamba2 | 512 | 2405.5 | 101.0 | - |
-| `mamba2-130m` | mamba2 | 512 | 9828.6 | 213.4 | - |
 | `mellum2-12b-a2.5b-base` | MellumForCausalLM | 512 | 1675.1 | 76.0 | - |
 | `mimo-7b-4bit` | MiMoForCausalLM | 512 | 569.8 | 82.8 | 100% |
 | `minicpm3-4b-4bit` | MiniCPM3ForCausalLM | 512 | 1191.8 | 77.5 | 109% |
@@ -363,13 +360,13 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 512 | 750.6 | 105.5 | - |
 | `molmo2-4b` | Molmo2ForConditionalGeneration | 512 | 1072.9 | 91.1 | - |
 | `molmo-7b` | MolmoForCausalLM | 512 | 789.8 | 108.9 | - |
-| `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 512 | 349.9 | 96.0 | - |
 | `nemotron-h-30b-4bit` | NemotronHForCausalLM | 512 | 349.2 | 96.1 | 103% |
+| `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 512 | 349.9 | 96.0 | - |
 | `olmo2-7b-4bit` | Olmo2ForCausalLM | 512 | 814.6 | 102.3 | 100% |
 | `olmo3-32b-4bit` | Olmo3ForCausalLM | 512 | 129.0 | 21.6 | 101% |
 | `olmo-1b-4bit` | OlmoModelForCausalLM | 512 | 3505.6 | 184.5 | - |
 | `openelm-1_1b-instruct-4bit` | OpenELMForCausalLM | 512 | 4150.9 | 278.9 | - |
-| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 512 | 7089.8 | 132.6 | - |
+| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 512 | 8641.7 | 316.3 | - |
 | `paligemma2-3b-6bit` | PaliGemmaForConditionalGeneration | 512 | 1814.3 | 129.9 | - |
 | `phi-3-mini-4bit` | Phi3ForCausalLM | 512 | 1446.2 | 151.4 | 99% |
 | `phi-3.5-mini-4bit` | Phi3ForCausalLM | 512 | 1435.7 | 145.7 | 98% |
@@ -382,8 +379,6 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `phixtral-4x2_8-4bit` | PhiForCausalLM | 512 | 989.7 | 85.1 | 90% |
 | `phi-3.5-moe-4bit` | PhiMoEForCausalLM | 512 | 602.1 | 75.1 | 110% |
 | `plamo-2-1b` | PlamoForCausalLM | 512 | 2961.3 | 107.5 | 100% |
-| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 512 | 1674.4 | 150.0 | 99% |
-| `qwen2.5-vl-3b-hf` | Qwen2_5_VLForConditionalGeneration | 512 | 1803.9 | 75.2 | 106% |
 | `deepseek-r1-distill-7b-4bit` | Qwen2ForCausalLM | 512 | 788.5 | 107.1 | 100% |
 | `qwen2-0.5b` | Qwen2ForCausalLM | 512 | 6816.2 | 331.6 | 115% |
 | `qwen2.5-0.5b-bf16` | Qwen2ForCausalLM | 512 | 7548.1 | 274.3 | 109% |
@@ -393,17 +388,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen2.5-7b-8bit` | Qwen2ForCausalLM | 512 | 783.5 | 67.5 | 97% |
 | `qwen1.5-moe-a2.7b-4bit` | Qwen2MoeForCausalLM | 512 | 1684.3 | 143.7 | 107% |
 | `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 512 | 3042.6 | 224.4 | 102% |
-| `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3779.6 | 279.3 | 102% |
-| `qwen3.5-0.8b-optiq-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3749.2 | 262.0 | 103% |
-| `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 152.7 | 25.1 | 97% |
-| `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 1831.4 | 202.9 | 99% |
-| `qwen3.5-4b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 851.4 | 112.0 | 98% |
-| `qwen3.5-9b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 483.9 | 75.6 | 97% |
-| `qwen3.5-9b-bf16` | Qwen3_5ForConditionalGeneration | 512 | 753.3 | 31.5 | 94% |
-| `qwen3.8-27b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 153.3 | 25.1 | 98% |
-| `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 512 | 219.2 | 10.3 | 97% |
-| `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 512 | 839.6 | 82.3 | 109% |
-| `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 512 | 842.6 | 81.5 | 109% |
+| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 512 | 1674.4 | 150.0 | 99% |
 | `qwen3-0.6b-4bit` | Qwen3ForCausalLM | 512 | 4754.1 | 249.9 | 105% |
 | `qwen3-1.7b-4bit` | Qwen3ForCausalLM | 512 | 2037.4 | 185.3 | 98% |
 | `qwen3-4b-4bit` | Qwen3ForCausalLM | 512 | 942.3 | 116.9 | 101% |
@@ -416,6 +401,17 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 512 | 944.1 | 117.6 | 101% |
 | `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 512 | 522.1 | 81.3 | 101% |
 | `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 512 | 851.9 | 81.2 | 123% |
+| `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3779.6 | 279.3 | 102% |
+| `qwen3.5-0.8b-optiq-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3749.2 | 262.0 | 103% |
+| `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 152.7 | 25.1 | 97% |
+| `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 1831.4 | 202.9 | 99% |
+| `qwen3.5-4b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 851.4 | 112.0 | 98% |
+| `qwen3.5-9b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 483.9 | 75.6 | 97% |
+| `qwen3.5-9b-bf16` | Qwen3_5ForConditionalGeneration | 512 | 753.3 | 31.5 | 94% |
+| `qwen3.8-27b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 153.3 | 25.1 | 98% |
+| `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 512 | 219.2 | 10.3 | 97% |
+| `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 512 | 839.6 | 82.3 | 109% |
+| `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 512 | 842.6 | 81.5 | 109% |
 | `seed-oss-36b-instruct-4bit` | SeedOssForCausalLM | 512 | 115.4 | 19.3 | 99% |
 | `smollm3-3b-4bit` | SmolLM3ForCausalLM | 512 | 1210.9 | 128.4 | 97% |
 | `solar-open-100b-4bit` | SolarOpenForCausalLM | 512 | 255.6 | 35.7 | 103% |
@@ -424,24 +420,26 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `telechat3-36b-thinking-4bit` | Telechat3ForCausalLM | 512 | 114.8 | 20.1 | 101% |
 | `youtu-llm-2b-4bit` | YoutuForCausalLM | 512 | 1728.8 | 136.3 | 92% |
 | `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 512 | 1088.5 | 43.6 | - |
+| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 512 | 532.1 | 111.7 | - |
+| `mamba2-1.3b-4bit` | mamba2 | 512 | 2405.5 | 101.0 | - |
+| `mamba2-130m` | mamba2 | 512 | 9828.6 | 213.4 | - |
 
 ## VLM results
 
-76 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
+78 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
 | `aya-vision-8b` | AyaVisionForConditionalGeneration | 735 | 640.2 | 110.4 | 107% |
 | `bunny-llama3-8b-4bit` | BunnyLlamaForCausalLM | 746 | 672.8 | 101.3 | - |
-| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 440.1 | 109.9 | - |
 | `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 409 | 856.5 | 281.5 | - |
 | `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 281 | 899.5 | 289.4 | - |
 | `dots.ocr-4bit` | DotsOCRForCausalLM | 74 | 451.7 | 220.0 | 113% |
 | `ernie-4.5-vl-28b-a3b-thinking-4bit` | Ernie4_5_VLMoeForConditionalGeneration | 108 | 295.8 | 94.9 | 128% |
 | `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 275 | 252.3 | 106.2 | 112% |
-| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 273 | 834.5 | 84.7 | 138% |
-| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 273 | 553.5 | 65.2 | 135% |
-| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 273 | 654.2 | 35.2 | 98% |
+| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 273 | 908.7 | 84.3 | 138% |
+| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 273 | 590.1 | 65.1 | 135% |
+| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 273 | 671.2 | 41.4 | 115% |
 | `gemma-4-26b-a4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 317.7 | 78.9 | 118% |
 | `gemma-4-26b-a4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 328.8 | 77.5 | 113% |
 | `gemma-4-31b-4bit` | Gemma4ForConditionalGeneration | 265 | 98.5 | 19.9 | 102% |
@@ -455,11 +453,11 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 520.9 | 65.6 | 98% |
 | `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 518.1 | 71.2 | 105% |
 | `gemma-4-12b-it-4bit` | Gemma4UnifiedForConditionalGeneration | 277 | 298.2 | 38.1 | 102% |
-| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 78 | 270.1 | 58.4 | - |
-| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 82 | 110.0 | 18.2 | - |
+| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 78 | 230.9 | 63.0 | - |
+| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 82 | 104.5 | 34.8 | - |
 | `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 82 | 1106.0 | 388.2 | 107% |
 | `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 337 | 750.9 | 130.8 | 111% |
-| `moondream2` | HfMoondream | 8 | 14.9 | 44.5 | - |
+| `moondream2` | HfMoondream | 8 | 22.9 | 146.8 | - |
 | `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 284 | 1335.6 | 261.1 | 161% |
 | `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 81 | 286.7 | 114.6 | shape |
 | `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 189 | 504.2 | 107.7 | shape |
@@ -484,12 +482,20 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `molmo2-4b` | Molmo2ForConditionalGeneration | 438 | 696.7 | 92.4 | 153% |
 | `molmo-7b` | MolmoForCausalLM | 327 | 583.3 | 110.8 | 142% |
 | `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 279 | 269.6 | 96.6 | 113% |
-| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 212 | 1339.5 | 135.7 | 42% |
+| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 212 | 1416.7 | 333.3 | 104% |
 | `paligemma2-3b-6bit` | PaliGemmaForConditionalGeneration | 1032 | 1470.6 | 131.1 | 181% |
 | `phi-3.5-vision-4bit` | Phi3VForCausalLM | 773 | 991.4 | 137.7 | 173% |
-| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 91 | 601.9 | 121.3 | 80% |
-| `qwen2.5-vl-3b-hf` | Qwen2_5_VLForConditionalGeneration | 91 | 385.4 | 19.7 | 27% |
-| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 91 | 844.5 | 181.6 | 82% |
+| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 91 | 973.9 | 214.8 | 97% |
+| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 91 | 702.6 | 143.4 | 95% |
+| `qwen2.5-vl-3b-instruct` | Qwen2_5_VLForConditionalGeneration | 91 | 642.0 | 71.2 | 98% |
+| `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 294.0 | 47.2 | 183% |
+| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 65 | 676.0 | 199.5 | shape |
+| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 65 | 74.9 | 21.7 | shape |
+| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 65 | 402.4 | 115.3 | shape |
+| `qwen3-vl-4b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 403.3 | 115.5 | shape |
+| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 65 | 255.5 | 79.7 | shape |
+| `qwen3-vl-8b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 256.9 | 79.8 | shape |
+| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 268.8 | 78.9 | shape |
 | `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 925.4 | 285.9 | shape |
 | `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 87.0 | 25.2 | shape |
 | `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 566.3 | 206.4 | shape |
@@ -500,13 +506,8 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 69 | 85.8 | 10.5 | shape |
 | `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 289.5 | 83.0 | shape |
 | `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 292.3 | 81.2 | shape |
-| `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 294.0 | 47.2 | 183% |
-| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 65 | 718.6 | 200.3 | shape |
-| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 65 | 90.8 | 19.3 | shape |
-| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 65 | 454.5 | 111.7 | shape |
-| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 65 | 308.0 | 73.3 | shape |
-| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 285.9 | 47.3 | shape |
 | `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 28 | 217.8 | 46.2 | - |
+| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 440.1 | 109.9 | - |
 
 ## Benchmark families measured on their own conditions
 
