@@ -97,7 +97,7 @@ lfm2-350m-8bit		mlx-community/LFM2-350M-8bit	heading	8bit	yes	yes	config	repo	ok
 lfm2-8b-a1b-4bit		mlx-community/LFM2-8B-A1B-4bit	heading	4bit	yes	yes	config	repo	ok(1)	29	4	ok	
 lfm2-vl-450m-4bit		mlx-community/LFM2-VL-450M-4bit	heading	4bit	yes	yes	config	repo	ok(1)	21	4	ok	
 lfm2.5-embedding-350m			none	unquantized	yes	yes	none	repo	ok(1)	0	0	ok	
-ling-lite-1.5			none	bfloat16	yes	no	none	repo		0	0	ok	present on M1 Ultra, missed by the transfer, re-copy pending
+ling-lite-1.5			none	bfloat16	yes	yes	none	repo	ok(4)	0	0	ok	
 llada2.0-mini-preview-4bit		mlx-community/LLaDA2.0-mini-preview-4bit	heading	4bit	yes	yes	config	repo	ok(2)	19	2	ok	
 llama-3.1-8b-instruct-bf16	llama-3.1-8b-bf16	mlx-community/Llama-3.1-8B-Instruct	heading	bfloat16	yes	yes	config	repo	ok(4)	45	12	ok	
 llama-3.2-11b-vision-instruct-4bit		mlx-community/Llama-3.2-11B-Vision-Instruct-4bit	heading	4bit	yes	yes	config	repo	ok(2)	15	9	ok	
