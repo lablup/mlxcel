@@ -5,8 +5,6 @@ colqwen2.5-v0.2-merged	bfloat16		models/mlx/_m5_only/colqwen2.5-v0.2-merged
 colsmol-256m-merged	bfloat16		models/mlx/_m5_only/colsmol-256m-merged
 embeddinggemma-300m-4bit	4bit		models/mlx/_m5_only/embeddinggemma-300m-4bit
 gemma-4-e4b-4bit	4bit		models/mlx/_m5_only/gemma-4-e4b-4bit
-glm-5-4bit	4bit	mlx-community/GLM-5-4bit	models/mlx/_m5_only/glm-5-4bit
-glm-5.1-4bit	?		models/mlx/_m5_only/glm-5.1-4bit
 gte-reranker-modernbert-base	float32		models/mlx/_m5_only/gte-reranker-modernbert-base
 kokoro-82m	unquantized		models/mlx/_m5_only/kokoro-82m
 lfm2.5-embedding-350m	unquantized		models/mlx/_m5_only/lfm2.5-embedding-350m
