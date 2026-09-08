@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+mellum2-12b-a2.5b-base,models/mellum2-12b-a2.5b-base,512,128,130.58,3920.86,1265.53,101.14,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
