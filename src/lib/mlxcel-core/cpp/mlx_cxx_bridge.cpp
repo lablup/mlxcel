@@ -817,36 +817,102 @@ std::unique_ptr<MlxArray> isposinf(const MlxArray& a) {
 }
 
 // Reduction operations.
+// Reduce a half-precision input in f32 and hand the input dtype back.
+//
+// A flat `max` over a bfloat16 array on M5 returns NaN for a finite input, on
+// roughly one call in six. It is the reduction and not the data: reading the
+// same row back to the host finds every element finite on 60 of 60 runs while
+// the device reduction reports non-finite on 28 of them, with no overlap.
+// Casting to f32 first is the only thing that fixes it; measured one variant
+// per process over 150 forwards of granite-4.0-3b-vision-4bit, whose logits are
+// bfloat16, the counts are 23 for the plain reduction, 31 reshaped to 1-D, 20
+// made contiguous, 24 reduced over an axis, and 0 cast to f32. Contiguity and
+// the flat-versus-axis choice are therefore not the trigger and the element
+// width is.
+//
+// Measuring several of those variants inside one loop hides this: each `eval`
+// synchronises the next one, and the 1-D reshape read 0 of 60 that way against
+// 123 of 150 when it was the only variant in the process.
+//
+// `llama4.rs` already cast to f32 before calling this, which reads as an
+// earlier encounter with the same fault. Promotion is lossless for a max or a
+// min, whose result is one of the inputs, so the restore is exact.
+static std::unique_ptr<MlxArray> reduce_in_f32(
+    const mlx::core::array& in,
+    mlx::core::array (*op)(const mlx::core::array&, mlx::core::StreamOrDevice)) {
+    const auto dt = in.dtype();
+    const bool half = dt == mlx::core::bfloat16 || dt == mlx::core::float16;
+    if (!half) {
+        return std::make_unique<MlxArray>(op(in, {}));
+    }
+    auto wide = mlx::core::astype(in, mlx::core::float32);
+    return std::make_unique<MlxArray>(mlx::core::astype(op(wide, {}), dt));
+}
+
+
+static std::unique_ptr<MlxArray> reduce_axis_in_f32(
+    const mlx::core::array& in, int32_t axis, bool keepdims,
+    mlx::core::array (*op)(const mlx::core::array&, int, bool, mlx::core::StreamOrDevice)) {
+    const auto dt = in.dtype();
+    const bool half = dt == mlx::core::bfloat16 || dt == mlx::core::float16;
+    if (!half) {
+        return std::make_unique<MlxArray>(op(in, axis, keepdims, {}));
+    }
+    auto wide = mlx::core::astype(in, mlx::core::float32);
+    return std::make_unique<MlxArray>(mlx::core::astype(op(wide, axis, keepdims, {}), dt));
+}
+
 std::unique_ptr<MlxArray> sum_all(const MlxArray& a) {
-    return std::make_unique<MlxArray>(mlx::core::sum(a.inner));
+    return reduce_in_f32(a.inner, [](const mlx::core::array& x, mlx::core::StreamOrDevice s) {
+        return mlx::core::sum(x, s);
+    });
 }
 
 std::unique_ptr<MlxArray> sum_axis(const MlxArray& a, int32_t axis, bool keepdims) {
-    return std::make_unique<MlxArray>(mlx::core::sum(a.inner, axis, keepdims));
+    return reduce_axis_in_f32(a.inner, axis, keepdims,
+        [](const mlx::core::array& x, int ax, bool kd, mlx::core::StreamOrDevice s) {
+            return mlx::core::sum(x, ax, kd, s);
+        });
 }
 
 std::unique_ptr<MlxArray> mean_all(const MlxArray& a) {
-    return std::make_unique<MlxArray>(mlx::core::mean(a.inner));
+    return reduce_in_f32(a.inner, [](const mlx::core::array& x, mlx::core::StreamOrDevice s) {
+        return mlx::core::mean(x, s);
+    });
 }
 
 std::unique_ptr<MlxArray> mean_axis(const MlxArray& a, int32_t axis, bool keepdims) {
-    return std::make_unique<MlxArray>(mlx::core::mean(a.inner, axis, keepdims));
+    return reduce_axis_in_f32(a.inner, axis, keepdims,
+        [](const mlx::core::array& x, int ax, bool kd, mlx::core::StreamOrDevice s) {
+            return mlx::core::mean(x, ax, kd, s);
+        });
 }
 
 std::unique_ptr<MlxArray> max_all(const MlxArray& a) {
-    return std::make_unique<MlxArray>(mlx::core::max(a.inner));
+    return reduce_in_f32(a.inner, [](const mlx::core::array& x, mlx::core::StreamOrDevice s) {
+        return mlx::core::max(x, s);
+    });
 }
 
 std::unique_ptr<MlxArray> max_axis(const MlxArray& a, int32_t axis, bool keepdims) {
-    return std::make_unique<MlxArray>(mlx::core::max(a.inner, axis, keepdims));
+    return reduce_axis_in_f32(a.inner, axis, keepdims,
+        [](const mlx::core::array& x, int ax, bool kd, mlx::core::StreamOrDevice s) {
+            return mlx::core::max(x, ax, kd, s);
+        });
 }
 
 std::unique_ptr<MlxArray> min_all(const MlxArray& a) {
-    return std::make_unique<MlxArray>(mlx::core::min(a.inner));
+    // Same reduction, same fault class; see `max_all`.
+    return reduce_in_f32(a.inner, [](const mlx::core::array& x, mlx::core::StreamOrDevice s) {
+        return mlx::core::min(x, s);
+    });
 }
 
 std::unique_ptr<MlxArray> min_axis(const MlxArray& a, int32_t axis, bool keepdims) {
-    return std::make_unique<MlxArray>(mlx::core::min(a.inner, axis, keepdims));
+    return reduce_axis_in_f32(a.inner, axis, keepdims,
+        [](const mlx::core::array& x, int ax, bool kd, mlx::core::StreamOrDevice s) {
+            return mlx::core::min(x, ax, kd, s);
+        });
 }
 
 // Product reduction

@@ -304,6 +304,16 @@ impl PrefillHandoff {
     pub fn is_timed_out(&self, timeout: Duration) -> bool {
         self.initiated_at.elapsed() > timeout
     }
+
+    /// Whether no measurable time has passed since this handoff was created.
+    ///
+    /// Exists so a test can wait for the clock to tick instead of assuming it
+    /// already has; `is_timed_out` is a strict comparison, so a zero timeout is
+    /// not satisfied until `elapsed` is non-zero.
+    #[cfg(test)]
+    pub(crate) fn elapsed_is_zero(&self) -> bool {
+        self.initiated_at.elapsed() == Duration::ZERO
+    }
 }
 
 /// Protocol interface for the prefill-to-decode handoff.

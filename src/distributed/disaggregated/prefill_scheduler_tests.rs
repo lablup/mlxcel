@@ -366,8 +366,15 @@ fn handoff_timeout_check() {
     // Just created, should not be timed out.
     assert!(!handoff.is_timed_out(Duration::from_secs(30)));
 
-    // Zero timeout should be timed out immediately (or nearly so).
-    // Note: there may be a tiny race here, but Duration::ZERO should work.
+    // `is_timed_out` is a strict `elapsed() > timeout`, so a zero timeout needs
+    // the clock to have advanced at least one tick since construction. On a
+    // coarse `Instant` that is not guaranteed, and the assertion failed on
+    // roughly one gate run in three. Wait for the tick rather than assume it:
+    // this keeps the case the test is about, a zero timeout expiring at once,
+    // without depending on timer granularity.
+    while handoff.elapsed_is_zero() {
+        std::hint::spin_loop();
+    }
     assert!(handoff.is_timed_out(Duration::ZERO));
 }
 
