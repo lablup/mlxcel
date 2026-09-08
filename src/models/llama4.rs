@@ -1301,7 +1301,11 @@ impl Llama4CxxModel {
         let h_dtype = mlxcel_core::array_dtype(&h);
         println!("Embedding output shape: {:?}, dtype: {}", h_shape, h_dtype);
 
-        // Convert to float32 before computing statistics (float16 sum has precision issues)
+        // The f32 cast is no longer what keeps these statistics finite: the
+        // bridge promotes a half-precision reduction to f32 internally and
+        // restores the dtype, so `sum_all`, `max_all` and `min_all` accumulate
+        // in f32 wherever they are called. Kept because reading the widened
+        // array once is cheaper than three separate promotions.
         let h_f32 = mlxcel_core::astype(&h, mlxcel_core::dtype::FLOAT32);
         let h_sum = mlxcel_core::sum_all(&h_f32);
         mlxcel_core::eval(&h_sum);
