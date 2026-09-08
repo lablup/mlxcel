@@ -1,2 +1,2 @@
 model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-paddleocr-vl-bfloat16,models/paddleocr-vl-bfloat16,212,128,64.87,3268.27,813.79,157.29,2026-09-08,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"What is in this image?",,ec414719,9a795735
+paddleocr-vl-bfloat16,models/paddleocr-vl-bfloat16,212,128,59.09,3587.90,281.20,455.19,2026-09-08,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"What is in this image?",,395fc3ba,9a795735

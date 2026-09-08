@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+granite-4.0-h-350m-4bit,./models/granite-4.0-h-350m-4bit/,512,128,38.38,13341.63,226.88,564.18,2026-09-06,Apple_M5_Max_128GB,mlx-lm-0.31.3,python,128,"Hello, how are you today?"

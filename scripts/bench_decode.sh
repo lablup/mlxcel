@@ -173,6 +173,35 @@ SOURCE_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
 if [[ -n "$(git status --porcelain --untracked-files=no -- ':!benchmarks' 2>/dev/null)" ]]; then
   SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
 fi
+
+# `SOURCE_COMMIT` above is read from git, not from the executable, so it names
+# the revision of the *tree* and not the revision the measured binary was built
+# from. Those diverge the moment a sweep runs without rebuilding after a pull,
+# a rebase or a branch switch, and the run then records provenance its binary
+# does not have. That is not a hypothetical: an M5 Max sweep recorded a commit
+# containing the 3D-rotary restore while running a binary built before it, and
+# the resulting rows read as "this change does nothing on this machine" when it
+# is worth up to 3.26x. Both arms of the follow-up A/B were the same stale
+# binary, so they agreed, and the agreement looked like evidence.
+#
+# Checked by mtime rather than by invoking cargo: a checkout rewrites the files
+# it touches, so a rebase that lands new source is caught, and the check costs
+# no build. A file touched without a content change is a false positive, which
+# costs one needless rebuild and never a wrong number. Set
+# BENCH_ALLOW_STALE_BINARY=1 to measure a deliberately old binary, which is a
+# real case when bisecting.
+if [[ -x "$MLXCEL_BENCH" && "${BENCH_ALLOW_STALE_BINARY:-0}" != "1" ]]; then
+  newer_src=$(find src Cargo.toml Cargo.lock -newer "$MLXCEL_BENCH" -type f 2>/dev/null | head -5)
+  if [[ -n "$newer_src" ]]; then
+    echo "ERROR: source is newer than $MLXCEL_BENCH, so the binary predates the tree." >&2
+    echo "       Rows would be stamped $SOURCE_COMMIT against a binary that does not contain it." >&2
+    echo "       Newer than the binary:" >&2
+    printf '         %s\n' $newer_src >&2
+    echo "       Rebuild first:  cargo build --release --features metal,accelerate" >&2
+    echo "       Or set BENCH_ALLOW_STALE_BINARY=1 if the old binary is the point (bisect)." >&2
+    exit 1
+  fi
+fi
 # Pinned MLX C++ revision the binary links, 8 characters. `mlxcel_version` and
 # `mlxcel_commit` describe this repository; an MLX pin bump changes kernels
 # without moving either, so it needs its own column.

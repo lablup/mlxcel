@@ -1,2 +1,2 @@
 model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-glm-4.5v-4bit,models/glm-4.5v-4bit,512,128,767.50,667.10,7262.54,17.62,2026-09-08,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,ec414719,9a795735
+glm-4.5v-4bit,models/glm-4.5v-4bit,512,128,525.50,974.31,2302.34,55.60,2026-09-08,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,395fc3ba,9a795735
