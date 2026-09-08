@@ -161,15 +161,15 @@ Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and 
 
 | Population | n | Median | Quartiles | Range |
 |---|--:|--:|---|---|
-| Comparable VLM rows | 41 | 108% | 101 / 129 | 27-206% |
+| Comparable VLM rows | 43 | 111% | 102 / 128 | 27-206% |
 
-mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than on text. The widest margins are `jina-vlm-mlx` at 206%, `phi-3.5-vision-4bit` at 171% and `qwen3-omni-30b-a3b-instruct-4bit` at 166%.
+mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than on text. The widest margins are `jina-vlm-mlx` at 206%, `qwen3-omni-30b-a3b-instruct-4bit` at 183% and `paligemma2-3b-6bit` at 181%.
 
 Fourteen rows moved by more than 3% when this sweep was re-run on the fixed build, and the largest are `glm-ocr-4bit` at 1.35x, `hunyuanocr-mlx-4bit` at 1.23x and `paligemma2-3b-6bit` at 1.19x. The gains here are smaller than the text table's because the term removed grows with context and an image prompt is short: 8 to 1543 tokens against a fixed 512.
 
 `qwen2.5-vl-3b-hf` is the clearest demonstration of that. It gains 4.07x on a 512-token text prompt and 1.02x here on a 91-token image prompt, which is the same binary and the same weights. A gap that behaves that way is a context-scaling term, not a property of the checkpoint.
 
-Two low rows are left that this does not explain. `qwen2.5-vl-3b-4bit` at 80% and `qwen2-vl-2b-4bit` at 82% sit at 99% and 102% in the text table, so they are worse on the shorter prompt, which is the opposite of what a context-scaling cost predicts. Whatever remains is specific to the image path. `mistral-small-4-119b-2603-4bit` at 37% is not in any set the fixes touched.
+Two low rows are left that this does not explain. `qwen2.5-vl-3b-4bit` at 80% and `qwen2-vl-2b-4bit` at 82% sit at 99% and 102% in the text table, so they are worse on the shorter prompt, which is the opposite of what a context-scaling cost predicts. Whatever remains is specific to the image path. `mistral-small-4-119b-2603-4bit` was here at 37% and is now at 113%: its Llama-4 attention scale was built in f32 and promoted the query, which widened the residual stream for all 36 layers (lablup/mlxcel#1711).
 
 ### Failures
 
@@ -358,7 +358,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `minicpm-v-4.6-mxfp4` | MiniCPMV4_6ForConditionalGeneration | 512 | 3931.7 | 217.2 | - |
 | `ministral-3b-4bit` | Mistral3ForConditionalGeneration | 512 | 1120.9 | 153.0 | 102% |
 | `mistral-small-3.1-24b-4bit` | Mistral3ForConditionalGeneration | 512 | 179.0 | 31.4 | 100% |
-| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 512 | 382.2 | 18.9 | - |
+| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 512 | 381.2 | 55.0 | - |
 | `mixtral-8x7b-4bit` | MixtralForCausalLM | 512 | 333.4 | 54.5 | 100% |
 | `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 512 | 750.6 | 105.5 | - |
 | `molmo2-4b` | Molmo2ForConditionalGeneration | 512 | 1072.9 | 91.1 | - |
@@ -479,7 +479,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `minicpm-v-4.6-mxfp4` | MiniCPMV4_6ForConditionalGeneration | 80 | 620.6 | 229.2 | 112% |
 | `ministral-3b-4bit` | Mistral3ForConditionalGeneration | 613 | 996.4 | 150.1 | 110% |
 | `mistral-small-3.1-24b-4bit` | Mistral3ForConditionalGeneration | 253 | 167.5 | 31.9 | 102% |
-| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 93 | 197.8 | 19.6 | 37% |
+| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 93 | 179.6 | 59.8 | 113% |
 | `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 17 | 6.5 | 65.3 | - |
 | `molmo2-4b` | Molmo2ForConditionalGeneration | 438 | 696.7 | 92.4 | 153% |
 | `molmo-7b` | MolmoForCausalLM | 327 | 583.3 | 110.8 | 142% |
