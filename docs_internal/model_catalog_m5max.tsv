@@ -1,188 +1,188 @@
 local_name	upstream_repo_id	id_source	precision
-ai21-jamba-reasoning-3b-4bit	mlx-community/AI21-Jamba-Reasoning-3B-4bit	readme-heading	4bit
+ai21-jamba-reasoning-3b-4bit	mlx-community/AI21-Jamba-Reasoning-3B-4bit	heading	4bit
 all-minilm-l6-v2		none	unquantized
-apertus-8b-instruct-2509-4bit	mlx-community/Apertus-8B-Instruct-2509-4bit	readme-heading	4bit
-aya-expanse-8b-4bit	mlx-community/aya-expanse-8b-4bit	readme-heading	4bit
-aya-vision-8b-4bit	mlx-community/aya-vision-8b-4bit	readme-heading	4bit
-baichuan-m1-14b-instruct-4bit	mlx-community/Baichuan-M1-14B-Instruct-4bit	readme-heading	4bit
+apertus-8b-instruct-2509-4bit	mlx-community/Apertus-8B-Instruct-2509-4bit	heading	4bit
+aya-expanse-8b-4bit	mlx-community/aya-expanse-8b-4bit	heading	4bit
+aya-vision-8b-4bit	mlx-community/aya-vision-8b-4bit	heading	4bit
+baichuan-m1-14b-instruct-4bit	mlx-community/Baichuan-M1-14B-Instruct-4bit	heading	4bit
 bge-m3-safetensors		none	float32
 bge-reranker-v2-m3		none	float32
-bitnet-b1.58-2b-4t-4bit	mlx-community/bitnet-b1.58-2B-4T-4bit	readme-heading	4bit
-bitnet-b1.58-2b-4t	mlx-community/bitnet-b1.58-2B-4T	readme-heading	bfloat16
-bunny-llama-3-8b-v-4bit	mlx-community/Bunny-Llama-3-8B-V-4bit	readme-heading	4bit
-c4ai-command-r7b-12-2024-4bit	mlx-community/c4ai-command-r7b-12-2024-4bit	readme-heading	4bit
+bitnet-b1.58-2b-4t-4bit	mlx-community/bitnet-b1.58-2B-4T-4bit	heading	4bit
+bitnet-b1.58-2b-4t	mlx-community/bitnet-b1.58-2B-4T	heading	bfloat16
+bunny-llama-3-8b-v-4bit	mlx-community/Bunny-Llama-3-8B-V-4bit	heading	4bit
+c4ai-command-r7b-12-2024-4bit	mlx-community/c4ai-command-r7b-12-2024-4bit	heading	4bit
 colqwen2.5-v0.2-merged		none	bfloat16
 colsmol-256m-merged		none	bfloat16
-deepseek-coder-1.3b-instruct-mlx	mlx-community/deepseek-coder-1.3b-instruct-mlx	readme-heading	bfloat16
-deepseek-ocr-2-4bit	mlx-community/DeepSeek-OCR-2-4bit	readme-heading	4bit
-deepseek-ocr-4bit	mlx-community/DeepSeek-OCR-4bit	readme-heading	4bit
-deepseek-r1-distill-qwen-7b-4bit	mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit	readme-heading	4bit
-deepseek-v2-lite-chat-4bit-mlx	mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx	readme-heading	4bit
-deepseek-v3-0324-4bit	mlx-community/DeepSeek-v3-0324-4bit	readme-heading	4bit
-deepseek-vl2-small-4bit	mlx-community/deepseek-vl2-small-4bit	readme-heading	4bit
-diffusiongemma-26b-a4b-it-4bit	mlx-community/diffusiongemma-26B-A4B-it-4bit	readme-heading	4bit
+deepseek-coder-1.3b-instruct-mlx	mlx-community/deepseek-coder-1.3b-instruct-mlx	heading	bfloat16
+deepseek-ocr-2-4bit	mlx-community/DeepSeek-OCR-2-4bit	heading	4bit
+deepseek-ocr-4bit	mlx-community/DeepSeek-OCR-4bit	heading	4bit
+deepseek-r1-distill-qwen-7b-4bit	mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit	heading	4bit
+deepseek-v2-lite-chat-4bit-mlx	mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx	heading	4bit
+deepseek-v3-0324-4bit	mlx-community/DeepSeek-v3-0324-4bit	heading	4bit
+deepseek-vl2-small-4bit	mlx-community/deepseek-vl2-small-4bit	heading	4bit
+diffusiongemma-26b-a4b-it-4bit	mlx-community/diffusiongemma-26B-A4B-it-4bit	heading	4bit
 docling-layout-heron-mlx-bf16		none	float32
-dots.llm1.inst-mixed-4-6bit	mlx-community/dots.llm1.inst-mixed-4-6bit	readme-heading	4bit
-dots.ocr-4bit	mlx-community/dots.ocr-4bit	readme-heading	4bit
+dots.llm1.inst-mixed-4-6bit	mlx-community/dots.llm1.inst-mixed-4-6bit	heading	4bit
+dots.ocr-4bit	mlx-community/dots.ocr-4bit	heading	4bit
 embeddinggemma-300m-4bit		none	4bit
-ernie-4.5-0.3b-pt-4bit	mlx-community/ERNIE-4.5-0.3B-PT-4bit	readme-heading	4bit
-ernie-4.5-vl-28b-a3b-thinking-4bit	mlx-community/ERNIE-4.5-VL-28B-A3B-Thinking-4bit	readme-heading	4bit
+ernie-4.5-0.3b-pt-4bit	mlx-community/ERNIE-4.5-0.3B-PT-4bit	heading	4bit
+ernie-4.5-vl-28b-a3b-thinking-4bit	mlx-community/ERNIE-4.5-VL-28B-A3B-Thinking-4bit	heading	4bit
 exaone-3.5-2.4b-4bit		none	4bit
-exaone-4.0-1.2b-4bit	mlx-community/exaone-4.0-1.2b-4bit	readme-heading	4bit
-falcon-h1-tiny-90m-instruct-4bit	mlx-community/Falcon-H1-Tiny-90M-Instruct-4bit	readme-heading	4bit
-falcon-mamba-7b-4bit-instruct	mlx-community/falcon-mamba-7b-4bit-instruct	readme-heading	4bit
-fastvlm-0.5b-bf16	mlx-community/FastVLM-0.5B-bf16	readme-heading	unquantized
-gemma-1.1-2b-it-4bit	mlx-community/gemma-1.1-2b-it-4bit	readme-heading	4bit
-gemma-2-2b-it-4bit	mlx-community/gemma-2-2b-it-4bit	readme-heading	4bit
-gemma-2-9b-8bit	mlx-community/gemma-2-9b-8bit	readme-heading	8bit
-gemma-3-1b-it-4bit	mlx-community/gemma-3-1b-it-4bit	readme-heading	4bit
-gemma-3-4b-it-4bit	mlx-community/gemma-3-4b-it-4bit	readme-heading	4bit
-gemma-3n-e2b-it-4bit	mlx-community/gemma-3n-E2B-it-4bit	readme-heading	4bit
-gemma-3n-e4b-bf16	google/gemma-3n-E4B	readme-base_model	bfloat16
-gemma-3n-e4b-it-4bit	mlx-community/gemma-3n-E4B-it-4bit	readme-heading	4bit
+exaone-4.0-1.2b-4bit	mlx-community/exaone-4.0-1.2b-4bit	heading	4bit
+falcon-h1-tiny-90m-instruct-4bit	mlx-community/Falcon-H1-Tiny-90M-Instruct-4bit	heading	4bit
+falcon-mamba-7b-4bit-instruct	mlx-community/falcon-mamba-7b-4bit-instruct	heading	4bit
+fastvlm-0.5b-bf16	mlx-community/FastVLM-0.5B-bf16	heading	unquantized
+gemma-1.1-2b-it-4bit	mlx-community/gemma-1.1-2b-it-4bit	heading	4bit
+gemma-2-2b-it-4bit	mlx-community/gemma-2-2b-it-4bit	heading	4bit
+gemma-2-9b-8bit	mlx-community/gemma-2-9b-8bit	heading	8bit
+gemma-3-1b-it-4bit	mlx-community/gemma-3-1b-it-4bit	heading	4bit
+gemma-3-4b-it-4bit	mlx-community/gemma-3-4b-it-4bit	heading	4bit
+gemma-3n-e2b-it-4bit	mlx-community/gemma-3n-E2B-it-4bit	heading	4bit
+gemma-3n-e4b-bf16	google/gemma-3n-E4B	base_model	bfloat16
+gemma-3n-e4b-it-4bit	mlx-community/gemma-3n-E4B-it-4bit	heading	4bit
 gemma-4-12b-it-4bit		none	4bit
-gemma-4-12b-it-assistant-4bit	mlx-community/gemma-4-12B-it-assistant-4bit	readme-heading	4bit
-gemma-4-26b-a4b-it-4bit	mlx-community/gemma-4-26b-a4b-it-4bit	readme-heading	4bit
-gemma-4-26b-a4b-it-qat-4bit	mlx-community/gemma-4-26B-A4B-it-qat-4bit	readme-heading	4bit
-gemma-4-31b-4bit	mlx-community/gemma-4-31b-4bit	readme-heading	4bit
-gemma-4-31b-it-4bit	mlx-community/gemma-4-31b-it-4bit	readme-heading	4bit
+gemma-4-12b-it-assistant-4bit	mlx-community/gemma-4-12B-it-assistant-4bit	heading	4bit
+gemma-4-26b-a4b-it-4bit	mlx-community/gemma-4-26b-a4b-it-4bit	heading	4bit
+gemma-4-26b-a4b-it-qat-4bit	mlx-community/gemma-4-26B-A4B-it-qat-4bit	heading	4bit
+gemma-4-31b-4bit	mlx-community/gemma-4-31b-4bit	heading	4bit
+gemma-4-31b-it-4bit	mlx-community/gemma-4-31b-it-4bit	heading	4bit
 gemma-4-31b-it-assistant-bf16		none	unquantized
 gemma-4-31b-it-nvfp4		none	unquantized
-gemma-4-31b-it-qat-4bit	mlx-community/gemma-4-31B-it-qat-4bit	readme-heading	4bit
-gemma-4-e2b-it-4bit	mlx-community/gemma-4-e2b-it-4bit	readme-heading	4bit
-gemma-4-e2b-it-8bit	mlx-community/gemma-4-e2b-it-8bit	readme-heading	8bit
-gemma-4-e2b-it-qat-4bit	mlx-community/gemma-4-E2B-it-qat-4bit	readme-heading	4bit
+gemma-4-31b-it-qat-4bit	mlx-community/gemma-4-31B-it-qat-4bit	heading	4bit
+gemma-4-e2b-it-4bit	mlx-community/gemma-4-e2b-it-4bit	heading	4bit
+gemma-4-e2b-it-8bit	mlx-community/gemma-4-e2b-it-8bit	heading	8bit
+gemma-4-e2b-it-qat-4bit	mlx-community/gemma-4-E2B-it-qat-4bit	heading	4bit
 gemma-4-e4b-4bit		none	4bit
-gemma-4-e4b-it-4bit	mlx-community/gemma-4-e4b-it-4bit	readme-heading	4bit
-gemma-4-e4b-it-8bit	mlx-community/gemma-4-e4b-it-8bit	readme-heading	8bit
-gemma-4-e4b-it-qat-4bit	mlx-community/gemma-4-E4B-it-qat-4bit	readme-heading	4bit
-glm-4.1v-9b-thinking-4bit	mlx-community/GLM-4.1V-9B-Thinking-4bit	readme-heading	4bit
-glm-4.5v-4bit	mlx-community/GLM-4.5V-4bit	readme-heading	4bit
-glm-4.7-flash-4bit	mlx-community/GLM-4.7-Flash-4bit	readme-heading	4bit
-glm-5-4bit	mlx-community/GLM-5-4bit	readme-heading	4bit
+gemma-4-e4b-it-4bit	mlx-community/gemma-4-e4b-it-4bit	heading	4bit
+gemma-4-e4b-it-8bit	mlx-community/gemma-4-e4b-it-8bit	heading	8bit
+gemma-4-e4b-it-qat-4bit	mlx-community/gemma-4-E4B-it-qat-4bit	heading	4bit
+glm-4.1v-9b-thinking-4bit	mlx-community/GLM-4.1V-9B-Thinking-4bit	heading	4bit
+glm-4.5v-4bit	mlx-community/GLM-4.5V-4bit	heading	4bit
+glm-4.7-flash-4bit	mlx-community/GLM-4.7-Flash-4bit	heading	4bit
+glm-5-4bit	mlx-community/GLM-5-4bit	heading	4bit
 glm-5.1-4bit		none	?
-glm-ocr-4bit	mlx-community/GLM-OCR-4bit	readme-heading	4bit
-gpt-oss-120b-4bit	mlx-community/gpt-oss-120b-4bit	readme-heading	4bit
-gpt-oss-20b-mxfp4-q4	mlx-community/gpt-oss-20b-MXFP4-Q4	readme-heading	4bit
-granite-3.3-2b-instruct-4bit	mlx-community/granite-3.3-2b-instruct-4bit	readme-heading	4bit
-granite-4.0-3b-vision-4bit	mlx-community/granite-4.0-3b-vision-4bit	readme-heading	4bit
-granite-4.0-h-350m-4bit	mlx-community/granite-4.0-h-350m-4bit	readme-heading	4bit
-granite-4.0-h-tiny-4bit	mlx-community/granite-4.0-h-tiny-4bit	readme-heading	4bit
-granite-4.1-3b-4bit	mlx-community/granite-4.1-3b-4bit	readme-heading	4bit
-granite-4.1-8b-4bit	mlx-community/granite-4.1-8b-4bit	readme-heading	4bit
-granite-speech-4.1-2b-nar-bf16	ibm-granite/granite-speech-4.1-2b-nar	readme-base_model	unquantized
-granite-vision-3.2-2b-4bit	mlx-community/granite-vision-3.2-2b-4bit	readme-heading	4bit
+glm-ocr-4bit	mlx-community/GLM-OCR-4bit	heading	4bit
+gpt-oss-120b-4bit	mlx-community/gpt-oss-120b-4bit	heading	4bit
+gpt-oss-20b-mxfp4-q4	mlx-community/gpt-oss-20b-MXFP4-Q4	heading	4bit
+granite-3.3-2b-instruct-4bit	mlx-community/granite-3.3-2b-instruct-4bit	heading	4bit
+granite-4.0-3b-vision-4bit	mlx-community/granite-4.0-3b-vision-4bit	heading	4bit
+granite-4.0-h-350m-4bit	mlx-community/granite-4.0-h-350m-4bit	heading	4bit
+granite-4.0-h-tiny-4bit	mlx-community/granite-4.0-h-tiny-4bit	heading	4bit
+granite-4.1-3b-4bit	mlx-community/granite-4.1-3b-4bit	heading	4bit
+granite-4.1-8b-4bit	mlx-community/granite-4.1-8b-4bit	heading	4bit
+granite-speech-4.1-2b-nar-bf16	ibm-granite/granite-speech-4.1-2b-nar	base_model	unquantized
+granite-vision-3.2-2b-4bit	mlx-community/granite-vision-3.2-2b-4bit	heading	4bit
 gte-reranker-modernbert-base		none	float32
-hunyuan-1.8b-4bit	mlx-community/Hunyuan-4B-Instruct-1.8bit	readme-heading	4bit
-hunyuan-a13b-instruct-4bit	mlx-community/Hunyuan-A13B-Instruct-4bit	readme-heading	4bit
-hunyuanocr-mlx-4bit	hadeseus/HunyuanOCR-mlx-4bit	readme-heading	4bit
-idefics2-8b-4bit	mlx-community/idefics2-8b-4bit	readme-heading	4bit
-idefics3-8b-llama3-4bit	mlx-community/Idefics3-8B-Llama3-4bit	readme-heading	4bit
-internlm2_5-7b-chat-4bit	mlx-community/internlm2_5-7b-chat-4bit	readme-heading	4bit
-internlm3-8b-instruct-4bit	mlx-community/internlm3-8b-instruct-4bit	readme-heading	4bit
-internvl3-1b-4bit	mlx-community/InternVL3-1B-4bit	readme-heading	4bit
-kimi-vl-a3b-thinking-4bit	mlx-community/Kimi-VL-A3B-Thinking-4bit	readme-heading	4bit
+hunyuan-1.8b-4bit	mlx-community/Hunyuan-4B-Instruct-1.8bit	heading	4bit
+hunyuan-a13b-instruct-4bit	mlx-community/Hunyuan-A13B-Instruct-4bit	heading	4bit
+hunyuanocr-mlx-4bit	hadeseus/HunyuanOCR-mlx-4bit	heading	4bit
+idefics2-8b-4bit	mlx-community/idefics2-8b-4bit	heading	4bit
+idefics3-8b-llama3-4bit	mlx-community/Idefics3-8B-Llama3-4bit	heading	4bit
+internlm2_5-7b-chat-4bit	mlx-community/internlm2_5-7b-chat-4bit	heading	4bit
+internlm3-8b-instruct-4bit	mlx-community/internlm3-8b-instruct-4bit	heading	4bit
+internvl3-1b-4bit	mlx-community/InternVL3-1B-4bit	heading	4bit
+kimi-vl-a3b-thinking-4bit	mlx-community/Kimi-VL-A3B-Thinking-4bit	heading	4bit
 kokoro-82m		none	unquantized
-lfm2-350m-8bit	mlx-community/LFM2-350M-8bit	readme-heading	8bit
-lfm2-8b-a1b-4bit	mlx-community/LFM2-8B-A1B-4bit	readme-heading	4bit
-lfm2-vl-450m-4bit	mlx-community/LFM2-VL-450M-4bit	readme-heading	4bit
+lfm2-350m-8bit	mlx-community/LFM2-350M-8bit	heading	8bit
+lfm2-8b-a1b-4bit	mlx-community/LFM2-8B-A1B-4bit	heading	4bit
+lfm2-vl-450m-4bit	mlx-community/LFM2-VL-450M-4bit	heading	4bit
 lfm2.5-embedding-350m		none	unquantized
-llada2.0-mini-preview-4bit	mlx-community/LLaDA2.0-mini-preview-4bit	readme-heading	4bit
-llama-3.1-8b-instruct	mlx-community/Llama-3.1-8B-Instruct	readme-heading	bfloat16
-llama-3.2-11b-vision-instruct-4bit	mlx-community/Llama-3.2-11B-Vision-Instruct-4bit	readme-heading	4bit
-llama-3.2-1b-instruct-4bit	mlx-community/Llama-3.2-1B-Instruct-4bit	readme-heading	4bit
+llada2.0-mini-preview-4bit	mlx-community/LLaDA2.0-mini-preview-4bit	heading	4bit
+llama-3.1-8b-instruct-bf16	mlx-community/Llama-3.1-8B-Instruct	heading	bfloat16
+llama-3.2-11b-vision-instruct-4bit	mlx-community/Llama-3.2-11B-Vision-Instruct-4bit	heading	4bit
+llama-3.2-1b-instruct-4bit	mlx-community/Llama-3.2-1B-Instruct-4bit	heading	4bit
 llama-3_3-nemotron-super-49b-4bit		none	4bit
-llama-4-scout-17b-16e-instruct-4bit	mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit	readme-heading	4bit
+llama-4-scout-17b-16e-instruct-4bit	mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit	heading	4bit
 llama-nemotron-embed-1b-v2		none	bfloat16
 llama-nemotron-embed-vl-1b-v2		none	bfloat16
-llava-1.5-7b-4bit	mlx-community/llava-1.5-7b-4bit	readme-heading	4bit
-llava-interleave-qwen-0.5b-bf16	mlx-community/llava-interleave-qwen-0.5b-bf16	readme-heading	bfloat16
-llava-v1.6-mistral-7b-4bit	mlx-community/llava-v1.6-mistral-7b-4bit	readme-heading	4bit
+llava-1.5-7b-4bit	mlx-community/llava-1.5-7b-4bit	heading	4bit
+llava-interleave-qwen-0.5b-bf16	mlx-community/llava-interleave-qwen-0.5b-bf16	heading	bfloat16
+llava-v1.6-mistral-7b-4bit	mlx-community/llava-v1.6-mistral-7b-4bit	heading	4bit
 mamba2-1.3b-4bit		none	4bit
 mamba2-130m		none	unquantized
-meta-llama-3.1-8b-instruct-4bit	mlx-community/Meta-Llama-3.1-8B-Instruct-4bit	readme-heading	4bit
-mimo-7b-rl-4bit	mlx-community/MiMo-7B-RL-4bit	readme-heading	4bit
-minicpm-2b-sft-4bit-llama-format-mlx	mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx	readme-heading	4bit
+meta-llama-3.1-8b-instruct-4bit	mlx-community/Meta-Llama-3.1-8B-Instruct-4bit	heading	4bit
+mimo-7b-rl-4bit	mlx-community/MiMo-7B-RL-4bit	heading	4bit
+minicpm-2b-sft-4bit-llama-format-mlx	mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx	heading	4bit
 minicpm-v-4.6-bf16		none	unquantized
 minicpm-v-4.6-mxfp4		none	4bit
-minicpm3-4b-4bit	mlx-community/MiniCPM3-4B-4bit	readme-heading	4bit
-ministral-3-3b-instruct-2512-4bit	mlx-community/Ministral-3-3B-Instruct-2512-4bit	readme-heading	4bit
-mistral-small-3.1-24b-instruct-2503-4bit	mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit	readme-heading	4bit
-mistral-small-4-119b-2603-4bit	mlx-community/Mistral-Small-4-119B-2603-4bit	readme-heading	4bit
-mixtral-8x7b-instruct-v0.1-4bit	mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit	readme-heading	4bit
+minicpm3-4b-4bit	mlx-community/MiniCPM3-4B-4bit	heading	4bit
+ministral-3-3b-instruct-2512-4bit	mlx-community/Ministral-3-3B-Instruct-2512-4bit	heading	4bit
+mistral-small-3.1-24b-instruct-2503-4bit	mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit	heading	4bit
+mistral-small-4-119b-2603-4bit	mlx-community/Mistral-Small-4-119B-2603-4bit	heading	4bit
+mixtral-8x7b-instruct-v0.1-4bit	mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit	heading	4bit
 models		none	?
 modernbert-embed-base		none	float32
-molmo-7b-d-0924-4bit	mlx-community/Molmo-7B-D-0924-4bit	readme-heading	4bit
+molmo-7b-d-0924-4bit	mlx-community/Molmo-7B-D-0924-4bit	heading	4bit
 molmo2-4b		none	8bit
 moondream2		none	bfloat16
 ms-marco-minilm-l6-v2		none	unquantized
 multilingual-e5-small		none	float32
 nemotron-3-embed-1b-bf16-8bit		none	8bit
 nemotron-3-embed-1b-bf16		none	unquantized
-nemotron-3-nano-omni-30b-a3b-reasoning-4bit	mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit	readme-heading	4bit
-nvidia-nemotron-3-nano-30b-a3b-4bit	mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit	readme-heading	4bit
-olmo-1b-hf-4bit-mlx	mlx-community/OLMo-1B-hf-4bit-mlx	readme-heading	4bit
-olmo-2-1124-7b-instruct-4bit	mlx-community/OLMo-2-1124-7B-Instruct-4bit	readme-heading	4bit
-olmo-3.1-32b-think-4bit	mlx-community/Olmo-3.1-32B-Think-4bit	readme-heading	4bit
-paddleocr-vl-bfloat16	mlx-community/PaddleOCR-VL-bfloat16	readme-heading	unquantized
-paligemma2-3b-ft-docci-448-6bit	mlx-community/paligemma2-3b-ft-docci-448-6bit	readme-heading	6bit
-phi-2-hf-4bit-mlx	mlx-community/phi-2-hf-4bit-mlx	readme-heading	4bit
-phi-3-mini-4k-instruct-4bit	mlx-community/Phi-3-mini-4k-instruct-4bit	readme-heading	4bit
-phi-3-small-8k-instruct-aq4_64	mlx-community/Phi-3-small-8k-instruct-aq4_64	readme-heading	4bit
-phi-3.5-mini-instruct-4bit	mlx-community/Phi-3.5-mini-instruct-4bit	readme-heading	4bit
-phi-3.5-moe-instruct-4bit	mlx-community/Phi-3.5-MoE-instruct-4bit	readme-heading	4bit
-phi-3.5-vision-instruct-4bit	mlx-community/Phi-3.5-vision-instruct-4bit	readme-heading	4bit
-phi-4-4bit	mlx-community/phi-4-4bit	readme-heading	4bit
-pixtral-12b-4bit	mlx-community/pixtral-12b-4bit	readme-heading	4bit
-plamo-2-1b	mlx-community/plamo-2-1b	readme-heading	float32
-qwen1.5-moe-a2.7b-chat-4bit	mlx-community/Qwen1.5-MoE-A2.7B-Chat-4bit	readme-heading	4bit
-qwen2-vl-2b-instruct-4bit	mlx-community/Qwen2-VL-2B-Instruct-4bit	readme-heading	4bit
-qwen2.5-0.5b-instruct-4bit	mlx-community/Qwen2.5-0.5B-Instruct-4bit	readme-heading	4bit
-qwen2.5-0.5b-instruct-bf16	mlx-community/Qwen2.5-0.5B-Instruct-bf16	readme-heading	bfloat16
-qwen2.5-1.5b-4bit	mlx-community/Qwen2.5-1.5B-4bit	readme-heading	4bit
-qwen2.5-1.5b-instruct-4bit	mlx-community/Qwen2.5-1.5B-Instruct-4bit	readme-heading	4bit
-qwen2.5-7b-instruct-4bit	mlx-community/Qwen2.5-7B-Instruct-4bit	readme-heading	4bit
-qwen2.5-7b-instruct-8bit	mlx-community/Qwen2.5-7B-Instruct-8bit	readme-heading	8bit
-qwen2.5-vl-3b-instruct-4bit	mlx-community/Qwen2.5-VL-3B-Instruct-4bit	readme-heading	4bit
-qwen3-0.6b-4bit	mlx-community/Qwen3-0.6B-4bit	readme-heading	4bit
-qwen3-1.7b-4bit	mlx-community/Qwen3-1.7B-4bit	readme-heading	4bit
-qwen3-30b-a3b-4bit	mlx-community/Qwen3-30B-A3B-4bit	readme-heading	4bit
-qwen3-4b-4bit	mlx-community/Qwen3-4B-4bit	readme-heading	4bit
-qwen3-8b-4bit	mlx-community/Qwen3-8B-4bit	readme-heading	4bit
-qwen3-coder-480b-a35b-instruct-4bit	mlx-community/Qwen3-Coder-480B-A35B-Instruct-4bit	readme-heading	4bit
+nemotron-3-nano-omni-30b-a3b-reasoning-4bit	mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit	heading	4bit
+nvidia-nemotron-3-nano-30b-a3b-4bit	mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit	heading	4bit
+olmo-1b-hf-4bit-mlx	mlx-community/OLMo-1B-hf-4bit-mlx	heading	4bit
+olmo-2-1124-7b-instruct-4bit	mlx-community/OLMo-2-1124-7B-Instruct-4bit	heading	4bit
+olmo-3.1-32b-think-4bit	mlx-community/Olmo-3.1-32B-Think-4bit	heading	4bit
+paddleocr-vl-bfloat16	mlx-community/PaddleOCR-VL-bfloat16	heading	unquantized
+paligemma2-3b-ft-docci-448-6bit	mlx-community/paligemma2-3b-ft-docci-448-6bit	heading	6bit
+phi-2-hf-4bit-mlx	mlx-community/phi-2-hf-4bit-mlx	heading	4bit
+phi-3-mini-4k-instruct-4bit	mlx-community/Phi-3-mini-4k-instruct-4bit	heading	4bit
+phi-3-small-8k-instruct-aq4_64	mlx-community/Phi-3-small-8k-instruct-aq4_64	heading	4bit
+phi-3.5-mini-instruct-4bit	mlx-community/Phi-3.5-mini-instruct-4bit	heading	4bit
+phi-3.5-moe-instruct-4bit	mlx-community/Phi-3.5-MoE-instruct-4bit	heading	4bit
+phi-3.5-vision-instruct-4bit	mlx-community/Phi-3.5-vision-instruct-4bit	heading	4bit
+phi-4-4bit	mlx-community/phi-4-4bit	heading	4bit
+pixtral-12b-4bit	mlx-community/pixtral-12b-4bit	heading	4bit
+plamo-2-1b	mlx-community/plamo-2-1b	heading	float32
+qwen1.5-moe-a2.7b-chat-4bit	mlx-community/Qwen1.5-MoE-A2.7B-Chat-4bit	heading	4bit
+qwen2-vl-2b-instruct-4bit	mlx-community/Qwen2-VL-2B-Instruct-4bit	heading	4bit
+qwen2.5-0.5b-instruct-4bit	mlx-community/Qwen2.5-0.5B-Instruct-4bit	heading	4bit
+qwen2.5-0.5b-instruct-bf16	mlx-community/Qwen2.5-0.5B-Instruct-bf16	heading	bfloat16
+qwen2.5-1.5b-4bit	mlx-community/Qwen2.5-1.5B-4bit	heading	4bit
+qwen2.5-1.5b-instruct-4bit	mlx-community/Qwen2.5-1.5B-Instruct-4bit	heading	4bit
+qwen2.5-7b-instruct-4bit	mlx-community/Qwen2.5-7B-Instruct-4bit	heading	4bit
+qwen2.5-7b-instruct-8bit	mlx-community/Qwen2.5-7B-Instruct-8bit	heading	8bit
+qwen2.5-vl-3b-instruct-4bit	mlx-community/Qwen2.5-VL-3B-Instruct-4bit	heading	4bit
+qwen3-0.6b-4bit	mlx-community/Qwen3-0.6B-4bit	heading	4bit
+qwen3-1.7b-4bit	mlx-community/Qwen3-1.7B-4bit	heading	4bit
+qwen3-30b-a3b-4bit	mlx-community/Qwen3-30B-A3B-4bit	heading	4bit
+qwen3-4b-4bit	mlx-community/Qwen3-4B-4bit	heading	4bit
+qwen3-8b-4bit	mlx-community/Qwen3-8B-4bit	heading	4bit
+qwen3-coder-480b-a35b-instruct-4bit	mlx-community/Qwen3-Coder-480B-A35B-Instruct-4bit	heading	4bit
 qwen3-embedding-0.6b		none	bfloat16
-qwen3-next-80b-a3b-instruct-4bit	mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit	readme-heading	4bit
-qwen3-omni-30b-a3b-instruct-4bit	mlx-community/Qwen3-Omni-30B-A3B-Instruct-4bit	readme-heading	4bit
+qwen3-next-80b-a3b-instruct-4bit	mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit	heading	4bit
+qwen3-omni-30b-a3b-instruct-4bit	mlx-community/Qwen3-Omni-30B-A3B-Instruct-4bit	heading	4bit
 qwen3-reranker-0.6b-4bit		none	4bit
-qwen3-vl-2b-instruct-4bit	mlx-community/Qwen3-VL-2B-Instruct-4bit	readme-heading	4bit
-qwen3-vl-30b-a3b-instruct-4bit	mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit	readme-heading	4bit
-qwen3-vl-32b-instruct-4bit	mlx-community/Qwen3-VL-32B-Instruct-4bit	readme-heading	4bit
-qwen3-vl-4b-instruct-4bit	mlx-community/Qwen3-VL-4B-Instruct-4bit	readme-heading	4bit
-qwen3-vl-8b-instruct-4bit	mlx-community/Qwen3-VL-8B-Instruct-4bit	readme-heading	4bit
+qwen3-vl-2b-instruct-4bit	mlx-community/Qwen3-VL-2B-Instruct-4bit	heading	4bit
+qwen3-vl-30b-a3b-instruct-4bit	mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit	heading	4bit
+qwen3-vl-32b-instruct-4bit	mlx-community/Qwen3-VL-32B-Instruct-4bit	heading	4bit
+qwen3-vl-4b-instruct-4bit	mlx-community/Qwen3-VL-4B-Instruct-4bit	heading	4bit
+qwen3-vl-8b-instruct-4bit	mlx-community/Qwen3-VL-8B-Instruct-4bit	heading	4bit
 qwen3-vl-embedding-2b		none	unquantized
 qwen3-vl-reranker-2b		none	unquantized
-qwen3.5-0.8b-4bit	mlx-community/Qwen3.5-0.8B-4bit	readme-heading	4bit
-qwen3.5-0.8b-optiq-4bit	mlx-community/Qwen3.5-0.8B-OptiQ-4bit	readme-heading	4bit
-qwen3.5-27b-4bit	mlx-community/Qwen3.5-27B-4bit	readme-heading	4bit
+qwen3.5-0.8b-4bit	mlx-community/Qwen3.5-0.8B-4bit	heading	4bit
+qwen3.5-0.8b-optiq-4bit	mlx-community/Qwen3.5-0.8B-OptiQ-4bit	heading	4bit
+qwen3.5-27b-4bit	mlx-community/Qwen3.5-27B-4bit	heading	4bit
 qwen3.5-27b-dflash		none	unquantized
-qwen3.5-2b-4bit	mlx-community/Qwen3.5-2B-4bit	readme-heading	4bit
-qwen3.5-35b-a3b-4bit	mlx-community/Qwen3.5-35B-A3B-4bit	readme-heading	4bit
+qwen3.5-2b-4bit	mlx-community/Qwen3.5-2B-4bit	heading	4bit
+qwen3.5-35b-a3b-4bit	mlx-community/Qwen3.5-35B-A3B-4bit	heading	4bit
 qwen3.5-4b-4bit		none	4bit
 qwen3.5-4b-dflash		none	unquantized
-qwen3.5-9b-4bit	mlx-community/Qwen3.5-9B-4bit	readme-heading	4bit
-qwen3.5-9b-bf16	Qwen/Qwen3.5-9B	readme-base_model	unquantized
-qwen3.6-35b-a3b-4bit	mlx-community/Qwen3.6-35B-A3B-4bit	readme-heading	4bit
-qwen3.8-27b-4bit	mlx-community/Qwen3.8-27B-4bit	readme-heading	4bit
+qwen3.5-9b-4bit	mlx-community/Qwen3.5-9B-4bit	heading	4bit
+qwen3.5-9b-bf16	Qwen/Qwen3.5-9B	base_model	unquantized
+qwen3.6-35b-a3b-4bit	mlx-community/Qwen3.6-35B-A3B-4bit	heading	4bit
+qwen3.8-27b-4bit	mlx-community/Qwen3.8-27B-4bit	heading	4bit
 qwen3.8-27b-mtp-4bit		none	4bit
 qwen3.8-27b-mtp-bf16		none	unquantized
 recurrentgemma-9b		none	bfloat16
-seed-oss-36b-instruct-4bit	mlx-community/Seed-OSS-36B-Instruct-4bit	readme-heading	4bit
+seed-oss-36b-instruct-4bit	mlx-community/Seed-OSS-36B-Instruct-4bit	heading	4bit
 siglip-base-patch16-224		none	float32
-smollm-135m-instruct-4bit	mlx-community/SmolLM-135M-Instruct-4bit	readme-heading	4bit
-smollm3-3b-4bit	mlx-community/SmolLM3-3B-4bit	readme-heading	4bit
-smolvlm-instruct-bf16	mlx-community/SmolVLM-Instruct-bf16	readme-heading	bfloat16
-solar-open-100b-4bit	mlx-community/Solar-Open-100B-4bit	readme-heading	4bit
-stablelm-2-1_6b-chat-4bit	mlx-community/stablelm-2-1_6b-chat-4bit	readme-heading	4bit
-starcoder2-3b-4bit	mlx-community/starcoder2-3b-4bit	readme-heading	4bit
+smollm-135m-instruct-4bit	mlx-community/SmolLM-135M-Instruct-4bit	heading	4bit
+smollm3-3b-4bit	mlx-community/SmolLM3-3B-4bit	heading	4bit
+smolvlm-instruct-bf16	mlx-community/SmolVLM-Instruct-bf16	heading	bfloat16
+solar-open-100b-4bit	mlx-community/Solar-Open-100B-4bit	heading	4bit
+stablelm-2-1_6b-chat-4bit	mlx-community/stablelm-2-1_6b-chat-4bit	heading	4bit
+starcoder2-3b-4bit	mlx-community/starcoder2-3b-4bit	heading	4bit
 whisper-base		none	float32
 youtu-vl-4b-instruct		none	bfloat16
