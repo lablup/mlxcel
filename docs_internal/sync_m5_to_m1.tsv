@@ -1,0 +1,25 @@
+local_name	precision	upstream_repo_id	requested_at
+bge-m3-safetensors	float32		models/mlx/_m5_only/bge-m3-safetensors
+bge-reranker-v2-m3	float32		models/mlx/_m5_only/bge-reranker-v2-m3
+colqwen2.5-v0.2-merged	bfloat16		models/mlx/_m5_only/colqwen2.5-v0.2-merged
+colsmol-256m-merged	bfloat16		models/mlx/_m5_only/colsmol-256m-merged
+embeddinggemma-300m-4bit	4bit		models/mlx/_m5_only/embeddinggemma-300m-4bit
+gemma-4-e4b-4bit	4bit		models/mlx/_m5_only/gemma-4-e4b-4bit
+glm-5-4bit	4bit	mlx-community/GLM-5-4bit	models/mlx/_m5_only/glm-5-4bit
+glm-5.1-4bit	?		models/mlx/_m5_only/glm-5.1-4bit
+gte-reranker-modernbert-base	float32		models/mlx/_m5_only/gte-reranker-modernbert-base
+kokoro-82m	unquantized		models/mlx/_m5_only/kokoro-82m
+lfm2.5-embedding-350m	unquantized		models/mlx/_m5_only/lfm2.5-embedding-350m
+llama-3_3-nemotron-super-49b-4bit	4bit		models/mlx/_m5_only/llama-3_3-nemotron-super-49b-4bit
+llama-nemotron-embed-1b-v2	bfloat16		models/mlx/_m5_only/llama-nemotron-embed-1b-v2
+llama-nemotron-embed-vl-1b-v2	bfloat16		models/mlx/_m5_only/llama-nemotron-embed-vl-1b-v2
+modernbert-embed-base	float32		models/mlx/_m5_only/modernbert-embed-base
+multilingual-e5-small	float32		models/mlx/_m5_only/multilingual-e5-small
+nemotron-3-embed-1b-bf16	unquantized		models/mlx/_m5_only/nemotron-3-embed-1b-bf16
+nemotron-3-embed-1b-bf16-8bit	8bit		models/mlx/_m5_only/nemotron-3-embed-1b-bf16-8bit
+qwen3-embedding-0.6b	bfloat16		models/mlx/_m5_only/qwen3-embedding-0.6b
+qwen3-reranker-0.6b-4bit	4bit		models/mlx/_m5_only/qwen3-reranker-0.6b-4bit
+qwen3-vl-embedding-2b	unquantized		models/mlx/_m5_only/qwen3-vl-embedding-2b
+qwen3-vl-reranker-2b	unquantized		models/mlx/_m5_only/qwen3-vl-reranker-2b
+siglip-base-patch16-224	float32		models/mlx/_m5_only/siglip-base-patch16-224
+whisper-base	float32		models/mlx/_m5_only/whisper-base
