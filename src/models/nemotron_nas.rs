@@ -26,7 +26,7 @@
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, repeat_kv};
+use mlxcel_core::utils::create_causal_mask;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{
     MlxArray, UniquePtr, add, array_shape, copy, fast_rope, gelu, multiply, relu, reshape, silu,
@@ -237,6 +237,15 @@ impl NASAttention {
             &[batch, seq_len, self.n_kv_heads as i32, self.head_dim as i32],
         );
 
+        // Transpose to [batch, n_heads, seq_len, head_dim] before RoPE, not
+        // after. `fast_rope` reads token positions off the second-to-last
+        // axis, so rotating `[B, L, H, D]` makes the head index the position:
+        // every token in a head shares one angle. Same defect #1687 fixed in
+        // `recurrent_gemma.rs`; every other decoder here transposes first.
+        let q = transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = transpose_axes(&v, &[0, 2, 1, 3]);
+
         // Apply RoPE
         let offset = cache.offset;
         let q = fast_rope(
@@ -256,21 +265,12 @@ impl NASAttention {
             offset,
         );
 
-        // Transpose to [batch, n_heads, seq_len, head_dim]
-        let q = transpose_axes(&q, &[0, 2, 1, 3]);
-        let k = transpose_axes(&k, &[0, 2, 1, 3]);
-        let v = transpose_axes(&v, &[0, 2, 1, 3]);
-
         // Update KV cache and get full keys/values
         let (k, v) = cache.update_and_fetch(k, v);
 
-        // Repeat KV for GQA if needed
-        let n_rep = (self.n_heads / self.n_kv_heads) as i32;
-        let (k, v) = if n_rep > 1 {
-            (repeat_kv(&k, n_rep), repeat_kv(&v, n_rep))
-        } else {
-            (k, v)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy
+        // of the whole live cache on every decode step (#1686).
 
         // Scaled dot-product attention
         let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
