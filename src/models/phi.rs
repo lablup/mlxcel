@@ -190,11 +190,13 @@ impl Attention {
         // layers. `phi-2-4bit` goes NaN at layer 29 of 32 in f16, after which
         // every sampled token is the argmax of a NaN row and decodes as `!`.
         // The cache stays f16; only the arithmetic widens.
+        // Upstream widens the queries alone, and MLX promotes the score matmul to
+        // match its wider operand, so that is enough to keep `q @ k^T` out of f16.
+        // The values are only ever multiplied by probabilities in [0, 1] and cannot
+        // overflow, so widening them would double the V read on every decode step
+        // and buy nothing.
         let dtype = mlxcel_core::array_dtype(&cache_v);
-        let f32_dtype = mlxcel_core::dtype::FLOAT32;
-        let q = mlxcel_core::astype(&q, f32_dtype);
-        let cache_k = mlxcel_core::astype(&cache_k, f32_dtype);
-        let cache_v = mlxcel_core::astype(&cache_v, f32_dtype);
+        let q = mlxcel_core::astype(&q, mlxcel_core::dtype::FLOAT32);
 
         let attn_out = if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
