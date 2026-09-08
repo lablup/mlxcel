@@ -58,7 +58,7 @@ The sweep walks every checkpoint directory under `models/mlx`. What it does with
 
 | Outcome | Text | Notes |
 |---|--:|---|
-| Measured | 165 | |
+| Measured | 173 | Includes 8 checkpoints fetched on 2026-09-08 and 12 re-measured after #1686 |
 | Alias of another checkpoint | 16 | Same `config.json` hash and shard set; measured once |
 | Not a checkpoint | 2 | `models` and `large_models`, container directories |
 | Over the memory limit | 1 | `mimo-v2-flash-4bit` |
@@ -81,7 +81,7 @@ All 15 text-sweep failures resolve to something other than a runtime bug, so the
 
 The first six rows are not text-generation models and cannot produce a decode figure; the drafters and speculative variants are components of a pairing rather than standalone targets, and belong in the speculative sweep instead. `afm-4.5b` is the only real coverage gap: `mlxcel generate` reports `Unsupported model type: arcee` and `arcee` is absent from `mlxcel list`.
 
-The Python baseline measured 124 of the same set, so parity is computed over the 107 models both sides measured. One of those, `plamo-2-1b`, was added on 2026-09-07 after `numba` was installed; its earlier `FAIL:warmup` was a missing dependency of the checkpoint's remote code, not a property of the model. Its own failures are not analysed here; they say what mlx-lm loads, not what mlxcel does.
+The Python baseline measured 124 of the same set, so parity is computed over the 107 models both sides measured. The eight checkpoints added on 2026-09-08 have no baseline row yet and are not in that figure. One of those, `plamo-2-1b`, was added on 2026-09-07 after `numba` was installed; its earlier `FAIL:warmup` was a missing dependency of the checkpoint's remote code, not a property of the model. Its own failures are not analysed here; they say what mlx-lm loads, not what mlxcel does.
 
 ## Performance against the Python baselines
 
@@ -89,9 +89,9 @@ Parity is `mlxcel decode tok/s / baseline decode tok/s`, over the 107 text model
 
 | Population | n | Median | Quartiles | Range |
 |---|--:|--:|---|---|
-| All text models | 107 | 100% | 98 / 105 | 26-140% |
-| MoE | 24 | 106% | 101 / 110 | 78-140% |
-| Dense | 83 | 100% | 97 / 102 | 26-115% |
+| All text models | 107 | 100% | 99 / 105 | 28-140% |
+| MoE | 24 | 106% | 101 / 111 | 78-140% |
+| Dense | 83 | 100% | 98 / 102 | 28-115% |
 
 The overall median sits at parity, which is the expected result for two runtimes calling the same MLX kernels on the same weights.
 
@@ -100,6 +100,14 @@ This ratio is the runtime claim and it is the one to read first. It is measured 
 MoE is the one population that separates. Its lower quartile (101%) is above the dense median, so three quarters of MoE checkpoints are ahead rather than a few large wins pulling an average. The direction matches the fused decode-MoE kernel, which replaces `gather_qmm` on small-expert families and gains in proportion to how much of the model is MoE. `trinity-nano-preview-4bit` at 140%, `qwen3-30b-a3b-4bit` at 125% and `klear-46b-a2.5b-instruct-4bit` at 123% are the largest.
 
 Quantization is not a factor. Non-quantized checkpoints have a median of 98% against 100% for quantized, and 11 of the 14 sit between 89% and 109%. An earlier reading that the slowest three models were all non-quantized was a coincidence of a three-model sample, not a property of the non-quantized path.
+
+### The same redundancy, found switched off
+
+`compiled_softcap_sdpa_gqa` already carried a decode branch that keeps K and V at `[B, H_kv, S, D]` and broadcasts `n_rep` inside the matmul, which is what #1686 went on to do by hand in the VL decoders. It sat behind `MLXCEL_ENABLE_SOFTCAP_GQA_DECODE_GROUPED` and was off, so every Gemma 2 decode step fell through to `do_repeat_kv` instead. Turning it on by default moves `gemma2-2b-4bit` from 99% of mlx-lm to 107% and `gemma-2-9b-8bit` from 43.66 to 46.76 tok/s.
+
+The gain is smaller here than on M5 Max, where the same change is worth 1.12x and 1.17x against 1.07x on both here. That is the direction bandwidth predicts: this host was already at 99% because the copy it removes weighs less against a wider memory bus, so there was less to recover.
+
+The attribution is checked rather than assumed. `MLXCEL_DISABLE_SOFTCAP_GQA_DECODE_GROUPED=1` restores the old path and measures 146.25 and 43.45, back at the recorded 144.91 and 43.66. A background-load artefact would not respond to that flag.
 
 ### Open performance gaps
 
@@ -122,16 +130,31 @@ Ruled out so far, so the next investigation does not repeat it:
 
 What has not been checked is the MLP and linear path, and the two architecture features these share with each other and with little else: GPT-NeoX's partial rotary (`rotary_pct`) and GPT-BigCode's fused `c_attn`. That needs a profile on a quiet host rather than more reading.
 
-The Qwen VL family forms a second, milder band: `qwen2.5-vl-3b-4bit` at 59% and `qwen2-vl-2b-4bit` at 60%, with the qwen3-vl checkpoints at 83-92%. The 4-bit Qwen 2.5 VL checkpoint is more than twice as fast relative to baseline as its bf16 sibling above, so whatever the bf16 row hits is not what the 4-bit rows hit.
+### The Qwen VL gap closed, and it closed in two pieces
 
-A single ratio understates this one. Measured on M5 Max across prompt lengths, `qwen2.5-vl-3b-4bit` loses throughput as context grows and the baseline does not:
+The 2026-09-06 sweep had `qwen2.5-vl-3b-4bit` at 59% of mlx-lm and `qwen2-vl-2b-4bit` at 60%, with the qwen3-vl checkpoints at 83-92%, and this document described the shape as a structural gap that widened with context. It did widen: measured on M5 Max, `qwen2.5-vl-3b-4bit` fell from 71% of baseline at a 64-token prompt to 46% at 2048.
 
-| Prompt tokens | mlxcel | mlx-lm | Ratio |
-|--:|--:|--:|--:|
-| 64 | 160.5 | 225.5 | 71% |
-| 128 | 156.2 | 224.4 | 70% |
-| 512 | 137.8 | 218.0 | 63% |
-| 2048 | 95.8 | 206.1 | 46% |
+The cause was a GQA KV expansion. The decoder called `repeat_kv` to widen the cache by `n_rep` before handing it to the fused SDPA, which broadcasts KV heads internally, so the copy was pure duplication of the whole live cache on every decode step. Removing it (#1686) takes the curve to 9.7% loss over the same 32x context increase, against 9 to 11% for mlx-lm, which is not a smaller gap but the absence of the term that produced it.
+
+A second fix followed. `qwen3_vl.rs` already routed a run with no vision state to a text-only path; `qwen2_vl.rs` did not, and paid the MRoPE table build on every text token. Adding it there is where the `qwen2*` prefill numbers move.
+
+The two fixes land in different places, which is why the gains look uneven:
+
+| Checkpoint | Prefill | Decode | Fixes applied |
+|---|--:|--:|---|
+| `qwen2-vl-2b-4bit` | 1.20x | 1.71x | both |
+| `qwen2.5-vl-3b-4bit` | 1.20x | 1.67x | both |
+| `qwen2.5-vl-3b-hf` | 1.43x | 4.07x | both |
+| `qwen3-vl-2b-4bit` | 1.02x | 1.09x | KV only |
+| `qwen3-vl-4b-4bit` | 1.00x | 1.23x | KV only |
+| `qwen3-vl-8b-4bit` | 1.01x | 1.15x | KV only |
+| `qwen3-vl-30b-a3b-4bit` | 1.02x | 1.15x | KV only |
+| `qwen3-vl-32b-4bit` | 1.02x | 1.13x | KV only |
+| `paddleocr-vl-bfloat16` | 1.03x | 1.12x | KV only |
+
+Prefill moves only where the text-only path was added, and the KV-only rows gain modestly at this prompt length because the term removed grows with context: 512 tokens is near the flat end of the curve above.
+
+One difference inside the `qwen2*` group is not explained. `qwen2.5-vl-3b-hf` and `qwen2.5-vl-3b-4bit` are the same architecture with the same head counts and the same two fixes, and gain 4.07x against 1.67x. The obvious account, that a KV cache is f16 regardless of weight quantization so the removed copy is a larger share of a shorter 4-bit decode step, predicts the opposite ordering. Recorded as measured, unexplained.
 
 Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and mlx-lm gives up 9%. The sweep figure is one point on that curve at 512, and production contexts are longer, so this is a structural gap that widens rather than a fixed deficit.
 
@@ -145,7 +168,9 @@ Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and 
 
 mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than on text. The widest margins are `jina-vlm-mlx` at 206%, `phi-3.5-vision-4bit` at 171% and `qwen3-omni-30b-a3b-instruct-4bit` at 166%.
 
-The bottom of the range repeats a name from the text table: `qwen2.5-vl-3b-hf` is at 27% here and 26% there. A gap that survives both modes belongs to that checkpoint rather than to either path. `mistral-small-4-119b-2603-4bit` at 36% and `paddleocr-vl-bfloat16` at 39% are the other two below half, and the 4-bit Qwen 2.5 VL sibling sits at 70% against the bf16 checkpoint's 27%.
+**These VLM rows predate #1686 and its follow-up.** The text table above was re-measured on the fixed build; this one was not, so every Qwen VL and `paddleocr` figure here still carries the GQA KV expansion. `qwen2.5-vl-3b-hf` reads 27% below and 106% in the text table for that reason, not because the two paths disagree. Read the low end here as a snapshot of the old build until the VLM sweep is re-run.
+
+Within that caveat, `mistral-small-4-119b-2603-4bit` at 36% is the one low row the fix does not explain: it is not in the set #1686 touched.
 
 ### Failures
 
@@ -221,7 +246,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 
 ## Text results
 
-165 models, 512-token prompt, 128 generated tokens. `vs baseline` is mlx-lm 0.31.3 on the same host and day; `-` means mlx-lm did not measure that model.
+173 models, 512-token prompt, 128 generated tokens. `vs baseline` is mlx-lm 0.31.3 on the same host and day; `-` means mlx-lm did not measure that model.
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
@@ -242,16 +267,18 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 512 | 4430.4 | 278.5 | - |
 | `deepseek-v2-lite-4bit` | DeepseekV2ForCausalLM | 512 | 537.1 | 110.8 | 100% |
 | `diffusiongemma-26b-a4b-it-4bit` | DiffusionGemmaForBlockDiffusion | 512 | 785.4 | 66.7 | - |
+| `dots.llm1.inst-mixed-4-6bit` | Dots1ForCausalLM | 512 | 210.2 | 29.1 | - |
 | `dots.ocr-4bit` | DotsOCRForCausalLM | 512 | 2245.1 | 193.4 | - |
 | `ernie-4.5-0.3b-4bit` | Ernie4_5_ForCausalLM | 512 | 7224.0 | 464.2 | - |
 | `ernie-4.5-vl-28b-a3b-thinking-4bit` | Ernie4_5_VLMoeForConditionalGeneration | 512 | 840.6 | 82.9 | - |
 | `exaone-3.5-2.4b-4bit` | ExaoneForCausalLM | 512 | 2097.2 | 181.5 | 98% |
 | `exaone4-1.2b-4bit` | Exaone4ForCausalLM | 512 | 2591.1 | 234.5 | - |
-| `falcon-h1-tiny-90m-instruct-4bit` | FalconH1ForCausalLM | 512 | 5679.1 | 330.7 | 108% |
+| `falcon-h1-tiny-90m-instruct-4bit` | FalconH1ForCausalLM | 512 | 9680.0 | 351.1 | 115% |
 | `falcon-mamba-7b-4bit` | FalconMambaForCausalLM | 512 | 198.5 | 71.8 | 113% |
 | `falcon-ocr` | FalconOCRForCausalLM | 512 | 9792.6 | 241.2 | - |
 | `florence-2-base-ft-4bit` | Florence2ForConditionalGeneration | 512 | 10215.5 | 416.8 | - |
 | `florence-2-large-ft-4bit` | Florence2ForConditionalGeneration | 512 | 6275.9 | 230.0 | - |
+| `gemma-2-9b-8bit` | Gemma2ForCausalLM | 512 | 598.2 | 46.8 | - |
 | `gemma-2b-4bit` | GemmaForCausalLM | 512 | 2095.2 | 186.3 | 99% |
 | `gemma-3-1b-it-4bit` | Gemma3ForCausalLM | 512 | 4137.0 | 222.9 | 113% |
 | `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 512 | 968.8 | 100.5 | 107% |
@@ -268,10 +295,12 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `gemma-4-e4b-it-4bit` | Gemma4ForConditionalGeneration | 512 | 768.6 | 76.3 | - |
 | `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 512 | 757.4 | 62.8 | - |
 | `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 512 | 745.6 | 68.6 | 101% |
-| `gemma2-2b-4bit` | Gemma2ForCausalLM | 512 | 1912.6 | 144.9 | 99% |
+| `gemma2-2b-4bit` | Gemma2ForCausalLM | 512 | 1955.8 | 154.4 | 106% |
 | `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 512 | 1359.8 | 82.2 | - |
 | `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 512 | 761.7 | 62.3 | - |
 | `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 512 | 928.1 | 33.6 | 89% |
+| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 512 | 536.9 | 55.5 | - |
+| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 512 | 234.0 | 17.7 | - |
 | `glm4-flash-4bit` | Glm4MoeLiteForCausalLM | 512 | 718.2 | 50.3 | 105% |
 | `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 512 | 5250.5 | 206.1 | - |
 | `gpt2` | GPT2LMHeadModel | 512 | 13868.3 | 208.7 | 96% |
@@ -283,20 +312,23 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 512 | 1103.1 | 128.1 | - |
 | `granite-4.1-3b-4bit` | GraniteForCausalLM | 512 | 1089.6 | 128.6 | 100% |
 | `granite-4.1-8b-4bit` | GraniteForCausalLM | 512 | 469.2 | 71.9 | 100% |
-| `granite-4.0-h-350m-4bit` | GraniteMoeHybridForCausalLM | 512 | 3511.7 | 266.2 | 100% |
-| `granite-4.0-h-tiny-4bit` | GraniteMoeHybridForCausalLM | 512 | 1402.5 | 109.1 | 93% |
+| `granite-4.0-h-350m-4bit` | GraniteMoeHybridForCausalLM | 512 | 5173.2 | 264.8 | 100% |
+| `granite-4.0-h-tiny-4bit` | GraniteMoeHybridForCausalLM | 512 | 1688.0 | 107.2 | 91% |
 | `helium-1-preview-2b-4bit` | HeliumForCausalLM | 512 | 2471.0 | 196.7 | 96% |
+| `moondream2` | HfMoondream | 512 | 2236.6 | 45.1 | - |
 | `hunyuan-1.8b-4bit` | HunYuanDenseV1ForCausalLM | 512 | 1965.2 | 173.1 | 94% |
 | `hunyuan-13b` | HunYuanMoEV1ForCausalLM | 512 | 244.0 | 44.1 | - |
 | `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 512 | 4872.7 | 199.3 | - |
 | `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 512 | 786.9 | 109.0 | - |
 | `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 512 | 749.4 | 104.5 | - |
+| `smolvlm-instruct-bf16` | Idefics3ForConditionalGeneration | 512 | 3231.4 | 128.0 | - |
 | `internlm2-7b-4bit` | InternLM2ForCausalLM | 512 | 764.2 | 105.4 | 99% |
 | `internlm3-8b-4bit` | InternLM3ForCausalLM | 512 | 671.4 | 84.2 | - |
 | `internvl3-1b` | InternVLChatModel | 512 | 6982.6 | 331.9 | - |
 | `iquest-coder-v1-7b-instruct-8bit` | IQuestCoderForCausalLM | 512 | 563.6 | 70.7 | 100% |
 | `jamba-v0.1-4bit` | JambaForCausalLM | 512 | 213.9 | 131.0 | 100% |
 | `jina-vlm-mlx` | JinaVLMForConditionalGeneration | 512 | 2478.9 | 168.4 | - |
+| `kimi-vl-a3b-thinking-4bit` | KimiVLForConditionalGeneration | 512 | 528.2 | 98.4 | - |
 | `klear-46b-a2.5b-instruct-4bit` | KlearMoeForCausalLM | 512 | 963.7 | 93.1 | 123% |
 | `lfm2-350m-8bit` | Lfm2ForCausalLM | 512 | 7711.8 | 568.1 | 105% |
 | `lfm2-8b-a1b-4bit` | Lfm2MoeForCausalLM | 512 | 2128.4 | 195.2 | 106% |
@@ -327,6 +359,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `mistral-small-3.1-24b-4bit` | Mistral3ForConditionalGeneration | 512 | 179.0 | 31.4 | 100% |
 | `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 512 | 382.2 | 18.9 | - |
 | `mixtral-8x7b-4bit` | MixtralForCausalLM | 512 | 333.4 | 54.5 | 100% |
+| `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 512 | 750.6 | 105.5 | - |
 | `molmo-7b` | MolmoForCausalLM | 512 | 789.8 | 108.9 | - |
 | `molmo2-4b` | Molmo2ForConditionalGeneration | 512 | 1072.9 | 91.1 | - |
 | `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 512 | 349.9 | 96.0 | - |
@@ -335,7 +368,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `olmo3-32b-4bit` | Olmo3ForCausalLM | 512 | 129.0 | 21.6 | 101% |
 | `olmo-1b-4bit` | OlmoModelForCausalLM | 512 | 3505.6 | 184.5 | - |
 | `openelm-1_1b-instruct-4bit` | OpenELMForCausalLM | 512 | 4150.9 | 278.9 | - |
-| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 512 | 6875.6 | 118.4 | - |
+| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 512 | 7089.8 | 132.6 | - |
 | `paligemma2-3b-6bit` | PaliGemmaForConditionalGeneration | 512 | 1814.3 | 129.9 | - |
 | `phi-2-4bit` | PhiForCausalLM | 512 | 1656.9 | 128.6 | - |
 | `phi-3-mini-4bit` | Phi3ForCausalLM | 512 | 1446.2 | 151.4 | 99% |
@@ -347,18 +380,18 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `phi-4-4bit` | Phi3ForCausalLM | 512 | 405.6 | 57.6 | 100% |
 | `phixtral-4x2_8-4bit` | PhiForCausalLM | 512 | 926.7 | 73.1 | 78% |
 | `phi-3.5-moe-4bit` | PhiMoEForCausalLM | 512 | 602.1 | 75.1 | 110% |
-| `plamo-2-1b` | PlamoForCausalLM | 512 | 2961.3 | 107.5 | - |
+| `plamo-2-1b` | PlamoForCausalLM | 512 | 2961.3 | 107.5 | 100% |
 | `deepseek-r1-distill-7b-4bit` | Qwen2ForCausalLM | 512 | 788.5 | 107.1 | 100% |
 | `qwen1.5-moe-a2.7b-4bit` | Qwen2MoeForCausalLM | 512 | 1684.3 | 143.7 | 107% |
 | `qwen2-0.5b` | Qwen2ForCausalLM | 512 | 6816.2 | 331.6 | 115% |
-| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 512 | 2537.8 | 131.1 | 60% |
+| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 512 | 3042.6 | 224.4 | 102% |
 | `qwen2.5-0.5b-bf16` | Qwen2ForCausalLM | 512 | 7548.1 | 274.3 | 109% |
 | `qwen2.5-1.5b-4bit` | Qwen2ForCausalLM | 512 | 2887.8 | 230.2 | 105% |
 | `qwen2.5-1.5b-instruct-4bit` | Qwen2ForCausalLM | 512 | 2910.1 | 223.8 | 102% |
 | `qwen2.5-7b-4bit` | Qwen2ForCausalLM | 512 | 779.2 | 105.3 | 99% |
 | `qwen2.5-7b-8bit` | Qwen2ForCausalLM | 512 | 783.5 | 67.5 | 97% |
-| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 512 | 1397.1 | 89.7 | 59% |
-| `qwen2.5-vl-3b-hf` | Qwen2_5_VLForConditionalGeneration | 512 | 1265.0 | 18.5 | 26% |
+| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 512 | 1674.4 | 150.0 | 99% |
+| `qwen2.5-vl-3b-hf` | Qwen2_5_VLForConditionalGeneration | 512 | 1803.9 | 75.2 | 106% |
 | `qwen3-0.6b-4bit` | Qwen3ForCausalLM | 512 | 4754.1 | 249.9 | 105% |
 | `qwen3-1.7b-4bit` | Qwen3ForCausalLM | 512 | 2037.4 | 185.3 | 98% |
 | `qwen3-30b-a3b-4bit` | Qwen3MoeForCausalLM | 512 | 858.4 | 82.3 | 125% |
@@ -366,11 +399,11 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen3-8b-4bit` | Qwen3ForCausalLM | 512 | 518.0 | 81.2 | 101% |
 | `qwen3-next-80b-a3b-instruct-4bit` | Qwen3NextForCausalLM | 512 | 615.1 | 60.0 | 118% |
 | `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 512 | 845.4 | 70.3 | - |
-| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 512 | 2036.4 | 170.7 | 90% |
-| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 512 | 837.9 | 70.8 | 107% |
-| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 512 | 125.6 | 19.5 | 92% |
-| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 512 | 945.3 | 95.9 | 83% |
-| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 512 | 519.1 | 70.9 | 88% |
+| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 512 | 2082.6 | 186.2 | 98% |
+| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 512 | 851.9 | 81.2 | 123% |
+| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 512 | 128.1 | 21.9 | 103% |
+| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 512 | 944.1 | 117.6 | 101% |
+| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 512 | 522.1 | 81.3 | 101% |
 | `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3779.6 | 279.3 | 102% |
 | `qwen3.5-0.8b-optiq-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3749.2 | 262.0 | 103% |
 | `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 152.7 | 25.1 | 97% |

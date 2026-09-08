@@ -239,6 +239,18 @@
 "shards": 1,
 "vocab": null
 },
+"dots.llm1.inst-mixed-4-6bit": {
+"arch": "Dots1ForCausalLM",
+"bits": 4,
+"bytes": 86085905592,
+"cfg_sha": "395e2c852951",
+"group": 64,
+"hidden": 4096,
+"layers": 62,
+"shard_source": "index",
+"shards": 17,
+"vocab": 152064
+},
 "dots.ocr-4bit": {
 "arch": "DotsOCRForCausalLM",
 "bits": 4,
@@ -370,6 +382,18 @@
 "shard_source": "index",
 "shards": 1,
 "vocab": 51289
+},
+"gemma-2-9b-8bit": {
+"arch": "Gemma2ForCausalLM",
+"bits": 8,
+"bytes": 9820000722,
+"cfg_sha": "b8706d7b47e9",
+"group": 64,
+"hidden": 3584,
+"layers": 42,
+"shard_source": "index",
+"shards": 2,
+"vocab": 256000
 },
 "gemma-2b-4bit": {
 "arch": "GemmaForCausalLM",
@@ -658,6 +682,30 @@
 "shard_source": "index",
 "shards": 4,
 "vocab": 262400
+},
+"glm-4.1v-9b-thinking-4bit": {
+"arch": "Glm4vForConditionalGeneration",
+"bits": 4,
+"bytes": 7074017754,
+"cfg_sha": "dc52582b6322",
+"group": 64,
+"hidden": 4096,
+"layers": 40,
+"shard_source": "glob-stale-index",
+"shards": 2,
+"vocab": 151552
+},
+"glm-4.5v-4bit": {
+"arch": "Glm4vMoeForConditionalGeneration",
+"bits": 4,
+"bytes": 61857424876,
+"cfg_sha": "05580742de18",
+"group": 64,
+"hidden": 4096,
+"layers": 46,
+"shard_source": "glob-stale-index",
+"shards": 12,
+"vocab": 151552
 },
 "glm-ocr-4bit": {
 "arch": "GlmOcrForConditionalGeneration",
@@ -983,6 +1031,18 @@
 "shards": 1,
 "vocab": 151936
 },
+"kimi-vl-a3b-thinking-4bit": {
+"arch": "KimiVLForConditionalGeneration",
+"bits": 4,
+"bytes": 9833812376,
+"cfg_sha": "de2a7d0d5123",
+"group": 64,
+"hidden": 2048,
+"layers": 27,
+"shard_source": "glob-stale-index",
+"shards": 2,
+"vocab": 163840
+},
 "klear-46b-a2.5b-instruct-4bit": {
 "arch": "KlearMoeForCausalLM",
 "bits": 4,
@@ -1089,6 +1149,18 @@
 "layers": 32,
 "shard_source": "index",
 "shards": 4,
+"vocab": 128256
+},
+"llama-3.2-11b-vision-instruct-4bit": {
+"arch": "MllamaForConditionalGeneration",
+"bits": 4,
+"bytes": 6007438436,
+"cfg_sha": "91903c927d36",
+"group": 64,
+"hidden": 4096,
+"layers": 40,
+"shard_source": "index",
+"shards": 2,
 "vocab": 128256
 },
 "llama-3.2-1b-4bit": {
@@ -1354,6 +1426,18 @@
 "shard_source": "glob-stale-index",
 "shards": 2,
 "vocab": 151936
+},
+"moondream2": {
+"arch": "HfMoondream",
+"bits": null,
+"bytes": 3854538968,
+"cfg_sha": "c4d59ae1179c",
+"group": null,
+"hidden": null,
+"layers": null,
+"shard_source": "glob",
+"shards": 1,
+"vocab": null
 },
 "ms-marco-minilm-l6-v2": {
 "arch": "BertForSequenceClassification",
@@ -2266,6 +2350,18 @@
 "shard_source": "index",
 "shards": 1,
 "vocab": 128256
+},
+"smolvlm-instruct-bf16": {
+"arch": "Idefics3ForConditionalGeneration",
+"bits": null,
+"bytes": 4492627795,
+"cfg_sha": "c657de8af3b7",
+"group": null,
+"hidden": 2048,
+"layers": 24,
+"shard_source": "index",
+"shards": 1,
+"vocab": 49155
 },
 "solar-open-100b-4bit": {
 "arch": "SolarOpenForCausalLM",
