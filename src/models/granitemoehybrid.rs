@@ -452,7 +452,8 @@ impl GraniteMoeHybridMamba2Mixer {
         // `eval` here is gone: measured on M5 Max with MLX pin 9a795735 it cost
         // 3.31x decode on Falcon-H1 and 2.24x on GraniteMoeHybrid while greedy
         // output stayed byte-identical with it removed, across short and long
-        // prompts. `mamba2_hybrid_decode_is_finite` guards the regression it
+        // prompts. `mamba2_hybrid_decode_is_finite` in
+        // `tests/mamba2_hybrid_finite.rs` guards the regression it
         // was protecting against. CLAUDE.md "Apple Silicon precision".
         result
     }
