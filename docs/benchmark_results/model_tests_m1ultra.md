@@ -86,7 +86,7 @@ All 15 text-sweep failures resolve to something other than a runtime bug, so the
 | Object detection | 1 | `docling-layout-heron-mlx-bf16` (RT-DETRv2) |
 | Unsupported architecture | 1 | `afm-4.5b` |
 
-The first six rows are not text-generation models and cannot produce a decode figure; the drafters and speculative variants are components of a pairing rather than standalone targets, and belong in the speculative sweep instead. `afm-4.5b` is the only real coverage gap: `mlxcel generate` reports `Unsupported model type: arcee` and `arcee` is absent from `mlxcel list`.
+The first six rows are not text-generation models and cannot produce a decode figure; the drafters and speculative variants are components of a pairing rather than standalone targets, and belong in the speculative sweep instead. `afm-4.5b` is the only real coverage gap: `mlxcel generate` reports `Unsupported model type: arcee`. Checking that against `mlxcel arch`, which is the command that lists architectures, takes a second look: an "Arcee" heading is present, but the entry under it is the AFMoE / Trinity MoE variant, and this checkpoint is the dense `ArceeForCausalLM`. The vendor heading is not the answer; the entry under it is.
 
 The Python baseline measured 124 of the same set, so parity is computed over the 107 models both sides measured. The eight checkpoints added on 2026-09-08 have no baseline row yet and are not in that figure. One of those, `plamo-2-1b`, was added on 2026-09-07 after `numba` was installed; its earlier `FAIL:warmup` was a missing dependency of the checkpoint's remote code, not a property of the model. Its own failures are not analysed here; they say what mlx-lm loads, not what mlxcel does.
 
@@ -245,7 +245,7 @@ M5 Max measured at `a50ff440`, M1 Ultra at `30ab5a39`, eight commits later on th
 | Qwen VL band, 59-92% | `qwen2.5-vl-3b-4bit` 59% and `qwen2-vl-2b-4bit` 60% on text, qwen3-vl 83-92% |
 | `granite-vision-3.2-2b-4bit` refuses descriptive prompts | lablup/mlxcel#1683. The image does reach the model: it answers colour questions correctly on three different solid images. Only descriptive prompts draw a refusal, and mlx-vlm answers those |
 | `minicpm-v-4.6-bf16` names the wrong colour under mlxcel | Under investigation. mlx-vlm gets it right, and the two prompt lengths differ (32 against 78) |
-| `afm-4.5b` | `arcee` is not in `mlxcel list`. A coverage gap, not a defect |
+| `afm-4.5b` | dense `ArceeForCausalLM` has no entry under `mlxcel arch`'s Arcee heading, which lists the AFMoE / Trinity MoE variant. A coverage gap, not a defect |
 | Speculative and batched-serving sweeps | Not re-run on this shape yet |
 
 ### A note on reading the low end of these tables
