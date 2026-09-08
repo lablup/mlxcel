@@ -47,10 +47,34 @@ use mlxcel_core::{
 static COUNTER_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 fn counter_lock() -> std::sync::MutexGuard<'static, ()> {
+    arm_counters();
     COUNTER_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Turn on the two counters that are opt-in in production.
+///
+/// `LANG_BIAS_TOKENS_SUPPRESSED_TOTAL` and
+/// `LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL` need the pre-bias argmax, and
+/// reading it costs an `eval` plus an `item_i32` on every biased decode step,
+/// which measured 13% to 78% of decode for anyone using `logit_bias`,
+/// `--ignore-eos` or `--lang-bias`. That read now sits behind
+/// `MLXCEL_LANG_BIAS_COUNTERS`, so a test that asserts those counters has to ask
+/// for them. `LANG_BIAS_APPLIED_TOTAL` is outside the gate and needs nothing.
+///
+/// The gate caches its answer in a `OnceLock`, so this has to run before the
+/// first sampling call in the process. Every test here takes `counter_lock()`
+/// first, and nothing else in this test binary samples with a non-empty bias.
+fn arm_counters() {
+    static ARMED: std::sync::Once = std::sync::Once::new();
+    ARMED.call_once(|| {
+        // SAFETY: single-threaded here by construction. `Once` admits one caller,
+        // and it runs before any test body, so no other thread is reading the
+        // environment at this point.
+        unsafe { std::env::set_var("MLXCEL_LANG_BIAS_COUNTERS", "1") };
+    });
 }
 
 /// Call `sample_token_optimized` with greedy sampling and the given bias,
