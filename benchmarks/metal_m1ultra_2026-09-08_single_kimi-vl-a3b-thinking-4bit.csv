@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+kimi-vl-a3b-thinking-4bit,models/mlx/kimi-vl-a3b-thinking-4bit,512,128,969.37,528.18,1300.90,98.39,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,1b6a5773-dirty,9a795735

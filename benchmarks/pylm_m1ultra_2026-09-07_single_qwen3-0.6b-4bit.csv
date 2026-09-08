@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+qwen3-0.6b-4bit,./models/mlx/qwen3-0.6b-4bit/,512,128,94.21,5434.66,533.93,239.73,2026-09-07,Apple_M1_Ultra_128GB,mlx-lm-0.31.3,python,128,"Hello, how are you today?"

@@ -317,6 +317,40 @@ model_fits_in_memory() {
   [[ "$effective_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
 }
 
+# Resolve the timeout(1) implementation once, at load.
+#
+# GNU coreutils ships `timeout`. macOS ships neither it nor a BSD equivalent, so
+# a stock Mac has the binary only under its Homebrew name, `gtimeout`. Every run
+# here used to call `timeout` unconditionally, which on such a host exits 127
+# ("command not found") before the model is ever loaded. That surfaced as
+# FAIL:bench, the same status a real mlxcel defect produces, so a sweep read as
+# a total runtime failure rather than a missing dependency: the 2026-09-04 M3
+# Ultra attempt was abandoned on exactly this, one model in.
+#
+# When neither binary is present the runs proceed unwrapped rather than failing.
+# A sweep with no watchdog is worth more than no sweep at all, but it is not
+# free: nothing bounds a hung run, and exit code 124 (the expiry signal
+# is_oom_failure keys on) never occurs in that mode. The Run section announces
+# the degradation once so it cannot be mistaken for a normal sweep.
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+fi
+
+# Run "$@" under TIMEOUT_BIN with a budget of $1 seconds, or unwrapped when no
+# implementation was found. Returns the command's own exit status either way.
+run_with_timeout() {
+  local secs="$1"
+  shift
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
 # Returns 0 (true) when a failed run looks like an out-of-memory condition.
 # OOM is matched by EITHER the exit signal OR a recognisable allocator message,
 # independently. Requiring both would miss the two real OOM paths: the OS
@@ -762,7 +796,7 @@ bench_one() {
   # a non-zero exit code is captured in rc rather than aborting the script.
   local eos_args=()
   [[ "$IGNORE_EOS" == "1" ]] && eos_args+=(--ignore-eos)
-  raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
+  raw=$(run_with_timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
       --warmup-tokens "$WARMUP_TOKENS" \
       ${eos_args[@]+"${eos_args[@]}"} \
@@ -929,6 +963,15 @@ skip_for_vlm_mode() {
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
+if [[ -z "$TIMEOUT_BIN" ]]; then
+  >&2 echo "!!! WARNING: neither timeout(1) nor gtimeout was found on this host."
+  >&2 echo "!!!          Runs proceed UNBOUNDED: a hung model will not be killed,"
+  >&2 echo "!!!          and no row can be classified as a timeout (exit 124)."
+  >&2 echo "!!!          Install GNU coreutils to restore the watchdog:"
+  >&2 echo "!!!            brew install coreutils    # provides gtimeout"
+  >&2 echo ""
+fi
+
 # ---------------------------------------------------------------------------
 # Pre-warm before `all` sweeps: on the first run after a build the shared
 # kernels are not cached yet (CUDA JIT-compiles for 3-8 minutes per model;
@@ -954,7 +997,7 @@ if [[ "$PRE_WARM" == "1" && "$MODEL_ARG" == "all" ]]; then
     else
       >&2 echo "    Warming shared GPU pipeline caches..."
     fi
-    if timeout "$JIT_PREHEAT_TIMEOUT" "$MLXCEL" generate \
+    if run_with_timeout "$JIT_PREHEAT_TIMEOUT" "$MLXCEL" generate \
         -m "$preheat_model" -p "Hello" -n 5 --profile >/dev/null 2>&1; then
       >&2 echo "    Pre-warm complete."
     else
