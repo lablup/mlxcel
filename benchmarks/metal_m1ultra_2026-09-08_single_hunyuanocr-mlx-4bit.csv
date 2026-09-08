@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+hunyuanocr-mlx-4bit,models/mlx/hunyuanocr-mlx-4bit,512,128,102.26,5006.97,550.36,232.58,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a273131f-dirty,9a795735

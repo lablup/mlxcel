@@ -202,6 +202,12 @@ impl InklingAttention {
             let scaled = crate::multiply(&mask, &tau4);
             mask = crate::where_cond(&valid, &scaled, &mask);
         }
+        // GQA with a per-head mask: the KV head axis must match the query's
+        // outright, so expand it here (see `repeat_kv_heads`).
+        if self.n_kv != self.n_heads {
+            keys = repeat_kv_heads(&keys, self.n_heads, self.n_kv);
+            values = repeat_kv_heads(&values, self.n_heads, self.n_kv);
+        }
         let mask = crate::astype(&mask, crate::array_dtype(&q));
         let mask_ptr = mask
             .as_ref()
@@ -221,6 +227,41 @@ impl InklingAttention {
         let out = crate::reshape(&out, &[batch, length, self.n_heads * self.head_dim]);
         self.o_proj.forward(&out)
     }
+}
+
+/// Expand `n_kv` key/value heads to `n_heads` for grouped-query attention.
+///
+/// MLX's SDPA does GQA on its own, but only when it can broadcast the KV head
+/// axis against the query's. Inkling is the one family here that hands it a
+/// PER-HEAD mask: `banded_additive_mask` produces `[batch, n_heads, length,
+/// source]` because the relative-position logits differ per query head, while
+/// every other model in the tree passes the 2-D `[length, source]` mask
+/// `create_causal_mask` builds, which broadcasts over heads for free.
+///
+/// With a per-head mask the KV axis has to match the query axis outright.
+/// `n_kv == 1` broadcasts and so worked by accident, which is exactly what
+/// every Inkling fixture used and why this reached real checkpoints: the
+/// published ones use 4 sliding KV heads against 8 query heads (0.6B) and 8
+/// against 32 (Small), and both aborted with
+/// `[broadcast_shapes] Shapes (1,8) and (1,4) cannot be broadcast` (issue #1549).
+///
+/// Repeating here rather than inside the shared SDPA wrapper keeps the cost
+/// where the need is. The overwhelming majority of callers pass a 2-D mask and
+/// would pay a pointless KV copy, which at long context is the traffic that
+/// dominates decode.
+///
+/// Each KV head serves `n_heads / n_kv` CONSECUTIVE query heads, so the
+/// expansion is head-major: insert a repeat axis directly after the KV axis and
+/// fold it in, never `tile`, which would interleave the groups and silently
+/// pair every query head with the wrong KV head.
+fn repeat_kv_heads(x: &MlxArray, n_heads: i32, n_kv: i32) -> UniquePtr<MlxArray> {
+    let shape = crate::array_shape(x);
+    let (batch, length, head_dim) = (shape[0], shape[2], shape[3]);
+    let repeats = n_heads / n_kv;
+    let expanded = crate::reshape(x, &[batch, n_kv, 1, length, head_dim]);
+    let expanded = crate::broadcast_to(&expanded, &[batch, n_kv, repeats, length, head_dim]);
+    let expanded = crate::contiguous(&expanded, false);
+    crate::reshape(&expanded, &[batch, n_heads, length, head_dim])
 }
 
 pub fn banded_additive_mask(

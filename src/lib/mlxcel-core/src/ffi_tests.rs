@@ -3530,6 +3530,63 @@ fn test_compiled_softcap_sdpa_gqa_shape() {
     assert_eq!(array_shape(&out), vec![1, 4, 2, 8]);
 }
 
+/// The grouped decode branch inside `compiled_softcap_sdpa_gqa` is what serves
+/// every Gemma 2 decode step now that it is on by default, and nothing else in
+/// this file reaches it: the other cases here use `q_len == 2`, and the branch
+/// requires `q_len == 1` with a null mask. This pins it against the arithmetic
+/// it replaced, which is `repeat_kv` on K and V followed by the ungrouped
+/// composite. The two reassociate the head axis differently, so they are
+/// compared within tolerance rather than for byte identity.
+#[test]
+fn test_compiled_softcap_sdpa_gqa_decode_matches_repeated_reference() {
+    let (b, h_kv, n_rep, s, d) = (1i32, 2i32, 3i32, 5i32, 8i32);
+    let h_q = h_kv * n_rep;
+
+    // Deterministic, non-uniform inputs: uniform ones make every head equal and
+    // would pass even if the grouping mapped heads to the wrong KV group.
+    let fill = |n: i32, seed: f32| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as f32 * 0.37 + seed).sin() * 0.5) as f32)
+            .collect()
+    };
+    let q = from_slice_f32(&fill(b * h_q * 1 * d, 0.1), &[b, h_q, 1, d]);
+    let k = from_slice_f32(&fill(b * h_kv * s * d, 1.7), &[b, h_kv, s, d]);
+    let v = from_slice_f32(&fill(b * h_kv * s * d, 2.9), &[b, h_kv, s, d]);
+
+    let (scale, softcap) = (0.125f32, 30.0f32);
+    let grouped =
+        unsafe { compiled_softcap_sdpa_gqa(&q, &k, &v, scale, softcap, n_rep, std::ptr::null()) };
+
+    // Reference: expand K and V to full head count, then take the ungrouped
+    // path, which is exactly what the fallback in the same function does.
+    let k_rep = crate::utils::repeat_kv(&k, n_rep);
+    let v_rep = crate::utils::repeat_kv(&v, n_rep);
+    let reference =
+        unsafe { compiled_softcap_sdpa(&q, &k_rep, &v_rep, scale, softcap, std::ptr::null()) };
+
+    eval(&grouped);
+    eval(&reference);
+    assert_eq!(array_shape(&grouped), vec![b, h_q, 1, d]);
+    assert_eq!(array_shape(&reference), vec![b, h_q, 1, d]);
+
+    // Guard against a vacuous pass: uniform or near-zero output would satisfy
+    // `allclose` no matter how the heads were grouped.
+    let magnitude = max_all(&abs(&reference));
+    eval(&magnitude);
+    let magnitude = item_f32(&magnitude);
+    assert!(
+        magnitude > 1e-3,
+        "reference output is ~zero ({magnitude}), so the comparison proves nothing"
+    );
+
+    let close = allclose(&grouped, &reference, 1e-4, 1e-4);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "grouped decode must match the repeated-K/V fallback it replaces"
+    );
+}
+
 #[test]
 fn test_compiled_softcap_sdpa_gqa_preserves_v_dtype() {
     for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
@@ -4647,5 +4704,50 @@ fn dequantize_commutes_with_output_axis_slice_on_strided_inputs() {
             "{name}: dequantize(slice(x)) must equal slice(dequantize(x)) bit for bit \
              (max abs diff {max_abs_diff})"
         );
+    }
+}
+
+/// Every activation helper must return the dtype it was given.
+///
+/// This is the whole rule behind the 2026-09-08 fix, and it is worth a test
+/// rather than a convention because breaking it is invisible: the result is
+/// numerically right, so no parity or output check fails. What fails is
+/// throughput, somewhere else entirely. A f32 activation joins the residual
+/// stream at the first MLP, the hidden state stays f32 for every later layer,
+/// and each of those matmuls promotes its half-precision weight to f32 to match
+/// the operand. On M1 Ultra that left `gpt_bigcode-santacoder` at 28% of mlx-lm
+/// and `pythia-1b` at 31%, and on M5 Max it left `recurrent_gemma` at a fifth.
+///
+/// The rule is per function, not a list of call sites to keep in sync:
+/// promotion *inside* a helper is free, because `mx.compile` fuses it and the
+/// widened values never leave a register. Only promotion that escapes the
+/// helper costs anything. So a new helper may compute in f32 for numerical
+/// headroom, as `gelu_approx` deliberately does; it just has to cast back
+/// before it returns.
+#[test]
+fn activation_helpers_return_the_input_dtype() {
+    for (dtype, name) in [
+        (crate::dtype::FLOAT16, "f16"),
+        (crate::dtype::BFLOAT16, "bf16"),
+        (crate::dtype::FLOAT32, "f32"),
+    ] {
+        let x = full_f32(&[4, 8], 0.75, dtype);
+        let cases: [(&str, UniquePtr<MlxArray>); 5] = [
+            ("silu", silu(&x)),
+            ("gelu", gelu(&x)),
+            ("gelu_approx", gelu_approx(&x)),
+            ("relu", relu(&x)),
+            ("leaky_relu", leaky_relu(&x, 0.01)),
+        ];
+        for (helper, out) in cases {
+            assert_eq!(
+                array_dtype(&out),
+                dtype,
+                "{helper} returned dtype {} for a {name} input; a helper must cast back to \
+                 the dtype it was given, or the widened result reaches the next projection \
+                 and MLX promotes that layer's weight to match",
+                array_dtype(&out)
+            );
+        }
     }
 }

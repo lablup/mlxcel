@@ -182,7 +182,21 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention
+        // Scaled dot-product attention in float32. Upstream widens both the
+        // queries and the keys before the call and narrows the result after
+        // (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/stablelm.py),
+        // the same guard [`crate::models::phixtral`] and [`crate::models::phi`]
+        // carry: the `q @ k^T` products can pass f16's 65504 ceiling in the deep
+        // layers, and the softmax turns the resulting inf into NaN. The cache
+        // stays in its own dtype; only the arithmetic widens.
+        // Upstream widens the queries and the keys, and leaves the values alone:
+        // values are multiplied by probabilities in [0, 1] and cannot overflow, so
+        // widening them would double the V read on every decode step for nothing.
+        let dtype = mlxcel_core::array_dtype(&cache_v);
+        let f32_dtype = mlxcel_core::dtype::FLOAT32;
+        let q = mlxcel_core::astype(&q, f32_dtype);
+        let cache_k = mlxcel_core::astype(&cache_k, f32_dtype);
+
         let attn_out = if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
         } else {
@@ -193,6 +207,7 @@ impl Attention {
                 )
             }
         };
+        let attn_out = mlxcel_core::astype(&attn_out, dtype);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);

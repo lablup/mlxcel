@@ -227,6 +227,14 @@ fn mask_blocked_value() -> f32 {
 /// `x` is `[.., D]` and `cos`/`sin` are broadcastable to `[.., D/2]`. Pair `j`
 /// is `(x[2j], x[2j+1])`.
 pub fn rotate_interleaved(x: &MlxArray, cos: &MlxArray, sin: &MlxArray) -> UniquePtr<MlxArray> {
+    // Both `temporal_cos_sin` and `golden_cos_sin` build their tables in f32, so
+    // the products below promote a half-precision `x`. Restore the input dtype
+    // here, at the leaf, so `apply_3d_rotary` and its callers stay correct: left
+    // promoted, the rotated `q`/`k` escape into attention as f32, the rotated
+    // `k` lands in the KV cache at twice its intended width, and every later
+    // matmul promotes its own weight to match. Same invariant as
+    // lablup/mlxcel#1709: hand back the dtype you were given.
+    let dtype = mlxcel_core::array_dtype(x);
     let mut shape = mlxcel_core::array_shape(x);
     let dim = *shape
         .last()
@@ -263,7 +271,8 @@ pub fn rotate_interleaved(x: &MlxArray, cos: &MlxArray, sin: &MlxArray) -> Uniqu
     );
     shape.pop();
     shape.push(dim);
-    mlxcel_core::reshape(&stacked, &shape)
+    let out = mlxcel_core::reshape(&stacked, &shape);
+    mlxcel_core::astype(&out, dtype)
 }
 
 /// Inverse frequencies for the 1-D temporal rotary.

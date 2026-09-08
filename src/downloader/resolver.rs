@@ -152,6 +152,16 @@ pub struct ModelSourceOptions<'a> {
     /// Forbid every network fetch (`--offline`, issue #1434). A repo-id that
     /// is not already in a reuse location is an error instead of a download.
     pub offline: bool,
+    /// Root for the legacy per-CWD `./models/<basename>` probe. `None` uses
+    /// [`LEGACY_MODELS_DIR`], which is what every production caller wants.
+    ///
+    /// It is settable so a test can point step 2a somewhere empty. That probe
+    /// resolves against the process working directory, so a developer who has
+    /// downloaded the checkpoint a test names finds it ahead of the temp store
+    /// the test built, and the test fails on the machine that has the model
+    /// rather than the one that does not. `MLXCEL_CACHE_DIR` and `HF_HUB_CACHE`
+    /// already isolate the other two probes; this closes the third.
+    pub cwd_models_dir: Option<&'a Path>,
 }
 
 /// Resolve a `-m/--model` value into a concrete on-disk model directory,
@@ -333,12 +343,14 @@ fn resolve_repo_id(repo_id: &str, opts: ModelSourceOptions<'_>, quiet: bool) -> 
         revision,
         token,
         offline,
+        cwd_models_dir,
     } = opts;
     // The process-wide flag can only ADD offline-ness, never remove it, so a
     // caller that did not thread `--offline` through its own options cannot
     // re-enable a fetch the operator forbade (issue #1434).
     let offline = offline || super::offline_mode();
-    let cwd_models = PathBuf::from(LEGACY_MODELS_DIR);
+    let cwd_models =
+        cwd_models_dir.map_or_else(|| PathBuf::from(LEGACY_MODELS_DIR), Path::to_path_buf);
 
     // 2a–2c: reuse an existing COMPLETE snapshot without re-downloading.
     if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {

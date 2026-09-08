@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+deepseek-ocr-2-4bit,models/mlx/deepseek-ocr-2-4bit,409,128,477.55,856.46,454.71,281.50,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"What is in this image?",,3576d734-dirty,9a795735

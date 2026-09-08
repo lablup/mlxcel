@@ -300,10 +300,21 @@ impl Mistral4Attention {
         // Concatenate query nope and pe parts
         let queries = mlxcel_core::concatenate(&q_nope, &q_pe, -1);
 
-        // Apply Llama-4 position-dependent attention scaling
+        // Apply Llama-4 position-dependent attention scaling.
+        //
+        // The scale is built from a host `&[f32]`, so it has to be cast to the
+        // query dtype before the multiply. Without that cast MLX promotes on the
+        // wider operand and `queries` leaves this line as f32, which carries
+        // through the attention into `o_proj` and then into the residual stream,
+        // after which every matmul in every later layer promotes its own weight
+        // to match. It is the same failure as the bridge activation helpers in
+        // lablup/mlxcel#1709, reached through a model file instead. The scale is
+        // O(1) per position and the operand it multiplies is already half
+        // precision, so nothing is lost by building it in that dtype.
         let scale_shape = vec![1, 1, l, 1];
         let scale_arr = mlxcel_core::from_slice_f32(attn_scale, &[l]);
         let scale_arr = mlxcel_core::reshape(&scale_arr, &scale_shape);
+        let scale_arr = mlxcel_core::astype(&scale_arr, mlxcel_core::array_dtype(&queries));
         let queries = mlxcel_core::multiply(&queries, &scale_arr);
 
         // Scaled dot-product attention

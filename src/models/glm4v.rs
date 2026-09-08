@@ -293,6 +293,15 @@ impl Glm4vMRoPE {
         let term2 = mlxcel_core::multiply(&rotated, sin_f);
         let x_embed = mlxcel_core::add(&term1, &term2);
 
+        // Restore the input dtype. `cos_sin` builds its tables in f32 on
+        // purpose, so the two multiplies above promote a half-precision `x`.
+        // Left promoted, the rotated result escapes into the residual stream and
+        // every later matmul promotes its own weight to match; the rotated `k`
+        // also lands in the KV cache at twice its intended width. Same invariant
+        // as lablup/mlxcel#1709: hand back the dtype you were given.
+        let dtype = mlxcel_core::array_dtype(x);
+        let x_embed = mlxcel_core::astype(&x_embed, dtype);
+
         if head_dim > rope_dims {
             let x_pass = mlxcel_core::slice(x, &[0, 0, 0, rope_dims], &[b, h, l, head_dim]);
             mlxcel_core::concatenate(&x_embed, &x_pass, 3)
@@ -397,17 +406,9 @@ impl Attention {
 
         let (k, v) = cache.update_and_fetch(k, v);
 
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&k, n_rep)
-        } else {
-            mlxcel_core::copy(&k)
-        };
-        let v = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&v, n_rep)
-        } else {
-            mlxcel_core::copy(&v)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy of
+        // the whole live cache on every decode step (#1686).
 
         let output = if let Some(m) = mask {
             unsafe {
@@ -727,9 +728,17 @@ impl Glm4vTextModel {
         let auto_mask;
         let mask = if mask.is_some() {
             mask
-        } else {
+        } else if seq_len > 1 {
             auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
             Some(auto_mask.as_ref().unwrap() as &MlxArray)
+        } else {
+            // Decode width. The one query row sits at logical position
+            // `live_len`, so every key column is permitted: the mask would be
+            // uniformly zero, constrain nothing, and only force the masked arm
+            // of the fused SDPA. mlx-lm returns None here as well
+            // (`create_attention_mask`), and `qwen3_5.rs` carries the same
+            // `seq_len > 1` guard (#1686).
+            None
         };
 
         for (i, layer) in self.layers.iter().enumerate() {

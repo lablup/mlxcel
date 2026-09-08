@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+gemma-4-e2b-it-4bit,./models/gemma-4-e2b-it-4bit/,277,128,83.44,3319.67,612.56,208.96,2026-09-07,Apple_M5_Max_128GB,mlx-vlm-0.6.17,python,128,"What is in this image?"

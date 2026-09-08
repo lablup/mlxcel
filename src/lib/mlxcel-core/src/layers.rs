@@ -3731,6 +3731,16 @@ impl Attention {
         let k = ffi::reshape(&k, &[batch_size, seq_len, self.n_kv_heads, self.head_dim]);
         let v = ffi::reshape(&v, &[batch_size, seq_len, self.n_kv_heads, self.head_dim]);
 
+        // Transpose to [batch, n_heads, seq_len, head_dim] before RoPE, not
+        // after. `fast_rope` reads token positions off the second-to-last
+        // axis, so rotating `[B, L, H, D]` makes the head index the position.
+        // Nothing calls this type today, which is why the defect was invisible;
+        // it is the same one #1687 fixed in `recurrent_gemma.rs` and
+        // `nemotron_nas.rs`, where it made both families emit degenerate text.
+        let q = ffi::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = ffi::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = ffi::transpose_axes(&v, &[0, 2, 1, 3]);
+
         // Apply RoPE
         let offset = cache.offset;
         let q = ffi::fast_rope(
@@ -3749,11 +3759,6 @@ impl Attention {
             self.rope_scale,
             offset,
         );
-
-        // Transpose to [batch, n_heads, seq_len, head_dim]
-        let q = ffi::transpose_axes(&q, &[0, 2, 1, 3]);
-        let k = ffi::transpose_axes(&k, &[0, 2, 1, 3]);
-        let v = ffi::transpose_axes(&v, &[0, 2, 1, 3]);
 
         // Update KV cache and get sliced views
         let (k, v) = cache.update_and_fetch(k, v);

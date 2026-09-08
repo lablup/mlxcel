@@ -3832,6 +3832,11 @@ mod tests {
             "{ctx}: support changed"
         );
 
+        // Report the worst drift rather than the first one over the bound. The
+        // first token past the limit says nothing about how far the platform
+        // actually is from the snapshot, which is the number needed to decide
+        // whether a bound is too tight or an arithmetic change is real.
+        let mut worst = (0u32, usize::MAX);
         for (i, (&observed, &want_bits)) in got.iter().zip(expected_bits).enumerate() {
             if want_bits == 0 {
                 assert_eq!(observed.to_bits(), 0, "{ctx}: token {i} left zero support");
@@ -3842,12 +3847,16 @@ mod tests {
                 "{ctx}: token {i} left the positive finite support: {observed}"
             );
             let ulp = observed.to_bits().abs_diff(want_bits);
-            assert!(
-                ulp <= max_ulp,
-                "{ctx}: token {i} moved by {ulp} ulp ({observed} vs {})",
-                f32::from_bits(want_bits)
-            );
+            if ulp > worst.0 {
+                worst = (ulp, i);
+            }
         }
+        assert!(
+            worst.0 <= max_ulp,
+            "{ctx}: worst drift {} ulp at token {} (limit {max_ulp})",
+            worst.0,
+            worst.1
+        );
     }
 
     /// `[1, 4]` logits whose softmax is `[0.50, 0.30, 0.15, 0.05]`.
@@ -4094,7 +4103,19 @@ mod tests {
             if routed {
                 assert_probs_match_snapshot_within_ulp(&got, &expected, 1, &ctx);
             } else {
-                assert_probs_match_snapshot_within_ulp(&got, &expected, 2, &ctx);
+                // 4, not 2. The bound is a drift tripwire on the fused softmax,
+                // not the correctness gate: the support set is asserted just
+                // above and the distribution is checked by the chi-square test
+                // against exact softmax. What it keeps catching instead is new
+                // hardware. #1419 replaced exact-bit goldens with a tolerance
+                // after Metal and CUDA moved 1 ulp, #1563 is sm_70 at 1 ulp,
+                // and M5 Max moves 3 at token 50 of this case and nowhere else.
+                // Three platforms have crossed it, so the number was tracking
+                // reassociation order rather than arithmetic, and 4 leaves one
+                // ulp of headroom over the worst measured. A jump well past
+                // this is worth reading as a real change; the failure message
+                // reports the worst drift so that call can be made from it.
+                assert_probs_match_snapshot_within_ulp(&got, &expected, 4, &ctx);
             }
         }
     }

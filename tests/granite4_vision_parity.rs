@@ -97,8 +97,11 @@ fn text_only_forward_produces_finite_logits() {
     let row = mlxcel_core::slice(&logits, &[0, last_pos, 0], &[1, last_pos + 1, vocab]);
     let max = mlxcel_core::max_all(&row);
     mlxcel_core::eval(&max);
+    let v = mlxcel_core::item_f32(&max);
     assert!(
-        mlxcel_core::item_f32(&max).is_finite(),
-        "text-only logits must be finite"
+        v.is_finite(),
+        "text-only logits must be finite, got {v} (nan={}, inf={})",
+        v.is_nan(),
+        v.is_infinite()
     );
 }

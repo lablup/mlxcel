@@ -263,6 +263,22 @@ fn apply_multimodal_rotary_pos_emb(
         mlxcel_core::add(&t1, &t2)
     };
 
+    // Restore the input dtype. `cos` and `sin` are built in f32 (the MRoPE table
+    // widens `inv_freq` and the position ids on purpose), so these multiplies
+    // promote a half-precision `q`/`k` and the rotated result would leave this
+    // function as f32, carry through the attention and the output projection,
+    // and make every later layer promote its own weight to match. Upstream does
+    // the same widen-then-restore: `apply_multimodal_rotary_pos_emb` in
+    // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rope_utils.py
+    // computes at `compute_dtype=mx.float32` and ends with
+    // `q_embed.astype(q.dtype)` / `k_embed.astype(k.dtype)` under `cast_output`.
+    // Same invariant as lablup/mlxcel#1709: hand back the dtype you were given.
+    //
+    // This only bites once an image has been seen: the text-only fast path uses
+    // plain 1-D `fast_rope`, which preserves dtype and never reaches here.
+    let q_embed = mlxcel_core::astype(&q_embed, mlxcel_core::array_dtype(q));
+    let k_embed = mlxcel_core::astype(&k_embed, mlxcel_core::array_dtype(k));
+
     (q_embed, k_embed)
 }
 
@@ -386,18 +402,10 @@ impl Attention {
         // KV cache
         let (k, v) = cache.update_and_fetch(k, v);
 
-        // Repeat KV heads if GQA
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&k, n_rep)
-        } else {
-            mlxcel_core::copy(&k)
-        };
-        let v = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&v, n_rep)
-        } else {
-            mlxcel_core::copy(&v)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy of
+        // the whole live cache on every decode step. `qwen3.rs` hands the cache
+        // output straight to attention the same way.
 
         // Attention
         let output = if let Some(m) = mask {
@@ -461,17 +469,10 @@ impl Attention {
 
         let (k, v) = cache.update_and_fetch(k, v);
 
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&k, n_rep)
-        } else {
-            mlxcel_core::copy(&k)
-        };
-        let v = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&v, n_rep)
-        } else {
-            mlxcel_core::copy(&v)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy of
+        // the whole live cache on every decode step. `qwen3.rs` hands the cache
+        // output straight to attention the same way.
 
         let output = if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
@@ -1123,9 +1124,17 @@ impl Qwen3VLMoeModel {
         let auto_mask;
         let mask = if mask.is_some() {
             mask
-        } else {
+        } else if seq_len > 1 {
             auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
             Some(auto_mask.as_ref().unwrap() as &MlxArray)
+        } else {
+            // Decode width. The one query row sits at logical position
+            // `live_len`, so every key column is permitted: the mask would be
+            // uniformly zero, constrain nothing, and only force the masked arm
+            // of the fused SDPA. mlx-lm returns None here as well
+            // (`create_attention_mask`), and `qwen3_5.rs` carries the same
+            // `seq_len > 1` guard. The sizing note above still governs prefill.
+            None
         };
 
         // Get deepstack state references

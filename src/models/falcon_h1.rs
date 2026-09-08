@@ -413,14 +413,12 @@ impl FalconH1Mixer {
 
         let result = self.out_proj.forward(&y_gated);
 
-        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
-        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
-        // within one Metal command buffer. On every other chip this per-layer
-        // sync is pure decode-throughput loss (it blocks cross-layer
-        // pipelining), so skip it. CLAUDE.md "Apple Silicon precision".
-        if mlxcel_core::hardware::is_m5_neural_accelerator() {
-            mlxcel_core::eval(&result);
-        }
+        // The M5 Max (Metal GPU Family 4) NaN workaround that used to force an
+        // `eval` here is gone: measured on M5 Max with MLX pin 9a795735 it cost
+        // 3.31x decode on Falcon-H1 and 2.24x on GraniteMoeHybrid while greedy
+        // output stayed byte-identical with it removed, across short and long
+        // prompts. `mamba2_hybrid_decode_is_finite` guards the regression it
+        // was protecting against. CLAUDE.md "Apple Silicon precision".
         result
     }
 
@@ -563,9 +561,13 @@ impl FalconH1Mixer {
 
         let y = mlxcel_core::astype(&y, mlxcel_core::array_dtype(hidden_states));
 
-        mlxcel_core::eval(&y);
-        mlxcel_core::eval(&next_state);
-
+        // No `eval` boundary here. The two that used to sit at this point came
+        // in with the original port (#259) with no recorded reason, and they
+        // only ever fire on the graph path, which serves prefill and the first
+        // token; steady-state decode takes `ssm_step_kernel`. Forcing a
+        // materialization once per layer per prefill chunk is what the
+        // measurement below charges them for. The NaN risk this family does
+        // carry is covered by `tests/mamba2_hybrid_decode_finite.rs` (#1685).
         (y, next_state)
     }
 

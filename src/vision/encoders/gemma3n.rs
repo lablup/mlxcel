@@ -48,17 +48,38 @@ pub struct RMSNormAct2d {
 
 impl RMSNormAct2d {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let in_dtype = mlxcel_core::array_dtype(x);
+
         // NHWC → NCHW for channel-wise normalization
         let x = mlxcel_core::transpose_axes(x, &[0, 3, 1, 2]);
 
         // RMS norm on channel axis (axis=1 in NCHW)
         // v = mean(x^2, axis=1, keepdims=true)
+        //
+        // The f32 eps promotes `v`, then `rsqrt`, then `x`, matching mlx-vlm's
+        // `rms_norm2d`, which computes the reduction in f32 for the range and
+        // casts back before the weight multiply. The cast back is what this
+        // used to be missing, and everything downstream of the first norm ran
+        // f32 as a result.
+        //
+        // The restore only became safe once Gemma3n stopped converting to f16
+        // at load (see `gemma3n_bf16_key`). This tower's deep blocks carry
+        // residuals well past what f16 holds: probing mlx-vlm on a 768x768
+        // input, 10 of 184 norm calls take inputs above the f16 ceiling of
+        // 65504, starting in the 1280-channel blocks and peaking at 213055.
+        // The norm outputs stay small (6 to 160), so it is the accumulation
+        // between norms that overflows, not the norm itself. While the tower
+        // loaded f16, restoring here clipped those blocks and gemma3n-e4b-bf16
+        // answered "blue" for blue, green and purple alike. bf16 has f32's
+        // exponent, so it holds them, and the restore is worth about 1.04x VLM
+        // prefill on top of what the uniform load already gains.
         let x_sq = mlxcel_core::square(&x);
         let v = mlxcel_core::mean_axis(&x_sq, 1, true);
         let eps_arr = mlxcel_core::full_f32(&[1], self.eps, mlxcel_core::dtype::FLOAT32);
         let v_eps = mlxcel_core::add(&v, &eps_arr);
         let rsqrt = mlxcel_core::rsqrt(&v_eps);
         let x = mlxcel_core::multiply(&x, &rsqrt);
+        let x = mlxcel_core::astype(&x, in_dtype);
 
         // Apply weight: reshape to [1, C, 1, 1] for broadcast
         let shape = mlxcel_core::array_shape(&x);

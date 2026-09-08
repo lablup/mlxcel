@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+minicpm-v-4.6-mxfp4,models/mlx/minicpm-v-4.6-mxfp4,512,128,130.22,3931.72,589.21,217.24,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,562dca6f-dirty,9a795735

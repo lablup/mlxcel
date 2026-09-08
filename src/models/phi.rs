@@ -181,7 +181,23 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention
+        // **The attention runs in float32, and that is load-bearing**, for the
+        // reason [`crate::models::phixtral`] already documents: upstream writes
+        // `queries.astype(mx.float32)` around the SDPA call
+        // (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/phi.py),
+        // Phi-2 carries large outlier activations, and this checkpoint ships
+        // float16, whose 65504 ceiling the `q @ k^T` products reach in the deep
+        // layers. `phi-2-4bit` goes NaN at layer 29 of 32 in f16, after which
+        // every sampled token is the argmax of a NaN row and decodes as `!`.
+        // The cache stays f16; only the arithmetic widens.
+        // Upstream widens the queries alone, and MLX promotes the score matmul to
+        // match its wider operand, so that is enough to keep `q @ k^T` out of f16.
+        // The values are only ever multiplied by probabilities in [0, 1] and cannot
+        // overflow, so widening them would double the V read on every decode step
+        // and buy nothing.
+        let dtype = mlxcel_core::array_dtype(&cache_v);
+        let q = mlxcel_core::astype(&q, mlxcel_core::dtype::FLOAT32);
+
         let attn_out = if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
         } else {
@@ -192,6 +208,7 @@ impl Attention {
                 )
             }
         };
+        let attn_out = mlxcel_core::astype(&attn_out, dtype);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);

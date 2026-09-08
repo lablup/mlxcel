@@ -303,7 +303,7 @@ fn finish_vlm_weights_common(
             let had_bf16 = if is_gemma3n_model(model_path) {
                 crate::models::convert_bf16_weights_with_keep(
                     weights,
-                    crate::models::gemma3n_language_mlp_bf16_key,
+                    crate::models::gemma3n_bf16_key,
                 )
             } else {
                 crate::models::convert_bf16_weights(weights)

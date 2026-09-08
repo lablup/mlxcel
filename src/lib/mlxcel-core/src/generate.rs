@@ -2313,11 +2313,40 @@ impl CxxGenerator {
 
         // Decode
         let decode_start = Instant::now();
+
+        // Same `[PIPELINE_DETAIL]` breakdown the text paths emit. This is the
+        // function `mlxcel-bench-decode --image` lands in, and without the
+        // split a VLM decode investigation cannot tell a host graph-build cost
+        // from a device wait. That gap is live: qwen2.5-vl-3b-hf decodes at
+        // 77 tok/s on text and 20 tok/s with an image attached on the same
+        // weights and a shorter prompt, and the candidate explanation (a
+        // sticky `position_ids`/`rope_deltas` state that keeps every later
+        // step on the slow forward) is a host-side claim that only this split
+        // can confirm. Off unless `MLXCEL_PROFILE_PIPELINE_DETAIL` is set.
+        let profile_pipeline_detail = std::env::var("MLXCEL_PROFILE_PIPELINE_DETAIL").is_ok();
+        let mut reshape_ns_total = 0u128;
+        let mut forward_ns_total = 0u128;
+        let mut sample_ns_total = 0u128;
+        let mut async_eval_ns_total = 0u128;
+        let mut wait_ns_total = 0u128;
+        let mut detail_count = 0u32;
+
         let mut n = 0;
         loop {
             let next_y = if n + 1 < max_tokens {
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 let next_input = ffi::reshape_token_for_forward(&y);
+                if let Some(start) = detail_start {
+                    reshape_ns_total += start.elapsed().as_nanos();
+                }
+
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
+                if let Some(start) = detail_start {
+                    forward_ns_total += start.elapsed().as_nanos();
+                }
+
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 let (next_tok, _next_log) = if needs_history {
                     sample_token_optimized_with_state(
                         &next_logits,
@@ -2328,7 +2357,16 @@ impl CxxGenerator {
                 } else {
                     sample_token_optimized(&next_logits, sampling, &token_history)
                 };
+                if let Some(start) = detail_start {
+                    sample_ns_total += start.elapsed().as_nanos();
+                }
+
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 ffi::async_eval(&next_tok);
+                if let Some(start) = detail_start {
+                    async_eval_ns_total += start.elapsed().as_nanos();
+                }
+                detail_count += 1;
                 Some(next_tok)
             } else {
                 None
@@ -2341,7 +2379,11 @@ impl CxxGenerator {
                 break;
             }
 
+            let wait_start = profile_pipeline_detail.then(Instant::now);
             let token_val = ffi::item_i32(&y);
+            if let Some(start) = wait_start {
+                wait_ns_total += start.elapsed().as_nanos();
+            }
             if eos_tokens.contains(&token_val) {
                 break;
             }
@@ -2371,6 +2413,19 @@ impl CxxGenerator {
                 break;
             }
             n += 1;
+        }
+
+        if profile_pipeline_detail && detail_count > 3 {
+            let d = detail_count as f64;
+            eprintln!(
+                "[PIPELINE_DETAIL] reshape={:.3}ms/tok forward={:.3}ms/tok sample={:.3}ms/tok async_eval={:.3}ms/tok item_wait={:.3}ms/tok over {} tokens",
+                reshape_ns_total as f64 / d / 1e6,
+                forward_ns_total as f64 / d / 1e6,
+                sample_ns_total as f64 / d / 1e6,
+                async_eval_ns_total as f64 / d / 1e6,
+                wait_ns_total as f64 / d / 1e6,
+                detail_count,
+            );
         }
         let decode_time = decode_start.elapsed();
 
@@ -2533,12 +2588,37 @@ impl CxxGenerator {
         // DECODE PHASE (with lookahead pipelining).
         let decode_start = Instant::now();
 
+        // Same `[PIPELINE_DETAIL]` breakdown `generate_streaming` emits, wired
+        // here too because this is the path `mlxcel-bench-decode` takes, and a
+        // decode-throughput investigation that cannot see the split between
+        // host graph build and device wait has to guess (#1689 spent a while
+        // guessing). Off unless `MLXCEL_PROFILE_PIPELINE_DETAIL` is set, and
+        // then it costs a handful of `Instant::now` calls per token.
+        let profile_pipeline_detail = std::env::var("MLXCEL_PROFILE_PIPELINE_DETAIL").is_ok();
+        let mut reshape_ns_total = 0u128;
+        let mut forward_ns_total = 0u128;
+        let mut sample_ns_total = 0u128;
+        let mut async_eval_ns_total = 0u128;
+        let mut wait_ns_total = 0u128;
+        let mut detail_count = 0u32;
+
         let mut n = 0;
         loop {
             // Start next step computation (if not at max)
             let next_y = if n + 1 < max_tokens {
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 let next_input = ffi::reshape_token_for_forward(&y);
+                if let Some(start) = detail_start {
+                    reshape_ns_total += start.elapsed().as_nanos();
+                }
+
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
+                if let Some(start) = detail_start {
+                    forward_ns_total += start.elapsed().as_nanos();
+                }
+
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 let (next_tok, _next_log) = if needs_history {
                     sample_token_optimized_with_state(
                         &next_logits,
@@ -2549,7 +2629,16 @@ impl CxxGenerator {
                 } else {
                     sample_token_optimized(&next_logits, sampling, &token_history)
                 };
+                if let Some(start) = detail_start {
+                    sample_ns_total += start.elapsed().as_nanos();
+                }
+
+                let detail_start = profile_pipeline_detail.then(Instant::now);
                 ffi::async_eval(&next_tok);
+                if let Some(start) = detail_start {
+                    async_eval_ns_total += start.elapsed().as_nanos();
+                }
+                detail_count += 1;
                 Some(next_tok)
             } else {
                 None
@@ -2566,7 +2655,11 @@ impl CxxGenerator {
             }
 
             // Extract current token value (syncs y)
+            let wait_start = profile_pipeline_detail.then(Instant::now);
             let token_val = ffi::item_i32(&y);
+            if let Some(start) = wait_start {
+                wait_ns_total += start.elapsed().as_nanos();
+            }
 
             // Check EOS before storing (avoid including stop tokens in output)
             if eos_tokens.contains(&token_val) {
@@ -2605,6 +2698,18 @@ impl CxxGenerator {
             n += 1;
         }
 
+        if profile_pipeline_detail && detail_count > 3 {
+            let d = detail_count as f64;
+            eprintln!(
+                "[PIPELINE_DETAIL] reshape={:.3}ms/tok forward={:.3}ms/tok sample={:.3}ms/tok async_eval={:.3}ms/tok item_wait={:.3}ms/tok over {} tokens",
+                reshape_ns_total as f64 / d / 1e6,
+                forward_ns_total as f64 / d / 1e6,
+                sample_ns_total as f64 / d / 1e6,
+                async_eval_ns_total as f64 / d / 1e6,
+                wait_ns_total as f64 / d / 1e6,
+                detail_count,
+            );
+        }
         let decode_time = decode_start.elapsed();
 
         // Calculate stats

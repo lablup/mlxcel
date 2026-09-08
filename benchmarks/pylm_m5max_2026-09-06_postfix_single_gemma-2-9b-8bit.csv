@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+gemma-2-9b-8bit,./models/gemma-2-9b-8bit/,512,128,258.90,1977.59,2549.99,50.20,2026-09-06,Apple_M5_Max_128GB,mlx-lm-0.31.3,python,128,"Hello, how are you today?"

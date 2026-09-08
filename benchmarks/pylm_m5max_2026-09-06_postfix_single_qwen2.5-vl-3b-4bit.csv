@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+qwen2.5-vl-3b-4bit,./models/qwen2.5-vl-3b-4bit/,512,128,74.94,6832.09,582.42,219.77,2026-09-06,Apple_M5_Max_128GB,mlx-lm-0.31.3,python,128,"Hello, how are you today?"

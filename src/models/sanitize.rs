@@ -1614,7 +1614,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .and_then(|config_str| serde_json::from_str::<Value>(&config_str).ok());
 
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
-    let keep_gemma3n_mlp_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
+    let keep_gemma3n_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
     // BitNet runs in its native bf16: its squared-ReLU activation overflows the
     // f16 max (65504), so the usual bf16->f16 Apple-Silicon conversion produces
     // NaNs. Keep the whole model bf16 to match the reference.
@@ -1724,8 +1724,8 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // identically and the same token count generated in both dtypes. Ampere and
     // later keep the guard, so their behavior is unchanged.
     if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet {
-        let had_bf16 = if keep_gemma3n_mlp_bf16 {
-            convert_bf16_weights_with_keep(&mut weights, gemma3n_language_mlp_bf16_key)
+        let had_bf16 = if keep_gemma3n_bf16 {
+            convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)
         } else {
             convert_bf16_weights(&mut weights)
         };
@@ -1789,6 +1789,15 @@ fn bf16_conversion_reason() -> &'static str {
 }
 
 pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
+    // Measurement instrument for dtype-policy A/B runs, not a supported
+    // configuration: it loads every checkpoint uniformly bf16. This is what
+    // found the Gemma3n mixture cost documented on `gemma3n_bf16_key`, and the
+    // control that says the win there is the uniformity rather than the dtype,
+    // since on families with no forced-bf16 subset the two land within noise.
+    // f16 stays the default for everything else.
+    if std::env::var("MLXCEL_KEEP_BF16").is_ok() {
+        return false;
+    }
     if pre_ampere_cuda() {
         // Quantized checkpoints included, unlike every other arm: the packed
         // planes are u32 and do not move, so only the bf16 side-data converts,
@@ -2024,19 +2033,29 @@ fn is_gemma3n_model_config(config: &Value) -> bool {
             .is_some_and(|model_type| model_type == "gemma3n" || model_type == "gemma3n_text")
 }
 
-/// Return true for Gemma3n language MLP tensors that should remain bf16.
+/// Return true for every Gemma3n tensor: this family stays bf16 end to end.
+///
+/// The policy used to keep only the language MLP bf16 and convert the rest to
+/// f16, which left one checkpoint holding both dtypes. MLX promotes f16 with
+/// bf16 to f32, so every boundary between the kept MLP and its f16 neighbours
+/// promoted, and the decode path read promoted weights the whole way down.
+/// Keeping the checkpoint uniform removes those boundaries.
+///
+/// Measured on M5 Max, gemma3n-e4b-bf16, 273-token prompt with an image and
+/// 128 generated: decode 38.02 to 47.48 tok/s (1.25x) and prefill 2143 to 2371
+/// tok/s, against mlx-vlm at 48.72 and 1207. Decode goes from 78% of the
+/// reference to 97% while prefill stays about 1.95x ahead of it.
+///
+/// This is specific to Gemma3n, and it is not a claim that bf16 beats f16. A
+/// control on models with no forced-bf16 subset found the two dtypes within
+/// noise of each other on the same hardware: qwen2.5-0.5b-bf16 401.8 against
+/// 397.3 tok/s, llama-3.1-8b-bf16 33.07 against 33.02. What costs is the
+/// mixture, not the dtype, so every other family keeps converting to f16.
 ///
 /// Used by: load_text_weights, load_vlm_weights_common
 #[must_use]
-pub fn gemma3n_language_mlp_bf16_key(key: &str) -> bool {
-    let layer_mlp_key =
-        (key.contains(".layers.") || key.starts_with("layers.")) && key.contains(".mlp.");
-    layer_mlp_key
-        && (key.starts_with("language_model.model.layers.")
-            || key.starts_with("model.language_model.layers.")
-            || key.starts_with("language_model.layers.")
-            || key.starts_with("model.layers.")
-            || key.starts_with("layers."))
+pub fn gemma3n_bf16_key(_key: &str) -> bool {
+    true
 }
 
 /// Emit a one-line stderr note when a full-precision bf16 model is loaded,
@@ -2699,19 +2718,20 @@ mod tests {
     // --- normalize_nvfp4_keys tests ---
 
     #[test]
-    fn gemma3n_language_mlp_bf16_key_matches_language_mlp_prefixes_only() {
-        assert!(gemma3n_language_mlp_bf16_key(
+    fn gemma3n_bf16_key_keeps_every_tensor_not_just_the_language_mlp() {
+        // The attention and vision entries are the point: under the old policy
+        // they converted to f16 and met the kept bf16 MLP, and MLX promotes
+        // that pair to f32.
+        assert!(gemma3n_bf16_key(
             "model.language_model.layers.0.mlp.gate_proj.weight"
         ));
-        assert!(gemma3n_language_mlp_bf16_key(
-            "language_model.model.layers.0.mlp.down_proj.weight"
-        ));
-        assert!(!gemma3n_language_mlp_bf16_key(
-            "model.vision_tower.layers.0.mlp.gate_proj.weight"
-        ));
-        assert!(!gemma3n_language_mlp_bf16_key(
+        assert!(gemma3n_bf16_key(
             "model.language_model.layers.0.self_attn.q_proj.weight"
         ));
+        assert!(gemma3n_bf16_key(
+            "model.vision_tower.timm_model.conv_stem.conv.weight"
+        ));
+        assert!(gemma3n_bf16_key("model.embed_vision.embedding.weight"));
     }
 
     #[test]

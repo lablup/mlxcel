@@ -1,0 +1,17 @@
+pairing,kind,batch,block_size,tok_s,speedup_vs_baseline,acceptance_rate,mean_accepted_len,status,date,hardware,mlxcel_version,max_tokens,prompt,mlxcel_commit,mlx_commit
+Qwen 3.5 4B (no drafter),none,1,,171.5,1.00,,,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.5 4B + DFlash (K=2),dflash,1,2,,,,,DEFERRED — DFlash loader + public Qwen3NextCache API,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.5 4B + DFlash (K=4),dflash,1,4,,,,,DEFERRED — DFlash loader + public Qwen3NextCache API,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.5 4B + DFlash (K=8),dflash,1,8,,,,,DEFERRED — DFlash loader + public Qwen3NextCache API,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 31B (no drafter),none,1,,28.1,1.00,,,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 31B + MTP assistant (K=2),mtp,1,2,45.9,1.63,0.800,0.80,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 31B + MTP assistant (K=4),mtp,1,4,53.5,1.90,0.583,1.75,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 31B + MTP assistant (K=8),mtp,1,8,50.0,1.78,0.583,1.75,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 Unified 12B (no drafter),none,1,,44.7,1.00,,,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 Unified 12B + MTP assistant (K=2),mtp,1,2,62.2,1.39,0.556,0.56,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 Unified 12B + MTP assistant (K=4),mtp,1,4,70.1,1.57,0.350,1.05,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Gemma 4 Unified 12B + MTP assistant (K=8),mtp,1,8,69.4,1.55,0.346,1.07,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.8 27B (no drafter),none,1,,32.9,1.00,,,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.8 27B + MTP head (K=2),mtp,1,2,48.0,1.46,0.735,0.74,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.8 27B + MTP head (K=4),mtp,1,4,44.3,1.35,0.504,1.51,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735
+Qwen 3.8 27B + MTP head (K=8),mtp,1,8,25.5,0.78,0.224,1.57,ok,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,128,Explain Apple Silicon's unified memory architecture in one short paragraph.,a50ff440,9a795735

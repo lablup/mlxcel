@@ -59,3 +59,43 @@ fn preprocess_outputs_hwc_tensor_and_spatial_shape() {
     assert!(processed[0].spatial_shape.0 >= 1);
     assert!(processed[0].spatial_shape.1 >= 1);
 }
+
+#[test]
+fn find_best_resize_upscales_below_the_scale_resolution() {
+    // Upstream's `_find_best_resize` takes `allow_upscale` and every caller passes
+    // `True`, so its guard `(w * h > scale_resolution^2) or allow_upscale` always
+    // fires. Only the downscale half was ported, and nothing here reached the other
+    // branch: the two cases above both pass 1000x400, which downscales. A 224x224
+    // input therefore stayed 224x224 and produced 16 visual tokens against the 64 the
+    // checkpoint declares, which lablup/mlxcel#1684 measured as a model that answers
+    // the same thing for three different images.
+    let processor = MiniCPMOProcessor::new_with_resize_multiples(14, 448, 64, 56, 56);
+    let (width, height) = processor.find_best_resize(224, 224);
+
+    assert_eq!(
+        (width, height),
+        (448, 448),
+        "a square input below the scale resolution must be upscaled to it"
+    );
+    // 448/14 = 32 patches per side, which the 2x2 VitMerger and 2x2 Merger reduce to
+    // 8x8, matching `image_feature_size: 64` in the checkpoint's processor_config.json.
+    assert_eq!((width / 14 / 4) * (height / 14 / 4), 64);
+}
+
+#[test]
+fn find_best_resize_still_downscales_above_the_scale_resolution() {
+    // The guard change must not stop the original behaviour: an input larger than the
+    // scale resolution still comes back much smaller. It does not come back inside
+    // `scale_resolution^2` in area, because `_ensure_divide` rounds each side up to a
+    // patch multiple and a non-square aspect ratio can push the product past it; a
+    // 2:1 input lands at 630x322, which is 202860 against 200704. Both upstream and
+    // this port behave that way, so the property to pin is the reduction, not an
+    // area bound.
+    let processor = MiniCPMOProcessor::new(14, 448, 64);
+    let (width, height) = processor.find_best_resize(2000, 1000);
+
+    assert!(width < 2000 && height < 1000, "got {width}x{height}");
+    assert!(width <= 448 * 2 && height <= 448);
+    assert_eq!(width % 14, 0);
+    assert_eq!(height % 14, 0);
+}

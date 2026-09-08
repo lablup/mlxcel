@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+paddleocr-vl-bfloat16,models/paddleocr-vl-bfloat16,512,128,17.31,29574.93,905.23,141.40,2026-09-06,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a50ff440-dirty,9a795735

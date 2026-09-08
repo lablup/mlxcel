@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+glm-4.1v-9b-thinking-4bit,models/mlx/glm-4.1v-9b-thinking-4bit,512,128,1127.05,454.28,2109.55,60.68,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,255203e5,9a795735

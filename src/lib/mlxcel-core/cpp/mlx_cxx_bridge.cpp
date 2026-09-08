@@ -1738,7 +1738,16 @@ namespace {
             if (const char* v = std::getenv("MLXCEL_ENABLE_SOFTCAP_GQA_DECODE_GROUPED")) {
                 return std::string_view(v) != "0";
             }
-            return false;
+            // On by default since #1686's measurement. The grouped path keeps
+            // K and V at `[B, H_kv, S, D]` and broadcasts n_rep inside the
+            // matmul; the fallback below it calls `do_repeat_kv`, which writes
+            // an n_rep-sized copy of the whole live cache on every decode step.
+            // Measured on M5 Max at 512 prompt tokens: gemma2-2b-4bit decode
+            // 195.59 to 221.69 tok/s and gemma-2-9b-8bit 40.51 to 47.34, with
+            // greedy output byte-identical either way on both. Set
+            // MLXCEL_DISABLE_SOFTCAP_GQA_DECODE_GROUPED=1 to restore the
+            // repeat-based path.
+            return true;
         }();
         return enabled;
     }
@@ -1871,12 +1880,18 @@ namespace {
             auto up = mlx::core::quantized_matmul(x, up_w, up_s, up_b, true, group_size, bits);
 
             // GELU(gate): gate * 0.5 * (1 + erf(gate / sqrt(2)))
+            //
+            // The f32 constants promote a half-precision `gate`, so `gelu_gate`
+            // is cast back before it reaches the down projection: a f32
+            // activation makes `quantized_matmul` promote the scales and biases
+            // to match, which is the same defect the dense `gelu_approx` had.
             auto sqrt2 = array(std::sqrt(2.0f));
             auto half = array(0.5f);
             auto one = array(1.0f);
             auto erf_val = mlx::core::erf(mlx::core::divide(gate, sqrt2));
             auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            auto gelu_gate = mlx::core::multiply(gate, scale);
+            auto gelu_gate = mlx::core::astype(
+                mlx::core::multiply(gate, scale), gate.dtype());
 
             // activated = gelu(gate) * up
             auto activated = mlx::core::multiply(gelu_gate, up);
@@ -1936,13 +1951,14 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward(
         x.inner, up_proj.inner, up_scales.inner, ub_opt,
         true, std::optional<int>(group_size), std::optional<int>(bits), mode_str);
 
-    // GELU(gate) * up
+    // GELU(gate) * up. Cast back to `gate`'s dtype for the same reason the
+    // compiled variant above does; the two paths must stay byte-identical.
     auto sqrt2 = array(std::sqrt(2.0f));
     auto half = array(0.5f);
     auto one = array(1.0f);
     auto erf_val = mlx::core::erf(mlx::core::divide(gate, sqrt2));
     auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-    auto gelu_gate = mlx::core::multiply(gate, scale);
+    auto gelu_gate = mlx::core::astype(mlx::core::multiply(gate, scale), gate.dtype());
     auto activated = mlx::core::multiply(gelu_gate, up);
 
     auto down = mlx::core::quantized_matmul(
@@ -2842,12 +2858,19 @@ std::unique_ptr<MlxArray> silu(const MlxArray& a) {
 
 std::unique_ptr<MlxArray> gelu(const MlxArray& a) {
     // gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+    //
+    // The f32 constants promote a half-precision input, so the result is cast
+    // back to the input dtype before it is returned. `compiled_gelu` has always
+    // done this; leaving it out here let the f32 activation reach the next
+    // projection, where MLX promotes the f16 weight to f32 to match it. See
+    // `gelu_approx` for the measurement.
     auto sqrt2 = array(std::sqrt(2.0f));
     auto half = array(0.5f);
     auto one = array(1.0f);
     auto erf_val = mlx::core::erf(mlx::core::divide(a.inner, sqrt2));
     auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-    return std::make_unique<MlxArray>(mlx::core::multiply(a.inner, scale));
+    auto result = mlx::core::multiply(a.inner, scale);
+    return std::make_unique<MlxArray>(mlx::core::astype(result, a.inner.dtype()));
 }
 
 std::unique_ptr<MlxArray> gelu_approx(const MlxArray& a) {
@@ -2862,22 +2885,37 @@ std::unique_ptr<MlxArray> gelu_approx(const MlxArray& a) {
     // The erf-based GELU: x * 0.5 * (1 + erf(x / sqrt(2))) is numerically
     // stable for all inputs and matches Python nn.GELU(approx="precise")
     // output within floating-point tolerance.
+    // The erf math stays in f32 (that is what the constants above buy), but the
+    // result is cast back to the input dtype, matching `compiled_gelu_approx`.
+    // Without the cast a f16 activation leaves this function as f32, the residual
+    // stream turns f32 at the first MLP, and every later matmul promotes its f16
+    // weight to f32 to match. On M1 Ultra that cost gpt_bigcode-santacoder 18.8
+    // ms/token against 6.3 ms for the same graph in f16, and left it at 28% of
+    // mlx-lm; a 24-layer MLP chain measures 8.59 ms promoted against 3.67 ms not.
     auto sqrt2 = array(std::sqrt(2.0f));
     auto half = array(0.5f);
     auto one = array(1.0f);
     auto erf_val = mlx::core::erf(mlx::core::divide(a.inner, sqrt2));
     auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-    return std::make_unique<MlxArray>(mlx::core::multiply(a.inner, scale));
+    auto result = mlx::core::multiply(a.inner, scale);
+    return std::make_unique<MlxArray>(mlx::core::astype(result, a.inner.dtype()));
 }
 
 std::unique_ptr<MlxArray> relu(const MlxArray& a) {
-    return std::make_unique<MlxArray>(mlx::core::maximum(a.inner, array(0.0f)));
+    // Build the zero in the input dtype rather than casting the result: an f32
+    // literal here would promote a half-precision input the same way the GELU
+    // constants did.
+    return std::make_unique<MlxArray>(
+        mlx::core::maximum(a.inner, array(0.0f, a.inner.dtype())));
 }
 
 std::unique_ptr<MlxArray> leaky_relu(const MlxArray& a, float negative_slope) {
-    auto zero = array(0.0f);
+    // Same dtype rule as `relu`.
+    auto dt = a.inner.dtype();
+    auto zero = array(0.0f, dt);
     auto pos = mlx::core::maximum(a.inner, zero);
-    auto neg = mlx::core::multiply(mlx::core::minimum(a.inner, zero), array(negative_slope));
+    auto neg =
+        mlx::core::multiply(mlx::core::minimum(a.inner, zero), array(negative_slope, dt));
     return std::make_unique<MlxArray>(mlx::core::add(pos, neg));
 }
 

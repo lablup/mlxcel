@@ -98,6 +98,9 @@ trap 'echo "Interrupted (signal received)" >&2; exit 130' INT TERM
 
 MLXCEL="./target/release/mlxcel"
 MLXCEL_BENCH="./target/release/mlxcel-bench-decode"
+# Resolved from this script's own location so the VLM filter works regardless
+# of the caller's working directory.
+VLM_DETECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vlm_detect.py"
 # Overridable so `all` mode can sweep a checkout whose models live under a
 # nested store root (e.g. `./models/mlx-community`), which is what the mlxcel
 # model store produces when it downloads by `owner/name` repo-id. The Makefile's
@@ -158,8 +161,46 @@ SOURCE_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
 # Only tracked modifications make the measured binary differ from the commit.
 # Untracked files (stray notes, scratch CSVs) do not, and flagging them would
 # mark almost every real sweep dirty.
-if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+#
+# `benchmarks/` is excluded because it holds this script's own output, not
+# source. A multi-model sweep writes a CSV per model, so the first model to
+# overwrite a tracked CSV made every later model in the same sweep record
+# `-dirty` against a binary that had not changed at all. That is the opposite
+# of what this column is for: it exists to say which source revision produced
+# the numbers, and a run that only rewrote measurement data still produced them
+# from the named commit. A source edit mid-sweep is still caught, which is the
+# case worth catching.
+if [[ -n "$(git status --porcelain --untracked-files=no -- ':!benchmarks' 2>/dev/null)" ]]; then
   SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+fi
+
+# `SOURCE_COMMIT` above is read from git, not from the executable, so it names
+# the revision of the *tree* and not the revision the measured binary was built
+# from. Those diverge the moment a sweep runs without rebuilding after a pull,
+# a rebase or a branch switch, and the run then records provenance its binary
+# does not have. That is not a hypothetical: an M5 Max sweep recorded a commit
+# containing the 3D-rotary restore while running a binary built before it, and
+# the resulting rows read as "this change does nothing on this machine" when it
+# is worth up to 3.26x. Both arms of the follow-up A/B were the same stale
+# binary, so they agreed, and the agreement looked like evidence.
+#
+# Checked by mtime rather than by invoking cargo: a checkout rewrites the files
+# it touches, so a rebase that lands new source is caught, and the check costs
+# no build. A file touched without a content change is a false positive, which
+# costs one needless rebuild and never a wrong number. Set
+# BENCH_ALLOW_STALE_BINARY=1 to measure a deliberately old binary, which is a
+# real case when bisecting.
+if [[ -x "$MLXCEL_BENCH" && "${BENCH_ALLOW_STALE_BINARY:-0}" != "1" ]]; then
+  newer_src=$(find src Cargo.toml Cargo.lock -newer "$MLXCEL_BENCH" -type f 2>/dev/null | head -5)
+  if [[ -n "$newer_src" ]]; then
+    echo "ERROR: source is newer than $MLXCEL_BENCH, so the binary predates the tree." >&2
+    echo "       Rows would be stamped $SOURCE_COMMIT against a binary that does not contain it." >&2
+    echo "       Newer than the binary:" >&2
+    printf '         %s\n' $newer_src >&2
+    echo "       Rebuild first:  cargo build --release --features metal,accelerate" >&2
+    echo "       Or set BENCH_ALLOW_STALE_BINARY=1 if the old binary is the point (bisect)." >&2
+    exit 1
+  fi
 fi
 # Pinned MLX C++ revision the binary links, 8 characters. `mlxcel_version` and
 # `mlxcel_commit` describe this repository; an MLX pin bump changes kernels
@@ -312,6 +353,40 @@ model_fits_in_memory() {
   # syntax error (which could abort the sweep under set -e).
   effective_bytes=$(awk -v b="$model_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f}')
   [[ "$effective_bytes" -le "$MEMORY_LIMIT_BYTES" ]]
+}
+
+# Resolve the timeout(1) implementation once, at load.
+#
+# GNU coreutils ships `timeout`. macOS ships neither it nor a BSD equivalent, so
+# a stock Mac has the binary only under its Homebrew name, `gtimeout`. Every run
+# here used to call `timeout` unconditionally, which on such a host exits 127
+# ("command not found") before the model is ever loaded. That surfaced as
+# FAIL:bench, the same status a real mlxcel defect produces, so a sweep read as
+# a total runtime failure rather than a missing dependency: the 2026-09-04 M3
+# Ultra attempt was abandoned on exactly this, one model in.
+#
+# When neither binary is present the runs proceed unwrapped rather than failing.
+# A sweep with no watchdog is worth more than no sweep at all, but it is not
+# free: nothing bounds a hung run, and exit code 124 (the expiry signal
+# is_oom_failure keys on) never occurs in that mode. The Run section announces
+# the degradation once so it cannot be mistaken for a normal sweep.
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+fi
+
+# Run "$@" under TIMEOUT_BIN with a budget of $1 seconds, or unwrapped when no
+# implementation was found. Returns the command's own exit status either way.
+run_with_timeout() {
+  local secs="$1"
+  shift
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" "$secs" "$@"
+  else
+    "$@"
+  fi
 }
 
 # Returns 0 (true) when a failed run looks like an out-of-memory condition.
@@ -525,6 +600,7 @@ emit_duplicate_row() {
   local prompt="$TEXT_PROMPT"
   [[ "$VLM_MODE" -eq 1 ]] && prompt="$VLM_PROMPT"
   local ptl="$PROMPT_TOKENS"
+  [[ "$VLM_MODE" -eq 1 ]] && ptl=""
   >&2 printf '>>> [skip]   %s duplicate of %s (SKIP:duplicate_of)\n' "$model_name" "$owner"
   echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${SOURCE_COMMIT},${MLX_COMMIT},SKIP:duplicate_of=${owner}"
 }
@@ -674,8 +750,10 @@ bench_one() {
   model_name=$(basename "$model_path")
 
   # Long-prompt target recorded in the prompt_target_len CSV column; empty for
-  # the short-prompt default so historical rows stay byte-compatible.
+  # the short-prompt default so historical rows stay byte-compatible, and empty
+  # in VLM mode because the synthetic long prompt is never used there.
   local ptl="$PROMPT_TOKENS"
+  [[ "$VLM_MODE" -eq 1 ]] && ptl=""
 
   # Classify a directory that cannot be a checkpoint before spending a model
   # load and a cooldown on a guaranteed failure. Both cases previously landed
@@ -728,7 +806,12 @@ bench_one() {
   fi
 
   # Long-prompt prefill mode: synthesize an exactly-N-token prompt in the runner.
-  if [[ -n "$PROMPT_TOKENS" ]]; then
+  # Never in VLM mode: the synthetic prompt is text-only and the runner ignores
+  # --image whenever --prompt-tokens is set, which silently turns the VLM sweep
+  # into a second text sweep. The VLM pass keeps the fixed --max-tokens budget
+  # and --ignore-eos, so decode stays comparable across models; prefill varies
+  # with each checkpoint's image token count, which is inherent to VLM prefill.
+  if [[ -n "$PROMPT_TOKENS" && "$VLM_MODE" -ne 1 ]]; then
     extra_args+=(--prompt-tokens "$PROMPT_TOKENS")
   fi
 
@@ -751,7 +834,7 @@ bench_one() {
   # a non-zero exit code is captured in rc rather than aborting the script.
   local eos_args=()
   [[ "$IGNORE_EOS" == "1" ]] && eos_args+=(--ignore-eos)
-  raw=$(timeout "$run_timeout" "$MLXCEL_BENCH" \
+  raw=$(run_with_timeout "$run_timeout" "$MLXCEL_BENCH" \
       -m "$model_path" -p "$prompt" -n "$MAX_TOKENS" \
       --warmup-tokens "$WARMUP_TOKENS" \
       ${eos_args[@]+"${eos_args[@]}"} \
@@ -899,9 +982,34 @@ is_gpu_crash_model() {
   return 1
 }
 
+# In --vlm mode, exclude checkpoints that have no vision tower. Running one
+# under an image prompt produces FAIL:bench here, which is the same status a
+# real mlxcel defect produces, so a sweep's failure count stops meaning
+# anything: on the 2026-09-07 M1 Ultra run 100 of 109 VLM-sweep failures were
+# just text-only checkpoints. The Python baseline had the opposite symptom --
+# mlx-vlm loads them, silently drops the image, and records a text-only row as
+# a VLM measurement. Both harnesses call scripts/vlm_detect.py so their model
+# sets match; see that module's docstring.
+#
+# Text mode filters nothing: a VLM's decoder is a real text workload.
+skip_for_vlm_mode() {
+  [[ "$VLM_MODE" -eq 1 ]] || return 1
+  python3 "$VLM_DETECT" "$1" && return 1
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
+if [[ -z "$TIMEOUT_BIN" ]]; then
+  >&2 echo "!!! WARNING: neither timeout(1) nor gtimeout was found on this host."
+  >&2 echo "!!!          Runs proceed UNBOUNDED: a hung model will not be killed,"
+  >&2 echo "!!!          and no row can be classified as a timeout (exit 124)."
+  >&2 echo "!!!          Install GNU coreutils to restore the watchdog:"
+  >&2 echo "!!!            brew install coreutils    # provides gtimeout"
+  >&2 echo ""
+fi
+
 # ---------------------------------------------------------------------------
 # Pre-warm before `all` sweeps: on the first run after a build the shared
 # kernels are not cached yet (CUDA JIT-compiles for 3-8 minutes per model;
@@ -927,7 +1035,7 @@ if [[ "$PRE_WARM" == "1" && "$MODEL_ARG" == "all" ]]; then
     else
       >&2 echo "    Warming shared GPU pipeline caches..."
     fi
-    if timeout "$JIT_PREHEAT_TIMEOUT" "$MLXCEL" generate \
+    if run_with_timeout "$JIT_PREHEAT_TIMEOUT" "$MLXCEL" generate \
         -m "$preheat_model" -p "Hello" -n 5 --profile >/dev/null 2>&1; then
       >&2 echo "    Pre-warm complete."
     else
@@ -948,6 +1056,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     # First pass: run all models except known GPU-crash models
     for dir in "$MODELS_DIR"/*/; do
       [[ -d "$dir" ]] || continue
+      skip_for_vlm_mode "$dir" && continue
       is_gpu_crash_model "$dir" && continue
       result=$(bench_one "$dir")
       emit "$result"
@@ -956,6 +1065,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     # Second pass: run known GPU-crash models last
     for dir in "$MODELS_DIR"/*/; do
       [[ -d "$dir" ]] || continue
+      skip_for_vlm_mode "$dir" && continue
       is_gpu_crash_model "$dir" || continue
       result=$(bench_one "$dir")
       emit "$result"
@@ -969,6 +1079,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     # runs for them). Second pass: measured GPU-crash models, run last.
     for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
       dir="${DEDUP_DIR[$i]}"
+      skip_for_vlm_mode "$dir" && continue
       if [[ -n "${DEDUP_ALIAS_OF[$i]}" ]]; then
         result=$(emit_duplicate_row "$dir" "${DEDUP_ALIAS_OF[$i]}")
         emit "$result"
@@ -981,6 +1092,7 @@ if [[ "$MODEL_ARG" == "all" ]]; then
     done
     for ((i = 0; i < ${#DEDUP_DIR[@]}; i++)); do
       dir="${DEDUP_DIR[$i]}"
+      skip_for_vlm_mode "$dir" && continue
       [[ -z "${DEDUP_ALIAS_OF[$i]}" ]] || continue
       is_gpu_crash_model "$dir" || continue
       result=$(bench_one "$dir")

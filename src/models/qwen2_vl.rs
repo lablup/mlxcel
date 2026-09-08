@@ -245,6 +245,22 @@ fn apply_multimodal_rotary_pos_emb(
         mlxcel_core::add(&t1, &t2)
     };
 
+    // Restore the input dtype. `cos` and `sin` are built in f32 (the MRoPE table
+    // widens `inv_freq` and the position ids on purpose), so these multiplies
+    // promote a half-precision `q`/`k` and the rotated result would leave this
+    // function as f32, carry through the attention and the output projection,
+    // and make every later layer promote its own weight to match. Upstream does
+    // the same widen-then-restore: `apply_multimodal_rotary_pos_emb` in
+    // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rope_utils.py
+    // computes at `compute_dtype=mx.float32` and ends with
+    // `q_embed.astype(q.dtype)` / `k_embed.astype(k.dtype)` under `cast_output`.
+    // Same invariant as lablup/mlxcel#1709: hand back the dtype you were given.
+    //
+    // This only bites once an image has been seen: the text-only fast path uses
+    // plain 1-D `fast_rope`, which preserves dtype and never reaches here.
+    let q_embed = mlxcel_core::astype(&q_embed, mlxcel_core::array_dtype(q));
+    let k_embed = mlxcel_core::astype(&k_embed, mlxcel_core::array_dtype(k));
+
     (q_embed, k_embed)
 }
 
@@ -272,11 +288,12 @@ struct Attention {
     k_proj: UnifiedLinear,
     v_proj: UnifiedLinear,
     o_proj: UnifiedLinear,
-    mrope: MRoPE,
     num_heads: i32,
     num_kv_heads: i32,
     head_dim: i32,
     scale: f32,
+    /// `rope_theta`, kept for the text-only path's plain 1-D RoPE.
+    rope_base: f32,
 }
 
 impl Attention {
@@ -313,27 +330,32 @@ impl Attention {
         )?;
 
         let head_dim = config.head_dim();
-        let mrope = MRoPE::new(head_dim, config.rope_theta, config.mrope_section());
 
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
-            mrope,
             num_heads: config.num_attention_heads as i32,
             num_kv_heads: config.num_kv_heads() as i32,
             head_dim: head_dim as i32,
             scale: (head_dim as f32).powf(-0.5),
+            rope_base: config.rope_theta,
         })
     }
 
+    /// `cos` and `sin` are the MRoPE tables for this forward, built once by
+    /// `Qwen2VLModel::forward_hidden`. They depend only on `position_ids` and
+    /// the rope config, both identical across layers, so building them here
+    /// would repeat the same work once per layer per token. mlx-vlm threads
+    /// them the same way (`qwen2_5_vl/language.py`).
     fn forward(
         &self,
         x: &MlxArray,
         cache: &mut KVCache,
         mask: Option<&MlxArray>,
-        position_ids: &MlxArray,
+        cos: &MlxArray,
+        sin: &MlxArray,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -352,24 +374,15 @@ impl Attention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         // Apply MRoPE
-        let (cos, sin) = self.mrope.forward(position_ids);
-        let (q, k) = apply_multimodal_rotary_pos_emb(&q, &k, &cos, &sin);
+        let (q, k) = apply_multimodal_rotary_pos_emb(&q, &k, cos, sin);
 
         // KV cache
         let (k, v) = cache.update_and_fetch(k, v);
 
-        // Repeat KV heads if GQA
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&k, n_rep)
-        } else {
-            mlxcel_core::copy(&k)
-        };
-        let v = if n_rep > 1 {
-            mlxcel_core::utils::repeat_kv(&v, n_rep)
-        } else {
-            mlxcel_core::copy(&v)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy of
+        // the whole live cache on every decode step. `qwen3.rs` hands the cache
+        // output straight to attention the same way.
 
         // Attention
         let output = if let Some(m) = mask {
@@ -399,6 +412,52 @@ impl Attention {
         };
 
         // [B, heads, L, head_dim] -> [B, L, dim]
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+        self.o_proj.forward(&output)
+    }
+
+    /// Text-only fast path: plain 1-D RoPE, no MRoPE tables, no causal mask
+    /// built by the caller. For a sequence with no vision tokens the three
+    /// MRoPE sections all carry the same position, so this is numerically the
+    /// multimodal path; `qwen3_vl.rs` splits the same way for the same reason.
+    fn forward_text_only(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offset = cache.offset;
+        let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
+        let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+
+        let (k, v) = cache.update_and_fetch(k, v);
+
+        // K and V stay GQA-shaped; see the note in `forward`.
+        let output = if l > 1 && mask.is_none() {
+            mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(&q, &k, &v, self.scale, mask_ptr, 0.0, 0)
+            }
+        };
+
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         self.o_proj.forward(&output)
@@ -485,11 +544,26 @@ impl DecoderLayer {
         x: &MlxArray,
         cache: &mut KVCache,
         mask: Option<&MlxArray>,
-        position_ids: &MlxArray,
+        cos: &MlxArray,
+        sin: &MlxArray,
     ) -> UniquePtr<MlxArray> {
         let r = self
             .attn
-            .forward(&self.input_layernorm.forward(x), cache, mask, position_ids);
+            .forward(&self.input_layernorm.forward(x), cache, mask, cos, sin);
+        let h = mlxcel_core::add(x, &r);
+        let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
+        mlxcel_core::add(&h, &r)
+    }
+
+    fn forward_text_only(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let r = self
+            .attn
+            .forward_text_only(&self.input_layernorm.forward(x), cache, mask);
         let h = mlxcel_core::add(x, &r);
         let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
         mlxcel_core::add(&h, &r)
@@ -512,6 +586,9 @@ pub struct Qwen2VLModel {
     norm: RMSNorm,
     lm_head: UnifiedLinear,
     _config: Qwen2VLConfig,
+    /// Shared MRoPE tables source. One per model rather than one per attention:
+    /// every layer builds the same cos/sin from the same config (#1686).
+    mrope: MRoPE,
     /// Per-sequence MRoPE state (mlx-vlm PR #1095). Each row
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
@@ -548,6 +625,7 @@ impl Qwen2VLModel {
             norm,
             lm_head,
             _config: config.clone(),
+            mrope: MRoPE::new(config.head_dim(), config.rope_theta, config.mrope_section()),
             mrope_state: MRopeState::new(),
         })
     }
@@ -655,6 +733,10 @@ impl Qwen2VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
+            return self.forward_text_only_hidden(input_ids, caches, mask);
+        }
+
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -728,13 +810,55 @@ impl Qwen2VLModel {
         let auto_mask;
         let mask = if mask.is_some() {
             mask
-        } else {
+        } else if seq_len > 1 {
             auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
             Some(auto_mask.as_ref().unwrap() as &MlxArray)
+        } else {
+            // Decode width. The one query row sits at logical position
+            // `live_len`, so every key column is permitted: the mask would be
+            // uniformly zero, constrain nothing, and only force the masked arm
+            // of the fused SDPA. mlx-lm returns None here as well
+            // (`create_attention_mask`), and `qwen3_5.rs` carries the same
+            // `seq_len > 1` guard. The sizing note above still governs prefill.
+            None
         };
 
+        // MRoPE tables, built once per forward rather than once per layer. Every
+        // layer's rope config is identical, so the per-layer builds this
+        // replaces were recomputing the same arrays `num_hidden_layers` times
+        // for every decoded token (#1686).
+        let (cos, sin) = self.mrope.forward(&position_ids);
+
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask, &position_ids);
+            h = layer.forward(&h, &mut caches[i], mask, &cos, &sin);
+        }
+
+        self.norm.forward(&h)
+    }
+
+    /// True when this sequence has never carried image positions, so the
+    /// MRoPE machinery has nothing to encode that plain RoPE would not.
+    /// `Qwen2VLModel` has no DeepStack or visual-mask state, so the MRoPE
+    /// entry is the whole test (`qwen3_vl.rs` checks two more for that reason).
+    fn can_use_text_only_fast_path(&self, seq_id: Option<SequenceId>) -> bool {
+        !self.mrope_state.with_entry(seq_id, |entry| {
+            entry.position_ids.is_some() || entry.rope_deltas.unwrap_or(0) != 0
+        })
+    }
+
+    /// Text-only fast path. Skips the MRoPE table build and the auto causal
+    /// mask entirely: `Attention::forward_text_only` uses plain 1-D RoPE and
+    /// lets `causal_attention` supply prefill causality.
+    fn forward_text_only_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward_text_only(&h, &mut caches[i], mask);
         }
 
         self.norm.forward(&h)

@@ -54,7 +54,9 @@ VLM_IMAGE = "tests/fixtures/test_image.png"
 MAX_TOKENS = 128
 WARMUP_TOKENS = 20
 PROMPT_TOKENS = 512
-MODELS_DIR = Path("./models")
+# Root the sweep enumerates. Overridable so a host whose checkpoint store is
+# `models/mlx` works without symlinks, matching scripts/bench_decode.sh.
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", "./models"))
 BENCHMARKS_DIR = Path("./benchmarks")
 # Memory budget: 85% of 128 GB. Override with PYLM_BENCH_MAX_GB env var to
 # enforce a tighter cap (e.g. PYLM_BENCH_MAX_GB=65 to skip very large MoE
@@ -109,33 +111,10 @@ def estimate_model_size(model_path: Path) -> int:
     return total
 
 
-def is_vlm(model_path: Path) -> bool:
-    """Detect VLM by config.json contents or preprocessor presence."""
-    cfg = model_path / "config.json"
-    if not cfg.exists():
-        return False
-    try:
-        with open(cfg) as f:
-            data = json.load(f)
-    except Exception:
-        return False
-    if "vision_config" in data or "image_processor_type" in data:
-        return True
-    archs = data.get("architectures", []) or []
-    VLM_ARCH_SUBSTR = (
-        "Llava", "PaliGemma", "Qwen2VL", "Qwen2_5_VL", "Qwen3VL",
-        "Idefics", "Pixtral", "Bunny", "Phi3V", "Phi35V", "AyaVision",
-        "Gemma3ForConditional", "Gemma4ForConditional", "Mllama",
-        "Mistral3", "Llama4", "MolmoForCausalLM", "Molmo", "InternVL",
-        "GotOcr", "Smolvlm", "Florence", "Kimi",
-    )
-    for a in archs:
-        if any(sub in a for sub in VLM_ARCH_SUBSTR):
-            return True
-    # Has image preprocessor → likely VLM
-    if (model_path / "preprocessor_config.json").exists():
-        return True
-    return False
+# VLM detection lives in scripts/vlm_detect.py so bench_decode.sh applies the
+# identical rule; see that module's docstring for why they must agree.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vlm_detect import is_vlm  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +155,15 @@ if prompt_tokens_target > 0 and corpus:
 # runs on every step, including the first generated token.
 import mlx.core as mx
 _eos = set()
+# Same superset problem as the VLM path: the stopping set can be wider than the
+# tokenizer's eos_token_ids attribute (Gemma 4 reports 1 but stops on
+# [1, 106, 50]), so read the criteria object first.
+_sc = getattr(tokenizer, 'stopping_criteria', None)
+if _sc is not None:
+    for _attr in ('eos_token_ids', '_eos_token_ids', 'stop_ids'):
+        _v = getattr(_sc, _attr, None)
+        if _v is not None:
+            _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
 for _attr in ('eos_token_ids', 'eos_token_id'):
     _v = getattr(tokenizer, _attr, None)
     if _v is None:
@@ -238,7 +226,12 @@ max_tokens = int(sys.argv[4])
 image_path = sys.argv[5]
 
 try:
-    model, processor = load(model_path)
+    # The text child already loads with trust_remote_code; without the same here a
+    # checkpoint carrying custom code stops on an interactive "Do you wish to run
+    # the custom code? [y/N]" prompt. mlx_vlm.load forwards this to the processor
+    # loader as a direct kwarg; `tokenizer_config={'trust_remote_code': True}`
+    # does not reach it.
+    model, processor = load(model_path, trust_remote_code=True)
 except Exception as e:
     print('ERROR load:', repr(e), file=sys.stderr)
     sys.exit(2)
@@ -255,7 +248,27 @@ except Exception as e:
 # without this a VLM that answers in three words is timed over three tokens.
 import mlx.core as mx
 _tok = getattr(processor, 'tokenizer', processor)
+
+# Token count of the formatted prompt as plain text, with no image expanded into
+# it. The parent compares the measured prompt_tokens against this: an image that
+# reached the model always adds tokens, so equality means it did not.
+try:
+    _text_only_tokens = len(_tok.encode(formatted_prompt))
+except Exception:
+    _text_only_tokens = None
+
 _eos = set()
+# The set mlx_vlm actually stops on is stopping_criteria.eos_token_ids, which is
+# a superset of the tokenizer's own eos_token_ids attribute: Gemma 4 reports 1
+# there but stops on [1, 106, 50]. Reading only the attribute left 106 and 50
+# unbiased, so the whole Gemma 4 family terminated early (11 to 115 tokens
+# instead of 128) while single-id families like Qwen looked fine.
+_sc = getattr(_tok, 'stopping_criteria', None)
+if _sc is not None:
+    for _attr in ('eos_token_ids', '_eos_token_ids', 'stop_ids'):
+        _v = getattr(_sc, _attr, None)
+        if _v is not None:
+            _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
 for _attr in ('eos_token_ids', 'eos_token_id'):
     _v = getattr(_tok, _attr, None)
     if _v is None:
@@ -296,6 +309,7 @@ result = {
     'prefill_tps': getattr(last, 'prompt_tps', None),
     'gen_tokens': getattr(last, 'generation_tokens', None),
     'decode_tps': getattr(last, 'generation_tps', None),
+    'text_only_prompt_tokens': _text_only_tokens,
 }
 print('RESULT', json.dumps(result))
 """
@@ -308,7 +322,19 @@ def resolve_python() -> list[str]:
     `uv run` against that venv, then bare python3. The bare interpreter is last
     because the system Python here is 3.14, which has no mlx wheels; the venv is
     created with `uv venv --python 3.12 .venv-mlxlm` and populated with
-    `uv pip install --python .venv-mlxlm/bin/python mlx-lm mlx-vlm`.
+
+        uv pip install --python .venv-mlxlm/bin/python \
+            mlx-lm mlx-vlm torch torchvision timm numba addict matplotlib einops
+
+    The packages past `mlx-vlm` are not optional. Several checkpoints reach a
+    processor or a `trust_remote_code` module that imports them, and without
+    them the model does not load at all, so the sweep records `FAIL:warmup` and
+    the row looks like a runtime defect rather than a missing dependency. On
+    2026-09-07 that was 4 VLM checkpoints for `torchvision` (idefics2, idefics3,
+    smolvlm, fastvlm), `timm` for fastvlm, and `numba` for plamo2, which had no
+    baseline on either host until it was installed and then measured at 106% of
+    mlx-lm. `addict`, `matplotlib` and `einops` are imported by the DeepSeek-OCR
+    remote code.
     """
     explicit = os.environ.get("MLXLM_PYTHON")
     if explicit:
@@ -346,6 +372,10 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
     try:
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout,
+            # A child that asks something on stdin would otherwise inherit the
+            # terminal and hang until `timeout`, turning one prompt into a lost
+            # sweep slot. With no stdin it fails immediately and is classified.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return ("FAIL:timeout", None)
@@ -355,9 +385,23 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
             if line.startswith("RESULT "):
                 try:
                     data = json.loads(line[len("RESULT "):])
-                    return ("OK", data)
                 except json.JSONDecodeError:
-                    pass
+                    continue
+                # mlx-vlm loads a checkpoint, accepts an `image=` it cannot use,
+                # and generates from the text alone, so the run looks like a
+                # successful VLM measurement while timing a text-only decode.
+                # An image that reached the model always expands the prompt
+                # beyond the plain-text template, so no expansion means no
+                # image. Found by hand on llava-next-mistral-7b (7 prompt
+                # tokens, the bare question) and confirmed identical on two
+                # hosts; bunny-llama3-8b and fastvlm-0.5b hid in the same way
+                # behind a template that made their counts look plausible.
+                if vlm:
+                    got = data.get("prompt_tokens")
+                    text_only = data.get("text_only_prompt_tokens")
+                    if got is not None and text_only is not None and got <= text_only:
+                        return ("FAIL:image_not_applied", None)
+                return ("OK", data)
         return ("FAIL:no_result", None)
 
     # Map exit codes to FAIL types matching bench_decode.sh
@@ -386,12 +430,19 @@ def main():
     hw_short, hw_full = detect_hardware()
     today = date.today().isoformat()
     # Get versions
+    # Ask the interpreter that actually runs the benchmark, not the one running
+    # this script. They differ whenever PYTHON_CMD resolves to the uv venv,
+    # which is the normal case here: the system Python has no mlx wheels, so an
+    # in-process import would always fail and record "unknown".
+    pkg = "mlx_vlm" if args.vlm else "mlx_lm"
+    label = "mlx-vlm" if args.vlm else "mlx-lm"
     try:
-        import mlx_lm, mlx_vlm
-        if args.vlm:
-            mlx_version = f"mlx-vlm-{mlx_vlm.__version__}"
-        else:
-            mlx_version = f"mlx-lm-{mlx_lm.__version__}"
+        probe = subprocess.run(
+            [*PYTHON_CMD, "-c", f"import {pkg}; print({pkg}.__version__)"],
+            capture_output=True, text=True, timeout=120,
+        )
+        ver = probe.stdout.strip().splitlines()[-1] if probe.returncode == 0 else ""
+        mlx_version = f"{label}-{ver}" if ver else "unknown"
     except Exception:
         mlx_version = "unknown"
 
@@ -410,7 +461,32 @@ def main():
 
     # Discover models
     if args.model == "all":
-        model_dirs = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir())
+        # Same checkpoint test as scripts/bench_decode.sh: a directory is a
+        # model only if it has a config.json and at least one readable
+        # *.safetensors. This drops container directories (models/mlx holds a
+        # `large_models` parking area) and checkpoints whose weights are absent
+        # or behind a dangling symlink, instead of charging a load attempt and
+        # a cooldown to each.
+        def _is_checkpoint(d: Path) -> bool:
+            if not (d / "config.json").is_file():
+                return False
+            return any(f.is_file() for f in d.glob("*.safetensors"))
+
+        model_dirs = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir() and _is_checkpoint(p))
+
+        # Restrict the sweep to checkpoints that match the requested modality.
+        # mlx-vlm loads a text-only checkpoint without complaint and silently
+        # drops the image, so an unfiltered --vlm sweep records text-only rows
+        # (prompt 11-15 tokens, the bare question) as if they were VLM
+        # measurements. On the 2026-09-07 M1 Ultra run that was 49 of 95
+        # measured rows. Text mode drops nothing: a VLM's decoder is a real
+        # text workload and mlx-lm loads it fine.
+        if args.vlm:
+            skipped = [p for p in model_dirs if not is_vlm(p)]
+            model_dirs = [p for p in model_dirs if is_vlm(p)]
+            if skipped:
+                print(f">>> [filter] {len(skipped)} non-VLM checkpoints excluded "
+                      f"from the --vlm sweep", file=sys.stderr)
     else:
         p = Path(args.model)
         if not p.is_dir():

@@ -567,8 +567,16 @@ pub fn load_weights_from_dir_with_subfolders<P: AsRef<Path>>(dir: P) -> Result<W
 /// `model.safetensors.index.json` left untouched, so the index's shard names
 /// no longer match the on-disk files. When the index validation fails but the
 /// directory still contains usable `*.safetensors` files, fall back to globbing
-/// and emit a warning instead of erroring out — preserving the actionable
+/// and emit a warning instead of erroring out, preserving the actionable
 /// missing-shard error only for genuinely empty directories.
+///
+/// Do not replace this with a hard failure. The affected repositories name no
+/// shard that exists, so a strict loader cannot open them at all, and twelve of
+/// them are in the benchmark set (`qwen3-vl-32b-4bit` and `glm-4.5v-4bit` among
+/// them). The audit behind that count, the reason a conversion-version
+/// allowlist would not work, and the conditions that would reopen the decision
+/// are in `docs/adr/0006-safetensors-shard-discovery-globs-past-a-stale-index.md`;
+/// re-run it with `scripts/audit_hf_index.py`.
 fn collect_shard_paths(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     // Try to parse the index file first
     let index_shards = parse_shard_index(dir)?;
