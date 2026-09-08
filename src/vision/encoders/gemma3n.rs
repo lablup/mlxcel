@@ -53,6 +53,25 @@ impl RMSNormAct2d {
 
         // RMS norm on channel axis (axis=1 in NCHW)
         // v = mean(x^2, axis=1, keepdims=true)
+        //
+        // The f32 eps promotes `v`, then `rsqrt`, then `x`, so everything
+        // downstream of the first norm runs f32. That is deliberate, not a
+        // leak to clean up. This tower is published bf16 and we convert it to
+        // f16 at load, but its deep blocks accumulate residuals past what f16
+        // can hold: measured against mlx-vlm on a 768x768 input, 10 of 184
+        // norm calls take inputs above the f16 ceiling of 65504, starting in
+        // the 1280-channel blocks and peaking at 213055. The norm outputs stay
+        // small (6 to 160), so it is the accumulation between norms that
+        // overflows, not the norm itself. mlx-vlm never hits this because it
+        // keeps bf16 weights, and MLX promotes f16 with bf16 to f32, so the
+        // reference lands back in f32 at the next conv either way.
+        //
+        // Restoring the input dtype here, the usual boundary fix, costs the
+        // tower those blocks: gemma3n-e4b-bf16 then answers "blue" for blue,
+        // green and purple alike while the 4-bit variants still discriminate.
+        // It does buy about 1.10x VLM prefill, so if that is worth reclaiming
+        // the fix is to keep this tower bf16 at load, the way the language MLP
+        // already is, rather than to narrow the arithmetic here.
         let x_sq = mlxcel_core::square(&x);
         let v = mlxcel_core::mean_axis(&x_sq, 1, true);
         let eps_arr = mlxcel_core::full_f32(&[1], self.eps, mlxcel_core::dtype::FLOAT32);
