@@ -1,2 +1,2 @@
 model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-glm-4.5v-4bit,models/mlx/glm-4.5v-4bit,82,128,785.02,104.46,3675.37,34.83,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"What is in this image?",,255203e5,9a795735
+qwen3-vl-4b-4bit,models/mlx/qwen3-vl-4b-4bit,65,128,161.51,402.45,1110.27,115.29,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"What is in this image?",,5287eb9a,9a795735
