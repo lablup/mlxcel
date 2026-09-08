@@ -263,6 +263,22 @@ fn apply_multimodal_rotary_pos_emb(
         mlxcel_core::add(&t1, &t2)
     };
 
+    // Restore the input dtype. `cos` and `sin` are built in f32 (the MRoPE table
+    // widens `inv_freq` and the position ids on purpose), so these multiplies
+    // promote a half-precision `q`/`k` and the rotated result would leave this
+    // function as f32, carry through the attention and the output projection,
+    // and make every later layer promote its own weight to match. Upstream does
+    // the same widen-then-restore: `apply_multimodal_rotary_pos_emb` in
+    // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/rope_utils.py
+    // computes at `compute_dtype=mx.float32` and ends with
+    // `q_embed.astype(q.dtype)` / `k_embed.astype(k.dtype)` under `cast_output`.
+    // Same invariant as lablup/mlxcel#1709: hand back the dtype you were given.
+    //
+    // This only bites once an image has been seen: the text-only fast path uses
+    // plain 1-D `fast_rope`, which preserves dtype and never reaches here.
+    let q_embed = mlxcel_core::astype(&q_embed, mlxcel_core::array_dtype(q));
+    let k_embed = mlxcel_core::astype(&k_embed, mlxcel_core::array_dtype(k));
+
     (q_embed, k_embed)
 }
 
