@@ -143,8 +143,8 @@ The two fixes land in different places, which is why the gains look uneven:
 | `qwen2.5-vl-3b-4bit` | 1.20x | 1.67x | both |
 | `qwen2.5-vl-3b-instruct` | 1.43x | 4.07x | both |
 | `qwen3-vl-2b-4bit` | 1.02x | 1.09x | KV only |
-| `qwen3-vl-4b-4bit` | 1.00x | 1.23x | KV only |
-| `qwen3-vl-8b-4bit` | 1.01x | 1.15x | KV only |
+| `qwen3-vl-4b-instruct-4bit` | 1.00x | 1.23x | KV only |
+| `qwen3-vl-8b-instruct-4bit` | 1.01x | 1.15x | KV only |
 | `qwen3-vl-30b-a3b-4bit` | 1.02x | 1.15x | KV only |
 | `qwen3-vl-32b-4bit` | 1.02x | 1.13x | KV only |
 | `paddleocr-vl-bfloat16` | 1.03x | 1.12x | KV only |
@@ -247,7 +247,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 
 ## Text results
 
-172 models, 512-token prompt, 128 generated tokens. `vs baseline` is mlx-lm 0.31.3 on the same host; `-` means mlx-lm did not measure that model.
+167 models, 512-token prompt, 128 generated tokens. `vs baseline` is mlx-lm 0.31.3 on the same host; `-` means mlx-lm did not measure that model.
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
@@ -336,7 +336,6 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 512 | 8722.9 | 574.8 | - |
 | `llama-4-scout-17b-4bit` | Llama4ForConditionalGeneration | 512 | 281.6 | 35.2 | - |
 | `deepseek-coder-1.3b-4bit` | LlamaForCausalLM | 512 | 3739.6 | 146.1 | - |
-| `llama-3.1-8b-4bit` | LlamaForCausalLM | 512 | 750.9 | 105.0 | 99% |
 | `llama-3.1-8b-bf16` | LlamaForCausalLM | 512 | 810.5 | 36.1 | 102% |
 | `llama-3.2-1b-4bit` | LlamaForCausalLM | 512 | 4140.0 | 402.9 | 101% |
 | `llama-3.2-1b-instruct` | LlamaForCausalLM | 512 | 4585.6 | 189.1 | 105% |
@@ -380,11 +379,9 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `phi-3.5-moe-4bit` | PhiMoEForCausalLM | 512 | 602.1 | 75.1 | 110% |
 | `plamo-2-1b` | PlamoForCausalLM | 512 | 2961.3 | 107.5 | 100% |
 | `deepseek-r1-distill-7b-4bit` | Qwen2ForCausalLM | 512 | 788.5 | 107.1 | 100% |
-| `qwen2-0.5b` | Qwen2ForCausalLM | 512 | 6816.2 | 331.6 | 115% |
 | `qwen2.5-0.5b-bf16` | Qwen2ForCausalLM | 512 | 7548.1 | 274.3 | 109% |
 | `qwen2.5-1.5b-4bit` | Qwen2ForCausalLM | 512 | 2887.8 | 230.2 | 105% |
 | `qwen2.5-1.5b-instruct-4bit` | Qwen2ForCausalLM | 512 | 2910.1 | 223.8 | 102% |
-| `qwen2.5-7b-4bit` | Qwen2ForCausalLM | 512 | 779.2 | 105.3 | 99% |
 | `qwen2.5-7b-8bit` | Qwen2ForCausalLM | 512 | 783.5 | 67.5 | 97% |
 | `qwen1.5-moe-a2.7b-4bit` | Qwen2MoeForCausalLM | 512 | 1684.3 | 143.7 | 107% |
 | `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 512 | 3042.6 | 224.4 | 102% |
@@ -398,8 +395,6 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 512 | 854.4 | 81.2 | - |
 | `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 512 | 2082.6 | 186.2 | 98% |
 | `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 512 | 128.1 | 21.9 | 103% |
-| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 512 | 944.1 | 117.6 | 101% |
-| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 512 | 522.1 | 81.3 | 101% |
 | `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 512 | 851.9 | 81.2 | 123% |
 | `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3779.6 | 279.3 | 102% |
 | `qwen3.5-0.8b-optiq-4bit` | Qwen3_5ForConditionalGeneration | 512 | 3749.2 | 262.0 | 103% |
@@ -426,7 +421,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 
 ## VLM results
 
-78 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
+76 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
@@ -491,9 +486,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 294.0 | 47.2 | 183% |
 | `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 65 | 676.0 | 199.5 | shape |
 | `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 65 | 74.9 | 21.7 | shape |
-| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 65 | 402.4 | 115.3 | shape |
 | `qwen3-vl-4b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 403.3 | 115.5 | shape |
-| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 65 | 255.5 | 79.7 | shape |
 | `qwen3-vl-8b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 256.9 | 79.8 | shape |
 | `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 268.8 | 78.9 | shape |
 | `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 925.4 | 285.9 | shape |
