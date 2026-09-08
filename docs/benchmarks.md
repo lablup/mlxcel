@@ -22,6 +22,18 @@ For every benchmark run, include:
 Averages are useful only after the raw rows are available. Avoid statements such
 as "faster than X" unless the comparable model set and exclusions are explicit.
 
+The checkpoint name is a claim about what was measured, and it is worth as much
+as the evidence behind it. [`docs/model-catalog.md`](model-catalog.md) records
+what each directory under `models/` actually holds, on what evidence, and which
+names the same checkpoint has been measured under before, which is how a row in
+a past-dated CSV joins to a current one after a rename.
+
+Confirm the binary matches the tree before measuring. `bench_decode.sh` stamps
+`mlxcel_commit` from git rather than from the executable, so a sweep run without
+rebuilding after a pull or a rebase records provenance its binary does not have.
+The harness now refuses to run in that state, and `BENCH_ALLOW_STALE_BINARY=1`
+opts out for a bisect.
+
 ## Current result snapshot
 
 Keep public result summaries in a single place so aggregate numbers do not drift
