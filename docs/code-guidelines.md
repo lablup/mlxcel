@@ -107,6 +107,28 @@ Do not audit this by grep. The restore can live in a callee: `compiled_softcap_s
 
 `activation_helpers_return_the_input_dtype` in [`src/lib/mlxcel-core/src/ffi_tests.rs`](../src/lib/mlxcel-core/src/ffi_tests.rs) calls each exported activation with f16, bf16 and f32 and asserts the dtype survives. Add new activation helpers to it.
 
+## One Checkpoint, One Dtype
+
+A load-time dtype policy must leave a checkpoint holding a single floating-point dtype. Keeping part of a model in one dtype and converting the rest is the same promotion defect as the section above, one layer up, and it is the harder of the two to find.
+
+**Why this matters:**
+
+MLX promotes f16 met with bf16 to f32. A policy that keeps some tensors bf16 and converts their neighbours to f16 therefore inserts a promotion at every boundary between the two, and those boundaries are wherever the kept set happens to end. No helper is wrong, every activation returns the dtype it was given, and the enforcement test above passes.
+
+Gemma3n was in this state. The policy kept the language MLP bf16, for a real reason (forcing it to f16 measured 3x worse), and converted everything else. On M5 Max with `gemma3n-e4b-bf16`, a 273-token prompt with an image and 128 generated, loading the checkpoint uniformly bf16 instead moved decode from 38.02 to 47.48 tok/s and prefill from 2143 to 2371, taking decode from 78% of mlx-vlm to 97%.
+
+**How to find it:**
+
+Not by reading functions, and not by grep. There is no offending call site, so a static audit of this class returns nothing.
+
+The symptom is positional. Compare within one machine and one family, and look for a single checkpoint sitting far below its siblings. On M1 Ultra the three Gemma3n rows read 138%, 135% and 98% of the reference; the 37-point drop is the whole signal, and it is only legible once you know the 4-bit variants skip conversion entirely and were therefore uniform all along. Read as three independent numbers, that table says "the bf16 checkpoint is slower", which is unremarkable and was in fact passed over.
+
+**Do not apply the function-layer fix here.** The two layers look identical at the call site and the wrong fix is actively destructive. Restoring the input dtype inside `RMSNormAct2d::forward` in [`src/vision/encoders/gemma3n.rs`](../src/vision/encoders/gemma3n.rs) is correct by the rule above and matches mlx-vlm's `rms_norm2d` line for line, but while the tower still loaded f16 it clipped the deep blocks: 10 of 184 norm calls take inputs above the f16 ceiling of 65504, peaking at 213055, so `gemma3n-e4b-bf16` answered "blue" for blue, green and purple alike. The f32 that the audit flagged as a leak was the only thing supplying the range. That restore became both safe and worth 1.04x prefill after the load policy was fixed, and not before. When a boundary restore breaks a model, the dtype being restored to is the thing to check.
+
+**Do not generalize the win to the dtype.** Uniform bf16 helped here because it removed a mixture, not because bf16 is faster. Run the control: on families with no forced-bf16 subset the two dtypes land within noise on the same hardware, measured at `qwen2.5-0.5b-bf16` 401.8 against 397.3 tok/s and `llama-3.1-8b-bf16` 33.07 against 33.02. Without that control the result reads as an argument for converting less everywhere, which it is not. Every other family keeps converting to f16.
+
+`MLXCEL_KEEP_BF16` loads any checkpoint uniformly bf16 and exists for exactly this A/B. See [`docs/environment-variables.md`](environment-variables.md).
+
 ## JIT Kernel Cache Keys
 
 Every `template_args` list passed to a `cuda_kernel` launch must name the dtype of each input whose dtype can vary:
