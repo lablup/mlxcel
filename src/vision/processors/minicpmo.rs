@@ -31,6 +31,10 @@ pub struct MiniCPMOProcessor {
     pub image_feature_size: usize,
     resize_multiple_h: usize,
     resize_multiple_w: usize,
+    /// Mirrors upstream's `allow_upscale`, which every caller sets. Kept as a
+    /// field rather than hard-coded so a future caller that needs the
+    /// downscale-only behaviour has somewhere to say so.
+    allow_upscale: bool,
     mean: [f32; 3],
     std: [f32; 3],
 }
@@ -64,6 +68,7 @@ impl MiniCPMOProcessor {
             image_feature_size,
             resize_multiple_h: resize_multiple_h.max(1),
             resize_multiple_w: resize_multiple_w.max(1),
+            allow_upscale: true,
             mean: [0.5, 0.5, 0.5],
             std: [0.5, 0.5, 0.5],
         }
@@ -77,7 +82,18 @@ impl MiniCPMOProcessor {
         let mut resized_w = width;
         let mut resized_h = height;
 
-        if width * height > self.scale_resolution * self.scale_resolution || width * height == 0 {
+        // Upstream's `_find_best_resize` takes `allow_upscale` and every caller in
+        // `mlx_vlm/models/minicpmo/processing_minicpmo.py` passes `True`, which makes
+        // its guard `(w * h > scale_resolution^2) or allow_upscale` unconditional. Only
+        // the downscale half was ported, so an image smaller than the scale resolution
+        // was left at its original size: a 224x224 input stayed 224x224 and produced a
+        // 16x16 patch grid, which the mergers reduce to 16 visual tokens against the
+        // 64 that `processor_config.json` declares as `image_feature_size`. Resizing it
+        // to 448x448 gives 32x32 and the declared 64. See lablup/mlxcel#1684.
+        if width * height > self.scale_resolution * self.scale_resolution
+            || width * height == 0
+            || self.allow_upscale
+        {
             let ratio = if height == 0 {
                 1.0
             } else {
