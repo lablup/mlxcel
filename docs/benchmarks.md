@@ -404,7 +404,7 @@ was indifferent about has no right answer to get wrong, and pooling those with
 decided ones hides the only distinction that matters. Byte-identity is the
 limit case, zero disagreements at every gap.
 
-Two things decide whether the answer means anything.
+Four things decide whether the answer means anything.
 
 **Trace at the width the code under test runs at.** A forward over `N`
 positions runs the quantized projections at `M = N`, and MLX picks a different
@@ -422,6 +422,26 @@ and at width 5 behind 512 tokens are different measurements, and only the
 second one is the shape a verify actually runs at. Behind 512 tokens the two
 kernels disagree on 4.0% of positions overall but 0.585% of decided ones, and
 three quarters of the disagreements are the reference's runner-up.
+
+**Run the arm without the change and watch it fail.** A comparison where only
+the fixed arm was measured shows that the code works, not that the measurement
+would have noticed if it did not, and those are different claims. Revert the
+change, keep everything else identical, and confirm the metric moves. Until
+that second arm exists there is one reading, not a comparison.
+
+**Check that the input reaches the branch that changed.** A conditional path
+has a threshold, and the threshold is usually written in the checkpoint's own
+config, so this is knowable before the probe is written rather than after it
+passes. The `nemotron_nas` rope-scaling fix is the worked example: the config
+carries `original_max_position_embeddings: 8192`, so a 1300-token probe passed
+without touching the replaced scaling at all, and its pass came from the head
+layout and GQA paths that a different commit had fixed. A 9500-token probe did
+reach the branch, but was only ever run against the fixed build, which
+established that the code works and left the probe's own discrimination
+untested. The evidence arrived at 14737 tokens with that one file reverted:
+the needle went unfound. Length selected which frequency band was live exactly
+the way forward width selects which kernel is dispatched above, and the same
+mistake is available in both.
 
 ### Gemma 4 Unified (12B) + 4-bit assistant
 
