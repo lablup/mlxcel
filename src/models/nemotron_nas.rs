@@ -36,6 +36,24 @@ use serde::Deserialize;
 use std::path::Path;
 
 // Configuration.
+
+/// `eos_token_id` is a scalar in some checkpoints and a list in others.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EosTokenId {
+    One(i32),
+    Many(Vec<i32>),
+}
+
+impl EosTokenId {
+    fn ids(&self) -> Vec<i32> {
+        match self {
+            Self::One(v) => vec![*v],
+            Self::Many(v) => v.clone(),
+        }
+    }
+}
+
 //
 // `rope_scaling` reuses the shared reader so this family resolves the same
 // schemes every other decoder does. It used to carry a private copy of the
@@ -91,6 +109,14 @@ pub struct BlockConfig {
 pub struct NemotronNASConfig {
     #[serde(default = "default_model_type")]
     pub model_type: String,
+    /// `eos_token_id` as published, which this family gives as a list. Read
+    /// rather than assumed: the checkpoint declares `[128001, 128008, 128009]`
+    /// and the hardcoded `2` this replaced is an ordinary character in a
+    /// Llama-3 vocabulary, so generation stopped wherever the model happened to
+    /// emit it. A correct answer truncated after a few tokens looks like the
+    /// model degrading, which is how it read in #1688.
+    #[serde(default)]
+    pub eos_token_id: Option<EosTokenId>,
 
     #[serde(default = "default_hidden_size")]
     pub hidden_size: usize,
@@ -741,7 +767,14 @@ impl LanguageModel for NemotronNASModel {
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
-        vec![2] // Standard EOS token for most models
+        // The Llama-3 fallback covers a checkpoint that omits the field; this
+        // family is DeciLM over a Llama-3 tokenizer, so `2` never applied.
+        self.config
+            .eos_token_id
+            .as_ref()
+            .map(EosTokenId::ids)
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| vec![128001, 128009])
     }
 }
 
