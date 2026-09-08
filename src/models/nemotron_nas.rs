@@ -36,18 +36,16 @@ use serde::Deserialize;
 use std::path::Path;
 
 // Configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RopeScaling {
-    #[serde(alias = "type")]
-    pub rope_type: Option<String>,
-    pub factor: Option<f32>,
-    #[serde(default)]
-    pub low_freq_factor: Option<f32>,
-    #[serde(default)]
-    pub high_freq_factor: Option<f32>,
-    #[serde(default)]
-    pub original_max_position_embeddings: Option<usize>,
-}
+//
+// `rope_scaling` reuses the shared reader so this family resolves the same
+// schemes every other decoder does. It used to carry a private copy of the
+// llama3 fields and then ignore all but `factor`, applying `1 / factor` as a
+// uniform position scale. That is the `linear` scheme, and this family ships
+// `rope_type: "llama3"`, whose rescaling is piecewise in the frequency: long
+// wavelengths divide by `factor`, short ones are left alone, and the band
+// between interpolates. Compressing every frequency by 8x instead left
+// Llama-3_3-Nemotron-Super-49B generating loops of "I don't understand".
+pub use crate::models::rope_utils::RopeScalingSpec as RopeScaling;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AttentionConfig {
@@ -204,6 +202,9 @@ struct NASAttention {
     rope_dims: i32,
     rope_base: f32,
     rope_scale: f32,
+    /// Frequency table for a `rope_scaling` scheme that needs one (llama3,
+    /// yarn). `None` leaves the plain `fast_rope` path untouched.
+    rope_freqs: Option<UniquePtr<MlxArray>>,
     scale: f32,
 }
 
@@ -248,22 +249,47 @@ impl NASAttention {
 
         // Apply RoPE
         let offset = cache.offset;
-        let q = fast_rope(
-            &q,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            self.rope_scale,
-            offset,
-        );
-        let k = fast_rope(
-            &k,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            self.rope_scale,
-            offset,
-        );
+        // MLX takes a base or a frequency table, never both, so the table
+        // branch drops `rope_base` exactly as `Attention::apply_rope` does in
+        // `llama3.rs`.
+        let (q, k) = match self.rope_freqs.as_ref() {
+            Some(freqs) => (
+                mlxcel_core::fast_rope_with_freqs(
+                    &q,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offset,
+                    freqs,
+                ),
+                mlxcel_core::fast_rope_with_freqs(
+                    &k,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offset,
+                    freqs,
+                ),
+            ),
+            None => (
+                fast_rope(
+                    &q,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offset,
+                ),
+                fast_rope(
+                    &k,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offset,
+                ),
+            ),
+        };
 
         // Update KV cache and get full keys/values
         let (k, v) = cache.update_and_fetch(k, v);
@@ -496,12 +522,15 @@ impl NemotronNASModel {
                 let n_kv_heads = config.num_attention_heads / n_heads_in_group;
                 let head_dim = config.get_head_dim();
 
-                let rope_scale = config
-                    .rope_scaling
-                    .as_ref()
-                    .and_then(|s| s.factor)
-                    .map(|f| 1.0 / f)
-                    .unwrap_or(1.0);
+                let rope_kind = crate::models::rope_utils::RopeScalingKind::resolve(
+                    config.rope_scaling.as_ref(),
+                    head_dim,
+                    config.rope_theta,
+                    Some(config.max_position_embeddings as f32),
+                    "nemotron_nas",
+                );
+                let rope_scale = rope_kind.scale();
+                let rope_freqs = rope_kind.freqs().map(mlxcel_core::copy);
 
                 let q_proj = UnifiedLinear::from_weights(
                     &weights,
@@ -539,6 +568,7 @@ impl NemotronNASModel {
                     rope_dims: head_dim as i32,
                     rope_base: config.rope_theta,
                     rope_scale,
+                    rope_freqs,
                     scale: (head_dim as f32).powf(-0.5),
                 })
             };
@@ -712,5 +742,55 @@ impl LanguageModel for NemotronNASModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![2] // Standard EOS token for most models
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RopeScaling;
+    use crate::models::rope_utils::RopeScalingKind;
+
+    /// Llama-3_3-Nemotron-Super-49B ships `rope_type: "llama3"`, whose rescaling
+    /// is piecewise in the frequency. Reading only `factor` and handing
+    /// `1 / factor` to `fast_rope` is the `linear` scheme, and applying it here
+    /// compressed every frequency by 8x: the model generated loops of "I don't
+    /// understand" until this resolved through the shared reader instead.
+    #[test]
+    fn llama3_scaling_resolves_to_a_frequency_table_not_a_position_scale() {
+        let spec = RopeScaling {
+            rope_type: Some("llama3".to_string()),
+            factor: Some(8.0),
+            low_freq_factor: Some(1.0),
+            high_freq_factor: Some(4.0),
+            original_max_position_embeddings: Some(8192.0),
+            ..Default::default()
+        };
+        let kind = RopeScalingKind::resolve(Some(&spec), 128, 500000.0, Some(131072.0), "test");
+        assert!(
+            kind.freqs().is_some(),
+            "llama3 must produce a frequency table"
+        );
+        assert_eq!(
+            kind.scale(),
+            1.0,
+            "llama3 rotates at unit position scale; 1/factor is the linear scheme"
+        );
+    }
+
+    /// The `linear` scheme is the one that really does want `1 / factor`, so the
+    /// shared reader has to keep telling the two apart.
+    #[test]
+    fn linear_scaling_still_resolves_to_a_position_scale() {
+        let spec = RopeScaling {
+            rope_type: Some("linear".to_string()),
+            factor: Some(8.0),
+            ..Default::default()
+        };
+        let kind = RopeScalingKind::resolve(Some(&spec), 128, 500000.0, Some(131072.0), "test");
+        assert!(kind.freqs().is_none(), "linear needs no frequency table");
+        assert!(
+            (kind.scale() - 0.125).abs() < 1e-6,
+            "linear scale is 1/factor"
+        );
     }
 }
