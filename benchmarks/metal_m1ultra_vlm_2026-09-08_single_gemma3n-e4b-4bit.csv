@@ -1,2 +1,2 @@
 model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-gemma3n-e2b-4bit,models/mlx/gemma3n-e2b-4bit,512,128,370.89,1380.46,1608.89,79.56,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,ec414719,9a795735
+gemma3n-e4b-4bit,models/mlx/gemma3n-e4b-4bit,273,128,462.59,590.15,1965.32,65.13,2026-09-08,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"What is in this image?",,ec414719,9a795735
