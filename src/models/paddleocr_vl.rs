@@ -226,6 +226,21 @@ fn apply_multimodal_rotary_pos_emb(
         let t2 = mlxcel_core::multiply(&r, &sin);
         mlxcel_core::add(&t1, &t2)
     };
+
+    // Restore the input dtype. `cos` and `sin` are built in f32 (the MRoPE table
+    // widens `inv_freq` and the position ids on purpose), so these multiplies
+    // promote a half-precision `q`/`k` and the rotated result would leave this
+    // function as f32, carry through the attention and the output projection,
+    // and make every later layer promote its own weight to match. Same
+    // invariant as lablup/mlxcel#1709: hand back the dtype you were given.
+    //
+    // Unlike the Qwen-VL families there is no text-only fast path here, so this
+    // ran on every decode step whether or not an image was present. That is why
+    // mlxcel measured the same decode rate with and without an image while
+    // mlx-vlm was 2.4x faster on both.
+    let q_embed = mlxcel_core::astype(&q_embed, mlxcel_core::array_dtype(q));
+    let k_embed = mlxcel_core::astype(&k_embed, mlxcel_core::array_dtype(k));
+
     (q_embed, k_embed)
 }
 

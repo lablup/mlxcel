@@ -293,6 +293,15 @@ impl Glm4vMRoPE {
         let term2 = mlxcel_core::multiply(&rotated, sin_f);
         let x_embed = mlxcel_core::add(&term1, &term2);
 
+        // Restore the input dtype. `cos_sin` builds its tables in f32 on
+        // purpose, so the two multiplies above promote a half-precision `x`.
+        // Left promoted, the rotated result escapes into the residual stream and
+        // every later matmul promotes its own weight to match; the rotated `k`
+        // also lands in the KV cache at twice its intended width. Same invariant
+        // as lablup/mlxcel#1709: hand back the dtype you were given.
+        let dtype = mlxcel_core::array_dtype(x);
+        let x_embed = mlxcel_core::astype(&x_embed, dtype);
+
         if head_dim > rope_dims {
             let x_pass = mlxcel_core::slice(x, &[0, 0, 0, rope_dims], &[b, h, l, head_dim]);
             mlxcel_core::concatenate(&x_embed, &x_pass, 3)
