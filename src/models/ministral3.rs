@@ -176,11 +176,20 @@ impl Attention {
         let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
         let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
 
-        // Apply Llama 4 attention scaling
+        // Apply Llama 4 attention scaling.
+        //
+        // The scale comes from a host `&[f32]`, so it is cast to the query dtype
+        // before the multiply, the way [`crate::models::llama4`] already does it.
+        // Without the cast MLX promotes on the wider operand, `q` leaves this line
+        // as f32, and that carries through the attention and the output projection
+        // into the residual stream, after which every matmul in every later layer
+        // promotes its own weight to match. Same failure as the bridge activation
+        // helpers in lablup/mlxcel#1709, reached through a model file.
         // attn_scale: [seq_len] -> reshape to [1, 1, seq_len, 1] for broadcasting
         let scale_shape = vec![1, 1, l, 1];
         let scale_arr = mlxcel_core::from_slice_f32(attn_scale, &[l]);
         let scale_arr = mlxcel_core::reshape(&scale_arr, &scale_shape);
+        let scale_arr = mlxcel_core::astype(&scale_arr, mlxcel_core::array_dtype(&q));
         let q = mlxcel_core::multiply(&q, &scale_arr);
 
         // Update KV cache and get sliced views
