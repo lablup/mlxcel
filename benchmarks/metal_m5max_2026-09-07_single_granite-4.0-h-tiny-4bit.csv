@@ -1,2 +1,2 @@
 model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-gemma3n-e4b-4bit,models/gemma3n-e4b-4bit,273,128,112.88,2418.43,1162.88,110.07,2026-09-08,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"What is in this image?",,395fc3ba,9a795735
+granite-4.0-h-tiny-4bit,models/granite-4.0-h-tiny-4bit,512,128,119.54,4282.97,603.36,212.15,2026-09-07,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,c07826df,9a795735
