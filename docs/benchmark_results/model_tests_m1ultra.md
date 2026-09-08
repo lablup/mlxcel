@@ -160,17 +160,19 @@ Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and 
 
 ## Vision-language models
 
-87 VLM checkpoints, 70 measured by mlxcel and 67 by mlx-vlm, 60 by both. Prompt length comes from the image rather than being fixed, so the comparison below is restricted to the 41 models whose two prompt lengths agree within 10%; the other 19 are listed under the shape mismatch above.
+93 VLM checkpoints, 76 measured by mlxcel and 67 by mlx-vlm, 60 by both. Prompt length comes from the image rather than being fixed, so the comparison below is restricted to the 41 models whose two prompt lengths agree within 10%; the other 19 are listed under the shape mismatch above.
 
 | Population | n | Median | Quartiles | Range |
 |---|--:|--:|---|---|
-| Comparable VLM rows | 41 | 109% | 101 / 128 | 27-206% |
+| Comparable VLM rows | 41 | 108% | 101 / 129 | 27-206% |
 
 mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than on text. The widest margins are `jina-vlm-mlx` at 206%, `phi-3.5-vision-4bit` at 171% and `qwen3-omni-30b-a3b-instruct-4bit` at 166%.
 
-**These VLM rows predate #1686 and its follow-up.** The text table above was re-measured on the fixed build; this one was not, so every Qwen VL and `paddleocr` figure here still carries the GQA KV expansion. `qwen2.5-vl-3b-hf` reads 27% below and 106% in the text table for that reason, not because the two paths disagree. Read the low end here as a snapshot of the old build until the VLM sweep is re-run.
+Fourteen rows moved by more than 3% when this sweep was re-run on the fixed build, and the largest are `glm-ocr-4bit` at 1.35x, `hunyuanocr-mlx-4bit` at 1.23x and `paligemma2-3b-6bit` at 1.19x. The gains here are smaller than the text table's because the term removed grows with context and an image prompt is short: 8 to 1543 tokens against a fixed 512.
 
-Within that caveat, `mistral-small-4-119b-2603-4bit` at 36% is the one low row the fix does not explain: it is not in the set #1686 touched.
+`qwen2.5-vl-3b-hf` is the clearest demonstration of that. It gains 4.07x on a 512-token text prompt and 1.02x here on a 91-token image prompt, which is the same binary and the same weights. A gap that behaves that way is a context-scaling term, not a property of the checkpoint.
+
+Two low rows are left that this does not explain. `qwen2.5-vl-3b-4bit` at 80% and `qwen2-vl-2b-4bit` at 82% sit at 99% and 102% in the text table, so they are worse on the shorter prompt, which is the opposite of what a context-scaling cost predicts. Whatever remains is specific to the image path. `mistral-small-4-119b-2603-4bit` at 37% is not in any set the fixes touched.
 
 ### Failures
 
@@ -215,7 +217,9 @@ Decode throughput depends on context length, so a decode ratio is only meaningfu
 | 5 qwen3-vl checkpoints | 65 | 80 | 1.2x |
 | 10 qwen3.5 / 3.6 / 3.8 checkpoints | 69 | 84 | 1.2x |
 
-The 1.2x group is a fixed 15-token offset, which is a chat-template difference. The larger five tokenize the image differently. The parity figure below is computed over the 41 models whose prompt lengths agree within 10%; the other 20 are reported as a shape mismatch rather than a number.
+The parity figure below is computed over the 41 models whose prompt lengths agree within 10%; the other 19 are reported as a shape mismatch rather than a number. The mismatch is not a setting either harness exposes: the two runtimes tokenize the same image into different numbers of visual tokens, and matching them would mean changing one of them.
+
+Which one is wrong varies, and the checkpoint's own declaration is what settles it. For `qwen3-vl-2b-4bit` the 15-token gap decomposes into 14 image tokens and 1 template token, and the geometry the checkpoint declares (`patch_size` 16, `spatial_merge_size` 2) gives `(224/16)^2 = 196` patches merging 2x2 to 49, which is mlxcel's count; mlx-vlm produces 63. `minicpm-v-4.6` is the opposite case, where the checkpoint declares `image_feature_size: 64` and mlxcel produces 16 (lablup/mlxcel#1684). The `idefics2` and `idefics3` gaps are unjudged: those configs declare no merge size, so the arithmetic that settles the other two is not available.
 
 ### A prompt-token count cannot prove the model saw the image
 
@@ -426,80 +430,86 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 
 ## VLM results
 
-70 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
+76 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
-| `aya-vision-8b` | AyaVisionForConditionalGeneration | 735 | 638.1 | 110.4 | 107% |
-| `bunny-llama3-8b-4bit` | BunnyLlamaForCausalLM | 746 | 672.5 | 101.0 | - |
-| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 438.9 | 111.2 | - |
-| `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 409 | 839.0 | 284.5 | - |
-| `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 281 | 884.2 | 291.0 | - |
-| `dots.ocr-4bit` | DotsOCRForCausalLM | 74 | 443.6 | 220.6 | 114% |
-| `ernie-4.5-vl-28b-a3b-thinking-4bit` | Ernie4_5_VLMoeForConditionalGeneration | 108 | 290.3 | 91.4 | 124% |
-| `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 275 | 254.6 | 106.2 | 112% |
-| `gemma-4-12b-it-4bit` | Gemma4UnifiedForConditionalGeneration | 277 | 299.5 | 38.1 | 102% |
-| `gemma-4-26b-a4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 316.7 | 79.2 | 118% |
-| `gemma-4-26b-a4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 318.9 | 77.7 | 114% |
-| `gemma-4-31b-4bit` | Gemma4ForConditionalGeneration | 265 | 97.8 | 19.8 | 101% |
-| `gemma-4-31b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 102.4 | 19.8 | 101% |
-| `gemma-4-31b-it-nvfp4` | Gemma4ForConditionalGeneration | 278 | 99.9 | 13.5 | 100% |
-| `gemma-4-31b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 102.4 | 16.8 | 102% |
-| `gemma-4-e2b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 818.4 | 114.0 | 110% |
-| `gemma-4-e2b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 796.9 | 98.5 | 101% |
-| `gemma-4-e2b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 789.6 | 105.6 | 108% |
-| `gemma-4-e4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 522.5 | 79.7 | 106% |
-| `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 518.4 | 65.8 | 99% |
-| `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 515.1 | 70.5 | 104% |
-| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 273 | 818.7 | 84.5 | 138% |
-| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 273 | 533.0 | 65.2 | 135% |
-| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 273 | 640.4 | 35.2 | 98% |
-| `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 82 | 991.5 | 284.7 | 79% |
-| `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 337 | 739.3 | 131.6 | 112% |
-| `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 284 | 1191.0 | 212.6 | 131% |
-| `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 81 | 275.1 | 114.6 | shape |
-| `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 189 | 500.0 | 107.8 | shape |
-| `internvl3-1b` | InternVLChatModel | 293 | 1863.3 | 354.2 | 130% |
-| `jina-vlm-mlx` | JinaVLMForConditionalGeneration | 436 | 1174.8 | 176.5 | 206% |
-| `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 82 | 1579.3 | 626.2 | 127% |
-| `llama-4-scout-17b-4bit` | Llama4ForConditionalGeneration | 162 | 154.6 | 36.4 | - |
-| `llava-1.5-7b-4bit` | LlavaForConditionalGeneration | 594 | 745.4 | 103.7 | - |
-| `llava-interleave-qwen-0.5b-bf16` | LlavaForConditionalGeneration | 744 | 4136.9 | 266.1 | - |
-| `pixtral-12b-4bit` | LlavaForConditionalGeneration | 213 | 402.1 | 68.7 | 103% |
-| `granite-vision-3.2-2b-4bit` | LlavaNextForConditionalGeneration | 1543 | 1253.8 | 131.1 | 112% |
-| `llava-next-mistral-7b-4bit` | LlavaNextForConditionalGeneration | 590 | 700.0 | 106.8 | - |
-| `fastvlm-0.5b-bf16` | LlavaQwen2ForCausalLM | 282 | 1590.8 | 283.7 | - |
-| `minicpm-v-4.6-bf16` | MiniCPMV4_6ForConditionalGeneration | 32 | 355.9 | 209.7 | shape |
-| `minicpm-v-4.6-mxfp4` | MiniCPMV4_6ForConditionalGeneration | 32 | 340.1 | 231.6 | shape |
-| `ministral-3b-4bit` | Mistral3ForConditionalGeneration | 613 | 981.0 | 148.7 | 109% |
-| `mistral-small-3.1-24b-4bit` | Mistral3ForConditionalGeneration | 253 | 165.4 | 31.7 | 101% |
-| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 93 | 191.3 | 19.2 | 36% |
-| `molmo-7b` | MolmoForCausalLM | 327 | 578.8 | 109.5 | 140% |
-| `molmo2-4b` | Molmo2ForConditionalGeneration | 438 | 690.1 | 90.7 | 150% |
-| `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 279 | 268.6 | 96.5 | 113% |
-| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 212 | 1206.9 | 125.6 | 39% |
-| `paligemma2-3b-6bit` | PaliGemmaForConditionalGeneration | 1032 | 1432.9 | 110.2 | 153% |
-| `phi-3.5-vision-4bit` | Phi3VForCausalLM | 773 | 993.5 | 136.1 | 171% |
-| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 91 | 783.0 | 155.4 | 70% |
-| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 91 | 570.7 | 106.4 | 70% |
-| `qwen2.5-vl-3b-hf` | Qwen2_5_VLForConditionalGeneration | 91 | 415.8 | 19.2 | 27% |
-| `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 280.8 | 43.0 | 166% |
-| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 65 | 678.5 | 181.2 | shape |
-| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 258.5 | 42.8 | shape |
-| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 65 | 88.3 | 18.5 | shape |
-| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 65 | 448.7 | 97.0 | shape |
-| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 65 | 299.4 | 68.8 | shape |
-| `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 878.2 | 294.6 | shape |
-| `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 87.2 | 25.1 | shape |
-| `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 553.0 | 206.2 | shape |
-| `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 280.5 | 85.1 | shape |
-| `qwen3.5-4b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 344.5 | 111.9 | shape |
-| `qwen3.5-9b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 224.9 | 75.6 | shape |
-| `qwen3.5-9b-bf16` | Qwen3_5ForConditionalGeneration | 69 | 265.6 | 31.9 | shape |
-| `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 283.4 | 83.4 | shape |
-| `qwen3.8-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 88.7 | 25.2 | shape |
-| `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 69 | 84.5 | 10.2 | shape |
-| `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 28 | 216.7 | 46.1 | - |
+| `aya-vision-8b` | AyaVisionForConditionalGeneration | 735 | 640.2 | 110.4 | 107% |
+| `bunny-llama3-8b-4bit` | BunnyLlamaForCausalLM | 746 | 672.8 | 101.3 | - |
+| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 440.0 | 111.1 | - |
+| `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 409 | 868.4 | 280.8 | - |
+| `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 281 | 917.5 | 290.3 | - |
+| `dots.ocr-4bit` | DotsOCRForCausalLM | 74 | 451.4 | 219.8 | 113% |
+| `ernie-4.5-vl-28b-a3b-thinking-4bit` | Ernie4_5_VLMoeForConditionalGeneration | 108 | 295.8 | 94.9 | 128% |
+| `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 275 | 252.3 | 106.2 | 112% |
+| `gemma-4-12b-it-4bit` | Gemma4UnifiedForConditionalGeneration | 277 | 298.2 | 38.1 | 102% |
+| `gemma-4-26b-a4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 317.7 | 78.9 | 118% |
+| `gemma-4-26b-a4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 328.8 | 77.5 | 113% |
+| `gemma-4-31b-4bit` | Gemma4ForConditionalGeneration | 265 | 98.5 | 19.9 | 102% |
+| `gemma-4-31b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 103.9 | 19.9 | 101% |
+| `gemma-4-31b-it-nvfp4` | Gemma4ForConditionalGeneration | 278 | 100.4 | 13.5 | 100% |
+| `gemma-4-31b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 102.7 | 16.8 | 102% |
+| `gemma-4-e2b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 817.9 | 112.6 | 108% |
+| `gemma-4-e2b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 809.0 | 96.5 | 98% |
+| `gemma-4-e2b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 796.3 | 105.7 | 108% |
+| `gemma-4-e4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 528.0 | 79.7 | 106% |
+| `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 520.9 | 65.6 | 98% |
+| `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 518.1 | 71.2 | 105% |
+| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 273 | 834.5 | 84.7 | 138% |
+| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 273 | 553.5 | 65.2 | 135% |
+| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 273 | 654.2 | 35.2 | 98% |
+| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 78 | 256.9 | 58.1 | - |
+| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 82 | 107.9 | 18.1 | - |
+| `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 82 | 1157.1 | 385.4 | 107% |
+| `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 337 | 750.9 | 130.8 | 111% |
+| `moondream2` | HfMoondream | 8 | 14.9 | 44.5 | - |
+| `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 284 | 1335.6 | 261.1 | 161% |
+| `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 81 | 286.7 | 114.6 | shape |
+| `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 189 | 504.2 | 107.7 | shape |
+| `smolvlm-instruct-bf16` | Idefics3ForConditionalGeneration | 102 | 670.3 | 137.4 | - |
+| `internvl3-1b` | InternVLChatModel | 293 | 1915.3 | 351.3 | 129% |
+| `jina-vlm-mlx` | JinaVLMForConditionalGeneration | 436 | 1208.3 | 176.2 | 206% |
+| `kimi-vl-a3b-thinking-4bit` | KimiVLForConditionalGeneration | 90 | 366.0 | 100.3 | - |
+| `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 82 | 1573.0 | 619.0 | 125% |
+| `llama-4-scout-17b-4bit` | Llama4ForConditionalGeneration | 162 | 154.7 | 36.3 | - |
+| `llava-1.5-7b-4bit` | LlavaForConditionalGeneration | 594 | 762.7 | 105.8 | - |
+| `llava-interleave-qwen-0.5b-bf16` | LlavaForConditionalGeneration | 744 | 4330.8 | 269.9 | - |
+| `pixtral-12b-4bit` | LlavaForConditionalGeneration | 213 | 409.6 | 69.7 | 104% |
+| `granite-vision-3.2-2b-4bit` | LlavaNextForConditionalGeneration | 1543 | 1263.7 | 131.1 | 112% |
+| `llava-next-mistral-7b-4bit` | LlavaNextForConditionalGeneration | 590 | 711.8 | 108.7 | - |
+| `fastvlm-0.5b-bf16` | LlavaQwen2ForCausalLM | 282 | 1635.2 | 284.3 | - |
+| `minicpm-v-4.6-bf16` | MiniCPMV4_6ForConditionalGeneration | 32 | 379.4 | 213.4 | shape |
+| `minicpm-v-4.6-mxfp4` | MiniCPMV4_6ForConditionalGeneration | 32 | 351.0 | 230.1 | shape |
+| `ministral-3b-4bit` | Mistral3ForConditionalGeneration | 613 | 996.4 | 150.1 | 110% |
+| `mistral-small-3.1-24b-4bit` | Mistral3ForConditionalGeneration | 253 | 167.5 | 31.9 | 102% |
+| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 93 | 197.8 | 19.6 | 37% |
+| `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 17 | 6.5 | 65.3 | - |
+| `molmo-7b` | MolmoForCausalLM | 327 | 583.3 | 110.8 | 142% |
+| `molmo2-4b` | Molmo2ForConditionalGeneration | 438 | 696.7 | 92.4 | 153% |
+| `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 279 | 269.6 | 96.6 | 113% |
+| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 212 | 1339.5 | 135.7 | 42% |
+| `paligemma2-3b-6bit` | PaliGemmaForConditionalGeneration | 1032 | 1470.6 | 131.1 | 181% |
+| `phi-3.5-vision-4bit` | Phi3VForCausalLM | 773 | 991.4 | 137.7 | 173% |
+| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 91 | 844.5 | 181.6 | 82% |
+| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 91 | 601.9 | 121.3 | 80% |
+| `qwen2.5-vl-3b-hf` | Qwen2_5_VLForConditionalGeneration | 91 | 385.4 | 19.7 | 27% |
+| `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 294.0 | 47.2 | 183% |
+| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 65 | 718.6 | 200.3 | shape |
+| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 285.9 | 47.3 | shape |
+| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 65 | 90.8 | 19.3 | shape |
+| `qwen3-vl-4b-4bit` | Qwen3VLForConditionalGeneration | 65 | 454.5 | 111.7 | shape |
+| `qwen3-vl-8b-4bit` | Qwen3VLForConditionalGeneration | 65 | 308.0 | 73.3 | shape |
+| `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 925.4 | 285.9 | shape |
+| `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 87.0 | 25.2 | shape |
+| `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 566.3 | 206.4 | shape |
+| `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 289.5 | 83.0 | shape |
+| `qwen3.5-4b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 364.6 | 112.7 | shape |
+| `qwen3.5-9b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 230.7 | 76.0 | shape |
+| `qwen3.5-9b-bf16` | Qwen3_5ForConditionalGeneration | 69 | 277.8 | 33.1 | shape |
+| `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 292.3 | 81.2 | shape |
+| `qwen3.8-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 89.7 | 25.2 | shape |
+| `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 69 | 85.8 | 10.5 | shape |
+| `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 28 | 217.8 | 46.2 | - |
 
 ## Benchmark families measured on their own conditions
 
