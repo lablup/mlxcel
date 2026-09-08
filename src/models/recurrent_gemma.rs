@@ -29,7 +29,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
     GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, repeat_kv, slice_axis, softcap};
+use mlxcel_core::utils::{create_causal_mask, slice_axis, softcap};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -372,10 +372,22 @@ impl RecurrentBlock {
             concatenate(&pad_arr, &h, 1)
         };
 
-        // Depthwise conv1d: transpose to [B, C, L], apply conv, transpose back
-        let h_t = mlxcel_core::transpose_axes(&padded_input, &[0, 2, 1]);
-        let conv_out = mlxcel_core::conv1d(&h_t, &self.conv_weight, 1, 0, 1, self.lru_width as i32);
-        let conv_out = mlxcel_core::transpose_axes(&conv_out, &[0, 2, 1]);
+        // Depthwise conv1d. MLX takes NLC, `[B, L, C]`, which is what
+        // `padded_input` already is. This used to transpose into the PyTorch
+        // `[B, C, L]` layout first, which made every forward raise "input
+        // channels must be divisible by the number of groups": MLX reads the
+        // channel count off the last axis, so it saw `L` channels against
+        // `lru_width` groups. `mamba.rs` and `nemotron_h.rs` pass their padded
+        // input straight through for the same reason, and the reference does
+        // too (`mlx_lm/models/recurrent_gemma.py`, `Conv1d.__call__`).
+        let conv_out = mlxcel_core::conv1d(
+            &padded_input,
+            &self.conv_weight,
+            1,
+            0,
+            1,
+            self.lru_width as i32,
+        );
 
         // Add bias
         let bias_reshaped = mlxcel_core::reshape(&self.conv_bias, &[1, 1, -1]);
@@ -459,6 +471,17 @@ impl LocalAttentionBlock {
             ],
         );
 
+        // Transpose to [batch, n_heads, seq_len, head_dim] before RoPE, not
+        // after. `fast_rope` reads token positions off the second-to-last
+        // axis, so rotating `[B, L, H, D]` makes the head index the position:
+        // every token in a head shares one angle and every head gets a
+        // different one. The reference transposes first for the same reason
+        // (`mlx_lm/models/recurrent_gemma.py`, `LocalAttentionBlock.__call__`),
+        // as does every other decoder here, `qwen3_vl.rs` included.
+        let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
+        let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
+        let values = mlxcel_core::transpose_axes(&values, &[0, 2, 1, 3]);
+
         // Apply RoPE
         let offset = cache.as_ref().map(|c| c.get_offset()).unwrap_or(0);
         let queries = mlxcel_core::fast_rope(
@@ -478,11 +501,6 @@ impl LocalAttentionBlock {
             offset,
         );
 
-        // Transpose to [batch, n_heads, seq_len, head_dim]
-        let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
-        let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
-        let values = mlxcel_core::transpose_axes(&values, &[0, 2, 1, 3]);
-
         // Update KV cache
         let (keys, values) = if let Some(c) = cache {
             c.update_and_fetch(keys, values)
@@ -490,16 +508,11 @@ impl LocalAttentionBlock {
             (keys, values)
         };
 
-        // Repeat KV for GQA if needed
-        let n_rep = self.num_heads / self.num_kv_heads;
-        let (keys, values) = if n_rep > 1 {
-            (
-                repeat_kv(&keys, n_rep as i32),
-                repeat_kv(&values, n_rep as i32),
-            )
-        } else {
-            (keys, values)
-        };
+        // K and V stay GQA-shaped: the fused SDPA below broadcasts KV heads
+        // internally, so expanding them here only writes an n_rep-sized copy of
+        // the whole live cache on every decode step. This checkpoint is the
+        // widest case of that among the ported families, 16 query heads over a
+        // single KV head (#1686).
 
         // Scaled dot-product attention
         let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
@@ -720,19 +733,19 @@ impl GriffinModel {
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
         let config: GriffinConfig = serde_json::from_str(&config_str)?;
+        // Count over the expanded per-layer schedule, not the repeating
+        // pattern. Reporting the pattern's counts made a 38-layer model print
+        // "2 recurrent, 1 attention", which read as a config quirk rather than
+        // as the symptom it was.
+        let pattern = config.get_block_types();
+        let recurrent = (0..config.num_hidden_layers)
+            .filter(|i| pattern[i % pattern.len()] == "recurrent")
+            .count();
         println!(
             "[Griffin] Config loaded: {} layers ({} recurrent, {} attention)",
             config.num_hidden_layers,
-            config
-                .get_block_types()
-                .iter()
-                .filter(|t| *t == "recurrent")
-                .count(),
-            config
-                .get_block_types()
-                .iter()
-                .filter(|t| *t == "attention")
-                .count()
+            recurrent,
+            config.num_hidden_layers - recurrent
         );
 
         // Load weights
@@ -778,7 +791,18 @@ impl GriffinModel {
         config: GriffinConfig,
         mut weights: WeightMap,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let block_types = config.get_block_types();
+        // `block_types` in the config is the repeating pattern, not the
+        // per-layer list: recurrentgemma-9b declares
+        // `["recurrent", "recurrent", "attention"]` for 38 layers. Expand it to
+        // one entry per layer the way the reference indexes it
+        // (`block_types[i % len(block_types)]` in
+        // `mlx_lm/models/recurrent_gemma.py`). Iterating the raw pattern built
+        // 3 layers out of 38, which loaded and ran and produced finite
+        // nonsense, and left the cache list the same 3 entries long.
+        let pattern = config.get_block_types();
+        let block_types: Vec<String> = (0..config.num_hidden_layers)
+            .map(|i| pattern[i % pattern.len()].clone())
+            .collect();
 
         // Find first attention layer index
         let attn_idx = block_types
@@ -1100,10 +1124,75 @@ impl LanguageModel for GriffinModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{GriffinLayerCache, make_griffin_caches};
+    use super::{GriffinConfig, GriffinLayerCache, make_griffin_caches};
     use crate::models::model_owned::ModelOwnedSequenceState;
     use mlxcel_core::cache::SequenceId;
     use mlxcel_core::dtype;
+
+    /// The conv used to be called with the PyTorch `[B, C, L]` layout, which
+    /// MLX rejects because it reads the channel count off the last axis. That
+    /// failed at first inference rather than in CI, so pin the contract here:
+    /// NLC input against a `[C, K, 1]` weight, depthwise over `C` groups.
+    #[test]
+    fn conv1d_takes_nlc_input_with_channelwise_groups() {
+        let (channels, kernel, seq) = (8i32, 4i32, 5i32);
+        let x = mlxcel_core::zeros(&[1, seq + kernel - 1, channels], dtype::FLOAT32);
+        let w = mlxcel_core::zeros(&[channels, kernel, 1], dtype::FLOAT32);
+
+        let out = mlxcel_core::conv1d(&x, &w, 1, 0, 1, channels);
+        mlxcel_core::eval(&out);
+
+        // `[B, L, C]` in, `[B, L, C]` out with `L` restored by the left pad.
+        // The transposed call cannot reach this assert: MLX raises first.
+        assert_eq!(mlxcel_core::array_shape(&out), vec![1, seq, channels]);
+    }
+
+    /// `block_types` in the config is the repeating pattern, not the per-layer
+    /// list. Iterating it directly built 3 of recurrentgemma-9b's 38 layers,
+    /// which loaded and ran and emitted nonsense.
+    #[test]
+    fn block_type_pattern_expands_to_one_entry_per_layer() {
+        let pattern = [
+            "recurrent".to_string(),
+            "recurrent".to_string(),
+            "attention".to_string(),
+        ];
+        let layers = 38usize;
+        let expanded: Vec<String> = (0..layers)
+            .map(|i| pattern[i % pattern.len()].clone())
+            .collect();
+
+        assert_eq!(expanded.len(), layers);
+        assert_eq!(expanded.iter().filter(|t| *t == "attention").count(), 12);
+        assert_eq!(expanded.iter().filter(|t| *t == "recurrent").count(), 26);
+        // Layers 0 and 1 recurrent, layer 2 attention, as the checkpoint's
+        // `model.layers.2.temporal_block.q_proj.weight` requires.
+        assert_eq!(expanded[0], "recurrent");
+        assert_eq!(expanded[1], "recurrent");
+        assert_eq!(expanded[2], "attention");
+
+        // The cache list is built from the same expansion, so it has to be
+        // layer-length too or `forward` trips its cardinality assert.
+        assert_eq!(make_griffin_caches(&expanded, 2048).len(), layers);
+    }
+
+    /// A config that omits `block_types` still has to yield a schedule as long
+    /// as the stack, not as long as the default pattern.
+    #[test]
+    fn missing_block_types_still_expands_to_the_layer_count() {
+        let config: GriffinConfig = serde_json::from_str(
+            r#"{"model_type":"recurrent_gemma","hidden_size":16,"intermediate_size":32,
+                "num_hidden_layers":7,"num_attention_heads":2,"num_key_value_heads":1,
+                "vocab_size":32}"#,
+        )
+        .expect("config should parse without block_types");
+        let pattern = config.get_block_types();
+        assert!(!pattern.is_empty());
+        let expanded: Vec<String> = (0..config.num_hidden_layers)
+            .map(|i| pattern[i % pattern.len()].clone())
+            .collect();
+        assert_eq!(expanded.len(), 7);
+    }
 
     #[test]
     fn recurrent_gemma_eos_token_ids_come_from_config_metadata() {

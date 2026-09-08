@@ -943,7 +943,7 @@ pub fn create_causal_bool_mask_with_window(
 /// # Returns
 /// Tensor of shape [batch, n_heads, seq_len, head_dim]
 ///
-/// Used by: DeepSeekV2, MiniCPM3, NemotronNas and RecurrentGemma under
+/// Used by: DeepSeekV2, MiniCPM3 and NemotronNas under
 /// `src/models`, plus the DeepSeek-OCR Qwen2 vision encoder
 /// (`src/vision/encoders/deepseekocr_qwen2.rs`) and the Qwen3-Omni MoE speech
 /// layers (`src/audio/qwen3_omni_moe/speech_layers.rs`). Most decoders never
@@ -954,11 +954,12 @@ pub fn create_causal_bool_mask_with_window(
 /// Two kinds of caller remain, and they are not interchangeable. DeepSeekV2 and
 /// MiniCPM3 broadcast a single-head `k_pe` so it can be *concatenated* with a
 /// full-head `k_nope`; SDPA cannot do that for them and the call has to stay.
-/// NemotronNas and RecurrentGemma instead expand GQA-shaped K and V immediately
-/// before a fused SDPA, which is the redundant pattern #1686 removed from the
-/// Qwen VL, GLM-4V, PaddleOCR, HunyuanVL and Ernie4.5MoeVL decoders for 1.4x to
-/// 1.8x at 2048 prompt tokens. Neither benchmark host holds a checkpoint for
-/// those two, so they were left alone rather than changed blind.
+/// NemotronNas instead expands GQA-shaped K and V immediately before a fused
+/// SDPA, which is the redundant pattern #1686 removed from the Qwen VL, GLM-4V,
+/// PaddleOCR, HunyuanVL, Ernie4.5MoeVL and RecurrentGemma decoders. It is worth
+/// 1.4x to 1.8x at 2048 prompt tokens where attention dominates, and within
+/// noise on RecurrentGemma, whose decode is bound elsewhere. NemotronNas has no
+/// measurement yet, so it was left alone rather than changed blind.
 pub fn repeat_kv(x: &MlxArray, n_rep: i32) -> UniquePtr<MlxArray> {
     if n_rep == 1 {
         // No repetition needed — return a zero-copy view via reshape
