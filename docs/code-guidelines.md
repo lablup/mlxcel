@@ -83,6 +83,30 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 - `src/lib/mlxcel-core/src/utils.rs` - create_causal_mask, softcap, repeat_kv
 - Model-specific attention variants in `src/models/*.rs`
 
+## Bridge Helpers Return the Input Dtype
+
+A helper in `src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp` must return the dtype it was given. It may compute in something wider, and several deliberately do, but it casts back before it returns.
+
+```cpp
+auto result = mlx::core::multiply(a.inner, scale);          // f32, because the constants are
+return std::make_unique<MlxArray>(
+    mlx::core::astype(result, a.inner.dtype()));            // hand back what came in
+```
+
+**Why this matters:**
+
+`mlx::core::array(0.5f)` is a f32 scalar, so any binary op against a f16 or bf16 input promotes, and the helper hands back f32. Nothing about the result is wrong: it is the same value at higher precision, so parity checks, output diffs and unit tests all pass. What breaks is throughput, in a different file. The widened activation joins the residual stream at the first MLP, the hidden state stays f32 for every layer after it, and each of those matmuls promotes its own half-precision weight to f32 to match the operand. Decode is bandwidth-bound, so the model reads roughly twice the weight bytes plus the cast traffic.
+
+On 2026-09-08 that had `gpt_bigcode-santacoder` at 28% of mlx-lm and `pythia-1b` at 31% on M1 Ultra, and `recurrent_gemma` at a fifth on M5 Max, with `starcoder2-3b-4bit` at 100% beside them for the single reason that its GELU took `compiled_gelu`, which had always cast back.
+
+The rule is per function, not a set of call sites to keep in sync. Promotion *inside* a helper is free: `mx.compile` fuses it and the widened values never leave a register, which is why rewriting `compiled_gelu_topk`'s internal scalars moves `gemma3n-e4b-bf16` by 0.7%, inside noise. Only promotion that escapes the helper costs anything. A helper whose return value is its whole result may equally build the scalar in the input dtype from the start, as `gelu_tanh_approx` and `relu` do; that saves an intermediate and is the same guarantee.
+
+Do not audit this by grep. The restore can live in a callee: `compiled_softcap_sdpa_gqa` reads as a violation and is not one, because its fallback branch restores inside `softcap_sdpa_graph`.
+
+**Enforcement:**
+
+`activation_helpers_return_the_input_dtype` in [`src/lib/mlxcel-core/src/ffi_tests.rs`](../src/lib/mlxcel-core/src/ffi_tests.rs) calls each exported activation with f16, bf16 and f32 and asserts the dtype survives. Add new activation helpers to it.
+
 ## JIT Kernel Cache Keys
 
 Every `template_args` list passed to a `cuda_kernel` launch must name the dtype of each input whose dtype can vary:

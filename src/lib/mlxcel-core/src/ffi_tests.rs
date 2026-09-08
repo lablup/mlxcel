@@ -4706,3 +4706,48 @@ fn dequantize_commutes_with_output_axis_slice_on_strided_inputs() {
         );
     }
 }
+
+/// Every activation helper must return the dtype it was given.
+///
+/// This is the whole rule behind the 2026-09-08 fix, and it is worth a test
+/// rather than a convention because breaking it is invisible: the result is
+/// numerically right, so no parity or output check fails. What fails is
+/// throughput, somewhere else entirely. A f32 activation joins the residual
+/// stream at the first MLP, the hidden state stays f32 for every later layer,
+/// and each of those matmuls promotes its half-precision weight to f32 to match
+/// the operand. On M1 Ultra that left `gpt_bigcode-santacoder` at 28% of mlx-lm
+/// and `pythia-1b` at 31%, and on M5 Max it left `recurrent_gemma` at a fifth.
+///
+/// The rule is per function, not a list of call sites to keep in sync:
+/// promotion *inside* a helper is free, because `mx.compile` fuses it and the
+/// widened values never leave a register. Only promotion that escapes the
+/// helper costs anything. So a new helper may compute in f32 for numerical
+/// headroom, as `gelu_approx` deliberately does; it just has to cast back
+/// before it returns.
+#[test]
+fn activation_helpers_return_the_input_dtype() {
+    for (dtype, name) in [
+        (crate::dtype::FLOAT16, "f16"),
+        (crate::dtype::BFLOAT16, "bf16"),
+        (crate::dtype::FLOAT32, "f32"),
+    ] {
+        let x = full_f32(&[4, 8], 0.75, dtype);
+        let cases: [(&str, UniquePtr<MlxArray>); 5] = [
+            ("silu", silu(&x)),
+            ("gelu", gelu(&x)),
+            ("gelu_approx", gelu_approx(&x)),
+            ("relu", relu(&x)),
+            ("leaky_relu", leaky_relu(&x, 0.01)),
+        ];
+        for (helper, out) in cases {
+            assert_eq!(
+                array_dtype(&out),
+                dtype,
+                "{helper} returned dtype {} for a {name} input; a helper must cast back to \
+                 the dtype it was given, or the widened result reaches the next projection \
+                 and MLX promotes that layer's weight to match",
+                array_dtype(&out)
+            );
+        }
+    }
+}
