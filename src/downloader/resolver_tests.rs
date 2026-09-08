@@ -960,11 +960,16 @@ fn with_empty_caches<T>(tmp: &Path, body: impl FnOnce() -> T) -> T {
 #[test]
 fn offline_mode_turns_a_repo_id_miss_into_an_error_without_downloading() {
     let tmp = tempfile::tempdir().unwrap();
+    // Step 2a probes `./models/<basename>` against the process working
+    // directory, so without this the test finds a real checkpoint on any
+    // machine that has downloaded it and never reaches the offline arm.
+    let empty_cwd_models = tmp.path().join("cwd-models");
     let msg = with_empty_caches(tmp.path(), || {
         let err = resolve_model_source_with_options(
             Path::new("mlx-community/Qwen3-4B-4bit"),
             ModelSourceOptions {
                 offline: true,
+                cwd_models_dir: Some(empty_cwd_models.as_path()),
                 ..ModelSourceOptions::default()
             },
         )
@@ -986,12 +991,16 @@ fn offline_mode_still_answers_from_the_mlxcel_store() {
     let store_dir = models_root.join("mlx-community").join("Qwen3-4B-4bit");
     make_complete_snapshot(&store_dir);
 
+    // See the sibling test: step 2a would otherwise answer from the developer's
+    // own `./models` and this would assert the wrong path.
+    let empty_cwd_models = tmp.path().join("cwd-models");
     let resolved = with_empty_caches(tmp.path(), || {
         resolve_model_source_with_options(
             Path::new("mlx-community/Qwen3-4B-4bit"),
             ModelSourceOptions {
                 models_dir: Some(models_root.as_path()),
                 offline: true,
+                cwd_models_dir: Some(empty_cwd_models.as_path()),
                 ..ModelSourceOptions::default()
             },
         )

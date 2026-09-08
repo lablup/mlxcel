@@ -2371,6 +2371,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
                 revision: args.revision.as_deref(),
                 token: args.hf_token.as_deref(),
                 offline: args.offline,
+                cwd_models_dir: None,
             },
         )
         // Name the flag the operator actually typed. Without this a failure to
@@ -2402,6 +2403,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
+                    cwd_models_dir: None,
                 },
             )
         })
@@ -2420,6 +2422,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
+                    cwd_models_dir: None,
                 },
             )
         })

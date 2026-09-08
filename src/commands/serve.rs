@@ -272,6 +272,7 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
             revision: args.revision.as_deref(),
             token: args.hf_token.as_deref(),
             offline: args.offline,
+            cwd_models_dir: None,
         },
     )
     // Name the flag the operator actually typed. Without this a failure to
@@ -510,6 +511,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
+                    cwd_models_dir: None,
                 },
             )
         })
@@ -528,6 +530,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
                     revision: args.revision.as_deref(),
                     token: args.hf_token.as_deref(),
                     offline: args.offline,
+                    cwd_models_dir: None,
                 },
             )
         })
