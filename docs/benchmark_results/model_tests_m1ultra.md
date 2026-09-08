@@ -82,11 +82,12 @@ All 15 text-sweep failures resolve to something other than a runtime bug, so the
 | Speculative-decoding variants | 4 | `qwen3.5-4b-dflash`, `qwen3.5-27b-dflash`, `qwen3.8-27b-mtp-4bit`, `qwen3.8-27b-mtp-bf16` |
 | MTP drafters | 2 | `gemma-4-12b-it-assistant-4bit`, `gemma-4-31b-it-assistant-bf16` |
 | Audio models | 2 | `whisper-tiny`, `granite-speech-4.1-2b-nar-mlx` |
-| Source repositories, not release weights | 2 | `klear-46b-src`, `phixtral-4x2_8-src` |
 | Object detection | 1 | `docling-layout-heron-mlx-bf16` (RT-DETRv2) |
 | Unsupported architecture | 1 | `afm-4.5b` |
 
-The first six rows are not text-generation models and cannot produce a decode figure; the drafters and speculative variants are components of a pairing rather than standalone targets, and belong in the speculative sweep instead. `afm-4.5b` is the only real coverage gap: `mlxcel generate` reports `Unsupported model type: arcee`. Checking that against `mlxcel arch`, which is the command that lists architectures, takes a second look: an "Arcee" heading is present, but the entry under it is the AFMoE / Trinity MoE variant, and this checkpoint is the dense `ArceeForCausalLM`. The vendor heading is not the answer; the entry under it is.
+Two more checkpoints used to sit in this table as source repositories rather than release weights, `klear-46b-src` and `phixtral-4x2_8-src`. Both were removed from the store on 2026-09-08: they are pre-conversion originals kept for reference, not something the runtime serves, and their rows were dropped with them.
+
+The first five rows are not text-generation models and cannot produce a decode figure; the drafters and speculative variants are components of a pairing rather than standalone targets, and belong in the speculative sweep instead. `afm-4.5b` is the only real coverage gap: `mlxcel generate` reports `Unsupported model type: arcee`. Checking that against `mlxcel arch`, which is the command that lists architectures, takes a second look: an "Arcee" heading is present, but the entry under it is the AFMoE / Trinity MoE variant, and this checkpoint is the dense `ArceeForCausalLM`. The vendor heading is not the answer; the entry under it is.
 
 The Python baseline measured 124 of the same set, so parity is computed over the 107 models both sides measured. The eight checkpoints added on 2026-09-08 have no baseline row yet and are not in that figure. One of those, `plamo-2-1b`, was added on 2026-09-07 after `numba` was installed; its earlier `FAIL:warmup` was a missing dependency of the checkpoint's remote code, not a property of the model. Its own failures are not analysed here; they say what mlx-lm loads, not what mlxcel does.
 
@@ -270,6 +271,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `command-r7b-4bit` | Cohere2ForCausalLM | 512 | 694.9 | 107.1 | 111% |
 | `aya-expanse-8b-4bit` | CohereForCausalLM | 512 | 696.8 | 104.9 | 95% |
 | `dbrx-instruct-4bit` | DbrxForCausalLM | 512 | 90.3 | 23.9 | - |
+| `llama-3_3-nemotron-super-49b-4bit` | DeciLMForCausalLM | 512 | 119.6 | 19.4 | 99% |
 | `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 512 | 4469.7 | 284.5 | - |
 | `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 512 | 4430.4 | 278.5 | - |
 | `deepseek-v2-lite-4bit` | DeepseekV2ForCausalLM | 512 | 537.1 | 110.8 | 100% |
@@ -324,7 +326,6 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `helium-1-preview-2b-4bit` | HeliumForCausalLM | 512 | 2471.0 | 196.7 | 96% |
 | `moondream2` | HfMoondream | 512 | 3786.6 | 150.1 | - |
 | `hunyuan-1.8b-4bit` | HunYuanDenseV1ForCausalLM | 512 | 1965.2 | 173.1 | 94% |
-| `hunyuan-13b` | HunYuanMoEV1ForCausalLM | 512 | 244.0 | 44.1 | - |
 | `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 512 | 5007.0 | 232.6 | - |
 | `iquest-coder-v1-7b-instruct-8bit` | IQuestCoderForCausalLM | 512 | 563.6 | 70.7 | 100% |
 | `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 512 | 786.9 | 109.0 | - |
