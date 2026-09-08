@@ -161,7 +161,16 @@ SOURCE_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
 # Only tracked modifications make the measured binary differ from the commit.
 # Untracked files (stray notes, scratch CSVs) do not, and flagging them would
 # mark almost every real sweep dirty.
-if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+#
+# `benchmarks/` is excluded because it holds this script's own output, not
+# source. A multi-model sweep writes a CSV per model, so the first model to
+# overwrite a tracked CSV made every later model in the same sweep record
+# `-dirty` against a binary that had not changed at all. That is the opposite
+# of what this column is for: it exists to say which source revision produced
+# the numbers, and a run that only rewrote measurement data still produced them
+# from the named commit. A source edit mid-sweep is still caught, which is the
+# case worth catching.
+if [[ -n "$(git status --porcelain --untracked-files=no -- ':!benchmarks' 2>/dev/null)" ]]; then
   SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
 fi
 # Pinned MLX C++ revision the binary links, 8 characters. `mlxcel_version` and
