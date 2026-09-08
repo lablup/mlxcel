@@ -351,9 +351,9 @@ pub(crate) use sanitize::{
 #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub(crate) use sanitize::load_weights_from_dir_with_filter;
 pub use sanitize::{
-    bf16_to_f16_at_load, convert_bf16_weights, convert_bf16_weights_with_keep,
-    gemma3n_language_mlp_bf16_key, load_and_sanitize_weights, load_text_weights,
-    sanitize_config_json, sanitize_tied_embeddings, warn_bf16_precision,
+    bf16_to_f16_at_load, convert_bf16_weights, convert_bf16_weights_with_keep, gemma3n_bf16_key,
+    load_and_sanitize_weights, load_text_weights, sanitize_config_json, sanitize_tied_embeddings,
+    warn_bf16_precision,
 };
 pub use seed_oss::SeedOssModel;
 pub use siglip_text::{SigLipTextArgs, SigLipTextModel};
