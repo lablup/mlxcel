@@ -24,6 +24,7 @@ With no heading and no `base_model`, leave the name alone. A name assembled from
 | `upstream_repo_id` | The HuggingFace repo, empty when neither source yielded one. |
 | `id_source` | `heading`, `base_model` or `none`. Reliability is readable from this column alone. |
 | `precision` | From `config.json`, or from the shard headers when `torch_dtype` is absent. |
+| `size_gb` | On-disk footprint, which is what a transfer between machines has to be planned against. |
 | `present_on_m1ultra`, `present_on_m5max` | Each host owns its own column. |
 | `verified_by` | `config` when an upstream id was cross-checked against the config, `none` otherwise. |
 | `store` | `repo` for the standard store. |
