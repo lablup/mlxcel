@@ -11,14 +11,21 @@ Every number here comes from the 2026-09-06 through 2026-09-08 sweeps, with 18 r
 | Hardware | Mac Studio M1 Ultra, 128GB unified memory |
 | OS | macOS 26.6.2 |
 | mlxcel version | 0.7.0-beta.1 |
-| mlxcel commit | `30ab5a39` (both sweeps; later commits changed only the harness) |
+| mlxcel commit | `5287eb9a2` for the 16 refreshed VLM rows, `255203e51` and `ec414719f` for rows retaken after it; the three differ only in `scripts/bench_decode.sh` and the Gemma3n load policy |
 | MLX C++ pin | `9a795735` |
 | Build | `cargo build --release --features metal,accelerate` |
 | mlxcel harness | `mlxcel-bench-decode` (load, warmup and measured pass in one process) |
 | mlx-lm baseline | 0.31.3 |
 | mlx-vlm baseline | 0.6.17 |
 | Baseline stack | mlx 0.32.2, transformers 5.16.1, torch 2.14.0, torchvision 0.29.0, timm 1.0.29, numba 0.67.0 |
+| Model store | `models/mlx/` only |
 | CSVs | `metal_m1ultra_2026-09-08.csv`, `pylm_m1ultra_2026-09-06.csv`, `metal_m1ultra_vlm_2026-09-08.csv`, `pylm_m1ultra_vlm_2026-09-07.csv` |
+
+### The model store is `models/mlx/`, and only that
+
+Every checkpoint named in these tables lives under `models/mlx/`. A second store exists on this host at `~/.cache/mlxcel/models/` holding 12 more checkpoints, and it is deliberately out of scope: its path and contents differ per machine, so a table assembled from it cannot be compared against another host's. Sweeps, duplicate scans and the shared catalogue all read `models/mlx/` and stop there.
+
+That boundary has to be stated because getting it wrong is silent. A scan of `models/mlx/` alone reports a checkpoint as absent when a copy sits in the cache, and the absence reads as a fact about the project rather than about the scan. Two related traps sit next to it: `models` is itself a symlink, so a scan that does not resolve links can miss the whole tree, and a `model_type` is not always spelled the way the Rust module is (`nemotron-nas` in a config against `nemotron_nas` in `src/models/`). Each of those turned a real checkpoint into a false negative during the 2026-09-08 audit.
 
 ## Measurement shape
 
