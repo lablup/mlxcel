@@ -119,15 +119,26 @@ Gemma3n was in this state. The policy kept the language MLP bf16, for a real rea
 
 **How to find it:**
 
-Not by reading functions, and not by grep. There is no offending call site, so a static audit of this class returns nothing.
+Start with the exception surface, which is small and enumerable even though the defect is not. Every split is created by a keep predicate passed to `convert_bf16_weights_with_keep`, so those call sites are the entire candidate list. What separates a safe predicate from a splitting one is *what* it keeps, not whether it is constant:
 
-The symptom is positional. Compare within one machine and one family, and look for a single checkpoint sitting far below its siblings. On M1 Ultra the three Gemma3n rows read 138%, 135% and 98% of the reference; the 37-point drop is the whole signal, and it is only legible once you know the 4-bit variants skip conversion entirely and were therefore uniform all along. Read as three independent numbers, that table says "the bf16 checkpoint is slower", which is unremarkable and was in fact passed over.
+- **Quantization sidecars are safe.** Nine call sites under `src/loading/` keep exactly `key.ends_with(".scales") || key.ends_with(".biases")`. Those feed `quantized_matmul` directly and never meet a dense weight on a general matmul path, which is why the 4-bit Gemma3n variants were healthy at 135% and 138% while the bf16 one sat at 98%.
+- **Anything else splits dense weights.** `gemma3n_bf16_key` was the only predicate that did, keeping the language MLP while its neighbours converted. It is now a constant `true`.
+
+So the check is: does this predicate keep a tensor that a general matmul will multiply against a converted one? If yes, it needs a measurement, not an argument.
+
+Once that list is clean, the defect itself has no call site and a static audit returns nothing. The remaining symptom is positional. Compare within one machine and one family, and look for a single checkpoint sitting far below its siblings. On M1 Ultra the three Gemma3n rows read 138%, 135% and 98% of the reference; the 37-point drop is the whole signal, and it is only legible once you know the 4-bit variants skip conversion entirely and were therefore uniform all along. Read as three independent numbers, that table says "the bf16 checkpoint is slower", which is unremarkable and was in fact passed over.
 
 **Do not apply the function-layer fix here.** The two layers look identical at the call site and the wrong fix is actively destructive. Restoring the input dtype inside `RMSNormAct2d::forward` in [`src/vision/encoders/gemma3n.rs`](../src/vision/encoders/gemma3n.rs) is correct by the rule above and matches mlx-vlm's `rms_norm2d` line for line, but while the tower still loaded f16 it clipped the deep blocks: 10 of 184 norm calls take inputs above the f16 ceiling of 65504, peaking at 213055, so `gemma3n-e4b-bf16` answered "blue" for blue, green and purple alike. The f32 that the audit flagged as a leak was the only thing supplying the range. That restore became both safe and worth 1.04x prefill after the load policy was fixed, and not before. When a boundary restore breaks a model, the dtype being restored to is the thing to check.
 
 **Do not generalize the win to the dtype.** Uniform bf16 helped here because it removed a mixture, not because bf16 is faster. Run the control: on families with no forced-bf16 subset the two dtypes land within noise on the same hardware, measured at `qwen2.5-0.5b-bf16` 401.8 against 397.3 tok/s and `llama-3.1-8b-bf16` 33.07 against 33.02. Without that control the result reads as an argument for converting less everywhere, which it is not. Every other family keeps converting to f16.
 
-`MLXCEL_KEEP_BF16` loads any checkpoint uniformly bf16 and exists for exactly this A/B. See [`docs/environment-variables.md`](environment-variables.md).
+Positional diagnosis needs siblings. A family shipping one checkpoint has nothing to sit below, so the drop is invisible and the comparison has to be against the reference implementation instead. `MLXCEL_KEEP_BF16` loads any checkpoint uniformly bf16 and is the A/B for that case, and for confirming a suspected split before changing a policy. See [`docs/environment-variables.md`](environment-variables.md).
+
+**Enforcement:**
+
+No automated gate, unlike the section above. The obvious invariant, one float dtype per checkpoint, is wrong as stated: a quantized checkpoint keeps bf16 scales and biases against u32 planes by design, so asserting the naive rule would fire on every 4-bit model, the healthy Gemma3n ones included. The invariant that matters is that two float dtypes never meet on a *general* matmul, which is a property of the graph rather than of the weight map and is not available at load time.
+
+What is available is the predicate rule above, and it is mechanical enough to check: a keep predicate may name only `.scales` and `.biases`. Nine of the ten call sites satisfy that by inspection and the tenth is now constant. A source check in the shape of [`scripts/ci/check_kernel_dtype_keys.py`](../scripts/ci/check_kernel_dtype_keys.py) could enforce it, and has not been written. Until it is, review the candidate list when a predicate changes.
 
 ## JIT Kernel Cache Keys
 
