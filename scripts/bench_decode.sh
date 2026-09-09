@@ -1049,6 +1049,42 @@ if [[ "$PRE_WARM" == "1" && "$MODEL_ARG" == "all" ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Discovery report and zero-candidate guard (`all` mode)
+#
+# `all` used to be trusted to find something because it iterates the existing
+# entries of $MODELS_DIR. That assumption is wrong when $MODELS_DIR holds
+# containers rather than checkpoints: on a host whose store is
+# models/mlx/ plus models/mlx-big/, the default ./models has four entries and
+# none is a checkpoint, so the filter left nothing, the sweep wrote a
+# header-only CSV and exited 0. Nothing in the output said so; the only signal
+# was that a multi-hour sweep finished in two minutes.
+#
+# Both numbers are printed on every run, not just on failure. Zero is caught
+# here, but a partial match ("209 entries, 3 candidates") is the same defect
+# with a survivor, and only a count shown up front catches that one.
+if [[ "$MODEL_ARG" == "all" ]]; then
+  discovered=0
+  candidates=0
+  for dir in "$MODELS_DIR"/*/; do
+    [[ -d "$dir" ]] || continue
+    discovered=$((discovered + 1))
+    skip_for_vlm_mode "$dir" && continue
+    candidates=$((candidates + 1))
+  done
+  >&2 echo "Model store: $MODELS_DIR ($discovered entries, $candidates candidates after the $([[ "$VLM_MODE" -eq 1 ]] && echo VLM || echo text) filter)"
+  if [[ "$candidates" -eq 0 ]]; then
+    rm -f "$OUTPUT"
+    >&2 echo ""
+    >&2 echo "Error: no benchmark candidates under '$MODELS_DIR'."
+    >&2 echo "  A sweep that measures nothing is a configuration error, not a result,"
+    >&2 echo "  so no CSV was written."
+    >&2 echo "  If this host keeps checkpoints one level down, name that root:"
+    >&2 echo "    MODELS_DIR=models/mlx $0 all${VLM_MODE:+ --vlm}"
+    exit 1
+  fi
+fi
+
 if [[ "$MODEL_ARG" == "all" ]]; then
   if [[ "$NO_DEDUP" -eq 1 ]]; then
     # --no-dedup: pre-#1615 behavior, byte-for-byte. Every directory is

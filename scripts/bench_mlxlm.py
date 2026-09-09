@@ -472,7 +472,10 @@ def main():
                 return False
             return any(f.is_file() for f in d.glob("*.safetensors"))
 
-        model_dirs = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir() and _is_checkpoint(p))
+        entries = sorted(p for p in MODELS_DIR.iterdir() if p.is_dir())
+        model_dirs = [p for p in entries if _is_checkpoint(p)]
+        print(f">>> [store] {MODELS_DIR} ({len(entries)} entries, "
+              f"{len(model_dirs)} checkpoints)", file=sys.stderr)
 
         # Restrict the sweep to checkpoints that match the requested modality.
         # mlx-vlm loads a text-only checkpoint without complaint and silently
@@ -487,6 +490,21 @@ def main():
             if skipped:
                 print(f">>> [filter] {len(skipped)} non-VLM checkpoints excluded "
                       f"from the --vlm sweep", file=sys.stderr)
+
+        # A sweep that matches nothing is a configuration error, not a result.
+        # MODELS_DIR defaults to ./models, which on a host whose store is
+        # models/mlx plus models/mlx-big holds only container directories: the
+        # discovery returned zero, the run wrote a header-only CSV and exited
+        # 0, and the only signal was that a multi-hour sweep took two minutes.
+        # Refuse before the header is written, and name the fix.
+        if not model_dirs:
+            print(f"\nError: no benchmark candidates under '{MODELS_DIR}'.",
+                  file=sys.stderr)
+            print("  No CSV was written. If this host keeps checkpoints one "
+                  "level down, name that root:", file=sys.stderr)
+            print(f"    MODELS_DIR=models/mlx {sys.argv[0]} all"
+                  f"{' --vlm' if args.vlm else ''}", file=sys.stderr)
+            sys.exit(1)
     else:
         p = Path(args.model)
         if not p.is_dir():
