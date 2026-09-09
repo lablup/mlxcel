@@ -1113,16 +1113,31 @@ fn filter_reasoning_for_display(
     mlxcel::reasoning_stream::render_full(&markers, generated_text, primed, show_reasoning, dim)
 }
 
+/// Print the generation and its timing line.
+///
+/// `reasoning_only` comes from [`mlxcel::reasoning_stream::is_reasoning_only`]:
+/// the model generated normally but every token landed in the suppressed
+/// reasoning channel, so `generated_text` is empty here. Saying so is the whole
+/// point of the flag. A silent blank has twice been read as a broken model or a
+/// broken patch, once while it was the safety half of an A/B measurement.
 fn print_generation_result(
     generated_text: &str,
     stats: &GenerationStats,
     profile: bool,
+    reasoning_only: bool,
 ) -> Result<()> {
     print!("{}", generated_text);
     io::stdout().flush()?;
 
     println!();
     println!();
+
+    if reasoning_only {
+        println!(
+            "[All {} generated tokens went to the reasoning channel; the content channel is empty. Re-run with --show-reasoning to see them.]",
+            stats.generated_tokens
+        );
+    }
 
     if profile {
         println!("[Profile Results]");
@@ -2496,7 +2511,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &generated_text,
             args.generation.show_reasoning,
         );
-        print_generation_result(&visible, &stats, args.generation.profile)?;
+        let reasoning_only = mlxcel::reasoning_stream::is_reasoning_only(
+            &generated_text,
+            !visible.trim().is_empty(),
+            args.generation.show_reasoning,
+        );
+        print_generation_result(&visible, &stats, args.generation.profile, reasoning_only)?;
         mlxcel_core::clear_memory_cache();
         return Ok(());
     }
@@ -2635,7 +2655,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &generated_text,
         args.generation.show_reasoning,
     );
-    print_generation_result(&visible, &stats, args.generation.profile)?;
+    let reasoning_only = mlxcel::reasoning_stream::is_reasoning_only(
+        &generated_text,
+        !visible.trim().is_empty(),
+        args.generation.show_reasoning,
+    );
+    print_generation_result(&visible, &stats, args.generation.profile, reasoning_only)?;
 
     // Cleanup
     mlxcel_core::clear_memory_cache();

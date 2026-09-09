@@ -647,6 +647,11 @@ fn stream_turn<M: LanguageModel>(
     let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
     let mut stdout = io::stdout();
     let dim = stdout.is_terminal();
+    // Whether anything ever reached the content channel. A turn that stays
+    // inside `<think>` to the end prints nothing at all, which reads as a hung
+    // or broken model rather than a suppressed channel, so the tail below says
+    // which one it was.
+    let mut saw_visible_text = false;
 
     session.generate_streaming(
         model,
@@ -659,6 +664,7 @@ fn stream_turn<M: LanguageModel>(
                 let visible =
                     reasoning_stream::render_visible(&filter.feed(&text), show_reasoning, dim);
                 if !visible.is_empty() {
+                    saw_visible_text |= !visible.trim().is_empty();
                     print!("{visible}");
                     let _ = stdout.flush();
                 }
@@ -674,12 +680,14 @@ fn stream_turn<M: LanguageModel>(
     if let Some(tail) = decode_state.flush(tokenizer) {
         let visible = reasoning_stream::render_visible(&filter.feed(&tail), show_reasoning, dim);
         if !visible.is_empty() {
+            saw_visible_text |= !visible.trim().is_empty();
             print!("{visible}");
             let _ = stdout.flush();
         }
     }
     let visible = reasoning_stream::render_visible(&filter.flush(), show_reasoning, dim);
     if !visible.is_empty() {
+        saw_visible_text |= !visible.trim().is_empty();
         print!("{visible}");
         let _ = stdout.flush();
     }
@@ -690,6 +698,17 @@ fn stream_turn<M: LanguageModel>(
     // not leak into the next turn's rendered history). Kept as the byte-exact
     // turn text used for the transcript.
     let reply = tokenizer.decode(&generated_ids, true).unwrap_or_default();
+
+    // The turn generated tokens but none of them left the reasoning channel, so
+    // nothing printed above. Say that, rather than leaving a blank turn.
+    if reasoning_stream::is_reasoning_only(&reply, saw_visible_text, show_reasoning) {
+        println!(
+            "[All {} generated tokens went to the reasoning channel; the content channel is empty. Restart with --show-reasoning to see them.]",
+            generated_ids.len()
+        );
+        println!();
+    }
+
     Ok(reply)
 }
 
