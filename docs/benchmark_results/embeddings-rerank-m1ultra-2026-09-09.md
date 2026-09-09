@@ -59,28 +59,21 @@ Eight short documents per request.
 
 ## Observations
 
-**The backend is not what decides the bf16 against 8-bit question.** The M5 Max report concluded that `Nemotron-3-Embed-1B-BF16` and its 8-bit sibling invert between CUDA and Metal, and that precision guidance therefore has to name the backend. A second Metal host contradicts the grouping: M1 Ultra agrees with GB10, not with M5 Max.
+**The backend is not what decides the bf16 against 8-bit question, and as of the 2026-09-09 passes there is nothing left to decide.** The M5 Max report concluded that `Nemotron-3-Embed-1B-BF16` and its 8-bit sibling invert between CUDA and Metal, and that precision guidance therefore has to name the backend. That grouping does not survive a second Metal host, and the disagreement it rested on has since closed on its own.
 
-| Cell | GB10 (CUDA) | M5 Max (Metal) | M1 Ultra (Metal) |
-|------|-------------|----------------|------------------|
-| 1 short | 8-bit 1.1x slower | 8-bit **2.83x faster** | 8-bit 1.02x slower |
-| 8 short | 2.3x slower | **1.49x faster** | 1.24x slower |
-| 32 short | 2.7x slower | **1.38x faster** | 1.27x slower |
-| 32 long | 1.6x slower | **1.12x faster** | 1.60x slower |
+| 32 short inputs, p50 | bf16 | 8-bit | faster |
+|---|---:|---:|---|
+| GB10, 2026-08-26 | | | bf16 (8-bit 2.7x slower) |
+| M5 Max, 2026-09-04 `b2ff1eee` | 67.03 ms | 48.45 ms | 8-bit |
+| M5 Max, 2026-09-06 `a50ff440` | 66.26 ms | 47.89 ms | 8-bit |
+| M5 Max, 2026-09-09 `66b8346e` | 37.49 ms | 46.82 ms | **bf16** |
+| M1 Ultra, 2026-09-09 `f42d127d` | 113.15 ms | 143.31 ms | **bf16** |
 
-M5 Max rows above are from `metal_m5max_embeddings_2026-09-06.csv`, the newer full-roster pass at `a50ff440`, rather than from the 90-row file the M5 Max report itself used; the two agree on every direction. Two of the three hosts say the 8-bit conversion costs throughput, and the two that agree do not share a backend. Whatever M5 Max is doing is specific to that machine rather than to Metal.
+Two things follow. The backend was never the axis: M1 Ultra is Metal and has always agreed with GB10. And the M5 Max exception was temporary, closed by the bf16 half of the pair getting 1.77x faster between `a50ff440` and `66b8346e` while the 8-bit half stayed flat at 47.89 to 46.82 ms.
 
-**And it is the bf16 half that behaves unusually, not the 8-bit half.** Comparing the same cell across the two Metal hosts, M5 Max leads by roughly 2.4 to 3.0x on most of the roster, which is the machine's general margin here. `Nemotron-3-Embed-1B-BF16` is the one entry that breaks the pattern.
+**Only the wide-dtype checkpoint moved, which points at the dtype work in that interval rather than at anything embedding-specific.** The two checkpoints are the same model at two precisions and they sit on the same host under the same harness, so the 8-bit one is a control. That interval carries this session's half-precision reduction fix and the activation-helper dtype restore; an 8-bit checkpoint keeps only its scales and biases in bf16, so it has far less surface for either. Attribution to a specific commit would need an A/B and has not been done.
 
-| Model | M1 Ultra 32 short p50 | M5 Max | M5 Max lead |
-|-------|----------------------:|-------:|------------:|
-| multilingual-e5-small | 26.03 ms | 8.96 ms | 2.91x |
-| Qwen3-Embedding-0.6B | 86.07 ms | 30.88 ms | 2.79x |
-| LFM2.5-Embedding-350M | 61.56 ms | 25.19 ms | 2.44x |
-| Nemotron-3-Embed-1B-BF16-8bit | 144.44 ms | 47.89 ms | 3.02x |
-| **Nemotron-3-Embed-1B-BF16** | **113.15 ms** | **66.26 ms** | **1.71x** |
-
-The 8-bit checkpoint sits at the roster's usual 3.02x. The bf16 one is at 1.71x, which is to say it runs comparatively well on M1 Ultra, and that alone produces the inversion. Reading the pair in isolation makes it look like quantization behaves differently per backend; reading it against the roster shows one checkpoint out of step on one host. The cause is not established here.
+With the M5 Max figure corrected, the cross-host reading is unremarkable: M5 Max leads M1 Ultra by a median of 2.77x at 32 short inputs, and both Nemotron checkpoints sit at the top of that band, 3.02x for bf16 and 3.06x for 8-bit. An earlier revision of this report read the pair against the 2026-09-06 M5 Max file, found bf16 at 1.71x, and called it a checkpoint out of step on one host. That was true of the file it was written from and is not true now.
 
 **Rerankers need this file rather than the decode tables.** Several are built on a causal backbone, so `mlxcel-bench-decode` loads them and reports a decode rate. `qwen3-reranker-0.6b-4bit` returns 232 tok/s that way, while answering "No relevant content." to the prompt "The capital of France is" -- scoring relevance is what it was trained for. Through `/v1/rerank` the same checkpoint reads 7377 tok/s at eight documents. The two numbers differ by more than an order of magnitude and only the second one describes work anyone would ask of it. The embedding-only checkpoints do not have this failure mode, because the loader refuses them for generation and names the endpoint that serves them instead.
 
@@ -90,6 +83,6 @@ Peak `tokens_per_s` per model lands at batch 32 for text and multivector entries
 
 The single-input cells sit between 4 and 21 ms, where run-to-run variation is a meaningful share of the figure: a repeat of this pass moved `Nemotron-3-Embed-1B-BF16-8bit` at one short input from 1.11x slower to 1.02x slower against its bf16 sibling. Read the one-input column as an ordering rather than as a ratio; the batched cells are where the separation is stable.
 
-The three reports were taken at different commits: GB10 on 2026-08-26, M5 Max at `a50ff440` on 2026-09-06, and this one at `f42d127d`. Cross-host rows in the tables above are read as directions rather than as measured gaps.
+The comparisons above draw on four passes at four commits: GB10 on 2026-08-26, and M5 Max at `b2ff1eee`, `a50ff440` and `66b8346e` on 2026-09-04, 09-06 and 09-09, against this host at `f42d127d`. Cross-host rows in the tables above are read as directions rather than as measured gaps.
 
 `metal_m5max_embeddings_2026-09-06.csv` carries 20 fields per row against a 21-field header, because two of the three `writerow` calls in `bench_embeddings.py` omitted `mlx_commit` until `f42d127d`. Everything from `hardware` rightward is therefore one column left of its label in that file: the `mlx_commit` cell holds the mlxcel commit, and `mlxcel_commit` holds the build type. The timings this report draws from it sit left of the shift and are unaffected. The file is left as recorded rather than rewritten, since it is what that run produced; read its provenance columns with the offset in mind.
