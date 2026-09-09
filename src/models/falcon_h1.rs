@@ -219,6 +219,14 @@ impl ModelArgs {
 // Promotes to float32 for the whole gated-norm computation, matching the
 // Nemotron-H mixer: float16/bf16 RMS-norm (x^2 sum) and mixed-dtype multiply
 // can overflow to NaN on M5 Max (Metal GPU Family 4) NAx kernels.
+//
+// Whether that promotion is still needed after #1718 was measured for the other
+// two families carrying it and cannot be measured here: there is nothing to
+// measure rather than nothing measured. `mamba_rms_norm` defaults to false and
+// the only Falcon-H1 checkpoint in the store, `falcon-h1-tiny-90m-instruct-4bit`,
+// spells it `false`, so `forward` below is never reached on any checkpoint
+// available to test with. Removing the promotion here would be an unmeasurable
+// change; a checkpoint with the flag on has to arrive first.
 struct MambaRMSNormGated {
     weight: UniquePtr<MlxArray>,
     eps: f32,
