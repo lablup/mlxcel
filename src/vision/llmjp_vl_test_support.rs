@@ -138,6 +138,29 @@ pub(crate) fn tiny_vision_weights(rng: &mut Rng, prefix: &str) -> WeightMap {
 
 /// `mlp1` weights: LayerNorm over `VIT_HIDDEN * 4`, then two Linears into the
 /// text width.
+/// The same tower weights with `patch_embedding.weight` pre-transposed into the
+/// MLX `[O, kH, kW, I]` layout an already-converted checkpoint would ship.
+pub(crate) fn tiny_vision_weights_mlx_layout(rng: &mut Rng, prefix: &str) -> WeightMap {
+    let mut w = tiny_vision_weights(rng, prefix);
+    let key = format!("{prefix}.embeddings.patch_embedding.weight");
+    let hf = w.remove(&key).expect("patch embedding present");
+    w.insert(key, mlxcel_core::transpose_axes(&hf, &[0, 2, 3, 1]));
+    w
+}
+
+/// Build only the tower, from a caller-supplied weight map.
+pub(crate) fn build_vision_model(weights: &WeightMap) -> SigLipVisionModel {
+    SigLipVisionModel::from_weights_with_quant_and_gelu(
+        weights,
+        &tiny_vision_config(),
+        "vision_backbone.vision_model",
+        64,
+        4,
+        false,
+    )
+    .expect("tiny SigLIP tower builds")
+}
+
 pub(crate) fn tiny_connector_weights(rng: &mut Rng) -> WeightMap {
     let mut w = WeightMap::new();
     let shuffled = (VIT_HIDDEN * 4) as i32;

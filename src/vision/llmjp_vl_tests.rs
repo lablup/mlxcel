@@ -28,9 +28,11 @@ use mlxcel_core::cache::SequenceStateBackend;
 use mlxcel_core::generate::LanguageModel;
 
 use super::{LLMJP_MLP1_LAYER_NORM_EPS, image_tile_budget};
+use crate::models::embedding_test_support::Rng;
+use crate::vision::encoders::VisionEncoder;
 use crate::vision::llmjp_vl_test_support::{
-    IMG_END, IMG_PAD, IMG_START, TEXT_HIDDEN, TEXT_LAYERS, build_model, tile_pixels,
-    tiny_vision_config, to_vec,
+    IMG_END, IMG_PAD, IMG_START, TEXT_HIDDEN, TEXT_LAYERS, build_model, build_vision_model,
+    tile_pixels, tiny_vision_config, tiny_vision_weights, tiny_vision_weights_mlx_layout, to_vec,
 };
 
 #[test]
@@ -208,4 +210,52 @@ fn the_three_framing_ids_are_suppressed_from_the_output() {
             "stop id {id} must not be suppressed"
         );
     }
+}
+
+#[test]
+fn either_patch_embedding_conv_layout_produces_the_same_features() {
+    // The released bf16 originals ship the HF `[O, I, kH, kW]` layout
+    // (`[1152, 3, 16, 16]`); an MLX conversion would ship `[O, kH, kW, I]`.
+    // `VisionEmbeddings::from_weights` sanitizes the first into the second, so
+    // both must reach the encoder as the same weight and the tower must emit
+    // identical features. The fixture also carries a `head.probe` tensor, the
+    // attention-pooling head the loader drops: the tower never reads it, so its
+    // presence changes nothing here either.
+    let mut rng = Rng::new(0x00C0_FFEE_1362);
+    let hf_layout = tiny_vision_weights(&mut rng, "vision_backbone.vision_model");
+    let mut rng = Rng::new(0x00C0_FFEE_1362);
+    let mlx_layout = tiny_vision_weights_mlx_layout(&mut rng, "vision_backbone.vision_model");
+    assert!(
+        hf_layout.contains_key("vision_backbone.vision_model.head.probe"),
+        "the fixture must carry the pooling head the loader drops"
+    );
+
+    let pixels = tile_pixels(1);
+    // The tower is channels-last, so transpose the processor's [N, C, H, W].
+    let pixels = mlxcel_core::transpose_axes(&pixels, &[0, 2, 3, 1]);
+    let from_hf = to_vec(
+        &build_vision_model(&hf_layout)
+            .forward(&pixels)
+            .hidden_states,
+    );
+    let from_mlx = to_vec(
+        &build_vision_model(&mlx_layout)
+            .forward(&pixels)
+            .hidden_states,
+    );
+
+    assert_eq!(from_hf.len(), from_mlx.len());
+    let max_diff = from_hf
+        .iter()
+        .zip(&from_mlx)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff == 0.0,
+        "the two conv layouts must reach the encoder as the same weight (max diff {max_diff})"
+    );
+    assert!(
+        from_hf.iter().all(|v| v.is_finite()),
+        "features must be finite"
+    );
 }

@@ -11,7 +11,7 @@
 
 ## 요약
 
-PR #1737은 LLM-jp 연구소의 일본어 VLM 계열인 `model_type: "llmjpvl"`을 추가한다. 아키텍처는 하나이고, 배포된 두 체크포인트의 실질적 차이는 `llm_config.model_type`이 지목하는 디코더뿐이다(`llm-jp-4-vl-9B-beta`는 Llama, `Jagle-VL-2.2B-Jagle-FineVision`은 Qwen3). SigLIP2-so400m 타워가 InternVL식 동적 타일링 뒤에서 돌고, `pixel_shuffle(0.5)`가 512px 타일마다 폭 4608의 벡터 256개를 만들며, `mlp1` 커넥터가 그것을 디코더 폭으로 투영해 `<|image_pad|>` 자리를 대체한다. 이슈가 요청한 대로 InternVL 런타임을 재사용했고, 그 주변에서 조용히 실패하는 방식으로 갈리는 지점이 넷이다. 디코더 설정이 `text_config`가 아니라 `llm_config`에 있고, SigLIP 타워에는 CLS 토큰이 없어 InternViT의 `[:, 1:, :]` 슬라이스가 진짜 패치 한 줄을 지우며, `mlp1`의 LayerNorm은 비전 설정의 1e-6이 아니라 torch 기본값 1e-5를 쓰고, 런타임이 두 디코더 중 하나를 실어야 한다. 합성 테스트로는 잡히지 않았을 프롬프트 결함 둘도 찾아 고쳤다. InternVL의 "첫 토큰 뒤에 끼우기" 대체 경로는 이 템플릿에서 이미지 블록을 **시스템** 턴 안에 넣고, 서버는 타입 있는 미디어를 보지 않는 템플릿에 `{{ message['content'] }}`용 content **리스트**를 넘기고 있었다. 공유 InternVL 프로세서에서 물려받은 타일링 타이브레이크도 두 계열이 함께 읽는 업스트림 규칙과 어긋나, 레퍼런스가 5타일을 내는 768x768 이미지에 1타일을 냈다. 검증은 체크포인트 자신의 `modeling_llmjpvl.py`를 기준으로 했다. CLI에서 두 백본 모두 레퍼런스의 프롬프트 토큰 수와 greedy 출력을 정확히 재현하고, 서버에서는 Jagle-VL이 바이트 단위로 같으며 9B의 토큰 하나 차이는 배치 디코드 경로로 귀속된다(`--max-batch-size 1`에서 일치). 새 테스트 31개, 그리고 건드린 공유 파일의 회귀 범위에서 269개 통과.
+PR #1737은 LLM-jp 연구소의 일본어 VLM 계열인 `model_type: "llmjpvl"`을 추가한다. 아키텍처는 하나이고, 배포된 두 체크포인트의 실질적 차이는 `llm_config.model_type`이 지목하는 디코더뿐이다(`llm-jp-4-vl-9B-beta`는 Llama, `Jagle-VL-2.2B-Jagle-FineVision`은 Qwen3). SigLIP2-so400m 타워가 InternVL식 동적 타일링 뒤에서 돌고, `pixel_shuffle(0.5)`가 512px 타일마다 폭 4608의 벡터 256개를 만들며, `mlp1` 커넥터가 그것을 디코더 폭으로 투영해 `<|image_pad|>` 자리를 대체한다. 이슈가 요청한 대로 InternVL 런타임을 재사용했고, 그 주변에서 조용히 실패하는 방식으로 갈리는 지점이 넷이다. 디코더 설정이 `text_config`가 아니라 `llm_config`에 있고, SigLIP 타워에는 CLS 토큰이 없어 InternViT의 `[:, 1:, :]` 슬라이스가 진짜 패치 한 줄을 지우며, `mlp1`의 LayerNorm은 비전 설정의 1e-6이 아니라 torch 기본값 1e-5를 쓰고, 런타임이 두 디코더 중 하나를 실어야 한다. 합성 테스트로는 잡히지 않았을 프롬프트 결함 둘도 찾아 고쳤다. InternVL의 "첫 토큰 뒤에 끼우기" 대체 경로는 이 템플릿에서 이미지 블록을 **시스템** 턴 안에 넣고, 서버는 타입 있는 미디어를 보지 않는 템플릿에 `{{ message['content'] }}`용 content **리스트**를 넘기고 있었다. 공유 InternVL 프로세서에서 물려받은 타일링 타이브레이크도 두 계열이 함께 읽는 업스트림 규칙과 어긋나, 레퍼런스가 5타일을 내는 768x768 이미지에 1타일을 냈다. 검증은 체크포인트 자신의 `modeling_llmjpvl.py`를 기준으로 했다. CLI에서 두 백본 모두 레퍼런스의 프롬프트 토큰 수와 greedy 출력을 정확히 재현하고, 서버에서는 Jagle-VL이 바이트 단위로 같으며 9B의 토큰 하나 차이는 배치 디코드 경로로 귀속된다(`--max-batch-size 1`에서 일치). 새 테스트 32개, 그리고 건드린 공유 파일의 회귀 범위에서 269개 통과.
 
 ---
 
@@ -159,7 +159,7 @@ Jagle-VL은 CLI 및 레퍼런스와 바이트 단위로 같다. 9B는 토큰 하
 - `cargo clippy --lib --tests --features cuda -- -D warnings`: 통과.
 - `cargo fmt --all`: 적용, 잔여 diff 없음.
 - `cargo check --lib --tests --features cuda`: 통과.
-- 새 단위 테스트(`--profile test-fast --features cuda`): `vision::llmjp_vl` 6/6, `multimodal::llmjp_vl_prompt`(대조 게이트 포함) 8/8, `loading::vlm::llmjp_vl` 7/7, `server::llmjp_chat_template_tests` 5/5, 검출 테스트 1/1, `models::metadata_tests` 4/4.
+- 새 단위 테스트(`--profile test-fast --features cuda`): `vision::llmjp_vl` 7/7, `multimodal::llmjp_vl_prompt`(대조 게이트 포함) 8/8, `loading::vlm::llmjp_vl` 7/7, `server::llmjp_chat_template_tests` 5/5, 검출 테스트 1/1, `models::metadata_tests` 4/4.
 - 이 PR이 건드린 공유 파일의 회귀 범위: `vision::processors::internvl` 5/5(새 타이브레이크 게이트 포함), `server::chat_request` 104/104, `server::chat_template` 154/154, `vision::internvl` 2/2, `multimodal::internvl_prompt` 4/4.
 
 ---
