@@ -442,6 +442,20 @@ impl NemotronLayerCache {
 }
 
 // MambaRMSNormGated - RMS norm with gating and group structure.
+//
+// Promotes the whole computation to float32, the same local defense against the
+// M5 Max half-precision `x^2` NaN that `granitemoehybrid.rs` and `falcon_h1.rs`
+// carry. Whether it is still needed after #1718 was measured, and the answer
+// here is that the promotion stays.
+//
+// Measured on M1 Ultra with `nvidia-nemotron-3-nano-30b-a3b-4bit`, five runs per
+// arm: 96.51 tok/s promoted against 97.31 native, ranges 96.34-96.63 and
+// 97.14-97.46, disjoint but 1.008x. Outputs are token-identical between the arms
+// once `--show-reasoning` is passed. `granitemoehybrid.rs` gets 1.079x from the
+// same removal, which is worth the argument; 0.8% is not worth giving up a NaN
+// defense whose coverage after #1718 is not established, because that fix
+// changed the bridge's reduction helpers and not MLX's fused `fast_rms_norm`.
+// Do not re-run this A/B without a reason the numbers above do not already give.
 struct MambaRMSNormGated {
     weight: UniquePtr<MlxArray>,
     eps: f32,
