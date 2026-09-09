@@ -3546,10 +3546,12 @@ fn test_compiled_softcap_sdpa_gqa_decode_matches_repeated_reference() {
     // would pass even if the grouping mapped heads to the wrong KV group.
     let fill = |n: i32, seed: f32| -> Vec<f32> {
         (0..n)
-            .map(|i| ((i as f32 * 0.37 + seed).sin() * 0.5) as f32)
+            .map(|i| (i as f32 * 0.37 + seed).sin() * 0.5)
             .collect()
     };
-    let q = from_slice_f32(&fill(b * h_q * 1 * d, 0.1), &[b, h_q, 1, d]);
+    // Decode shape: one query position, so the element count drops the q_len of
+    // 1 that the shape literal still spells out.
+    let q = from_slice_f32(&fill(b * h_q * d, 0.1), &[b, h_q, 1, d]);
     let k = from_slice_f32(&fill(b * h_kv * s * d, 1.7), &[b, h_kv, s, d]);
     let v = from_slice_f32(&fill(b * h_kv * s * d, 2.9), &[b, h_kv, s, d]);
 
