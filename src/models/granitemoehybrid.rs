@@ -245,10 +245,23 @@ impl ModelArgs {
 // Gated RMSNorm (`GraniteMoeHybridRMSNormGated`).
 //
 // `rms_norm(swiglu(gate, y), weight, eps)` = gate BEFORE a PLAIN full-weight
-// RMSNorm (no `n_groups` grouping, unlike the Falcon-H1 gated norm). Promotes to
-// float32 for the whole computation: float16/bf16 RMS-norm (x^2 sum) and
-// mixed-dtype multiply can overflow to NaN on M5 Max (Metal GPU Family 4) NAx
-// kernels.
+// RMSNorm (no `n_groups` grouping, unlike the Falcon-H1 gated norm).
+//
+// Runs in the input dtype. It used to promote the whole computation to float32
+// against a NaN seen on M5 Max, from a half-precision `x^2` sum.
+//
+// The promotion is removed on measurement, not on an argument that the fault is
+// gone. #1718 fixed a bfloat16 reduction defect in the bridge's own helpers
+// (`max_all`, `sum_all`, `mean_all` and their axis forms, all routed through
+// `reduce_in_f32`), but this norm calls `mlx::core::fast::rms_norm` directly and
+// does not pass through them, so that fix does not cover this site. What covers
+// it is `tests/mamba2_hybrid_finite.rs`, which runs 250 forwards per checkpoint
+// and passed 3 runs of 3 on both hosts with the promotion removed, plus a
+// 3000-token needle recall on M5 Max where an overflow would show. If MLX
+// changes that kernel, the measurement has to be repeated rather than inferred.
+//
+// What the promotion cost: every mixer step widened the residual stream to f32
+// and each later matmul promoted its own weight to match.
 struct GraniteMoeHybridRMSNormGated {
     weight: UniquePtr<MlxArray>,
     eps: f32,
@@ -257,21 +270,18 @@ struct GraniteMoeHybridRMSNormGated {
 
 impl GraniteMoeHybridRMSNormGated {
     fn forward(&self, y: &MlxArray, gate: &MlxArray) -> UniquePtr<MlxArray> {
-        let orig_dtype = mlxcel_core::array_dtype(y);
+        let dtype = mlxcel_core::array_dtype(y);
 
-        let y_f32 = mlxcel_core::astype(y, mlxcel_core::dtype::FLOAT32);
-        let g_f32 = mlxcel_core::astype(gate, mlxcel_core::dtype::FLOAT32);
         // swiglu(gate, y) = silu(gate) * y (gate applied before the norm).
-        let gated = mlxcel_core::multiply(&y_f32, &silu(&g_f32));
+        let gated = mlxcel_core::multiply(y, &silu(gate));
 
         // Full-weight RMSNorm (no grouping): normalize with a ones vector, then
-        // multiply the learned weight, keeping everything in float32.
-        let ones = mlxcel_core::ones(&[self.dim], mlxcel_core::dtype::FLOAT32);
+        // multiply the learned weight. Every operand is already `dtype`, so the
+        // result leaves in the dtype it arrived in with no cast.
+        let ones = mlxcel_core::ones(&[self.dim], dtype);
         let normed = mlxcel_core::fast_rms_norm(&gated, &ones, self.eps);
-        let w_f32 = mlxcel_core::astype(&self.weight, mlxcel_core::dtype::FLOAT32);
-        let result = mlxcel_core::multiply(&w_f32, &normed);
 
-        mlxcel_core::astype(&result, orig_dtype)
+        mlxcel_core::multiply(&self.weight, &normed)
     }
 }
 
