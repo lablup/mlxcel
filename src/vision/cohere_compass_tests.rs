@@ -62,8 +62,10 @@ fn image_pad_expands_to_merged_grid() {
         196,
         "the single template placeholder must expand to t * (h/2) * (w/2) copies"
     );
-    assert_eq!(prompt_tokens[197], VISION_END);
-    assert_eq!(prompt_tokens[198], 42);
+    // BOS, VISION_START, 196 image pads (indices 2..=197), VISION_END, then the
+    // one text token the fixture prompt carries.
+    assert_eq!(prompt_tokens[198], VISION_END);
+    assert_eq!(prompt_tokens[199], 42);
 }
 
 /// The checkpoint's `min_pixels` of 65536 is what pulls a small image up to a

@@ -369,8 +369,15 @@ fn text_prefill_is_causal() {
 
 /// DeepStack features are injected after the first `k` layers only, where `k`
 /// is the number of branch outputs the vision tower produced (3 for the
-/// published checkpoint). Injecting into a fourth layer would change the
-/// result; not injecting at all would leave it equal to the no-DeepStack run.
+/// published checkpoint). Injecting into a fourth layer must change the result;
+/// not injecting at all must leave it equal to the no-DeepStack run.
+///
+/// The injected rows are deliberately non-uniform across channels. This family
+/// normalizes with a mean-subtracting LayerNorm and carries the residual
+/// through a parallel block, so adding the *same* constant to every channel of
+/// a position is invisible end to end: each block's input norm removes it, so
+/// attention and the MLP see unchanged inputs, and the final norm removes it
+/// again. A constant fixture here would pass whether or not the injection ran.
 #[test]
 fn deepstack_injects_first_three_layers_only() {
     let _guard = mlx_test_guard();
@@ -387,43 +394,30 @@ fn deepstack_injects_first_three_layers_only() {
     let mask = mlxcel_core::from_slice_f32(&mask_vals, &[1, 8]);
     let mask = mlxcel_core::astype(&mask, mlxcel_core::dtype::BOOL);
 
+    let branches = |count: usize| -> Vec<_> {
+        let mut rng = Rng::new(0x5EED_0DEE);
+        (0..count).map(|_| rng.tensor(&[3, HIDDEN], 0.5)).collect()
+    };
+
     let mut caches = model.make_caches();
     let plain = to_vec(&model.forward_impl(&input, Some(&embeds), &mut caches));
 
-    let three: Vec<_> = (0..3)
-        .map(|k| {
-            mlxcel_core::full_f32(
-                &[3, HIDDEN],
-                0.1 * (k as f32 + 1.0),
-                mlxcel_core::dtype::FLOAT32,
-            )
-        })
-        .collect();
-    model.set_deepstack_state(mlxcel_core::copy(&mask), three);
+    model.set_deepstack_state(mlxcel_core::copy(&mask), branches(3));
     let mut caches = model.make_caches();
     let injected3 = to_vec(&model.forward_impl(&input, Some(&embeds), &mut caches));
     model.clear_deepstack_state();
 
-    let four: Vec<_> = (0..4)
-        .map(|k| {
-            mlxcel_core::full_f32(
-                &[3, HIDDEN],
-                0.1 * (k as f32 + 1.0),
-                mlxcel_core::dtype::FLOAT32,
-            )
-        })
-        .collect();
-    model.set_deepstack_state(mlxcel_core::copy(&mask), four);
+    model.set_deepstack_state(mlxcel_core::copy(&mask), branches(4));
     let mut caches = model.make_caches();
     let injected4 = to_vec(&model.forward_impl(&input, Some(&embeds), &mut caches));
     model.clear_deepstack_state();
 
     assert!(
-        max_abs_diff(&plain, &injected3) > 1e-5,
+        max_abs_diff(&plain, &injected3) > 1e-4,
         "three DeepStack branches must change the logits"
     );
     assert!(
-        max_abs_diff(&injected3, &injected4) > 1e-5,
+        max_abs_diff(&injected3, &injected4) > 1e-4,
         "a fourth DeepStack branch must reach layer 3; the injection window follows the branch \
          count, not a hard-coded 3"
     );

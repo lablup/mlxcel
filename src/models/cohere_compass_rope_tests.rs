@@ -72,8 +72,11 @@ fn frequencies_are_pre_permuted_over_the_hw_block() {
     let table = CompassMRoPE::new(HEAD_DIM, BASE, SECTION).expect("published section is valid");
     let (want_inv, _) = reference_table(HEAD_DIM, BASE, SECTION);
     assert_eq!(table.inv_freq().len(), 64);
+    // `x.powf(-a)` and `1.0 / x.powf(a)` are the same value but not the same
+    // f32 rounding, so this is an f32-epsilon comparison, not an equality. A
+    // wrong permutation moves entries by O(0.1), three orders above the bound.
     assert!(
-        max_abs_diff(table.inv_freq(), &want_inv) < 1e-9,
+        max_abs_diff(table.inv_freq(), &want_inv) < 1e-6,
         "inv_freq is not upstream's pre-rotated inv_freq_3d"
     );
 
@@ -81,7 +84,7 @@ fn frequencies_are_pre_permuted_over_the_hw_block() {
     // carry the natural frequency at index 2, not index 1.
     let natural_1 = BASE.powf(-2.0 / HEAD_DIM as f32);
     assert!(
-        (table.inv_freq()[1] - natural_1).abs() > 1e-9,
+        (table.inv_freq()[1] - natural_1).abs() > 1e-3,
         "the table is in natural order, so the pre-rotation was skipped"
     );
 }
