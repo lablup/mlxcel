@@ -2,7 +2,7 @@
 
 Compatibility and single-stream performance for mlxcel on **Mac Studio M1 Ultra 128GB**, measured against the Python mlx-lm and mlx-vlm baselines on the same host, the same day, and the same prompt shape.
 
-Every number here comes from the 2026-09-06 through 2026-09-08 sweeps, with 18 rows re-measured on 2026-09-08 after lablup/mlxcel#1709 and #1710. Earlier sweeps used a different measurement shape and are not comparable, so they are not carried forward; the CSVs under `benchmarks/` remain the record of what was measured when.
+Every number here comes from the 2026-09-06 through 2026-09-09 sweeps, with 18 rows re-measured on 2026-09-08 after lablup/mlxcel#1709 and #1710 and six checkpoints taken singly on 2026-09-09 (see "Newly measured checkpoints"). Earlier sweeps used a different measurement shape and are not comparable, so they are not carried forward; the CSVs under `benchmarks/` remain the record of what was measured when.
 
 ## Test environment
 
@@ -18,14 +18,18 @@ Every number here comes from the 2026-09-06 through 2026-09-08 sweeps, with 18 r
 | mlx-lm baseline | 0.31.3 |
 | mlx-vlm baseline | 0.6.17 |
 | Baseline stack | mlx 0.32.2, transformers 5.16.1, torch 2.14.0, torchvision 0.29.0, timm 1.0.29, numba 0.67.0 |
-| Model store | `models/mlx/` only |
-| CSVs | `metal_m1ultra_2026-09-08.csv`, `pylm_m1ultra_2026-09-06.csv`, `metal_m1ultra_vlm_2026-09-08.csv`, `pylm_m1ultra_vlm_2026-09-07.csv` |
+| Model store | `models/mlx/` and `models/mlx-big/` |
+| CSVs | `metal_m1ultra_2026-09-08.csv`, `pylm_m1ultra_2026-09-06.csv`, `metal_m1ultra_vlm_2026-09-08.csv`, `pylm_m1ultra_vlm_2026-09-07.csv`, plus the six `metal_m1ultra_2026-09-09_single_*.csv` and `metal_m1ultra_vlm_2026-09-09_single_*.csv` files named under "Newly measured checkpoints" |
 
-### The model store is `models/mlx/`, and only that
+### The model store is `models/mlx/` and `models/mlx-big/`, and only those
 
-Every checkpoint named in these tables lives under `models/mlx/`. A second store exists on this host at `~/.cache/mlxcel/models/` holding 12 more checkpoints, and it is deliberately out of scope: its path and contents differ per machine, so a table assembled from it cannot be compared against another host's. Sweeps, duplicate scans and the shared catalogue all read `models/mlx/` and stop there.
+Checkpoints on this host live under two in-repository roots. `models/mlx/` holds 209 of them and is where every row in the tables below comes from. `models/mlx-big/` holds the five largest: `qwen3-coder-480b-a35b-instruct-4bit` (252 GB), `mimo-v2-flash-4bit` (162 GB), `deepseek-v3-0324-4bit` (100 GB), `minimax-m2-3bit` (94 GB) and `dots.llm1.inst-mixed-4-6bit` (81 GB). Setting aside the duplicate noted below, the largest entry left in `models/mlx/` is `dbrx-instruct-4bit` at 70 GB, so the split sits at roughly 80 GB. It is a placement decision, not a rule the tooling enforces. A third store exists at `~/.cache/mlxcel/models/` holding 12 more checkpoints, and that one is deliberately out of scope: its path and contents differ per machine, so a table assembled from it cannot be compared against another host's.
 
-That boundary has to be stated because getting it wrong is silent. A scan of `models/mlx/` alone reports a checkpoint as absent when a copy sits in the cache, and the absence reads as a fact about the project rather than about the scan. Two related traps sit next to it: `models` is itself a symlink, so a scan that does not resolve links can miss the whole tree, and a `model_type` is not always spelled the way the Rust module is (`nemotron-nas` in a config against `nemotron_nas` in `src/models/`). Each of those turned a real checkpoint into a false negative during the 2026-09-08 audit.
+`dots.llm1.inst-mixed-4-6bit` is currently present in both roots as two independent copies, not links (different inodes, 81 GB each). The `models/mlx/` copy is the one the sweeps read. Reclaiming the other 81 GB is worth doing but is left alone here so that no table row changes underneath a release measurement.
+
+The Coverage table below still counts `large_models` among the container directories it skipped, because that is the layout the 2026-09-06 and 2026-09-08 sweeps walked. No such directory exists now. The sweep record is left as it ran rather than back-dated to the current layout, so read that row as history.
+
+That boundary has to be stated because getting it wrong is silent, and a one-root scan is the specific way it goes wrong. Reading only `models/mlx/` reports all five of the oversized checkpoints as absent, and the absence reads as a fact about the project rather than about the scan; `model_tests_m5max.md` lists `dots.llm1.inst-mixed-4-6bit` and `MiniMax-M2-3bit` as "not present on M1 Ultra" for exactly that reason, and the first of those has had a committed M1 Ultra CSV since 2026-09-08. Three related traps sit next to it: a checkpoint may instead sit in the per-machine cache, `models` is itself a symlink so a scan that does not resolve links can miss the whole tree, and a `model_type` is not always spelled the way the Rust module is (`nemotron-nas` in a config against `nemotron_nas` in `src/models/`). Each of those turned a real checkpoint into a false negative during the 2026-09-08 audit. Match checkpoints by basename across both roots rather than by a literal path: the two hosts do not share a layout, and M5 Max records `model_path` as `models/<name>` where this host records `models/mlx/<name>`.
 
 ## Measurement shape
 
@@ -509,6 +513,30 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 292.3 | 81.2 | shape |
 | `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 28 | 217.8 | 46.2 | - |
 | `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 440.1 | 109.9 | - |
+
+## Newly measured checkpoints (2026-09-09)
+
+Six checkpoints taken singly after the 2026-09-08 sweep closed, at `0accedd9` with MLX pin `9a795735`, on the standard pp512/tg128 condition. They are the M1 Ultra half of the pass `model_tests_m5max.md` records under the same heading, taken so that neither host is left quoting a cross-host ratio against a checkpoint only one of them measured.
+
+One of the six belongs in the tables above:
+
+| Model | Architecture | Prefill | Decode | CSV |
+|---|---|--:|--:|---|
+| `gemma-4-e4b-4bit` | Gemma4ForConditionalGeneration | 803.70 | 77.44 | `metal_m1ultra_2026-09-09_single_gemma-4-e4b-4bit.csv` |
+
+M5 Max read 4768.35 prefill and 136.07 decode on that checkpoint at the same commit and pin, so the pair is a hardware comparison and not one spanning a version or a condition.
+
+The other five are embedding, rerank and speech checkpoints. They stay out of the tables above because a decode rate does not describe the work any of them does; their ladder is `scripts/bench_embeddings.py`, reported in [`embeddings-rerank-m1ultra-2026-09-09.md`](embeddings-rerank-m1ultra-2026-09-09.md), where all four of the embedders and rerankers already have rows.
+
+| Model | `bench_decode` result | Reading |
+|---|---|---|
+| `qwen3-reranker-0.6b-4bit` | 4817.19 / 232.60 | Causal backbone, so the harness loads it and returns a rate. Asked "The capital of France is" it answers "No relevant content."; through `/v1/rerank` the same checkpoint reads 7377 tok/s at eight documents |
+| `qwen3-vl-reranker-2b` | 866.52 / 114.62 | Same shape as the row above; `/v1/rerank` reads 3176 tok/s |
+| `qwen3-embedding-0.6b` | `FAIL:bench` | Loader refuses it for generation and names the endpoint that serves it |
+| `qwen3-vl-embedding-2b` | `FAIL:bench` | Same refusal |
+| `whisper-base` | `FAIL:bench` | ASR, no autoregressive text-decode path |
+
+The two reranker rates are recorded here rather than dropped because the gap between them and the `/v1/rerank` figures is the argument for keeping these checkpoints out of the decode tables. A reader who finds only the 232 tok/s has no way to see that it describes the wrong task.
 
 ## Benchmark families measured on their own conditions
 
