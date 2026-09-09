@@ -189,6 +189,7 @@ impl LoadedModel {
             Self::Qwen25VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VL(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3VLMoe(model) => Some(VlmRuntimeRef::Qwen(model)),
+            Self::CohereCompassVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen3OmniMoe(model) => Some(VlmRuntimeRef::Qwen3OmniMoe(model)),
             Self::Glm4v(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Glm4vMoe(model) => Some(VlmRuntimeRef::Qwen(model)),

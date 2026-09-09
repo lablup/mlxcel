@@ -92,6 +92,10 @@ pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
 pub mod cohere2_moe;
+pub mod cohere_compass;
+pub mod cohere_compass_config;
+pub mod cohere_compass_layers;
+pub mod cohere_compass_rope;
 pub mod colidefics3;
 pub mod colqwen2_5;
 pub mod dbrx;
@@ -233,6 +237,8 @@ pub use bailing_moe::BailingMoeModel;
 pub use bailing_moe_linear::BailingMoeLinearModel;
 pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
+pub use cohere_compass::CohereCompassTextModel;
+pub use cohere_compass_config::CompassTextConfig;
 pub use cohere2::Cohere2Model;
 pub use cohere2_moe::Cohere2MoeModel;
 pub use dbrx::DbrxModel;
@@ -414,6 +420,7 @@ pub enum ModelType {
     Qwen3VL,           // Qwen3-VL (ViT + interleaved MRoPE + DeepStack)
     Qwen3VLMoe,        // Qwen3-VL-MoE (Qwen3-VL + MoE text backbone)
     Qwen3OmniMoe,      // Qwen3-Omni MoE thinker (Qwen3-VL-MoE + audio tower)
+    CohereCompassVLM,  // Cohere Compass / North-Micro-Vision (Qwen3-VL tower + Command decoder)
     PaddleOcrVL,       // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
     DotsOcrVL,         // dots.ocr (dots_vit ViT + Qwen2 text decoder)
     FalconOcrVL,       // Falcon-OCR (early-fusion patch projector, no vision tower)
@@ -682,6 +689,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen3VL,
     ModelType::Qwen3VLMoe,
     ModelType::Qwen3OmniMoe,
+    ModelType::CohereCompassVLM,
     ModelType::PaddleOcrVL,
     ModelType::DotsOcrVL,
     ModelType::FalconOcrVL,
@@ -883,6 +891,7 @@ impl ModelType {
             ModelType::Qwen3VL => ("Qwen3-VL", "Qwen VLM"),
             ModelType::Qwen3VLMoe => ("Qwen3-VL MoE", "Qwen VLM"),
             ModelType::Qwen3OmniMoe => ("Qwen3-Omni MoE (thinker)", "Qwen VLM"),
+            ModelType::CohereCompassVLM => ("Cohere Compass / North-Micro-Vision", "Other VLM"),
             ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
             ModelType::DotsOcrVL => ("dots.ocr (dots_vit + Qwen2)", "Other VLM"),
             ModelType::FalconOcrVL => ("Falcon-OCR (early fusion)", "Other VLM"),
@@ -1280,6 +1289,7 @@ mod metadata_tests {
             Qwen3VL,
             Qwen3VLMoe,
             Qwen3OmniMoe,
+            CohereCompassVLM,
             PaddleOcrVL,
             DotsOcrVL,
             FalconOcrVL,

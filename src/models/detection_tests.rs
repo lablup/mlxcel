@@ -433,6 +433,39 @@ fn qwen3_omni_moe_model_type_is_detected() {
 }
 
 #[test]
+fn cohere_compass_model_type_is_detected() {
+    let model_dir = temp_path("cohere_compass");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "cohere_compass",
+            "image_token_id": 255031,
+            "video_token_id": 255032,
+            "vision_start_token_id": 255028,
+            "text_config": {
+                "model_type": "cohere_compass_text",
+                "hidden_size": 2048,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 16,
+                "vocab_size": 262144
+            },
+            "vision_config": {
+                "model_type": "cohere_compass_vision",
+                "depth": 27,
+                "hidden_size": 1152
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::CohereCompassVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn hunyuan_vl_model_type_is_detected() {
     let model_dir = temp_path("hunyuan_vl");
     fs::create_dir_all(&model_dir).unwrap();

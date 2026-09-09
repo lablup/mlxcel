@@ -37,6 +37,7 @@ pub mod merge;
 pub mod processors;
 
 // VLM model implementations
+pub mod cohere_compass;
 pub mod deepseek_vl2;
 pub mod deepseekocr;
 pub mod deepseekocr_2;
@@ -92,6 +93,7 @@ pub mod unlimited_ocr;
 pub mod youtu_vl;
 
 // Re-export VLM model types
+pub use cohere_compass::CohereCompassModel;
 pub use deepseek_vl2::DeepSeekVl2VlModel;
 pub use deepseekocr::DeepSeekOcrVlModel;
 pub use deepseekocr_2::DeepSeekOcr2VlModel;

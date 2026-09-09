@@ -22,6 +22,7 @@
 //! - `vlm_gemma.rs`: Gemma3 / Gemma3n
 //! - `vlm_llava.rs`: LLaVA / Bunny
 //! - `vlm_pixtral.rs`: Pixtral / Mistral3
+//! - `vlm_cohere_compass.rs`: Cohere Compass / North-Micro-Vision
 //! - `vlm_qwen.rs`: Qwen2 / 2.5 / 3 / 3.5-VL
 //! - `vlm_siglip.rs`: Aya Vision / PaliGemma
 //! - `vlm_special.rs`: Llama4 / MiniCPM-o / Phi4MM / Phi4-SigLIP / Phi3V / Molmo2
@@ -37,6 +38,8 @@ use crate::models;
 use crate::vision;
 use models::sanitize_config_json;
 
+#[path = "vlm_cohere_compass.rs"]
+mod cohere_compass;
 #[path = "vlm_deepseek_vl2.rs"]
 mod deepseek_vl2;
 #[path = "vlm_deepseekocr.rs"]
@@ -102,6 +105,7 @@ mod step3p7;
 #[path = "vlm_youtu_vl.rs"]
 mod youtu_vl_loader;
 
+pub(crate) use cohere_compass::load_cohere_compass_vlm;
 pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
 pub(crate) use deepseekocr::{
     load_deepseekocr_2_vlm, load_deepseekocr_vlm, load_unlimited_ocr_vlm,
@@ -401,7 +405,7 @@ fn is_gemma3n_model(model_path: &Path) -> bool {
             .is_some_and(|model_type| model_type == "gemma3n" || model_type == "gemma3n_text")
 }
 
-fn read_optional_model_json(model_path: &Path, file_name: &str) -> Option<Value> {
+pub(super) fn read_optional_model_json(model_path: &Path, file_name: &str) -> Option<Value> {
     let path = model_path.join(file_name);
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&json).ok()

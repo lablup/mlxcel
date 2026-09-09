@@ -300,6 +300,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::Qwen3VL => Some(load_qwen3_vl(model_path)?),
         ModelType::Qwen3VLMoe => Some(load_qwen3_vl_moe(model_path)?),
         ModelType::Qwen3OmniMoe => Some(load_qwen3_omni_moe(model_path)?),
+        ModelType::CohereCompassVLM => Some(load_cohere_compass_vlm(model_path)?),
         ModelType::PaddleOcrVL => Some(load_paddleocr_vl(model_path)?),
         ModelType::Step3p7 => Some(load_step3p7_vl(model_path)?),
         ModelType::DotsOcrVL => Some(load_dots_ocr_vl(model_path)?),

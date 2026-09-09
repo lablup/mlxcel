@@ -962,6 +962,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::Qwen3VL => "qwen3_vl",
         ModelType::Qwen3VLMoe => "qwen3_vl_moe",
         ModelType::Qwen3OmniMoe => "qwen3_omni_moe",
+        ModelType::CohereCompassVLM => "cohere_compass",
         ModelType::PaddleOcrVL => "paddleocr_vl",
         ModelType::DotsOcrVL => "dots_ocr_vl",
         ModelType::FalconOcrVL => "falcon_ocr_vl",

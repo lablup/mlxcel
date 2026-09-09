@@ -733,7 +733,12 @@ impl Qwen3VLModel {
     }
 
     /// DeepStack: add visual features at image positions in hidden states
-    fn deepstack_process(
+    ///
+    /// Used by: Qwen3-VL, Qwen3-VL MoE (through their own text models) and
+    /// [`crate::models::cohere_compass::CohereCompassTextModel`], which reuses
+    /// the identical Qwen3-VL DeepStack injection behind a Command-style
+    /// decoder.
+    pub(crate) fn deepstack_process(
         h: &MlxArray,
         visual_pos_masks: &MlxArray,
         visual_embeds: &MlxArray,
@@ -1015,7 +1020,12 @@ impl Qwen3VLModel {
 
     /// Compute `[3, batch, seq_len]` position ids by adding `delta` to a
     /// sequential range starting at `cache_offset`.
-    fn compute_position_ids_with_delta(
+    ///
+    /// Used by: Qwen3-VL and
+    /// [`crate::models::cohere_compass::CohereCompassTextModel`], which shares
+    /// the Qwen-VL MRoPE decode rule (every new token advances all three axes
+    /// by one from `cache_offset + rope_delta`).
+    pub(crate) fn compute_position_ids_with_delta(
         delta: i32,
         batch: i32,
         seq_len: i32,
