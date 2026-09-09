@@ -13,7 +13,27 @@ import argparse, base64, csv, json, os, signal, statistics, subprocess, sys, tim
 from pathlib import Path
 
 HOME = Path.home()
-STORE = HOME / ".cache/mlxcel/models"
+# The benchmark store. The roster used to name `~/.cache/mlxcel/models` paths;
+# when the two stores were consolidated the cache was drained and all twenty
+# entries stopped resolving, and a missing path is a `[skip]` rather than an
+# error, so the sweep ran to completion and wrote an empty CSV.
+#
+# The root differs per host: `models/` holds the checkpoints directly on one
+# machine and `models/mlx/` does on another, so a fixed default silently
+# produces twenty skips on whichever host it does not match. Probe instead, and
+# let `MLXCEL_MODEL_STORE` override when a host has neither shape.
+def _default_store():
+    override = os.environ.get("MLXCEL_MODEL_STORE")
+    if override:
+        return Path(override)
+    for candidate in (Path("models"), Path("models/mlx")):
+        # A store is the directory that actually holds checkpoints, not one
+        # that merely exists: `models/` is present on both hosts.
+        if (candidate / "all-minilm-l6-v2").is_dir():
+            return candidate
+    return Path("models")
+
+STORE = _default_store()
 IMAGE = Path("tests/fixtures/test_image.png").resolve()
 
 SHORT = "The quick brown fox jumps over the lazy dog near the river bank at dawn."
@@ -26,26 +46,26 @@ LONG = " ".join([
 
 # (name, path, kind) kind in {"text", "vl", "multivector", "rerank", "rerank_vl"}
 MODELS = [
-    ("all-MiniLM-L6-v2", STORE / "sentence-transformers/all-MiniLM-L6-v2", "text"),
-    ("multilingual-e5-small", STORE / "intfloat/multilingual-e5-small", "text"),
-    ("bge-m3-safetensors", STORE / "seansitter/bge-m3-safetensors", "text"),
-    ("modernbert-embed-base", STORE / "nomic-ai/modernbert-embed-base", "text"),
-    ("siglip-base-patch16-224", STORE / "google/siglip-base-patch16-224", "text"),
-    ("embeddinggemma-300m-4bit", STORE / "mlx-community/embeddinggemma-300m-4bit", "text"),
-    ("Qwen3-Embedding-0.6B", STORE / "Qwen/Qwen3-Embedding-0.6B", "text"),
-    ("llama-nemotron-embed-1b-v2", STORE / "nvidia/llama-nemotron-embed-1b-v2", "text"),
-    ("Nemotron-3-Embed-1B-BF16", STORE / "nvidia/Nemotron-3-Embed-1B-BF16", "text"),
-    ("Nemotron-3-Embed-1B-BF16-8bit", STORE / "mlx-community/Nemotron-3-Embed-1B-BF16-8bit", "text"),
-    ("LFM2.5-Embedding-350M", STORE / "LiquidAI/LFM2.5-Embedding-350M", "text"),
-    ("Qwen3-VL-Embedding-2B", STORE / "Qwen/Qwen3-VL-Embedding-2B", "vl"),
-    ("llama-nemotron-embed-vl-1b-v2", STORE / "nvidia/llama-nemotron-embed-vl-1b-v2", "vl"),
-    ("colSmol-256M-merged", STORE / "local/colSmol-256M-merged", "multivector"),
-    ("colqwen2.5-v0.2-merged", STORE / "local/colqwen2.5-v0.2-merged", "multivector"),
-    ("ms-marco-MiniLM-L6-v2", STORE / "cross-encoder/ms-marco-MiniLM-L6-v2", "rerank"),
-    ("bge-reranker-v2-m3", STORE / "BAAI/bge-reranker-v2-m3", "rerank"),
-    ("gte-reranker-modernbert-base", STORE / "Alibaba-NLP/gte-reranker-modernbert-base", "rerank"),
-    ("Qwen3-Reranker-0.6B-4bit", STORE / "mlx-community/Qwen3-Reranker-0.6B-4bit", "rerank"),
-    ("Qwen3-VL-Reranker-2B", STORE / "Qwen/Qwen3-VL-Reranker-2B", "rerank_vl"),
+    ("all-MiniLM-L6-v2", STORE / "all-minilm-l6-v2", "text"),
+    ("multilingual-e5-small", STORE / "multilingual-e5-small", "text"),
+    ("bge-m3-safetensors", STORE / "bge-m3-safetensors", "text"),
+    ("modernbert-embed-base", STORE / "modernbert-embed-base", "text"),
+    ("siglip-base-patch16-224", STORE / "siglip-base-patch16-224", "text"),
+    ("embeddinggemma-300m-4bit", STORE / "embeddinggemma-300m-4bit", "text"),
+    ("Qwen3-Embedding-0.6B", STORE / "qwen3-embedding-0.6b", "text"),
+    ("llama-nemotron-embed-1b-v2", STORE / "llama-nemotron-embed-1b-v2", "text"),
+    ("Nemotron-3-Embed-1B-BF16", STORE / "nemotron-3-embed-1b-bf16", "text"),
+    ("Nemotron-3-Embed-1B-BF16-8bit", STORE / "nemotron-3-embed-1b-bf16-8bit", "text"),
+    ("LFM2.5-Embedding-350M", STORE / "lfm2.5-embedding-350m", "text"),
+    ("Qwen3-VL-Embedding-2B", STORE / "qwen3-vl-embedding-2b", "vl"),
+    ("llama-nemotron-embed-vl-1b-v2", STORE / "llama-nemotron-embed-vl-1b-v2", "vl"),
+    ("colSmol-256M-merged", STORE / "colsmol-256m-merged", "multivector"),
+    ("colqwen2.5-v0.2-merged", STORE / "colqwen2.5-v0.2-merged", "multivector"),
+    ("ms-marco-MiniLM-L6-v2", STORE / "ms-marco-minilm-l6-v2", "rerank"),
+    ("bge-reranker-v2-m3", STORE / "bge-reranker-v2-m3", "rerank"),
+    ("gte-reranker-modernbert-base", STORE / "gte-reranker-modernbert-base", "rerank"),
+    ("Qwen3-Reranker-0.6B-4bit", STORE / "qwen3-reranker-0.6b-4bit", "rerank"),
+    ("Qwen3-VL-Reranker-2B", STORE / "qwen3-vl-reranker-2b", "rerank_vl"),
 ]
 
 CSV_HEADER = ["model", "model_path", "kind", "input_kind", "batch", "inputs", "prompt_tokens", "repeats",
@@ -213,12 +233,12 @@ def run_model(name, path, kind, args, meta, writer, fh):
             writer.writerow([name, str(path), kind, input_kind, batch, batch, ptoks, len(times), f"{p50:.2f}", f"{mean:.2f}",
                              f"{mn:.2f}", f"{batch / (p50 / 1000.0):.2f}", f"{ptoks / (p50 / 1000.0):.1f}" if ptoks else "",
                              f"{load_ms:.1f}", meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"],
-                             meta["commit"], note])
+                             meta["commit"], meta["mlx_commit"], note])
             fh.flush()
             print(f"  {name} {input_kind} b={batch}: p50={p50:.1f}ms tokens={ptoks}", flush=True)
     except Exception as e:
         writer.writerow([name, str(path), kind, "", "", "", "", 0, "", "", "", "", "", "", meta["date"], meta["hardware"],
-                         meta["mlxcel_version"], meta["build_type"], meta["commit"], f"ERROR: {e}"])
+                         meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], f"ERROR: {e}"])
         fh.flush()
         print(f"[error] {name}: {e}", flush=True)
     finally:

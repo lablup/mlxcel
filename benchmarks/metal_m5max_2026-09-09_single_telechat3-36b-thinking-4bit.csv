@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+telechat3-36b-thinking-4bit,models/telechat3-36b-thinking-4bit,512,128,709.65,721.48,5005.29,25.57,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a4496eac,9a795735
