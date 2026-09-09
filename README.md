@@ -208,16 +208,41 @@ A plain Linux build has no CUDA feature and runs on the CPU, which is not a vali
 
 ## Performance
 
-The last full same-host reference campaign against `mlx-lm` and `mlx-vlm` ran on mlxcel 0.0.28 (2026-05-19) and has not been repeated since. These are aggregate results from that campaign, not guarantees for an individual checkpoint, and not current-release figures:
+Measured on v0.7.0-beta.1 against same-host, same-day runs of `mlx-lm` 0.31.3 and `mlx-vlm` 0.6.17. Text is the 2026-09-06 sweeps at a fixed pp512/tg128 shape; VLM is the 2026-09-09 sweeps, where both the runtime and the reference were re-measured in one pass; `qwen3-vl-reranker-2b` is excluded from the VLM rows because a reranker driven through a generation harness is not measuring the VLM path. These are medians over a roster, not guarantees for an individual checkpoint.
 
 | Workload | Host | Reference | Result |
 |----------|------|-----------|-------:|
-| Text prefill, 67 comparable pairs | M5 Max 128 GB | `mlx-lm` median | **2.78x** |
-| Text prefill, 74 comparable pairs | M1 Ultra | `mlx-lm` median | **1.79x** |
-| Text decode, 67 comparable pairs | M5 Max 128 GB | `mlx-lm` | **99% average, 100% median** |
-| VLM decode, 24 comparable pairs | M5 Max 128 GB | `mlx-vlm` | **98% average, 98% median** |
+| Text decode, 60 pairs | M5 Max 128 GB | `mlx-lm` | **99% median** (quartiles 99 / 101) |
+| Text decode, 110 pairs | M1 Ultra | `mlx-lm` | **100% median** (quartiles 99 / 105) |
+| Text prefill, 60 pairs | M5 Max 128 GB | `mlx-lm` median | **1.09x** |
+| Text prefill, 110 pairs | M1 Ultra | `mlx-lm` median | **0.94x** |
+| VLM decode, 47 pairs | M5 Max 128 GB | `mlx-vlm` | **105% median** (quartiles 101 / 113, none below 90%) |
+| VLM decode, 47 pairs | M1 Ultra | `mlx-vlm` | **108% median** (quartiles 101 / 124, none below 90%) |
 
-Treat the prefill row above with particular care. `prefill_tok_s` is prompt tokens divided by prefill time, so it moves whenever the prompt length moves, and the chat-template rendering has changed on the mlxcel side since that campaign: the Llama family's rendering of the standard test prompt is 42 tokens on 0.6.0 against 98 previously, which matches the canonical template tokenization exactly. The prefill ratio therefore needs a fresh same-host run before it is quoted for the current release.
+Two of these numbers replace larger ones and the reason is the measurement condition rather than a regression. The 2026-05-19 campaign on mlxcel 0.0.28 reported text prefill at 2.78x on M5 Max and 1.79x on M1 Ultra. Those ran on a short natural prompt whose token count differed between the two runtimes, and `prefill_tok_s` is prompt tokens divided by prefill time, so a difference in tokenization lands directly in the ratio. At a synthetic 512-token prompt that both runtimes receive identically, prefill is close to parity. The older figures should not be quoted for the current release.
+
+Named checkpoints, M5 Max, mlxcel against the same-day reference. Text rows are `mlx-lm` 0.31.3, VLM rows are `mlx-vlm` 0.6.17:
+
+| Checkpoint | Harness | mlxcel | Reference | Result |
+|---|---|--:|--:|--:|
+| `qwen3-30b-a3b-4bit` | text | 166.55 | 143.81 | **116%** |
+| `qwen3-next-80b-a3b-instruct-4bit` | text | 121.49 | 106.04 | **115%** |
+| `qwen3-vl-30b-a3b-instruct-4bit` | text | 169.55 | 145.32 | **117%** |
+| `gemma-4-26b-a4b-it-qat-4bit` | VLM | 141.01 | 124.70 | **113%** |
+| `gemma-4-26b-a4b-it-qat-4bit` | text | 138.51 | 128.47 | **108%** |
+| `qwen3.5-35b-a3b-4bit` | text | 163.75 | 152.72 | **107%** |
+| `qwen3.6-35b-a3b-4bit` | text | 157.11 | 148.14 | **106%** |
+| `gemma-4-e2b-it-qat-4bit` | VLM | 172.66 | 165.16 | **105%** |
+| `gpt-oss-20b-mxfp4-q4` | text | 168.92 | 164.72 | **103%** |
+| `gpt-oss-120b-4bit` | text | 113.56 | 110.82 | **102%** |
+| `qwen3.8-27b-4bit` | text | 33.61 | 33.75 | **100%** |
+| `meta-llama-3.1-8b-instruct-4bit` | text | 114.68 | 114.52 | **100%** |
+| `qwen2.5-7b-instruct-4bit` | text | 123.70 | 123.65 | **100%** |
+| `mixtral-8x7b-instruct-v0.1-4bit` | text | 65.82 | 65.85 | **100%** |
+
+The split in that table is architectural rather than arbitrary. Across the whole M5 Max text roster, mixture-of-experts checkpoints run at a median 106% of `mlx-lm` (19 pairs, quartiles 100 and 108) while dense ones sit at 100% (69 pairs, quartiles 99 and 100). Every checkpoint above 105% in the table is MoE, and every dense entry is at parity, including `qwen3.8-27b-4bit`, `mixtral-8x7b` and the dense Gemma 4 QAT variants. Gemma 4 QAT splits along the same line rather than along quantization: the 26B A4B mixture reads 108% on text and 113% on VLM, while the dense E2B, E4B and 31B QAT checkpoints read 100%, 100% and 99%. Read a dense model's row as "no reason to switch runtimes for speed" and an MoE model's as the case where mlxcel's expert dispatch is worth something.
+
+The VLM figures also moved between mlxcel releases, and unevenly. Re-sweeping that table at one commit left the median row unchanged at 1.00x against its previous reading, with 9 of 71 rows moving more than 10%: `mistral-small-4-119b-2603-4bit` 5.30x, `moondream2` 4.19x, `qwen3-vl-30b-a3b` 2.61x, `qwen3-omni-30b-a3b` 2.57x, then five between 1.16x and 1.46x. The gains come from dtype fixes that reach specific paths, so the aggregate moved from 98% to 105% while most individual rows stayed where they were. Read the per-model tables rather than the median if a particular checkpoint matters.
 
 Per-host sweeps are more current than the combined report. M5 Max and M1 Ultra are both measured on v0.7.0-beta.1 (2026-09-06 through 2026-09-09) at the same MLX pin and the same pp512/tg128 shape, so cross-host ratios between those two are taken on one version. Coverage differs by host rather than version: M5 Max carries text, VLM, speculative decoding, batched serving and the embedding and rerank ladder, while M1 Ultra carries text, VLM, speculative decoding and embeddings. GB10 is still on v0.4.0-rc.1 and the older measurement shape, so any ratio involving it mixes versions. Focused reports cover paged attention, MoE, KV compression, embeddings, and speculative decoding. Read [Benchmark results](docs/benchmark_results/model_tests.md), the [benchmark report](docs/benchmark_results/benchmark-report.md), and the [methodology](docs/benchmarks.md) before comparing hosts or planning capacity.
 

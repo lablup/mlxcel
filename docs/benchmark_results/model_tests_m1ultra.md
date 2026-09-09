@@ -2,7 +2,7 @@
 
 Compatibility and single-stream performance for mlxcel on **Mac Studio M1 Ultra 128GB**, measured against the Python mlx-lm and mlx-vlm baselines on the same host, the same day, and the same prompt shape.
 
-Every number here comes from the 2026-09-06 through 2026-09-09 sweeps, with 18 rows re-measured on 2026-09-08 after lablup/mlxcel#1709 and #1710 and six checkpoints taken singly on 2026-09-09 (see "Newly measured checkpoints"). Earlier sweeps used a different measurement shape and are not comparable, so they are not carried forward; the CSVs under `benchmarks/` remain the record of what was measured when.
+The VLM tables come from a single 2026-09-09 pass at `f85898eb`, paired with a same-day mlx-vlm 0.6.17 baseline. The text tables come from the 2026-09-06 through 2026-09-09 sweeps, with 18 rows re-measured on 2026-09-08 after lablup/mlxcel#1709 and #1710 and six checkpoints taken singly on 2026-09-09 (see "Newly measured checkpoints"). Earlier sweeps used a different measurement shape and are not comparable, so they are not carried forward; the CSVs under `benchmarks/` remain the record of what was measured when.
 
 ## Test environment
 
@@ -11,7 +11,7 @@ Every number here comes from the 2026-09-06 through 2026-09-09 sweeps, with 18 r
 | Hardware | Mac Studio M1 Ultra, 128GB unified memory |
 | OS | macOS 26.6.2 |
 | mlxcel version | 0.7.0-beta.1 |
-| mlxcel commit | `5287eb9a2` for the 16 refreshed VLM rows, `255203e51` and `ec414719f` for rows retaken after it; the three differ only in `scripts/bench_decode.sh` and the Gemma3n load policy |
+| mlxcel commit | `f85898eb` for every VLM row. Text rows carry `5287eb9a2` for the 16 refreshed entries and `255203e51` / `ec414719f` for rows retaken after it; those three differ only in `scripts/bench_decode.sh` and the Gemma3n load policy |
 | MLX C++ pin | `9a795735` |
 | Build | `cargo build --release --features metal,accelerate` |
 | mlxcel harness | `mlxcel-bench-decode` (load, warmup and measured pass in one process) |
@@ -19,7 +19,7 @@ Every number here comes from the 2026-09-06 through 2026-09-09 sweeps, with 18 r
 | mlx-vlm baseline | 0.6.17 |
 | Baseline stack | mlx 0.32.2, transformers 5.16.1, torch 2.14.0, torchvision 0.29.0, timm 1.0.29, numba 0.67.0 |
 | Model store | `models/mlx/` and `models/mlx-big/` |
-| CSVs | `metal_m1ultra_2026-09-08.csv`, `pylm_m1ultra_2026-09-06.csv`, `metal_m1ultra_vlm_2026-09-08.csv`, `pylm_m1ultra_vlm_2026-09-07.csv`, plus the six `metal_m1ultra_2026-09-09_single_*.csv` and `metal_m1ultra_vlm_2026-09-09_single_*.csv` files named under "Newly measured checkpoints" |
+| CSVs | VLM: `metal_m1ultra_vlm_2026-09-09.csv` and `pylm_m1ultra_vlm_2026-09-09_resweep.csv`. Text: `metal_m1ultra_2026-09-08.csv` and `pylm_m1ultra_2026-09-06.csv`, plus the six `metal_m1ultra_2026-09-09_single_*.csv` and `metal_m1ultra_vlm_2026-09-09_single_*.csv` files named under "Newly measured checkpoints". The superseded VLM pass is kept as `metal_m1ultra_vlm_2026-09-08.csv` and `pylm_m1ultra_vlm_2026-09-07.csv` |
 
 ### The model store is `models/mlx/` and `models/mlx-big/`, and only those
 
@@ -35,7 +35,7 @@ That boundary has to be stated because getting it wrong is silent, and a one-roo
 
 Text rows follow the llama-bench `pp512/tg128` convention: a 512-token synthetic prompt, exactly 128 generated tokens, EOS suppressed on both sides so a model that would answer in twelve words is still timed over 128 tokens. Without that suppression the decode figure is an average over whatever length the model chose, which is a property of the model's verbosity rather than of the runtime, and it is not comparable across models.
 
-VLM rows keep the 128-token generation but take their prompt length from the image, since the image fixes it. Prompt lengths there run from 56 to 1032 tokens depending on the tower's patch count.
+VLM rows keep the 128-token generation but take their prompt length from the image, since the image fixes it. Prompt lengths there run from 8 to 1543 tokens depending on the tower's patch count.
 
 Time Machine is stopped for the duration (`tmutil stopbackup`) and models run with a 30 second cooldown between them.
 
@@ -169,37 +169,37 @@ Over a 32x increase in prompt length mlxcel gives up 40% of its decode rate and 
 
 ## Vision-language models
 
-93 VLM checkpoints, 76 measured by mlxcel and 67 by mlx-vlm, 60 by both. Prompt length comes from the image rather than being fixed, so the comparison below is restricted to the 41 models whose two prompt lengths agree within 10%; the other 19 are listed under the shape mismatch above.
+93 VLM checkpoints, 78 measured by mlxcel and 67 by mlx-vlm, 65 by both. Prompt length comes from the image rather than being fixed, so the comparison below is restricted to the 47 models whose two prompt lengths agree within 10%; the other 18 are listed under the shape mismatch above.
 
 | Population | n | Median | Quartiles | Range |
 |---|--:|--:|---|---|
-| Comparable VLM rows | 43 | 111% | 102 / 128 | 27-206% |
+| Comparable VLM rows | 47 | 108% | 101 / 124 | 94-197% |
 
-mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than on text. The widest margins are `jina-vlm-mlx` at 206%, `qwen3-omni-30b-a3b-instruct-4bit` at 183% and `paligemma2-3b-6bit` at 181%.
+mlxcel is ahead of the mlx-vlm baseline on most of this set, further ahead than on text, and nothing in it now reads below 90%. The widest margins are `jina-vlm-mlx` at 197%, `paligemma2-3b-ft-docci-448-6bit` at 176% and `qwen3-omni-30b-a3b-instruct-4bit` at 159%. M5 Max reads the same three at 194%, 146% and 155% on its own same-day pair, and its comparable set is also 48 rows wide with a 105% median, so the two hosts agree on both the shape and the leader.
 
-Read those three ratios, and every absolute number in the VLM table, as a snapshot that has since moved. This table is a patchwork of commits taken across 2026-09-08. Of its 76 measured rows, 54 predate `f4ecc9269`, the shared bridge fix that keeps the activation helpers in the input dtype and therefore reaches any model: 52 at `7007dab4` and 2 at `562dca6f`. The other 22 were taken after it and are current.
+Both sides of every ratio above were taken on 2026-09-09, and that pairing is the point. The table this replaced was a patchwork: 54 of its 76 measured rows predated `f4ecc9269`, the shared bridge fix that keeps the activation helpers in the input dtype and therefore reaches any model. Re-measuring all of them in one pass moved two materially, `qwen3-omni-30b-a3b-instruct-4bit` 47.25 to 77.16 and `llama-3.2-11b-vision-instruct-4bit` 65.28 to 87.18, while the median row moved 0.987x and 63 of 76 stayed within 3%. So the exposure was real but narrow, and it could not have been found by reasoning: `qwen3-omni` is in neither family the two model-specific rotary fixes targeted, so a scope drawn from those commits would have skipped exactly the row that moved most.
 
-`qwen3-omni-30b-a3b-instruct-4bit` is the row that shows what that costs. It is one of the 54, and re-measured at `ab788d17` it reads 76.53 decode against the 47.25 recorded here, while M5 Max moved 61.21 to 158.56 on the same checkpoint. It is not in the family either model-specific rotary fix targeted, so a scope drawn from those two commits would have missed it; the shared fix is the only candidate left in the window, though no A/B has pinned it. The ten rows that are in those families (the seven Qwen2-VL / Qwen3-VL entries plus `glm-4.1v-9b-thinking-4bit`, `glm-4.5v-4bit` and `paddleocr-vl-bfloat16`) all sit at `5287eb9a` or later and are current. Treat the 54 as unverified rather than wrong, and re-measure before quoting any of them.
+The mlx-vlm side had to be re-run as well, and skipping it would have been worse than leaving both stale. Dividing the new `qwen3-omni` decode by the 2026-09-07 baseline gives 298%, which would have entered this table as its widest margin; against the same-day baseline the row reads 159%. A runtime improvement measured against an aging reference is indistinguishable from a reference regression, and the number it produces is larger than either.
 
-The ratio is the more durable quantity. It holds at 179% here across both eras, and M5 Max reads 156% once both of its sides are taken in one session, so mlxcel leading mlx-vlm on this checkpoint survives the re-measurement even though neither absolute does. The mlx-vlm side does not reproduce on this host either, at 42.68, 46.24 and 32.95 against the 25.89 recorded, and nothing in this repository can move a Python baseline. M5 Max reads its own baseline three times within 1.7%, so whatever moves it here is specific to this host; a hot sweep against cold singles is the likeliest cause and is untested.
+Eighteen rows read `shape` rather than a percentage, and they are not measurement noise. Three are image tiling, where mlx-vlm splits the same fixture far finer: `idefics3-8b-llama3-4bit` sees 189 tokens against 3041, `smolvlm-instruct-bf16` 102 against 1562, `idefics2-8b-4bit` 81 against 340. The other fifteen differ by exactly 15 tokens, across two different bases (65 and 69) and three model families, which is a fixed chat-template overhead rather than anything that scales. Every one of those counts matches M5 Max exactly, so both effects belong to the runtimes and not to either host.
 
-Fourteen rows moved by more than 3% when this sweep was re-run on the fixed build, and the largest are `glm-ocr-4bit` at 1.35x, `hunyuanocr-mlx-4bit` at 1.23x and `paligemma2-3b-6bit` at 1.19x. The gains here are smaller than the text table's because the term removed grows with context and an image prompt is short: 8 to 1543 tokens against a fixed 512.
+Seven further rows differ in the other direction, with mlxcel using more tokens than the baseline: `internvl3-1b-4bit` by 23, then six by one to three. Those counts also match M5 Max exactly, so they are small but reproducible differences rather than noise, and at 0.2 to 2.5% they do not move a margin. `internvl3-1b-4bit` is the exception worth naming, because 23 tokens on a 293-token prompt is 7.8% and stays inside the 10% gate: **its margin is computed across a 23-token difference**. The gate cuts by size and not by cause, so the same effect is excluded at 13% and admitted at 8%.
 
-`qwen2.5-vl-3b-instruct` is the clearest demonstration of that. It gains 4.07x on a 512-token text prompt and 1.02x here on a 91-token image prompt, which is the same binary and the same weights. A gap that behaves that way is a context-scaling term, not a property of the checkpoint.
+The gains from the activation-dtype work are smaller here than in the text table, because the term it removed grows with context and an image prompt is short: 8 to 1543 tokens against a fixed 512. `qwen2.5-vl-3b-instruct` shows that directly, gaining 4.07x on a 512-token text prompt and 1.02x on its 91-token image prompt from the same binary and the same weights. A gap that behaves that way is a context-scaling term, not a property of the checkpoint.
 
-Two low rows are left that this does not explain. `qwen2.5-vl-3b-4bit` at 80% and `qwen2-vl-2b-4bit` at 82% sit at 99% and 102% in the text table, so they are worse on the shorter prompt, which is the opposite of what a context-scaling cost predicts. Whatever remains is specific to the image path. `mistral-small-4-119b-2603-4bit` was here at 37% and is now at 113%: its Llama-4 attention scale was built in f32 and promoted the query, which widened the residual stream for all 36 layers (lablup/mlxcel#1711).
+The two rows that used to contradict that reading no longer do. `qwen2.5-vl-3b-instruct-4bit` and `qwen2-vl-2b-instruct-4bit` sat at 80% and 82% against the old baseline while reading 99% and 102% in the text table, which is the opposite of what a context-scaling cost predicts. On the same-day pair they read 96% and 98%. `mistral-small-4-119b-2603-4bit` was at 37% before its Llama-4 attention scale stopped being built in f32 and promoting the query across all 36 layers (lablup/mlxcel#1711), and reads 106% here.
 
 ### Failures
 
-20 of the 87 produced no row. Three are `FAIL:image_not_applied`, where the guard rejected a measurement whose prompt never grew past its plain-text template: `llava-next-mistral-7b-4bit` (7 tokens), `bunny-llama3-8b-4bit` (20) and `fastvlm-0.5b-bf16` (27). All three are mlx-vlm side failures, and mlxcel expands the image correctly on the first of them, which is why neither runtime can be treated as the reference.
+26 of the 93 produced no row on the mlx-vlm side. Four are `FAIL:image_not_applied`, where the guard rejected a measurement whose prompt never grew past its plain-text template: `bunny-llama-3-8b-v-4bit`, `fastvlm-0.5b-bf16`, `llama-3.2-11b-vision-instruct-4bit` and `llava-v1.6-mistral-7b-4bit`. All four are mlx-vlm side failures, and mlxcel expands the image correctly on each of them, which is why neither runtime can be treated as the reference.
 
-The remaining 17 are load or warmup failures. Causes established for six of them, on both hosts:
+The remaining 22 are load or warmup failures. Causes established for six of them, on both hosts:
 
 | Checkpoint | Cause |
 |---|---|
 | `deepseek-ocr-4bit`, `-2-4bit` | Bundled remote code targets an older transformers (`LlamaFlashAttention2`, `is_torch_fx_available`) |
 | `deepseek-vl2-small-4bit` | mlx-vlm passes an `mx.array` where an int is required; strict since nanobind 2.15 (Blaizzy/mlx-vlm#2177) |
-| `llama-4-scout-17b-4bit` | `attn_temperature_tuning` is `4` where transformers 5.16 requires a bool; upstream config is the same |
+| `llama-4-scout-17b-16e-instruct-4bit` | `attn_temperature_tuning` is `4` where transformers 5.16 requires a bool; upstream config is the same |
 | `llava-1.5-7b-4bit` | `LlavaProcessor` has `patch_size=None` |
 | `youtu-vl-4b-instruct` | Bundled `image_processing_siglip2_fast.py` imports a removed symbol |
 
@@ -219,20 +219,21 @@ The fixture has already moved once by a factor of 21. PR #792 (2026-07-13) chang
 
 Replacing the fixture with a representative image would make every prior VLM number incomparable. If it is replaced, measure both fixtures side by side once at the switch to leave a conversion basis, and switch every host together.
 
-### VLM parity covers 41 of the 61 models both sides measured
+### VLM parity covers 47 of the 65 models both sides measured
 
-Decode throughput depends on context length, so a decode ratio is only meaningful when both sides ran the same prompt length. On 20 of the 61 common models they did not:
+Decode throughput depends on context length, so a decode ratio is only meaningful when both sides ran the same prompt length. On 18 of the 65 common models they did not:
 
 | Models | mlxcel | mlx-vlm | Ratio |
 |---|--:|--:|--:|
-| `granite-vision-3.2-2b-4bit` | 1543 | 56 | 27.6x |
 | `idefics3-8b-llama3-4bit` | 189 | 3041 | 16.1x |
+| `smolvlm-instruct-bf16` | 102 | 1562 | 15.3x |
 | `idefics2-8b-4bit` | 81 | 340 | 4.2x |
-| `minicpm-v-4.6-bf16`, `-mxfp4` | 32 | 78 | 2.4x |
 | 5 qwen3-vl checkpoints | 65 | 80 | 1.2x |
 | 10 qwen3.5 / 3.6 / 3.8 checkpoints | 69 | 84 | 1.2x |
 
-The parity figure below is computed over the 41 models whose prompt lengths agree within 10%; the other 19 are reported as a shape mismatch rather than a number. The mismatch is not a setting either harness exposes: the two runtimes tokenize the same image into different numbers of visual tokens, and matching them would mean changing one of them.
+Two entries that used to sit in this table have left it. `granite-vision-3.2-2b-4bit` was recorded here at 1543 against 56 because the baseline column carried a figure from an older mlx-vlm run; on the same-day pair both sides read within three tokens of 1543. `minicpm-v-4.6-bf16` and `-mxfp4` were at 32 against 78 and now read 80 against 78, because lablup/mlxcel#1684 was fixed by `94323c20`, which upscales an image below the scale resolution and took the count from 32 to 80. That is an intended behavior change, not measurement drift, and it is the only case in this document where a prompt length moved because our own code moved.
+
+The parity figure below is computed over the 47 models whose prompt lengths agree within 10%; the other 18 are reported as a shape mismatch rather than a number. The mismatch is not a setting either harness exposes: the two runtimes tokenize the same image into different numbers of visual tokens, and matching them would mean changing one of them. Two shapes are distinct. The first three rows are tiling, differing by factors of four to sixteen; the fifteen below them differ by exactly 15 tokens from two different bases, which is a fixed template overhead. M5 Max records identical counts for all eighteen.
 
 Which one is wrong varies, and the checkpoint's own declaration is what settles it. For `qwen3-vl-2b-4bit` the 15-token gap decomposes into 14 image tokens and 1 template token, and the geometry the checkpoint declares (`patch_size` 16, `spatial_merge_size` 2) gives `(224/16)^2 = 196` patches merging 2x2 to 49, which is mlxcel's count; mlx-vlm produces 63. `minicpm-v-4.6` is the opposite case, where the checkpoint declares `image_feature_size: 64` and mlxcel produces 16 (lablup/mlxcel#1684). The `idefics2` and `idefics3` gaps are unjudged: those configs declare no merge size, so the arithmetic that settles the other two is not available.
 
@@ -244,9 +245,11 @@ Which side is blind varies by model, so neither runtime can be assumed correct: 
 
 The check that separates these is differential, not length-based: run the model twice with two visually different images and compare the generated text. Identical output means the image contributed nothing, and the test does not depend on knowing what the fixture depicts. It costs two runs per model, so it is a post-hoc check rather than part of the sweep, and it applies in two branches. Rows both harnesses measured are selected by the prompt-length disagreement above; rows only one harness measured have no cross-comparison at all and need the differential on their own.
 
-### The two hosts are on different mlxcel commits
+### The two hosts are on different mlxcel commits, for the text tables only
 
-M5 Max measured at `a50ff440`, M1 Ultra at `30ab5a39`, eight commits later on the same branch, both at mlxcel 0.7.0-beta.1 and MLX pin `9a795735`, both on the pp512/tg128 shape. Of those eight, one touches shared inference code: #1656, which converts bf16 weights to f16 at load on pre-Ampere CUDA and rewrites 297 lines of `src/models/sanitize.rs`. Its Metal behavior is unchanged: `cuda_f16_normalize_for_config` returns false as soon as `cuda_is_available()` is false, and the BitNet exclusion that keeps `bitnet-b1.58-2b-4t` on native bf16 moved from inside the decision function to its call site at `src/models/sanitize.rs:1726` rather than being dropped. The remaining seven are CUDA JIT serialization, harness fixes and documentation. A cross-host gap in the tables below is therefore attributable to hardware rather than to the commit difference.
+This applies to the text tables. The VLM tables no longer have the problem: both hosts re-swept VLM at `f85898eb` on 2026-09-09, each against a same-day mlx-vlm 0.6.17 run on its own machine, so a VLM cross-host ratio now spans hardware and nothing else.
+
+For text, M5 Max measured at `a50ff440`, M1 Ultra at `30ab5a39`, eight commits later on the same branch, both at mlxcel 0.7.0-beta.1 and MLX pin `9a795735`, both on the pp512/tg128 shape. Of those eight, one touches shared inference code: #1656, which converts bf16 weights to f16 at load on pre-Ampere CUDA and rewrites 297 lines of `src/models/sanitize.rs`. Its Metal behavior is unchanged: `cuda_f16_normalize_for_config` returns false as soon as `cuda_is_available()` is false, and the BitNet exclusion that keeps `bitnet-b1.58-2b-4t` on native bf16 moved from inside the decision function to its call site at `src/models/sanitize.rs:1726` rather than being dropped. The remaining seven are CUDA JIT serialization, harness fixes and documentation. A cross-host gap in the tables below is therefore attributable to hardware rather than to the commit difference.
 
 ## Open items
 
@@ -352,7 +355,7 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 | `lfm2-350m-8bit` | Lfm2ForCausalLM | 512 | 7711.8 | 568.1 | 105% |
 | `lfm2-8b-a1b-4bit` | Lfm2MoeForCausalLM | 512 | 2128.4 | 195.2 | 106% |
 | `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 512 | 8722.9 | 574.8 | - |
-| `llama-4-scout-17b-4bit` | Llama4ForConditionalGeneration | 512 | 281.6 | 35.2 | - |
+| `llama-4-scout-17b-16e-instruct-4bit` | Llama4ForConditionalGeneration | 512 | 281.6 | 35.2 | - |
 | `deepseek-coder-1.3b-4bit` | LlamaForCausalLM | 512 | 3739.6 | 146.1 | - |
 | `llama-3.1-8b-bf16` | LlamaForCausalLM | 512 | 810.5 | 36.1 | 102% |
 | `llama-3.2-1b-4bit` | LlamaForCausalLM | 512 | 4140.0 | 402.9 | 101% |
@@ -439,86 +442,87 @@ Neither runtime is the reference. `granite-vision` looked blind under mlxcel unt
 
 ## VLM results
 
-76 models, prompt length set by the image, 128 generated tokens. `vs baseline` is mlx-vlm 0.6.17; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model.
+77 models, prompt length set by the image, 128 generated tokens, all measured in one pass at `f85898eb` against a same-day mlx-vlm 0.6.17 run. `vs baseline` compares the two; `shape` means the two harnesses used prompt lengths differing by more than 10%, which makes a decode ratio meaningless; `-` means mlx-vlm did not measure that model. The embedding and rerank checkpoints the VLM sweep also loads are not listed here, for the reason given under "Newly measured checkpoints".
 
 | Model | Architecture | Prompt | Prefill tok/s | Decode tok/s | vs baseline |
 |---|---|--:|--:|--:|--:|
-| `aya-vision-8b` | AyaVisionForConditionalGeneration | 735 | 640.2 | 110.4 | 107% |
-| `bunny-llama3-8b-4bit` | BunnyLlamaForCausalLM | 746 | 672.8 | 101.3 | - |
-| `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 409 | 856.5 | 281.5 | - |
-| `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 281 | 899.5 | 289.4 | - |
-| `dots.ocr-4bit` | DotsOCRForCausalLM | 74 | 451.7 | 220.0 | 113% |
-| `ernie-4.5-vl-28b-a3b-thinking-4bit` | Ernie4_5_VLMoeForConditionalGeneration | 108 | 295.8 | 94.9 | 128% |
-| `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 275 | 252.3 | 106.2 | 112% |
-| `gemma3n-e2b-4bit` | Gemma3nForConditionalGeneration | 273 | 908.7 | 84.3 | 138% |
-| `gemma3n-e4b-4bit` | Gemma3nForConditionalGeneration | 273 | 590.1 | 65.1 | 135% |
-| `gemma3n-e4b-bf16` | Gemma3nForConditionalGeneration | 273 | 671.2 | 41.4 | 115% |
-| `gemma-4-26b-a4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 317.7 | 78.9 | 118% |
-| `gemma-4-26b-a4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 328.8 | 77.5 | 113% |
-| `gemma-4-31b-4bit` | Gemma4ForConditionalGeneration | 265 | 98.5 | 19.9 | 102% |
-| `gemma-4-31b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 103.9 | 19.9 | 101% |
-| `gemma-4-31b-it-nvfp4` | Gemma4ForConditionalGeneration | 278 | 100.4 | 13.5 | 100% |
-| `gemma-4-31b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 102.7 | 16.8 | 102% |
-| `gemma-4-e2b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 817.9 | 112.6 | 108% |
-| `gemma-4-e2b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 809.0 | 96.5 | 98% |
-| `gemma-4-e2b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 796.3 | 105.7 | 108% |
-| `gemma-4-e4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 528.0 | 79.7 | 106% |
-| `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 520.9 | 65.6 | 98% |
-| `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 518.1 | 71.2 | 105% |
-| `gemma-4-12b-it-4bit` | Gemma4UnifiedForConditionalGeneration | 277 | 298.2 | 38.1 | 102% |
-| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 78 | 230.9 | 63.0 | - |
-| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 82 | 104.5 | 34.8 | - |
-| `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 82 | 1106.0 | 388.2 | 107% |
-| `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 337 | 750.9 | 130.8 | 111% |
-| `moondream2` | HfMoondream | 8 | 22.9 | 146.8 | - |
-| `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 284 | 1335.6 | 261.1 | 161% |
-| `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 81 | 286.7 | 114.6 | shape |
-| `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 189 | 504.2 | 107.7 | shape |
-| `smolvlm-instruct-bf16` | Idefics3ForConditionalGeneration | 102 | 670.3 | 137.4 | - |
-| `internvl3-1b` | InternVLChatModel | 293 | 1915.3 | 351.3 | 129% |
-| `jina-vlm-mlx` | JinaVLMForConditionalGeneration | 436 | 1208.3 | 176.2 | 206% |
-| `kimi-vl-a3b-thinking-4bit` | KimiVLForConditionalGeneration | 90 | 366.0 | 100.3 | - |
-| `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 82 | 1573.0 | 619.0 | 125% |
-| `llama-4-scout-17b-4bit` | Llama4ForConditionalGeneration | 162 | 154.7 | 36.3 | - |
-| `llava-1.5-7b-4bit` | LlavaForConditionalGeneration | 594 | 762.7 | 105.8 | - |
-| `llava-interleave-qwen-0.5b-bf16` | LlavaForConditionalGeneration | 744 | 4330.8 | 269.9 | - |
-| `pixtral-12b-4bit` | LlavaForConditionalGeneration | 213 | 409.6 | 69.7 | 104% |
-| `granite-vision-3.2-2b-4bit` | LlavaNextForConditionalGeneration | 1543 | 1263.7 | 131.1 | 112% |
-| `llava-next-mistral-7b-4bit` | LlavaNextForConditionalGeneration | 590 | 711.8 | 108.7 | - |
-| `fastvlm-0.5b-bf16` | LlavaQwen2ForCausalLM | 282 | 1641.6 | 284.6 | - |
-| `minicpm-v-4.6-bf16` | MiniCPMV4_6ForConditionalGeneration | 80 | 646.6 | 212.8 | 116% |
-| `minicpm-v-4.6-mxfp4` | MiniCPMV4_6ForConditionalGeneration | 80 | 620.6 | 229.2 | 112% |
-| `ministral-3b-4bit` | Mistral3ForConditionalGeneration | 613 | 996.4 | 150.1 | 110% |
-| `mistral-small-3.1-24b-4bit` | Mistral3ForConditionalGeneration | 253 | 167.5 | 31.9 | 102% |
-| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 93 | 179.6 | 59.8 | 113% |
-| `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 17 | 6.5 | 65.3 | - |
-| `molmo2-4b` | Molmo2ForConditionalGeneration | 438 | 696.7 | 92.4 | 153% |
-| `molmo-7b` | MolmoForCausalLM | 327 | 583.3 | 110.8 | 142% |
-| `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 279 | 269.6 | 96.6 | 113% |
-| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 212 | 1416.7 | 333.3 | 104% |
-| `paligemma2-3b-6bit` | PaliGemmaForConditionalGeneration | 1032 | 1470.6 | 131.1 | 181% |
-| `phi-3.5-vision-4bit` | Phi3VForCausalLM | 773 | 991.4 | 137.7 | 173% |
-| `qwen2-vl-2b-4bit` | Qwen2VLForConditionalGeneration | 91 | 973.9 | 214.8 | 97% |
-| `qwen2.5-vl-3b-4bit` | Qwen2_5_VLForConditionalGeneration | 91 | 702.6 | 143.4 | 95% |
-| `qwen2.5-vl-3b-instruct` | Qwen2_5_VLForConditionalGeneration | 91 | 642.0 | 71.2 | 98% |
-| `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 294.0 | 47.2 | 183% |
-| `qwen3-vl-2b-4bit` | Qwen3VLForConditionalGeneration | 65 | 676.0 | 199.5 | shape |
-| `qwen3-vl-32b-4bit` | Qwen3VLForConditionalGeneration | 65 | 74.9 | 21.7 | shape |
-| `qwen3-vl-4b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 403.3 | 115.5 | shape |
-| `qwen3-vl-8b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 256.9 | 79.8 | shape |
-| `qwen3-vl-30b-a3b-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 268.8 | 78.9 | shape |
-| `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 925.4 | 285.9 | shape |
-| `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 87.0 | 25.2 | shape |
-| `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 566.3 | 206.4 | shape |
-| `qwen3.5-4b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 364.6 | 112.7 | shape |
-| `qwen3.5-9b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 230.7 | 76.0 | shape |
-| `qwen3.5-9b-bf16` | Qwen3_5ForConditionalGeneration | 69 | 277.8 | 33.1 | shape |
-| `qwen3.8-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 89.7 | 25.2 | shape |
-| `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 69 | 85.8 | 10.5 | shape |
-| `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 289.5 | 83.0 | shape |
-| `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 292.3 | 81.2 | shape |
-| `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 28 | 217.8 | 46.2 | - |
-| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 440.1 | 109.9 | - |
+| `aya-vision-8b-4bit` | AyaVisionForConditionalGeneration | 735 | 643.5 | 109.3 | 106% |
+| `bunny-llama-3-8b-v-4bit` | BunnyLlamaForCausalLM | 746 | 652.0 | 99.8 | - |
+| `deepseek-vl2-small-4bit` | deepseek_vl_v2 | 494 | 437.1 | 106.3 | - |
+| `deepseek-ocr-2-4bit` | DeepseekOCR2ForCausalLM | 409 | 777.4 | 264.4 | - |
+| `deepseek-ocr-4bit` | DeepseekOCRForCausalLM | 281 | 853.2 | 272.1 | - |
+| `dots.ocr-4bit` | DotsOCRForCausalLM | 74 | 444.7 | 211.1 | 110% |
+| `ernie-4.5-vl-28b-a3b-thinking-4bit` | Ernie4_5_VLMoeForConditionalGeneration | 108 | 291.3 | 91.3 | 118% |
+| `gemma-3-4b-it-4bit` | Gemma3ForConditionalGeneration | 275 | 254.8 | 108.2 | 113% |
+| `gemma-3n-e2b-it-4bit` | Gemma3nForConditionalGeneration | 273 | 883.1 | 84.1 | 130% |
+| `gemma-3n-e4b-bf16` | Gemma3nForConditionalGeneration | 273 | 653.8 | 41.3 | 111% |
+| `gemma-3n-e4b-it-4bit` | Gemma3nForConditionalGeneration | 273 | 574.7 | 64.2 | 125% |
+| `gemma-4-26b-a4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 313.7 | 77.6 | 115% |
+| `gemma-4-26b-a4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 316.7 | 74.8 | 110% |
+| `gemma-4-31b-4bit` | Gemma4ForConditionalGeneration | 265 | 97.7 | 19.5 | 100% |
+| `gemma-4-31b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 102.4 | 19.6 | 100% |
+| `gemma-4-31b-it-nvfp4` | Gemma4ForConditionalGeneration | 278 | 99.9 | 13.3 | 99% |
+| `gemma-4-31b-it-qat-4bit` | Gemma4ForConditionalGeneration | 277 | 102.7 | 16.5 | 100% |
+| `gemma-4-e2b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 795.0 | 111.8 | 108% |
+| `gemma-4-e2b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 781.0 | 96.6 | 97% |
+| `gemma-4-e2b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 762.8 | 104.0 | 105% |
+| `gemma-4-e4b-4bit` | Gemma4ForConditionalGeneration | 265 | 499.1 | 78.8 | 105% |
+| `gemma-4-e4b-it-4bit` | Gemma4ForConditionalGeneration | 277 | 504.7 | 78.2 | 104% |
+| `gemma-4-e4b-it-8bit` | Gemma4ForConditionalGeneration | 277 | 501.6 | 63.7 | 94% |
+| `gemma-4-e4b-it-qat-4bit` | Gemma4ForConditionalGeneration | 273 | 511.0 | 69.8 | 101% |
+| `gemma-4-12b-it-4bit` | Gemma4UnifiedForConditionalGeneration | 277 | 297.1 | 37.7 | 101% |
+| `glm-4.1v-9b-thinking-4bit` | Glm4vForConditionalGeneration | 78 | 225.5 | 62.2 | 94% |
+| `glm-4.5v-4bit` | Glm4vMoeForConditionalGeneration | 82 | 103.4 | 33.5 | 105% |
+| `glm-ocr-4bit` | GlmOcrForConditionalGeneration | 82 | 1075.8 | 372.9 | 104% |
+| `granite-4.0-3b-vision-4bit` | Granite4VisionForConditionalGeneration | 337 | 793.4 | 129.3 | 108% |
+| `moondream2` | HfMoondream | 8 | 22.6 | 144.9 | - |
+| `hunyuanocr-mlx-4bit` | HunYuanVLForConditionalGeneration | 284 | 1264.0 | 257.8 | 155% |
+| `idefics2-8b-4bit` | Idefics2ForConditionalGeneration | 81 | 276.9 | 112.6 | shape |
+| `idefics3-8b-llama3-4bit` | Idefics3ForConditionalGeneration | 189 | 502.4 | 106.8 | shape |
+| `smolvlm-instruct-bf16` | Idefics3ForConditionalGeneration | 102 | 670.9 | 137.9 | shape |
+| `internvl3-1b-4bit` | InternVLChatModel | 293 | 2201.7 | 342.3 | 125% |
+| `jina-vlm-mlx` | JinaVLMForConditionalGeneration | 436 | 1180.2 | 174.2 | 197% |
+| `kimi-vl-a3b-thinking-4bit` | KimiVLForConditionalGeneration | 90 | 351.1 | 95.0 | 138% |
+| `lfm2-vl-450m-4bit` | Lfm2VlForConditionalGeneration | 82 | 1554.0 | 601.5 | 124% |
+| `llama-4-scout-17b-16e-instruct-4bit` | Llama4ForConditionalGeneration | 162 | 135.4 | 36.1 | - |
+| `llava-1.5-7b-4bit` | LlavaForConditionalGeneration | 594 | 763.0 | 104.4 | - |
+| `llava-interleave-qwen-0.5b-bf16` | LlavaForConditionalGeneration | 744 | 4317.3 | 264.8 | - |
+| `pixtral-12b-4bit` | LlavaForConditionalGeneration | 213 | 408.1 | 68.3 | 104% |
+| `granite-vision-3.2-2b-4bit` | LlavaNextForConditionalGeneration | 1543 | 1266.0 | 128.1 | 110% |
+| `llava-v1.6-mistral-7b-4bit` | LlavaNextForConditionalGeneration | 590 | 715.1 | 107.4 | - |
+| `fastvlm-0.5b-bf16` | LlavaQwen2ForCausalLM | 282 | 1624.5 | 276.0 | - |
+| `minicpm-v-4.6-bf16` | MiniCPMV4_6ForConditionalGeneration | 80 | 745.0 | 210.2 | 113% |
+| `minicpm-v-4.6-mxfp4` | MiniCPMV4_6ForConditionalGeneration | 80 | 623.5 | 228.3 | 112% |
+| `ministral-3-3b-instruct-2512-4bit` | Mistral3ForConditionalGeneration | 613 | 990.6 | 146.7 | 107% |
+| `mistral-small-3.1-24b-instruct-2503-4bit` | Mistral3ForConditionalGeneration | 253 | 167.1 | 31.5 | 102% |
+| `mistral-small-4-119b-2603-4bit` | Mistral3ForConditionalGeneration | 93 | 177.2 | 56.5 | 106% |
+| `llama-3.2-11b-vision-instruct-4bit` | MllamaForConditionalGeneration | 17 | 8.6 | 87.2 | - |
+| `molmo2-4b` | Molmo2ForConditionalGeneration | 438 | 679.9 | 90.4 | 140% |
+| `molmo-7b-d-0924-4bit` | MolmoForCausalLM | 327 | 585.5 | 108.8 | 139% |
+| `nemotron-3-nano-omni-30b-a3b-reasoning-4bit` | NemotronH_Nano_Omni_Reasoning_V3 | 279 | 267.4 | 95.6 | 108% |
+| `paddleocr-vl-bfloat16` | PaddleOCRVLForConditionalGeneration | 212 | 1337.9 | 327.5 | 103% |
+| `paligemma2-3b-ft-docci-448-6bit` | PaliGemmaForConditionalGeneration | 1032 | 1488.2 | 129.5 | 176% |
+| `phi-3.5-vision-instruct-4bit` | Phi3VForCausalLM | 773 | 1028.7 | 135.0 | 145% |
+| `qwen2.5-vl-3b-instruct` | Qwen2_5_VLForConditionalGeneration | 91 | 628.9 | 70.5 | 98% |
+| `qwen2.5-vl-3b-instruct-4bit` | Qwen2_5_VLForConditionalGeneration | 91 | 695.9 | 140.8 | 96% |
+| `qwen2-vl-2b-instruct-4bit` | Qwen2VLForConditionalGeneration | 91 | 950.8 | 209.7 | 98% |
+| `qwen3.5-0.8b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 1013.9 | 286.4 | shape |
+| `qwen3.5-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 90.9 | 25.2 | shape |
+| `qwen3.5-2b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 638.7 | 205.7 | shape |
+| `qwen3.5-4b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 384.8 | 112.2 | shape |
+| `qwen3.5-9b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 237.5 | 75.5 | shape |
+| `qwen3.5-9b-bf16` | Qwen3_5ForConditionalGeneration | 69 | 292.4 | 32.9 | shape |
+| `qwen3.8-27b-4bit` | Qwen3_5ForConditionalGeneration | 69 | 91.2 | 25.1 | shape |
+| `qwen3.8-27b-hf-bf16` | Qwen3_5ForConditionalGeneration | 69 | 87.7 | 10.5 | shape |
+| `qwen3.5-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 291.2 | 82.2 | shape |
+| `qwen3.6-35b-a3b-4bit` | Qwen3_5MoeForConditionalGeneration | 69 | 293.2 | 80.1 | shape |
+| `qwen3-omni-30b-a3b-instruct-4bit` | Qwen3OmniMoeForConditionalGeneration | 69 | 272.6 | 77.2 | 159% |
+| `qwen3-vl-2b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 683.0 | 195.3 | shape |
+| `qwen3-vl-32b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 74.6 | 21.4 | shape |
+| `qwen3-vl-4b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 394.6 | 114.4 | shape |
+| `qwen3-vl-8b-instruct-4bit` | Qwen3VLForConditionalGeneration | 65 | 259.0 | 78.9 | shape |
+| `qwen3-vl-30b-a3b-instruct-4bit` | Qwen3VLMoeForConditionalGeneration | 65 | 267.7 | 77.7 | shape |
+| `youtu-vl-4b-instruct` | YoutuVLForConditionalGeneration | 28 | 213.3 | 46.0 | - |
 
 ## Newly measured checkpoints (2026-09-09)
 
