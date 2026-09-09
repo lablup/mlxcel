@@ -66,6 +66,18 @@
 
 use crate::models::rope_utils::{RopeScalingSpec, is_usable_scalar, printable_label};
 use mlxcel_core::{MlxArray, UniquePtr};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Guards the one-time `base_eff` debug log in [`DynamicNtkRope::apply`].
+///
+/// `DynamicNtkRope` is `Copy` and rebuilt once per attention block (32 layers
+/// for the checkpoint this schedule was validated against), and `apply` runs
+/// once per layer on every forward past `max_position_embeddings`. None of
+/// that identifies the struct across calls, so a per-instance guard cannot
+/// dedupe it; a single process-wide flag is what turns "log every layer at
+/// every decode step past the boundary" into "log the rescale once, as a
+/// validation aid, not as telemetry."
+static DYNAMIC_BASE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The three `rope_scaling` schemes the InternLM families accept.
 ///
@@ -209,6 +221,19 @@ impl DynamicNtkRope {
         self.mode
     }
 
+    /// Whether `apply` rotates adjacent pairs (`true`) or the two halves of
+    /// the head (`false`).
+    // Used by: InternLM3, InternLM2 (tests)
+    pub fn traditional(&self) -> bool {
+        self.traditional
+    }
+
+    /// The rotary dimension the schedule was built with.
+    // Used by: InternLM3, InternLM2 (tests)
+    pub fn dims(&self) -> i32 {
+        self.dims
+    }
+
     /// The position scale to hand `fast_rope`.
     ///
     /// `1.0` for `Default` **and** for `Dynamic`: the dynamic schedule adjusts
@@ -257,14 +282,47 @@ impl DynamicNtkRope {
     /// `seq_len` is `L + offset`.
     // Used by: InternLM3, InternLM2
     pub fn apply(&self, x: &MlxArray, offset: i32, seq_len: i32) -> UniquePtr<MlxArray> {
+        let base_eff = self.base_for(seq_len);
+        self.log_dynamic_rescale_once(seq_len, base_eff);
         mlxcel_core::fast_rope(
             x,
             self.dims,
             self.traditional,
-            self.base_for(seq_len),
+            base_eff,
             self.scale(),
             offset,
         )
+    }
+
+    /// Log the rescaled base the first time any dynamic schedule crosses
+    /// `max_position_embeddings` in this process.
+    ///
+    /// This is a validation aid for the case a short prompt cannot exercise
+    /// (`base_for` is a no-op below the boundary), not telemetry, so it is
+    /// gated at debug level, fires only in [`DynamicNtkRopeMode::Dynamic`],
+    /// and fires once total rather than once per layer or per decode step;
+    /// see [`DYNAMIC_BASE_LOGGED`]. It never touches `base_eff`, so `apply`'s
+    /// arithmetic is unaffected whether or not `RUST_LOG` is set.
+    fn log_dynamic_rescale_once(&self, seq_len: i32, base_eff: f32) {
+        let DynamicNtkRopeMode::Dynamic { factor } = self.mode else {
+            return;
+        };
+        let max_pos = i64::try_from(self.max_position_embeddings).unwrap_or(i64::MAX);
+        if (seq_len as i64) <= max_pos {
+            return;
+        }
+        if DYNAMIC_BASE_LOGGED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        tracing::debug!(
+            seq_len,
+            max_position_embeddings = self.max_position_embeddings,
+            factor,
+            dims = self.dims,
+            base = self.base,
+            base_eff,
+            "dynamic NTK rope base rescaled past max_position_embeddings"
+        );
     }
 }
 

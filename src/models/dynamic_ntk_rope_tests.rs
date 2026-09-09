@@ -114,7 +114,7 @@ fn a_default_block_is_the_unscaled_schedule() {
 #[test]
 fn both_spellings_of_the_scheme_key_resolve() {
     // InternLM3 checkpoints spell it `rope_type`; InternLM2 checkpoints spell
-    // it `type` (`models/internlm2-7b-4bit` ships `{"type": "dynamic",
+    // it `type` (`models/internlm2_5-7b-chat-4bit` ships `{"type": "dynamic",
     // "factor": 2.0}`). One helper serves both families, so it has to read
     // both, and a config carrying both keys has to parse rather than hit
     // serde's `duplicate field`.
@@ -170,7 +170,7 @@ fn the_dynamic_base_grows_past_max_position() {
 
 #[test]
 fn the_dynamic_base_grows_past_max_position_for_internlm2_geometry() {
-    // `models/internlm2-7b-4bit`: factor 2.0, rope_theta 1e6, same head_dim and
+    // `models/internlm2_5-7b-chat-4bit`: factor 2.0, rope_theta 1e6, same head_dim and
     // max_position_embeddings. Its block was dropped at deserialization before
     // this change, so the base never left 1e6 at any length.
     let rope = DynamicNtkRope::from_scaling(
@@ -179,7 +179,7 @@ fn the_dynamic_base_grows_past_max_position_for_internlm2_geometry() {
         false,
         32768,
         Some(&spec(r#"{"type": "dynamic", "factor": 2.0}"#)),
-        "internlm2-7b-4bit",
+        "internlm2_5-7b-chat-4bit",
     )
     .expect("block must resolve");
     assert_eq!(rope.base_for(32768), 1_000_000.0);
