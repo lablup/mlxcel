@@ -14,7 +14,9 @@
 set -euo pipefail
 
 MLXCEL="./target/release/mlxcel"
-MODELS_DIR="./models"
+MODELS_DIR="${MODELS_DIR:-./models}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/store_guard.sh"
+
 BENCHMARKS_DIR="./benchmarks"
 PROMPT="Hello, how are you today?"
 MAX_TOKENS=50
@@ -234,6 +236,7 @@ emit() {
 }
 
 if [[ "$MODEL_ARG" == "all" ]]; then
+  require_checkpoints "$MODELS_DIR" "NA-attention sweep"
   while IFS= read -r dir; do
     [[ -d "$dir" ]] || continue
     emit "$(bench_one "$dir")"

@@ -101,7 +101,9 @@ trap 'echo "Interrupted (signal received)" >&2; exit 130' INT TERM
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_DECODE="${SCRIPT_DIR}/bench_decode.sh"
-MODELS_DIR="./models"
+MODELS_DIR="${MODELS_DIR:-./models}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/store_guard.sh"
+
 BENCHMARKS_DIR="./benchmarks"
 DATE=$(date '+%Y-%m-%d')
 
@@ -113,7 +115,11 @@ CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_t
 
 # Representative subset: mix of dense (llama, qwen2.5), MoE (qwen3-a3b,
 # mixtral), and a large multimodal-capable text model (gemma-4).
-MODELS_DEFAULT="llama-3.1-8b-4bit qwen2.5-7b-4bit qwen3-30b-a3b-4bit mixtral-8x7b-4bit gemma-4-31b-it-4bit"
+# Directory names as of the 2026-09-09 store consolidation. Three of the
+# previous five (llama-3.1-8b-4bit, qwen2.5-7b-4bit, mixtral-8x7b-4bit) were
+# renamed then, so this list had been naming directories that no longer
+# existed and the sweep skipped them.
+MODELS_DEFAULT="meta-llama-3.1-8b-instruct-4bit qwen2.5-7b-instruct-4bit qwen3-30b-a3b-4bit mixtral-8x7b-instruct-v0.1-4bit gemma-4-31b-it-4bit"
 LADDER_DEFAULT="512 2048 8192 32768"
 
 MODELS="$MODELS_DEFAULT"
@@ -402,6 +408,8 @@ fi
 >&2 echo ""
 
 header_written=0
+require_named_checkpoints "$MODELS_DIR" "long-prompt sweep" $MODELS
+
 for model_name in $MODELS; do
   model_path="${MODELS_DIR}/${model_name}"
   if [[ ! -d "$model_path" ]]; then
