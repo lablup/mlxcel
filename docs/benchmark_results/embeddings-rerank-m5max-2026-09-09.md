@@ -70,9 +70,38 @@ An earlier draft of this file reported rerankers at 1.56x to 4.87x and named the
 
 ## Cross-host comparison
 
-Deferred. The M1 Ultra file this would compare against was written before the column fix and is being re-taken; comparing against it now would pin numbers that are about to be replaced.
+Against `metal_m1ultra_embeddings_2026-09-09.csv`, re-taken at `f42d127d` with aligned columns. M5 Max leads by a median of 2.77x at 32 short inputs.
 
-One provisional note, to be re-checked against the re-run. Against the pre-fix M1 Ultra file, M5 Max leads by a median of 2.95x at 32 short inputs, and the one entry outside the 2.2x to 3.1x band is `all-MiniLM-L6-v2` at 1.64x. The M1 Ultra report reads the outlier differently, as `Nemotron-3-Embed-1B-BF16` at 1.71x, which does not reproduce here: that model measures 3.02x, squarely inside the band. Two readings of the same pair of files disagreeing is itself a reason to wait for the re-run rather than to argue from either.
+| Model | M5 Max tok/s | M1 Ultra tok/s | ratio |
+|-------|-------------:|---------------:|------:|
+| bge-m3-safetensors | 24774 | 7788 | 3.18x |
+| llama-nemotron-embed-1b-v2 | 12079 | 3907 | 3.09x |
+| Nemotron-3-Embed-1B-BF16-8bit | 10937 | 3573 | 3.06x |
+| Nemotron-3-Embed-1B-BF16 | 13655 | 4525 | 3.02x |
+| Qwen3-Embedding-0.6B | 18676 | 6425 | 2.91x |
+| embeddinggemma-300m-4bit | 33331 | 12038 | 2.77x |
+| siglip-base-patch16-224 | 22559 | 9227 | 2.44x |
+| multilingual-e5-small | 80101 | 34074 | 2.35x |
+| LFM2.5-Embedding-350M | 19964 | 9497 | 2.10x |
+| modernbert-embed-base | 24411 | 12257 | 1.99x |
+| all-MiniLM-L6-v2 | 58659 | 36198 | 1.62x |
+
+The two entries below 2x are the two smallest encoders, which is the shape a bandwidth advantage takes: less weight to move leaves less for the faster memory to win. Whether that fully accounts for them is not established here.
+
+### The bf16 against 8-bit inversion is gone
+
+The 2026-09-04 M5 Max report concluded that `Nemotron-3-Embed-1B-BF16` and its 8-bit sibling invert between backends, and the M1 Ultra report corrected the grouping by showing that M1 Ultra, also Metal, agrees with GB10 rather than with M5 Max. At this commit the disagreement no longer exists: all three hosts now have bf16 ahead of 8-bit.
+
+What moved is the bf16 half on this machine, and its sibling makes a clean control.
+
+| 32 short inputs, p50 ms | 2026-09-04 | 2026-09-06 | 2026-09-09 |
+|-------------------------|-----------:|-----------:|-----------:|
+| `Nemotron-3-Embed-1B-BF16` | 67.03 | 66.26 | **37.49** |
+| `Nemotron-3-Embed-1B-BF16-8bit` | 48.45 | 47.89 | 46.82 |
+
+The bf16 checkpoint gains 1.77x between `a50ff440` and `66b8346e` while the 8-bit one stays flat across all three passes. That window holds two dtype changes, the activation-helper restore in `f4ecc926` and the half-precision reduction fix in `71fd7a11`. Either would reach a bf16 checkpoint far more than an 8-bit one, whose body is quantized and whose bf16 surface is limited to scales and biases. Which of the two it is has not been separated, and would need an A/B rather than this table.
+
+The earlier reading is worth keeping in view rather than deleting: read as a pair, the two checkpoints looked like evidence that quantization behaves differently per backend, and neither that nor its correction survived a third measurement.
 
 ## Harness state
 
