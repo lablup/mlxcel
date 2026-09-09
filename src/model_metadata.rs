@@ -152,6 +152,7 @@ macro_rules! for_each_model_registration {
             YoutuLLM => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("Youtu-LLM does not support adapter loading; use load_model() instead") };
             YoutuVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Youtu-VL VLM does not support adapter loading; use load_model() instead") };
             InternVLChatVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("InternVL VLM does not support adapter loading; use load_model() instead") };
+            LlmJpVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LLM-jp-VL does not support adapter loading; use load_model() instead") };
             LocateAnythingVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("LocateAnything VLM does not support adapter loading; use load_model() instead") };
             KimiVL => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Kimi-VL VLM does not support adapter loading; use load_model() instead") };
             KimiK25 => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Kimi-VL 2.5 VLM does not support adapter loading; use load_model() instead") };

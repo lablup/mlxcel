@@ -1498,3 +1498,60 @@ fn an_unreadable_layer_count_does_not_open_the_sliding_window_guard() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn llmjpvl_model_type_is_detected_for_both_released_backbones() {
+    // One `model_type` covers two checkpoints whose decoders differ, and the
+    // decoder config sits under `llm_config` rather than `text_config`, so a
+    // detector keyed on `text_config` would not see a backbone at all. Both
+    // must route to the LLM-jp-VL runtime instead of erroring with
+    // "Unsupported model type: llmjpvl". Config shapes mirror the released
+    // llm-jp/llm-jp-4-vl-9B-beta and llm-jp/Jagle-VL-2.2B-Jagle-FineVision.
+    for (name, backbone, hidden, layers, image_pad) in [
+        ("llmjp_4vl_9b", "llama", 4096, 32, 14),
+        ("jagle_vl_2p2b", "qwen3", 2048, 28, 151655),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "architectures": ["LLMjpVLModel"],
+                    "model_type": "llmjpvl",
+                    "downsample_ratio": 0.5,
+                    "force_image_size": 512,
+                    "img_context_token_id": {image_pad},
+                    "max_dynamic_patch": 12,
+                    "min_dynamic_patch": 1,
+                    "ps_version": "v2",
+                    "select_layer": -1,
+                    "template": "llmjp4_harmony",
+                    "use_thumbnail": true,
+                    "llm_config": {{
+                        "model_type": "{backbone}",
+                        "hidden_size": {hidden},
+                        "num_hidden_layers": {layers}
+                    }},
+                    "vision_config": {{
+                        "model_type": "siglip_vision_model",
+                        "hidden_size": 1152,
+                        "intermediate_size": 4304,
+                        "num_hidden_layers": 27,
+                        "num_attention_heads": 16,
+                        "patch_size": 16,
+                        "image_size": 512,
+                        "layer_norm_eps": 1e-06,
+                        "hidden_act": "gelu_pytorch_tanh"
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::LlmJpVLM, "{name}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}

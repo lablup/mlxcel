@@ -75,6 +75,8 @@ mod kimi_vl_loader;
 mod lfm2_vl;
 #[path = "vlm_llava.rs"]
 mod llava;
+#[path = "vlm_llmjp_vl.rs"]
+mod llmjp_vl;
 #[path = "vlm_locateanything.rs"]
 mod locateanything;
 #[path = "vlm_minimax_m3_vl.rs"]
@@ -125,6 +127,7 @@ pub(crate) use lfm2_vl::load_lfm2_vl;
 #[cfg(feature = "xla-iree")]
 pub(crate) use llava::load_llava_iree_host_preprocessor;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_host_preprocessor, load_llava_vlm};
+pub(crate) use llmjp_vl::load_llmjp_vl;
 pub(crate) use locateanything::load_locateanything_vlm;
 pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;

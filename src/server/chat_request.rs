@@ -448,9 +448,26 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // `render_simple_fallback`: the fallback is not the template, so its
     // "history" form carries no relationship to what the model was actually
     // prompted with.
+
+    // Typed media parts only belong on the raw-JSON render when the template
+    // actually inspects them. A template that never mentions an `image` /
+    // `video` / `audio` content type expects `content` to be a plain string,
+    // and minijinja renders a list handed to `{{ message['content'] }}` by
+    // printing the list itself into the prompt. Those families carry the image
+    // through token ids inserted after rendering (LLM-jp-VL's
+    // `<|image_start|>` block, InternVL's `<img>` block, ...), so the flattened
+    // text render is both what the template expects and what the token-level
+    // expansion assumes. Audio requests stay on the raw path regardless,
+    // because that is where the ordered `<|audio_i|>` sentinels are emitted.
+    let media_parts_need_raw_render = has_template_media_parts(request)
+        && (processor.supports_image_content()
+            || processor.supports_video_content()
+            || processor.supports_audio_content()
+            || !request.audio_inputs().is_empty());
+
     let (prompt, history_render) = if has_tool_fields(request)
         || has_reasoning_fields(request)
-        || has_template_media_parts(request)
+        || media_parts_need_raw_render
     {
         // When messages contain tool_calls / tool_call_id, a parallel
         // `reasoning` field (issue #362), or typed media content, use raw JSON

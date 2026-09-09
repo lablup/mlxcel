@@ -109,16 +109,60 @@ impl InternVLProcessor {
                 best_ratio_diff = ratio_diff;
                 best_ratio = (i, j);
             } else if ratio_diff == best_ratio_diff {
-                // Tie-break: prefer the ratio whose target area is closer to
-                // the original image area.
-                let target_area = image_size * image_size * i as f64 * j as f64;
-                let best_area = image_size * image_size * best_ratio.0 as f64 * best_ratio.1 as f64;
-                if (area - target_area).abs() < (area - best_area).abs() {
+                // Upstream's tie-break, verbatim: take the later (larger-area)
+                // candidate only when the source image is big enough to fill
+                // more than half of it. Candidates are visited in ascending
+                // tile-count order, so this trades up to a finer grid exactly
+                // when there are pixels to justify it.
+                //
+                // This used to be a "target area closest to the source area"
+                // rule, which disagrees with upstream on a real range of
+                // inputs: a 768x768 image at `image_size` 512 has an area of
+                // 2.25 * 512^2, which clears upstream's `0.5 * 512^2 * 2 * 2`
+                // threshold and yields a 2x2 grid plus a thumbnail (5 tiles),
+                // while the closest-area rule kept 1x1 (1 tile). Both this
+                // processor's families read the same upstream rule
+                // (`find_closest_aspect_ratio` in InternVL's and LLM-jp-VL's
+                // `processing_*.py`), so the alignment is a fix for both.
+                let threshold = 0.5 * image_size * image_size * i as f64 * j as f64;
+                if area > threshold {
                     best_ratio = (i, j);
                 }
             }
         }
         best_ratio
+    }
+
+    /// A copy of this processor with `max_dynamic_patch` replaced.
+    ///
+    /// LLM-jp-VL recomputes the per-request tile budget from the prompt's token
+    /// count (see `vision::llmjp_vl::image_tile_budget`), so its runtime needs
+    /// a processor whose tiling cap is the request's budget rather than the
+    /// checkpoint's ceiling. The struct holds no MLX arrays, so this is a plain
+    /// scalar copy.
+    ///
+    /// Used by: LLM-jp-VL (`llmjpvl`) VLM runtime.
+    pub fn with_max_dynamic_patch(&self, max_dynamic_patch: usize) -> Self {
+        Self {
+            image_size: self.image_size,
+            min_dynamic_patch: self.min_dynamic_patch.min(max_dynamic_patch.max(1)),
+            max_dynamic_patch: max_dynamic_patch.max(1),
+            use_thumbnail: self.use_thumbnail,
+            mean: self.mean,
+            std: self.std,
+        }
+    }
+
+    /// [`Self::preprocess_with_tiles`] with a per-request tiling cap.
+    ///
+    /// Used by: LLM-jp-VL (`llmjpvl`) VLM runtime.
+    pub fn preprocess_with_tiles_max(
+        &self,
+        images: &[image::DynamicImage],
+        max_dynamic_patch: usize,
+    ) -> (UniquePtr<MlxArray>, Vec<usize>) {
+        self.with_max_dynamic_patch(max_dynamic_patch)
+            .preprocess_with_tiles(images)
     }
 
     /// Split a single image into tiles (PIL-equivalent crops), optionally

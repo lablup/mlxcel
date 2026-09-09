@@ -47,6 +47,7 @@ pub mod inkling_audio;
 pub mod internvl_prompt;
 pub mod kimi_vl_prompt;
 pub mod lfm2_vl_prompt;
+pub mod llmjp_vl_prompt;
 pub mod locateanything_prompt;
 pub mod minicpmo_prompt;
 pub mod moondream2_prompt;
@@ -67,6 +68,10 @@ pub mod video;
 pub mod vlm_prompt;
 pub mod vlm_runtime;
 pub mod youtu_vl_prompt;
+
+#[cfg(test)]
+#[path = "llmjp_vl_prompt_parity_tests.rs"]
+mod llmjp_vl_prompt_parity_tests;
 
 #[cfg(test)]
 #[path = "moondream3_prompt_tests.rs"]

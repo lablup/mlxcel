@@ -57,6 +57,9 @@ pub enum VlmRuntimeRef<'a> {
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
     InternVL(&'a vision::InternVLChatVLM),
+    /// LLM-jp-VL (llmjpvl) runtime (SigLIP2 tiles + pixel-shuffle mlp1 +
+    /// a Llama or Qwen3 decoder).
+    LlmJpVl(&'a vision::LlmJpVlModel),
     /// Kimi-VL / Kimi-VL 2.5 (MoonViT) runtime.
     KimiVL(&'a vision::KimiVLModel),
     /// LocateAnything (MoonViT + Qwen2 grounding) runtime.
@@ -215,6 +218,7 @@ impl LoadedModel {
             Self::NemotronHNanoOmniVLM(model) => Some(VlmRuntimeRef::NemotronHNanoOmni(model)),
             Self::YoutuVL(model) => Some(VlmRuntimeRef::YoutuVL(model)),
             Self::InternVLChatVLM(model) => Some(VlmRuntimeRef::InternVL(model)),
+            Self::LlmJpVL(model) => Some(VlmRuntimeRef::LlmJpVl(model)),
             Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
             Self::LocateAnythingVLM(model) => Some(VlmRuntimeRef::LocateAnything(model)),
             Self::MllamaVLM(model) => Some(VlmRuntimeRef::Mllama(model)),
