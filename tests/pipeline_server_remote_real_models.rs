@@ -171,19 +171,19 @@ fn assert_remote_coordinator_matches_dense_baseline(
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote stage services"]
 fn pipeline_server_remote_coordinator_llama_matches_dense_baseline() {
-    assert_remote_coordinator_matches_dense_baseline("llama-3.2-1b-4bit", "Hello", None);
+    assert_remote_coordinator_matches_dense_baseline("llama-3.2-1b-instruct-4bit", "Hello", None);
 }
 
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote stage services"]
 fn pipeline_server_remote_coordinator_gpt_oss_matches_dense_baseline() {
-    assert_remote_coordinator_matches_dense_baseline("gpt-oss-20b-mxfp4", "Hello", None);
+    assert_remote_coordinator_matches_dense_baseline("gpt-oss-20b-mxfp4-q4", "Hello", None);
 }
 
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote stage services"]
 fn pipeline_server_remote_coordinator_gemma3_matches_dense_baseline() {
-    assert_remote_coordinator_matches_dense_baseline("gemma3-1b-4bit", "Hello", None);
+    assert_remote_coordinator_matches_dense_baseline("gemma-3-1b-it-4bit", "Hello", None);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn pipeline_server_remote_coordinator_qwen35_matches_dense_baseline() {
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote stage services"]
 fn pipeline_server_remote_coordinator_glm4_matches_dense_baseline() {
-    assert_remote_coordinator_matches_dense_baseline("glm4-flash-4bit", "Hello", None);
+    assert_remote_coordinator_matches_dense_baseline("glm-4.7-flash-4bit", "Hello", None);
 }
 
 #[test]

@@ -151,7 +151,7 @@ fn assert_remote_runtime_matches_full_model(
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote pipeline stages"]
 fn pipeline_remote_runtime_llama_real_model_parity_and_cleanup() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",
@@ -218,7 +218,7 @@ fn pipeline_remote_runtime_llama_real_model_parity_and_cleanup() {
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote pipeline stages"]
 fn pipeline_remote_runtime_llama_drain_and_shutdown_transition() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",
@@ -259,7 +259,7 @@ fn pipeline_remote_runtime_llama_drain_and_shutdown_transition() {
 #[test]
 #[ignore = "requires local model weights and an active Thunderbolt Bridge interface"]
 fn pipeline_remote_runtime_llama_thunderbolt_bridge_parity() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",
@@ -317,13 +317,13 @@ fn pipeline_remote_runtime_llama_thunderbolt_bridge_parity() {
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote pipeline stages"]
 fn pipeline_remote_runtime_gpt_oss_real_model_parity_and_cleanup() {
-    assert_remote_runtime_matches_full_model("gpt-oss-20b-mxfp4", &[42, 43], 44, 420, None);
+    assert_remote_runtime_matches_full_model("gpt-oss-20b-mxfp4-q4", &[42, 43], 44, 420, None);
 }
 
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote pipeline stages"]
 fn pipeline_remote_runtime_gemma3_real_model_parity_and_cleanup() {
-    assert_remote_runtime_matches_full_model("gemma3-1b-4bit", &[2, 3], 4, 430, None);
+    assert_remote_runtime_matches_full_model("gemma-3-1b-it-4bit", &[2, 3], 4, 430, None);
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn pipeline_remote_runtime_qwen35_real_model_parity_and_cleanup() {
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote pipeline stages"]
 fn pipeline_remote_runtime_glm4_real_model_parity_and_cleanup() {
-    assert_remote_runtime_matches_full_model("glm4-flash-4bit", &[2, 3], 4, 470, None);
+    assert_remote_runtime_matches_full_model("glm-4.7-flash-4bit", &[2, 3], 4, 470, None);
 }
 
 #[test]
@@ -374,7 +374,7 @@ fn pipeline_remote_runtime_glm_moe_dsa_real_model_parity_and_cleanup() {
 #[test]
 #[ignore = "requires local model weights and RDMA-capable or fallback-enabled loopback"]
 fn pipeline_remote_runtime_llama_rdma_real_model_parity_and_cleanup() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",

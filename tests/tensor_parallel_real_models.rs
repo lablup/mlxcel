@@ -289,7 +289,7 @@ fn assert_tp_generates_tokens(
 #[ignore = "requires local model weights and extended real-model generation"]
 fn llama_tp2_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("llama-3.2-1b-4bit"),
+        &repo_model_dir("llama-3.2-1b-instruct-4bit"),
         "Continue this sequence with more entries separated by commas: 1, 2, 3, 4, 5,",
         32,
         2,
@@ -300,7 +300,7 @@ fn llama_tp2_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn llama31_8b_tp4_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("llama-3.1-8b-4bit"),
+        &repo_model_dir("meta-llama-3.1-8b-instruct-4bit"),
         "Continue this sequence with more entries separated by commas: 1, 2, 3, 4, 5,",
         32,
         4,
@@ -311,7 +311,7 @@ fn llama31_8b_tp4_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn qwen2_5_tp2_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("qwen2.5-0.5b-4bit"),
+        &repo_model_dir("qwen2.5-0.5b-instruct-4bit"),
         "Continue this sequence with more entries separated by commas: alpha, beta, gamma,",
         24,
         2,
@@ -322,7 +322,7 @@ fn qwen2_5_tp2_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn qwen2_5_7b_tp4_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("qwen2.5-7b-4bit"),
+        &repo_model_dir("qwen2.5-7b-instruct-4bit"),
         "Continue this sequence with more entries separated by commas: alpha, beta, gamma,",
         32,
         4,
@@ -435,7 +435,7 @@ fn qwen3_8_27b_tp4_matches_single_rank_stepwise() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn ernie45_tp2_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("ernie-4.5-0.3b-4bit"),
+        &repo_model_dir("ernie-4.5-0.3b-pt-4bit"),
         "Continue this sequence with more entries separated by commas: red, blue, green,",
         32,
         2,
@@ -446,7 +446,7 @@ fn ernie45_tp2_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn ernie45_tp4_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("ernie-4.5-0.3b-4bit"),
+        &repo_model_dir("ernie-4.5-0.3b-pt-4bit"),
         "Continue this sequence with more entries separated by commas: red, blue, green,",
         32,
         4,
@@ -479,7 +479,7 @@ fn hunyuan_v1_dense_tp4_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn gemma3_tp2_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("gemma3-1b-4bit"),
+        &repo_model_dir("gemma-3-1b-it-4bit"),
         "Continue this sequence with more entries separated by commas: north, south, east,",
         24,
         2,
@@ -490,7 +490,7 @@ fn gemma3_tp2_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn llama_tp4_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("llama-3.2-1b-4bit"),
+        &repo_model_dir("llama-3.2-1b-instruct-4bit"),
         "Continue this sequence with more entries separated by commas: 1, 2, 3, 4, 5,",
         32,
         4,
@@ -501,7 +501,7 @@ fn llama_tp4_matches_single_rank_greedy_long_generation() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn gemma3_tp4_matches_single_rank_greedy_long_generation() {
     assert_tp_matches_single_rank(
-        &repo_model_dir("gemma3-1b-4bit"),
+        &repo_model_dir("gemma-3-1b-it-4bit"),
         "Continue this sequence with more entries separated by commas: north, south, east,",
         24,
         4,

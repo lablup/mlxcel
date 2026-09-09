@@ -44,7 +44,7 @@ use mlxcel::vision::processors::smolvlm::{
     DEFAULT_SIGLIP_MEAN, DEFAULT_SIGLIP_STD, SmolVLMProcessor, TileLayout,
 };
 
-const MODEL_NAME: &str = "SmolVLM-Instruct";
+const MODEL_NAME: &str = "smolvlm-instruct-bf16";
 
 fn model_dir() -> Option<PathBuf> {
     let dir = repo_model_dir(MODEL_NAME);

@@ -84,7 +84,7 @@ fn completion_text_is_non_empty(response: &serde_json::Value) -> bool {
 #[tokio::test]
 #[ignore = "requires local model weights and the mlxcel-server binary"]
 async fn pipeline_server_llama_multi_request_smoke() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",
@@ -182,7 +182,7 @@ async fn pipeline_server_llama_multi_request_smoke() {
 #[tokio::test]
 #[ignore = "requires local model weights and the mlxcel-server binary"]
 async fn pipeline_server_llama_dense_baseline_smoke() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",

@@ -49,7 +49,7 @@ fn run_generate(args: &[&str]) -> String {
 #[test]
 #[ignore = "requires local model weights, a paired LoRA adapter, and the mlxcel binary"]
 fn pipeline_cli_llama_real_model_lora_parity() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     let adapter_dir = repo_model_dir("llama-3.2-1b-4bit-lora");
     if !model_dir.exists() {
         eprintln!(

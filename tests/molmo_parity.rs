@@ -36,7 +36,7 @@ use common::repo_model_dir;
 use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::processors::molmo::{MolmoImageTokens, MolmoProcessor};
 
-const MODEL_NAME: &str = "molmo-7b";
+const MODEL_NAME: &str = "molmo-7b-d-0924-4bit";
 const MOLMO_VOCAB: i32 = 152064;
 const PATCH_DIM: i32 = 14 * 14 * 3; // 588
 const N_PATCHES: i32 = 24 * 24; // 576 patches per 336/14 crop

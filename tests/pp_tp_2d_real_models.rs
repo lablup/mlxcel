@@ -46,7 +46,7 @@ fn run_generate(args: &[&str]) -> (bool, String, String) {
 #[test]
 #[ignore = "requires local model weights and a 2×2 PP×TP capable environment"]
 fn pp_tp_2x2_llama_real_model_parity() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",

@@ -150,7 +150,7 @@ fn two_stage_assignments(num_layers: usize, split: usize) -> [StageAssignment; 2
 #[test]
 #[ignore = "requires local model weights and TCP-bound remote stage services"]
 fn zero_config_two_stage_cluster_matches_dense_baseline() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",
