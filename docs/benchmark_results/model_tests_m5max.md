@@ -9,13 +9,13 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **Hardware** | MacBook Pro M5 Max, 128GB RAM |
 | **OS** | macOS 26.6.2 (build 25G83) |
 | **mlxcel version** | 0.7.0-beta.1 (`mlxcel_version`) |
-| **Source revision** | `a50ff440` (`mlxcel_commit`); MLX pin `9a795735` (`mlx_commit`). The VLM pass and two re-checked text rows record `a50ff440-dirty`. That working tree is exactly `a50ff440` plus the diff committed as `34455e42`, so those rows are reproducible from `34455e42` and the rest from `a50ff440`. |
+| **Source revision** | `a50ff440` (`mlxcel_commit`) for the 2026-09-06 sweep and `0accedd9` for the 2026-09-09 rows; MLX pin `9a795735` (`mlx_commit`) throughout. The VLM pass and two re-checked text rows record `a50ff440-dirty`. That working tree is exactly `a50ff440` plus the diff committed as `34455e42`, so those rows are reproducible from `34455e42` and the rest from `a50ff440`. |
 | **MLX version** | upstream main (via mlxcel-core; pinned commit `9a795735`) |
 | **mlx-lm baseline** | 0.31.3 (dev checkout https://github.com/ml-explore/mlx-lm, commit `ed1fca4`); not re-run for the 0.6.0 sweep, see note below |
 | **mlx-vlm baseline** | 0.4.4; not re-run for the 0.6.0 sweep |
 | **Test Prompt** | Text: a deterministic synthetic 512-token prompt (`--prompt-tokens 512`). VLM: "What is in this image?" plus `tests/fixtures/test_image.png`, at the checkpoint's own image token count. |
 | **Max Tokens** | 128, with every end-of-generation token suppressed (`--ignore-eos`), so every row spends the full budget |
-| **Test Date** | 2026-09-06 full re-benchmark (text, VLM, speculative, batched serving, embeddings) on the pp512/tg128 condition; prior: 2026-09-03/04 full text + VLM sweep (0.6.0), 2026-07-11/12 (0.4.0-rc.1), 2026-06-15 (0.2.1), 2026-05-27 (0.1.0) |
+| **Test Date** | 2026-09-09 partial pass: 21 text checkpoints new to this host (see "Newly measured checkpoints"), at `0accedd9`. Prior: 2026-09-06 full re-benchmark (text, VLM, speculative, batched serving, embeddings) on the pp512/tg128 condition; prior: 2026-09-03/04 full text + VLM sweep (0.6.0), 2026-07-11/12 (0.4.0-rc.1), 2026-06-15 (0.2.1), 2026-05-27 (0.1.0) |
 | **Benchmark Status** | Full re-benchmark on mlxcel 0.7.0-beta.1. Text: 178 directories via `bench_decode.sh all`, 149 with decode numbers. VLM: `all --vlm`, 71 with decode numbers. Both used `--cooldown 30 --big-cooldown 30`, which remain required on this host, and `BENCH_MEM_OVERHEAD_FACTOR=1.209` (a 90 GB weight budget). Time Machine was confirmed idle for the whole campaign. **The measurement condition changed this round and the prefill column is not comparable to any earlier sweep**; see "Measurement condition: pp512/tg128" below before reading any delta. The `vs M1 Ultra` column is populated again as of 2026-09-07: M1 Ultra was re-swept at pp512/tg128 on the same mlxcel version and MLX pin, so the ratio is a hardware comparison rather than one spanning a version and a condition change. It is M5 Max decode over M1 Ultra decode, filled where both hosts measured the same checkpoint at prompt lengths agreeing within 10%. `n/a` now means one thing only: that checkpoint is not present on M1 Ultra. Nine models are in that state (`glm-4.1v-9b-thinking-4bit`, `glm-4.5v-4bit`, `kimi-vl-a3b-thinking-4bit`, `llama-3.2-11b-vision-instruct-4bit`, `moondream2`, `smolvlm-instruct-bf16`, `dots.llm1.inst-mixed-4-6bit`, `gemma-2-9b-8bit`, `MiniMax-M2-3bit`). Rows are matched by checkpoint basename, and this document's display names do not always equal it; `scripts/checkpoint_fingerprint.py` and `benchmarks/fingerprints_m1ultra_2026-09-07.json` exist so that pairing can be checked against the weights rather than the name. The `mlxcel vs mlx-lm` / `vs mlx-vlm` percentages further down still carry the 2026-05-18 Python baselines and are likewise on the old condition. |
 
 ### Which version each CSV column records
@@ -406,8 +406,52 @@ model); they will be refreshed by the pending 0.6.0 M1 Ultra run.
 | qwen3.5 (0.8B optiq) | qwen3.5-0.8b-optiq-4bit | ✅ | 19553.86 | 435.58 | **1.66x** | NEW (0.6.0) |
 | qwen2.5 (1.5B) | qwen2.5-1.5b-instruct-4bit | ✅ | 15957.70 | 361.85 | **1.62x** | NEW (0.6.0) |
 | dots.ocr | dots.ocr-4bit | ⚠️ | 15942.04 | 360.87 | **1.87x** | loads and prefills but emits no text on a text-only prompt |
-| glm-5 | glm-5-4bit | ❌ | - | FAIL | - | FAIL:bench, but not a runtime defect: the local checkpoint is an interrupted download (21 GB still sitting as `.incomplete` blobs under `.cache/huggingface/download/`, no `*.safetensors` and no tokenizer materialized). Re-download before reading this as a GLM-5 support gap |
-| glm-5.1 | glm-5.1-4bit | ❌ | - | FAIL | - | FAIL:bench, but not a runtime defect: the local directory holds only `.gitattributes` (8 KB of cache metadata, no `config.json`), i.e. the download never started. Re-download before reading this as a GLM-5.1 support gap |
+| glm-5 | glm-5-4bit | ❌ | - | FAIL | - | FAIL:bench, but not a runtime defect: the local checkpoint is an interrupted download (21 GB still sitting as `.incomplete` blobs under `.cache/huggingface/download/`, no `*.safetensors` and no tokenizer materialized). The directory was removed on 2026-09-09 rather than re-downloaded, so there is no row for it in later sweeps; this is a missing checkpoint, not a GLM-5 support gap |
+| glm-5.1 | glm-5.1-4bit | ❌ | - | FAIL | - | FAIL:bench, but not a runtime defect: the local directory holds only `.gitattributes` (8 KB of cache metadata, no `config.json`), i.e. the download never started. The directory was removed on 2026-09-09 rather than re-downloaded, so there is no row for it in later sweeps; this is a missing checkpoint, not a GLM-5.1 support gap |
+
+## Newly measured checkpoints (2026-09-09)
+
+Twenty-one text-generation checkpoints measured here for the first time. They
+arrived when the two hosts' model stores were synchronised and the download
+cache was drained into `models/`, so their absence from earlier sweeps was a
+store-layout artifact rather than a coverage decision.
+
+Condition is the standard pp512/tg128 (`--prompt-tokens 512 --max-tokens 128`),
+at `0accedd9` with MLX pin `9a795735`. Raw rows: `benchmarks/metal_m5max_2026-09-09.csv`.
+
+No vs M1 Ultra column: the M1 Ultra numbers for these checkpoints are being
+taken in the same pass and are not in yet. Comparing against an older M1 Ultra
+sweep would cross a version boundary as well as a hardware one.
+
+| Model | Prefill | Decode | Notes |
+|-------|---------|--------|-------|
+| `gpt2` | 100780.80 | 443.28 |  |
+| `openelm-1_1b-instruct-4bit` | 20581.23 | 441.32 |  |
+| `ring-mini-linear-2.0-4bit` | 7263.85 | 311.76 |  |
+| `youtu-llm-2b-4bit` | 11065.21 | 285.46 |  |
+| `helium-1-preview-2b-4bit` | 12040.96 | 264.71 |  |
+| `pythia-1b` | 19958.94 | 250.42 | sits far above the pre-fix level the activation-dtype work moved on M1 Ultra, so that fix reaches this hardware too |
+| `klear-46b-a2.5b-instruct-4bit` | 3505.10 | 200.11 | 46B total, 2.5B active |
+| `gpt_bigcode-santacoder` | 16440.23 | 198.38 | sits far above the pre-fix level the activation-dtype work moved on M1 Ultra, so that fix reaches this hardware too |
+| `trinity-nano-preview-4bit` | 10183.73 | 189.78 |  |
+| `llama-3.2-1b-instruct` | 20745.37 | 182.39 |  |
+| `gemma-4-e4b-4bit` | 4768.35 | 136.07 |  |
+| `phixtral-4x2_8-4bit` | 3875.90 | 114.66 |  |
+| `mellum2-12b-a2.5b-base` | 3920.86 | 101.14 | 12B total, 2.5B active |
+| `ling-lite-1.5` | 2993.49 | 90.86 | the validation checkpoint `docs/supported-models.md` names for the Bailing MoE port; without it this machine cannot exercise that family |
+| `iquest-coder-v1-7b-instruct-8bit` | 3371.12 | 69.35 |  |
+| `phi-3.5-mini-instruct-hf` | 7223.48 | 59.70 |  |
+| `phi-3.5-mini-bf16` | 7177.32 | 58.94 |  |
+| `telechat3-36b-thinking-4bit` | 721.48 | 25.57 |  |
+| `dbrx-instruct-4bit` | 445.74 | 25.22 | 74.9 GB on disk, the largest entry in this pass |
+| `qwen3.8-27b-hf-bf16` | 994.63 | 9.27 |  |
+| `afm-4.5b` | - | FAIL | `Unsupported model type: arcee`. The checkpoint is dense `ArceeForCausalLM` and the only Arcee entry the binary carries is the AFMoE / Trinity MoE variant, so this is a coverage gap rather than a defect |
+
+Embedding, rerank and speech checkpoints that arrived in the same transfer are
+not in this table. They have no decode phase, and the loader refuses them for
+text generation with a message naming the endpoint that does serve them. Their
+ladder is `scripts/bench_embeddings.py`, reported separately under
+`embeddings-rerank-m5max-*.md`.
 
 ### Duplicate checkpoint directories (not listed separately)
 
