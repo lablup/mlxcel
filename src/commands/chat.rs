@@ -612,7 +612,7 @@ fn stream_turn<M: LanguageModel>(
     sampling_config: &SamplingConfig,
     show_reasoning: bool,
 ) -> Result<String> {
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(prompt);
     let prompt_tokens: Vec<i32> = tokenizer
         .encode(prompt, add_special)
         .map_err(|e| anyhow!("Tokenization failed: {e}"))?

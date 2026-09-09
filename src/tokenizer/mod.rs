@@ -95,6 +95,37 @@ impl MlxcelTokenizer {
         }
     }
 
+    /// The spelling of the BOS token this tokenizer prepends, when it
+    /// prepends one (see [`Self::bos_token_id`]).
+    fn bos_token_string(&self) -> Option<String> {
+        let id = self.bos_token_id()?;
+        match self {
+            Self::SentencePiece(sp) => sp.id_to_special_token.get(&id).cloned(),
+            Self::HuggingFace(tokenizer) => tokenizer.id_to_token(id),
+            Self::Tiktoken(_) => None,
+        }
+    }
+
+    /// Whether a rendered prompt already starts with the BOS token, so
+    /// `add_special_tokens` must be suppressed to avoid a doubled BOS
+    /// (issue #1347).
+    ///
+    /// Every tokenize site that feeds a chat-templated prompt (server
+    /// scheduler, dispatch thread, router, diffusion worker, offline
+    /// `generate`) must call this rather than spell the rule out, so they keep
+    /// producing identical ids (the #633 invariant). The literal `<bos>` and
+    /// `<s>` prefixes are the historical rule; on top of that the tokenizer's
+    /// own BOS spelling counts, which is what the Laguna template needs: it
+    /// emits `〈|EOS|〉` (id 2, both BOS and EOS) first and the checkpoint's
+    /// `TemplateProcessing` post-processor would prepend id 2 again.
+    pub fn prompt_carries_bos(&self, prompt: &str) -> bool {
+        if prompt.starts_with("<bos>") || prompt.starts_with("<s>") {
+            return true;
+        }
+        self.bos_token_string()
+            .is_some_and(|bos| !bos.is_empty() && prompt.starts_with(bos.as_str()))
+    }
+
     /// Create a stub tokenizer for unit tests.
     ///
     /// The stub returns empty/identity results; it exists so that types like
@@ -2439,6 +2470,53 @@ mod tests {
             .collect();
         hf.add_tokens(&added);
         MlxcelTokenizer::HuggingFace(hf)
+    }
+
+    /// A Laguna-shaped tokenizer: the BOS spelling is `〈|EOS|〉` and the
+    /// post-processor prepends it on every `encode(_, true)`.
+    fn mlxcel_with_bos_template(bos: &str) -> MlxcelTokenizer {
+        let mut hf = Tokenizer::new(BPE::default());
+        hf.add_tokens(&[AddedToken::from("a", false)]);
+        hf.add_special_tokens(&[AddedToken::from(bos, true)]);
+        let bos_id = hf.token_to_id(bos).expect("bos registered");
+        let template = tokenizers::processors::template::TemplateProcessing::builder()
+            .try_single(format!("{bos} $A"))
+            .unwrap()
+            .special_tokens(vec![(bos.to_string(), bos_id)])
+            .build()
+            .unwrap();
+        hf.with_post_processor(Some(template));
+        MlxcelTokenizer::HuggingFace(hf)
+    }
+
+    #[test]
+    fn prompt_carries_bos_recognizes_tokenizer_bos_string() {
+        let bos = "〈|EOS|〉";
+        let tok = mlxcel_with_bos_template(bos);
+        let bos_id = tok.bos_token_id().expect("template prepends the bos");
+
+        // The tokenizer's own spelling counts, in addition to the literal rule.
+        assert!(tok.prompt_carries_bos(&format!("{bos}a")));
+        assert!(tok.prompt_carries_bos("<bos>a"));
+        assert!(tok.prompt_carries_bos("<s>a"));
+        assert!(!tok.prompt_carries_bos("a"));
+        assert!(!tok.prompt_carries_bos(&format!("a{bos}")));
+
+        // Suppressing `add_special` on such a prompt yields exactly one bos id.
+        let prompt = format!("{bos}a");
+        let ids = tok
+            .encode(&prompt, !tok.prompt_carries_bos(&prompt))
+            .unwrap();
+        assert_eq!(ids.iter().filter(|&&id| id == bos_id).count(), 1);
+        assert_eq!(ids.first(), Some(&bos_id));
+        // Without the rule the post-processor would double it.
+        let doubled = tok.encode(&prompt, true).unwrap();
+        assert_eq!(doubled.iter().filter(|&&id| id == bos_id).count(), 2);
+
+        // A tokenizer that prepends nothing never claims a bos prefix.
+        let bare = mlxcel_with_added(&["<think>"]);
+        assert!(!bare.prompt_carries_bos("<think>a"));
+        assert!(bare.prompt_carries_bos("<bos>a"));
     }
 
     #[test]

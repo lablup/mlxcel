@@ -333,6 +333,19 @@ pub enum SwitchLinear {
         group_size: i32,
         bits: i32,
         mode: String,
+        /// Optional per-expert output multiplier, shape `[num_experts]` f32.
+        ///
+        /// The compressed-tensors `nvfp4-pack-quantized` layout (Laguna,
+        /// issue #1347) carries one `weight_global_scale` per expert plane on
+        /// top of the E4M3 block scales: `W = code * E4M3(scale) / global`.
+        /// MLX native NVFP4 has no slot for that scalar, and folding
+        /// `1 / global` into the E4M3 block scales is lossy (3 mantissa bits),
+        /// so the loader keeps `1 / global[e]` here and the gathered matmul
+        /// output is multiplied by the selected experts' entries after
+        /// `gather_qmm`. This is the per-expert analogue of
+        /// `QuantizedWeight::apply_global_scale` on a dense linear. `None`
+        /// for every other layout.
+        global_scale: Option<UniquePtr<MlxArray>>,
     },
     /// Non-quantized path: uses gather_mm
     Regular { weight: UniquePtr<MlxArray> },
@@ -348,12 +361,13 @@ impl SwitchLinear {
                 group_size,
                 bits,
                 mode,
+                global_scale,
             } => {
                 let biases_ptr: *const MlxArray = match biases {
                     Some(b) => b.as_ref().unwrap() as *const MlxArray,
                     None => std::ptr::null(),
                 };
-                unsafe {
+                let out = unsafe {
                     mlxcel_core::gather_qmm(
                         x,
                         weight,
@@ -367,6 +381,10 @@ impl SwitchLinear {
                         sorted,
                         mode,
                     )
+                };
+                match global_scale {
+                    Some(scale) => apply_expert_global_scale(out, scale, indices),
+                    None => out,
                 }
             }
             Self::Regular { weight } => {
@@ -403,6 +421,9 @@ impl SwitchLinear {
                 group_size,
                 bits,
                 mode,
+                // The fused compile paths have no per-expert output multiplier,
+                // so a plane that carries one must stay on `forward`.
+                global_scale: None,
             } => Some(QuantizedSwitchLinearRef {
                 weight,
                 scales,
@@ -447,8 +468,20 @@ impl SwitchLinear {
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w));
+            // Per-expert `1 / weight_global_scale` sidecar emitted by the
+            // compressed-tensors NVFP4 transcode (issue #1347).
+            let global_scale = weights
+                .get(&format!("{}.global_scale", prefix))
+                .map(|w| mlxcel_core::copy(w));
             return Self::from_stacked_parts(
-                prefix, weight, scales, biases, group_size, bits, mode,
+                prefix,
+                weight,
+                scales,
+                biases,
+                global_scale,
+                group_size,
+                bits,
+                mode,
             );
         }
 
@@ -463,7 +496,7 @@ impl SwitchLinear {
         // (`None`); callers that do carry one (DeepSeek v1) pass it through.
         if let Some((weight, scales, biases)) = stack_individual_experts(weights, prefix, None)? {
             return Self::from_stacked_parts(
-                prefix, weight, scales, biases, group_size, bits, mode,
+                prefix, weight, scales, biases, None, group_size, bits, mode,
             );
         }
 
@@ -486,11 +519,13 @@ impl SwitchLinear {
     /// checkpoint exposed. The declared `mode` is bounded here for the same
     /// reason (issue #973): `SwitchLinear::from_weights` hardcodes `"affine"`,
     /// but `from_weights_with_mode` is `pub` and takes an unbounded `&str`.
+    #[allow(clippy::too_many_arguments)]
     fn from_stacked_parts(
         prefix: &str,
         weight: UniquePtr<MlxArray>,
         scales: Option<UniquePtr<MlxArray>>,
         biases: Option<UniquePtr<MlxArray>>,
+        global_scale: Option<UniquePtr<MlxArray>>,
         group_size: i32,
         bits: i32,
         mode: &str,
@@ -586,6 +621,21 @@ impl SwitchLinear {
                     }
                 }
 
+                // The per-expert sidecar is indexed by the same expert ids the
+                // routed `gather_qmm` uses, so it must carry exactly one entry
+                // per stacked expert; anything else is a corrupted transcode
+                // that `take` would turn into an out-of-range read.
+                if let Some(global_scale) = global_scale.as_ref() {
+                    let g_shape = mlxcel_core::array_shape(global_scale);
+                    let num_experts = w_shape.first().copied().unwrap_or(0);
+                    if g_shape.len() != 1 || g_shape[0] != num_experts {
+                        return Err(format!(
+                            "{prefix}: per-expert global_scale {g_shape:?} must be a rank-1 \
+                             vector with one entry per stacked expert ({num_experts})"
+                        ));
+                    }
+                }
+
                 Ok(Self::Quantized {
                     weight,
                     scales,
@@ -593,10 +643,49 @@ impl SwitchLinear {
                     group_size,
                     bits: effective_bits,
                     mode: mode.to_string(),
+                    global_scale,
                 })
             }
-            None => Ok(Self::Regular { weight }),
+            None => {
+                if global_scale.is_some() {
+                    return Err(format!(
+                        "{prefix}: a per-expert global_scale sidecar is only meaningful next to \
+                         quantized `.scales`; the stacked weight carries none"
+                    ));
+                }
+                Ok(Self::Regular { weight })
+            }
         }
+    }
+}
+
+/// Multiply a gathered expert output by the selected experts' global scales.
+///
+/// `out` is the `gather_qmm` result for `indices` (its leading axes equal the
+/// index tensor's shape, followed by `[1, out_features]`), and `global_scale`
+/// is the `[num_experts]` f32 sidecar. The selected scales are broadcast over
+/// the trailing axes and applied in f32, then cast back so the expert stream
+/// keeps its bf16/f16 dtype (the same shape as
+/// `QuantizedWeight::apply_global_scale` on a dense linear).
+///
+/// Used by: `SwitchLinear::forward` (compressed-tensors NVFP4 experts)
+fn apply_expert_global_scale(
+    out: UniquePtr<MlxArray>,
+    global_scale: &MlxArray,
+    indices: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let out_dtype = mlxcel_core::array_dtype(&out);
+    let out_rank = mlxcel_core::array_shape(&out).len();
+    let idx_rank = mlxcel_core::array_shape(indices).len();
+    let mut selected = mlxcel_core::take(global_scale, indices, 0);
+    for _ in idx_rank..out_rank {
+        selected = mlxcel_core::expand_dims(&selected, -1);
+    }
+    let scaled = mlxcel_core::multiply(&out, &selected);
+    if mlxcel_core::array_dtype(&scaled) == out_dtype {
+        scaled
+    } else {
+        mlxcel_core::astype(&scaled, out_dtype)
     }
 }
 

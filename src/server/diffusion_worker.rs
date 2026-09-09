@@ -268,7 +268,7 @@ fn handle_diffusion_request(
 
     // Tokenize the already chat-templated prompt, mirroring the batched
     // scheduler's add-special heuristic.
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(prompt);
     let token_ids = match tokenizer.encode(prompt, add_special) {
         Ok(ids) => ids,
         Err(err) => {
@@ -597,7 +597,7 @@ fn handle_llada2_request(
         return;
     }
 
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(prompt);
     let token_ids = match tokenizer.encode(prompt, add_special) {
         Ok(ids) => ids,
         Err(err) => {

@@ -166,7 +166,7 @@ fn load_cli_prompt(
 fn tokenize_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<Vec<i32>> {
     // Matches the CLI generate path: chat templates that render a BOS token
     // should not receive a duplicate special token from the tokenizer.
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(prompt);
     let ids = tokenizer
         .encode(prompt, add_special)
         .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?;

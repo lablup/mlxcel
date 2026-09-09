@@ -342,7 +342,7 @@ fn resolve_model_dir(name: &str) -> PathBuf {
 
 /// Encode a prompt with a tokenizer, mirroring `tests/tensor_parallel_real_models.rs`.
 fn encode_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Vec<i32> {
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(prompt);
     tokenizer
         .encode(prompt, add_special)
         .expect("tokenizer.encode must succeed on a valid utf-8 prompt")

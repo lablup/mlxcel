@@ -1773,6 +1773,7 @@ fn prepare_inkling_audio_embeddings(
         .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
     *prompt_tokens = tokenize_inkling_ordered_media_prompt(
         prompt,
+        tokenizer.prompt_carries_bos(prompt),
         prompt_ids,
         token_ids,
         inkling.image_token_id(),
@@ -2083,6 +2084,7 @@ fn audio_feature_error(
 #[allow(clippy::too_many_arguments)]
 fn tokenize_inkling_ordered_media_prompt<E>(
     prompt: &str,
+    prompt_carries_bos: bool,
     prompt_ids: crate::vlm_runtime::InklingPromptTokenIds,
     audio_ids: crate::vlm_runtime::InklingAudioTokenIds,
     image_token_id: i32,
@@ -2110,8 +2112,7 @@ where
     for segment in parse_ordered_media_segments(prompt).map_err(anyhow::Error::msg)? {
         match segment {
             OrderedMediaSegment::Text(text) => {
-                let add_special =
-                    first_text && !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                let add_special = first_text && !prompt_carries_bos;
                 let encoded = encode(text, add_special)?;
                 if encoded
                     .iter()
@@ -2283,6 +2284,7 @@ fn tokenize_ordered_media_prompt(
 ) -> Result<Option<Vec<i32>>> {
     encode_ordered_media_prompt(
         prompt,
+        tokenizer.prompt_carries_bos(prompt),
         image_token_id,
         audio_token_id,
         expected_images,
@@ -2298,6 +2300,7 @@ fn tokenize_ordered_media_prompt(
 
 fn encode_ordered_media_prompt<E>(
     prompt: &str,
+    prompt_carries_bos: bool,
     image_token_id: i32,
     audio_token_id: i32,
     expected_images: usize,
@@ -2327,14 +2330,13 @@ where
     for segment in parse_ordered_media_segments(prompt).map_err(anyhow::Error::msg)? {
         match segment {
             OrderedMediaSegment::Text(text) => {
-                let add_special =
-                    first_text && !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                let add_special = first_text && !prompt_carries_bos;
                 tokens.extend(encode(text, add_special)?);
                 first_text = false;
             }
             OrderedMediaSegment::Image(_) => {
                 if first_text {
-                    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                    let add_special = !prompt_carries_bos;
                     tokens.extend(encode("", add_special)?);
                     first_text = false;
                 }
@@ -2343,7 +2345,7 @@ where
             }
             OrderedMediaSegment::Audio(_) => {
                 if first_text {
-                    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                    let add_special = !prompt_carries_bos;
                     tokens.extend(encode("", add_special)?);
                     first_text = false;
                 }

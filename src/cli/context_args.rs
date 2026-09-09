@@ -131,8 +131,8 @@ impl ContextCompatArgs {
             return Err(
                 "--swa-full requests a full-size sliding-window-attention cache, which mlxcel \
                  does not have. Sliding-window families (Gemma 3/4, Exaone 4, gpt-oss, \
-                 RecurrentGemma, Step 3.5, Mellum, Ministral 3, AFMoE, DeepSeek V4) build their \
-                 own ring caches from the checkpoint's sliding_window inside each model's cache \
+                 RecurrentGemma, Step 3.5, Mellum, Laguna, Ministral 3, AFMoE, DeepSeek V4) build \
+                 their own ring caches from the checkpoint's sliding_window inside each model's cache \
                  constructor, and the capability the flag buys in llama-server (KV state \
                  save/restore and context shifting over SWA layers) is gated on those caches \
                  being scheduler-owned, not on their size. Drop the flag (or pass --swa-full \

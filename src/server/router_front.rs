@@ -1471,7 +1471,7 @@ async fn route_completion(
 /// (issue #200).
 ///
 /// Tokenizes the rendered `prompt` with the worker's `add_special` rule
-/// (`!prompt.starts_with("<bos>") && !prompt.starts_with("<s>")`), routes it to
+/// (`!tokenizer.prompt_carries_bos(prompt)`), routes it to
 /// a prefill node, registers a per-request result channel keyed by the numeric
 /// `request_id`, and sends the [`PrefillRequestFrame`]. The caller then drives
 /// the returned receiver with [`drive_handoff_result`] and shapes the
@@ -1492,7 +1492,7 @@ async fn start_handoff(
 ) -> Result<(usize, UnboundedReceiver<ResultFrame>)> {
     // Tokenize the rendered prompt. Match the worker's behavior: skip the
     // BOS special token when the prompt already starts with one.
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    let add_special = !state.tokenizer.prompt_carries_bos(prompt);
     let token_ids: Vec<i32> = state
         .tokenizer
         .encode(prompt, add_special)

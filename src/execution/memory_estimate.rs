@@ -1046,6 +1046,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::GptNeoX => "gpt_neox",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
+        ModelType::Laguna => "laguna",
         ModelType::Helium => "helium",
         ModelType::TeleChat3 => "telechat3",
         ModelType::MiniCPM => "minicpm",

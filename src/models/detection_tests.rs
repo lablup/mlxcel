@@ -627,6 +627,32 @@ fn mellum_model_type_is_detected() {
 }
 
 #[test]
+fn laguna_model_type_is_detected() {
+    let model_dir = temp_path("laguna_code");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "laguna",
+            "architectures": ["LagunaForCausalLM"],
+            "hidden_size": 2048,
+            "head_dim": 128,
+            "num_hidden_layers": 40,
+            "num_attention_heads": 48,
+            "num_key_value_heads": 8,
+            "num_experts": 256,
+            "vocab_size": 100352
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Laguna);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn gemma4_detection_stays_on_text_route_without_vision_weights() {
     let model_dir = temp_path("gemma4_text_route");
     fs::create_dir_all(&model_dir).unwrap();

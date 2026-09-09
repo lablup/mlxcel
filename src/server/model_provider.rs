@@ -2092,7 +2092,7 @@ pub(crate) fn tokenize_prompt_for_generation_with_ordered_media(
     } else {
         std::borrow::Cow::Borrowed(prompt)
     };
-    let add_special = !plain_prompt.starts_with("<bos>") && !plain_prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(&plain_prompt);
     let ids = tokenizer.encode(&plain_prompt, add_special)?;
     Ok(ids.iter().map(|&x| x as i32).collect())
 }

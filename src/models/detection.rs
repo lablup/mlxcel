@@ -687,6 +687,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "telechat3" => Ok(ModelType::TeleChat3),
         "starcoder2" => Ok(ModelType::StarCoder2),
         "mellum" => Ok(ModelType::Mellum),
+        "laguna" => Ok(ModelType::Laguna),
         "minicpm" => Ok(ModelType::MiniCPM),
         "minicpm3" => Ok(ModelType::MiniCPM3),
         "stablelm" => Ok(ModelType::StableLM),

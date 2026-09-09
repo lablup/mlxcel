@@ -141,7 +141,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             match prompt_token_ids {
                 Some(tokens) => tokens,
                 None => {
-                    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                    let add_special = !self.tokenizer.prompt_carries_bos(&prompt);
                     match self.tokenizer.encode(&prompt, add_special) {
                         Ok(ids) => ids.into_iter().map(|token| token as i32).collect(),
                         Err(error) => {

@@ -147,6 +147,9 @@ pub mod jamba;
 pub mod jina_vlm;
 pub mod kimi_linear;
 pub mod klear;
+pub mod laguna;
+pub mod laguna_layers;
+pub mod laguna_sanitize;
 pub mod lfm2;
 pub mod lfm2_embedding;
 pub mod llada2_moe;
@@ -293,6 +296,7 @@ pub use jamba::JambaModel;
 pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
+pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
 pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
@@ -553,6 +557,7 @@ pub enum ModelType {
     // Code models
     StarCoder2,
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
+    Laguna, // Poolside Laguna XS / S (hybrid sliding/full MoE with NVFP4 experts)
 
     // Other Transformer models
     Helium,    // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
@@ -788,6 +793,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Code models
     ModelType::StarCoder2,
     ModelType::Mellum,
+    ModelType::Laguna,
     // Other Transformer models
     ModelType::Helium,
     ModelType::TeleChat3,
@@ -1132,6 +1138,7 @@ impl ModelType {
             ),
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
+            ModelType::Laguna => ("Laguna XS / S (Poolside code, hybrid MoE)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
             ModelType::Baichuan => ("Baichuan", "Specialized"),
             ModelType::MiniCPM => ("MiniCPM 1", "Specialized"),
@@ -1381,6 +1388,7 @@ mod metadata_tests {
             GptNeoX,
             StarCoder2,
             Mellum,
+            Laguna,
             Helium,
             TeleChat3,
             MiniCPM,
@@ -1579,6 +1587,10 @@ mod plamo2_tests;
 #[cfg(test)]
 #[path = "mellum_tests.rs"]
 mod mellum_tests;
+
+#[cfg(test)]
+#[path = "laguna_tests.rs"]
+mod laguna_tests;
 
 #[cfg(test)]
 #[path = "granitemoehybrid_tests.rs"]
