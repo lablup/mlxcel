@@ -183,9 +183,18 @@ fn gptq_to_mlx_tensors(
     let mlx_biases = if let Some(qz) = qzeros {
         compute_mlx_biases_from_qzeros(qz, &mlx_scales, pack_factor, scales_dtype)
     } else {
-        // Symmetric quantization: zero_point = 2^(bits-1)
+        // Symmetric quantization: zero_point = 2^(bits-1).
+        //
+        // The scalar is built from a host `f32`, so it has to be cast to
+        // `scales_dtype` before the multiply. Without the cast MLX promotes on
+        // the wider operand and this branch hands back f32 biases beside f16
+        // scales, while the `qzeros` branch above passes `scales_dtype` through
+        // and returns f16. Step 4 casts the scales specifically so the
+        // quantized_matmul and gather_qmm paths see the dtype they expect, and
+        // biases are the other half of that pair.
         let zero_point = (1 << (bits - 1)) as f32;
         let neg_zp = mlxcel_core::from_slice_f32(&[-zero_point], &[1]);
+        let neg_zp = mlxcel_core::astype(&neg_zp, scales_dtype);
         mlxcel_core::multiply(&mlx_scales, &neg_zp)
     };
 
@@ -932,6 +941,59 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both quantization branches have to hand back biases in the same dtype as
+    /// the scales they sit beside.
+    ///
+    /// Step 4 of `gptq_to_mlx_tensors` casts the scales to f16 on purpose, so
+    /// that `quantized_matmul` and `gather_qmm` see the dtype they expect. The
+    /// `qzeros` branch passes that dtype down; the symmetric branch built its
+    /// zero point from a host `f32` and let MLX promote on the wider operand,
+    /// so a checkpoint without `qzeros` loaded f16 scales beside f32 biases.
+    /// The pair is what matters here, not either dtype on its own, which is why
+    /// this asserts equality rather than naming f16 twice.
+    #[test]
+    fn gptq_biases_match_the_scales_dtype_in_both_branches() {
+        let bits = 4;
+        let pack_factor = 32 / bits;
+        let in_features = 16;
+        let out_features = 4;
+        let n_groups = 2;
+
+        let qweight = mlxcel_core::from_slice_i32(
+            &vec![0x1234_5678u32 as i32; ((in_features / pack_factor) * out_features) as usize],
+            &[in_features / pack_factor, out_features],
+        );
+        let scales = mlxcel_core::from_slice_f32(
+            &vec![0.05f32; (n_groups * out_features) as usize],
+            &[n_groups, out_features],
+        );
+        let qzeros = mlxcel_core::from_slice_i32(
+            &vec![0x8888_8888u32 as i32; (n_groups * (out_features / pack_factor).max(1)) as usize],
+            &[n_groups, (out_features / pack_factor).max(1)],
+        );
+
+        let (_, sym_scales, sym_biases) = gptq_to_mlx_tensors(&qweight, &scales, None, bits, 128);
+        assert_eq!(
+            mlxcel_core::array_dtype(&sym_biases),
+            mlxcel_core::array_dtype(&sym_scales),
+            "symmetric branch: biases dtype must equal scales dtype"
+        );
+
+        let (_, qz_scales, qz_biases) =
+            gptq_to_mlx_tensors(&qweight, &scales, Some(&qzeros), bits, 128);
+        assert_eq!(
+            mlxcel_core::array_dtype(&qz_biases),
+            mlxcel_core::array_dtype(&qz_scales),
+            "qzeros branch: biases dtype must equal scales dtype"
+        );
+
+        assert_eq!(
+            mlxcel_core::array_dtype(&sym_biases),
+            mlxcel_core::array_dtype(&qz_biases),
+            "the two branches must agree with each other"
+        );
+    }
 
     #[test]
     fn test_solar_open_config_parsing() {
