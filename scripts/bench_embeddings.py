@@ -233,12 +233,12 @@ def run_model(name, path, kind, args, meta, writer, fh):
             writer.writerow([name, str(path), kind, input_kind, batch, batch, ptoks, len(times), f"{p50:.2f}", f"{mean:.2f}",
                              f"{mn:.2f}", f"{batch / (p50 / 1000.0):.2f}", f"{ptoks / (p50 / 1000.0):.1f}" if ptoks else "",
                              f"{load_ms:.1f}", meta["date"], meta["hardware"], meta["mlxcel_version"], meta["build_type"],
-                             meta["commit"], note])
+                             meta["commit"], meta["mlx_commit"], note])
             fh.flush()
             print(f"  {name} {input_kind} b={batch}: p50={p50:.1f}ms tokens={ptoks}", flush=True)
     except Exception as e:
         writer.writerow([name, str(path), kind, "", "", "", "", 0, "", "", "", "", "", "", meta["date"], meta["hardware"],
-                         meta["mlxcel_version"], meta["build_type"], meta["commit"], f"ERROR: {e}"])
+                         meta["mlxcel_version"], meta["build_type"], meta["commit"], meta["mlx_commit"], f"ERROR: {e}"])
         fh.flush()
         print(f"[error] {name}: {e}", flush=True)
     finally:
