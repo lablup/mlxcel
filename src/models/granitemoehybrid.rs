@@ -248,14 +248,20 @@ impl ModelArgs {
 // RMSNorm (no `n_groups` grouping, unlike the Falcon-H1 gated norm).
 //
 // Runs in the input dtype. It used to promote the whole computation to float32
-// against a NaN seen on M5 Max, from a half-precision `x^2` sum. #1718 found
-// that fault in the bridge's reduction helpers, where a bfloat16 `max` or `sum`
-// returned NaN for a finite input on roughly one call in six, and fixed it by
-// accumulating those reductions in f32; `tests/mamba2_hybrid_finite.rs` is the
-// guard, and it fails 4 runs of 4 with that fix reverted. This promotion is a
-// second, local copy of the same defense, and it is the expensive one: every
-// mixer step widens the residual stream to f32 and each later matmul promotes
-// its own weight to match.
+// against a NaN seen on M5 Max, from a half-precision `x^2` sum.
+//
+// The promotion is removed on measurement, not on an argument that the fault is
+// gone. #1718 fixed a bfloat16 reduction defect in the bridge's own helpers
+// (`max_all`, `sum_all`, `mean_all` and their axis forms, all routed through
+// `reduce_in_f32`), but this norm calls `mlx::core::fast::rms_norm` directly and
+// does not pass through them, so that fix does not cover this site. What covers
+// it is `tests/mamba2_hybrid_finite.rs`, which runs 250 forwards per checkpoint
+// and passed 3 runs of 3 on both hosts with the promotion removed, plus a
+// 3000-token needle recall on M5 Max where an overflow would show. If MLX
+// changes that kernel, the measurement has to be repeated rather than inferred.
+//
+// What the promotion cost: every mixer step widened the residual stream to f32
+// and each later matmul promoted its own weight to match.
 struct GraniteMoeHybridRMSNormGated {
     weight: UniquePtr<MlxArray>,
     eps: f32,
