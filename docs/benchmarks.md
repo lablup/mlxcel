@@ -95,6 +95,26 @@ actually hold: 88 carry `mlxcel_version`, 15 pre-2026-06-12 files carry a real
 `mlx_version` (the column was hardcoded to the MLX release then), and 26 Python
 baseline files carry `baseline_version`.
 
+## Comparing two CSVs
+
+Do not write the join by hand. `scripts/compare_bench_csv.py` holds the preconditions that a comparison has to satisfy, and it refuses rather than returning a number when one fails.
+
+```bash
+# the runtime against its own earlier sweep
+scripts/compare_bench_csv.py --before benchmarks/metal_m5max_vlm_2026-09-06.csv \
+    --after benchmarks/metal_m5max_vlm_2026-09-09.csv --allow-commit-change
+
+# the runtime against a reference, which has to be the same host and day
+scripts/compare_bench_csv.py --before benchmarks/pylm_m5max_vlm_2026-09-09.csv \
+    --after benchmarks/metal_m5max_vlm_2026-09-09.csv --reference
+```
+
+It refuses a VLM row paired with a text one, refuses two different `mlxcel_commit` values unless the version change is what you are measuring, refuses a reference measured more than a day apart, drops pairs whose `prompt_tokens` disagree by more than 10%, and excludes embedders and rerankers from a generation roster. Names resolve through `docs/model-catalog.tsv`, whose `aliases` column is `;`-separated. It also warns when a baseline row has been superseded by a newer reading in another CSV for the same host and harness, which is the case that reads as a change and is not one.
+
+Every drop is reported with its reason. A pair count alone hides what it left out.
+
+The tool exists because six published figures from the 2026-09 campaign were wrong in exactly these ways, and each comparison had been written separately with a different subset of the checks. Replaying them against the tool: the 0.35x cross-host deficit and the 298% margin both refuse outright, the 61% parity figure exits non-zero on the harness mismatch, and the pair count disagreement between two hosts resolves because the roster policy is in one place. The corrected margins reproduce, 105% on M5 Max and 108% on M1 Ultra.
+
 ## Suggested benchmark commands
 
 The repository contains benchmark helper scripts under `scripts/`. The exact
