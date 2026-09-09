@@ -491,6 +491,12 @@ def main():
                 print(f">>> [filter] {len(skipped)} non-VLM checkpoints excluded "
                       f"from the --vlm sweep", file=sys.stderr)
 
+        # Print the final candidate count unconditionally, in the same shape the
+        # shell harness uses. [store] alone reports checkpoints before the
+        # modality filter, and [filter] only fires when something was excluded,
+        # so without this line a VLM sweep never states how many it will run.
+        print(f">>> [candidates] {len(model_dirs)} to measure", file=sys.stderr)
+
         # A sweep that matches nothing is a configuration error, not a result.
         # MODELS_DIR defaults to ./models, which on a host whose store is
         # models/mlx plus models/mlx-big holds only container directories: the
