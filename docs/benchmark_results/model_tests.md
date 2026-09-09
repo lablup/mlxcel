@@ -110,11 +110,32 @@ Neither comparison alone would have surfaced this. The same-machine median is 10
 
 `plamo-2-1b` carries the same construct and was briefly suspected on the strength of its 0.81x M5-over-M1 ratio. That was the wrong quantity: 0.81x is hardware against hardware, not mlxcel against mlx-lm, and the two cannot corroborate each other. It had no baseline on either host at the time, which turned out to be a missing `numba` in the baseline environment rather than anything about the model. With the baseline measured it is ahead on both machines, at 100% of mlx-lm on M1 Ultra (107.47 against 107.04) and 106% on M5 Max (86.83 against 82.10), and it gains nothing from removing the boundary, so it keeps its gate.
 
-`qwen3-omni-30b-a3b-instruct-4bit` is open, and it is section 1 and section 3 disagreeing rather than either one failing. Under the VLM harness it measures 61% of mlx-vlm on M5 Max (61.21 against 99.72 tok/s) and 183% on M1 Ultra (47.25 against 25.89). Taken separately, the first reads as an M5 Max defect and the second as an mlxcel win, and neither is safe.
+`qwen3-omni-30b-a3b-instruct-4bit` is resolved and there was no defect, but it took four wrong turns to get there and each one is a distinct trap.
 
-Splitting the same four numbers by host says which side to doubt. mlxcel's own cross-host ratio is 1.30x, which is unremarkable. The baseline's is 3.85x, and across the 61 checkpoints both hosts measured under the 2026-09-07 VLM baseline that is the largest of the set by a margin of 1.65x over second place, while the four other 30B-A3B MoE checkpoints sit together at 2.0x to 2.2x. The anomalous quantity is a baseline reading, not an mlxcel one.
+It first read as 61% of mlx-vlm on M5 Max and 183% on M1 Ultra. Re-measured on both hosts at the current commit it is 157% and 179%, and mlxcel's cross-host ratio of 2.07x sits with the other 30B-A3B MoE checkpoints at 2.11x to 2.20x. Everything reconciles.
 
-Which baseline is wrong decides the conclusion, and the two answers are opposite. If M5 Max's 99.72 is right, M1 Ultra should read about 47 and its ratio is 100% rather than 183%, leaving a real M5 Max deficit. If M1 Ultra's 25.89 is right, M5 Max should read about 54 and its ratio is 113% rather than 61%, leaving no defect at all. A version gap is ruled out: both hosts' 2026-09-07 baselines record `mlx-vlm-0.6.17`, taken through the repo-local `.venv-mlxlm` rather than the system interpreter. M5 Max's baseline has been re-measured at 101.45 tok/s against the 99.72 on record, so that half reproduces; M1 Ultra's 25.89 has not been re-measured and is the remaining experiment. Until it is, do not quote either the 61% or the 183%.
+The four turns. **First**, the 61% came from mixing harnesses: an mlxcel VLM row compared against an mlx-lm text baseline. **Second**, corrected to VLM against VLM, it survived at 61% but the mlxcel row was from `a50ff440` while the baseline was measured that day, so a pre-fix runtime was being compared against a current reference. **Third**, the cross-host split correctly identified the baseline as the anomalous quantity, 3.85x against mlxcel's 1.30x and the largest of 61 VLM pairs, which pointed at the baseline when the stale mlxcel row was the actual cause. **Fourth**, the movement was attributed to `5287eb9a`, which the timeline supports and the diff does not: that commit touches `falcon_ocr_rope.rs`, `glm4v.rs` and `paddleocr_vl.rs`, and `qwen3_omni_moe.rs` is unchanged across the whole window. Which commit moved it is not established here.
+
+Two things are worth keeping. A ratio survived all four turns while no absolute value did: the same-host figure stayed near 180% on M1 Ultra across a full re-measurement of both sides (183% then 179%), while both absolute readings moved by more than 1.6x. And measuring mlxcel and the baseline back to back in one session is what settles a case like this, because comparing a stored row against a fresh one cannot separate a code change from machine state. On M5 Max the baseline reads 99.72, 101.45 and 101.23 across three occasions, so it is stable here; M1 Ultra's moved from 25.89 to 42.68 and that remains unexplained.
+
+### 2b. The VLM tables were a commit behind, and by how much
+
+Chasing `qwen3-omni` surfaced a larger problem than the checkpoint itself: M5 Max's VLM rows for the Qwen VL families were last measured on 2026-09-04 at `b2ff1eee`, which predates `2f4fbabb` ("restore the input dtype after multimodal RoPE"), `5287eb9a` and `f4ecc926`, all landed 2026-09-08. Seven rows were in that state. Re-measured at `12f9dbd0`:
+
+| Checkpoint | 2026-09-04 | 2026-09-09 | ratio |
+|---|--:|--:|--:|
+| `qwen3-vl-30b-a3b-instruct-4bit` | 58.01 | 158.43 | 2.73x |
+| `qwen3-vl-32b-instruct-4bit` | 19.00 | 28.25 | 1.49x |
+| `qwen2-vl-2b-instruct-4bit` | 248.86 | 336.69 | 1.35x |
+| `qwen3-vl-8b-instruct-4bit` | 81.68 | 109.52 | 1.34x |
+| `qwen3-vl-4b-instruct-4bit` | 136.19 | 177.18 | 1.30x |
+| `qwen3-vl-2b-instruct-4bit` | 273.88 | 338.10 | 1.23x |
+
+`qwen3-omni-30b-a3b-instruct-4bit` moves 2.59x on the same harness, and it and `qwen3-vl-30b-a3b` are the two largest movers and the two MoE VLMs in the set. That is consistent with a shared activation helper rather than a per-family rotary change, but no A/B was run, so which commit is responsible is not established.
+
+The scope was smaller than it first appeared and worth stating as a count rather than a worry. Of 95 M5 Max VLM rows, 20 belong to the families those three commits touch, and 13 of the 20 had already been re-measured on 2026-09-08. Seven had not. On M1 Ultra all ten rows in those families already sit at `5287eb9a` or later, so that host needed none. The earlier reading that "the whole M5 Max VLM table predates the fixes" was true of the sweep date and false of the table, because per-model re-measurements had already replaced most of the affected rows.
+
+What is not closed is the part the families cannot describe. `qwen3-omni-30b-a3b-instruct-4bit` routes through `src/vision/qwen3_omni_moe.rs`, which none of the three commits touch and which is unchanged across the whole window, yet it is one of the two largest movers. Scoping a re-measurement by family would therefore have skipped the row that moved most. The remaining candidate is shared rather than per-family, and 52 measured M1 Ultra VLM rows still carry a commit that predates it. Those are unverified rather than known stale, and re-measuring by commit rather than by family is the way to close them; that work is out of scope here.
 
 ### 3. Machine against machine
 
