@@ -748,7 +748,7 @@ Both sides measured on 2026-09-09: mlxcel at `f85898eb`, mlx-vlm 0.6.17 through 
 
 | | Value |
 |---|---|
-| Comparable pairs | 48 |
+| Comparable pairs | 47 |
 | Median | 105% |
 | Quartiles | 101% / 113% |
 | Range | 95% to 194% |
@@ -776,7 +776,7 @@ Slowest, none of which falls below 90%:
 
 Measuring the baseline in the same pass is what makes these numbers usable. Dividing the new mlxcel readings by the 2026-09-07 baseline instead puts `qwen3-omni-30b-a3b-instruct-4bit` at 298% and at the top of the table, because only one side had been re-swept. It reads 155% here.
 
-The pair count is 48 rather than the 67 both sides measured. The 19 dropped rows are prompt-length mismatches rather than failures, described under the cross-host comparison in [`model_tests.md`](model_tests.md); the same 19 drop on M1 Ultra with the same values, so they are a property of the two runtimes.
+The pair count is 47 rather than the 67 both sides measured, after excluding `qwen3-vl-reranker-2b`, which a generation harness does not measure meaningfully. The 19 dropped rows are prompt-length mismatches rather than failures, described under the cross-host comparison in [`model_tests.md`](model_tests.md); the same 19 drop on M1 Ultra with the same values, so they are a property of the two runtimes.
 
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 

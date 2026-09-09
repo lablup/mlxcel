@@ -140,7 +140,7 @@ M5 Max at `f85898eb`: 92 rows, 78 measured, 71 comparable against the previous r
 
 **Re-sweeping only the runtime inflates its own margins.** Dividing the new mlxcel numbers by the 2026-09-07 baseline puts `qwen3-omni` at 298% and at the top of the table, because only one side had moved and the 25.89 tok/s it divides by does not reproduce. The baseline was re-swept in the same pass. With both sides measured on 2026-09-09 the margin is 155% and the top of the table is `jina-vlm-mlx` at 194%.
 
-Same-day margins on M5 Max: 48 pairs, median 105%, quartiles 101 and 113, range 95 to 194%, nothing below 90%. The pair count is 48 rather than the 67 both sides measured, and the 19 dropped rows are not failures: the two runtimes turn the same image into different prompt lengths, so there is no like-for-like comparison to make. They fall into three kinds, and the counts are identical on both hosts, which makes this a property of the two runtimes rather than of either machine.
+Same-day margins on M5 Max: 47 pairs, median 105%, quartiles 101 and 113, range 95 to 194%, nothing below 90%. M1 Ultra reads 47 pairs at 108%. The pair count is 47 rather than the 67 both sides measured, and the 19 dropped rows are not failures: the two runtimes turn the same image into different prompt lengths, so there is no like-for-like comparison to make. They fall into three kinds, and the counts are identical on both hosts, which makes this a property of the two runtimes rather than of either machine.
 
 | Kind | Rows | Shape |
 |---|--:|---|

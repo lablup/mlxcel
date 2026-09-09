@@ -208,7 +208,7 @@ A plain Linux build has no CUDA feature and runs on the CPU, which is not a vali
 
 ## Performance
 
-Measured on v0.7.0-beta.1 against same-host, same-day runs of `mlx-lm` 0.31.3 and `mlx-vlm` 0.6.17. Text is the 2026-09-06 sweeps at a fixed pp512/tg128 shape; VLM is the 2026-09-09 sweeps, where both the runtime and the reference were re-measured in one pass. These are medians over a roster, not guarantees for an individual checkpoint.
+Measured on v0.7.0-beta.1 against same-host, same-day runs of `mlx-lm` 0.31.3 and `mlx-vlm` 0.6.17. Text is the 2026-09-06 sweeps at a fixed pp512/tg128 shape; VLM is the 2026-09-09 sweeps, where both the runtime and the reference were re-measured in one pass; `qwen3-vl-reranker-2b` is excluded from the VLM rows because a reranker driven through a generation harness is not measuring the VLM path. These are medians over a roster, not guarantees for an individual checkpoint.
 
 | Workload | Host | Reference | Result |
 |----------|------|-----------|-------:|
@@ -216,8 +216,8 @@ Measured on v0.7.0-beta.1 against same-host, same-day runs of `mlx-lm` 0.31.3 an
 | Text decode, 110 pairs | M1 Ultra | `mlx-lm` | **100% median** (quartiles 99 / 105) |
 | Text prefill, 60 pairs | M5 Max 128 GB | `mlx-lm` median | **1.09x** |
 | Text prefill, 110 pairs | M1 Ultra | `mlx-lm` median | **0.94x** |
-| VLM decode, 48 pairs | M5 Max 128 GB | `mlx-vlm` | **105% median** (quartiles 101 / 113, none below 90%) |
-| VLM decode, 48 pairs | M1 Ultra | `mlx-vlm` | **107% median** (quartiles 101 / 124, none below 90%) |
+| VLM decode, 47 pairs | M5 Max 128 GB | `mlx-vlm` | **105% median** (quartiles 101 / 113, none below 90%) |
+| VLM decode, 47 pairs | M1 Ultra | `mlx-vlm` | **108% median** (quartiles 101 / 124, none below 90%) |
 
 Two of these numbers replace larger ones and the reason is the measurement condition rather than a regression. The 2026-05-19 campaign on mlxcel 0.0.28 reported text prefill at 2.78x on M5 Max and 1.79x on M1 Ultra. Those ran on a short natural prompt whose token count differed between the two runtimes, and `prefill_tok_s` is prompt tokens divided by prefill time, so a difference in tokenization lands directly in the ratio. At a synthetic 512-token prompt that both runtimes receive identically, prefill is close to parity. The older figures should not be quoted for the current release.
 
