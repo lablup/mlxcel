@@ -13,12 +13,27 @@ import argparse, base64, csv, json, os, signal, statistics, subprocess, sys, tim
 from pathlib import Path
 
 HOME = Path.home()
-# The benchmark store, which is `models/` and not the downloader cache. The
-# roster used to name `~/.cache/mlxcel/models` paths; when the two stores were
-# consolidated the cache was drained and all twenty entries stopped resolving,
-# so the sweep printed twenty `[skip]` lines and measured nothing without
-# failing. `MLXCEL_MODEL_STORE` overrides it for a host that keeps them apart.
-STORE = Path(os.environ.get("MLXCEL_MODEL_STORE", "models"))
+# The benchmark store. The roster used to name `~/.cache/mlxcel/models` paths;
+# when the two stores were consolidated the cache was drained and all twenty
+# entries stopped resolving, and a missing path is a `[skip]` rather than an
+# error, so the sweep ran to completion and wrote an empty CSV.
+#
+# The root differs per host: `models/` holds the checkpoints directly on one
+# machine and `models/mlx/` does on another, so a fixed default silently
+# produces twenty skips on whichever host it does not match. Probe instead, and
+# let `MLXCEL_MODEL_STORE` override when a host has neither shape.
+def _default_store():
+    override = os.environ.get("MLXCEL_MODEL_STORE")
+    if override:
+        return Path(override)
+    for candidate in (Path("models"), Path("models/mlx")):
+        # A store is the directory that actually holds checkpoints, not one
+        # that merely exists: `models/` is present on both hosts.
+        if (candidate / "all-minilm-l6-v2").is_dir():
+            return candidate
+    return Path("models")
+
+STORE = _default_store()
 IMAGE = Path("tests/fixtures/test_image.png").resolve()
 
 SHORT = "The quick brown fox jumps over the lazy dog near the river bank at dawn."
