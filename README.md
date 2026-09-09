@@ -208,16 +208,20 @@ A plain Linux build has no CUDA feature and runs on the CPU, which is not a vali
 
 ## Performance
 
-The last full same-host reference campaign against `mlx-lm` and `mlx-vlm` ran on mlxcel 0.0.28 (2026-05-19) and has not been repeated since. These are aggregate results from that campaign, not guarantees for an individual checkpoint, and not current-release figures:
+Measured on v0.7.0-beta.1 against same-host, same-day runs of `mlx-lm` 0.31.3 and `mlx-vlm` 0.6.17. Text is the 2026-09-06 sweeps at a fixed pp512/tg128 shape; VLM is the 2026-09-09 sweeps, where both the runtime and the reference were re-measured in one pass. These are medians over a roster, not guarantees for an individual checkpoint.
 
 | Workload | Host | Reference | Result |
 |----------|------|-----------|-------:|
-| Text prefill, 67 comparable pairs | M5 Max 128 GB | `mlx-lm` median | **2.78x** |
-| Text prefill, 74 comparable pairs | M1 Ultra | `mlx-lm` median | **1.79x** |
-| Text decode, 67 comparable pairs | M5 Max 128 GB | `mlx-lm` | **99% average, 100% median** |
-| VLM decode, 24 comparable pairs | M5 Max 128 GB | `mlx-vlm` | **98% average, 98% median** |
+| Text decode, 60 pairs | M5 Max 128 GB | `mlx-lm` | **99% median** (quartiles 99 / 101) |
+| Text decode, 110 pairs | M1 Ultra | `mlx-lm` | **100% median** (quartiles 99 / 105) |
+| Text prefill, 60 pairs | M5 Max 128 GB | `mlx-lm` median | **1.09x** |
+| Text prefill, 110 pairs | M1 Ultra | `mlx-lm` median | **0.94x** |
+| VLM decode, 48 pairs | M5 Max 128 GB | `mlx-vlm` | **105% median** (quartiles 101 / 113, none below 90%) |
+| VLM decode, 48 pairs | M1 Ultra | `mlx-vlm` | **107% median** (quartiles 101 / 124, none below 90%) |
 
-Treat the prefill row above with particular care. `prefill_tok_s` is prompt tokens divided by prefill time, so it moves whenever the prompt length moves, and the chat-template rendering has changed on the mlxcel side since that campaign: the Llama family's rendering of the standard test prompt is 42 tokens on 0.6.0 against 98 previously, which matches the canonical template tokenization exactly. The prefill ratio therefore needs a fresh same-host run before it is quoted for the current release.
+Two of these numbers replace larger ones and the reason is the measurement condition rather than a regression. The 2026-05-19 campaign on mlxcel 0.0.28 reported text prefill at 2.78x on M5 Max and 1.79x on M1 Ultra. Those ran on a short natural prompt whose token count differed between the two runtimes, and `prefill_tok_s` is prompt tokens divided by prefill time, so a difference in tokenization lands directly in the ratio. At a synthetic 512-token prompt that both runtimes receive identically, prefill is close to parity. The older figures should not be quoted for the current release.
+
+The VLM figures did move, and unevenly. Re-sweeping that table at one commit left the median row unchanged at 1.00x against its previous reading, with 9 of 71 rows moving more than 10%: `mistral-small-4-119b-2603-4bit` 5.30x, `moondream2` 4.19x, `qwen3-vl-30b-a3b` 2.61x, `qwen3-omni-30b-a3b` 2.57x, then five between 1.16x and 1.46x. The gains come from dtype fixes that reach specific paths, so the aggregate moved from 98% to 105% while most individual rows stayed where they were. Read the per-model tables rather than the median if a particular checkpoint matters.
 
 Per-host sweeps are more current than the combined report. M5 Max and M1 Ultra are both measured on v0.7.0-beta.1 (2026-09-06 through 2026-09-09) at the same MLX pin and the same pp512/tg128 shape, so cross-host ratios between those two are taken on one version. Coverage differs by host rather than version: M5 Max carries text, VLM, speculative decoding, batched serving and the embedding and rerank ladder, while M1 Ultra carries text, VLM, speculative decoding and embeddings. GB10 is still on v0.4.0-rc.1 and the older measurement shape, so any ratio involving it mixes versions. Focused reports cover paged attention, MoE, KV compression, embeddings, and speculative decoding. Read [Benchmark results](docs/benchmark_results/model_tests.md), the [benchmark report](docs/benchmark_results/benchmark-report.md), and the [methodology](docs/benchmarks.md) before comparing hosts or planning capacity.
 
