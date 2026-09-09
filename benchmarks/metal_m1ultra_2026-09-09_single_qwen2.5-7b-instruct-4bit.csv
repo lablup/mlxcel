@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+qwen2.5-7b-instruct-4bit,models/mlx/qwen2.5-7b-instruct-4bit,512,128,649.71,788.04,1203.74,106.34,2026-09-09,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,ab788d17,9a795735
