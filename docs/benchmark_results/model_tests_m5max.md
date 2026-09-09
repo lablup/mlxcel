@@ -16,7 +16,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **Test Prompt** | Text: a deterministic synthetic 512-token prompt (`--prompt-tokens 512`). VLM: "What is in this image?" plus `tests/fixtures/test_image.png`, at the checkpoint's own image token count. |
 | **Max Tokens** | 128, with every end-of-generation token suppressed (`--ignore-eos`), so every row spends the full budget |
 | **Test Date** | 2026-09-09 partial pass: 21 text checkpoints new to this host (see "Newly measured checkpoints"), at `0accedd9`. Prior: 2026-09-06 full re-benchmark (text, VLM, speculative, batched serving, embeddings) on the pp512/tg128 condition; prior: 2026-09-03/04 full text + VLM sweep (0.6.0), 2026-07-11/12 (0.4.0-rc.1), 2026-06-15 (0.2.1), 2026-05-27 (0.1.0) |
-| **Benchmark Status** | Full re-benchmark on mlxcel 0.7.0-beta.1. Text: 178 directories via `bench_decode.sh all`, 149 with decode numbers. VLM: `all --vlm`, 71 with decode numbers. Both used `--cooldown 30 --big-cooldown 30`, which remain required on this host, and `BENCH_MEM_OVERHEAD_FACTOR=1.209` (a 90 GB weight budget). Time Machine was confirmed idle for the whole campaign. **The measurement condition changed this round and the prefill column is not comparable to any earlier sweep**; see "Measurement condition: pp512/tg128" below before reading any delta. The `vs M1 Ultra` column is populated again as of 2026-09-07: M1 Ultra was re-swept at pp512/tg128 on the same mlxcel version and MLX pin, so the ratio is a hardware comparison rather than one spanning a version and a condition change. It is M5 Max decode over M1 Ultra decode, filled where both hosts measured the same checkpoint at prompt lengths agreeing within 10%. `n/a` means the pair could not be formed, which is not the same as the checkpoint being absent. An earlier revision of this line named nine models as "not present on M1 Ultra" and all nine are in fact present there; eight already carry measured rows in CSVs committed to this repository. The cause was the scan, not the store: M1 Ultra keeps two store roots, `models/mlx/` and `models/mlx-big/` for checkpoints above 120 GB, and a scan of the first alone reports the second as absent. `dots.llm1.inst-mixed-4-6bit` is the case that shows it plainly, since `benchmarks/metal_m1ultra_2026-09-08_single_dots.llm1.inst-mixed-4-6bit.csv` was already committed while this document claimed the checkpoint did not exist. The eight now read M5 Max over M1 Ultra as `glm-4.1v-9b-thinking-4bit` 1.40x, `glm-4.5v-4bit` 1.67x, `kimi-vl-a3b-thinking-4bit` 1.68x, `llama-3.2-11b-vision-instruct-4bit` 1.08x, `moondream2` 1.13x, `smolvlm-instruct-bf16` 1.05x, `dots.llm1.inst-mixed-4-6bit` 1.72x and `gemma-2-9b-8bit` 1.00x on the text harness. Only `minimax-m2-3bit` is still unpaired, and it is present at 93 GB in `models/mlx-big/` and merely unmeasured. Before writing `n/a` into this column, check the name against `benchmarks/` rather than against a directory listing. Rows are matched by checkpoint basename, and this document's display names do not always equal it; `scripts/checkpoint_fingerprint.py` and `benchmarks/fingerprints_m1ultra_2026-09-07.json` exist so that pairing can be checked against the weights rather than the name. The `mlxcel vs mlx-lm` / `vs mlx-vlm` percentages further down still carry the 2026-05-18 Python baselines and are likewise on the old condition. |
+| **Benchmark Status** | Full re-benchmark on mlxcel 0.7.0-beta.1. Text: 178 directories via `bench_decode.sh all`, 149 with decode numbers. VLM: `all --vlm`, re-swept in full on 2026-09-09 at `f85898eb`, 92 rows and 78 with decode numbers. Both used `--cooldown 30 --big-cooldown 30`, which remain required on this host, and `BENCH_MEM_OVERHEAD_FACTOR=1.209` (a 90 GB weight budget). Time Machine was confirmed idle for the whole campaign. **The measurement condition changed this round and the prefill column is not comparable to any earlier sweep**; see "Measurement condition: pp512/tg128" below before reading any delta. The `vs M1 Ultra` column is taken against M1 Ultra's own 2026-09-09 re-sweep at the same commit, so the ratio compares two tables that agree on when they were measured rather than one spanning a version, a condition change or a fix. It is M5 Max decode over M1 Ultra decode, filled where both hosts measured the same checkpoint at prompt lengths agreeing within 10%. `n/a` means the pair could not be formed, which is not the same as the checkpoint being absent. An earlier revision of this line named nine models as "not present on M1 Ultra" and all nine are in fact present there; eight already carry measured rows in CSVs committed to this repository. The cause was the scan, not the store: M1 Ultra keeps two store roots, `models/mlx/` and `models/mlx-big/` for checkpoints above 120 GB, and a scan of the first alone reports the second as absent. `dots.llm1.inst-mixed-4-6bit` is the case that shows it plainly, since `benchmarks/metal_m1ultra_2026-09-08_single_dots.llm1.inst-mixed-4-6bit.csv` was already committed while this document claimed the checkpoint did not exist. The eight now read M5 Max over M1 Ultra as `glm-4.1v-9b-thinking-4bit` 1.40x, `glm-4.5v-4bit` 1.67x, `kimi-vl-a3b-thinking-4bit` 1.68x, `llama-3.2-11b-vision-instruct-4bit` 1.08x, `moondream2` 1.13x, `smolvlm-instruct-bf16` 1.05x, `dots.llm1.inst-mixed-4-6bit` 1.72x and `gemma-2-9b-8bit` 1.00x on the text harness. Only `minimax-m2-3bit` is still unpaired, and it is present at 93 GB in `models/mlx-big/` and merely unmeasured. After the 2026-09-09 re-sweep of both hosts the VLM table has no `n/a` entries at all. Before writing `n/a` into this column, check the name against `benchmarks/` rather than against a directory listing. Rows are matched by checkpoint basename, and this document's display names do not always equal it; `scripts/checkpoint_fingerprint.py` and `benchmarks/fingerprints_m1ultra_2026-09-07.json` exist so that pairing can be checked against the weights rather than the name. The `mlxcel vs mlx-lm` / `vs mlx-vlm` percentages further down still carry the 2026-05-18 Python baselines and are likewise on the old condition. |
 
 ### Which version each CSV column records
 
@@ -486,68 +486,67 @@ suppressed. Unlike the text tables, prefill here runs at each checkpoint's own
 image token count (32 to 1032 tokens across the roster), which is inherent to
 VLM prefill and why no single `--prompt-tokens` value applies.
 
-Every VLM row that moved more than 10% against 2026-09-04 moved *up*, at an
-identical prompt token count, because the old rows stopped at EOS after 2 to 28
-tokens where these run the full 128: `qwen3-omni-30b-a3b-instruct-4bit` +57%
-(2 tokens then), `paligemma2-3b-6bit` +44% (2), `deepseek-ocr-2-4bit` +65% (5),
-`moondream2` +31% (4). 81% of the 69 shared models land within 10%, median
-1.035.
+Every row below was measured on 2026-09-09 at `f85898eb`, one commit for the whole table. The previous version of this table mixed readings taken between 2026-09-04 and 2026-09-08, a span containing three dtype fixes, which is how a stale row came to be read as a hardware deficit. Against those readings the sweep is flat: 71 comparable rows, median 1.00x, quartiles 1.00 and 1.01, with nine rows moving more than 10% and all nine moving up.
+
+The `vs M1 Ultra` column is M5 Max decode over M1 Ultra decode, and M1 Ultra was re-swept the same day at the same commit, so the ratio is taken between two tables that agree on when they were measured. Every row pairs; there are no `n/a` entries left.
+
+`minicpm-v-4.6-bf16` and `-mxfp4` are the exception to "compared at an identical prompt token count". Their image now renders to 80 tokens against 32 before, because `94323c20` upscales an image below the scale resolution and the fixture is 224x224. That is an intended behavior change. Both rows still read within 1% of their old decode, which says decode is close to indifferent to prompt length at this scale rather than that the change did nothing.
 
 | Model | Test Model | Status | Prefill | Decode | vs M1 Ultra | Notes |
 |-------|------------|--------|---------|--------|-------------|-------|
-| aya-vision-8b | aya-vision-8b | ✅ | 2636.11 | 112.10 | **1.02x** |  |
-| bunny-llama3-8b | bunny-llama3-8b-4bit | ✅ | 2842.91 | 114.89 | **1.13x** |  |
-| gemma3 (4B) | gemma3-4b-4bit | ✅ | 564.65 | 177.96 | **1.68x** | same checkpoint as `gemma-3-4b-it-4bit`, measured under that name (dedup #1615) |
-| gemma3n (E2B 4bit) | gemma3n-e2b-4bit | ✅ | 2973.46 | 157.54 | **1.86x** |  |
-| gemma3n (E4B 4bit) | gemma3n-e4b-4bit | ✅ | 2228.35 | 109.94 | **1.69x** |  |
-| gemma3n (E4B bf16) | gemma3n-e4b-bf16 | ✅ | 2164.95 | 40.06 | **1.14x** | bf16→f16 conversion path |
-| gemma4 (26B MoE) | gemma-4-26b-a4b-it-4bit | ✅ | 902.47 | 150.31 | **1.91x** |  |
-| gemma4 (31B) | gemma-4-31b-4bit | ✅ | 432.98 | 28.13 | **1.41x** |  |
-| gemma4 (31B IT) | gemma-4-31b-it-4bit | ✅ | 442.50 | 28.14 | **1.42x** |  |
-| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 2841.78 | 223.27 | **1.98x** |  |
-| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 2644.07 | 148.93 | **1.54x** |  |
-| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 2067.23 | 137.61 | **1.73x** |  |
-| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 1927.85 | 85.88 | **1.31x** |  |
-| internvl3 (1B) | internvl3-1b | ✅ | 6451.25 | 645.33 | **1.84x** |  |
-| llama4 (Scout) | llama-4-scout-17b-4bit | ✅ | 396.92 | 48.35 | **1.33x** |  |
-| llava-1.5-7b | llava-1.5-7b-4bit | ✅ | 3188.79 | 116.95 | **1.11x** |  |
-| llava-interleave | llava-interleave-qwen-0.5b-bf16 | ✅ | 16088.92 | 351.16 | **1.30x** |  |
-| llava-next | llava-next-mistral-7b-4bit | ✅ | 2965.97 | 119.84 | **1.10x** |  |
-| ministral3 | ministral-3b-4bit | ✅ | 5446.72 | 224.49 | **1.50x** |  |
-| mistral-small (3.1 24B) | mistral-small-3.1-24b-4bit | ✅ | 1042.62 | 41.32 | **1.30x** |  |
-| molmo-7b | molmo-7b | ✅ | 2341.68 | 123.58 | **1.12x** | mlx-vlm baseline is a 1-token anomaly |
-| molmo2 (4B) | molmo2-4b | ✅ | 2465.99 | 103.02 | **1.12x** |  |
-| paligemma2 (3B 6-bit) | paligemma2-3b-6bit | ✅ | 5232.20 | 139.53 | **1.06x** |  |
-| phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 3731.31 | 185.16 | **1.34x** |  |
-| pixtral (12B) | pixtral-12b-4bit | ✅ | 1595.85 | 75.68 | **1.09x** | intermittent slow VLM decode reads (~20 tok/s) seen on M5, not consistently reproducible (see Known Issues) |
-| qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2493.83 | 286.66 | **1.58x** | EOS-terminate |
-| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1678.89 | 170.64 | **1.41x** | re-downloaded (prior FAIL was a corrupt checkpoint) |
-| qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 13754.52 | 350.91 | **1.88x** |  |
-| qwen3-vl (4B) | qwen3-vl-4b-4bit | ✅ | 1191.84 | 146.99 | **1.32x** | NEW (6-13) |
-| qwen3-vl (8B) | qwen3-vl-8b-4bit | ✅ | 1009.82 | 84.66 | **1.15x** | NEW (6-13) |
-| qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 549.53 | 60.73 | **1.29x** |  |
-| qwen3-vl (32B) | qwen3-vl-32b-4bit | ✅ | 298.38 | 19.34 | **1.00x** |  |
-| gemma4 (12B) | gemma-4-12b-it-4bit | ✅ | 1416.44 | 45.45 | **1.19x** | NEW (6-13) |
-| minicpm-v (4.6) | minicpm-v-4.6-bf16 | ✅ | 933.30 | 272.43 | shape | NEW (6-13) |
-| nemotron-omni | nemotron-3-nano-omni-30b-a3b-reasoning-4bit | ✅ | 646.27 | 181.31 | **1.88x** | NEW (6-14) |
-| youtu-vl | youtu-vl-4b-instruct | ✅ | 518.03 | 48.06 | **1.04x** | NEW (6-13) |
-| deepseek-ocr | deepseek-ocr-4bit | ✅ | 1610.78 | 659.63 | **2.27x** | NEW (0.4.0-rc.1) |
-| deepseek-ocr-2 | deepseek-ocr-2-4bit | ✅ | 1553.99 | 631.67 | **2.25x** | NEW (0.4.0-rc.1) |
-| deepseek-vl2 | deepseek-vl2-small-4bit | ✅ | 860.61 | 207.02 | **1.86x** | NEW (0.4.0-rc.1) |
-| fastvlm | fastvlm-0.5b-bf16 | ✅ | 2669.19 | 392.97 | **1.38x** | NEW (0.4.0-rc.1) |
-| glm-4.1v | glm-4.1v-9b-thinking-4bit | ✅ | 1998.97 | 67.10 | **1.21x** | NEW (0.4.0-rc.1) |
-| glm-4.5v | glm-4.5v-4bit | ✅ | 217.16 | 17.76 | **0.98x** | NEW (0.4.0-rc.1) |
-| granite4-vision (3B) | granite-4.0-3b-vision-4bit | ✅ | 2635.07 | 205.31 | **1.57x** | NEW (0.4.0-rc.1) |
-| granite-vision (2B) | granite-vision-3.2-2b-4bit | ✅ | 6192.79 | 233.33 | **1.78x** | NEW (0.4.0-rc.1) |
-| idefics2 | idefics2-8b-4bit | ✅ | 913.68 | 121.44 | **1.06x** | NEW (0.4.0-rc.1) |
-| idefics3 | idefics3-8b-llama3-4bit | ✅ | 2095.94 | 117.62 | **1.09x** | NEW (0.4.0-rc.1) |
-| kimi-vl | kimi-vl-a3b-thinking-4bit | ✅ | 754.18 | 173.45 | **1.73x** | A3B MoE; NEW (0.4.0-rc.1) |
-| lfm2-vl | lfm2-vl-450m-4bit | ✅ | 5228.47 | 1026.21 | **1.66x** | NEW (0.4.0-rc.1) |
-| llama-3.2-vision (11B) | llama-3.2-11b-vision-instruct-4bit | ✅ | 14.23 | 72.57 | **1.11x** | NEW (0.4.0-rc.1) |
-| moondream2 | moondream2 | ✅ | 52.90 | 41.36 | **0.93x** | NEW (0.4.0-rc.1) |
-| paddleocr-vl | paddleocr-vl-bfloat16 | ✅ | 3313.25 | 155.46 | **1.15x** | NEW (0.4.0-rc.1) |
-| smolvlm | smolvlm-instruct-bf16 | ✅ | 2109.44 | 130.30 | **0.95x** | NEW (0.4.0-rc.1) |
-| qwen3-omni (30B) | qwen3-omni-30b-a3b-instruct-4bit | ✅ | 581.20 | 61.21 | **1.30x** | NEW (0.4.0-rc.1) |
+| aya-vision-8b | aya-vision-8b | ✅ | 2788.19 | 112.41 | **1.03x** |  |
+| bunny-llama3-8b | bunny-llama3-8b-4bit | ✅ | 2848.79 | 114.97 | **1.15x** |  |
+| gemma3 (4B) | gemma3-4b-4bit | ✅ | 836.34 | 180.23 | **1.67x** | same checkpoint as `gemma-3-4b-it-4bit`, measured under that name (dedup #1615) |
+| gemma3n (E2B 4bit) | gemma3n-e2b-4bit | ✅ | 3204.93 | 158.17 | **1.88x** |  |
+| gemma3n (E4B 4bit) | gemma3n-e4b-4bit | ✅ | 2378.20 | 110.33 | **1.72x** |  |
+| gemma3n (E4B bf16) | gemma3n-e4b-bf16 | ✅ | 2428.39 | 49.75 | **1.20x** | bf16→f16 conversion path |
+| gemma4 (26B MoE) | gemma-4-26b-a4b-it-4bit | ✅ | 901.21 | 150.35 | **1.94x** |  |
+| gemma4 (31B) | gemma-4-31b-4bit | ✅ | 433.37 | 28.26 | **1.45x** |  |
+| gemma4 (31B IT) | gemma-4-31b-it-4bit | ✅ | 445.74 | 28.20 | **1.44x** |  |
+| gemma4 (E2B 4bit) | gemma-4-e2b-it-4bit | ✅ | 2843.57 | 224.39 | **2.01x** |  |
+| gemma4 (E2B 8bit) | gemma-4-e2b-it-8bit | ✅ | 2656.47 | 149.02 | **1.54x** |  |
+| gemma4 (E4B 4bit) | gemma-4-e4b-it-4bit | ✅ | 2103.32 | 138.21 | **1.77x** |  |
+| gemma4 (E4B 8bit) | gemma-4-e4b-it-8bit | ✅ | 1929.22 | 85.84 | **1.35x** |  |
+| internvl3 (1B) | internvl3-1b | ✅ | 8009.79 | 647.10 | **1.89x** |  |
+| llama4 (Scout) | llama-4-scout-17b-4bit | ✅ | 407.15 | 48.54 | **1.34x** |  |
+| llava-1.5-7b | llava-1.5-7b-4bit | ✅ | 3187.11 | 117.41 | **1.12x** |  |
+| llava-interleave | llava-interleave-qwen-0.5b-bf16 | ✅ | 15999.13 | 353.06 | **1.33x** |  |
+| llava-next | llava-next-mistral-7b-4bit | ✅ | 2975.48 | 120.11 | **1.12x** |  |
+| ministral3 | ministral-3b-4bit | ✅ | 5386.92 | 225.36 | **1.54x** |  |
+| mistral-small (3.1 24B) | mistral-small-3.1-24b-4bit | ✅ | 1045.82 | 41.43 | **1.32x** |  |
+| molmo-7b | molmo-7b | ✅ | 2357.04 | 124.15 | **1.14x** | mlx-vlm baseline is a 1-token anomaly |
+| molmo2 (4B) | molmo2-4b | ✅ | 2474.42 | 103.71 | **1.15x** |  |
+| paligemma2 (3B 6-bit) | paligemma2-3b-6bit | ✅ | 5573.06 | 169.00 | **1.31x** |  |
+| phi-3.5-vision | phi-3.5-vision-4bit | ✅ | 3935.24 | 185.64 | **1.38x** |  |
+| pixtral (12B) | pixtral-12b-4bit | ✅ | 1596.69 | 75.96 | **1.11x** | intermittent slow VLM decode reads (~20 tok/s) seen on M5, not consistently reproducible (see Known Issues) |
+| qwen2-vl (2B) | qwen2-vl-2b-4bit | ✅ | 2674.27 | 338.48 | **1.61x** | EOS-terminate |
+| qwen2.5-vl (3B) | qwen2.5-vl-3b-4bit | ✅ | 1771.67 | 207.31 | **1.47x** | re-downloaded (prior FAIL was a corrupt checkpoint) |
+| qwen3-vl (2B) | qwen3-vl-2b-4bit | ✅ | 2306.64 | 337.83 | **1.73x** |  |
+| qwen3-vl (4B) | qwen3-vl-4b-4bit | ✅ | 1304.99 | 177.09 | **1.55x** | NEW (6-13) |
+| qwen3-vl (8B) | qwen3-vl-8b-4bit | ✅ | 1051.21 | 109.63 | **1.39x** | NEW (6-13) |
+| qwen3-vl (30B MoE) | qwen3-vl-30b-a3b-4bit | ✅ | 730.10 | 158.38 | **2.04x** |  |
+| qwen3-vl (32B) | qwen3-vl-32b-4bit | ✅ | 337.88 | 28.28 | **1.32x** |  |
+| gemma4 (12B) | gemma-4-12b-it-4bit | ✅ | 1411.63 | 45.65 | **1.21x** | NEW (6-13) |
+| minicpm-v (4.6) | minicpm-v-4.6-bf16 | ✅ | 2457.04 | 272.67 | **1.30x** | NEW (6-13) |
+| nemotron-omni | nemotron-3-nano-omni-30b-a3b-reasoning-4bit | ✅ | 644.78 | 181.16 | **1.89x** | NEW (6-14) |
+| youtu-vl | youtu-vl-4b-instruct | ✅ | 520.04 | 48.21 | **1.05x** | NEW (6-13) |
+| deepseek-ocr | deepseek-ocr-4bit | ✅ | 1621.67 | 613.56 | **2.25x** | NEW (0.4.0-rc.1) |
+| deepseek-ocr-2 | deepseek-ocr-2-4bit | ✅ | 1563.76 | 616.38 | **2.33x** | NEW (0.4.0-rc.1) |
+| deepseek-vl2 | deepseek-vl2-small-4bit | ✅ | 867.06 | 200.98 | **1.89x** | NEW (0.4.0-rc.1) |
+| fastvlm | fastvlm-0.5b-bf16 | ✅ | 2633.15 | 394.12 | **1.43x** | NEW (0.4.0-rc.1) |
+| glm-4.1v | glm-4.1v-9b-thinking-4bit | ✅ | 1031.32 | 86.90 | **1.40x** | NEW (0.4.0-rc.1) |
+| glm-4.5v | glm-4.5v-4bit | ✅ | 305.98 | 56.61 | **1.69x** | NEW (0.4.0-rc.1) |
+| granite4-vision (3B) | granite-4.0-3b-vision-4bit | ✅ | 2672.84 | 206.28 | **1.60x** | NEW (0.4.0-rc.1) |
+| granite-vision (2B) | granite-vision-3.2-2b-4bit | ✅ | 6632.19 | 234.12 | **1.83x** | NEW (0.4.0-rc.1) |
+| idefics2 | idefics2-8b-4bit | ✅ | 921.58 | 122.00 | **1.08x** | NEW (0.4.0-rc.1) |
+| idefics3 | idefics3-8b-llama3-4bit | ✅ | 2089.31 | 117.49 | **1.10x** | NEW (0.4.0-rc.1) |
+| kimi-vl | kimi-vl-a3b-thinking-4bit | ✅ | 755.52 | 172.37 | **1.81x** | A3B MoE; NEW (0.4.0-rc.1) |
+| lfm2-vl | lfm2-vl-450m-4bit | ✅ | 4989.21 | 1015.08 | **1.69x** | NEW (0.4.0-rc.1) |
+| llama-3.2-vision (11B) | llama-3.2-11b-vision-instruct-4bit | ✅ | 16.35 | 94.92 | **1.09x** | NEW (0.4.0-rc.1) |
+| moondream2 | moondream2 | ✅ | 76.43 | 173.36 | **1.20x** | NEW (0.4.0-rc.1) |
+| paddleocr-vl | paddleocr-vl-bfloat16 | ✅ | 3615.80 | 456.24 | **1.39x** | NEW (0.4.0-rc.1) |
+| smolvlm | smolvlm-instruct-bf16 | ✅ | 2146.77 | 127.07 | **0.92x** | NEW (0.4.0-rc.1) |
+| qwen3-omni (30B) | qwen3-omni-30b-a3b-instruct-4bit | ✅ | 784.71 | 157.12 | **2.04x** | NEW (0.4.0-rc.1) |
 
 ## Condition changes since 0.4.0-rc.1
 
