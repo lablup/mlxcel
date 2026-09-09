@@ -22,6 +22,7 @@ class InsertApacheHeaderTests(unittest.TestCase):
         self.assertTrue(should_process_path(Path("src/lib.rs")))
         self.assertTrue(should_process_path(Path("examples/demo.cpp")))
         self.assertTrue(should_process_path(Path("tests/sample.h")))
+        self.assertTrue(should_process_path(Path("benches/audio_fft.rs")))
         self.assertFalse(should_process_path(Path("references/upstream.rs")))
         self.assertFalse(should_process_path(Path("src/lib/mlxcel-core/target/tmp.rs")))
         self.assertFalse(should_process_path(Path("scripts/insert_apache_header.py")))

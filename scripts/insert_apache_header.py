@@ -17,7 +17,7 @@ PROJECT_HEADER = """\
 
 """
 PROJECT_COPYRIGHT_LINE = "// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin"
-TARGET_ROOTS = ("src", "examples", "tests")
+TARGET_ROOTS = ("src", "examples", "tests", "benches")
 ALLOWED_SUFFIXES = {".rs", ".cpp", ".h"}
 SKIP_DIR_NAMES = {".git", "target", "__pycache__"}
 HEADER_SCAN_LINE_COUNT = 40
