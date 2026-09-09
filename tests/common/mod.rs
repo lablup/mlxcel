@@ -1,23 +1,55 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// Where a real-model test finds its checkpoint.
+///
+/// Every caller treats a missing directory as "skip this test", so pointing at
+/// the wrong root does not fail: it turns the test into a no-op that still
+/// reports `ok`. That is what happened when the store was consolidated under
+/// `models/mlx/`, with checkpoints over 120GB split into `models/mlx-big/`.
+/// Measured on the M1 Ultra tree afterwards, none of the 30 distinct names used
+/// across `tests/` resolved under a bare `models/<name>`, so every real-model
+/// integration test in the repository was skipping while the suite stayed
+/// green. `tests/mamba2_hybrid_finite.rs` was among them, which is how a NaN
+/// guard written in #1718 came to cover nothing on either machine.
+///
+/// The roots are searched in order and the first hit wins. Set
+/// `MLXCEL_REQUIRE_MODELS=1` to make a name that resolves nowhere panic instead
+/// of returning a path that does not exist, so a local gate run cannot pass by
+/// skipping everything. CI has no checkpoints and leaves the variable unset,
+/// keeping the skip behaviour there.
 #[allow(dead_code)]
 pub fn repo_model_dir(name: &str) -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let primary = manifest_dir.join("models").join(name);
-    if primary.exists() {
-        return primary;
+    let mut roots: Vec<PathBuf> = ["models", "models/mlx", "models/mlx-big"]
+        .iter()
+        .map(|r| manifest_dir.join(r))
+        .collect();
+    if let Some(parent) = manifest_dir.parent() {
+        roots.push(parent.join("mlxcel-internal").join("models"));
+        roots.push(parent.join("mlxcel-internal").join("models").join("mlx"));
     }
 
-    let shared_checkout = manifest_dir
-        .parent()
-        .map(|parent| parent.join("mlxcel-internal").join("models").join(name))
-        .unwrap_or(primary.clone());
-    if shared_checkout.exists() {
-        return shared_checkout;
+    for root in &roots {
+        let candidate = root.join(name);
+        if candidate.exists() {
+            return candidate;
+        }
     }
 
-    primary
+    if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+        panic!(
+            "MLXCEL_REQUIRE_MODELS is set and checkpoint {name:?} resolves nowhere. Tried: {}",
+            roots
+                .iter()
+                .map(|r| r.join(name).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // Unchanged fallback: the caller's `exists()` check turns this into a skip.
+    manifest_dir.join("models").join(name)
 }
 
 /// Candidate locations for one of the crate's binaries, most authoritative
