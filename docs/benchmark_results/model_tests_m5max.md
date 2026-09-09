@@ -742,6 +742,42 @@ serializes their slots, so a B-ladder over them measures nothing.
 
 **Attribution was done on M1 Ultra, and the M5 Max re-run is pending.** Issue #1616 read these rows as the MoE decode path declining the fused kernel at B>=2. Profiling on M1 Ultra found a different cause: `Qwen3MoeModel` never overrode `forward_batched`, so every batching family without that override ran the single-sequence `forward` once per row and got its aggregate only from overlapping independent graphs. The fix and the full attribution, including an op-level measurement showing the batched fused kernel the issue proposed loses to `gather_qmm` from n=4, are in [moe-batched-decode-m1ultra-2026-09-04.md](moe-batched-decode-m1ultra-2026-09-04.md) and in the M1 Ultra document. These M5 Max numbers predate that change and are left as measured; re-running this ladder on M5 Max is what would show its effect here.
 
+## Performance vs mlx-vlm, same host and same day (2026-09-09)
+
+Both sides measured on 2026-09-09: mlxcel at `f85898eb`, mlx-vlm 0.6.17 through the repo-local `.venv-mlxlm`. This supersedes the 2026-05-19 VLM figures below for every purpose except history.
+
+| | Value |
+|---|---|
+| Comparable pairs | 48 |
+| Median | 105% |
+| Quartiles | 101% / 113% |
+| Range | 95% to 194% |
+| Below 90% | 0 |
+
+Fastest relative to the reference:
+
+| Model | mlxcel | mlx-vlm | ratio |
+|---|--:|--:|--:|
+| `jina-vlm-mlx` | 284.39 | 146.90 | 194% |
+| `kimi-vl-a3b-thinking-4bit` | 172.37 | 97.61 | 177% |
+| `molmo2-4b` | 103.71 | 66.21 | 157% |
+| `qwen3-omni-30b-a3b-instruct-4bit` | 157.12 | 101.68 | 155% |
+| `molmo-7b-d-0924-4bit` | 124.15 | 85.00 | 146% |
+| `paligemma2-3b-ft-docci-448-6bit` | 169.00 | 115.87 | 146% |
+
+Slowest, none of which falls below 90%:
+
+| Model | mlxcel | mlx-vlm | ratio |
+|---|--:|--:|--:|
+| `glm-4.1v-9b-thinking-4bit` | 86.90 | 90.08 | 96% |
+| `paddleocr-vl-bfloat16` | 456.24 | 477.81 | 95% |
+| `qwen2-vl-2b-instruct-4bit` | 338.48 | 354.67 | 95% |
+| `qwen2.5-vl-3b-instruct-4bit` | 207.31 | 219.30 | 95% |
+
+Measuring the baseline in the same pass is what makes these numbers usable. Dividing the new mlxcel readings by the 2026-09-07 baseline instead puts `qwen3-omni-30b-a3b-instruct-4bit` at 298% and at the top of the table, because only one side had been re-swept. It reads 155% here.
+
+The pair count is 48 rather than the 67 both sides measured. The 19 dropped rows are prompt-length mismatches rather than failures, described under the cross-host comparison in [`model_tests.md`](model_tests.md); the same 19 drop on M1 Ultra with the same values, so they are a property of the two runtimes.
+
 ## Performance vs mlx-lm / mlx-vlm baseline (2026-05-19 benchmark campaign)
 
 > **This section is on the old measurement condition and was not re-run on
