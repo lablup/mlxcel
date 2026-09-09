@@ -639,6 +639,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "cohere" => Ok(ModelType::Cohere),
         "cohere2" => Ok(ModelType::Cohere2),
         "cohere2_moe" => Ok(ModelType::Cohere2Moe),
+        // Cohere Compass / North-Micro-Vision: a Qwen3-VL deepstack vision
+        // tower in front of a Command-style parallel decoder. The text
+        // sub-config says `cohere_compass_text`, so this top-level arm has to
+        // win or the VLM would load as a text-only Command model.
+        "cohere_compass" => Ok(ModelType::CohereCompassVLM),
         "internlm2" => Ok(ModelType::InternLM2),
         "internlm3" => Ok(ModelType::InternLM3),
         "baichuan_m1" => Ok(ModelType::Baichuan),

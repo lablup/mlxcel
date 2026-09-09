@@ -161,6 +161,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL | ModelType::FastVLM => "qwen2",
         ModelType::Qwen3 | ModelType::Qwen3VL => "qwen3",
         ModelType::Qwen3Moe | ModelType::Qwen3VLMoe | ModelType::Qwen3OmniMoe => "qwen3_moe",
+        // Not shardable by the generic transformer plan: the Compass decoder
+        // is a parallel Command block whose attention and MLP read one norm,
+        // and no multi-rank host has run it. The label is the one its
+        // `config.json` carries.
+        ModelType::CohereCompassVLM => "cohere_compass",
         ModelType::Qwen3Next => "qwen3_next",
         ModelType::Qwen35 | ModelType::Qwen35VLM => "qwen3_5",
         ModelType::Qwen35Moe | ModelType::Qwen35MoeVLM => "qwen3_5_moe",
