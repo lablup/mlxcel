@@ -28,6 +28,7 @@
 //! ```
 
 use anyhow::Result;
+use serde_json::Value;
 use std::path::Path;
 
 use crate::LoadedModel;
@@ -78,9 +79,9 @@ pub(crate) fn load_cohere_compass_vlm(model_path: &Path) -> Result<LoadedModel> 
         Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Cohere Compass vision encoder: {}", e))?;
 
-    // `preprocessor_config.json` normalizes to mean/std 0.5, the same as the
-    // Qwen3-VL processor default this helper takes. Its resize bounds are not
-    // the family defaults, though, so they are read explicitly; see
+    // The sidecars normalize to mean/std 0.5, the same as the Qwen3-VL
+    // processor default this helper takes. The resize bounds are not the family
+    // defaults, though, and the two sidecars disagree; see
     // `compass_pixel_bounds`.
     let processor =
         qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
@@ -108,29 +109,47 @@ pub(crate) fn load_cohere_compass_vlm(model_path: &Path) -> Result<LoadedModel> 
     Ok(LoadedModel::CohereCompassVLM(vlm))
 }
 
-/// Resize bounds from `preprocessor_config.json`.
+/// Resize bounds in pixel *area*, as `smart_resize` consumes them.
 ///
-/// Compass stores them as `size.shortest_edge` / `size.longest_edge`, which in
-/// this processor family are pixel *areas*, not edge lengths (65536 = 256x256,
-/// 16777216 = 4096x4096). `min_pixels` / `max_pixels` at the top level win when
-/// present, matching what the HF image processor reads. Anything missing or
-/// malformed falls back to the Qwen-VL family default so a partial sidecar
-/// cannot silently produce a degenerate grid.
+/// Two sidecars carry them and they disagree on the published checkpoint.
+/// `processor_config.json` nests an `image_processor` block holding
+/// `min_pixels` 16384 / `max_pixels` 3868706, while the standalone
+/// `preprocessor_config.json` says `size.shortest_edge` 65536 /
+/// `size.longest_edge` 16777216. HF's `AutoProcessor` builds the image
+/// processor from the nested block, so 16384 is what the reference
+/// implementation actually resizes against; taking 65536 instead upscales any
+/// image under 256x256 and changes its token count. Measured on
+/// `tests/fixtures/test_image.png` (224x224): the reference keeps a 14x14 grid
+/// (49 image tokens), while the 65536 bound produces 16x16 (64), which
+/// silently desynchronizes the prompt from the oracle.
+///
+/// So: the nested block wins, `preprocessor_config.json` is the fallback, and
+/// the Qwen family defaults are the last resort. Explicit `min_pixels` /
+/// `max_pixels` beat `size` within each file, matching what the HF processor
+/// reads.
 fn compass_pixel_bounds(model_path: &Path) -> (usize, usize) {
     use vision::processors::qwen2_vl::{DEFAULT_MAX_PIXELS, DEFAULT_MIN_PIXELS};
 
-    let config = read_optional_model_json(model_path, "preprocessor_config.json");
-    let read = |primary: &str, nested: &str| -> Option<usize> {
-        let config = config.as_ref()?;
-        let value = config
+    let nested = read_optional_model_json(model_path, "processor_config.json")
+        .and_then(|v| v.get("image_processor").cloned());
+    let standalone = read_optional_model_json(model_path, "preprocessor_config.json");
+
+    let read = |source: Option<&Value>, primary: &str, nested_key: &str| -> Option<usize> {
+        let source = source?;
+        let value = source
             .get(primary)
             .filter(|v| !v.is_null())
-            .or_else(|| config.get("size").and_then(|s| s.get(nested)))?;
+            .or_else(|| source.get("size").and_then(|s| s.get(nested_key)))?;
         usize::try_from(value.as_u64()?).ok().filter(|v| *v > 0)
     };
 
-    let min_pixels = read("min_pixels", "shortest_edge").unwrap_or(DEFAULT_MIN_PIXELS);
-    let max_pixels = read("max_pixels", "longest_edge").unwrap_or(DEFAULT_MAX_PIXELS);
+    let pick = |primary: &str, nested_key: &str| -> Option<usize> {
+        read(nested.as_ref(), primary, nested_key)
+            .or_else(|| read(standalone.as_ref(), primary, nested_key))
+    };
+
+    let min_pixels = pick("min_pixels", "shortest_edge").unwrap_or(DEFAULT_MIN_PIXELS);
+    let max_pixels = pick("max_pixels", "longest_edge").unwrap_or(DEFAULT_MAX_PIXELS);
     if min_pixels > max_pixels {
         return (DEFAULT_MIN_PIXELS, DEFAULT_MAX_PIXELS);
     }

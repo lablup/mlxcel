@@ -336,6 +336,74 @@ fn sliding_layers_carry_the_window_and_full_layers_do_not() {
     assert_eq!(model.sliding_window(), 8);
 }
 
+/// Every layer sliding, so the window is the only thing bounding attention.
+fn sliding_only_config(num_layers: usize, window: usize) -> CompassTextConfig {
+    serde_json::from_value(json!({
+        "hidden_size": HIDDEN,
+        "num_hidden_layers": num_layers,
+        "intermediate_size": INTERMEDIATE,
+        "num_attention_heads": HEADS,
+        "num_key_value_heads": KV_HEADS,
+        "vocab_size": VOCAB,
+        "head_dim": HEAD_DIM,
+        "layer_norm_eps": 1e-5,
+        "logit_scale": 1.0,
+        "sliding_window": window,
+        "layer_types": vec!["sliding_attention"; num_layers],
+        "rope_parameters": {
+            "sliding_attention": {
+                "mrope_interleaved": true,
+                "mrope_section": [2, 1, 1],
+                "rope_theta": 50000
+            },
+            "rope_theta": 10000.0
+        },
+        "tie_word_embeddings": true,
+    }))
+    .expect("sliding-only Compass config parses")
+}
+
+/// The window actually bounds the receptive field, rather than being carried
+/// as an unused number. Two sliding layers at window 3 let position 11 reach
+/// back only to position 7, so editing token 0 must leave position 11's logits
+/// untouched; widening the window to cover the whole prefix must make the same
+/// edit move them.
+#[test]
+fn sliding_window_bounds_the_receptive_field() {
+    let _guard = mlx_test_guard();
+    let ids: Vec<i32> = (0..12).map(|i| (i * 5 + 1) % VOCAB).collect();
+    let mut edited = ids.clone();
+    edited[0] = (ids[0] + 7) % VOCAB;
+    assert_ne!(ids[0], edited[0]);
+
+    let last_row = |config: &CompassTextConfig, tokens: &[i32]| -> Vec<f32> {
+        let model = CohereCompassTextModel::from_weights(&tiny_weights(config), config)
+            .expect("sliding-only synthetic loads");
+        let input = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let mut caches = model.make_caches();
+        let logits = to_vec(&model.forward_impl(&input, None, &mut caches));
+        let width = VOCAB as usize;
+        logits[logits.len() - width..].to_vec()
+    };
+
+    let narrow = sliding_only_config(2, 3);
+    let a = last_row(&narrow, &ids);
+    let b = last_row(&narrow, &edited);
+    assert!(
+        max_abs_diff(&a, &b) < 1e-5,
+        "token 0 is outside a 2-layer window-3 receptive field, so it must not reach position 11"
+    );
+
+    let wide = sliding_only_config(2, 64);
+    let c = last_row(&wide, &ids);
+    let d = last_row(&wide, &edited);
+    assert!(
+        max_abs_diff(&c, &d) > 1e-4,
+        "with a window wider than the prefix the same edit must reach position 11; if it does \
+         not, the test above is passing for the wrong reason"
+    );
+}
+
 /// A `mask == None` prefill must still be causal on both layer types: the
 /// logits of the first 48 rows of a 96-token prefill have to match a 48-token
 /// prefill of the same prefix.
