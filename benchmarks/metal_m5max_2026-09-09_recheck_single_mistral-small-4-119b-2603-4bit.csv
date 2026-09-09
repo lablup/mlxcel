@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+mistral-small-4-119b-2603-4bit,models/mistral-small-4-119b-2603-4bit,512,128,389.72,1313.75,1294.09,98.91,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,fea72611-dirty,9a795735

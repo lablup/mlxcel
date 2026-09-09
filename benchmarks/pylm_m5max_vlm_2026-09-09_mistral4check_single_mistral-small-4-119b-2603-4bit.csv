@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+mistral-small-4-119b-2603-4bit,./models/mistral-small-4-119b-2603-4bit/,93,128,216.77,429.02,1295.96,98.77,2026-09-09,Apple_M5_Max_128GB,mlx-vlm-0.6.17,python,128,"What is in this image?"
