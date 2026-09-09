@@ -295,6 +295,30 @@ pub fn render_full(
     out
 }
 
+/// Whether a generation produced text but nothing outside the reasoning channel.
+///
+/// A reasoning model that answers entirely inside `<think>` ... `</think>` leaves
+/// the content channel empty, and the default rendering suppresses reasoning, so
+/// the terminal shows nothing at all. That is the model working normally, but it
+/// is indistinguishable on screen from a broken checkpoint or a broken patch: the
+/// blank output from `nvidia-nemotron-3-nano-30b-a3b-4bit` was nearly recorded as
+/// a regression caused by the arm under test during the RMS-norm A/B, and
+/// `glm-4.1v-9b-thinking-4bit` produced the same scare earlier the same day.
+/// Callers use this to name what happened instead of printing an empty line.
+///
+/// `saw_visible_text` is whether anything survived the filter: the one-shot
+/// caller tests [`render_full`]'s output, the streaming caller tracks whether any
+/// fragment printed. True only when decoding produced text, none of it reached
+/// the content channel, and reasoning was suppressed; with `--show-reasoning` the
+/// text is already on screen.
+pub fn is_reasoning_only(
+    generated_text: &str,
+    saw_visible_text: bool,
+    show_reasoning: bool,
+) -> bool {
+    !show_reasoning && !saw_visible_text && !generated_text.trim().is_empty()
+}
+
 /// Whether a rendered CLI prompt primed an open reasoning channel that the model
 /// is expected to close in its generation.
 ///
@@ -719,5 +743,52 @@ mod tests {
         assert!(shown.contains("reasoning body"));
         assert!(shown.contains("answer"));
         assert_no_markers(&shown);
+    }
+
+    #[test]
+    fn reasoning_only_flags_an_unclosed_thought_with_no_answer() {
+        // The nemotron / glm-4.1v shape: the whole generation stays inside the
+        // channel, so the default rendering is empty and the terminal would
+        // otherwise show nothing at all.
+        let text = "The user asks for the capital of France. Answer: Paris.";
+        let visible = render_full(&qwen_markers(), text, true, false, false);
+        assert_eq!(visible, "");
+        assert!(is_reasoning_only(text, !visible.trim().is_empty(), false));
+    }
+
+    #[test]
+    fn reasoning_only_is_false_once_the_answer_prints() {
+        let text = "thinking</think>Paris.";
+        let visible = render_full(&qwen_markers(), text, true, false, false);
+        assert_eq!(visible, "Paris.");
+        assert!(!is_reasoning_only(text, !visible.trim().is_empty(), false));
+    }
+
+    #[test]
+    fn reasoning_only_is_false_under_show_reasoning() {
+        // --show-reasoning already puts the text on screen, so there is nothing
+        // to explain.
+        let text = "thinking with no answer";
+        let visible = render_full(&qwen_markers(), text, true, true, false);
+        assert!(visible.contains("thinking with no answer"));
+        assert!(!is_reasoning_only(text, !visible.trim().is_empty(), true));
+    }
+
+    #[test]
+    fn reasoning_only_is_false_when_nothing_was_generated() {
+        // An empty generation is a different fact (zero tokens), not a
+        // suppressed channel, and must not borrow this explanation.
+        assert!(!is_reasoning_only("", false, false));
+        assert!(!is_reasoning_only("   \n", false, false));
+    }
+
+    #[test]
+    fn reasoning_only_treats_whitespace_only_content_as_empty() {
+        // A channel that closes just before EOS leaves a stray newline as the
+        // whole content channel; the screen is still blank.
+        let text = "thinking</think>\n";
+        let visible = render_full(&qwen_markers(), text, true, false, false);
+        assert_eq!(visible.trim(), "");
+        assert!(is_reasoning_only(text, !visible.trim().is_empty(), false));
     }
 }

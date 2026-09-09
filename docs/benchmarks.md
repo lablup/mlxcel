@@ -455,6 +455,51 @@ the needle went unfound. Length selected which frequency band was live exactly
 the way forward width selects which kernel is dispatched above, and the same
 mistake is available in both.
 
+### The output half of an A/B
+
+A throughput arm says the change is faster. It does not say the model still
+answers the same, and that half has three ways of reading as a result when it
+is nothing of the kind. `scripts/ab_output_equality.sh` runs it so none of them
+is available:
+
+```bash
+git stash && cargo build --release --features metal,accelerate --bin mlxcel
+/bin/cp target/release/mlxcel target/release/mlxcel.before
+git stash pop && cargo build --release --features metal,accelerate --bin mlxcel
+./scripts/ab_output_equality.sh --baseline target/release/mlxcel.before \
+                                --arm target/release/mlxcel \
+                                --model models/mlx/granite-4.0-h-tiny-4bit
+```
+
+**Sampling makes the comparison meaningless in both directions.** A checkpoint's
+`generation_config.json` can turn sampling on with no flag from the caller, and
+then the two files being compared are two samples rather than two
+implementations: an untouched arm reads as a failure, and a genuinely broken one
+can pass. The script passes `--temp 0` to both arms and never takes it from the
+caller.
+
+**A blank content channel is not a blank generation.** `mlxcel generate`
+suppresses the `<think>` channel by default, so a reasoning model whose
+generation ends before the channel closes prints nothing, and comparing empty
+against empty passes while comparing no tokens at all. Read the other way it is
+worse: the blank looks like a broken checkpoint, or like breakage caused by the
+arm under test. That reading was one step away twice in one day, on
+`glm-4.1v-9b-thinking-4bit` and then on
+`nvidia-nemotron-3-nano-30b-a3b-4bit` during the RMS-norm A/B, where it would
+have inverted the verdict. The script passes `--show-reasoning` to both arms, so
+every generated token is in the comparison. The CLI now names the case as well:
+when tokens were generated and none reached the content channel, `generate` and
+the chat REPL print `[All N generated tokens went to the reasoning channel ...]`
+instead of an empty line.
+
+**An output difference is only attributable to the arm if the baseline agrees
+with itself.** Some families are not bitwise stable run to run (the f16
+reduction-order jitter class), and on those a difference between arms says
+nothing about the change. The script runs the baseline twice as a control and
+reports `INCONCLUSIVE`, exit status 2, when the two baseline runs disagree,
+rather than reporting the arm as different. On such a checkpoint the
+teacher-forced logit trace above is the tool, not this one.
+
 ### Gemma 4 Unified (12B) + 4-bit assistant
 
 `mlx-community/gemma-4-12b-it-4bit` as the target and
