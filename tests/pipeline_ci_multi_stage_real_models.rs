@@ -309,8 +309,8 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
 #[test]
 #[ignore = "requires local model weights; CI drives with --ignored"]
 fn pipeline_multi_stage_two_host_logical_smoke() {
-    let model =
-        std::env::var("MLXCEL_CI_PP_MODEL").unwrap_or_else(|_| "llama-3.2-1b-4bit".to_string());
+    let model = std::env::var("MLXCEL_CI_PP_MODEL")
+        .unwrap_or_else(|_| "llama-3.2-1b-instruct-4bit".to_string());
     assert_multi_stage_coordinator_matches_dense_baseline(&model, "Hello", 2);
 }
 
@@ -320,7 +320,7 @@ fn pipeline_multi_stage_two_host_logical_smoke() {
 #[test]
 #[ignore = "requires local model weights and is driven by the on-demand self-hosted 3-host CI job"]
 fn pipeline_multi_stage_three_host_real_model_parity() {
-    assert_multi_stage_coordinator_matches_dense_baseline("llama-3.2-1b-4bit", "Hello", 3);
+    assert_multi_stage_coordinator_matches_dense_baseline("llama-3.2-1b-instruct-4bit", "Hello", 3);
 }
 
 /// Heterogeneous-memory partition regression.

@@ -1,6 +1,6 @@
 local_name	aliases	upstream_repo_id	id_source	precision	size_gb	present_on_m1ultra	present_on_m5max	verified_by	store	shards_ok_m5max	csv_rows	doc_mentions	shards_ok_m1ultra	m5_absence
 afm-4.5b			none	bfloat16	9.3	yes	yes	none	repo	ok(2)	3	5	ok	
-ai21-jamba-reasoning-3b-4bit	jamba-v0.1-4bit	mlx-community/AI21-Jamba-Reasoning-3B-4bit	heading	4bit	1.7	yes	yes	config	repo	ok(1)	45	5	ok	
+ai21-jamba-reasoning-3b-4bit		mlx-community/AI21-Jamba-Reasoning-3B-4bit	heading	4bit	1.7	yes	yes	config	repo	ok(1)	45	5	ok	
 all-minilm-l6-v2			none	unquantized	0.1	yes	yes	none	repo	ok(1)	3	1	ok	
 apertus-8b-instruct-2509-4bit		mlx-community/Apertus-8B-Instruct-2509-4bit	heading	4bit	4.5	yes	yes	config	repo	ok(1)	26	3	ok	
 aya-expanse-8b-4bit		mlx-community/aya-expanse-8b-4bit	heading	4bit	4.5	yes	yes	config	repo	ok(1)	44	4	ok	

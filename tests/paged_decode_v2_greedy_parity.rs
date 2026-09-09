@@ -326,7 +326,7 @@ fn paged_decode_v2_greedy_parity_qwen3() {
 fn paged_decode_v2_greedy_parity_llama3() {
     let _runtime = initialize_runtime();
     assert_parity_for(
-        "llama-3.2-1b-4bit",
+        "llama-3.2-1b-instruct-4bit",
         "mlx-community/Llama-3.2-1B-Instruct-4bit",
     );
 }

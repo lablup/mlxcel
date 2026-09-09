@@ -78,7 +78,7 @@ fn cache_config(stage_index: u32, budget_bytes: u64) -> PipelineCacheConfig {
 #[test]
 #[ignore = "requires local llama-3.2-1b-4bit weights and the mlxcel binary"]
 fn pp_observability_populates_all_four_metric_families() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",

@@ -74,7 +74,7 @@ use mlxcel_core::cache::{CachePool, PagedKvLayout, SequenceStateLayout};
 /// qwen3 checkpoint directory name (pool-backed family).
 const QWEN3_DIR: &str = "qwen3-0.6b-4bit";
 /// llama3 checkpoint directory name (pool-backed family).
-const LLAMA3_DIR: &str = "llama-3.2-1b-4bit";
+const LLAMA3_DIR: &str = "llama-3.2-1b-instruct-4bit";
 
 /// Paged block size (tokens per physical block), matching the scheduler's
 /// `DEFAULT_PAGED_BLOCK_SIZE`.

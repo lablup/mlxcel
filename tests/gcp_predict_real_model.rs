@@ -53,7 +53,7 @@ fn stop_server(child: &mut Child) {
 #[tokio::test]
 #[ignore = "requires local model weights and a built mlxcel-server binary"]
 async fn predict_serves_a_chat_completions_batch_against_a_real_model() {
-    let model_dir = repo_model_dir("mlx/llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "skipping: model checkpoint not found at {}",
@@ -106,14 +106,14 @@ async fn predict_serves_a_chat_completions_batch_against_a_real_model() {
             "instances": [
                 {
                     "@requestFormat": "chatCompletions",
-                    "model": "llama-3.2-1b-4bit",
+                    "model": "llama-3.2-1b-instruct-4bit",
                     "messages": [{"role": "user", "content": "Reply with one word: hello"}],
                     "max_tokens": 8,
                     "temperature": 0
                 },
                 {
                     "@requestFormat": "chatCompletions",
-                    "model": "llama-3.2-1b-4bit",
+                    "model": "llama-3.2-1b-instruct-4bit",
                     "messages": [{"role": "user", "content": "Reply with one word: goodbye"}],
                     "max_tokens": 8,
                     "temperature": 0

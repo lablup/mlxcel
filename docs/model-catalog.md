@@ -20,7 +20,7 @@ With no heading and no `base_model`, leave the name alone. A name assembled from
 | Column | Meaning |
 |---|---|
 | `local_name` | Directory name under `models/`. |
-| `aliases` | Names this checkpoint was measured under before a rename, `;`-separated. A past-dated CSV row joins to the current one through this. |
+| `aliases` | Names this checkpoint was measured under before a rename, `;`-separated. A past-dated CSV row joins to the current one through this. An alias records that one set of weights had another name, not that a directory was once misnamed after a different model: `jamba-v0.1-4bit` held AI21-Jamba-Reasoning-3B and no Jamba v0.1 was ever in the store, so renaming that directory was right and listing the old name as an alias was not. |
 | `upstream_repo_id` | The HuggingFace repo, empty when neither source yielded one. |
 | `id_source` | `heading`, `base_model` or `none`. Reliability is readable from this column alone. |
 | `precision` | From `config.json`, or from the shard headers when `torch_dtype` is absent. |

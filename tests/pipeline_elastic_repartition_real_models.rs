@@ -138,7 +138,7 @@ fn describe_ranges(ranges: &[Range<usize>]) -> String {
 #[test]
 #[ignore = "requires local llama-3.2-1b-4bit weights and the mlxcel binary"]
 fn elastic_repartition_completes_and_preserves_continued_serving() {
-    let model_dir = repo_model_dir("llama-3.2-1b-4bit");
+    let model_dir = repo_model_dir("llama-3.2-1b-instruct-4bit");
     if !model_dir.exists() {
         eprintln!(
             "Skipping test: model directory not found at {}",

@@ -32,7 +32,7 @@ use common::repo_model_dir;
 use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::encoders::glm4v::Glm4vVisionConfig;
 
-const MODEL_NAME: &str = "GLM-4.1V-9B-Thinking";
+const MODEL_NAME: &str = "glm-4.1v-9b-thinking-4bit";
 
 fn model_dir() -> Option<PathBuf> {
     let dir = repo_model_dir(MODEL_NAME);

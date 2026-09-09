@@ -199,7 +199,7 @@ fn assert_two_stage_model_worker_loop_matches_full_model(
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_executor_llama_real_model_parity() {
     assert_two_stage_model_matches_full_model(
-        &repo_model_dir("llama-3.2-1b-4bit"),
+        &repo_model_dir("llama-3.2-1b-instruct-4bit"),
         &[128000, 9906],
         13,
         None,
@@ -210,7 +210,7 @@ fn pipeline_stage_executor_llama_real_model_parity() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_worker_loop_llama_real_model_parity() {
     assert_two_stage_model_worker_loop_matches_full_model(
-        &repo_model_dir("llama-3.2-1b-4bit"),
+        &repo_model_dir("llama-3.2-1b-instruct-4bit"),
         &[128000, 9906],
         13,
         None,
@@ -221,7 +221,7 @@ fn pipeline_stage_worker_loop_llama_real_model_parity() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_executor_gpt_oss_real_model_parity() {
     assert_two_stage_model_matches_full_model(
-        &repo_model_dir("gpt-oss-20b-mxfp4"),
+        &repo_model_dir("gpt-oss-20b-mxfp4-q4"),
         &[42, 43],
         44,
         None,
@@ -232,7 +232,7 @@ fn pipeline_stage_executor_gpt_oss_real_model_parity() {
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_worker_loop_gpt_oss_real_model_parity() {
     assert_two_stage_model_worker_loop_matches_full_model(
-        &repo_model_dir("gpt-oss-20b-mxfp4"),
+        &repo_model_dir("gpt-oss-20b-mxfp4-q4"),
         &[42, 43],
         44,
         None,
@@ -242,14 +242,19 @@ fn pipeline_stage_worker_loop_gpt_oss_real_model_parity() {
 #[test]
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_executor_gemma3_real_model_parity() {
-    assert_two_stage_model_matches_full_model(&repo_model_dir("gemma3-1b-4bit"), &[2, 3], 4, None);
+    assert_two_stage_model_matches_full_model(
+        &repo_model_dir("gemma-3-1b-it-4bit"),
+        &[2, 3],
+        4,
+        None,
+    );
 }
 
 #[test]
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_worker_loop_gemma3_real_model_parity() {
     assert_two_stage_model_worker_loop_matches_full_model(
-        &repo_model_dir("gemma3-1b-4bit"),
+        &repo_model_dir("gemma-3-1b-it-4bit"),
         &[2, 3],
         4,
         None,
@@ -320,14 +325,19 @@ fn pipeline_stage_worker_loop_qwen35_real_model_parity() {
 #[test]
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_executor_glm4_real_model_parity() {
-    assert_two_stage_model_matches_full_model(&repo_model_dir("glm4-flash-4bit"), &[2, 3], 4, None);
+    assert_two_stage_model_matches_full_model(
+        &repo_model_dir("glm-4.7-flash-4bit"),
+        &[2, 3],
+        4,
+        None,
+    );
 }
 
 #[test]
 #[ignore = "requires local model weights and extended real-model generation"]
 fn pipeline_stage_worker_loop_glm4_real_model_parity() {
     assert_two_stage_model_worker_loop_matches_full_model(
-        &repo_model_dir("glm4-flash-4bit"),
+        &repo_model_dir("glm-4.7-flash-4bit"),
         &[2, 3],
         4,
         None,

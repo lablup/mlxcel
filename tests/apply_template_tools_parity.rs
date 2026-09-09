@@ -51,7 +51,7 @@ use common::{repo_binary_path, repo_model_dir};
 const YOUTU_MODEL: &str = "mlx/youtu-llm-2b-4bit";
 
 /// Llama 3.2 template, carried in `tokenizer_config.json`.
-const LLAMA_MODEL: &str = "mlx/llama-3.2-1b-4bit";
+const LLAMA_MODEL: &str = "llama-3.2-1b-instruct-4bit";
 
 /// The one-line user turn every request below sends.
 const PROMPT: &str = "The Fibonacci sequence begins with";

@@ -37,7 +37,7 @@ use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::processors::ImageProcessor;
 use mlxcel::vision::processors::internvl::InternVLProcessor;
 
-const MODEL_NAME: &str = "internvl3-1b";
+const MODEL_NAME: &str = "internvl3-1b-4bit";
 const QWEN2_VOCAB: i32 = 151674;
 
 fn model_dir() -> Option<PathBuf> {

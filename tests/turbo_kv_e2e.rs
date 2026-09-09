@@ -845,13 +845,13 @@ fn test_rotation_kurtosis_sanity() {
         "qwen2.5-0.5b-bf16",
         "gemma3n-e4b-bf16",
         "Qwen2.5-7B-Instruct-4bit",
-        "qwen2.5-7b-4bit",
+        "qwen2.5-7b-instruct-4bit",
         // base model used by B3 quality gate since
         "Qwen2.5-1.5B-4bit",
         "Qwen2.5-1.5B-Instruct-4bit",
         "Meta-Llama-3.1-8B-Instruct-4bit",
         "gemma-3-4b-it-4bit",
-        "llama-3.1-8b-4bit",
+        "meta-llama-3.1-8b-instruct-4bit",
         "gemma3-4b-4bit",
     ];
 

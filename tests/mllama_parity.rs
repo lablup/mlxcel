@@ -674,7 +674,7 @@ fn prepare_stashes_real_tile_states() {
 
 // --- Model-gated smoke test (inert without the checkpoint). ---
 
-const MODEL_NAME: &str = "llama-3.2-11b-vision";
+const MODEL_NAME: &str = "llama-3.2-11b-vision-instruct-4bit";
 
 fn model_dir() -> Option<PathBuf> {
     let dir = repo_model_dir(MODEL_NAME);
