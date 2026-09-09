@@ -118,24 +118,41 @@ The four turns. **First**, the 61% came from mixing harnesses: an mlxcel VLM row
 
 Two things are worth keeping. A ratio survived all four turns while no absolute value did: the same-host figure stayed near 180% on M1 Ultra across a full re-measurement of both sides (183% then 179%), while both absolute readings moved by more than 1.6x. And measuring mlxcel and the baseline back to back in one session is what settles a case like this, because comparing a stored row against a fresh one cannot separate a code change from machine state. On M5 Max the baseline reads 99.72, 101.45 and 101.23 across three occasions, so it is stable here; M1 Ultra's moved from 25.89 to 42.68 and that remains unexplained.
 
-### 2b. The VLM tables were a commit behind, and by how much
+### 2b. The VLM tables were a commit behind, and the whole thing was re-swept
 
-Chasing `qwen3-omni` surfaced a larger problem than the checkpoint itself: M5 Max's VLM rows for the Qwen VL families were last measured on 2026-09-04 at `b2ff1eee`, which predates `2f4fbabb` ("restore the input dtype after multimodal RoPE"), `5287eb9a` and `f4ecc926`, all landed 2026-09-08. Seven rows were in that state. Re-measured at `12f9dbd0`:
+Chasing `qwen3-omni` surfaced a larger problem than the checkpoint itself: the VLM tables mixed seven mlxcel commits spanning 2026-09-04 to 2026-09-08, and three dtype fixes had landed inside that span. Both hosts were re-swept in full at a single commit rather than patching the rows believed to be affected, because a partial pass leaves the table mixed again and every misreading in this document came from a mixed table.
 
-| Checkpoint | 2026-09-04 | 2026-09-09 | ratio |
+M5 Max at `f85898eb`: 92 rows, 78 measured, 71 comparable against the previous readings. Median 1.00x, quartiles 1.00 and 1.01. Nine rows moved more than 10%.
+
+| Checkpoint | before | 2026-09-09 | ratio |
 |---|--:|--:|--:|
-| `qwen3-vl-30b-a3b-instruct-4bit` | 58.01 | 158.43 | 2.73x |
-| `qwen3-vl-32b-instruct-4bit` | 19.00 | 28.25 | 1.49x |
-| `qwen2-vl-2b-instruct-4bit` | 248.86 | 336.69 | 1.35x |
-| `qwen3-vl-8b-instruct-4bit` | 81.68 | 109.52 | 1.34x |
-| `qwen3-vl-4b-instruct-4bit` | 136.19 | 177.18 | 1.30x |
-| `qwen3-vl-2b-instruct-4bit` | 273.88 | 338.10 | 1.23x |
+| `mistral-small-4-119b-2603-4bit` | 19.34 | 102.57 | 5.30x |
+| `moondream2` | 41.36 | 173.36 | 4.19x |
+| `qwen3-vl-30b-a3b-instruct-4bit` | 60.73 | 158.38 | 2.61x |
+| `qwen3-omni-30b-a3b-instruct-4bit` | 61.21 | 157.12 | 2.57x |
+| `qwen3-vl-32b-instruct-4bit` | 19.34 | 28.28 | 1.46x |
+| `llama-3.2-11b-vision-instruct-4bit` | 72.57 | 94.92 | 1.31x |
+| `qwen3-vl-8b-instruct-4bit` | 84.66 | 109.63 | 1.29x |
+| `paligemma2-3b-ft-docci-448-6bit` | 139.53 | 169.00 | 1.21x |
+| `qwen3-vl-2b-instruct-4bit` | 291.01 | 337.83 | 1.16x |
 
-`qwen3-omni-30b-a3b-instruct-4bit` moves 2.59x on the same harness, and it and `qwen3-vl-30b-a3b` are the two largest movers and the two MoE VLMs in the set. That is consistent with a shared activation helper rather than a per-family rotary change, but no A/B was run, so which commit is responsible is not established.
+**Selecting by family would have missed a third of the movers.** `moondream2`, `llama-3.2-11b-vision` and `paligemma2-3b` fall outside every family the three commits touch, and `qwen3_omni_moe.rs` is unchanged across the entire window while that checkpoint is one of the two largest movers. Selection was by commit lineage against `f4ecc926`, which is mechanical and needs no judgement about which family a fix reaches. Anyone narrowing a future re-measurement by family should read this row first.
 
-The scope was smaller than it first appeared and worth stating as a count rather than a worry. Of 95 M5 Max VLM rows, 20 belong to the families those three commits touch, and 13 of the 20 had already been re-measured on 2026-09-08. Seven had not. On M1 Ultra all ten rows in those families already sit at `5287eb9a` or later, so that host needed none. The earlier reading that "the whole M5 Max VLM table predates the fixes" was true of the sweep date and false of the table, because per-model re-measurements had already replaced most of the affected rows.
+**Re-sweeping only the runtime inflates its own margins.** Dividing the new mlxcel numbers by the 2026-09-07 baseline puts `qwen3-omni` at 298% and at the top of the table, because only one side had moved and the 25.89 tok/s it divides by does not reproduce. The baseline was re-swept in the same pass. With both sides measured on 2026-09-09 the margin is 155% and the top of the table is `jina-vlm-mlx` at 194%.
 
-What is not closed is the part the families cannot describe. `qwen3-omni-30b-a3b-instruct-4bit` routes through `src/vision/qwen3_omni_moe.rs`, which none of the three commits touch and which is unchanged across the whole window, yet it is one of the two largest movers. Scoping a re-measurement by family would therefore have skipped the row that moved most. The remaining candidate is shared rather than per-family, and 54 of M1 Ultra's 76 measured VLM rows still carry a commit that predates it, selected by commit lineage rather than by family so nothing is missed the way a family filter would have missed `qwen3-omni`. Those are unverified rather than known stale, and re-measuring by commit rather than by family is the way to close them; that work is out of scope here.
+Same-day margins on M5 Max: 48 pairs, median 105%, quartiles 101 and 113, range 95 to 194%, nothing below 90%. The pair count is 48 rather than the 67 both sides measured, and the 19 dropped rows are not failures: the two runtimes turn the same image into different prompt lengths, so there is no like-for-like comparison to make. They fall into three kinds, and the counts are identical on both hosts, which makes this a property of the two runtimes rather than of either machine.
+
+| Kind | Rows | Shape |
+|---|--:|---|
+| Image tiling | 3 | `idefics3-8b-llama3-4bit` 189 against 3041, `smolvlm-instruct-bf16` 102 against 1562, `idefics2-8b-4bit` 81 against 340 |
+| Chat template | 15 | Exactly +15 tokens on every row, whether the base is 65 or 69, across `qwen3-vl`, `qwen3.5`, `qwen3.6` and `qwen3.8` |
+| mlxcel uses more | 1 | `deepseek-vl2-small-4bit` 494 against 436 |
+
+The +15 group is the informative one: a constant offset across three families and sizes from 0.8B to 35B is a fixed template overhead, not a proportional difference, and it may be reconcilable. The tiling group is not, at a factor of 4 to 16.
+
+The last kind extends past the gate. `internvl3-1b-4bit` differs the same way at 293 against 270, and 8.5% clears the 10% threshold, so it stays in the comparison: **its margin is computed across a 23-token difference.** The gate cuts by magnitude and not by cause, so one instance of a single phenomenon is excluded while another is kept. Six further rows differ by 1 to 3 tokens in the same direction, and those are deterministic rather than noise, reproducing exactly on both hosts; they are small enough to disregard at 0.2% to 2.5%, which is a different statement from being unstable. Against a floor where 31 of the compared rows differ by zero tokens, none of this is measurement scatter.
+
+Two rows carry a caveat rather than a number. `minicpm-v-4.6-bf16` and `-mxfp4` are compared across a prompt-length change, 32 tokens against 80, because `94323c20` upscales an image below the scale resolution and the test fixture is 224x224. That is an intended behavior change, not measurement drift, and both read 1.00x and 1.01x, so decode is close to indifferent to prompt length at this scale. The prompt-length gate applied to the runtime-against-baseline comparison was not applied to this before-and-after one; it has been checked since and these two are the only rows it catches.
 
 ### 3. Machine against machine
 
