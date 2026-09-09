@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+qwen3-omni-30b-a3b-instruct-4bit,./models/qwen3-omni-30b-a3b-instruct-4bit/,69,128,102.66,672.10,1264.42,101.23,2026-09-09,Apple_M5_Max_128GB,mlx-vlm-0.6.17,python,128,"What is in this image?"

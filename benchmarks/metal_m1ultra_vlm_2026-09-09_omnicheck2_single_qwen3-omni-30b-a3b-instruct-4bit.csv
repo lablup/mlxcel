@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+qwen3-omni-30b-a3b-instruct-4bit,models/mlx/qwen3-omni-30b-a3b-instruct-4bit,69,128,260.79,264.58,1672.55,76.53,2026-09-09,Apple_M1_Ultra_128GB,0.7.0-beta.1,release,128,"What is in this image?",,ab788d17,9a795735
