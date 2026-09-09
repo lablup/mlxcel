@@ -369,6 +369,11 @@ for _len in $LADDER; do
   fi
 done
 
+# Before the output path is chosen. Line 379 truncates $OUTPUT, so a guard
+# placed at the model loop would refuse only after an --output naming an
+# existing CSV had already lost its contents.
+require_named_checkpoints "$MODELS_DIR" "long-prompt sweep" $MODELS
+
 if [[ -z "$OUTPUT" ]]; then
   BACKEND=$(detect_backend)
   HW=$(detect_hardware_short)
@@ -408,7 +413,6 @@ fi
 >&2 echo ""
 
 header_written=0
-require_named_checkpoints "$MODELS_DIR" "long-prompt sweep" $MODELS
 
 for model_name in $MODELS; do
   model_path="${MODELS_DIR}/${model_name}"

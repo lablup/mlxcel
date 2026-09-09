@@ -11,6 +11,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/store_guard.sh"
 
 PORT=18080
 OUTPUT="${1:-benchmark_batching_results.log}"
+
+# Before the first `tee -a "$OUTPUT"` below. A guard placed at the enumeration
+# runs after the log has already been created, and $1 here is the log name
+# rather than a mode, so a stray argument creates a file named after it.
+require_checkpoints "$MODELS_DIR" "continuous-batching sweep"
 MAX_TOKENS=50
 RUNS=2
 CONCURRENCY="1,2,4"
@@ -32,8 +37,6 @@ SUCCESS=0
 FAILED=0
 SKIPPED=0
 FAILED_LIST=""
-
-require_checkpoints "$MODELS_DIR" "continuous-batching sweep"
 
 for MODEL_DIR in "$MODELS_DIR"/*/; do
     MODEL_NAME=$(basename "$MODEL_DIR")

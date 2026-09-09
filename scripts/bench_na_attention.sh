@@ -221,6 +221,13 @@ if [[ ! -x "$MLXCEL" ]]; then
   exit 1
 fi
 
+# Before the output path is chosen, not after: the header write below
+# truncates $OUTPUT, so a guard placed at the enumeration cannot say nothing
+# was written, and an --output naming an existing CSV loses its contents.
+if [[ "$MODEL_ARG" == "all" ]]; then
+  require_checkpoints "$MODELS_DIR" "NA-attention sweep"
+fi
+
 if [[ -z "$OUTPUT" ]]; then
   OUTPUT="${BENCHMARKS_DIR}/na_attention_${HARDWARE_SHORT}_${DATE}.csv"
 fi
@@ -236,7 +243,6 @@ emit() {
 }
 
 if [[ "$MODEL_ARG" == "all" ]]; then
-  require_checkpoints "$MODELS_DIR" "NA-attention sweep"
   while IFS= read -r dir; do
     [[ -d "$dir" ]] || continue
     emit "$(bench_one "$dir")"
