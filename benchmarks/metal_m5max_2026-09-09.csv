@@ -1,0 +1,22 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
+afm-4.5b,models/afm-4.5b,,,,,,,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735,FAIL:unsupported_arch_arcee_dense
+dbrx-instruct-4bit,models/dbrx-instruct-4bit,512,128,1148.65,445.74,5076.03,25.22,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a4496eac,9a795735
+gemma-4-e4b-4bit,models/gemma-4-e4b-4bit,512,128,107.37,4768.35,940.70,136.07,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+gpt2,models/gpt2,512,128,5.08,100780.80,288.76,443.28,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+gpt_bigcode-santacoder,models/gpt_bigcode-santacoder,512,128,31.14,16440.23,645.21,198.38,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+helium-1-preview-2b-4bit,models/helium-1-preview-2b-4bit,512,128,42.52,12040.96,483.54,264.71,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+iquest-coder-v1-7b-instruct-8bit,models/iquest-coder-v1-7b-instruct-8bit,512,128,151.88,3371.12,1845.75,69.35,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+klear-46b-a2.5b-instruct-4bit,models/klear-46b-a2.5b-instruct-4bit,512,128,146.07,3505.10,639.66,200.11,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+ling-lite-1.5,models/ling-lite-1.5,512,128,171.04,2993.49,1408.70,90.86,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a4496eac,9a795735
+llama-3.2-1b-instruct,models/llama-3.2-1b-instruct,512,128,24.68,20745.37,701.80,182.39,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+mellum2-12b-a2.5b-base,models/mellum2-12b-a2.5b-base,512,128,130.58,3920.86,1265.53,101.14,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+openelm-1_1b-instruct-4bit,models/openelm-1_1b-instruct-4bit,512,128,24.88,20581.23,290.04,441.32,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+phi-3.5-mini-bf16,models/phi-3.5-mini-bf16,512,128,71.34,7177.32,2171.65,58.94,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+phi-3.5-mini-instruct-hf,models/phi-3.5-mini-instruct-hf,512,128,70.88,7223.48,2144.11,59.70,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+phixtral-4x2_8-4bit,models/phixtral-4x2_8-4bit,512,128,132.10,3875.90,1116.36,114.66,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+pythia-1b,models/pythia-1b,512,128,25.65,19958.94,511.13,250.42,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+qwen3.8-27b-hf-bf16,models/qwen3.8-27b-hf-bf16,512,128,514.76,994.63,13804.82,9.27,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a4496eac,9a795735
+ring-mini-linear-2.0-4bit,models/ring-mini-linear-2.0-4bit,512,128,70.49,7263.85,410.57,311.76,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+telechat3-36b-thinking-4bit,models/telechat3-36b-thinking-4bit,512,128,709.65,721.48,5005.29,25.57,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,a4496eac,9a795735
+trinity-nano-preview-4bit,models/trinity-nano-preview-4bit,512,128,50.28,10183.73,674.45,189.78,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
+youtu-llm-2b-4bit,models/youtu-llm-2b-4bit,512,128,46.27,11065.21,448.40,285.46,2026-09-09,Apple_M5_Max_128GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,0accedd9,9a795735
