@@ -431,6 +431,9 @@ pub enum ModelType {
     YoutuLLM,          // Youtu-LLM (text-only Youtu MLA decoder, no vision tower)
     YoutuVLM,          // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM,   // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
+    /// LLM-jp-VL (`llmjpvl`): SigLIP2 tower + pixel-shuffle `mlp1` + a
+    /// Llama (llm-jp-4-vl-9B) or Qwen3 (Jagle-VL-2.2B) decoder.
+    LlmJpVLM,
     LocateAnythingVLM, // LocateAnything: MoonViT + MLP connector + Qwen2 text (grounding)
     SmolVLM,  // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
     Idefics2, // Idefics2 (idefics2): SigLIP + perceiver-resampler connector + Mistral text
@@ -700,6 +703,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::YoutuLLM,
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
+    ModelType::LlmJpVLM,
     ModelType::LocateAnythingVLM,
     ModelType::SmolVLM,
     ModelType::Idefics2,
@@ -1164,6 +1168,10 @@ impl ModelType {
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
+            ModelType::LlmJpVLM => (
+                "LLM-jp VL (SigLIP2 + pixel-shuffle mlp1 + Llama/Qwen3)",
+                "Other VLM",
+            ),
             ModelType::LocateAnythingVLM => (
                 "LocateAnything (MoonViT + MLP connector + Qwen2, grounding)",
                 "Other VLM",
@@ -1300,6 +1308,7 @@ mod metadata_tests {
             YoutuLLM,
             YoutuVLM,
             InternVLChatVLM,
+            LlmJpVLM,
             LocateAnythingVLM,
             SmolVLM,
             Idefics2,

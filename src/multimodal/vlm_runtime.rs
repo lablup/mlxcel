@@ -35,6 +35,7 @@ use crate::minicpmo_prompt::{
 };
 use crate::moondream2_prompt::{Moondream2PromptMode, prepare_moondream2_prompt_tokens};
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
+use crate::multimodal::llmjp_vl_prompt::{insert_llmjp_image_tokens, text_token_count};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
@@ -281,6 +282,16 @@ pub enum VlmPreparationSummary {
     InternVL {
         image_blocks: usize,
         total_image_tokens: usize,
+    },
+    /// LLM-jp-VL framed each image as `<|image_start|> + <|image_pad|> *
+    /// (num_image_token * tiles) + <|image_end|>`. `tile_budget` is the
+    /// per-request `max_num` the prompt's token count left room for, and
+    /// `total_tiles` the tiles the tiler actually produced under it.
+    LlmJpVl {
+        image_blocks: usize,
+        total_image_tokens: usize,
+        total_tiles: usize,
+        tile_budget: usize,
     },
     /// LocateAnything expanded each image into
     /// `<img> + <IMG_CONTEXT> * (grid_h*grid_w / merge_length) + </img>`.
@@ -1860,6 +1871,61 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = internvl.get_input_embeddings(&input_ids_arr, &pixel_values);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::LlmJpVl(llmjp) => {
+            // Upstream sizes the dynamic-tiling budget per request from what is
+            // left of the tokenizer context after the prompt text, because each
+            // tile costs `image_seq_length` tokens. A short prompt saturates at
+            // the checkpoint's `max_dynamic_patch` (12); a long one falls back
+            // toward a single tile rather than overrunning the context.
+            let text_tokens = text_token_count(prompt_tokens, llmjp.image_context_token_id);
+            let tile_budget = llmjp.tile_budget(text_tokens, images.len());
+            let (pixel_values, tiles_per_image) = llmjp
+                .processor
+                .preprocess_with_tiles_max(images, tile_budget);
+
+            let preparation = insert_llmjp_image_tokens(
+                prompt,
+                prompt_tokens,
+                &tiles_per_image,
+                llmjp.num_image_token,
+                llmjp.img_start_token_id,
+                llmjp.image_context_token_id,
+                llmjp.img_end_token_id,
+                &mut encode,
+            )
+            .map(|stats| VlmPreparationSummary::LlmJpVl {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+                total_tiles: tiles_per_image.iter().sum(),
+                tile_budget,
+            });
+
+            // Guard the scatter: `merge_llava` writes one feature row per
+            // `<|image_pad|>` position, so a placement bug that lost or
+            // duplicated a block would otherwise surface as garbled output
+            // rather than an error.
+            ensure_image_token_feature_cardinality(
+                "LLM-jp-VL",
+                prompt_tokens,
+                llmjp.image_context_token_id,
+                tiles_per_image.iter().copied(),
+                llmjp.num_image_token,
+            )?;
+
+            // All tiles for the request go through the tower in one call; the
+            // opportunistic vision cache stays off for this first integration
+            // (mirrors the InternVL / Youtu-VL decision).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = llmjp.get_input_embeddings(&input_ids_arr, &pixel_values);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

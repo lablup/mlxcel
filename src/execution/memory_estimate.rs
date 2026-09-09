@@ -973,6 +973,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::YoutuLLM => "youtu_llm",
         ModelType::YoutuVLM => "youtu_vlm",
         ModelType::InternVLChatVLM => "internvl_chat_vlm",
+        ModelType::LlmJpVLM => "llmjp_vlm",
         ModelType::LocateAnythingVLM => "locateanything_vlm",
         ModelType::SmolVLM => "smolvlm",
         ModelType::Idefics2 => "idefics2",

@@ -84,3 +84,41 @@ fn multiple_images_report_per_image_tile_counts() {
     // Square -> 1 tile, wide 2:1 -> 2 tiles + thumbnail = 3.
     assert_eq!(tiles, vec![1, 3]);
 }
+
+#[test]
+fn an_aspect_ratio_tie_follows_the_upstream_area_threshold() {
+    // A square image ties every `n x n` candidate at ratio difference 0, so the
+    // tile count is decided entirely by the tie-break. Upstream trades up to a
+    // finer grid when the source area clears `0.5 * image_size^2 * i * j`.
+    //
+    // At `image_size` 512 (the LLM-jp-VL tile size), 768x768 has area
+    // 2.25 * 512^2: above the 2x2 threshold (2.0) and below the 3x3 one (4.5),
+    // so upstream picks 2x2 and appends a thumbnail. The checkpoints' own
+    // `processing_llmjpvl.LLMjpVLProcessor` returns 5 `pixel_values` rows for
+    // this image, which is what this pins.
+    let proc = InternVLProcessor::new(512, 1, 12, true);
+    let (_, tiles) = proc.preprocess_with_tiles(std::slice::from_ref(&solid_image(768, 768)));
+    assert_eq!(
+        tiles,
+        vec![5],
+        "768x768 at tile 512 -> 2x2 plus a thumbnail"
+    );
+
+    // 512x512 has area exactly 1.0 * 512^2, below the 2x2 threshold, so it
+    // stays a single tile and takes no thumbnail. The reference agrees.
+    let (_, tiles) = proc.preprocess_with_tiles(std::slice::from_ref(&solid_image(512, 512)));
+    assert_eq!(tiles, vec![1], "512x512 at tile 512 -> a single tile");
+
+    // 224x224 is far below every threshold.
+    let (_, tiles) = proc.preprocess_with_tiles(std::slice::from_ref(&solid_image(224, 224)));
+    assert_eq!(tiles, vec![1], "224x224 at tile 512 -> a single tile");
+
+    // A 4:3 image at 1024x768 hits (4, 3) exactly, so no tie is involved:
+    // 12 tiles plus a thumbnail, which is also what the reference reports.
+    let (_, tiles) = proc.preprocess_with_tiles(std::slice::from_ref(&solid_image(1024, 768)));
+    assert_eq!(
+        tiles,
+        vec![13],
+        "1024x768 at tile 512 -> 12 tiles plus a thumbnail"
+    );
+}

@@ -414,6 +414,12 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // does not panic on the dispatch table lookup. The actual loader
         // refuses TP routing earlier than this for VLM-kind models.
         ModelType::YoutuVLM => "youtu_vl",
+        // LLM-jp-VL carries either a Llama or a Qwen3 decoder depending on the
+        // checkpoint, so no single architecture string describes it. TP is
+        // refused for VLM-kind models earlier; the placeholder keeps the
+        // dispatch table total and the planner's supported-architecture
+        // validation rejects this string.
+        ModelType::LlmJpVLM => "llmjpvl",
         // Text-only Youtu-LLM is not tensor-parallel enabled either: its MLA
         // decoder has no sharded runtime. The planner's supported-architecture
         // validation rejects this string before any TP load is attempted; the

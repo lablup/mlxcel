@@ -264,6 +264,17 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::LlmJpVl {
+            image_blocks,
+            total_image_tokens,
+            total_tiles,
+            tile_budget,
+        } => {
+            println!(
+                "LLM-jp-VL: inserted {} image block(s), {} tile(s) under a budget of {} ({} total image tokens)",
+                image_blocks, total_tiles, tile_budget, total_image_tokens
+            );
+        }
         VlmPreparationSummary::LocateAnything {
             image_blocks,
             total_image_tokens,

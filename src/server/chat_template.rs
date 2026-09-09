@@ -176,8 +176,60 @@ pub struct ChatTemplateProcessor {
     /// path that constructs a processor without a corresponding tokenizer
     /// (template-string overrides, `Default`, tests).
     default_enable_thinking: bool,
+    /// Text appended to a *generation* render whose output stops at a bare
+    /// role opener the checkpoint's own processor completes in Python.
+    ///
+    /// LLM-jp-VL is the case this exists for: its shipped `chat_template.jinja`
+    /// ends an `add_generation_prompt` render at `<|start|>assistant`, and
+    /// `LLMjpVLProcessor.apply_chat_template` then does
+    /// `text += "<|channel|>final<|message|>"`. A bare template render is
+    /// therefore an incomplete prompt, and the model is left to pick a Harmony
+    /// channel instead of being told to answer in `final`.
+    ///
+    /// Keyed on the model family rather than on the trailing text alone,
+    /// because other Harmony templates (gpt-oss) also end at
+    /// `<|start|>assistant` and must NOT be forced onto the final channel. It
+    /// applies only when `add_generation_prompt` is true and the render really
+    /// does end at the opener, so a history render (the prompt cache's
+    /// boundary snapshot) and a template that already emitted the channel are
+    /// both left alone.
+    generation_prompt_suffix: Option<GenerationPromptSuffix>,
     #[cfg(test)]
     template_compile_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// A `(opener, suffix)` completion rule for a generation render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationPromptSuffix {
+    /// The bare opener the template's generation render ends with.
+    pub opener: &'static str,
+    /// The text the checkpoint's own processor appends after it.
+    pub suffix: &'static str,
+}
+
+impl GenerationPromptSuffix {
+    /// Append `suffix` when `rendered` ends exactly at `opener`.
+    fn apply(&self, rendered: String) -> String {
+        if rendered.ends_with(self.opener) {
+            let mut completed = rendered;
+            completed.push_str(self.suffix);
+            completed
+        } else {
+            rendered
+        }
+    }
+}
+
+/// The completion rule a model family needs, or `None` for the overwhelming
+/// majority whose template renders a complete generation prompt on its own.
+fn generation_prompt_suffix_for(model_path: &Path) -> Option<GenerationPromptSuffix> {
+    match crate::models::get_model_type(model_path).ok()? {
+        crate::models::ModelType::LlmJpVLM => Some(GenerationPromptSuffix {
+            opener: crate::multimodal::llmjp_vl_prompt::LLMJP_ASSISTANT_OPENER,
+            suffix: crate::multimodal::llmjp_vl_prompt::LLMJP_GENERATION_PROMPT_SUFFIX,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +353,7 @@ impl ChatTemplateProcessor {
             supports_tools_cached: None,
             forced_tool_call_format,
             default_enable_thinking: false,
+            generation_prompt_suffix: generation_prompt_suffix_for(model_path),
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -319,8 +372,36 @@ impl ChatTemplateProcessor {
             supports_tools_cached: None,
             forced_tool_call_format,
             default_enable_thinking: false,
+            generation_prompt_suffix: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Install a generation-prompt completion rule.
+    ///
+    /// [`Self::from_model_path`] installs the rule its checkpoint needs; this
+    /// exists so a caller that built the processor from a template string
+    /// (tests, template overrides) can opt into the same completion.
+    pub fn with_generation_prompt_suffix(mut self, rule: GenerationPromptSuffix) -> Self {
+        self.generation_prompt_suffix = Some(rule);
+        self
+    }
+
+    /// The generation-prompt completion rule in force, if any.
+    pub fn generation_prompt_suffix(&self) -> Option<GenerationPromptSuffix> {
+        self.generation_prompt_suffix
+    }
+
+    /// Complete a render that stopped at a bare role opener.
+    ///
+    /// A history render (`add_generation_prompt == false`) is never completed:
+    /// the prompt cache keys its boundary snapshot on that render and the last
+    /// assistant turn there is already terminated.
+    fn complete_generation_prompt(&self, rendered: String, add_generation_prompt: bool) -> String {
+        match self.generation_prompt_suffix {
+            Some(rule) if add_generation_prompt => rule.apply(rendered),
+            _ => rendered,
         }
     }
 
@@ -804,7 +885,8 @@ impl ChatTemplateProcessor {
         // enable_thinking branches faithfully (issue #686), so no post-render
         // Gemma-4 patching is applied. The `enable_thinking` value reaches the
         // template through `build_template_context` above.
-        self.render_template(context)
+        let rendered = self.render_template(context)?;
+        Ok(self.complete_generation_prompt(rendered, add_generation_prompt))
     }
 
     /// Apply the chat template to messages.
@@ -882,7 +964,8 @@ impl ChatTemplateProcessor {
         // enable_thinking branches faithfully (issue #686), so no post-render
         // Gemma-4 patching is applied. The `enable_thinking` value reaches the
         // template through `build_template_context` above.
-        self.render_template(context)
+        let rendered = self.render_template(context)?;
+        Ok(self.complete_generation_prompt(rendered, add_generation_prompt))
     }
 }
 

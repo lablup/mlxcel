@@ -147,6 +147,9 @@ pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 mod llama_compat_tests;
 
 #[cfg(test)]
+mod llmjp_chat_template_tests;
+
+#[cfg(test)]
 mod max_tokens_route_tests;
 
 #[cfg(test)]
