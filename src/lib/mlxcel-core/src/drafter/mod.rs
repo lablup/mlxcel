@@ -998,6 +998,24 @@ pub trait Drafter {
         false
     }
 
+    /// Whether this drafter is an LFM2 / LFM2.5 DSpark drafter (issue #1339).
+    ///
+    /// DSpark and the Qwen 3.5 DFlash drafters share [`DrafterKind::Dflash`],
+    /// one loader and one round loop, and differ in the target they can read:
+    /// a DSpark `fc` projection is sized for the LFM2 residual streams it was
+    /// published against, a DFlash one for Qwen 3.5's. The server's DFlash
+    /// target gate reads this to refuse an LFM2 target paired with a plain
+    /// DFlash drafter before any forward runs. [`Self::validate_target_compat`]
+    /// cannot make that call itself: it sees the target as a
+    /// [`LanguageModel`], which carries no architecture string, so a DFlash
+    /// drafter has no way to tell an LFM2 target from the Qwen 3.5 one it was
+    /// published for. Left unrefused, the pairing lands as an MLX shape throw
+    /// inside the drafter forward, and an MLX C++ exception crossing the cxx
+    /// bridge aborts the process instead of failing the request.
+    fn is_dspark(&self) -> bool {
+        false
+    }
+
     /// Produce a draft block of proposal tokens.
     ///
     /// Semantics are kind-specific:

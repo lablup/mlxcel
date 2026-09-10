@@ -201,6 +201,7 @@ impl DFlashDraftModel {
             Some(VanillaMarkovHead::from_weights(
                 weights,
                 "markov_head",
+                config.vocab_size,
                 config.markov_rank,
                 group_size,
                 bits,

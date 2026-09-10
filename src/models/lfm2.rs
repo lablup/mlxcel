@@ -483,8 +483,12 @@ impl ShortConv {
     /// The mixer forward, which can also record what a speculative rollback
     /// needs (issue #1339): the conv state as it was before this call and
     /// this call's gated input `Bx`, as a [`ConvRollbackSnapshot`] pushed
-    /// onto `capture` under `layer_idx`. The state is replaced, never
-    /// mutated in place, so holding the previous handle costs no copy.
+    /// onto `capture` under `layer_idx`. The snapshot takes an explicit
+    /// [`mlxcel_core::copy`] of the incoming state rather than aliasing the
+    /// handle: `conv_state` is reassigned at the end of this call, and the
+    /// rollback needs the pre-call tail, so an alias would be read back as
+    /// the post-block state. The copy is one `[B, L_cache - 1, hidden]`
+    /// slab per captured layer.
     pub(crate) fn forward_with_capture(
         &self,
         x: &MlxArray,

@@ -243,6 +243,30 @@ pub(crate) fn dspark_config_pairing_error(
             config.hidden_size
         ));
     }
+    // The mask id indexes the TARGET's embedding table, because a DSpark
+    // drafter ships none of its own, and MLX range-checks no positive gather
+    // index: an id past the last row reads whatever follows the table in the
+    // buffer and feeds it to the logits. The target half of this gate pins the
+    // target's vocabulary to `vocab_size`, so bounding the id against
+    // `vocab_size` here bounds the gather.
+    if config.mask_token_id < 0
+        || usize::try_from(config.mask_token_id).is_ok_and(|id| id >= config.vocab_size)
+    {
+        return Some(format!(
+            "DSpark drafter mask_token_id {} is outside the drafter vocabulary [0, {})",
+            config.mask_token_id, config.vocab_size
+        ));
+    }
+    if config.runtime_verify_width() < 2 {
+        return Some(format!(
+            "DSpark drafter runs at {} verify row(s) (block_size = {}, runtime_block_size = \
+             {:?}); a verify width below 2 proposes nothing and the round loop would emit one \
+             token per burst",
+            config.runtime_verify_width(),
+            config.block_size,
+            config.runtime_block_size
+        ));
+    }
     None
 }
 
@@ -457,8 +481,19 @@ impl Drafter for DFlashDrafter {
 
     /// DSpark (issue #1339): the verify width the checkpoint runs at by
     /// default, `min(block_size + 1, runtime_block_size)`. A plain DFlash
-    /// drafter keeps the trait default (`None`) so the round loop's block
-    /// size policy for the Qwen 3.5 family is unchanged.
+    /// drafter keeps the trait default (`None`).
+    ///
+    /// Declarative on this drafter, not load-bearing. The only readers of
+    /// this hook and of [`Self::prefer_requested_block_size`] are the MTP
+    /// generator and its batched round loop; the DFlash round loop uses the
+    /// `block_size` it was constructed with and never adapts it, so the
+    /// no-backoff property below holds for DSpark whatever this returns.
+    /// The width a DSpark run actually gets is decided one layer up, before
+    /// the drafter is loaded: `resolve_draft_block_size` peeks the drafter
+    /// config through `peek_dspark_configured_block_size` and passes the
+    /// same `runtime_verify_width()` in as `block_size`, unless
+    /// `--draft-block-size` overrides it. Kept implemented so the two agree
+    /// if the DFlash loop ever grows an adaptive width.
     fn configured_block_size(&self) -> Option<usize> {
         self.is_dspark()
             .then(|| self.model.config.runtime_verify_width())
@@ -466,13 +501,18 @@ impl Drafter for DFlashDrafter {
 
     /// DSpark never backs its block size off on low acceptance; the
     /// requested width (the config default or `--draft-block-size`) is the
-    /// width it runs at.
+    /// width it runs at. See [`Self::configured_block_size`] for why this is
+    /// currently a declaration rather than a control input.
     fn prefer_requested_block_size(&self) -> bool {
         self.is_dspark()
     }
 
     fn greedy_only(&self) -> bool {
         self.is_dspark()
+    }
+
+    fn is_dspark(&self) -> bool {
+        self.model.is_dspark()
     }
 
     fn draft_block(
@@ -891,6 +931,8 @@ mod tests {
         DFlashConfig {
             hidden_size: 2048,
             vocab_size: 128_000,
+            block_size: 9,
+            mask_token_id: 125_017,
             markov_rank: 256,
             target_layer_ids: vec![2, 9, 17, 21, 27],
             num_target_layers: 30,
@@ -928,6 +970,40 @@ mod tests {
             ..dspark_config()
         };
         assert!(dspark_config_pairing_error(&empty, 0).is_some());
+    }
+
+    /// The same gate bounds the two checkpoint-supplied numbers that index a
+    /// buffer or size the round: a mask id outside the vocabulary would be
+    /// gathered from the target's embedding table (MLX range-checks no
+    /// positive gather index), and a verify width below two rows proposes
+    /// nothing.
+    #[test]
+    fn dspark_config_pairing_gate_bounds_the_mask_id_and_the_verify_width() {
+        let past_vocab = DFlashConfig {
+            mask_token_id: 128_000,
+            ..dspark_config()
+        };
+        let err = dspark_config_pairing_error(&past_vocab, 5 * 2048).expect("mask id past vocab");
+        assert!(err.contains("mask_token_id 128000"), "{err}");
+
+        let negative = DFlashConfig {
+            mask_token_id: -1,
+            ..dspark_config()
+        };
+        assert!(dspark_config_pairing_error(&negative, 5 * 2048).is_some());
+
+        let degenerate = DFlashConfig {
+            block_size: 0,
+            ..dspark_config()
+        };
+        let err = dspark_config_pairing_error(&degenerate, 5 * 2048).expect("degenerate width");
+        assert!(err.contains("verify row(s)"), "{err}");
+
+        let clamped_low = DFlashConfig {
+            runtime_block_size: Some(1),
+            ..dspark_config()
+        };
+        assert!(dspark_config_pairing_error(&clamped_low, 5 * 2048).is_some());
     }
 
     /// The target half rejects a target whose hidden size, layer count or

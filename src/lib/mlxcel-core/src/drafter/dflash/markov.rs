@@ -54,21 +54,29 @@ impl VanillaMarkovHead {
     /// `markov_head` on the published checkpoints). Quantized siblings
     /// (`.scales` / `.biases`) load through the same unified loaders the
     /// backbone uses.
+    ///
+    /// Both factors are measured against the config's `vocab` and `rank`
+    /// before either is built, because neither shape is checked anywhere
+    /// downstream: `markov_w1` is gathered at a token id once per chain step
+    /// and MLX range-checks no positive gather index, so a table with fewer
+    /// rows than the vocabulary the chain draws from reads past its own
+    /// buffer into the logits; a `markov_w2` of the wrong width throws inside
+    /// MLX instead, which crosses the cxx bridge as a process abort rather
+    /// than a load error.
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
+        vocab: usize,
         rank: usize,
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let w1 = UnifiedEmbedding::from_weights(
-            weights,
-            &format!("{prefix}.markov_w1"),
-            group_size,
-            bits,
-        )?;
-        let w2 =
-            UnifiedLinear::from_weights(weights, &format!("{prefix}.markov_w2"), group_size, bits)?;
+        let w1_key = format!("{prefix}.markov_w1");
+        let w2_key = format!("{prefix}.markov_w2");
+        validate_markov_factor(weights, &w1_key, vocab, rank)?;
+        validate_markov_factor(weights, &w2_key, vocab, rank)?;
+        let w1 = UnifiedEmbedding::from_weights(weights, &w1_key, group_size, bits)?;
+        let w2 = UnifiedLinear::from_weights(weights, &w2_key, group_size, bits)?;
         Ok(Self { w1, w2, rank })
     }
 
@@ -139,6 +147,47 @@ impl VanillaMarkovHead {
         let proposals = self.sample_block_array(base_logits, anchor);
         super::materialize_argmax_i32_vec(&proposals, gamma)
     }
+}
+
+/// Check one `[vocab, rank]` Markov factor against the config that sizes it,
+/// before the loader turns it into a layer.
+///
+/// A quantized factor bit-packs `rank` along its last axis only, so its row
+/// count reads the same either way and its stored width is a function of the
+/// bit depth rather than the rank; the rank check is therefore skipped for a
+/// packed table and the row check is not.
+///
+/// Used by: [`VanillaMarkovHead::from_weights`].
+fn validate_markov_factor(
+    weights: &WeightMap,
+    key: &str,
+    vocab: usize,
+    rank: usize,
+) -> Result<(), String> {
+    let name = format!("{key}.weight");
+    let tensor = weights
+        .get(&name)
+        .ok_or_else(|| format!("Weight not found: {name}"))?;
+    let shape = ffi::array_shape(tensor);
+    let [rows, cols] = shape.as_slice() else {
+        return Err(format!(
+            "{name} must be a 2-D [vocab, rank] table, got shape {shape:?}"
+        ));
+    };
+    if usize::try_from(*rows).ok() != Some(vocab) {
+        return Err(format!(
+            "{name} has {rows} rows but the drafter config declares vocab_size {vocab}; the \
+             Markov chain gathers this table at a token id and MLX range-checks no positive \
+             gather index"
+        ));
+    }
+    if !weights.contains_key(&format!("{key}.scales")) && usize::try_from(*cols).ok() != Some(rank)
+    {
+        return Err(format!(
+            "{name} is [{rows}, {cols}] but the drafter config declares markov_rank {rank}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -36,8 +36,15 @@ fn head_with_transition(w2: Vec<f32>) -> VanillaMarkovHead {
         "markov_head.markov_w2.weight".to_string(),
         ffi::from_slice_f32(&w2, &[VOCAB, VOCAB]),
     );
-    VanillaMarkovHead::from_weights(&weights, "markov_head", VOCAB as usize, 64, 4)
-        .expect("markov head must load from w1 / w2")
+    VanillaMarkovHead::from_weights(
+        &weights,
+        "markov_head",
+        VOCAB as usize,
+        VOCAB as usize,
+        64,
+        4,
+    )
+    .expect("markov head must load from w1 / w2")
 }
 
 /// `[1, gamma, VOCAB]` logits that are flat (all zero) at every position.
@@ -113,7 +120,9 @@ fn markov_head_load_requires_both_factors() {
         "markov_head.markov_w1.weight".to_string(),
         ffi::zeros(&[VOCAB, 4], dtype::FLOAT32),
     );
-    let Err(err) = VanillaMarkovHead::from_weights(&weights, "markov_head", 4, 64, 4) else {
+    let Err(err) =
+        VanillaMarkovHead::from_weights(&weights, "markov_head", VOCAB as usize, 4, 64, 4)
+    else {
         panic!("a missing markov_w2 must fail the load");
     };
     assert!(

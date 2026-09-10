@@ -20,15 +20,28 @@
 //! of a burst also has to allocate the target's heterogeneous cache vector,
 //! read logits and captured hidden states off the target's own verify-output
 //! type, and decide how much of the prompt's captured hidden the first draft
-//! sees. [`DFlashTargetModel`] holds exactly those three things, so a new
-//! family plugs in with one `impl` block here plus a match arm in the burst
-//! gate:
+//! sees. [`DFlashTargetModel`] holds those, so most of what a family needs
+//! lives in one `impl` block here:
 //!
 //! - Qwen 3.5 (DFlash): fresh `Qwen3NextCache`s, the last prompt position's
 //!   hidden as the first draft input.
 //! - LFM2 / LFM2.5 (DSpark): fresh `Lfm2LayerCache`s, EVERY prompt row as the
 //!   first draft input (the drafter's own context cache holds the whole
-//!   prompt), and the block-versus-chain exactness probe as a gate.
+//!   prompt), the block-versus-chain exactness probe as a gate, and a
+//!   drafter-family requirement (DSpark only).
+//!
+//! The `impl` is not the whole cost, and the count is worth stating plainly
+//! before a fourth family is added. Each family also touches three match
+//! arms in [`super::speculative_burst`], because the burst reaches the
+//! target as a `LoadedModel` enum and only a match recovers the concrete
+//! type the trait is implemented on: the exactness gate, the `drive!`
+//! dispatch, and the batched variant gate. The first two are uniform
+//! one-liners; the third still carries the LFM2 B = 1 decline as a
+//! hardcoded arm rather than a trait method, which is the one piece of
+//! per-family policy living outside this trait (a `supports_batched()` hook
+//! is the fix, deferred to the next family that needs it). A fourth arm,
+//! `model_variant_label`, is the pre-existing project-wide label table
+//! (#1613) and is not specific to DFlash.
 //!
 //! The VLM wrappers of both families implement the trait by delegating to
 //! their text backbone, which is what lets a text-only request against a
@@ -136,6 +149,24 @@ pub(crate) trait DFlashTargetModel:
     fn exactness_allows(&self, _block_size: usize) -> bool {
         true
     }
+
+    /// Whether this family can only be driven by a DSpark drafter.
+    ///
+    /// `true` for LFM2 / LFM2.5: the only DFlash-family drafter published for
+    /// this target is a DSpark one, and a plain DFlash drafter's `fc`
+    /// projection reads the Qwen 3.5 residual streams it was trained on, at a
+    /// width this target does not produce. `Drafter::validate_target_compat`
+    /// cannot catch that pairing, because a DFlash drafter sees the target as
+    /// a `LanguageModel` with no architecture string and returns `Ok`; the
+    /// target is the side that knows. An associated function for the same
+    /// reason as `first_hidden_rows`: it is a property of the family, not of a
+    /// loaded instance, so the test below can pin it without a checkpoint.
+    ///
+    /// Qwen 3.5 keeps the permissive default. Widening it there would change
+    /// which DFlash pairings that family accepts, which is a separate call.
+    fn requires_dspark_drafter() -> bool {
+        false
+    }
 }
 
 impl DFlashTargetModel for crate::models::Qwen35Model {
@@ -160,6 +191,9 @@ impl DFlashTargetModel for crate::models::Lfm2Model {
     fn exactness_allows(&self, block_size: usize) -> bool {
         self.dflash_exactness_allows(block_size)
     }
+    fn requires_dspark_drafter() -> bool {
+        true
+    }
 }
 
 impl DFlashTargetModel for crate::vision::Lfm2VlModel {
@@ -171,6 +205,9 @@ impl DFlashTargetModel for crate::vision::Lfm2VlModel {
     }
     fn exactness_allows(&self, block_size: usize) -> bool {
         self.text_model.dflash_exactness_allows(block_size)
+    }
+    fn requires_dspark_drafter() -> bool {
+        true
     }
 }
 
@@ -200,6 +237,28 @@ fn concat_captured_hidden(slabs: &[UniquePtr<MlxArray>]) -> UniquePtr<MlxArray> 
         .map(|slab| slab.as_ref().expect("hidden state must be non-null"))
         .collect();
     mlxcel_core::concatenate_many(&refs, -1)
+}
+
+/// Whether a target that can only run a DSpark drafter got one, as the
+/// operator-facing reason to decline.
+///
+/// `None` when the pairing is admissible. Takes the two decided facts rather
+/// than the target and the drafter so both run arms and the unit test below
+/// share one message.
+///
+/// Used by: [`run_dflash_on_target`], [`run_dflash_batched_on_target`].
+fn dspark_required_pairing_error(requires_dspark: bool, drafter_is_dspark: bool) -> Option<String> {
+    (requires_dspark && !drafter_is_dspark).then(|| {
+        "the target is an LFM2 / LFM2.5 checkpoint and the drafter passed to --model-draft is a \
+         plain DFlash drafter, not a DSpark one. An LFM2 target can only be paired with the \
+         LiquidAI DSpark drafter published for that exact checkpoint (LFM2.5-2.6B with \
+         LFM2.5-2.6B-DSpark, LFM2.5-8B-A1B with LFM2.5-8B-A1B-DSpark, and so on): a DFlash \
+         drafter's fc projection reads the Qwen 3.5 residual streams it was trained on, at a \
+         width this target does not produce, and its mask token id indexes a different \
+         vocabulary. Point --model-draft at a DSpark drafter, or drop it to serve this model \
+         with classic decode."
+            .to_string()
+    })
 }
 
 /// The prompt rows the first draft round consumes, per
@@ -278,6 +337,20 @@ where
         drafter_slot.restore_unused(owned_drafter);
         return Err(BurstOutcome::Error(format!(
             "DFlash drafter incompatible with target: {e}"
+        )));
+    }
+    // Family half of the same gate, which the drafter cannot decide on its
+    // own: a plain DFlash drafter reads the target as a `LanguageModel`, sees
+    // no architecture string, and returns `Ok` for an LFM2 target it cannot
+    // run. Past this point the mismatch is an MLX shape throw inside the
+    // drafter forward, and an MLX C++ exception crossing the cxx bridge aborts
+    // the process rather than failing the request.
+    if let Some(reason) =
+        dspark_required_pairing_error(T::requires_dspark_drafter(), owned_drafter.is_dspark())
+    {
+        drafter_slot.restore_unused(owned_drafter);
+        return Err(BurstOutcome::Error(format!(
+            "DFlash drafter incompatible with target: {reason}"
         )));
     }
 
@@ -477,6 +550,20 @@ where
             "DFlash drafter incompatible with target: {e}"
         )));
     }
+    // Family half of the same gate, which the drafter cannot decide on its
+    // own: a plain DFlash drafter reads the target as a `LanguageModel`, sees
+    // no architecture string, and returns `Ok` for an LFM2 target it cannot
+    // run. Past this point the mismatch is an MLX shape throw inside the
+    // drafter forward, and an MLX C++ exception crossing the cxx bridge aborts
+    // the process rather than failing the request.
+    if let Some(reason) =
+        dspark_required_pairing_error(T::requires_dspark_drafter(), owned_drafter.is_dspark())
+    {
+        drafter_slot.restore_unused(owned_drafter);
+        return Err(BurstOutcome::Error(format!(
+            "DFlash drafter incompatible with target: {reason}"
+        )));
+    }
 
     let mut caches: Vec<T::Cache> = target.make_dflash_caches();
     target.enable_speculative_buffers(&mut caches, block_size as usize);
@@ -608,6 +695,37 @@ mod tests {
             mlxcel_core::utils::array_to_vec_f32(&last),
             vec![18.0, 19.0, 20.0, 21.0, 22.0, 23.0]
         );
+    }
+
+    /// An LFM2 target paired with a drafter that is not DSpark declines by
+    /// name, before any forward (issue #1339). Both facts the decision reads
+    /// are pinned: the family policy each `DFlashTargetModel` impl declares,
+    /// and the message the run arms return for the one inadmissible
+    /// combination. Before the DSpark work the pairing declined at the burst's
+    /// variant gate, which no longer rejects LFM2; the drafter's own
+    /// `validate_target_compat` returns `Ok` for a non-DSpark drafter, so
+    /// without this gate the mismatch reached MLX as a shape throw.
+    #[test]
+    fn an_lfm2_target_declines_a_drafter_that_is_not_dspark() {
+        assert!(<crate::models::Lfm2Model as DFlashTargetModel>::requires_dspark_drafter());
+        assert!(<crate::vision::Lfm2VlModel as DFlashTargetModel>::requires_dspark_drafter());
+        assert!(!<crate::models::Qwen35Model as DFlashTargetModel>::requires_dspark_drafter());
+        assert!(!<crate::vision::Qwen35VLModel as DFlashTargetModel>::requires_dspark_drafter());
+
+        let reason = dspark_required_pairing_error(true, false)
+            .expect("an LFM2 target with a plain DFlash drafter must decline");
+        assert!(reason.contains("DSpark"), "{reason}");
+        assert!(reason.contains("--model-draft"), "{reason}");
+
+        assert!(
+            dspark_required_pairing_error(true, true).is_none(),
+            "the published pairing must be admitted"
+        );
+        assert!(
+            dspark_required_pairing_error(false, false).is_none(),
+            "the Qwen 3.5 DFlash pairing must be untouched by this gate"
+        );
+        assert!(dspark_required_pairing_error(false, true).is_none());
     }
 
     /// The per-family policies, so a future `impl` that forgets

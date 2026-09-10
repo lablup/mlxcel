@@ -307,7 +307,10 @@ impl DFlashConfig {
     /// `block_size` already counts the bonus row, so it is the width itself.
     pub fn verify_width(&self) -> usize {
         if self.is_dspark() {
-            self.block_size + 1
+            // Saturating: a config is checkpoint-supplied, and `usize::MAX`
+            // here would panic in a debug build and wrap to a zero-row verify
+            // width in a release one.
+            self.block_size.saturating_add(1)
         } else {
             self.block_size
         }
