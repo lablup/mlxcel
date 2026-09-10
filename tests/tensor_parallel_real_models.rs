@@ -23,7 +23,9 @@ use mlxcel::{
 };
 
 fn prompt_tokens(tokenizer: &MlxcelTokenizer, prompt: &str) -> Vec<i32> {
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+    // Same rule production uses, so the test tokenizes what the server would
+    // (`src/server/model_provider.rs::tokenize_prompt_for_generation`).
+    let add_special = !tokenizer.prompt_carries_bos(prompt);
     tokenizer
         .encode(prompt, add_special)
         .unwrap()

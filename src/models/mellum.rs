@@ -178,7 +178,7 @@ pub(crate) struct YarnRope {
 /// `rope_parameters` entry. Returns `None` when the entry is not a YaRN config
 /// (then the layer falls back to a default RoPE).
 ///
-/// Used by: Mellum, TeleChat3
+/// Used by: Mellum, TeleChat3, Laguna
 ///
 /// The accepted `rope_type` set mirrors upstream's, which groups several
 /// vendor spellings onto one `YarnRoPE`

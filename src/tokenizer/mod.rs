@@ -2519,6 +2519,33 @@ mod tests {
         assert!(bare.prompt_carries_bos("<bos>a"));
     }
 
+    /// The Llama 3 lineage is the family this rule changes outside Laguna: the
+    /// chat template opens with `{{- bos_token }}` and the checkpoint's
+    /// `TemplateProcessing` post-processor prepends `<|begin_of_text|>` again,
+    /// so every chat prompt used to carry two BOS ids. `apply_chat_template`
+    /// upstream passes `add_special_tokens=False` for exactly this reason.
+    #[test]
+    fn prompt_carries_bos_collapses_the_llama3_double_bos() {
+        let bos = "<|begin_of_text|>";
+        let tok = mlxcel_with_bos_template(bos);
+        let bos_id = tok.bos_token_id().expect("template prepends the bos");
+
+        // A rendered chat prompt: the template already emitted the BOS text.
+        let rendered = format!("{bos}a");
+        let ids = tok
+            .encode(&rendered, !tok.prompt_carries_bos(&rendered))
+            .unwrap();
+        assert_eq!(ids.first(), Some(&bos_id));
+        assert_eq!(ids.iter().filter(|&&id| id == bos_id).count(), 1);
+
+        // A raw prompt that does not carry one still gets exactly one, so the
+        // rule can never subtract a BOS that was not already there.
+        let raw = "a";
+        let raw_ids = tok.encode(raw, !tok.prompt_carries_bos(raw)).unwrap();
+        assert_eq!(raw_ids.first(), Some(&bos_id));
+        assert_eq!(raw_ids.iter().filter(|&&id| id == bos_id).count(), 1);
+    }
+
     #[test]
     fn infer_thinking_markers_recognizes_single_token_qwen_think_pair() {
         let tok = mlxcel_with_added(&["<think>", "</think>"]);

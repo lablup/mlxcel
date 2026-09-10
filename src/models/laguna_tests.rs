@@ -203,6 +203,32 @@ fn router_sigmoid_selects_with_bias_but_weights_without_bias() {
     assert!((s3 - 1.0 / (1.0 + 2f32.exp())).abs() < 1e-5);
 }
 
+/// The legacy spelling. A checkpoint predating `moe_router_score_func` says
+/// `moe_router_use_sigmoid: false`, which selects softmax scoring; anything
+/// else, including the key being absent, is sigmoid.
+#[test]
+fn legacy_router_use_sigmoid_flag_resolves_the_score_function() {
+    let resolve = |legacy: Option<bool>, explicit: Option<&str>| {
+        let mut args = xs_config();
+        args.moe_router_use_sigmoid = legacy;
+        args.moe_router_score_func = explicit.map(str::to_string);
+        args.router_score_func()
+    };
+    assert_eq!(
+        resolve(Some(false), None).unwrap(),
+        RouterScoreFunc::Softmax
+    );
+    assert_eq!(resolve(Some(true), None).unwrap(), RouterScoreFunc::Sigmoid);
+    assert_eq!(resolve(None, None).unwrap(), RouterScoreFunc::Sigmoid);
+    // The explicit key wins over the legacy one, and an unknown name is an
+    // error rather than a silent fallback to sigmoid.
+    assert_eq!(
+        resolve(Some(false), Some("sqrtsoftplus")).unwrap(),
+        RouterScoreFunc::SqrtSoftplus
+    );
+    assert!(resolve(None, Some("bogus")).is_err());
+}
+
 #[test]
 fn router_sqrtsoftplus_matches_formula() {
     let z = [-100.0f32, -3.0, 0.0, 2.5, 30.0];
@@ -302,7 +328,11 @@ fn compressed_tensors_weights(num_experts: usize) -> (WeightMap, Vec<f32>, Vec<u
     let mut w: WeightMap = std::collections::HashMap::new();
     let mut globals = Vec::new();
     let mut scale_bytes = Vec::new();
-    let scale_values = [1.0f32, 0.5, 2.0, 0.125];
+    // Not all powers of two: 1.75 is `1.11b * 2^0`, which fills every E4M3
+    // mantissa bit, and `3 * 2^-9` is an E4M3 subnormal. A power-of-two-only
+    // set would pass the round-trip assertion without ever exercising the
+    // mantissa or the subnormal range.
+    let scale_values = [1.0f32, 1.75, 0.5, 3.0 * 2f32.powi(-9)];
     for e in 0..num_experts {
         let base = format!("model.layers.1.mlp.experts.{e}.gate_proj");
         // out = 4 rows, in = 16 -> 8 packed bytes per row, 1 block scale per row.

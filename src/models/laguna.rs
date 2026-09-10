@@ -23,6 +23,17 @@
 //! `nvfp4-pack-quantized` layout; [`crate::models::laguna_sanitize`] turns
 //! that into MLX native NVFP4 planes bit for bit.
 //!
+//! References: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/laguna.py
+//! for the graph, and the `modeling_laguna.py` / `configuration_laguna.py`
+//! that ship inside each published checkpoint for the config semantics. The
+//! two disagree in one place: the YaRN block's `attention_factor` is honored
+//! here when the config declares one, which is what
+//! `transformers.modeling_rope_utils._compute_yarn_parameters` does and
+//! therefore what the checkpoint's own modeling file inherits, while mlx-lm
+//! drops the key and always derives the factor from `factor`. It matters for
+//! `mlx-community/Laguna-XS.2-4bit`, which declares `attention_factor: 1.0`
+//! where the derived value would be 1.3466.
+//!
 //! Layer blocks live in [`crate::models::laguna_layers`]; this file holds
 //! the config, the per-layer RoPE resolution, the model shell and the
 //! `LanguageModel` wrapper.
@@ -367,6 +378,12 @@ impl LagunaModel {
     /// Run the stack. `capture_layer_ids` names layers whose post-block
     /// residual stream is returned alongside the logits (in that order); an
     /// empty slice captures nothing.
+    ///
+    /// Every caller today passes an empty slice: the capture arm and
+    /// [`crate::models::laguna_layers::LagunaCache::trim`] are staged for the
+    /// DFlash drafter (#1351), which the port keeps out of scope, and neither
+    /// is reachable until `verify_forward_with_capture_layers` is implemented
+    /// for this family.
     pub fn forward_with_capture(
         &self,
         input_ids: &MlxArray,
