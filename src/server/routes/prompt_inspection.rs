@@ -78,15 +78,32 @@ fn parse_with_default_model<T: serde::de::DeserializeOwned>(
 /// Render one chat-completions body into the prompt the generation path would
 /// prefill.
 ///
-/// Returns the rendered prompt or a 400-shaped error. The tool guard runs
-/// first, as it does on `/v1/chat/completions` and `/v1/messages/count_tokens`,
-/// so an oversized tool array cannot reach the Jinja2 renderer through a route
-/// that does not generate.
+/// Returns the rendered prompt or an error response. The media-capability gate
+/// and the tool guard run in the order `/v1/chat/completions` runs them, so
+/// neither an image the checkpoint has no tower for nor an oversized tool array
+/// can reach the Jinja2 renderer through a route that does not generate.
+///
+/// The media gate is not only about answering consistently. `prepare_chat_request_with_cache`
+/// downloads every `image_url` and `input_audio` payload and opens every
+/// `video_url` as part of rendering, and these routes never reach a model
+/// worker, so without a gate here a text-only checkpoint would fetch a URL a
+/// client named and report nothing but a token count for it. The generating
+/// routes have refused that at the boundary since issue #1451; this closes the
+/// same hole on the three routes that only inspect (issue #1349 moved the
+/// video+audio arm of that check here too, so the combination is covered by
+/// the same call).
 async fn render_chat_prompt(
     state: &AppState,
     live: &LiveSettings,
     request: &ChatCompletionRequest,
 ) -> Result<String, ErrorResponse> {
+    if let Some(rejection) = crate::server::media_capability_rejection(
+        request,
+        state.media_support,
+        state.display_model_id(),
+    ) {
+        return Err(rejection);
+    }
     if let Err(message) = super::chat::validate_chat_tool_inputs(request) {
         return Err(ErrorResponse::new(message, "invalid_request_error"));
     }

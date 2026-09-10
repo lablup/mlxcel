@@ -791,6 +791,23 @@ fn has_declared_media(media: super::media::MediaRequestMetadata) -> bool {
     media.declared_images > 0 || media.declared_audio > 0 || media.declared_videos > 0
 }
 
+/// Whether the inbound body names any media part, asked of the request itself
+/// rather than of the resolver's output.
+///
+/// [`has_declared_media`] answers the same question from
+/// `MediaRequestMetadata`, which only exists after
+/// `prepare_chat_request_with_cache` has already downloaded every `image_url`
+/// and `input_audio` payload and opened every `video_url`. The router is
+/// text-only for every checkpoint behind it, so that download can never be
+/// used for anything; refusing from the request keeps a text-only front from
+/// fetching a URL a client named. The single-node routes refuse at the same
+/// point for the same reason (`media_capability_rejection`).
+fn request_declares_media(request: &ChatCompletionRequest) -> bool {
+    !request.image_urls().is_empty()
+        || !request.audio_inputs().is_empty()
+        || !request.video_urls().is_empty()
+}
+
 /// Core chat routing logic: tokenizes, sends to prefill, merges result.
 async fn route_chat(
     state: Arc<RouterState>,
@@ -862,8 +879,14 @@ async fn route_chat(
         }
     };
 
-    // Render the chat template and reject multimodal requests (the
-    // disaggregated path is text-only for pool-backed Fp16 families).
+    // Reject multimodal requests before rendering: the disaggregated path is
+    // text-only for pool-backed Fp16 families, and the render below is also
+    // what resolves media, so refusing afterwards would mean fetching first.
+    if request_declares_media(&request) {
+        anyhow::bail!("the disaggregated router supports text-only requests");
+    }
+
+    // Render the chat template.
     let thinking_markers = state.tokenizer.infer_thinking_markers();
     let prepared = match super::chat_request::prepare_chat_request_with_cache(
         &state.chat_template,
@@ -887,6 +910,9 @@ async fn route_chat(
         }
     };
 
+    // Backstop for the check above: the resolver reports declared counts, so a
+    // future translation step that synthesized a media part after the request
+    // was inspected would still be refused rather than silently dropped.
     if has_declared_media(prepared.media) {
         anyhow::bail!("the disaggregated router supports text-only requests");
     }

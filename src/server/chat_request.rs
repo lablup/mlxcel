@@ -374,9 +374,14 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // No video+audio refusal here: preparation cannot see the loaded model, and
     // the Gemma 4 Unified merge path takes both in one prompt (issue #1349).
     // The capability check runs at the HTTP boundary in
-    // `media_capability_rejection` (which reads `ModelMediaSupport`), and
-    // `prepare_request_vlm_embeddings` on the worker is the backstop for the
-    // routes that bypass the boundary (`router_front`, `prompt_inspection`).
+    // `media_capability_rejection` (which reads `ModelMediaSupport`). Every
+    // caller of this function reaches a refusal before it: the generating
+    // routes and the prompt-inspection routes call the boundary check, and
+    // `router_front` refuses any declared media itself because it is text-only.
+    // `prepare_request_vlm_embeddings` repeats the refusal on the worker, but
+    // it is a backstop rather than the last line of defence for any route: the
+    // fetch this function performs happens before a worker ever sees the
+    // request, so a guard that only lives there would arrive too late.
     if declared_audio > 0 {
         validate_no_reserved_media_sentinels(request)?;
     }

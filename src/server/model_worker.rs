@@ -1518,8 +1518,12 @@ pub(crate) fn prepare_request_vlm_embeddings(
     // mirroring the CLI dispatch in `commands/generate_vlm.rs::compute_vlm_embeddings`.
     // A request that carries both video and audio is merged only by Gemma 4
     // Unified (issue #1349); for every other family this branch is the backstop
-    // behind `media_capability_rejection`, and the only guard on the routes that
-    // skip the HTTP boundary (`router_front`, `prompt_inspection`).
+    // behind `media_capability_rejection`. It is a backstop and not the only
+    // guard anywhere: every route that can carry a `video_url` runs the HTTP
+    // boundary check first, and the two fronts that do not reach a worker at
+    // all (`router_front`, which is text-only, and the prompt-inspection
+    // routes, which render without generating) refuse for themselves before
+    // any media byte is fetched.
     if !videos.is_empty() {
         if !audio.is_empty() {
             let unified = match model {
@@ -2582,8 +2586,13 @@ fn prepare_gemma4_unified_audio_embeddings(
         return Ok(None);
     }
 
-    let audio_input =
-        gemma4_unified_server_audio(unified, prompt_tokens, audio_data, end_of_turn_token_id)?;
+    let audio_input = gemma4_unified_server_audio_features(unified, audio_data)?;
+    gemma4_unified_server_expand_audio_run(
+        unified,
+        prompt_tokens,
+        audio_input.num_frames,
+        end_of_turn_token_id,
+    );
 
     // Process images alongside audio (encoder-free patch projector).
     let processed_images =
@@ -2601,21 +2610,24 @@ fn prepare_gemma4_unified_audio_embeddings(
     Ok(Some(embeddings))
 }
 
-/// Decode the request's single audio clip, chunk the raw waveform into
-/// `audio_samples_per_token` frames, and expand the prompt's audio run.
+/// Decode the request's single audio clip and chunk the raw waveform into
+/// `audio_samples_per_token` frames. Does not touch the prompt.
 ///
-/// Shared by the Gemma 4 Unified audio-only and video+audio worker paths
-/// (issue #1349) so both build the audio half of the prompt identically.
-fn gemma4_unified_server_audio(
+/// Kept separate from [`gemma4_unified_server_expand_audio_run`] so a caller
+/// can run it before the expensive half of a combined request. Both failures
+/// reachable here, a clip count other than one and a waveform the WAV reader
+/// rejects, are decided by bytes the client already sent, so a combined
+/// video+audio request must not discover them only after ffmpeg has decoded
+/// every clip and the patch projector has run over every sampled frame
+/// (issue #1349).
+///
+/// Shared by the Gemma 4 Unified audio-only and video+audio worker paths.
+fn gemma4_unified_server_audio_features(
     unified: &crate::vision::Gemma4UnifiedModel,
-    prompt_tokens: &mut Vec<i32>,
     audio_data: &[Vec<u8>],
-    end_of_turn_token_id: Option<i32>,
 ) -> Result<crate::vision::processors::gemma4_unified::Gemma4UnifiedAudioInput> {
-    use crate::audio;
-
     let audio_bytes = require_single_server_audio_clip("Gemma4 Unified", audio_data)?;
-    let (samples, sample_rate) = audio::load_wav_from_bytes(audio_bytes)
+    let (samples, sample_rate) = crate::audio::load_wav_from_bytes(audio_bytes)
         .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
     tracing::info!(
         "Gemma4 Unified audio input: {} samples at {} Hz ({:.1}s)",
@@ -2624,18 +2636,30 @@ fn gemma4_unified_server_audio(
         samples.len() as f64 / sample_rate.max(1) as f64
     );
 
-    let audio_input = unified.processor.process_audio(&samples);
+    Ok(unified.processor.process_audio(&samples))
+}
 
+/// Expand the prompt's audio run for an already-decoded clip.
+///
+/// Split from [`gemma4_unified_server_audio_features`] because the two halves
+/// belong at different points of a combined request: the decode is validation
+/// and runs first, the expansion has to run after the image and video
+/// expansions so the three placeholder runs land in the order the scatter
+/// expects.
+fn gemma4_unified_server_expand_audio_run(
+    unified: &crate::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    num_audio_frames: usize,
+    end_of_turn_token_id: Option<i32>,
+) {
     crate::vlm_runtime::expand_gemma4_audio_tokens_for_server(
         prompt_tokens,
         unified.audio_token_id,
         unified.boa_token_id,
         unified.eoa_token_id,
-        audio_input.num_frames,
+        num_audio_frames,
         end_of_turn_token_id,
     );
-
-    Ok(audio_input)
 }
 
 /// Decode and patchify the request's companion still images and expand their
@@ -3454,12 +3478,28 @@ fn prepare_gemma4_unified_video_and_audio_embeddings(
         ));
     }
 
+    // Decoded before the videos rather than after them. Everything this call can
+    // refuse (a clip count other than one, a waveform the WAV reader rejects) is
+    // decided by bytes the client already sent, so running it last would let a
+    // few kilobytes of malformed audio spend a full ffmpeg decode of every clip
+    // plus a patch projection over every sampled frame before the request is
+    // refused. The audio-only path already validates first; this keeps the
+    // combined path from being the cheaper way to buy that work.
+    let audio_input = gemma4_unified_server_audio_features(unified, audio_data)?;
+
     let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
     let processed_images =
         gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
     let video_frames = gemma4_unified_server_video_frames(unified, prompt_tokens, &decoded_videos)?;
-    let audio_input =
-        gemma4_unified_server_audio(unified, prompt_tokens, audio_data, end_of_turn_token_id)?;
+    // Expanded last: the audio run has to follow the image and video runs so
+    // the three placeholder streams land in the order `merge_multimodal`
+    // scatters them.
+    gemma4_unified_server_expand_audio_run(
+        unified,
+        prompt_tokens,
+        audio_input.num_frames,
+        end_of_turn_token_id,
+    );
 
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
