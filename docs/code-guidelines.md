@@ -63,7 +63,7 @@ Past roughly a dozen callers, a hand-written roster is wrong by the next release
 ```rust
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 44 non-test files under `src/models`, in four groups.
+/// commit that is N non-test files under `src/models`, in four groups.
 /// (groups and representatives ...)
 ///
 /// Not used by the mainstream dense decoders (Llama3, Mixtral, Gemma2 and
