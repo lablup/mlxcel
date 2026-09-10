@@ -44,10 +44,14 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-const THINKING_MARKER_PAIRS: [(&str, &str); 3] = [
+const THINKING_MARKER_PAIRS: [(&str, &str); 4] = [
     ("<think>", "</think>"),
     ("<|content_thinking|>", "<|end_message|>"),
     ("<|channel>", "<channel|>"),
+    // Kimi K3 XTML. The close marker is what the primed-open pass keys on: the
+    // generation prompt ends with the open tag, so the model emits only the
+    // close.
+    ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
 ];
 
 fn has_inkling_primed_boundary(text: &str) -> bool {
@@ -120,6 +124,10 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|message_model|>", "")
         .replace("<|content_text|>", "")
         .replace("<|end_message|>", "")
+        // Kimi K3: a stray `response` tag when the model closed the channel
+        // without opening it, or opened it without closing.
+        .replace("<|open|>response<|sep|>", "")
+        .replace("<|close|>response<|sep|>", "")
         .trim()
         .to_string()
 }
@@ -272,6 +280,19 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         // thought but produced no answer" rather than a wall of `<|channel>`
         // markers.
         return ToolCallParseResult::none(String::new());
+    }
+
+    // Kimi K3's XTML markers are unique to it (`<|open|>TAG<|sep|>`), so it
+    // declines cleanly on every other family's output and can run first. Like
+    // Harmony below it owns the whole stream: it routes the `response` channel
+    // to `content` and the `tools` section to tool calls, so returning its
+    // result unconditionally is what keeps XTML markup out of the content on
+    // the no-tool-call path.
+    if let Some(mut result) = formats::try_kimi_k3(text) {
+        if let Some(tools) = tools {
+            result.tool_calls = filter_by_tools(result.tool_calls, tools);
+        }
+        return result;
     }
 
     // Harmony (GPT-OSS) is handled up front, ahead of the single-purpose
@@ -1578,5 +1599,86 @@ mod tests {
             Some(crate::server::tool_calls::ToolCallFormat::Glm47),
             "a plain JSON tool call must not be claimed by the GLM parser"
         );
+    }
+
+    // -- Kimi K3 XTML --
+
+    /// The whole shape a thinking-mode K3 turn produces: the generation prompt
+    /// primed the open think tag, so the model's own output starts with the
+    /// reasoning body.
+    const K3_TURN: &str = concat!(
+        "weighing the options<|close|>think<|sep|>",
+        "<|open|>response<|sep|>Checking now.<|close|>response<|sep|>",
+        "<|open|>tools<|sep|>",
+        r#"<|open|>call tool="get_weather" index="1"<|sep|>"#,
+        r#"<|open|>argument key="location" type="string"<|sep|>Seoul<|close|>argument<|sep|>"#,
+        r#"<|open|>argument key="days" type="number"<|sep|>3<|close|>argument<|sep|>"#,
+        "<|close|>call<|sep|><|close|>tools<|sep|>",
+    );
+
+    #[test]
+    fn reasoning_and_tool_call_stream_markers() {
+        // Streaming: the shared filter splits the same token stream into the
+        // reasoning and content channels and suppresses the tool-call block.
+        let mut filter =
+            crate::server::tool_calls::stream_filter::StreamFilter::new_primed_open_thinking();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for ch in K3_TURN.chars() {
+            let out = filter.feed(ch.encode_utf8(&mut [0u8; 4]));
+            content.push_str(out.content.as_deref().unwrap_or_default());
+            reasoning.push_str(out.reasoning.as_deref().unwrap_or_default());
+        }
+        let out = filter.flush();
+        content.push_str(out.content.as_deref().unwrap_or_default());
+        reasoning.push_str(out.reasoning.as_deref().unwrap_or_default());
+        assert_eq!(reasoning, "weighing the options");
+        assert_eq!(content, "Checking now.");
+
+        // Non-streaming: the same text through the parser yields the answer,
+        // the tool call, and typed arguments, with no markup left anywhere.
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(K3_TURN, Some(&tools));
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::KimiK3)
+        );
+        assert_eq!(result.content, "Checking now.");
+        assert!(!result.content.contains("<|"));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let arguments: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).expect("arguments are JSON");
+        assert_eq!(arguments["location"], serde_json::json!("Seoul"));
+        assert_eq!(arguments["days"], serde_json::json!(3));
+
+        // `strip_thinking` owns the think block on this path, so the reasoning
+        // is already gone by the time the K3 parser runs; the streaming filter
+        // above is what surfaces it.
+        assert!(
+            strip_thinking(K3_TURN)
+                .trim_start()
+                .starts_with("<|open|>response")
+        );
+    }
+
+    #[test]
+    fn parse_kimi_k3_filters_calls_to_undeclared_tools() {
+        let tools = vec![make_tool("something_else")];
+        let result = parse_tool_calls(K3_TURN, Some(&tools));
+        assert!(!result.has_tool_calls());
+        // The answer still comes through: a filtered call must not take the
+        // content with it.
+        assert_eq!(result.content, "Checking now.");
+    }
+
+    #[test]
+    fn kimi_k3_thinking_pair_is_recognized_by_the_shared_helpers() {
+        assert_eq!(
+            thinking_marker_pair(K3_TURN),
+            Some(("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
+        );
+        let closed = format!("<|open|>think<|sep|>{K3_TURN}");
+        assert!(!strip_thinking(&closed).contains("weighing the options"));
     }
 }

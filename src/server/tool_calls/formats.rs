@@ -2874,6 +2874,246 @@ fn coerce_kv_value(raw: &str, param_schema: Option<&serde_json::Value>) -> serde
     minimax_m3_fallback_coerce(raw)
 }
 
+// ---------------------------------------------------------------------------
+// Kimi K3 XTML
+// ---------------------------------------------------------------------------
+
+/// Kimi K3 XTML markers. The generation prompt primes the opening `think` (or
+/// `response`) tag, so the model's own output starts with the body and the
+/// first marker it emits is a close.
+const K3_THINK_OPEN: &str = "<|open|>think<|sep|>";
+const K3_THINK_CLOSE: &str = "<|close|>think<|sep|>";
+const K3_RESPONSE_OPEN: &str = "<|open|>response<|sep|>";
+const K3_RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
+const K3_TOOLS_OPEN: &str = "<|open|>tools<|sep|>";
+const K3_TOOLS_CLOSE: &str = "<|close|>tools<|sep|>";
+const K3_CALL_OPEN: &str = "<|open|>call";
+const K3_CALL_CLOSE: &str = "<|close|>call<|sep|>";
+const K3_ARGUMENT_OPEN: &str = "<|open|>argument";
+const K3_ARGUMENT_CLOSE: &str = "<|close|>argument<|sep|>";
+const K3_JSON_OPEN: &str = "<|open|>json";
+const K3_JSON_CLOSE: &str = "<|close|>json<|sep|>";
+const K3_SEP: &str = "<|sep|>";
+
+/// Try parsing Kimi K3's XTML generation.
+///
+/// ```text
+/// REASONING<|close|>think<|sep|>
+/// <|open|>response<|sep|>ANSWER<|close|>response<|sep|>
+/// <|open|>tools<|sep|>
+///   <|open|>call tool="get_weather" index="1"<|sep|>
+///     <|open|>argument key="location" type="string"<|sep|>Seoul<|close|>argument<|sep|>
+///   <|close|>call<|sep|>
+/// <|close|>tools<|sep|>
+/// ```
+///
+/// Declines (`None`) unless at least one K3 marker is present, which no other
+/// family emits. Reasoning is reported when the think block is still in the
+/// text; `parser::parse_tool_calls` strips it before this runs, so on that path
+/// the reasoning comes from the shared stream filter instead and this stays
+/// `None`. The returned `content` never carries a K3 marker.
+///
+/// Argument values are typed by the `type` attribute the renderer wrote:
+/// `string` is taken verbatim and every other type is parsed as JSON, falling
+/// back to a string when the body does not parse. A whole-object
+/// `<|open|>json type="object"<|sep|>` block is re-serialized compactly when it
+/// parses as an object, and passed through verbatim when it does not, so a
+/// malformed body reaches the caller as the model wrote it rather than as an
+/// invented shape.
+pub fn try_kimi_k3(text: &str) -> Option<ToolCallParseResult> {
+    if !text.contains(K3_THINK_CLOSE)
+        && !text.contains(K3_RESPONSE_OPEN)
+        && !text.contains(K3_TOOLS_OPEN)
+    {
+        return None;
+    }
+
+    // Reasoning: everything up to the first think close, minus the open tag
+    // when the model emitted one.
+    let (reasoning, rest) = match text.find(K3_THINK_CLOSE) {
+        Some(close) => {
+            let head = &text[..close];
+            let body = match head.find(K3_THINK_OPEN) {
+                Some(open) => &head[open + K3_THINK_OPEN.len()..],
+                None => head,
+            };
+            (Some(body), &text[close + K3_THINK_CLOSE.len()..])
+        }
+        None => (None, text),
+    };
+
+    let tools_region = rest.find(K3_TOOLS_OPEN);
+    let content = match rest.find(K3_RESPONSE_OPEN) {
+        Some(open) => {
+            let body = &rest[open + K3_RESPONSE_OPEN.len()..];
+            match body.find(K3_RESPONSE_CLOSE) {
+                Some(close) => &body[..close],
+                // Unclosed: the answer runs to the tool block, or to the end.
+                None => match body.find(K3_TOOLS_OPEN) {
+                    Some(tools) => &body[..tools],
+                    None => body,
+                },
+            }
+        }
+        // No response tag at all: whatever precedes the tool block is the
+        // answer.
+        None => match tools_region {
+            Some(tools) => &rest[..tools],
+            None => rest,
+        },
+    };
+
+    let mut calls = Vec::new();
+    if let Some(tools_at) = tools_region {
+        let body = &rest[tools_at + K3_TOOLS_OPEN.len()..];
+        let body = match body.find(K3_TOOLS_CLOSE) {
+            Some(close) => &body[..close],
+            None => body,
+        };
+        parse_kimi_k3_calls(body, &mut calls);
+    }
+
+    let reasoning = reasoning.map(str::trim).filter(|r| !r.is_empty());
+    Some(ToolCallParseResult {
+        format: Some(ToolCallFormat::KimiK3),
+        tool_calls: calls,
+        content: strip_kimi_k3_markers(content).trim().to_string(),
+        reasoning_content: reasoning.map(str::to_string),
+    })
+}
+
+/// Parse the `<|open|>call ...<|sep|> ... <|close|>call<|sep|>` blocks inside a
+/// `tools` region.
+fn parse_kimi_k3_calls(body: &str, calls: &mut Vec<ParsedToolCall>) {
+    let mut rest = body;
+    while let Some(at) = rest.find(K3_CALL_OPEN) {
+        let after = &rest[at + K3_CALL_OPEN.len()..];
+        let Some(header_end) = after.find(K3_SEP) else {
+            break;
+        };
+        let header = &after[..header_end];
+        let call_body_start = &after[header_end + K3_SEP.len()..];
+        let (call_body, consumed) = match call_body_start.find(K3_CALL_CLOSE) {
+            Some(close) => (&call_body_start[..close], close + K3_CALL_CLOSE.len()),
+            None => (call_body_start, call_body_start.len()),
+        };
+
+        if let Some(name) = kimi_k3_attribute(header, "tool") {
+            calls.push(ParsedToolCall {
+                name,
+                arguments: parse_kimi_k3_arguments(call_body),
+            });
+        }
+        rest = &call_body_start[consumed..];
+    }
+}
+
+/// Turn one call body into the OpenAI `arguments` JSON string.
+fn parse_kimi_k3_arguments(call_body: &str) -> String {
+    if let Some(at) = call_body.find(K3_JSON_OPEN) {
+        let after = &call_body[at + K3_JSON_OPEN.len()..];
+        if let Some(header_end) = after.find(K3_SEP) {
+            let raw_start = &after[header_end + K3_SEP.len()..];
+            let raw = match raw_start.find(K3_JSON_CLOSE) {
+                Some(close) => &raw_start[..close],
+                None => raw_start,
+            };
+            return match serde_json::from_str::<serde_json::Value>(raw) {
+                Ok(value) if value.is_object() => {
+                    serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string())
+                }
+                _ => raw.to_string(),
+            };
+        }
+    }
+
+    let mut object = serde_json::Map::new();
+    let mut rest = call_body;
+    while let Some(at) = rest.find(K3_ARGUMENT_OPEN) {
+        let after = &rest[at + K3_ARGUMENT_OPEN.len()..];
+        let Some(header_end) = after.find(K3_SEP) else {
+            break;
+        };
+        let header = &after[..header_end];
+        let value_start = &after[header_end + K3_SEP.len()..];
+        let (value, consumed) = match value_start.find(K3_ARGUMENT_CLOSE) {
+            Some(close) => (&value_start[..close], close + K3_ARGUMENT_CLOSE.len()),
+            None => (value_start, value_start.len()),
+        };
+        if let Some(key) = kimi_k3_attribute(header, "key") {
+            let value_type = kimi_k3_attribute(header, "type").unwrap_or_default();
+            object.insert(key, kimi_k3_typed_value(&value_type, value));
+        }
+        rest = &value_start[consumed..];
+    }
+    serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Coerce one argument body by the `type` attribute the renderer wrote.
+fn kimi_k3_typed_value(value_type: &str, value: &str) -> serde_json::Value {
+    if value_type == "string" {
+        return serde_json::Value::String(value.to_string());
+    }
+    serde_json::from_str::<serde_json::Value>(value)
+        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
+/// Read one `key="value"` attribute out of an XTML tag header.
+///
+/// The header is the text between the tag name and `<|sep|>`, e.g.
+/// ` tool="get_weather" index="1"`. Values are unescaped in the reverse of the
+/// renderer's order (`&quot;` before `&amp;`) so a value that really contained
+/// `&quot;` survives the round trip.
+fn kimi_k3_attribute(header: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=\"");
+    let mut search = header;
+    let mut consumed = 0usize;
+    while let Some(at) = search.find(&needle) {
+        let absolute = consumed + at;
+        // Require an attribute boundary before the key so `index=` cannot be
+        // matched inside another attribute's value or name.
+        let boundary = absolute == 0
+            || header[..absolute]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == ' ');
+        let after = &header[absolute + needle.len()..];
+        if boundary && let Some(end) = after.find('"') {
+            return Some(unescape_kimi_k3_attr(&after[..end]));
+        }
+        consumed = absolute + needle.len();
+        search = &header[consumed..];
+    }
+    None
+}
+
+fn unescape_kimi_k3_attr(value: &str) -> String {
+    value.replace("&quot;", "\"").replace("&amp;", "&")
+}
+
+/// Remove any stray K3 marker from a content span.
+///
+/// The extraction above already bounds the span, so this only fires on
+/// malformed output (an unclosed tag, a marker the model emitted out of
+/// place). Content must never carry a marker.
+fn strip_kimi_k3_markers(text: &str) -> String {
+    let mut out = text.to_string();
+    for marker in [
+        K3_THINK_OPEN,
+        K3_THINK_CLOSE,
+        K3_RESPONSE_OPEN,
+        K3_RESPONSE_CLOSE,
+        K3_TOOLS_OPEN,
+        K3_TOOLS_CLOSE,
+        K3_CALL_CLOSE,
+        K3_ARGUMENT_CLOSE,
+        K3_JSON_CLOSE,
+    ] {
+        out = out.replace(marker, "");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5375,5 +5615,153 @@ mod tests {
             Some(serde_json::json!(18_446_744_073_709_551_615_u64))
         );
         assert_eq!(parse_integer_literal("18446744073709551616.0"), None);
+    }
+
+    // -- Kimi K3 XTML --
+
+    /// A complete K3 generation: reasoning, the visible answer, and one tool
+    /// call with one typed argument of each JSON kind.
+    const K3_FULL: &str = concat!(
+        "let me check<|close|>think<|sep|>",
+        "<|open|>response<|sep|>It is 21C.<|close|>response<|sep|>",
+        "<|open|>tools<|sep|>",
+        r#"<|open|>call tool="get_weather" index="1"<|sep|>"#,
+        r#"<|open|>argument key="location" type="string"<|sep|>Seoul<|close|>argument<|sep|>"#,
+        r#"<|open|>argument key="days" type="number"<|sep|>3<|close|>argument<|sep|>"#,
+        r#"<|open|>argument key="metric" type="boolean"<|sep|>true<|close|>argument<|sep|>"#,
+        r#"<|open|>argument key="note" type="null"<|sep|>null<|close|>argument<|sep|>"#,
+        r#"<|open|>argument key="tags" type="array"<|sep|>[1, 2]<|close|>argument<|sep|>"#,
+        r#"<|open|>argument key="opts" type="object"<|sep|>{"a": 1}<|close|>argument<|sep|>"#,
+        "<|close|>call<|sep|><|close|>tools<|sep|>",
+    );
+
+    #[test]
+    fn kimi_k3_splits_reasoning_content_and_typed_arguments() {
+        let result = try_kimi_k3(K3_FULL).expect("K3 markers are present");
+        assert_eq!(result.format, Some(ToolCallFormat::KimiK3));
+        assert_eq!(result.reasoning_content.as_deref(), Some("let me check"));
+        assert_eq!(result.content, "It is 21C.");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+
+        // Every value is typed by the `type` attribute the renderer wrote, not
+        // guessed from the text: `"3"` becomes a number because the attribute
+        // said so, and a `string` value is never JSON-parsed.
+        let arguments: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).expect("arguments are JSON");
+        assert_eq!(
+            arguments,
+            serde_json::json!({
+                "location": "Seoul",
+                "days": 3,
+                "metric": true,
+                "note": null,
+                "tags": [1, 2],
+                "opts": {"a": 1},
+            })
+        );
+    }
+
+    #[test]
+    fn kimi_k3_string_arguments_are_never_reinterpreted() {
+        let text = concat!(
+            "<|open|>tools<|sep|>",
+            r#"<|open|>call tool="echo" index="1"<|sep|>"#,
+            r#"<|open|>argument key="a" type="string"<|sep|>123<|close|>argument<|sep|>"#,
+            r#"<|open|>argument key="b" type="string"<|sep|>{"not": "parsed"}<|close|>argument<|sep|>"#,
+            "<|close|>call<|sep|><|close|>tools<|sep|>",
+        );
+        let result = try_kimi_k3(text).expect("K3");
+        let arguments: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).expect("arguments are JSON");
+        assert_eq!(arguments["a"], serde_json::json!("123"));
+        assert_eq!(arguments["b"], serde_json::json!(r#"{"not": "parsed"}"#));
+    }
+
+    #[test]
+    fn kimi_k3_whole_object_json_block_round_trips() {
+        let text = concat!(
+            "<|open|>tools<|sep|>",
+            r#"<|open|>call tool="raw" index="1"<|sep|>"#,
+            r#"<|open|>json type="object"<|sep|>{"a": 1, "b": [2]}<|close|>json<|sep|>"#,
+            "<|close|>call<|sep|><|close|>tools<|sep|>",
+        );
+        let result = try_kimi_k3(text).expect("K3");
+        assert_eq!(result.tool_calls[0].arguments, r#"{"a":1,"b":[2]}"#);
+
+        // A body that is not an object reaches the caller as the model wrote
+        // it rather than as an invented shape.
+        let malformed = text.replace(r#"{"a": 1, "b": [2]}"#, "not json");
+        let result = try_kimi_k3(&malformed).expect("K3");
+        assert_eq!(result.tool_calls[0].arguments, "not json");
+    }
+
+    #[test]
+    fn kimi_k3_unescapes_attribute_values_in_the_renderer_reverse_order() {
+        let text = concat!(
+            "<|open|>tools<|sep|>",
+            r#"<|open|>call tool="a&amp;b" index="1"<|sep|>"#,
+            r#"<|open|>argument key="q" type="string"<|sep|>x<|close|>argument<|sep|>"#,
+            "<|close|>call<|sep|><|close|>tools<|sep|>",
+        );
+        assert_eq!(try_kimi_k3(text).expect("K3").tool_calls[0].name, "a&b");
+        // `&quot;` is undone before `&amp;`, so a value that really held the
+        // literal text `&quot;` comes back as `&quot;` rather than as a quote.
+        assert_eq!(unescape_kimi_k3_attr("&amp;quot;"), "&quot;");
+        assert_eq!(unescape_kimi_k3_attr("say &quot;hi&quot;"), r#"say "hi""#);
+    }
+
+    #[test]
+    fn kimi_k3_multiple_calls_keep_their_order() {
+        let text = concat!(
+            "<|open|>tools<|sep|>",
+            r#"<|open|>call tool="first" index="1"<|sep|><|close|>call<|sep|>"#,
+            r#"<|open|>call tool="second" index="2"<|sep|>"#,
+            r#"<|open|>argument key="k" type="string"<|sep|>v<|close|>argument<|sep|>"#,
+            "<|close|>call<|sep|><|close|>tools<|sep|>",
+        );
+        let result = try_kimi_k3(text).expect("K3");
+        assert_eq!(
+            result
+                .tool_calls
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(result.tool_calls[0].arguments, "{}");
+    }
+
+    #[test]
+    fn kimi_k3_content_never_carries_a_marker() {
+        // An unclosed response tag runs to the tool block, and an answer with
+        // no response tag at all still stops there.
+        let unclosed = concat!(
+            "<|open|>response<|sep|>partial answer",
+            "<|open|>tools<|sep|>",
+            r#"<|open|>call tool="t" index="1"<|sep|><|close|>call<|sep|>"#,
+            "<|close|>tools<|sep|>",
+        );
+        let result = try_kimi_k3(unclosed).expect("K3");
+        assert_eq!(result.content, "partial answer");
+        assert!(!result.content.contains("<|"));
+
+        let no_response = "reasoning<|close|>think<|sep|>bare answer";
+        let result = try_kimi_k3(no_response).expect("K3");
+        assert_eq!(result.reasoning_content.as_deref(), Some("reasoning"));
+        assert_eq!(result.content, "bare answer");
+    }
+
+    #[test]
+    fn kimi_k3_declines_on_every_other_family() {
+        for text in [
+            "Hello, world!",
+            r#"<tool_call>{"name": "a", "arguments": {}}</tool_call>"#,
+            "<|channel>thought\nhidden<channel|>visible",
+            "<think>reasoning</think>answer",
+            "<|open|> not a tag",
+        ] {
+            assert!(try_kimi_k3(text).is_none(), "claimed {text:?}");
+        }
     }
 }

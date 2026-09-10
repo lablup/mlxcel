@@ -917,6 +917,19 @@ async fn route_chat(
         anyhow::bail!("the disaggregated router supports text-only requests");
     }
 
+    // A native chat renderer produced token ids rather than a prompt the
+    // remote worker can re-render (#1338). The router's wire form carries the
+    // prompt string only, and re-tokenizing the XTML text on the far side
+    // would re-recognize control-token spellings that came out of message
+    // bodies, so the request is refused instead of served with a prompt whose
+    // structure the caller could influence.
+    if prepared.prompt_token_ids.is_some() {
+        anyhow::bail!(
+            "the disaggregated router does not support the Kimi K3 native chat format: its \
+             pre-rendered prompt token ids cannot be carried to a remote worker"
+        );
+    }
+
     let prompt = prepared.prompt;
 
     // Stream filter (issue #198): mirror the single-node chat route, including

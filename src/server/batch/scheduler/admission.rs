@@ -105,7 +105,7 @@ impl BatchScheduler {
         &mut self,
         prompt: String,
         prompt_token_ids: Option<Vec<i32>>,
-        options: ServerGenerateOptions,
+        mut options: ServerGenerateOptions,
         images: Vec<Vec<u8>>,
         audio: Vec<Vec<u8>>,
         videos: Vec<crate::server::media::ResolvedVideo>,
@@ -117,6 +117,13 @@ impl BatchScheduler {
         // fall back to scheduler-side tokenization when the dispatcher had no
         // pre-tokenizer. `tokenize_prompt_for_generation` is the shared
         // `add_special` convention so both paths are byte-identical.
+        // A native chat renderer's ids reach the scheduler through
+        // `prompt_token_ids` on every path that goes through
+        // `ModelProvider`; this second read covers the legacy and XLA callers
+        // that pass `None` there, so the rendered ids are used rather than the
+        // debug string being re-tokenized (#1338).
+        let prompt_token_ids =
+            prompt_token_ids.or_else(|| options.pre_rendered_prompt_tokens.take());
         let mut prompt_tokens: Vec<i32> = match prompt_token_ids {
             Some(ids) => ids,
             None => match if audio.is_empty() {

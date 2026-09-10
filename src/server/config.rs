@@ -277,6 +277,22 @@ pub struct ServerGenerateOptions {
     /// so by the time the scheduler sees this field it is already known to be
     /// on the supported ladder. Ignored by every non-Gemma-4 model.
     pub image_soft_tokens: Option<usize>,
+
+    /// Prompt token ids produced by a native (non-Jinja) chat renderer,
+    /// bypassing tokenization of the prompt string (#1338).
+    ///
+    /// Kimi K3's XTML format emits control-token ids directly rather than a
+    /// string that is then re-tokenized: re-encoding the rendered text would
+    /// have to re-recognize `<|open|>` and friends as control tokens, which is
+    /// exactly the injection surface the native renderer exists to close. The
+    /// dispatch thread moves these into
+    /// `ModelRequest::Generate.prompt_token_ids` (issue #633's pre-tokenized
+    /// path), and the scheduler consults them as a second chance on the legacy
+    /// path that passes `None` there.
+    ///
+    /// `None` on every request that rendered through a chat template, which is
+    /// every request that predates #1338.
+    pub pre_rendered_prompt_tokens: Option<Vec<i32>>,
 }
 
 /// Per-request context-retention overrides (b10621 `n_keep` / `n_discard`,

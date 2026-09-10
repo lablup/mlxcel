@@ -1773,6 +1773,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             grammar: None,
             // Warmup is text-only; no image budget to override.
             image_soft_tokens: None,
+            pre_rendered_prompt_tokens: None,
         },
     )?;
     Ok(())

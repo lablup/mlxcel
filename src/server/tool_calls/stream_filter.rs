@@ -281,6 +281,15 @@ const MUSE_PRIMED_SELF_SPACED: &str = " to=self<|message|>";
 ///   shares a prefix with any other entry in this table (the closest is
 ///   Gemma 4's `<|tool_call>` / `<tool_call|>`, which start with `<|` / `<t`
 ///   rather than `<s` / `<e`), so this family cannot partial-match another.
+/// - Kimi K3 XTML (`<|open|>TAG<|sep|>` / `<|close|>TAG<|sep|>`) contributes six
+///   entries: the `think` pair drives the reasoning split, the `response` pair
+///   is stripped (it wraps the visible answer rather than hiding it), and the
+///   `tools` pair brackets the tool-call block. They cannot partial-match any
+///   other entry: every other `<|`-prefixed marker in this table continues with
+///   `c`, `t`, `s`, `e` or `m` at byte 2, while K3's continue with `o` and `c`
+///   and then diverge again (`<|cl` vs `<|co`). Nor do they contain another
+///   entry as a substring: `>think<` is not `<think>`. All six stay under the
+///   existing longest delimiter, so the partial-match window is unchanged.
 /// - ATEM `<atem:function_calls>` is a regular fixed delimiter. The
 ///   attribute-bearing `<atem:invoke ...>` and `<atem:parameter ...>` openers
 ///   are matched dynamically from their fixed prefixes so arbitrary names do
@@ -354,6 +363,15 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // longest delimiter, so the partial-match window is unchanged.
     ("</longcat_tool_call>", DelimiterAction::ExitToolCall),
     ("<longcat_tool_call>", DelimiterAction::EnterToolCall),
+    // Kimi K3 XTML. Exit before enter, mirroring the Hermes convention above.
+    // The `response` tags bracket the visible answer, so they are stripped
+    // rather than suppressing what they contain.
+    ("<|close|>think<|sep|>", DelimiterAction::ExitThinking),
+    ("<|open|>think<|sep|>", DelimiterAction::EnterThinking),
+    ("<|open|>response<|sep|>", DelimiterAction::Strip),
+    ("<|close|>response<|sep|>", DelimiterAction::Strip),
+    ("<|close|>tools<|sep|>", DelimiterAction::ExitToolCall),
+    ("<|open|>tools<|sep|>", DelimiterAction::EnterToolCall),
     // ATEM (Muse/Onyx): the outer function-call wrapper is fixed. Invoke and
     // parameter open tags carry attributes and are handled by the dynamic
     // matcher below; their close tags are fixed and depth-aware so inner closes
@@ -407,9 +425,10 @@ enum FilterState {
 /// and regular response text to `delta.content`.
 ///
 /// Covers Qwen-style (`<think>` / `</think>`), Hermes-style
-/// (`<tool_call>` / `</tool_call>`), Mistral Nemo (`[TOOL_CALLS]`), and
-/// Gemma 4 (`<|channel>thought` / `<channel|>`, with a malformed bare
-/// `<|channel>` fallback) reasoning families, plus Gemma 4 tool-call and turn
+/// (`<tool_call>` / `</tool_call>`), Mistral Nemo (`[TOOL_CALLS]`), Gemma 4
+/// (`<|channel>thought` / `<channel|>`, with a malformed bare `<|channel>`
+/// fallback) and Kimi K3 XTML (`<|open|>think<|sep|>` /
+/// `<|close|>think<|sep|>`) reasoning families, plus Gemma 4 tool-call and turn
 /// markers.
 ///
 /// Feed decoded text fragments via [`feed()`](StreamFilter::feed).  The
@@ -2471,6 +2490,99 @@ mod tests {
             content, "AB",
             "only the prose before and after the block is visible"
         );
+    }
+
+    // -- Kimi K3 XTML --
+
+    /// The full shape a K3 generation takes after a thinking-mode generation
+    /// prompt: the prompt already emitted `<|open|>think<|sep|>`, so the model
+    /// starts inside the think channel and the first marker it writes is the
+    /// close.
+    const K3_GENERATION: &str = concat!(
+        "let me check the weather<|close|>think<|sep|>",
+        "<|open|>response<|sep|>It is 21C in Seoul.<|close|>response<|sep|>",
+        "<|open|>tools<|sep|>",
+        r#"<|open|>call tool="get_weather" index="1"<|sep|>"#,
+        r#"<|open|>argument key="location" type="string"<|sep|>Seoul<|close|>argument<|sep|>"#,
+        "<|close|>call<|sep|><|close|>tools<|sep|>",
+    );
+
+    /// Feed `text` one character at a time, which is the harshest split: every
+    /// marker straddles many `feed()` calls.
+    fn drain_char_by_char(filter: &mut StreamFilter, text: &str) -> (String, String) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for ch in text.chars() {
+            let out = filter.feed(ch.encode_utf8(&mut [0u8; 4]));
+            content.push_str(out.content.as_deref().unwrap_or_default());
+            reasoning.push_str(out.reasoning.as_deref().unwrap_or_default());
+        }
+        let out = filter.flush();
+        content.push_str(out.content.as_deref().unwrap_or_default());
+        reasoning.push_str(out.reasoning.as_deref().unwrap_or_default());
+        (content, reasoning)
+    }
+
+    #[test]
+    fn kimi_k3_primed_open_thinking_splits_reasoning_content_and_tool_calls() {
+        let mut filter = StreamFilter::new_primed_open_thinking();
+        let (content, reasoning) = drain_char_by_char(&mut filter, K3_GENERATION);
+        assert_eq!(reasoning, "let me check the weather");
+        assert_eq!(content, "It is 21C in Seoul.");
+        // Neither channel may carry XTML markup, and the tool-call block is
+        // suppressed entirely (routes/chat materializes it from the raw text).
+        for marker in ["<|open|>", "<|close|>", "<|sep|>", "get_weather", "Seoul<"] {
+            assert!(
+                !content.contains(marker),
+                "content leaked {marker:?}: {content:?}"
+            );
+        }
+        assert!(
+            !reasoning.contains("<|"),
+            "reasoning leaked markup: {reasoning:?}"
+        );
+    }
+
+    #[test]
+    fn kimi_k3_whole_fragment_feed_agrees_with_byte_by_byte() {
+        let mut filter = StreamFilter::new_primed_open_thinking();
+        let out = filter.feed(K3_GENERATION);
+        let flushed = filter.flush();
+        let content = format!(
+            "{}{}",
+            out.content.unwrap_or_default(),
+            flushed.content.unwrap_or_default()
+        );
+        let reasoning = format!(
+            "{}{}",
+            out.reasoning.unwrap_or_default(),
+            flushed.reasoning.unwrap_or_default()
+        );
+        assert_eq!(reasoning, "let me check the weather");
+        assert_eq!(content, "It is 21C in Seoul.");
+    }
+
+    #[test]
+    fn kimi_k3_open_think_marker_enters_the_reasoning_channel() {
+        // A non-primed filter (the model wrote the open tag itself, which the
+        // reference format allows when the caller did not add a generation
+        // prompt) reaches the same split.
+        let mut filter = StreamFilter::new();
+        let stream = format!("<|open|>think<|sep|>{K3_GENERATION}");
+        let (content, reasoning) = drain_char_by_char(&mut filter, &stream);
+        assert_eq!(reasoning, "let me check the weather");
+        assert_eq!(content, "It is 21C in Seoul.");
+    }
+
+    #[test]
+    fn kimi_k3_markers_do_not_disturb_other_families() {
+        // The K3 entries share only `<|` with the Gemma 4 markers, so a Gemma 4
+        // stream still splits the way it did before K3 was added.
+        let mut filter = StreamFilter::new();
+        let (content, reasoning) =
+            drain_char_by_char(&mut filter, "<|channel>thought\nhidden<channel|>visible");
+        assert_eq!(content, "visible");
+        assert!(reasoning.contains("hidden"));
     }
 }
 

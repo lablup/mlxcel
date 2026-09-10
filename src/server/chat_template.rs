@@ -194,6 +194,18 @@ pub struct ChatTemplateProcessor {
     /// boundary snapshot) and a template that already emitted the channel are
     /// both left alone.
     generation_prompt_suffix: Option<GenerationPromptSuffix>,
+    /// A native, code-rendered chat format that replaces the Jinja template
+    /// entirely (#1338).
+    ///
+    /// Kimi K3 ships no template: its XTML chat format is rendered in code and
+    /// emits token ids directly. When this is `Some`, the request-preparation
+    /// path branches into the native renderer and never touches
+    /// `self.template`; the processor is still the object the routes hold, so
+    /// tool support, the thinking default and the kwargs plumbing all keep one
+    /// answer per loaded model. Attached by `AppState` at construction from the
+    /// loaded tokenizer, so every route and every test that builds an
+    /// `AppState` gets the same wiring.
+    kimi_k3: Option<Arc<super::kimi_k3_chat::KimiK3Renderer>>,
     #[cfg(test)]
     template_compile_count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -354,6 +366,7 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
+            kimi_k3: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -373,6 +386,7 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: None,
+            kimi_k3: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -405,9 +419,36 @@ impl ChatTemplateProcessor {
         }
     }
 
+    /// Attach the native Kimi K3 XTML renderer (#1338).
+    ///
+    /// Called once, at `AppState` construction, when the loaded tokenizer is a
+    /// K3 tiktoken vocabulary. From then on this processor reports itself as
+    /// tool-capable and thinking-by-default, and the request-preparation path
+    /// renders through [`Self::kimi_k3`] rather than through the template.
+    pub(crate) fn attach_kimi_k3(&mut self, renderer: Arc<super::kimi_k3_chat::KimiK3Renderer>) {
+        self.kimi_k3 = Some(renderer);
+    }
+
+    /// The native Kimi K3 renderer, when one is attached.
+    ///
+    /// This is the single "is the native XTML path active" predicate for the
+    /// server side, mirroring `MlxcelTokenizer::kimi_k3_control_ids` on the
+    /// tokenizer side.
+    pub(crate) fn kimi_k3(&self) -> Option<&Arc<super::kimi_k3_chat::KimiK3Renderer>> {
+        self.kimi_k3.as_ref()
+    }
+
     /// Set whether to add a generation prompt at the end
     pub fn set_add_generation_prompt(&mut self, add: bool) {
         self.add_generation_prompt = add;
+    }
+
+    /// Whether a generation prompt is appended to a primary render.
+    ///
+    /// The native renderer path needs the same answer the Jinja path takes
+    /// from this field, so it is readable as well as writable.
+    pub fn add_generation_prompt(&self) -> bool {
+        self.add_generation_prompt
     }
 
     /// Set the default value of the `enable_thinking` Jinja kwarg.
@@ -432,6 +473,11 @@ impl ChatTemplateProcessor {
     /// `server::chat_template::build_template_context` (chat-template
     /// rendering path) and tests that verify the upstream-aligned default.
     pub fn default_enable_thinking(&self) -> bool {
+        // Kimi K3's think channel is structural: the reference renderer's
+        // `thinking` default is `true` and there is no template to introspect.
+        if self.kimi_k3.is_some() {
+            return true;
+        }
         self.default_enable_thinking
     }
 
@@ -660,7 +706,9 @@ impl ChatTemplateProcessor {
     ///
     /// Used by: routes/health
     pub fn supports_tools_hint(&self) -> bool {
-        self.template_mentions_tools()
+        // The K3 XTML format renders tool declarations, tool calls and tool
+        // results natively, so there is no template text to probe.
+        self.kimi_k3.is_some() || self.template_mentions_tools()
     }
 
     /// Conservative string-based heuristic for whether the Jinja template
@@ -682,6 +730,9 @@ impl ChatTemplateProcessor {
     ///
     /// Falls back to the string-heuristic if template rendering fails.
     pub fn supports_tools(&mut self) -> bool {
+        if self.kimi_k3.is_some() {
+            return true;
+        }
         if let Some(cached) = self.supports_tools_cached {
             return cached;
         }
@@ -762,6 +813,20 @@ impl ChatTemplateProcessor {
     /// that does not read the name.
     // Used by: chat_request
     pub fn template_mentions(&self, name: &str) -> bool {
+        // The native K3 renderer has no template source to probe. It reads
+        // `thinking` / `enable_thinking` and `thinking_effort` /
+        // `reasoning_effort` from the merged kwargs, so those four names are
+        // the ones it "mentions"; `map_reasoning_control_kwargs` needs
+        // `reasoning_effort` to answer true or a request's portable reasoning
+        // effort would never reach the renderer. Every other name stays false,
+        // which keeps unrelated request fields from being forwarded as kwargs
+        // that nothing reads.
+        if self.kimi_k3.is_some() {
+            return matches!(
+                name,
+                "thinking" | "enable_thinking" | "thinking_effort" | "reasoning_effort"
+            );
+        }
         self.template.contains(name)
     }
 
@@ -1969,6 +2034,7 @@ impl std::fmt::Debug for ChatTemplateProcessor {
             .field("supports_tools_cached", &self.supports_tools_cached)
             .field("forced_tool_call_format", &self.forced_tool_call_format)
             .field("compiled_template", &self.compiled_template.get().is_some())
+            .field("kimi_k3", &self.kimi_k3.is_some())
             .finish_non_exhaustive()
     }
 }
