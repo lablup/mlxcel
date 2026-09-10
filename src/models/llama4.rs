@@ -17,6 +17,7 @@
 //! This is a parallel implementation of Llama 4 using direct C++ bindings
 //! to leverage kernel fusion for the MoE layers.
 
+use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::llama4_helpers::{
     create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
@@ -25,7 +26,7 @@ use crate::models::model_owned::{
 };
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{ChunkedKVCache, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -34,6 +35,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Llama4 Cache Types.
+/// Tensor-name and error-message vocabulary Llama 4 hands to the shared
+/// serializers in [`crate::models::kv_snapshot`]. The `rotating` slot is unused
+/// here: Llama 4 pairs a chunked cache with a full-attention one and holds no
+/// [`mlxcel_core::layers::RotatingKVCache`].
+const LLAMA4_KV_SNAPSHOT_NAMES: KvSnapshotNames =
+    KvSnapshotNames::new("Llama 4", "standard", "rotating");
+
 /// Cache enum for Llama4's iGQA (Interleaved GQA) pattern
 /// MoE layers use ChunkedKVCache, dense layers use regular KVCache
 pub enum Llama4Cache {
@@ -135,6 +143,84 @@ impl Llama4Cache {
 
     pub fn is_chunked(&self) -> bool {
         matches!(self, Llama4Cache::Chunked(_))
+    }
+
+    /// Copy this layer's state into `snapshot` under `prefix` (issue #1335).
+    ///
+    /// Used by: Llama 4 `snapshot_sequence_state`.
+    pub(crate) fn snapshot_into(
+        &self,
+        snapshot: &mut ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        match self {
+            Llama4Cache::Chunked(cache) => {
+                kv_snapshot::snapshot_chunked(cache, snapshot, prefix, LLAMA4_KV_SNAPSHOT_NAMES)
+            }
+            Llama4Cache::Regular(cache) => {
+                kv_snapshot::snapshot_standard(cache, snapshot, prefix, LLAMA4_KV_SNAPSHOT_NAMES)
+            }
+        }
+    }
+
+    /// Restore this layer's state from `snapshot` under `prefix` (issue #1335).
+    ///
+    /// Used by: Llama 4 `restore_sequence_state`.
+    pub(crate) fn restore_from(
+        &mut self,
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        match self {
+            Llama4Cache::Chunked(cache) => {
+                kv_snapshot::restore_chunked(cache, snapshot, prefix, LLAMA4_KV_SNAPSHOT_NAMES)
+            }
+            Llama4Cache::Regular(cache) => {
+                kv_snapshot::restore_standard(cache, snapshot, prefix, LLAMA4_KV_SNAPSHOT_NAMES)
+            }
+        }
+    }
+
+    /// Whether the layer state stored under `prefix` can be restored covering
+    /// only its first `target_len` tokens (issue #1335).
+    ///
+    /// Dense layers keep every token at its own slot and truncate
+    /// unconditionally. Chunked layers only while their front is untrimmed: a
+    /// cold prefill of `target_len` tokens would hold the window
+    /// `[target_len - chunk_size, target_len)`, which a front-trimmed buffer
+    /// cannot cover.
+    ///
+    /// Used by: Llama 4 `snapshot_truncatable_to`.
+    pub(crate) fn snapshot_truncatable_to(
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+        target_len: i32,
+    ) -> bool {
+        // Each helper is vacuously true when its own tensors are absent, so
+        // the conjunction reduces to whichever arm this layer stored.
+        kv_snapshot::chunked_truncatable_to(snapshot, prefix, target_len)
+            && kv_snapshot::standard_truncatable_to(
+                snapshot,
+                prefix,
+                target_len,
+                LLAMA4_KV_SNAPSHOT_NAMES,
+            )
+    }
+
+    /// Drop everything past `target_len` tokens, leaving the cache in the state
+    /// it would have had if only the first `target_len` tokens had ever been
+    /// processed (issue #1335).
+    ///
+    /// Used by: Llama 4 `restore_sequence_state_truncated`.
+    pub(crate) fn truncate_to(&mut self, target_len: i32) -> Result<(), String> {
+        match self {
+            Llama4Cache::Chunked(cache) => {
+                kv_snapshot::truncate_chunked(cache, target_len, LLAMA4_KV_SNAPSHOT_NAMES)
+            }
+            Llama4Cache::Regular(cache) => {
+                kv_snapshot::truncate_standard(cache, target_len, LLAMA4_KV_SNAPSHOT_NAMES)
+            }
+        }
     }
 }
 
@@ -1771,6 +1857,16 @@ impl LanguageModel for Llama4Wrapper {
         true
     }
 
+    /// Opt out of NA tile-aligned padded prefill for the reason spelled out on
+    /// `Gemma3Wrapper::supports_padded_prefill` (`src/models/gemma3.rs`): the
+    /// scheduler's post-pad trim only reaches `CachePool` caches, and a
+    /// `model_owned` family's pool entry holds none, so the pad positions would
+    /// stay in this model's own `ChunkedKVCache` / `KVCache` set and push
+    /// `offset` past the real token count (issue #1335).
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn supports_paged_decode_backend(&self) -> bool {
         true
     }
@@ -1790,6 +1886,111 @@ impl LanguageModel for Llama4Wrapper {
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id)
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot = ModelStateSnapshot::new("llama4", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    if let Err(error) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!(
+                            error,
+                            layer_idx = idx,
+                            "Llama4 snapshot prompt-cache donation skipped"
+                        );
+                        return None;
+                    }
+                }
+                if snapshot.is_empty() {
+                    None
+                } else {
+                    Some(snapshot)
+                }
+            })
+            .flatten()
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "llama4" {
+            return Err(format!(
+                "cannot restore {} snapshot into Llama 4",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.make_configured_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    /// Llama 4 interleaves chunked and full-attention layers. A truncating
+    /// restore is possible only while every chunked layer still holds its
+    /// window from position zero, so the answer flips to false once the
+    /// conversation passes `attention_chunk_size` tokens and the front trim
+    /// starts (an exact-prefix restore keeps working past that point; only the
+    /// truncating variant stops).
+    fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
+        if snapshot.family() != "llama4" {
+            return false;
+        }
+        if target_len > snapshot.token_len() {
+            return false;
+        }
+        let Ok(target) = i32::try_from(target_len) else {
+            return false;
+        };
+        (0..self.num_layers()).all(|idx| {
+            Llama4Cache::snapshot_truncatable_to(snapshot, &format!("layer{idx}"), target)
+        })
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        if snapshot.family() != "llama4" {
+            return Err(format!(
+                "cannot restore {} snapshot into Llama 4",
+                snapshot.family()
+            ));
+        }
+        let target = i32::try_from(target_len)
+            .map_err(|_| format!("Llama 4 truncated restore: target {target_len} out of range"))?;
+        // Re-check rather than trust the caller: installing a partially
+        // truncated state would corrupt generation silently, while an error
+        // here just falls back to a cold prefill.
+        if !self.snapshot_truncatable_to(snapshot, target_len) {
+            return Err(format!(
+                "Llama 4 truncated restore: snapshot cannot be truncated to {target_len} tokens"
+            ));
+        }
+        let mut state = self.make_configured_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            let prefix = format!("layer{idx}");
+            cache.restore_from(snapshot, &prefix)?;
+            cache
+                .truncate_to(target)
+                .map_err(|err| format!("{prefix}: {err}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn forward_with_sequence_id(

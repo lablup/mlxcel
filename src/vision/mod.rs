@@ -383,6 +383,60 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.release_sequence_state_by_id(seq_id)
     }
 
+    /// Exact-prefix snapshot reuse is the text backbone's capability, so this
+    /// wrapper answers with the text model's answer (issue #1335).
+    ///
+    /// The wrapper holds no per-sequence state of its own: [`VisionModule`] is
+    /// an encoder, a connector and a processor, all stateless across requests,
+    /// and image embeddings are recomputed into the prompt before every
+    /// forward. A restored snapshot therefore reconstitutes the whole of what
+    /// this model carries between requests.
+    ///
+    /// A media payload cannot leak across a restore either: the prompt-cache
+    /// key folds in the request's multimodal digest, so a text-only turn and
+    /// the same tokens with an image land in different buckets.
+    ///
+    /// Used by: the Gemma 3 and Llama 4 VLM checkpoints, whose text models opt
+    /// in, plus any other family behind this wrapper that does.
+    fn supports_snapshot_reuse(&self) -> bool {
+        self.text_model.supports_snapshot_reuse()
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.snapshot_sequence_state(seq_id, token_len)
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model.restore_sequence_state(seq_id, snapshot)
+    }
+
+    fn snapshot_truncatable_to(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        target_len: usize,
+    ) -> bool {
+        self.text_model
+            .snapshot_truncatable_to(snapshot, target_len)
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        self.text_model
+            .restore_sequence_state_truncated(seq_id, snapshot, target_len)
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         self.text_model.sequence_state_layout()
     }

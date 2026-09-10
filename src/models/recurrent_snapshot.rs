@@ -69,7 +69,11 @@ pub(crate) fn restore_kv_cache_mode(
     kv_cache_mode_from_i32(tag).map(Some)
 }
 
-fn kv_cache_mode_to_i32(mode: KVCacheMode) -> i32 {
+/// Map a KV cache mode onto its stable serialized tag.
+///
+/// Used by: `kv_snapshot` (the shared standard / rotating serializers) and the
+/// recurrent-family wrappers above.
+pub(crate) fn kv_cache_mode_to_i32(mode: KVCacheMode) -> i32 {
     match mode {
         KVCacheMode::Fp16 => 0,
         KVCacheMode::Int8 => 1,
@@ -80,7 +84,11 @@ fn kv_cache_mode_to_i32(mode: KVCacheMode) -> i32 {
     }
 }
 
-fn kv_cache_mode_from_i32(tag: i32) -> Result<KVCacheMode, String> {
+/// Inverse of [`kv_cache_mode_to_i32`].
+///
+/// Used by: `kv_snapshot` (the shared standard / rotating serializers) and the
+/// recurrent-family wrappers above.
+pub(crate) fn kv_cache_mode_from_i32(tag: i32) -> Result<KVCacheMode, String> {
     match tag {
         0 => Ok(KVCacheMode::Fp16),
         1 => Ok(KVCacheMode::Int8),

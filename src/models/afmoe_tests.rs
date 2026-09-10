@@ -757,3 +757,90 @@ fn the_mup_scale_actually_reaches_the_hidden_state() {
         "mup_enabled changed nothing, so the sqrt(hidden_size) scale is not reaching the stack"
     );
 }
+
+// -----------------------------------------------------------------
+// Exact-prefix snapshot prompt-cache support (issue #1335).
+//
+// AFMoE reuses Gemma 3's `Cache` enum, so the serializers under test are the
+// shared ones. What is AFMoE's own is the family tag and the wiring from
+// `ModelOwnedSequenceState` into the five trait hooks, and that is what these
+// tests pin. The `small_args` fixture has `sliding_window = 8` across six
+// layers, four sliding and two full, so a 12-token prompt leaves the sliding
+// rings wrapped when the snapshot is taken.
+mod snapshot_prompt_cache {
+    /// Sequence-id base for this module, so the ids stay readable as
+    /// "issue 1335, sequence N" without tripping the inconsistent-digit-
+    /// grouping lint that `1335_01` does.
+    const SEQ_BASE: u64 = 1_335_000;
+
+    use super::{AfmoeModel, filled_weights, read_all, small_args};
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
+
+    fn model() -> AfmoeModel {
+        let args = small_args();
+        let weights = filled_weights(&args);
+        AfmoeModel::from_weights(&weights, &args).expect("the model builds")
+    }
+
+    fn prefill(model: &AfmoeModel, seq: SequenceId, tokens: &[i32]) {
+        model.prepare_sequence_state(seq);
+        let prompt = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let _ = model.forward_with_sequence_id(&prompt, Some(seq), &mut [], None);
+    }
+
+    fn decode(model: &AfmoeModel, seq: SequenceId, token: i32) -> Vec<f32> {
+        let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
+        read_all(&model.forward_with_sequence_id(&input, Some(seq), &mut [], None))
+    }
+
+    #[test]
+    fn afmoe_declares_snapshot_reuse() {
+        assert!(model().supports_snapshot_reuse());
+    }
+
+    #[test]
+    fn snapshot_restore_matches_cold_decode() {
+        let cold = model();
+        let seq_cold = SequenceId::from_raw(SEQ_BASE + 21);
+        let prompt: Vec<i32> = (0..12).map(|i| i % 90 + 1).collect();
+        prefill(&cold, seq_cold, &prompt);
+
+        let snapshot = cold
+            .snapshot_sequence_state(seq_cold, prompt.len())
+            .expect("AFMoE must donate a non-empty snapshot");
+        assert_eq!(snapshot.family(), "afmoe");
+
+        let restored = model();
+        let seq_restored = SequenceId::from_raw(SEQ_BASE + 22);
+        restored.prepare_sequence_state(seq_restored);
+        restored
+            .restore_sequence_state(seq_restored, &snapshot)
+            .expect("AFMoE must restore its own snapshot");
+
+        for token in [13, 21, 34, 55] {
+            let reference = decode(&cold, seq_cold, token);
+            let got = decode(&restored, seq_restored, token);
+            assert_eq!(got.len(), reference.len());
+            for (i, (&g, &w)) in got.iter().zip(reference.iter()).enumerate() {
+                let abs = (g - w).abs();
+                let rel = abs / w.abs().max(1.0);
+                assert!(
+                    abs < 1e-3 || rel < 1e-3,
+                    "logit[{i}] differs after AFMoE snapshot restore: restored={g}, reference={w}, abs={abs}, rel={rel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_foreign_family_snapshot_is_refused() {
+        let model = model();
+        let foreign = ModelStateSnapshot::new("gemma3", 4);
+        let err = model
+            .restore_sequence_state(SequenceId::from_raw(SEQ_BASE + 23), &foreign)
+            .expect_err("a Gemma 3 snapshot must not land in AFMoE");
+        assert!(err.contains("gemma3"), "unexpected error: {err}");
+        assert!(!model.snapshot_truncatable_to(&foreign, 2));
+    }
+}

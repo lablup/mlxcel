@@ -27,6 +27,7 @@
 use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
+use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::model_owned::{
     KvCacheLayerModes, ModelOwnedSequenceState, dispatch_paged_decode_from_visible_caches,
 };
@@ -34,7 +35,7 @@ use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{
     CachePool, KVCacheMode, RotatingPagedDecodeMetadata, SequenceId, SequenceStateLayout,
 };
-use mlxcel_core::generate::DecodeBatchContext;
+use mlxcel_core::generate::{DecodeBatchContext, ModelStateSnapshot};
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
@@ -773,9 +774,19 @@ impl CacheInterface for RotatingKVCache {
     }
 
     fn live_len(&self) -> i32 {
-        // `RotatingKVCache` has no `live_start`; `seq_len()` already reports
-        // the live window the cache returns, so it is the right mask width.
-        self.seq_len()
+        // `RotatingKVCache` has no `live_start`, but `seq_len()` is the
+        // PHYSICAL buffer length, and that is not what the next append
+        // returns. `update_in_place` grows the buffer by `step` (256) blocks
+        // during decode, so a cache that has generated even one token holds
+        // `physical > offset`; `update_concat` then concatenates only
+        // `visible_len() = min(physical, offset)` prior keys onto the new
+        // ones. Sizing the mask from the physical length made it wider than
+        // the returned K/V and tripped `broadcast_shapes` on the first
+        // multi-token append after a decode, which is exactly the shape of a
+        // prompt-cache snapshot restore followed by the appended-token
+        // prefill (issue #1335). Live prefill-only sequences never diverged
+        // because concat leaves `physical == offset`.
+        self.visible_len()
     }
 
     fn update_and_fetch(
@@ -787,12 +798,93 @@ impl CacheInterface for RotatingKVCache {
     }
 }
 
+/// Tensor-name and error-message vocabulary Gemma 3 hands to the shared
+/// serializers in [`crate::models::kv_snapshot`].
+///
+/// AFMoE reuses this `Cache` enum but is a different family, so it passes its
+/// own [`KvSnapshotNames`] rather than borrowing this one: the snapshot's
+/// family tag already keeps the two apart, and threading the label through
+/// keeps AFMoE's error messages from claiming to come from Gemma 3.
+pub(crate) const GEMMA3_KV_SNAPSHOT_NAMES: KvSnapshotNames =
+    KvSnapshotNames::new("Gemma 3", "standard", "rotating");
+
 pub(crate) enum Cache {
     Standard(KVCache),
     Rotating(RotatingKVCache),
 }
 
 impl Cache {
+    /// Copy this layer's state into `snapshot` under `prefix` (issue #1335).
+    ///
+    /// Used by: Gemma 3, AFMoE.
+    pub(crate) fn snapshot_into(
+        &self,
+        snapshot: &mut ModelStateSnapshot,
+        prefix: &str,
+        names: KvSnapshotNames,
+    ) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => {
+                kv_snapshot::snapshot_standard(cache, snapshot, prefix, names)
+            }
+            Cache::Rotating(cache) => {
+                kv_snapshot::snapshot_rotating(cache, snapshot, prefix, names)
+            }
+        }
+    }
+
+    /// Restore this layer's state from `snapshot` under `prefix` (issue #1335).
+    ///
+    /// Used by: Gemma 3, AFMoE.
+    pub(crate) fn restore_from(
+        &mut self,
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+        names: KvSnapshotNames,
+    ) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => kv_snapshot::restore_standard(cache, snapshot, prefix, names),
+            Cache::Rotating(cache) => kv_snapshot::restore_rotating(cache, snapshot, prefix, names),
+        }
+    }
+
+    /// Whether the layer state stored under `prefix` can be restored covering
+    /// only its first `target_len` tokens (issue #1335).
+    ///
+    /// Answers from the snapshot's own scalars rather than from a live cache,
+    /// because the prompt-cache store has to decide before it allocates a
+    /// sequence. Global layers hold every token at its own slot and truncate
+    /// unconditionally; sliding layers only while their ring is unwrapped.
+    ///
+    /// Used by: Gemma 3, AFMoE.
+    pub(crate) fn snapshot_truncatable_to(
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+        target_len: i32,
+        names: KvSnapshotNames,
+    ) -> bool {
+        // Each helper is vacuously true when its own tensors are absent, so
+        // the conjunction reduces to whichever arm this layer stored.
+        kv_snapshot::rotating_truncatable_to(snapshot, prefix, target_len, names)
+            && kv_snapshot::standard_truncatable_to(snapshot, prefix, target_len, names)
+    }
+
+    /// Drop everything past `target_len` tokens, leaving the cache in the state
+    /// it would have had if only the first `target_len` tokens had ever been
+    /// processed (issue #1335).
+    ///
+    /// Used by: Gemma 3, AFMoE.
+    pub(crate) fn truncate_to(
+        &mut self,
+        target_len: i32,
+        names: KvSnapshotNames,
+    ) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => kv_snapshot::truncate_standard(cache, target_len, names),
+            Cache::Rotating(cache) => kv_snapshot::truncate_rotating(cache, target_len, names),
+        }
+    }
+
     pub(crate) fn as_interface(&mut self) -> &mut dyn CacheInterface {
         match self {
             Cache::Standard(c) => c,
@@ -1400,6 +1492,30 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         true
     }
 
+    /// Opt out of NA tile-aligned padded prefill, as Gemma 4 already does
+    /// (`src/models/gemma4.rs`).
+    ///
+    /// The contract on this method (see [`LanguageModel::supports_padded_prefill`])
+    /// requires that the caches be trimmed back to the real prompt length
+    /// after a padded chunk. The batch scheduler honours that by trimming the
+    /// `CachePool`'s `Vec<KVCache>`, and a `model_owned` family's pool entry is
+    /// `SequenceCacheSet::model_owned`, whose `caches` vector is empty, so the
+    /// trim reaches nothing and the pad positions stay in this model's own
+    /// caches. `offset` then runs ahead of the real token count by the pad
+    /// width (an M5-only, `should_align_prefill()`-gated defect), which puts
+    /// every later token at the wrong RoPE position and makes the cached state
+    /// disagree with the token vector a prompt-cache snapshot is keyed on
+    /// (issue #1335).
+    ///
+    /// The general repair is a sequence-aware trim hook the scheduler can call
+    /// for model-owned families; `trim_internal_caches` takes no `SequenceId`
+    /// and is only wired into the CLI generate paths. Until that exists, the
+    /// three families joining snapshot reuse decline padding the same way
+    /// Gemma 4 does.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn supports_paged_decode_backend(&self) -> bool {
         true
     }
@@ -1421,6 +1537,122 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id)
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot = ModelStateSnapshot::new("gemma3", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    if let Err(error) = cache.snapshot_into(
+                        &mut snapshot,
+                        &format!("layer{idx}"),
+                        GEMMA3_KV_SNAPSHOT_NAMES,
+                    ) {
+                        tracing::warn!(
+                            error,
+                            layer_idx = idx,
+                            "Gemma3 snapshot prompt-cache donation skipped"
+                        );
+                        return None;
+                    }
+                }
+                if snapshot.is_empty() {
+                    None
+                } else {
+                    Some(snapshot)
+                }
+            })
+            .flatten()
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "gemma3" {
+            return Err(format!(
+                "cannot restore {} snapshot into Gemma 3",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.make_configured_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"), GEMMA3_KV_SNAPSHOT_NAMES)?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    /// Gemma 3 interleaves sliding and global attention layers, and both are
+    /// ordinary KV state. A truncating restore is therefore possible whenever
+    /// every sliding layer is still unwrapped at `target_len`, which covers the
+    /// whole conversation regime under the model's sliding window.
+    ///
+    /// The check is per layer at the requested target, never a global
+    /// conversation-length heuristic: the layers do not share a window state,
+    /// and one wrapped sliding layer is enough to make the restore unsound.
+    fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
+        if snapshot.family() != "gemma3" {
+            return false;
+        }
+        if target_len > snapshot.token_len() {
+            return false;
+        }
+        let Ok(target) = i32::try_from(target_len) else {
+            return false;
+        };
+        (0..self.num_layers()).all(|idx| {
+            Cache::snapshot_truncatable_to(
+                snapshot,
+                &format!("layer{idx}"),
+                target,
+                GEMMA3_KV_SNAPSHOT_NAMES,
+            )
+        })
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        if snapshot.family() != "gemma3" {
+            return Err(format!(
+                "cannot restore {} snapshot into Gemma 3",
+                snapshot.family()
+            ));
+        }
+        let target = i32::try_from(target_len)
+            .map_err(|_| format!("Gemma 3 truncated restore: target {target_len} out of range"))?;
+        // Re-check rather than trust the caller: installing a partially
+        // truncated state would corrupt generation silently, while an error
+        // here just falls back to a cold prefill.
+        if !self.snapshot_truncatable_to(snapshot, target_len) {
+            return Err(format!(
+                "Gemma 3 truncated restore: snapshot cannot be truncated to {target_len} tokens"
+            ));
+        }
+        let mut state = self.make_configured_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            let prefix = format!("layer{idx}");
+            cache.restore_from(snapshot, &prefix, GEMMA3_KV_SNAPSHOT_NAMES)?;
+            cache
+                .truncate_to(target, GEMMA3_KV_SNAPSHOT_NAMES)
+                .map_err(|err| format!("{prefix}: {err}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
     }
 
     fn forward_with_sequence_id(

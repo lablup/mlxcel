@@ -102,7 +102,7 @@
 //! forward pass, not a Rust error.
 
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -113,8 +113,18 @@ use std::path::Path;
 
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
+use crate::models::kv_snapshot::KvSnapshotNames;
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
+
+/// Tensor-name and error-message vocabulary AFMoE hands to the shared
+/// serializers in [`crate::models::kv_snapshot`].
+///
+/// AFMoE reuses Gemma 3's `Cache` enum, so the two segment names match Gemma
+/// 3's. The family label does not: an AFMoE snapshot carries the `"afmoe"`
+/// family tag and its errors should say so.
+const AFMOE_KV_SNAPSHOT_NAMES: KvSnapshotNames =
+    KvSnapshotNames::new("AFMoE", "standard", "rotating");
 
 // Configuration.
 
@@ -1682,6 +1692,121 @@ impl LanguageModel for AfmoeModel {
         self.sequence_state.release_sequence_state(seq_id);
     }
 
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                let mut snapshot = ModelStateSnapshot::new("afmoe", token_len);
+                for (idx, cache) in state.iter().enumerate() {
+                    if let Err(error) = cache.snapshot_into(
+                        &mut snapshot,
+                        &format!("layer{idx}"),
+                        AFMOE_KV_SNAPSHOT_NAMES,
+                    ) {
+                        tracing::warn!(
+                            error,
+                            layer_idx = idx,
+                            "AFMoE snapshot prompt-cache donation skipped"
+                        );
+                        return None;
+                    }
+                }
+                if snapshot.is_empty() {
+                    None
+                } else {
+                    Some(snapshot)
+                }
+            })
+            .flatten()
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if snapshot.family() != "afmoe" {
+            return Err(format!(
+                "cannot restore {} snapshot into AFMoE",
+                snapshot.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from(snapshot, &format!("layer{idx}"), AFMOE_KV_SNAPSHOT_NAMES)?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    /// AFMoE mixes one sliding layer group with full-attention layers, both
+    /// ordinary KV state, so a truncating restore is sound whenever every
+    /// sliding layer is still unwrapped at `target_len`.
+    ///
+    /// The check is per layer at the requested target rather than a
+    /// conversation-length heuristic: one wrapped sliding layer is enough to
+    /// make the restore unsound.
+    fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
+        if snapshot.family() != "afmoe" {
+            return false;
+        }
+        if target_len > snapshot.token_len() {
+            return false;
+        }
+        let Ok(target) = i32::try_from(target_len) else {
+            return false;
+        };
+        (0..self.layers.len()).all(|idx| {
+            Cache::snapshot_truncatable_to(
+                snapshot,
+                &format!("layer{idx}"),
+                target,
+                AFMOE_KV_SNAPSHOT_NAMES,
+            )
+        })
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        if snapshot.family() != "afmoe" {
+            return Err(format!(
+                "cannot restore {} snapshot into AFMoE",
+                snapshot.family()
+            ));
+        }
+        let target = i32::try_from(target_len)
+            .map_err(|_| format!("AFMoE truncated restore: target {target_len} out of range"))?;
+        // Re-check rather than trust the caller: installing a partially
+        // truncated state would corrupt generation silently, while an error
+        // here just falls back to a cold prefill.
+        if !self.snapshot_truncatable_to(snapshot, target_len) {
+            return Err(format!(
+                "AFMoE truncated restore: snapshot cannot be truncated to {target_len} tokens"
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            let prefix = format!("layer{idx}");
+            cache.restore_from(snapshot, &prefix, AFMOE_KV_SNAPSHOT_NAMES)?;
+            cache
+                .truncate_to(target, AFMOE_KV_SNAPSHOT_NAMES)
+                .map_err(|err| format!("{prefix}: {err}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         // Compatibility only: the real state lives in `sequence_state`.
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
@@ -1695,6 +1820,16 @@ impl LanguageModel for AfmoeModel {
         // No batched (multi-sequence-per-forward) decode: the rotating cache has
         // no batched path here. Concurrent server requests are still isolated
         // per sequence through the model-owned `sequence_state`.
+        false
+    }
+
+    /// Opt out of NA tile-aligned padded prefill for the reason spelled out on
+    /// `Gemma3Wrapper::supports_padded_prefill` (`src/models/gemma3.rs`): the
+    /// scheduler's post-pad trim only reaches `CachePool` caches, and a
+    /// `model_owned` family's pool entry holds none, so the pad positions would
+    /// stay in this model's own caches and push `offset` past the real token
+    /// count (issue #1335).
+    fn supports_padded_prefill(&self) -> bool {
         false
     }
 
