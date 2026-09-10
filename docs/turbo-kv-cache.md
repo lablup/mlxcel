@@ -204,7 +204,7 @@ family-specific fallback; do not silently pad without a quality test.
 ## MLA latent caches are FP16 only
 
 `glm4_moe_lite`, `deepseek_v3`, `deepseek_v32` (also spelled `deepseek_v3.2`),
-`glm_moe_dsa`, `kimi_linear` and `longcat_flash_ngram` store an MLA
+`glm_moe_dsa`, `kimi_linear`, `kimi_k3` and `longcat_flash_ngram` store an MLA
 `(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
 `kv_lora_rank`-wide latent (512 in the shipping checkpoints) and the "V" slot
 holds the `qk_rope_head_dim`-wide RoPE key stream (64). `deepseek_v32`,

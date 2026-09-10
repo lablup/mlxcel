@@ -93,6 +93,59 @@ fn build_profile_separates_dense_and_moe_in_deepseek() {
 }
 
 #[test]
+fn build_profile_kimi_k3_distinguishes_kda_mla_and_moe_layers() {
+    // Kimi K3: layer 0 dense KDA, layers 1..3 MoE, layer 3 (1-based 4) MLA.
+    // The text geometry sits under `text_config`; the routed experts are
+    // counted at 4 bits plus E8M0 scales regardless of the dense width.
+    let config = json!({
+        "model_type": "kimi_k3",
+        "text_config": {
+            "model_type": "kimi_linear",
+            "num_hidden_layers": 4,
+            "hidden_size": 256,
+            "intermediate_size": 1024,
+            "moe_intermediate_size": 128,
+            "routed_expert_hidden_size": 128,
+            "num_experts": 16,
+            "num_shared_experts": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "q_lora_rank": 64,
+            "kv_lora_rank": 32,
+            "qk_nope_head_dim": 32,
+            "qk_rope_head_dim": 16,
+            "v_head_dim": 32,
+            "mla_use_output_gate": true,
+            "vocab_size": 2048,
+            "first_k_dense_replace": 1,
+            "moe_layer_freq": 1,
+            "linear_attn_config": {
+                "kda_layers": [1, 2, 3],
+                "num_heads": 4,
+                "head_dim": 32,
+                "short_conv_kernel_size": 4,
+                "use_full_rank_gate": true
+            }
+        }
+    });
+    let profile = build_profile_from_json(&config, 4);
+    assert_eq!(profile.num_layers, 4);
+    let layers = profile.layer_bytes.unwrap();
+    assert_eq!(layers.len(), 4);
+    // Layers 1 and 2 are both KDA + MoE and must agree; layer 3 swaps KDA
+    // for the (smaller, at this geometry) q-LoRA MLA block; layer 0 is the
+    // dense layer.
+    assert_eq!(layers[1], layers[2]);
+    assert_ne!(layers[3], layers[1]);
+    assert_ne!(layers[0], layers[1]);
+    // The experts dominate: 16 * 3 * 128 * 128 weights at 4 bits plus scales
+    // is 393216 bytes, and every MoE layer must carry at least that.
+    let expert_bytes = 16u64 * 3 * 128 * 128 / 2 + 16 * 3 * 128 * 128 / 32;
+    assert!(layers[1] > expert_bytes);
+    assert!(layers[3] > expert_bytes);
+}
+
+#[test]
 fn build_profile_emits_gemma4_kv_shared_adjacency() {
     let config = json!({
         "model_type": "gemma4",

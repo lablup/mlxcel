@@ -42,6 +42,7 @@
 //! | `nemotron_h`           | Mamba2 + Attention + MLP/MoE              |
 //! | `gated_delta`          | Gated DeltaNet (Qwen3-Next family)        |
 //! | `kimi_linear`          | Kimi linear-attention hybrid              |
+//! | `kimi_k3`              | Kimi K3 (KDA + MLA hybrid text backbone)  |
 //! | `qwen3_next`           | Full Attention + GatedDeltaNet + MoE      |
 //! | `falcon_mamba`         | Falcon Mamba (HF `model_type` alias)      |
 //! | `longcat_flash`        | LongCat-Flash linear hybrid               |
@@ -93,6 +94,7 @@ pub const HYBRID_SSM_MODEL_TYPES: &[&str] = &[
     "nemotron_h",
     "gated_delta",
     "kimi_linear",
+    "kimi_k3",
     "qwen3_next",
     // Aliases sometimes seen in HF configs:
     "falcon_mamba",
@@ -111,6 +113,7 @@ const HYBRID_SSM_ARCH_FRAGMENTS: &[&str] = &[
     "nemotronh",
     "gateddelta",
     "kimilinear",
+    "kimik3",
     "qwen3next",
     "falconmamba",
     "longcatflash",

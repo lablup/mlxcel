@@ -150,6 +150,7 @@ pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
 pub mod jina_vlm;
+pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
 pub mod laguna;
@@ -299,6 +300,7 @@ pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
+pub use kimi_k3::KimiK3Model;
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
 pub use laguna::{LagunaModel, LagunaWrapper};
@@ -613,7 +615,8 @@ pub enum ModelType {
 
     // Kimi models
     KimiLinear,
-    KimiVL,  // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
+    KimiK3, // Kimi K3 text backbone (fused-QKV KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)
+    KimiVL, // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
     KimiK25, // Kimi-VL 2.5 (MoonViT + DeepSeek-V3-style MoE, image path)
 
     // Longcat models
@@ -839,6 +842,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::GraniteMoeHybrid,
     // Kimi models
     ModelType::KimiLinear,
+    ModelType::KimiK3,
     ModelType::KimiVL,
     ModelType::KimiK25,
     // Longcat models
@@ -1060,6 +1064,10 @@ impl ModelType {
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::Dbrx => ("Databricks DBRX (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
+            ModelType::KimiK3 => (
+                "Kimi K3 (KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)",
+                "MoE (other)",
+            ),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
@@ -1432,6 +1440,7 @@ mod metadata_tests {
             Plamo2,
             GraniteMoeHybrid,
             KimiLinear,
+            KimiK3,
             KimiVL,
             KimiK25,
             LongcatFlash,

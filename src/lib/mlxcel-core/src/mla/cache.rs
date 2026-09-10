@@ -124,6 +124,9 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     "deepseek_v3.2",
     "glm_moe_dsa",
     "kimi_linear",
+    // Kimi K3 reuses Kimi Linear's absorbed MLA and the same unconditional
+    // `update_and_fetch(kv_latent, k_pe)` (`src/models/kimi_k3.rs`).
+    "kimi_k3",
     "longcat_flash_ngram",
 ];
 
@@ -378,6 +381,7 @@ mod tests {
             "deepseek_v3.2",
             "glm_moe_dsa",
             "kimi_linear",
+            "kimi_k3",
             "longcat_flash_ngram",
         ] {
             assert!(caches_mla_latent_pair(family), "{family}");

@@ -265,6 +265,40 @@ fn gpt2_model_type_is_detected() {
 }
 
 #[test]
+fn kimi_k3_model_type_is_detected_as_text_despite_vision_config() {
+    // The published `config.json` carries `vision_config` and the checkpoint
+    // ships `vision_tower.*` tensors, but in this wave `kimi_k3` is always the
+    // text backbone (the sanitizer drops the vision planes); #1342 adds the
+    // VLM split. Detection must not route it to a VLM type.
+    let model_dir = temp_path("kimi_k3_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "kimi_k3",
+            "architectures": ["KimiK3ForConditionalGeneration"],
+            "media_placeholder_token_id": 163605,
+            "text_config": {
+                "model_type": "kimi_linear",
+                "hidden_size": 7168,
+                "num_hidden_layers": 93,
+                "hidden_act": "situ"
+            },
+            "vision_config": {
+                "patch_size": 14,
+                "vt_hidden_size": 1152
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::KimiK3);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn gpt_bigcode_model_type_is_detected() {
     // GPT-BigCode reuses GPT-2's config field names and its `architectures`
     // entry starts with the same `GPT` prefix, so detection must key off
