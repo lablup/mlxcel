@@ -630,7 +630,7 @@ pub(crate) async fn non_stream_chat_completion(
     // true. The store is built by startup.rs only when configured, so
     // `state.prompt_cache.is_some()` is the operator-visible flag here.
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prepared = prepare_chat_request_with_cache(
+    let mut prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -674,6 +674,12 @@ pub(crate) async fn non_stream_chat_completion(
     // supported ladder by `prepare_chat_request_with_cache`. `None` for every
     // request that did not set `detail` / `max_soft_tokens`.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
+    // prompt as token ids. Handing them to the provider is what keeps the
+    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
+    // re-recognize control-token spellings, which is the injection surface the
+    // native renderer closes. `None` for every template-rendered request.
+    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     // `ThinkingState` counts reasoning tokens from the first decoded token
     // only when the prompt already left the model inside an open thinking
     // block. The chat template decides this at render time (Qwen primes
@@ -987,6 +993,17 @@ fn submit_next_turn_warmup(
     {
         return;
     }
+    // Kimi K3 opts out for the same reason it opts out of the #1143 boundary
+    // snapshot: it has no Jinja template, so `render_next_turn_history` would
+    // fall through to the generic `User:/Assistant:` form and tokenize that
+    // text, producing a warm-up prefix no XTML request can ever match. The
+    // entry is unreachable rather than wrong (`PromptCacheKey` carries
+    // `token_prefix_hash`), but it costs a background prefill per completion,
+    // and it is the one path that would put user-derived text back through the
+    // special-matching `encode` this family renders ids to avoid.
+    if state.chat_template.kimi_k3().is_some() {
+        return;
+    }
     let Some(history) = crate::server::chat_request::render_next_turn_history(
         &state.chat_template,
         request,
@@ -1159,7 +1176,7 @@ pub(crate) async fn stream_asr_completion(
     }
 
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prepared = match prepare_chat_request_with_cache(
+    let mut prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -1192,6 +1209,12 @@ pub(crate) async fn stream_asr_completion(
     options.priority = priority;
     options.prompt_cache_ctx = prompt_cache_ctx;
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
+    // prompt as token ids. Handing them to the provider is what keeps the
+    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
+    // re-recognize control-token spellings, which is the injection surface the
+    // native renderer closes. `None` for every template-rendered request.
+    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.thinking_enter_block_on_start = primed_open_thinking;
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
@@ -1346,7 +1369,7 @@ async fn stream_chat_completion(
         &state.thinking_markers,
     )
     .await;
-    let prepared = match prepared {
+    let mut prepared = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
@@ -1398,6 +1421,12 @@ async fn stream_chat_completion(
     // supported ladder by `prepare_chat_request_with_cache`. `None` for every
     // request that did not set `detail` / `max_soft_tokens`.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
+    // prompt as token ids. Handing them to the provider is what keeps the
+    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
+    // re-recognize control-token spellings, which is the injection surface the
+    // native renderer closes. `None` for every template-rendered request.
+    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     // `ThinkingState` counts reasoning tokens from the first decoded token
     // only when the prompt already left the model inside an open thinking
     // block. The chat template decides this at render time (Qwen primes
@@ -2133,7 +2162,7 @@ pub(crate) fn primed_open_thinking_close_marker(
 /// by family with [`OPEN_THINKING_SUFFIXES`] — either one closes "a block
 /// the prompt opened", so the post-processor treats the generation as
 /// closed when any of them appears in the raw output.
-const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>"];
+const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>", "<|close|>think<|sep|>"];
 
 /// Whether the prompt primed an open thinking block that the raw output never
 /// closed.
@@ -3214,6 +3243,36 @@ mod reasoning_format_route_tests {
     fn a_streamed_plain_response_gains_no_delimiters() {
         const PLAIN: &str = "just an answer";
         assert_eq!(streamed_content(PLAIN, 3, None), PLAIN);
+    }
+
+    /// Kimi K3's think block is always prompt-primed open in practice, so this
+    /// mirrors `a_primed_block_synthesizes_its_open_marker_in_the_stream` for
+    /// the K3 marker pair (#1743 security review: `canonical_thinking_pair`
+    /// had no K3 arm, so the close marker in the streamed form never matched
+    /// the non-streaming `with_thoughts` form under `--reasoning-format
+    /// none`).
+    #[test]
+    fn a_primed_k3_think_block_closes_byte_for_byte_in_the_stream() {
+        const K3_PRIMED: &str = "let me check the weather<|close|>think<|sep|>the answer";
+        let answer = clean_structural_tokens(K3_PRIMED);
+        let reasoning = super::extract_reasoning_content(K3_PRIMED, true);
+        let with_thoughts = content_with_thinking_block(K3_PRIMED, &answer, reasoning.as_deref());
+        assert_eq!(answer, "the answer");
+        // The non-streaming form synthesizes the open marker the prompt
+        // primed away, exactly as it does for the Qwen-style primed case
+        // above; the raw generation never carried it.
+        assert_eq!(
+            with_thoughts,
+            "<|open|>think<|sep|>let me check the weather<|close|>think<|sep|>the answer",
+            "the open marker is synthesized, not carried by the raw generation"
+        );
+        for fragments in 1..=8 {
+            assert_eq!(
+                streamed_content(K3_PRIMED, fragments, Some("<|close|>think<|sep|>")),
+                with_thoughts,
+                "fragments = {fragments}"
+            );
+        }
     }
 
     #[test]

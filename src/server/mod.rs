@@ -40,6 +40,7 @@ pub mod gcp_compat;
 pub mod grammar;
 mod http_timeout;
 pub mod infill;
+pub mod kimi_k3_chat;
 pub mod kokoro_tts;
 mod listen;
 pub mod logging;

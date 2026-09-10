@@ -106,6 +106,14 @@ pub enum ToolCallFormat {
     /// Values are coerced against the request tool schema (a `string`-typed
     /// parameter keeps its raw text; others are JSON/loose-literal parsed).
     Glm47,
+    /// Kimi K3: the XTML tag language built from the `<|open|>` / `<|close|>` /
+    /// `<|sep|>` control tokens. A tool call is
+    /// `<|open|>call tool="NAME" index="N"<|sep|>` wrapping one
+    /// `<|open|>argument key="K" type="T"<|sep|>VALUE<|close|>argument<|sep|>`
+    /// per argument (or a single `<|open|>json type="object"<|sep|>` block),
+    /// inside a `<|open|>tools<|sep|>` ... `<|close|>tools<|sep|>` section.
+    /// Argument values are typed by the `type` attribute rather than inferred.
+    KimiK3,
     /// LongCat-Flash (`longcat_flash`, `longcat_flash_ngram`): structurally
     /// identical to [`Glm47`](ToolCallFormat::Glm47) but with the distinct tags
     /// `<longcat_tool_call>`, `<longcat_arg_key>`, and `<longcat_arg_value>`; a
@@ -134,6 +142,7 @@ impl ToolCallFormat {
             Self::Qwen3Coder => "qwen3_coder",
             Self::Harmony => "harmony",
             Self::KimiK2 => "kimi_k2",
+            Self::KimiK3 => "kimi_k3",
             Self::Pythonic => "pythonic",
             Self::Glm47 => "glm47",
             Self::Longcat => "longcat",
@@ -169,6 +178,7 @@ impl FromStr for ToolCallFormat {
             "qwen3_coder" | "qwen3-coder" => Ok(Self::Qwen3Coder),
             "harmony" => Ok(Self::Harmony),
             "kimi_k2" | "kimi-k2" => Ok(Self::KimiK2),
+            "kimi_k3" | "kimi-k3" => Ok(Self::KimiK3),
             "pythonic" => Ok(Self::Pythonic),
             "glm47" | "glm4.7" | "glm-4.7" => Ok(Self::Glm47),
             "longcat" => Ok(Self::Longcat),

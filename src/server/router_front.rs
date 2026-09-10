@@ -886,6 +886,32 @@ async fn route_chat(
         anyhow::bail!("the disaggregated router supports text-only requests");
     }
 
+    // Refuse the Kimi K3 native chat format before rendering anything (#1338).
+    // The check below on `prepared.prompt_token_ids` is the same refusal, but
+    // it can only fire when the native renderer was attached to this state; a
+    // router built without that attachment would render through the generic
+    // template instead and hand `start_handoff` a prompt string, which
+    // `MlxcelTokenizer::encode` tokenizes with special parsing on. A `<|open|>`
+    // written into a message body would then become the real control id.
+    //
+    // The gate is the vocabulary family rather than
+    // `kimi_k3_control_ids()`, which is all-or-nothing across six spellings
+    // and reports `None` for a checkpoint that names only some of them. That
+    // is exactly the checkpoint whose control block is still populated (and so
+    // still recognized by `encode`) while no renderer exists to keep user text
+    // away from it, so keying on the ids would fail open on the one input that
+    // needs the refusal most.
+    if state
+        .tokenizer
+        .tiktoken()
+        .is_some_and(|t| t.family() == crate::tokenizer::TiktokenFamily::KimiK3)
+    {
+        anyhow::bail!(
+            "the disaggregated router does not support the Kimi K3 native chat format: its \
+             pre-rendered prompt token ids cannot be carried to a remote worker"
+        );
+    }
+
     // Render the chat template.
     let thinking_markers = state.tokenizer.infer_thinking_markers();
     let prepared = match super::chat_request::prepare_chat_request_with_cache(
@@ -915,6 +941,19 @@ async fn route_chat(
     // was inspected would still be refused rather than silently dropped.
     if has_declared_media(prepared.media) {
         anyhow::bail!("the disaggregated router supports text-only requests");
+    }
+
+    // A native chat renderer produced token ids rather than a prompt the
+    // remote worker can re-render (#1338). The router's wire form carries the
+    // prompt string only, and re-tokenizing the XTML text on the far side
+    // would re-recognize control-token spellings that came out of message
+    // bodies, so the request is refused instead of served with a prompt whose
+    // structure the caller could influence.
+    if prepared.prompt_token_ids.is_some() {
+        anyhow::bail!(
+            "the disaggregated router does not support the Kimi K3 native chat format: its \
+             pre-rendered prompt token ids cannot be carried to a remote worker"
+        );
     }
 
     let prompt = prepared.prompt;

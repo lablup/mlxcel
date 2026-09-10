@@ -545,6 +545,49 @@ fn build_slot_registry(config: &ServerConfig, slots_debug: bool) -> Arc<SlotRegi
     ))
 }
 
+/// Share the loaded tokenizer and attach any native (non-Jinja) chat renderer
+/// it implies (#1338).
+///
+/// Kimi K3 ships no chat template, so `resolve_chat_template` hands back the
+/// generic default processor and the real format lives in
+/// `server::kimi_k3_chat`. Doing the attachment here rather than in
+/// `server::startup` means every construction path (the server, the
+/// disaggregated worker, and every route test that builds an `AppState`) gets
+/// the same wiring from the same two values it already owns.
+pub(crate) fn attach_native_chat_renderer(
+    tokenizer: MlxcelTokenizer,
+    mut chat_template: ChatTemplateProcessor,
+) -> (Arc<MlxcelTokenizer>, ChatTemplateProcessor) {
+    let tokenizer = Arc::new(tokenizer);
+    if let Some(renderer) = super::kimi_k3_chat::KimiK3Renderer::new(Arc::clone(&tokenizer)) {
+        tracing::info!("Kimi K3 tiktoken vocabulary detected; using the native XTML chat renderer");
+        chat_template.attach_kimi_k3(Arc::new(renderer));
+    } else if tokenizer
+        .tiktoken()
+        .is_some_and(|t| t.family() == crate::tokenizer::TiktokenFamily::KimiK3)
+    {
+        // Same fail-open shape the disaggregated router was fixed for in
+        // a6aac844 (#1743 security review): `KimiK3Renderer::new` requires
+        // all six control-token spellings, and a checkpoint whose
+        // `added_tokens_decoder` names only some of them still has a live
+        // control block `MlxcelTokenizer::encode` recognizes with special
+        // parsing on. Falling through here to the generic template would let
+        // `prepare_chat_request_with_cache` render user text as a plain
+        // string and hand it to that special-parsing encode, re-tokenizing
+        // any `<|open|>` / `<|sep|>` spellings a message body wrote as the
+        // real control ids. Gated the same way the router gates it, on the
+        // vocabulary family rather than on `kimi_k3_control_ids()`, which is
+        // all-or-nothing and would report `None` here regardless.
+        tracing::error!(
+            "Kimi K3 tiktoken vocabulary detected, but its control-token names are incomplete; \
+             refusing to fall back to the generic chat template, which would let message text \
+             re-tokenize as control ids"
+        );
+        chat_template.mark_kimi_k3_family_unrenderable();
+    }
+    (tokenizer, chat_template)
+}
+
 impl AppState {
     /// Create `AppState` with all required components.
     pub fn new(
@@ -566,6 +609,7 @@ impl AppState {
             );
         let startup_live = Arc::new(startup_settings);
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
+        let (tokenizer, chat_template) = attach_native_chat_renderer(tokenizer, chat_template);
         Self {
             model_provider,
             config: Arc::new(config),
@@ -574,7 +618,7 @@ impl AppState {
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
             thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
-            tokenizer: Arc::new(tokenizer),
+            tokenizer,
             model_path,
             media_support: ModelMediaSupport::default(),
             batch_metrics,
@@ -624,6 +668,7 @@ impl AppState {
             );
         let startup_live = Arc::new(startup_settings);
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
+        let (tokenizer, chat_template) = attach_native_chat_renderer(tokenizer, chat_template);
         Self {
             model_provider,
             config: Arc::new(config),
@@ -632,7 +677,7 @@ impl AppState {
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
             thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
-            tokenizer: Arc::new(tokenizer),
+            tokenizer,
             model_path,
             media_support: ModelMediaSupport::default(),
             batch_metrics,

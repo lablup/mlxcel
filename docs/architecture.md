@@ -113,7 +113,11 @@ Important control surfaces:
    `/v1/audio/translations` (speech-to-text). These return a structured
    `501 Not Implemented` until a speech model is wired into the audio-model
    slot on `AppState`.
-4. Route handlers translate requests into internal generation work.
+4. Route handlers translate requests into internal generation work. Chat requests
+   render through `src/server/chat_template.rs`, except for checkpoints that ship no
+   Jinja template and have a code-rendered format instead: Kimi K3's XTML renderer
+   (`src/server/kimi_k3_chat.rs`) produces token ids directly and they reach the
+   scheduler through the pre-tokenized request path.
 5. `src/server/batch/` schedules batched decode when enabled.
 6. Streaming responses are emitted as SSE frames.
 

@@ -1773,6 +1773,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             grammar: None,
             // Warmup is text-only; no image budget to override.
             image_soft_tokens: None,
+            pre_rendered_prompt_tokens: None,
         },
     )?;
     Ok(())
@@ -2744,8 +2745,15 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
         let reply_to = crate::distributed::transport::Transport::local_addr(transport.as_ref())?;
         let config_arc = std::sync::Arc::new(config.clone());
+        // Attach the native chat renderer here too (#1338). `AppState` does
+        // this for every other construction path, and the router's own refusal
+        // of the Kimi K3 format keys off the renderer having produced token
+        // ids; without the attachment that refusal never fires and the request
+        // falls through to the generic template, whose rendered text is then
+        // re-tokenized with control-token spellings recognized.
+        let (tokenizer_arc, chat_template) =
+            crate::server::state::attach_native_chat_renderer(tokenizer, chat_template);
         let chat_template_arc = std::sync::Arc::new(chat_template);
-        let tokenizer_arc = std::sync::Arc::new(tokenizer);
         let state = std::sync::Arc::new(crate::server::router_front::RouterState::build(
             config_arc,
             transport,

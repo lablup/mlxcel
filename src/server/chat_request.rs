@@ -103,6 +103,15 @@ fn history_boundary_render_attempted() {}
 
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
+    /// Token ids a native (non-Jinja) chat renderer produced for this prompt
+    /// (#1338).
+    ///
+    /// `Some` only for Kimi K3, whose XTML renderer emits control-token ids
+    /// directly; `prompt` then holds the equivalent text for diagnostics, the
+    /// prompt-cache key and the primed-thinking check, but is never the thing
+    /// that gets tokenized. `None` for every template-rendered request, which
+    /// keeps the existing tokenize-the-string path exactly as it was.
+    pub(crate) prompt_token_ids: Option<Vec<i32>>,
     /// b10621 `--prefill-assistant` (#1470): the trailing assistant text this
     /// prompt continues from, when the request had one and prefill is on.
     ///
@@ -368,6 +377,21 @@ pub(crate) async fn prepare_chat_request_with_cache(
     prefill_assistant: bool,
     thinking_markers: &crate::tokenizer::ThinkingMarkers,
 ) -> Result<PreparedChatRequest> {
+    // Refuse rather than fall back to the generic template when the loaded
+    // tokenizer's vocabulary family is Kimi K3 but no native renderer could be
+    // attached (#1743 security review). The fallback below would render user
+    // text as a plain string and pass it to `MlxcelTokenizer::encode`, which
+    // still recognizes the checkpoint's live control-token spellings with
+    // special parsing on; see `ChatTemplateProcessor::kimi_k3_family_unrenderable`
+    // for why this cannot be gated on `kimi_k3_control_ids()` instead.
+    if processor.kimi_k3_family_unrenderable() {
+        anyhow::bail!(
+            "the loaded tokenizer's Kimi K3 control-token vocabulary is incomplete: refusing \
+             to render through the generic chat template, which would let message text \
+             re-tokenize as control ids"
+        );
+    }
+
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
     let declared_videos = request.video_urls().len();
@@ -389,7 +413,20 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // that carries the injected instruction. Shadowing the parameter keeps the
     // primary render, the history-boundary render and the media resolution
     // reading one message list, so `history_prompt` stays a prefix of `prompt`.
-    let request_for_render = with_tool_choice_instruction(request);
+    //
+    // Kimi K3 renders `tool_choice=required` (and `none`) as a system message
+    // of its own, so the generic textual injection would say the same thing
+    // twice. A named function has no native K3 form and keeps the injection.
+    let request_for_render = if processor.kimi_k3().is_some()
+        && request
+            .tool_choice
+            .as_ref()
+            .is_some_and(|choice| choice.is_required())
+    {
+        std::borrow::Cow::Borrowed(request)
+    } else {
+        with_tool_choice_instruction(request)
+    };
     let request: &ChatCompletionRequest = &request_for_render;
     // Determine effective tools based on tool_choice
     let effective_tools = effective_tools(request);
@@ -435,6 +472,24 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // the continuation text, with no closing tag).
     let prefill = super::assistant_prefill::resolve(request, prefill_assistant)
         .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+
+    // Kimi K3 renders natively, in code, straight to token ids (#1338). Its
+    // prompt has no Jinja template behind it, so everything below this point
+    // (the raw-vs-typed render split, the history-boundary render, the
+    // rolling-checkpoint `<think>` stripping) does not apply to it.
+    if let Some(renderer) = processor.kimi_k3() {
+        return prepare_kimi_k3_chat_request(
+            processor,
+            renderer,
+            request,
+            kimi_k3_tools(request, effective_tools),
+            &merged_kwargs,
+            prefill.is_some(),
+            declared_images,
+            declared_audio,
+            declared_videos,
+        );
+    }
 
     let render_history_prefix = prompt_cache_enabled
         && snapshot_reuse_capable
@@ -616,6 +671,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
 
     Ok(PreparedChatRequest {
         prompt,
+        prompt_token_ids: None,
         assistant_prefill,
         history_prompt,
         image_data,
@@ -624,6 +680,140 @@ pub(crate) async fn prepare_chat_request_with_cache(
         audio_data,
         videos,
     })
+}
+
+/// Prepare a request for Kimi K3's native XTML chat format (#1338).
+///
+/// The renderer emits token ids directly, so the returned
+/// [`PreparedChatRequest`] carries both the ids (authoritative) and their text
+/// form (diagnostics, prompt-cache key material, and the primed-thinking
+/// check). Four behaviors differ from the template path and are deliberate:
+///
+/// * **No history-boundary snapshot** (#1143). That optimization rests on the
+///   history render being a text prefix of the generation prompt; K3's
+///   generation prompt is a structural tag stream, and the id vector is what
+///   would have to prefix-match, not the string. Opting out costs a cache
+///   entry, never correctness.
+/// * **No rolling-checkpoint `<think>` stripping.** K3's history form is
+///   structural: in thinking mode every prior assistant turn carries its
+///   `think` channel, empty or not. `preserve_thinking` therefore has nothing
+///   to strip and is ignored, and a prior turn's `reasoning` renders exactly
+///   as the reference renders it.
+/// * **No assistant prefill.** b10621's `--prefill-assistant` appends
+///   continuation text after the generation prompt; K3's generation prompt
+///   ends inside an open XTML tag, so there is no text position to append to
+///   without corrupting the structure.
+/// * **No media.** Image prompts are #1342; until then a declared image,
+///   audio or video input is refused rather than silently dropped.
+#[allow(clippy::too_many_arguments)]
+fn prepare_kimi_k3_chat_request(
+    processor: &ChatTemplateProcessor,
+    renderer: &super::kimi_k3_chat::KimiK3Renderer,
+    request: &ChatCompletionRequest,
+    effective_tools: Option<&[Tool]>,
+    merged_kwargs: &ChatTemplateKwargs,
+    has_prefill: bool,
+    declared_images: usize,
+    declared_audio: usize,
+    declared_videos: usize,
+) -> Result<PreparedChatRequest> {
+    if has_prefill {
+        anyhow::bail!(
+            "Kimi K3 does not support prefilling an assistant message: its generation prompt \
+             ends inside an open XTML tag, so there is no text position to continue from"
+        );
+    }
+    if declared_images > 0 || declared_audio > 0 || declared_videos > 0 {
+        anyhow::bail!(
+            "Kimi K3 chat rendering does not accept image, audio or video inputs yet; \
+             image prompts land with the vision path"
+        );
+    }
+
+    // `thinking` is K3's own kwarg name; `enable_thinking` is mlxcel's
+    // cross-family one and is also what `map_reasoning_control_kwargs` fills
+    // in from a portable request reasoning control. The reference default is
+    // on.
+    let thinking = kwarg_bool(merged_kwargs, "thinking")?
+        .or(kwarg_bool(merged_kwargs, "enable_thinking")?)
+        .unwrap_or(true);
+    // Same two-name treatment for the level. An explicit JSON `null` means
+    // "omit the thinking-effort message", which is distinct from an absent key
+    // (the reference's `kwargs.setdefault("thinking_effort", "max")`).
+    let thinking_effort = match kwarg_effort(merged_kwargs, "thinking_effort")? {
+        Some(effort) => effort,
+        None => match kwarg_effort(merged_kwargs, "reasoning_effort")? {
+            // The portable name is clamped onto K3's three levels rather than
+            // passed through, so an OpenAI-shaped request asking for the
+            // portable default `medium` renders instead of failing. An
+            // unrecognized level still reaches the renderer and still errors.
+            Some(Some(effort)) => Some(
+                super::kimi_k3_chat::clamp_portable_reasoning_effort(&effort)
+                    .map(str::to_string)
+                    .unwrap_or(effort),
+            ),
+            Some(None) => None,
+            None => Some(super::kimi_k3_chat::DEFAULT_THINKING_EFFORT.to_string()),
+        },
+    };
+
+    // `required` and `none` are the two modes K3 renders itself. `auto`, a
+    // named function, and an absent field render nothing here; a named
+    // function is still narrowed by `effective_tools` and still carries the
+    // generic textual instruction.
+    let tool_choice = request.tool_choice.as_ref().and_then(|choice| {
+        matches!(choice.mode(), "required" | "none").then(|| choice.mode().to_string())
+    });
+
+    let options = super::kimi_k3_chat::K3RenderOptions {
+        add_generation_prompt: processor.add_generation_prompt(),
+        thinking,
+        thinking_effort,
+        tool_choice,
+        response_format: request.response_format.as_ref(),
+        image_prompts: None,
+    };
+    let rendered = renderer.render(&request.messages, effective_tools, &options)?;
+
+    Ok(PreparedChatRequest {
+        prompt: rendered.text,
+        prompt_token_ids: Some(rendered.ids),
+        assistant_prefill: None,
+        history_prompt: None,
+        image_data: Vec::new(),
+        media: MediaRequestMetadata::new(0, 0, 0, 0, 0, 0),
+        image_soft_tokens: None,
+        audio_data: Vec::new(),
+        videos: Vec::new(),
+    })
+}
+
+/// Read a boolean chat-template kwarg, rejecting a value of the wrong type
+/// rather than silently falling back to the default.
+fn kwarg_bool(kwargs: &ChatTemplateKwargs, key: &str) -> Result<Option<bool>> {
+    match kwargs.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(other) => {
+            anyhow::bail!("chat_template_kwargs.{key} must be a boolean, got {other}")
+        }
+    }
+}
+
+/// Read a thinking-effort kwarg.
+///
+/// `Ok(None)` means the key is absent (fall through to the next name, then to
+/// the default); `Ok(Some(None))` means it was explicitly `null`, which omits
+/// the thinking-effort message entirely.
+fn kwarg_effort(kwargs: &ChatTemplateKwargs, key: &str) -> Result<Option<Option<String>>> {
+    match kwargs.get(key) {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(serde_json::Value::String(value)) => Ok(Some(Some(value.clone()))),
+        Some(other) => {
+            anyhow::bail!("chat_template_kwargs.{key} must be a string or null, got {other}")
+        }
+    }
 }
 
 /// Render the history prefix the NEXT turn of this conversation will start
@@ -903,6 +1093,31 @@ pub(crate) fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]
             })
             .map(std::slice::from_ref),
         _ => tools,
+    }
+}
+
+/// The tools Kimi K3 declares, which differ from [`effective_tools`] in the
+/// `tool_choice: "none"` case alone (#1338).
+///
+/// `effective_tools` hides the tools from a Jinja template under `none`,
+/// because for a template the tools block *is* the offer: showing it and then
+/// saying "do not call these" is a contradiction the template cannot express.
+/// K3 can. It renders the refusal as its own system message, and the reference
+/// emits that message after the declaration, so the model is told exactly
+/// which tools it must not call. The `xtml/tool_choice_none.json` fixture
+/// carries both blocks in that order.
+///
+/// Every other mode keeps the shared narrowing, the named-function case
+/// included, so this only ever widens `none` back to the declared list.
+///
+/// Used by: prepare_chat_request_with_cache
+fn kimi_k3_tools<'a>(
+    request: &'a ChatCompletionRequest,
+    effective: Option<&'a [Tool]>,
+) -> Option<&'a [Tool]> {
+    match request.tool_choice.as_ref() {
+        Some(choice) if choice.is_none() => request.tools.as_deref(),
+        _ => effective,
     }
 }
 

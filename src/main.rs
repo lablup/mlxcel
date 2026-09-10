@@ -628,6 +628,30 @@ pub(crate) struct InspectArgs {
     #[arg(long)]
     pub(crate) json: bool,
 
+    /// Tokenize FILE with this model's tokenizer and print one compact JSON id
+    /// array per input line, then exit.
+    ///
+    /// Lines are split on `\n`; a trailing `\r` stays part of the line and the
+    /// newline itself is excluded. Special-token spellings written into the
+    /// text are NOT recognized (`<|open|>` encodes as ordinary characters),
+    /// which is the convention a chat renderer encodes message bodies with.
+    /// Nothing else runs in this mode: no safetensors scan and no memory
+    /// estimate, so it works on a tokenizer-only directory.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) tokenize: Option<PathBuf>,
+
+    /// With `--tokenize`, encode the whole file as one document and print a
+    /// single id array instead of one per line.
+    ///
+    /// Exercises the pattern's newline alternatives, which per-line encoding
+    /// never reaches.
+    ///
+    /// `requires` rather than a silent no-op: on its own this flag reads like
+    /// a request to tokenize something, and answering it with the ordinary
+    /// memory estimate would look like the tokenizer disagreeing.
+    #[arg(long, requires = "tokenize")]
+    pub(crate) tokenize_whole: bool,
+
     // Shared TurboQuant KV-cache flag group, gives `inspect` the same
     // `--cache-type-k` / `--cache-type-v` surface as `generate` so the
     // estimate matches what the loaded model would actually allocate.

@@ -1987,25 +1987,35 @@ impl ModelProvider {
             .validate_resolved_image_count()
             .map_err(anyhow::Error::from)?;
 
+        // A native chat renderer already produced the exact ids for this
+        // prompt (#1338), so there is nothing to tokenize: the prompt string
+        // is the diagnostic rendering of those ids, and re-encoding it would
+        // have to re-parse control-token spellings out of message text.
+        // Taking the field also clears it, so the scheduler's own fallback
+        // below cannot use it twice.
+        let pre_rendered = options.pre_rendered_prompt_tokens.take();
+
         // Tokenize on this (request-dispatch / HTTP-side) thread when a
         // pre-tokenizer is available, so a long prompt no longer stalls the
         // scheduler thread's decode loop (issue #633). A tokenization failure
         // falls back to `None` so the scheduler encodes it and surfaces the
         // error through the normal response channel.
-        let prompt_token_ids = self.prompt_tokenizer.as_ref().and_then(|tok| {
-            let tokenized = if audio.is_empty() {
-                tokenize_prompt_for_generation(tok, &prompt)
-            } else {
-                tokenize_prompt_for_generation_with_ordered_media(tok, &prompt, true)
-            };
-            tokenized
-                .map_err(|err| {
-                    tracing::debug!(
-                        "HTTP-side prompt tokenization failed ({err}); deferring to scheduler"
-                    );
-                    err
-                })
-                .ok()
+        let prompt_token_ids = pre_rendered.or_else(|| {
+            self.prompt_tokenizer.as_ref().and_then(|tok| {
+                let tokenized = if audio.is_empty() {
+                    tokenize_prompt_for_generation(tok, &prompt)
+                } else {
+                    tokenize_prompt_for_generation_with_ordered_media(tok, &prompt, true)
+                };
+                tokenized
+                    .map_err(|err| {
+                        tracing::debug!(
+                            "HTTP-side prompt tokenization failed ({err}); deferring to scheduler"
+                        );
+                        err
+                    })
+                    .ok()
+            })
         });
 
         // Same treatment for the history-boundary render (issue #1143): it is

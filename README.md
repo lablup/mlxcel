@@ -319,4 +319,5 @@ Apache License 2.0 unless otherwise noted. See [LICENSE](LICENSE). Third-party a
 - [mlx-lm](https://github.com/ml-explore/mlx-lm), [mlx-vlm](https://github.com/Blaizzy/mlx-vlm), and [mlx-audio](https://github.com/Blaizzy/mlx-audio), whose model coverage and behavior mlxcel ports and mirrors. See [NOTICE](NOTICE).
 - [MLX Community](https://huggingface.co/mlx-community), pre-converted MLX checkpoints.
 - [turboquant_plus](https://github.com/TheTom/turboquant_plus), whose TurboQuant KV-cache algorithms are ported under Apache-2.0. See [NOTICE](NOTICE).
+- [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3), whose tiktoken pre-tokenization pattern and XTML chat grammar are reimplemented in Rust under the Kimi K3 License. See [NOTICE](NOTICE).
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer), whose paged-attention, split-KV, cascade state-merge, and sampling designs inform mlxcel's serving kernels.

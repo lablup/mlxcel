@@ -238,7 +238,7 @@ async fn non_stream_create_response(
         &state.thinking_markers,
     )
     .await;
-    let prepared = match prepared {
+    let mut prepared = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
@@ -258,6 +258,12 @@ async fn non_stream_create_response(
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
+    // prompt as token ids. Handing them to the provider is what keeps the
+    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
+    // re-recognize control-token spellings, which is the injection surface the
+    // native renderer closes. `None` for every template-rendered request.
+    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
     options.structured = structured;
     // Wire the cross-request prompt-prefix KV cache (epic #116) into the
@@ -379,7 +385,7 @@ async fn stream_create_response(
         &state.thinking_markers,
     )
     .await;
-    let prepared = match prepared {
+    let mut prepared = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
@@ -399,6 +405,12 @@ async fn stream_create_response(
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
+    // prompt as token ids. Handing them to the provider is what keeps the
+    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
+    // re-recognize control-token spellings, which is the injection surface the
+    // native renderer closes. `None` for every template-rendered request.
+    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
     options.structured = structured;
     // Wire the prompt-prefix KV cache (epic #116) into the streaming Responses
