@@ -4006,10 +4006,10 @@ async fn video_expansion_cancelled_before_the_call_touches_no_clip() {
 
 #[tokio::test]
 async fn video_expansion_cancelled_after_the_first_clip_skips_the_second() {
-    // The client disconnects while the first clip is decoding. That clip's
-    // decode is allowed to finish, but the second clip must never be resolved:
-    // before issue #1766 every remaining clip was decoded to
-    // `--video-max-frames` for a response nobody would read.
+    // The token fires while the first clip is decoding. That clip's decode is
+    // allowed to finish, but the second clip must never be resolved. Without
+    // the per-clip check the loop runs to the end of the body however early
+    // the token fired.
     let mut request = request_with_messages(vec![user_parts(vec![
         video_part("file:///clip-a.mp4"),
         video_part("file:///clip-b.mp4"),
