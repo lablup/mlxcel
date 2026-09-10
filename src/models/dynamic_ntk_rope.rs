@@ -268,7 +268,16 @@ impl DynamicNtkRope {
         // Ask the subscriber before the dedup set's lock, so a run without
         // `RUST_LOG` never takes it. The gate sits here rather than inside
         // `log_dynamic_rescale_once` because the tests call that directly and
-        // assert on its return value.
+        // assert on its return value, with no subscriber installed.
+        //
+        // This check declares no fields, while the `tracing::debug!` it guards
+        // declares six, so the two agree on level and target but not on
+        // fields. An `EnvFilter` directive that selects on a field, say
+        // `RUST_LOG=[{seq_len}]=debug`, would enable the event and not this
+        // guard, and the diagnostic would go missing. Every documented way in
+        // to it is a level directive: `-v` and `--verbosity 4` both expand to
+        // one in `server::logging`, and the issue's own recipe is
+        // `RUST_LOG=debug`.
         if tracing::enabled!(tracing::Level::DEBUG) {
             let _ = self.log_dynamic_rescale_once(seq_len, base_eff);
         }
@@ -307,16 +316,24 @@ impl DynamicNtkRope {
     /// checkpoints that agree on all four are the same schedule and have
     /// nothing to distinguish in the log anyway.
     ///
-    /// The lock is taken only past the boundary, where a decode step already
-    /// costs on the order of a second at the context lengths that reach it.
+    /// Past the boundary the lock is taken once per call, which `apply`
+    /// reaches twice per layer per forward, so the steady state after the line
+    /// has been emitted is a lookup that can only answer "already present".
+    /// At roughly 40ns uncontended that is a few microseconds per forward
+    /// against a decode step of tens of milliseconds at these context lengths,
+    /// and the caller in `apply` skips it outright when no debug subscriber is
+    /// installed.
     fn log_dynamic_rescale_once(&self, seq_len: i32, base_eff: f32) -> bool {
         use std::collections::BTreeSet;
         use std::sync::{Mutex, OnceLock};
 
         /// `(dims, base bits, max_position_embeddings, factor bits)`. Raw bits
         /// rather than the `f32`s so the key is `Ord` without a total-order
-        /// wrapper; `from_scaling` has already rejected NaN through
-        /// `is_usable_scalar`, so the bit pattern is a faithful identity here.
+        /// wrapper. `from_scaling` screens `factor` through
+        /// `is_usable_scalar` but not `base`, so this is an identity on bit
+        /// patterns rather than on values: the worst a `base` of `-0.0` or a
+        /// NaN could do is split one schedule across two log lines, which no
+        /// real checkpoint produces and which costs nothing if it happens.
         type ScheduleKey = (i32, u32, usize, u32);
 
         static LOGGED: OnceLock<Mutex<BTreeSet<ScheduleKey>>> = OnceLock::new();
@@ -336,8 +353,11 @@ impl DynamicNtkRope {
             factor.to_bits(),
         );
         let logged = LOGGED.get_or_init(|| Mutex::new(BTreeSet::new()));
-        // A poisoned lock means another thread panicked while logging; the set
-        // is still a valid set, and losing the line is worse than reusing it.
+        // The guard is dropped before the event below, so a panicking
+        // subscriber cannot poison this lock; only a panic inside `insert`
+        // could, which in practice means nothing, since allocation failure
+        // aborts rather than unwinds. Recover anyway: the set stays a valid
+        // set either way, and losing every later line is worse.
         let mut logged = logged.lock().unwrap_or_else(|err| err.into_inner());
         if !logged.insert(key) {
             return false;
