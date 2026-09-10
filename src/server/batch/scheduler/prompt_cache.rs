@@ -103,13 +103,16 @@ impl BatchScheduler {
     /// (APC block-aligned) matches.
     ///
     /// The gate covers BOTH adopt branches. It used to sit only on the KV
-    /// branch, which was harmless while no VLM took the snapshot branch, but
-    /// `vision::VisionLanguageModel` now forwards the snapshot hooks to its
-    /// text model (#1335), so a truncating snapshot restore is reachable for a
-    /// multimodal request and has to decline for the same reason: the caller
-    /// drops the prepared VLM embeddings as soon as `prefill_start_offset > 0`
-    /// (`admission.rs`), so placeholder tokens left in the suffix would be
-    /// forwarded as ordinary ids.
+    /// branch, and that was already a gap: `vision::gemma4_vl` and
+    /// `vision::gemma4_unified` have forwarded `snapshot_truncatable_to` to
+    /// their text model since Gemma 4 first answered it, so a multimodal
+    /// request could already reach a truncating snapshot restore with the
+    /// whole-entry rule never consulted. #1335 widens the reach to
+    /// `vision::VisionLanguageModel` (the Gemma 3 and Llama 4 VLM checkpoints)
+    /// rather than creating it. The snapshot branch has to decline for the same
+    /// reason the KV branch does: the caller drops the prepared VLM embeddings
+    /// as soon as `prefill_start_offset > 0` (`admission.rs`), so placeholder
+    /// tokens left in the suffix would be forwarded as ordinary ids.
     ///
     /// Both dense and paged entries are adopted in-place: dense via
     /// [`CachePool::adopt`], paged via [`CachePool::adopt_paged`] (which shares
@@ -180,9 +183,10 @@ impl BatchScheduler {
             // placeholder tokens in the suffix, and the suffix runs through the
             // token path with the prepared embeddings dropped. Decline before
             // allocating anything, so the entry stays available for a later
-            // exact match. Only reachable since #1335 gave the VLM wrapper the
-            // snapshot hooks; an exact-prefix restore is unaffected because it
-            // leaves `partial` false.
+            // exact match. Reachable before #1335 as well, through the Gemma
+            // 4 VL and Unified wrappers, which already forwarded
+            // `snapshot_truncatable_to`; an exact-prefix restore is unaffected
+            // because it leaves `partial` false.
             if require_whole_entry && partial {
                 tracing::debug!(
                     matched = matched_len,

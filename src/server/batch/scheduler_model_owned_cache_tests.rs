@@ -310,10 +310,24 @@ fn paged_override_does_not_change_the_model_owned_natural_backend() {
 }
 
 /// End to end through the scheduler: a model-owned family completes a request
-/// without donating, and the next request extending the same conversation
-/// prefills from token 0.
+/// without ever putting a detached K/V set in the store, and the next request
+/// extending the same conversation never consults the K/V bucket.
+///
+/// The assertions read the K/V counters (`entries`, `inserts`, `lookups`)
+/// rather than the store's combined `len()`, because Gemma 3 answers
+/// `supports_snapshot_reuse()` since #1335 and donates an exact-prefix
+/// snapshot. That donation is a copy of the model's own caches, which is a
+/// different object from the pool's shadow block table and is exactly what
+/// #1346 wanted a model-owned family to use instead. `len()` counts both
+/// buckets, so it can no longer tell the two apart.
+///
+/// One assertion is gone rather than moved: `prompt_cache_reject_model_owned_state`
+/// counts the donate-side decline, and Gemma 3 now returns on the snapshot
+/// branch before it. That counter belongs to model-owned families without
+/// snapshot reuse, which this file has no model for. The guarantee it guarded
+/// is still asserted here directly, as an empty K/V bucket.
 #[test]
-fn model_owned_paged_family_never_donates_or_adopts() {
+fn model_owned_paged_family_never_donates_or_adopts_kv() {
     let store = test_store();
     let mut sched = scheduler(store.clone());
 
@@ -321,20 +335,25 @@ fn model_owned_paged_family_never_donates_or_adopts() {
     let rx = enqueue(&mut sched, first.clone());
     run_to_completion(&mut sched, &rx);
 
-    let snap = sched.batch_observability.snapshot();
+    let stats = store.stats();
+    // `PromptCacheStats::entries` is the COMBINED live count, so the K/V bucket
+    // is the difference. `inserts` counts only K/V inserts (snapshots have
+    // their own `snapshot_inserts`), which is the cleaner of the two signals.
     assert_eq!(
-        store.len(),
+        stats.entries - stats.snapshot_entries,
         0,
-        "a shadow paged sequence must never reach the store"
+        "a shadow paged sequence must never reach the K/V bucket"
     );
-    assert_eq!(snap.prompt_cache_inserts, 0, "nothing was donated");
+    assert_eq!(stats.inserts, 0, "no detached K/V set was donated");
     assert_eq!(
-        snap.prompt_cache_reject_model_owned_state, 1,
-        "the decline is counted once, so an operator can see why the store stays empty"
+        stats.snapshot_entries, 1,
+        "the donation Gemma 3 does make is a model-state snapshot (#1335)"
     );
 
-    // Turn 2: same conversation, four more tokens. Before the fix this adopted
-    // the shadow block table and skipped prefill for the first 40 tokens.
+    // Turn 2: same conversation, four more tokens. Before #1346 this adopted
+    // the shadow block table and skipped prefill for the first 40 tokens with
+    // no K/V behind it. The prefix is skipped again now, but through the
+    // snapshot restore, so the state the skip claims actually exists.
     let mut second = first.clone();
     second.extend([1, 2, 3, 4]);
     let _rx2 = enqueue(&mut sched, second.clone());
@@ -343,30 +362,28 @@ fn model_owned_paged_family_never_donates_or_adopts() {
         .prefill_queue
         .dequeue()
         .expect("the second request is queued for prefill");
-    assert_eq!(
-        queued.prefill_start_offset, 0,
-        "no prefix may be skipped: the K/V for those tokens does not exist"
+    assert!(
+        queued.prefill_start_offset >= first.len(),
+        "the snapshot restore covers at least the shared 40-token prefix, got {}",
+        queued.prefill_start_offset
     );
-    assert_eq!(queued.already_cached_tokens, 0);
+    assert_eq!(queued.already_cached_tokens, queued.prefill_start_offset);
     assert_eq!(queued.prompt_tokens.len(), second.len());
-
-    let after = sched.batch_observability.snapshot();
     assert_eq!(
-        after.prompt_cache_hits, 0,
-        "adoption must not happen either"
+        store.stats().snapshot_hits,
+        1,
+        "the skip came from the snapshot bucket"
     );
 
     // The adopt gate specifically, which the assertions above do not reach.
-    // They stay green with it deleted, because the donate gate already left the
-    // store empty and the lookup would have missed anyway. `lookups` only
-    // advances inside `finalize_miss`, so a zero here is the difference between
-    // "returned before the store lookup" and "looked, missed, and moved on".
-    // That distinction is the whole point of the second gate: it is what
-    // refuses a shadow entry that reached the store by some other route, such
-    // as a store populated before this fix landed.
+    // `lookups` only advances inside `finalize_miss`, so a zero here is the
+    // difference between "returned before the K/V store lookup" and "looked,
+    // missed, and moved on". That distinction is the whole point of the second
+    // gate: it is what refuses a shadow entry that reached the store by some
+    // other route, such as a store populated before #1346 landed.
     assert_eq!(
         store.stats().lookups,
         0,
-        "the adopt gate must return before the KV store lookup, not after a guaranteed miss"
+        "the adopt gate must return before the K/V store lookup, not after a guaranteed miss"
     );
 }
