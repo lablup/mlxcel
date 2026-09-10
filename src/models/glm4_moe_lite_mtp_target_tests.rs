@@ -19,6 +19,8 @@
 
 use super::*;
 use crate::models::glm4_moe_lite::ModelArgs;
+use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::sampling::LogprobsConfig;
 use mlxcel_core::weights::WeightMap;
 
@@ -593,5 +595,76 @@ fn real_checkpoint_verify_block_matches_decode_chain() {
     assert_eq!(
         decided_disagreements, 0,
         "verify block flipped {decided_disagreements} decided position(s) (gap > {decided_gap})"
+    );
+}
+
+// ── KV cache mode reaches the model-owned MTP slot ────────────────────────
+
+/// The scheduler upgrades a `DenseKvCache` family's caches inside its own
+/// `CachePool`, which is why this family carried no mode table before the MTP
+/// slot existed. The slot is built by the model, so the resolved table has to
+/// reach it here or an operator's `--kv-cache-mode` silently applies to
+/// nothing while the server still logs it as applied (issue #1326).
+#[test]
+fn injected_kv_cache_modes_reach_the_mtp_slot() {
+    let model = tiny_model();
+    let layers = model.layers.len();
+    assert!(layers >= 2, "the tiny model needs a per-layer table");
+
+    // Default: no table injected, every slot cache is FP16.
+    assert!(
+        model
+            .make_configured_caches()
+            .iter()
+            .all(|c| c.mode == KVCacheMode::Fp16),
+        "an uninjected model must stay on FP16"
+    );
+
+    // A per-layer table, last layer deliberately left at FP16 so a blanket
+    // application would be indistinguishable from the real one.
+    let mut modes = vec![KVCacheMode::Int8; layers];
+    modes[layers - 1] = KVCacheMode::Fp16;
+    LanguageModel::set_kv_cache_layer_modes(&model, modes.clone());
+
+    assert_eq!(
+        LanguageModel::kv_cache_layer_modes(&model),
+        Some(modes.clone()),
+        "the table must be readable back"
+    );
+    assert_eq!(
+        model
+            .make_configured_caches()
+            .iter()
+            .map(|c| c.mode)
+            .collect::<Vec<_>>(),
+        modes,
+        "every MTP slot cache must carry its layer's resolved mode"
+    );
+
+    // The install sites, not just the constructor: a sequence's slot and the
+    // offline fallback slot both have to come out of `make_configured_caches`.
+    let seq = SequenceId::from_raw(7);
+    model.reset_mtp_sequence_state(Some(seq));
+    assert_eq!(
+        model
+            .mtp_sequence_state
+            .with_sequence_state(Some(seq), |caches| caches
+                .iter()
+                .map(|c| c.mode)
+                .collect::<Vec<_>>()),
+        modes,
+        "the per-sequence slot install must honour the table"
+    );
+
+    model.reset_mtp_sequence_state(None);
+    assert_eq!(
+        model
+            .mtp_sequence_state
+            .with_sequence_state(None, |caches| caches
+                .iter()
+                .map(|c| c.mode)
+                .collect::<Vec<_>>()),
+        modes,
+        "the fallback slot install must honour the table"
     );
 }

@@ -22,9 +22,9 @@
 //! - Sparse MoE with grouped expert selection
 //! - Sigmoid routing with e_score_correction_bias
 
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{KVCacheMode, SequenceId};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
@@ -877,6 +877,16 @@ pub struct Glm4MoeLiteModel {
     /// `release_sequence_state_by_id` drops a sequence's slot when it
     /// finishes (issue #1326).
     pub(crate) mtp_sequence_state: ModelOwnedSequenceState<KVCache>,
+    /// Per-layer KV cache mode table the CLI generator or the server
+    /// scheduler injects through [`LanguageModel::set_kv_cache_layer_modes`].
+    ///
+    /// The scheduler upgrades the *pool* caches of a `DenseKvCache` family
+    /// after allocation (`apply_kv_cache_mode_to`), which is why this family
+    /// needed no table before the MTP slot existed. The slot is built by the
+    /// model, not the pool, so without this table every MTP sequence would
+    /// silently run on FP16 caches while the server logged the operator's
+    /// requested mode as applied (issue #1326).
+    pub(crate) kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Glm4MoeLiteModel {
@@ -922,6 +932,20 @@ impl Glm4MoeLiteModel {
 
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    /// The MTP slot's cache set, honouring the injected per-layer mode table.
+    ///
+    /// [`Self::make_caches`] stays unconditionally FP16 because it feeds the
+    /// scheduler's `CachePool`, which applies the resolved modes itself right
+    /// after allocation. Nothing does that for the model-owned MTP slot, so
+    /// every site that installs one goes through here instead (issue #1326).
+    ///
+    /// Used by: the MTP hooks' slot installs and the block-vs-chain probe.
+    pub(crate) fn make_configured_caches(&self) -> Vec<KVCache> {
+        (0..self.layers.len())
+            .map(|i| KVCache::new_with_mode(self.kv_cache_layer_modes.mode_for_layer(i)))
+            .collect()
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
@@ -970,6 +994,11 @@ impl Glm4MoeLiteModel {
             norm,
             lm_head,
             mtp_sequence_state,
+            // No mode table is known at load time; the CLI generator and the
+            // server scheduler inject one before the first forward, and every
+            // slot install after that rebuilds through
+            // `make_configured_caches`.
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -1021,12 +1050,29 @@ impl LanguageModel for Glm4MoeLiteModel {
         Some(self.lm_head.clone_shared())
     }
 
+    /// Record the resolved per-layer KV cache mode table and rebuild the
+    /// fallback slot so it is not left holding caches in the previous mode.
+    ///
+    /// Both injection sites (`GenerationConfig`'s
+    /// `apply_kv_cache_mode_with_boundary_policy_for_model` and the
+    /// scheduler's `inject_model_owned_kv_cache_modes`) run before any
+    /// sequence exists, so no per-sequence slot can be stranded here.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.mtp_sequence_state
+            .replace_internal(self.make_configured_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     /// Reset the MTP fallback slot before a fresh single-row generation.
     /// Classic CLI generation never touches the slot, so this only matters
     /// for a process that ran an MTP session and then a classic one.
     fn reset_runtime_state(&self) {
         self.mtp_sequence_state
-            .replace_internal(Glm4MoeLiteModel::make_caches(self));
+            .replace_internal(self.make_configured_caches());
     }
 
     /// Drop the sequence's MTP cache slot. The scheduler calls this for

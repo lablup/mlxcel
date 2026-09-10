@@ -555,3 +555,35 @@ fn split_dir_refuses_an_index_without_the_nextn_layer() {
     );
     assert!(!tmp.path().join("out").exists());
 }
+
+/// The recorded `block_size` becomes the served verify width, and this family
+/// materializes one query row per verify position, so an unbounded value
+/// produces a directory that loads fine and then wedges the scheduler tick.
+/// A typo has to fail here, before any tensor work (issue #1326).
+#[test]
+fn split_refuses_an_oversized_block_size() {
+    let opts = SplitMtpOptions {
+        block_size: Some(20_000),
+        ..SplitMtpOptions::default()
+    };
+    let err = split_mtp(synthetic_weights(), &source_config(), &opts)
+        .err()
+        .expect("must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("20000"), "{msg}");
+    assert!(msg.contains("maximum"), "{msg}");
+}
+
+/// The ceiling must not move the widths a caller can legitimately ask for.
+#[test]
+fn split_accepts_block_sizes_up_to_the_ceiling() {
+    for requested in [2usize, 8, 16] {
+        let opts = SplitMtpOptions {
+            block_size: Some(requested),
+            ..SplitMtpOptions::default()
+        };
+        let result =
+            split_mtp(synthetic_weights(), &source_config(), &opts).expect("must be accepted");
+        assert_eq!(result.config["block_size"], requested);
+    }
+}

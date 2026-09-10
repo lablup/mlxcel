@@ -124,12 +124,20 @@ impl Glm4MoeLiteMtpConfig {
             text.group_size = Some(q.group_size);
             text.bits = Some(q.bits);
         }
-        let default_block = text.num_nextn_predict_layers + 1;
+        let default_block = text.num_nextn_predict_layers.saturating_add(1);
         let block_size = self.block_size.unwrap_or(default_block);
         if block_size < 2 {
+            // Naming the source keeps a hand-written config actionable: with
+            // neither key present the default lands at 1 and the message
+            // would otherwise blame a `block_size` nobody wrote.
+            let source = if self.block_size.is_some() {
+                "block_size"
+            } else {
+                "text_config.num_nextn_predict_layers + 1 (no top-level block_size)"
+            };
             return Err(format!(
-                "glm4_moe_lite_mtp drafter: block_size {block_size} drafts nothing; the verify \
-                 block must hold at least one draft token plus the bonus (2)"
+                "glm4_moe_lite_mtp drafter: block_size {block_size} from {source} drafts \
+                 nothing; the verify block must hold at least one draft token plus the bonus (2)"
             ));
         }
         self.block_size = Some(block_size);
@@ -158,7 +166,10 @@ impl Glm4MoeLiteMtpConfig {
     /// requested width), at the cost of drafting past the depth the head was
     /// trained for.
     pub fn runtime_block_size(&self) -> usize {
-        let trained = self.text_config().num_nextn_predict_layers + 1;
+        let trained = self
+            .text_config()
+            .num_nextn_predict_layers
+            .saturating_add(1);
         self.block_size().min(trained).max(2)
     }
 

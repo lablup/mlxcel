@@ -91,7 +91,8 @@ const COMPANION_FILES: &[&str] = &[
 pub struct SplitMtpOptions {
     /// Verify block size written to the drafter config (bonus token
     /// included). `None` resolves to `num_nextn_predict_layers + 1`, with a
-    /// floor of 2 since a block of 1 drafts nothing.
+    /// floor of 2 since a block of 1 drafts nothing and a ceiling of
+    /// [`MAX_BLOCK_SIZE`] since the value becomes the served verify width.
     pub block_size: Option<usize>,
     /// Affine quantization bit width. `None` keeps the drafter bf16.
     pub q_bits: Option<i32>,
@@ -171,13 +172,33 @@ pub fn nextn_layer_index(config: &Value) -> Result<usize, SurgeryError> {
     cfg_usize(text, "num_hidden_layers")
 }
 
+/// Largest `block_size` this tool will record in a drafter config.
+///
+/// The recorded value becomes the server's default verify width
+/// (`peek_glm4_moe_lite_mtp_configured_block_size`), and the GLM verify
+/// attention materializes one query row at a time, so the width multiplies
+/// both the per-round graph size and the exactness probe's chain arm. A typo
+/// (`--block-size 20000`, or a `--q-group-size` value pasted into the wrong
+/// flag) would otherwise produce a directory that loads fine and then wedges
+/// the scheduler tick for every tenant on the first request. Drafting past
+/// the trained `num_nextn_predict_layers` already loses acceptance, so a
+/// ceiling well above any useful width costs nothing (issue #1326).
+const MAX_BLOCK_SIZE: usize = 16;
+
 /// The block size the drafter config records for `opts`.
-fn resolve_block_size(text: &Value, opts: &SplitMtpOptions) -> usize {
+fn resolve_block_size(text: &Value, opts: &SplitMtpOptions) -> Result<usize, SurgeryError> {
     let nextn = text
         .get("num_nextn_predict_layers")
         .and_then(Value::as_u64)
         .unwrap_or(1) as usize;
-    opts.block_size.unwrap_or(nextn + 1).max(2)
+    let requested = opts.block_size.unwrap_or_else(|| nextn.saturating_add(1));
+    if requested > MAX_BLOCK_SIZE {
+        return Err(anyhow!(
+            "split-mtp: --block-size {requested} exceeds the maximum of {MAX_BLOCK_SIZE}; the              value becomes the served verify width, and this family verifies one query row at a              time"
+        )
+        .into());
+    }
+    Ok(requested.max(2))
 }
 
 /// Map one `model.layers.N.<rest>` suffix to its drafter key. `None` drops
@@ -284,6 +305,9 @@ pub fn split_mtp(
 ) -> Result<SplitMtpResult, SurgeryError> {
     let text = text_config(config);
     let source_layer = nextn_layer_index(config)?;
+    // Resolved up front: a rejected `--block-size` should fail before the
+    // tensor work, not after it.
+    let block_size = resolve_block_size(text, opts)?;
     let geometry = KvBProjGeometry {
         num_heads: cfg_usize(text, "num_attention_heads")?,
         qk_nope_head_dim: cfg_usize(text, "qk_nope_head_dim")?,
@@ -387,7 +411,7 @@ pub fn split_mtp(
     }
     let mut drafter_config = json!({
         "model_type": DRAFTER_MODEL_TYPE,
-        "block_size": resolve_block_size(text, opts),
+        "block_size": block_size,
         "tie_word_embeddings": false,
         "text_config": text_out,
     });

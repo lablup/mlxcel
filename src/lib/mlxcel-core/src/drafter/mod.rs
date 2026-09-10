@@ -433,6 +433,10 @@ fn read_drafter_config_peek(model_path: &Path) -> Option<DrafterConfigPeek> {
 /// this mirrors upstream's blanket `(FileNotFoundError, json.JSONDecodeError,
 /// OSError) -> None` behaviour, which is load-bearing for the DFlash
 /// fallback path (DFlash configs intentionally omit `model_type`).
+///
+/// Used by: `load_drafter`, the server's drafter admission gate, the binary
+/// crate's `models::drafter_loader::load_drafter` (which needs the type name
+/// to pick the `glm4_moe_lite_mtp` constructor core cannot build itself).
 pub fn peek_drafter_model_type(model_path: &Path) -> Result<Option<String>, DrafterError> {
     Ok(read_drafter_config_peek(model_path).and_then(|peek| peek.model_type))
 }

@@ -79,10 +79,29 @@ pub fn decompose_kv_b_proj(
     geometry: KvBProjGeometry,
     label: &str,
 ) -> Result<bool, String> {
-    let num_heads = geometry.num_heads as i32;
-    let head_dim = (geometry.qk_nope_head_dim + geometry.v_head_dim) as i32;
-    let qk_nope_head_dim = geometry.qk_nope_head_dim as i32;
-    let kv_lora_rank = geometry.kv_lora_rank as i32;
+    // `as i32` would wrap a hostile or malformed config's field, and the
+    // release profile has overflow checks off, so `num_heads * head_dim`
+    // below could wrap past the shape check this function exists to perform
+    // and reach `reshape` with a bogus extent, which MLX answers by aborting
+    // across the cxx bridge. Convert fallibly instead (issue #1326).
+    let to_i32 = |value: usize, field: &str| -> Result<i32, String> {
+        i32::try_from(value).map_err(|_| {
+            format!("{label}: {field} {value} does not fit in i32; check the checkpoint config")
+        })
+    };
+    let num_heads = to_i32(geometry.num_heads, "num_attention_heads")?;
+    let head_dim = to_i32(
+        geometry
+            .qk_nope_head_dim
+            .checked_add(geometry.v_head_dim)
+            .ok_or_else(|| format!("{label}: qk_nope_head_dim + v_head_dim overflows"))?,
+        "qk_nope_head_dim + v_head_dim",
+    )?;
+    let qk_nope_head_dim = to_i32(geometry.qk_nope_head_dim, "qk_nope_head_dim")?;
+    let kv_lora_rank = to_i32(geometry.kv_lora_rank, "kv_lora_rank")?;
+    num_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| format!("{label}: num_attention_heads * head_dim overflows i32"))?;
 
     let kv_b_key = format!("{attn_prefix}.kv_b_proj.weight");
     let embed_q_key = format!("{attn_prefix}.embed_q.weight");

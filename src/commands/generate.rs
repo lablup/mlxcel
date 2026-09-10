@@ -1542,6 +1542,7 @@ pub(super) fn run_generation_mode(
                 args.generation.max_tokens,
                 sampling_config,
                 block_size as usize,
+                kv_cache_mode,
                 token_bias,
             );
         }
@@ -1863,6 +1864,7 @@ fn run_offline_mtp(
     max_tokens: usize,
     sampling_config: &SamplingConfig,
     block_size: usize,
+    kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
     use mlxcel::LoadedModel;
@@ -2024,6 +2026,23 @@ fn run_offline_mtp(
     // server burst path and the classic decode path's first-token seed). Empty
     // when no repetition / frequency / presence / DRY penalty is configured.
     let token_history = initial_token_history(prompt_tokens, sampling.needs_token_history());
+
+    // `--kv-cache-mode` reaches a model-owned cache slot only through
+    // `LanguageModel::set_kv_cache_layer_modes`, and this path never builds a
+    // `GenerationConfig`, so nothing else on it would carry the announced mode
+    // to the slot the round loop actually runs on. The server injects the same
+    // resolved table from `inject_model_owned_kv_cache_modes`. Scoped to
+    // `glm4_moe_lite` (issue #1326): the other MTP families have the same gap
+    // on this path, but correcting theirs changes what their offline runs
+    // measure and belongs with a real-checkpoint validation of its own.
+    if let LoadedModel::Glm4MoeLite(glm) = model {
+        let modes = mlxcel_core::cache::turbo::resolve_layer_modes(
+            kv_cache_mode,
+            LanguageModel::num_layers(glm),
+            mlxcel_core::cache::turbo::boundary_v_layers_from_env(),
+        );
+        LanguageModel::set_kv_cache_layer_modes(glm, modes);
+    }
 
     // Select the per-target adapter exactly as the server does, then drive the
     // round loop. `seq_id = None` selects the wrapper's internal single-sequence

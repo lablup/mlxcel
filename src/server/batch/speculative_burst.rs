@@ -198,7 +198,6 @@ use std::time::{Duration, Instant};
 // wrapper builds it and delegates every other kind back to core.
 use crate::models::drafter_loader::load_drafter;
 use mlxcel_core::drafter::dflash::drafter::sampler_is_greedy;
-use mlxcel_core::drafter::dflash::{DFlashBatchedGenerator, DFlashGenerator, SpeculativeTarget};
 use mlxcel_core::drafter::{Drafter, DrafterKind};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
 use mlxcel_core::generation_policy::{initial_token_history, merged_eos_token_ids};

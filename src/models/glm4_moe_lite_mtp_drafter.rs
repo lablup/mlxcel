@@ -497,6 +497,11 @@ impl Drafter for Glm4MoeLiteMtpDraftModel {
         sampler: &SamplingConfig,
     ) -> Result<(), DrafterError> {
         self.require_bound()?;
+        // Before the early return, not after: a session that reached here
+        // with an empty prompt would otherwise keep the previous session's
+        // seed token and hidden. The server rejects empty prompts twice
+        // upstream, so this only removes the dependence on those guards.
+        self.clear_runtime_state();
         let p = prompt_tokens.len();
         if p == 0 {
             return Ok(());
@@ -510,8 +515,6 @@ impl Drafter for Glm4MoeLiteMtpDraftModel {
                 ),
             });
         }
-        // The prompt prefill defines position 0 of the drafter sequence.
-        self.clear_runtime_state();
         // Position i pairs token_{i+1} with hidden_i: shift the prompt left
         // by one and append the just-sampled first bonus.
         let mut shifted: Vec<i32> = prompt_tokens[1..].to_vec();

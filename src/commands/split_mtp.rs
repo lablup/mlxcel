@@ -61,7 +61,7 @@ pub(crate) struct SplitMtpArgs {
     #[arg(long, default_value_t = 64, value_name = "N")]
     pub(crate) q_group_size: i32,
 
-    /// Overwrite an output directory that already holds a `model.safetensors`.
+    /// Overwrite an output directory that already holds a checkpoint.
     #[arg(long)]
     pub(crate) force: bool,
 }
@@ -73,11 +73,26 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
             args.model.display()
         ));
     }
-    if args.output.join("model.safetensors").exists() && !args.force {
-        return Err(anyhow!(
-            "split-mtp: {} already holds a model.safetensors; pass --force to overwrite",
-            args.output.display()
-        ));
+    // A sharded checkpoint carries no `model.safetensors`, so probing for
+    // that one filename let `--output` point at one and silently replace its
+    // `config.json` and tokenizer files while orphaning the shards. Screen on
+    // whatever makes the directory a checkpoint instead (issue #1326).
+    if let Some(existing) = existing_checkpoint_marker(&args.output) {
+        if !args.force {
+            return Err(anyhow!(
+                "split-mtp: {} already holds a checkpoint ({existing}); pass --force to overwrite",
+                args.output.display()
+            ));
+        }
+        // `collect_shard_paths` prefers an index over a bare
+        // `model.safetensors`, so a stale index left beside the drafter's
+        // single-file output would send the loader to the victim's shards.
+        let index = args.output.join("model.safetensors.index.json");
+        if index.exists() {
+            std::fs::remove_file(&index).with_context(|| {
+                format!("split-mtp: failed to remove stale {}", index.display())
+            })?;
+        }
     }
     if args.q_bits.is_none() && args.q_group_size != 64 {
         eprintln!("split-mtp: --q-group-size has no effect without --q-bits");
@@ -124,4 +139,72 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
         report.output_dir.display()
     );
     Ok(())
+}
+
+/// Name of the first artifact that makes `dir` look like an existing
+/// checkpoint, or `None` when writing there would clobber nothing.
+///
+/// `split_mtp_dir` writes `model.safetensors` and `config.json` and copies
+/// five tokenizer files over whatever is present, so the guard has to screen
+/// on more than the single-file weight name: a sharded checkpoint has an
+/// index and shards instead, and would lose its config and tokenizer while
+/// keeping shards nothing can load.
+///
+/// Used by: [`run_split_mtp`].
+fn existing_checkpoint_marker(dir: &std::path::Path) -> Option<String> {
+    for name in [
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "config.json",
+    ] {
+        if dir.join(name).exists() {
+            return Some(name.to_string());
+        }
+    }
+    let shard = std::fs::read_dir(dir).ok()?.flatten().find(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("model-") && n.ends_with(".safetensors"))
+    })?;
+    Some(shard.file_name().to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::existing_checkpoint_marker;
+
+    /// The guard this replaces probed only `model.safetensors`, so a sharded
+    /// checkpoint passed it and lost its `config.json` and tokenizer files to
+    /// the drafter's (issue #1326).
+    #[test]
+    fn marker_names_every_shape_of_existing_checkpoint() {
+        for name in [
+            "model.safetensors",
+            "model.safetensors.index.json",
+            "config.json",
+            "model-00001-of-00003.safetensors",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(name), b"x").expect("write");
+            assert_eq!(
+                existing_checkpoint_marker(dir.path()).as_deref(),
+                Some(name),
+                "{name} must be recognised as an existing checkpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn marker_is_none_for_an_empty_or_unrelated_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(existing_checkpoint_marker(dir.path()), None);
+        std::fs::write(dir.path().join("README.md"), b"x").expect("write");
+        assert_eq!(existing_checkpoint_marker(dir.path()), None);
+        assert_eq!(
+            existing_checkpoint_marker(&dir.path().join("missing")),
+            None,
+            "a directory that does not exist clobbers nothing"
+        );
+    }
 }

@@ -49,6 +49,16 @@
 //! (first at position 4 on one real prompt and 14 on another) and the drift
 //! compounded through the cache; the opt-in real-checkpoint gate in
 //! `glm4_moe_lite_mtp_target_tests.rs` is what caught it.
+//!
+//! The MoE is the other width-sensitive piece, and it is deliberately left
+//! batched. `SwitchGLU::forward` switches to the gather-sort path once
+//! `n_tokens * top_k >= 64`, so at the default `block_size = 2` (8 rows with
+//! `num_experts_per_tok = 4`) the verify block takes the same reduction as
+//! the decode chain, while a wide `--draft-block-size` crosses the threshold
+//! and takes a different one. Undoing that per row would give back the
+//! verify's whole saving, so the probe is left to measure it: a width that
+//! crosses the threshold and diverges declines the pairing rather than
+//! emitting a divergent stream.
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::KVCache;
@@ -269,8 +279,10 @@ impl Glm4MoeLiteModel {
         match seq_id {
             Some(id) => self
                 .mtp_sequence_state
-                .replace_sequence_state(id, self.make_caches()),
-            None => self.mtp_sequence_state.replace_internal(self.make_caches()),
+                .replace_sequence_state(id, self.make_configured_caches()),
+            None => self
+                .mtp_sequence_state
+                .replace_internal(self.make_configured_caches()),
         }
     }
 
@@ -284,7 +296,7 @@ impl Glm4MoeLiteModel {
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.mtp_sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.make_caches(),
+            || self.make_configured_caches(),
             |caches| self.forward_with_hidden(input_ids, caches),
         )
     }
@@ -299,7 +311,7 @@ impl Glm4MoeLiteModel {
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.mtp_sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.make_caches(),
+            || self.make_configured_caches(),
             |caches| self.forward_verify(input_ids, caches),
         )
     }
@@ -431,7 +443,7 @@ impl Glm4MoeLiteModel {
             mlxcel_core::array_to_raw_bytes(&row)
         };
 
-        let mut chain_caches = self.make_caches();
+        let mut chain_caches = self.make_configured_caches();
         let _ = self.forward(&as_input(&prompt), &mut chain_caches, None);
         let mut chain_positions: Vec<Vec<u8>> = Vec::with_capacity(walk.len());
         for token in &walk {
@@ -441,7 +453,11 @@ impl Glm4MoeLiteModel {
 
         // Teacher-forced on the same tokens, so the block arm's cache is fed
         // by its own `M = bs` rows exactly as an engaged session's would be.
-        let mut block_caches = self.make_caches();
+        // Both arms build through `make_configured_caches` for the same
+        // reason: a quantized KV mode is part of the arithmetic the probe is
+        // deciding about, so probing on FP16 would clear a path the engaged
+        // session does not run (issue #1326).
+        let mut block_caches = self.make_configured_caches();
         let _ = self.forward(&as_input(&prompt), &mut block_caches, None);
         let mut block_positions: Vec<Vec<u8>> = Vec::with_capacity(walk.len());
         for block in walk.chunks(block_size) {
