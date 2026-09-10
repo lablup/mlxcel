@@ -232,51 +232,88 @@ fn assert_matches_oracle(label: &str, got: &[(i32, f32)], expected: &[(i32, f32)
     }
 }
 
+/// The oracle's greedy continuation from `LONG_CHAT_IDS`, with the oracle's own
+/// top-1 against top-2 margin at each step.
+///
+/// Produced by re-prefilling the whole growing sequence each step, so it carries
+/// no cache state of its own and is a clean reference for a cached decoder.
+/// Decoded, the seven tokens read `This implementation uses a `colle`.
+const LONG_CHAT_GREEDY: &[(i32, f32)] = &[
+    (5123, 0.167),
+    (6275, 2.358),
+    (4774, 3.096),
+    (266, 0.706),
+    (684, 0.719),
+    (873, 0.271),
+    (43409, 13.007),
+];
+
+/// Below this oracle margin, which token wins is not something mlxcel can be
+/// held to: its quantized `lm_head` resolves about 0.125 at these magnitudes and
+/// its deviation from the f32 oracle is mean 0.27. Steps closer than this are
+/// still exercised, they just are not asserted against the oracle's choice.
+const ORACLE_DECISIVE_MARGIN: f32 = 1.0;
+
+/// Every check runs against one loaded model, inside one `#[test]`.
+///
+/// Not a style choice. The Rust harness runs `#[test]` functions in parallel by
+/// default, and each of these checks needs the whole 40B checkpoint resident, so
+/// five separate tests meant five simultaneous 21 GB models. On a 128 GB unified
+/// -memory host that exhausts the GPU and wedges the driver rather than failing
+/// cleanly. One load also cuts the wall clock by roughly the same factor.
+///
+/// Each check is a plain function so a failure still names the stage it came
+/// from; the `eprintln!` banners separate them in `--nocapture` output.
 #[test]
-fn iquestloopcoder_short_prompt_matches_the_oracle() {
+fn iquestloopcoder_matches_the_float32_oracle() {
     if !checkpoint_present() {
         eprintln!("skipping iquestloopcoder parity: {MODEL_DIR} not present");
         return;
     }
+
     let (model, args) = IQuestLoopCoderModel::load(MODEL_DIR).expect("load IQuest-Coder Loop");
     assert_eq!(args.loop_num, 2);
     assert_eq!(args.loop_window_size, 64);
+    let window = args.loop_window_size as i32;
 
-    assert_matches_oracle(
+    eprintln!("== short prompt, 38 tokens, inside the window");
+    check_prompt_matches_oracle(
+        &model,
         "short chat (38 tokens, inside the window)",
-        &last_logits(&model, SHORT_CHAT_IDS),
+        SHORT_CHAT_IDS,
         SHORT_CHAT_TOP5,
     );
-}
 
-#[test]
-fn iquestloopcoder_long_prompt_matches_the_oracle() {
-    if !checkpoint_present() {
-        eprintln!("skipping iquestloopcoder parity: {MODEL_DIR} not present");
-        return;
-    }
-    let (model, _args) = IQuestLoopCoderModel::load(MODEL_DIR).expect("load IQuest-Coder Loop");
-
-    // 218 tokens, past 2 * loop_window_size, so the pass-2 local branch drops
-    // keys the global branch keeps.
-    assert_matches_oracle(
+    eprintln!("== long prompt, 218 tokens, past 2x the window");
+    check_prompt_matches_oracle(
+        &model,
         "long chat (218 tokens, past 2x the window)",
-        &last_logits(&model, LONG_CHAT_IDS),
+        LONG_CHAT_IDS,
         LONG_CHAT_TOP5,
     );
+
+    eprintln!("== greedy continuation, inside the window");
+    check_greedy_continuation(&model);
+
+    eprintln!("== chunked prefill against single-pass");
+    check_chunked_prefill(&model);
+
+    eprintln!("== decode past the window against a full re-prefill");
+    check_decode_past_the_window(&model, window);
 }
 
-#[test]
-fn iquestloopcoder_greedy_continuation_matches_the_oracle() {
-    if !checkpoint_present() {
-        eprintln!("skipping iquestloopcoder parity: {MODEL_DIR} not present");
-        return;
-    }
-    let (model, _args) = IQuestLoopCoderModel::load(MODEL_DIR).expect("load IQuest-Coder Loop");
+fn check_prompt_matches_oracle(
+    model: &IQuestLoopCoderModel,
+    label: &str,
+    ids: &[i32],
+    expected: &[(i32, f32)],
+) {
+    assert_matches_oracle(label, &last_logits(model, ids), expected);
+}
 
-    // Incremental decode against the oracle's stateless re-prefill continuation.
-    // This exercises the decode path both caches take: the pass-1 cache keeps
-    // growing while the pass-2 rotating cache holds only the trailing window.
+/// Incremental decode against the oracle's stateless re-prefill continuation,
+/// from a prompt short enough that the pass-2 ring never fills its window.
+fn check_greedy_continuation(model: &IQuestLoopCoderModel) {
     let mut caches = model.make_caches();
     let prompt = mlxcel_core::from_slice_i32(SHORT_CHAT_IDS, &[1, SHORT_CHAT_IDS.len() as i32]);
     let mut logits =
@@ -303,22 +340,14 @@ fn iquestloopcoder_greedy_continuation_matches_the_oracle() {
 /// cache holding at most `loop_window_size - 1` of them, so
 /// `RotatingKVCache::update_concat` returns `kept + L` keys while the pass-1
 /// cache returns `S + L`, and the windowed mask
-/// [`mlxcel_core::causal_attention`] builds has to match the first of those,
-/// not the second. An off-by-one there windows the wrong keys, which stays
-/// fluent.
+/// [`mlxcel_core::causal_attention`] builds has to match the first of those, not
+/// the second. An off-by-one there windows the wrong keys, which stays fluent.
 ///
 /// `prefill_matches_incremental_decode` in
 /// `src/models/iquestloopcoder_tests.rs` covers the same seam on a synthetic
 /// one-layer model; this pins it on the real 80-layer checkpoint, across chunk
 /// sizes that land on, inside and across the 64-token window boundary.
-#[test]
-fn iquestloopcoder_chunked_prefill_matches_single_pass() {
-    if !checkpoint_present() {
-        eprintln!("skipping iquestloopcoder parity: {MODEL_DIR} not present");
-        return;
-    }
-    let (model, _args) = IQuestLoopCoderModel::load(MODEL_DIR).expect("load IQuest-Coder Loop");
-
+fn check_chunked_prefill(model: &IQuestLoopCoderModel) {
     let chunked = |chunk: usize| -> Vec<(i32, f32)> {
         let mut caches = model.make_caches();
         let mut logits = None;
@@ -347,6 +376,86 @@ fn iquestloopcoder_chunked_prefill_matches_single_pass() {
             assert!(
                 (value - reference).abs() <= 0.25,
                 "chunk {chunk}: logit for token {id} is {value}, single-pass says {reference}"
+            );
+        }
+    }
+}
+
+/// Decode past the window: the rotating ring must agree with a full re-prefill,
+/// and with the oracle wherever the oracle is decisive.
+///
+/// This is the one regime nothing else here covers. [`check_greedy_continuation`]
+/// decodes from a 38-token prompt, where the pass-2 cache never fills its
+/// 64-entry window, so the ring never wraps and never trims. Starting from 218
+/// tokens every step is past the window: the ring holds exactly 64 keys and
+/// drops one per token.
+///
+/// The load-bearing assertion is the self-consistency one. Incremental decode
+/// reads a physically trimmed 64-key ring while a full re-prefill of the same
+/// sequence keeps every key and windows them with a mask, so the two routes
+/// reach the same answer through different code. It needs no reference and is
+/// unaffected by mlxcel's f16 deviation from the f32 oracle, which is what makes
+/// it able to catch a ring that trims the wrong end, wraps at the wrong point,
+/// or loses the current token.
+///
+/// Tokens are teacher-forced onto the oracle's continuation so both routes and
+/// the oracle see one sequence. Free-running, mlxcel follows the oracle for
+/// three tokens and then flips step 4, where the oracle's own top three sit
+/// within 0.744 of each other; forced back on, it reproduces the oracle's next
+/// three exactly.
+fn check_decode_past_the_window(model: &IQuestLoopCoderModel, window: i32) {
+    for (n, (expected, margin)) in LONG_CHAT_GREEDY.iter().enumerate() {
+        // Route A: prefill the prompt, then decode the forced tokens one by one.
+        let mut caches = model.make_caches();
+        let prompt = mlxcel_core::from_slice_i32(LONG_CHAT_IDS, &[1, LONG_CHAT_IDS.len() as i32]);
+        let mut logits =
+            model.forward_last_logits_with_caches(&prompt, &mut caches, LONG_CHAT_IDS.len() - 1);
+        for (forced, _) in &LONG_CHAT_GREEDY[..n] {
+            let step = mlxcel_core::from_slice_i32(&[*forced], &[1, 1]);
+            logits = model.forward_last_logits_with_caches(&step, &mut caches, 0);
+        }
+        let incremental = top_k(&logits, 3);
+
+        if n > 0 {
+            assert_eq!(
+                caches[0].pass2.visible_len(),
+                window,
+                "step {n}: the pass-2 ring must be holding exactly its window once decode has \
+                 trimmed it, not the whole prompt"
+            );
+            assert_eq!(
+                caches[0].pass1.offset,
+                LONG_CHAT_IDS.len() as i32 + n as i32,
+                "step {n}: the pass-1 cache must still be growing with the sequence"
+            );
+        }
+
+        // Route B: one prefill over prompt plus the same forced tokens.
+        let mut seq = LONG_CHAT_IDS.to_vec();
+        seq.extend(LONG_CHAT_GREEDY[..n].iter().map(|(id, _)| *id));
+        let mut reprefill_caches = model.make_caches();
+        let whole = mlxcel_core::from_slice_i32(&seq, &[1, seq.len() as i32]);
+        let reprefill_logits =
+            model.forward_last_logits_with_caches(&whole, &mut reprefill_caches, seq.len() - 1);
+        let reprefill = top_k(&reprefill_logits, 3);
+
+        assert_eq!(
+            incremental[0].0, reprefill[0].0,
+            "step {n}: incremental decode over a trimmed ring and a full re-prefill over a \
+             mask-windowed cache disagree; got {incremental:?} against {reprefill:?}"
+        );
+
+        if *margin > ORACLE_DECISIVE_MARGIN {
+            assert_eq!(
+                incremental[0].0, *expected,
+                "step {n}: the oracle separates its choice by {margin}, so mlxcel must agree; \
+                 got {incremental:?}"
+            );
+        } else {
+            eprintln!(
+                "step {n}: oracle margin {margin} is inside mlxcel's resolution, not asserted \
+                 (oracle {expected}, mlxcel {})",
+                incremental[0].0
             );
         }
     }
