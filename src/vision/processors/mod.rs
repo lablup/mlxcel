@@ -32,6 +32,7 @@ pub mod idefics2;
 pub mod inkling;
 pub mod internvl;
 pub mod jina_vlm;
+pub mod kimi_k3;
 pub mod kimi_vl;
 pub mod lfm2_vl;
 pub mod locateanything;

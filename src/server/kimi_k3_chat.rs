@@ -42,7 +42,12 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use crate::multimodal::kimi_k3_prompt::{
+    MEDIA_BEGIN, MEDIA_CONTENT, MEDIA_END, MEDIA_PAD, image_block_ids, image_label,
+};
 use crate::tokenizer::{KimiK3ControlIds, MlxcelTokenizer};
+use crate::vision::kimi_k3_vl::KimiK3MediaTokenIds;
+use crate::vision::processors::kimi_k3::{KimiK3NavitConfig, image_prompt_text};
 
 use super::types::Role;
 use super::types::request::{ContentPart, Message, MessageContent, Tool};
@@ -205,6 +210,14 @@ pub struct KimiK3Renderer {
     tokenizer: Arc<MlxcelTokenizer>,
     control: KimiK3ControlIds,
     literals: HashMap<&'static str, Vec<u32>>,
+    /// The four media control ids, when the vocabulary names them all.
+    /// `None` makes every image request fail with a named error rather than
+    /// render a block the model cannot read.
+    media: Option<KimiK3MediaTokenIds>,
+    /// The navit resize parameters that size each image's `<|media_pad|>`
+    /// run. The published values unless `preprocessor_config.json` says
+    /// otherwise (`with_navit_config`).
+    navit: KimiK3NavitConfig,
 }
 
 impl std::fmt::Debug for KimiK3Renderer {
@@ -225,16 +238,77 @@ impl KimiK3Renderer {
         for literal in CACHED_LITERALS {
             literals.insert(*literal, tiktoken.encode_text(literal).ok()?);
         }
+        let media = match (
+            tiktoken.control_id(MEDIA_BEGIN),
+            tiktoken.control_id(MEDIA_CONTENT),
+            tiktoken.control_id(MEDIA_PAD),
+            tiktoken.control_id(MEDIA_END),
+        ) {
+            (Some(begin), Some(content), Some(pad), Some(end)) => Some(KimiK3MediaTokenIds {
+                begin: begin as i32,
+                content: content as i32,
+                pad: pad as i32,
+                end: end as i32,
+            }),
+            _ => None,
+        };
         Some(Self {
             tokenizer,
             control,
             literals,
+            media,
+            navit: KimiK3NavitConfig::default(),
         })
+    }
+
+    /// Size the image prompts with the checkpoint's own navit parameters
+    /// (`preprocessor_config.json` `media_proc_cfg`) instead of the published
+    /// defaults.
+    pub fn with_navit_config(mut self, navit: KimiK3NavitConfig) -> Self {
+        self.navit = navit;
+        self
     }
 
     /// The control ids this renderer emits.
     pub fn control_ids(&self) -> KimiK3ControlIds {
         self.control
+    }
+
+    /// The media control ids, when the vocabulary names all four.
+    pub fn media_token_ids(&self) -> Option<KimiK3MediaTokenIds> {
+        self.media
+    }
+
+    /// The navit parameters image prompts are sized with.
+    pub fn navit_config(&self) -> KimiK3NavitConfig {
+        self.navit
+    }
+
+    /// The pre-encoded prompt of one `w x h` image (#1342):
+    /// `<|media_begin|>image {w}x{h}<|media_content|>` + `<|media_pad|>` x
+    /// `grid_h * grid_w / 4` + `<|media_end|>`, the count from the navit rule
+    /// over the original size. The worker's processor re-derives the same
+    /// grid from the same pixels and refuses a run that disagrees.
+    pub fn image_prompt(&self, width: u32, height: u32) -> Result<K3ImagePrompt> {
+        let media = self.media.ok_or_else(|| {
+            anyhow::anyhow!(
+                "the loaded Kimi K3 tokenizer does not name all of {MEDIA_BEGIN}, \
+                 {MEDIA_CONTENT}, {MEDIA_PAD} and {MEDIA_END}; image inputs cannot be rendered"
+            )
+        })?;
+        let plan = self
+            .navit
+            .plan(width, height)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let label: Vec<i32> = self
+            .encode_text(&image_label(width, height))?
+            .into_iter()
+            .map(|id| id as i32)
+            .collect();
+        Ok(K3ImagePrompt {
+            ids: image_block_ids(media, &label, plan.num_tokens as usize),
+            text: image_prompt_text(width, height, plan.num_tokens),
+        })
     }
 
     /// The tokenizer this renderer encodes text with.
@@ -257,6 +331,22 @@ impl KimiK3Renderer {
         opts: &K3RenderOptions<'_>,
     ) -> Result<K3Rendered> {
         let tools = tools.filter(|t| !t.is_empty());
+        // A run of tool results is reordered below to follow the assistant's
+        // tool-call order, while the caller's image prompts and the worker's
+        // pixels are both in wire order. An image on a tool message would
+        // therefore be described by the prompt of whichever tool result landed
+        // in its place, and two same-sized images would pass every count check
+        // while swapping their features. Refuse instead: the XTML grammar
+        // renders a tool result as text and has no place to put an image.
+        if let Some(index) = messages
+            .iter()
+            .position(|m| m.role == Role::Tool && !m.content.image_parts().is_empty())
+        {
+            bail!(
+                "Kimi K3 chat rendering does not accept an image_url content part on a tool \
+                 message (message {index}); tool results render as text"
+            );
+        }
         let messages = normalize_xtml_tool_result_messages(messages);
 
         let mut sink = Sink::new(self);
@@ -510,7 +600,7 @@ impl<'a> Sink<'a> {
                     match part {
                         ContentPart::Text { text } => self.text_with_placeholders(text, images)?,
                         ContentPart::ImageUrl { .. } => {
-                            let prompt = images.next_prompt()?;
+                            let prompt = images.next_image_part_prompt()?;
                             self.image_prompt(&prompt)?;
                         }
                         ContentPart::VideoUrl { .. } => {
@@ -647,6 +737,24 @@ impl<'a> ImagePromptState<'a> {
             .ok_or_else(|| anyhow::anyhow!("More image placeholders than image prompts"))?;
         self.index += 1;
         Ok(prompt.clone())
+    }
+
+    /// The next image prompt for an `image_url` content part.
+    ///
+    /// The literal fallback of [`Self::next_prompt`] belongs to the text
+    /// path, where `<|kimi_image_placeholder|>` is ordinary text that the
+    /// caller re-encodes. An `image_url` part has no such text spelling: with
+    /// no prompt supplied it would put the placeholder into
+    /// [`K3Rendered::text`] and nothing into the ids, dropping the image from
+    /// the prompt the model actually reads. Refuse instead (#1342).
+    fn next_image_part_prompt(&mut self) -> Result<K3ImagePrompt> {
+        if self.prompts.is_none() {
+            bail!(
+                "Kimi K3: an image_url content part needs a pre-encoded image prompt, and the \
+                 renderer was given none"
+            );
+        }
+        self.next_prompt()
     }
 
     fn assert_consumed(&self) -> Result<()> {

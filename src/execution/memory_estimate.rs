@@ -1074,6 +1074,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::KimiLinear => "kimi_linear",
         ModelType::KimiK3 => "kimi_k3",
+        ModelType::KimiK3VLM => "kimi_k3_vlm",
         ModelType::KimiVL => "kimi_vl",
         ModelType::KimiK25 => "kimi_k25",
         ModelType::LongcatFlash => "longcat_flash",

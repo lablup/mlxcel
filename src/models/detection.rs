@@ -229,7 +229,8 @@ fn inkling_dir_is_mtp_only(model_path: &Path) -> bool {
 
 const MAX_SAFETENSORS_HEADER_BYTES: u64 = 128 * 1024 * 1024;
 
-fn safetensors_header_has_inkling_vision(path: &Path) -> bool {
+/// `true` when one safetensors shard's header names a tensor under `prefix`.
+fn safetensors_header_has_key_prefix(path: &Path, prefix: &str) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
@@ -253,18 +254,22 @@ fn safetensors_header_has_inkling_vision(path: &Path) -> bool {
         .and_then(|value| {
             value
                 .as_object()
-                .map(|entries| entries.keys().any(|key| key.starts_with("model.visual.")))
+                .map(|entries| entries.keys().any(|key| key.starts_with(prefix)))
         })
         .unwrap_or(false)
 }
 
-pub(crate) fn inkling_has_vision_weights(model_path: &Path) -> bool {
+/// `true` when the checkpoint stores a tensor under `prefix`, read from the
+/// safetensors index when there is one and from the shard headers otherwise.
+///
+/// Used by: Inkling (`model.visual.`), Kimi K3 (`vision_tower.`).
+pub(crate) fn checkpoint_has_weight_prefix(model_path: &Path, prefix: &str) -> bool {
     let index_path = model_path.join("model.safetensors.index.json");
     if let Ok(index) = std::fs::read_to_string(index_path)
         && let Ok(index) = serde_json::from_str::<Value>(&index)
         && let Some(weights) = index.get("weight_map").and_then(Value::as_object)
     {
-        return weights.keys().any(|key| key.starts_with("model.visual."));
+        return weights.keys().any(|key| key.starts_with(prefix));
     }
 
     let Ok(entries) = std::fs::read_dir(model_path) else {
@@ -272,8 +277,17 @@ pub(crate) fn inkling_has_vision_weights(model_path: &Path) -> bool {
     };
     entries.filter_map(Result::ok).any(|entry| {
         entry.path().extension().and_then(|value| value.to_str()) == Some("safetensors")
-            && safetensors_header_has_inkling_vision(&entry.path())
+            && safetensors_header_has_key_prefix(&entry.path(), prefix)
     })
+}
+
+pub(crate) fn inkling_has_vision_weights(model_path: &Path) -> bool {
+    checkpoint_has_weight_prefix(model_path, "model.visual.")
+}
+
+/// Kimi K3 ships its MoonViT3D tower under `vision_tower.` (#1342).
+pub(crate) fn kimi_k3_has_vision_weights(model_path: &Path) -> bool {
+    checkpoint_has_weight_prefix(model_path, "vision_tower.")
 }
 
 pub(crate) fn detect_text_or_vlm(
@@ -764,10 +778,17 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "nemotron-nas" => Ok(ModelType::NemotronNAS),
         "rwkv7" => Ok(ModelType::Rwkv7),
         "kimi_linear" => Ok(ModelType::KimiLinear),
-        // Kimi K3 is the text backbone in this wave even though `config.json`
-        // carries `vision_config` and the checkpoint ships `vision_tower.*`
-        // tensors; the sanitizer drops them. #1342 splits text / VLM.
-        "kimi_k3" => Ok(ModelType::KimiK3),
+        // Kimi K3 loads as the VLM when `config.json` carries `vision_config`
+        // and the checkpoint ships `vision_tower.*` tensors (#1342); a copy
+        // without either is the text backbone, whose sanitizer drops any
+        // stray vision keys.
+        "kimi_k3" => {
+            if has_vision_config(&v) && kimi_k3_has_vision_weights(model_path) {
+                Ok(ModelType::KimiK3VLM)
+            } else {
+                Ok(ModelType::KimiK3)
+            }
+        }
         "kimi_vl" => Ok(ModelType::KimiVL),
         "kimi_k25" => Ok(ModelType::KimiK25),
         // LocateAnything: MoonViT tower + MLP connector + Qwen2 text decoder.

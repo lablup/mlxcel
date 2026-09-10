@@ -348,6 +348,18 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::KimiK3 {
+            image_blocks,
+            total_image_tokens,
+            prerendered,
+        } => {
+            println!(
+                "Kimi K3: {} {} image block(s) ({} <|media_pad|> tokens)",
+                if prerendered { "verified" } else { "spliced" },
+                image_blocks,
+                total_image_tokens
+            );
+        }
         VlmPreparationSummary::KimiVLVideo {
             media_blocks,
             video_count,

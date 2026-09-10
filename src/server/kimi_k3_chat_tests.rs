@@ -198,6 +198,29 @@ const SYNTHETIC_CONTROL_NAMES: [&str; 6] = [
 /// and the control-id placement is not, so every structural property of the
 /// grammar is testable without the 2.8 MB checkpoint.
 fn synthetic_renderer() -> (tempfile::TempDir, KimiK3Renderer) {
+    synthetic_renderer_named(&SYNTHETIC_CONTROL_NAMES)
+}
+
+/// The four media control tokens the image prompt is built from (#1342),
+/// appended after the six structural ones.
+const SYNTHETIC_MEDIA_NAMES: [&str; 4] = [
+    "<|media_begin|>",
+    "<|media_content|>",
+    "<|media_end|>",
+    "<|media_pad|>",
+];
+
+/// [`synthetic_renderer`] plus the media control tokens.
+fn synthetic_renderer_with_media() -> (tempfile::TempDir, KimiK3Renderer) {
+    let names: Vec<&str> = SYNTHETIC_CONTROL_NAMES
+        .iter()
+        .chain(SYNTHETIC_MEDIA_NAMES.iter())
+        .copied()
+        .collect();
+    synthetic_renderer_named(&names)
+}
+
+fn synthetic_renderer_named(control_names: &[&str]) -> (tempfile::TempDir, KimiK3Renderer) {
     use base64::Engine;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -217,7 +240,7 @@ fn synthetic_renderer() -> (tempfile::TempDir, KimiK3Renderer) {
     let vocab = dir.path().join("tiktoken.model");
     std::fs::write(&vocab, lines).expect("write synthetic tiktoken file");
 
-    let decoder: serde_json::Map<String, Value> = SYNTHETIC_CONTROL_NAMES
+    let decoder: serde_json::Map<String, Value> = control_names
         .iter()
         .enumerate()
         .map(|(offset, name)| {
@@ -1042,4 +1065,198 @@ fn tools_serialize_without_absent_optional_fields() {
         compact_json(&deep_sorted_tools(&tools).expect("serialize")).expect("compact"),
         r#"[{"function":{"name":"t"},"type":"function"}]"#
     );
+}
+
+// ---------------------------------------------------------------------------
+// Image prompts (#1342)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn image_prompt_needs_the_media_control_ids() {
+    let (_dir, renderer) = synthetic_renderer();
+    assert!(renderer.media_token_ids().is_none());
+    let err = renderer
+        .image_prompt(100, 100)
+        .expect_err("no media ids, no image prompt");
+    assert!(err.to_string().contains("<|media_begin|>"), "{err}");
+}
+
+#[test]
+fn image_prompt_places_media_ids_around_the_pad_run() {
+    let (_dir, renderer) = synthetic_renderer_with_media();
+    let media = renderer.media_token_ids().expect("media ids");
+    let base = SYNTHETIC_BASE as i32 + SYNTHETIC_CONTROL_NAMES.len() as i32;
+    assert_eq!(media.begin, base);
+    assert_eq!(media.content, base + 1);
+    assert_eq!(media.end, base + 2);
+    assert_eq!(media.pad, base + 3);
+
+    // 100x100 -> grid (8, 8) -> 16 tokens, and the label is BPE text.
+    let prompt = renderer.image_prompt(100, 100).expect("image prompt");
+    let label: Vec<i32> = renderer
+        .tokenizer()
+        .encode_with_special("image 100x100", false, false)
+        .expect("label")
+        .into_iter()
+        .map(|id| id as i32)
+        .collect();
+    let mut expected = vec![media.begin];
+    expected.extend(&label);
+    expected.push(media.content);
+    expected.extend(std::iter::repeat_n(media.pad, 16));
+    expected.push(media.end);
+    assert_eq!(prompt.ids, expected);
+    assert_eq!(
+        prompt.text,
+        crate::vision::processors::kimi_k3::image_prompt_text(100, 100, 16)
+    );
+    assert!(
+        prompt
+            .text
+            .starts_with("<|media_begin|>image 100x100<|media_content|><|media_pad|>")
+    );
+    assert!(prompt.text.ends_with("<|media_pad|><|media_end|>"));
+
+    // The navit parameters size the run: a 4000x3000 photo costs 15444 pads.
+    let big = renderer.image_prompt(4000, 3000).expect("image prompt");
+    assert_eq!(
+        big.ids.iter().filter(|&&id| id == media.pad).count(),
+        15_444
+    );
+    // A checkpoint-provided budget changes the count through the same rule.
+    let tight = synthetic_renderer_with_media().1.with_navit_config(
+        crate::vision::processors::kimi_k3::KimiK3NavitConfig {
+            in_patch_limit: 64,
+            ..Default::default()
+        },
+    );
+    let small = tight.image_prompt(4000, 3000).expect("image prompt");
+    assert!(small.ids.iter().filter(|&&id| id == media.pad).count() < 15_444);
+
+    // Rendered into a user turn, the block sits between the text segments
+    // and every media id is a control id, not a re-encoding of its spelling.
+    let message = Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            crate::server::types::request::ContentPart::Text {
+                text: "look:".to_string(),
+            },
+            crate::server::types::request::ContentPart::ImageUrl {
+                image_url: crate::server::types::request::ImageUrl::new(
+                    "data:image/png;base64,AA==",
+                ),
+            },
+            crate::server::types::request::ContentPart::Text {
+                text: "what is it?".to_string(),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+        reasoning: None,
+    };
+    let prompts = vec![prompt.clone()];
+    let rendered = renderer
+        .render(
+            &[message],
+            None,
+            &K3RenderOptions {
+                thinking_effort: None,
+                image_prompts: Some(&prompts),
+                ..K3RenderOptions::reference_defaults()
+            },
+        )
+        .expect("render with one image");
+    assert!(
+        rendered
+            .ids
+            .windows(prompt.ids.len())
+            .any(|window| window == prompt.ids.as_slice()),
+        "the image block must appear verbatim in the rendered ids"
+    );
+    assert!(
+        rendered
+            .text
+            .contains("look:<|media_begin|>image 100x100<|media_content|>")
+    );
+    assert!(rendered.text.contains("<|media_end|>what is it?"));
+}
+
+#[test]
+fn an_image_url_part_without_image_prompts_is_refused() {
+    // The literal `<|kimi_image_placeholder|>` fallback belongs to the text
+    // path. An `image_url` part rendered with no prompt supplied would put
+    // the placeholder in `text` and nothing in `ids`, so the model would
+    // never see the image; that has to be an error, not a silent drop.
+    let (_dir, renderer) = synthetic_renderer();
+    let message = Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            crate::server::types::request::ContentPart::Text {
+                text: "look:".to_string(),
+            },
+            crate::server::types::request::ContentPart::ImageUrl {
+                image_url: crate::server::types::request::ImageUrl::new(
+                    "data:image/png;base64,AA==",
+                ),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+        reasoning: None,
+    };
+    let err = renderer
+        .render(
+            &[message],
+            None,
+            &K3RenderOptions {
+                thinking_effort: None,
+                image_prompts: None,
+                ..K3RenderOptions::reference_defaults()
+            },
+        )
+        .expect_err("an image part with no prompt cannot render");
+    assert!(err.to_string().contains("image_url content part"), "{err}");
+}
+
+#[test]
+fn an_image_on_a_tool_message_is_refused() {
+    // A run of tool results is reordered to the assistant's tool-call order,
+    // while images stay in wire order, so an image on a tool message would be
+    // paired with the wrong prompt without any count check noticing.
+    let (_dir, renderer) = synthetic_renderer_with_media();
+    let media = renderer.media_token_ids().expect("media ids");
+    let prompt = renderer.image_prompt(100, 100).expect("image prompt");
+    assert!(prompt.ids.contains(&media.pad));
+    let tool_with_image = Message {
+        role: Role::Tool,
+        content: MessageContent::Parts(vec![
+            crate::server::types::request::ContentPart::Text {
+                text: "result".to_string(),
+            },
+            crate::server::types::request::ContentPart::ImageUrl {
+                image_url: crate::server::types::request::ImageUrl::new(
+                    "data:image/png;base64,AA==",
+                ),
+            },
+        ]),
+        name: Some("lookup".to_string()),
+        tool_call_id: Some("call_1".to_string()),
+        tool_calls: None,
+        reasoning: None,
+    };
+    let prompts = vec![prompt];
+    let err = renderer
+        .render(
+            &[user("go"), tool_with_image],
+            None,
+            &K3RenderOptions {
+                thinking_effort: None,
+                image_prompts: Some(&prompts),
+                ..K3RenderOptions::reference_defaults()
+            },
+        )
+        .expect_err("an image on a tool message cannot render");
+    assert!(err.to_string().contains("tool message"), "{err}");
 }

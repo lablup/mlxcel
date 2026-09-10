@@ -264,31 +264,82 @@ fn gpt2_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+const KIMI_K3_CONFIG_WITH_VISION: &str = r#"{
+    "model_type": "kimi_k3",
+    "architectures": ["KimiK3ForConditionalGeneration"],
+    "media_placeholder_token_id": 163605,
+    "text_config": {
+        "model_type": "kimi_linear",
+        "hidden_size": 7168,
+        "num_hidden_layers": 93,
+        "hidden_act": "situ"
+    },
+    "vision_config": {
+        "patch_size": 14,
+        "vt_hidden_size": 1024
+    }
+}"#;
+
 #[test]
-fn kimi_k3_model_type_is_detected_as_text_despite_vision_config() {
-    // The published `config.json` carries `vision_config` and the checkpoint
-    // ships `vision_tower.*` tensors, but in this wave `kimi_k3` is always the
-    // text backbone (the sanitizer drops the vision planes); #1342 adds the
-    // VLM split. Detection must not route it to a VLM type.
+fn kimi_k3_with_vision_config_but_no_vision_weights_is_the_text_backbone() {
+    // `config.json` carries `vision_config`, but the index lists no
+    // `vision_tower.*` tensor: a text-only export. Detection must not route
+    // it to the VLM loader, which would fail on the missing tower.
     let model_dir = temp_path("kimi_k3_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), KIMI_K3_CONFIG_WITH_VISION).unwrap();
+    fs::write(
+        model_dir.join("model.safetensors.index.json"),
+        r#"{"weight_map": {"language_model.model.embed_tokens.weight": "model-00001-of-00002.safetensors"}}"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::KimiK3);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn kimi_k3_with_vision_config_and_vision_tower_weights_is_the_vlm() {
+    // The published layout (#1342): `vision_config` plus `vision_tower.*` and
+    // `mm_projector.*` tensors in the index.
+    let model_dir = temp_path("kimi_k3_vlm");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), KIMI_K3_CONFIG_WITH_VISION).unwrap();
+    fs::write(
+        model_dir.join("model.safetensors.index.json"),
+        r#"{"weight_map": {
+            "language_model.model.embed_tokens.weight": "model-00094-of-000096.safetensors",
+            "mm_projector.proj.0.weight": "model-00095-of-000096.safetensors",
+            "vision_tower.patch_embed.proj.weight": "model-00096-of-000096.safetensors"
+        }}"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::KimiK3VLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn kimi_k3_without_vision_config_is_the_text_backbone_even_with_tower_weights() {
+    // A config stripped of `vision_config` cannot build the tower, so the
+    // tensors alone do not make it a VLM.
+    let model_dir = temp_path("kimi_k3_no_vision_config");
     fs::create_dir_all(&model_dir).unwrap();
     fs::write(
         model_dir.join("config.json"),
         r#"{
             "model_type": "kimi_k3",
-            "architectures": ["KimiK3ForConditionalGeneration"],
-            "media_placeholder_token_id": 163605,
-            "text_config": {
-                "model_type": "kimi_linear",
-                "hidden_size": 7168,
-                "num_hidden_layers": 93,
-                "hidden_act": "situ"
-            },
-            "vision_config": {
-                "patch_size": 14,
-                "vt_hidden_size": 1152
-            }
+            "text_config": {"model_type": "kimi_linear", "hidden_size": 7168, "num_hidden_layers": 93}
         }"#,
+    )
+    .unwrap();
+    fs::write(
+        model_dir.join("model.safetensors.index.json"),
+        r#"{"weight_map": {"vision_tower.patch_embed.proj.weight": "model-00096-of-000096.safetensors"}}"#,
     )
     .unwrap();
 

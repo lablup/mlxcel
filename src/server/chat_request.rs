@@ -726,6 +726,14 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // (the raw-vs-typed render split, the history-boundary render, the
     // rolling-checkpoint `<think>` stripping) does not apply to it.
     if let Some(renderer) = processor.kimi_k3() {
+        // Image bytes are fetched here, before the render, because the
+        // renderer sizes each `<|media_pad|>` run from the image's pixel
+        // dimensions (#1342).
+        let image_data = if declared_images > 0 {
+            try_extract_chat_image_data(request).await?
+        } else {
+            Vec::new()
+        };
         return prepare_kimi_k3_chat_request(
             processor,
             renderer,
@@ -733,6 +741,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
             kimi_k3_tools(request, effective_tools),
             &merged_kwargs,
             prefill.is_some(),
+            image_data,
             declared_images,
             declared_audio,
             declared_videos,
@@ -951,8 +960,13 @@ pub(crate) async fn prepare_chat_request_with_cache(
 ///   continuation text after the generation prompt; K3's generation prompt
 ///   ends inside an open XTML tag, so there is no text position to append to
 ///   without corrupting the structure.
-/// * **No media.** Image prompts are #1342; until then a declared image,
-///   audio or video input is refused rather than silently dropped.
+/// * **Images, no audio or video.** Each image content part renders as
+///   `<|media_begin|>image {w}x{h}<|media_content|>` + `<|media_pad|>` x
+///   `grid_h * grid_w / 4` + `<|media_end|>` (#1342), sized from the image's
+///   pixel dimensions by the navit rule the worker's processor applies to the
+///   same bytes. Audio and video are refused rather than silently dropped
+///   (video never reaches this path: the HTTP boundary rewrites a clip into
+///   frame images for families without a native video path).
 #[allow(clippy::too_many_arguments)]
 fn prepare_kimi_k3_chat_request(
     processor: &ChatTemplateProcessor,
@@ -961,6 +975,7 @@ fn prepare_kimi_k3_chat_request(
     effective_tools: Option<&[Tool]>,
     merged_kwargs: &ChatTemplateKwargs,
     has_prefill: bool,
+    image_data: Vec<Vec<u8>>,
     declared_images: usize,
     declared_audio: usize,
     declared_videos: usize,
@@ -971,12 +986,17 @@ fn prepare_kimi_k3_chat_request(
              ends inside an open XTML tag, so there is no text position to continue from"
         );
     }
-    if declared_images > 0 || declared_audio > 0 || declared_videos > 0 {
+    if declared_audio > 0 || declared_videos > 0 {
         anyhow::bail!(
-            "Kimi K3 chat rendering does not accept image, audio or video inputs yet; \
-             image prompts land with the vision path"
+            "Kimi K3 chat rendering does not accept audio or video inputs; only image content \
+             parts are supported"
         );
     }
+    let media = MediaRequestMetadata::new(declared_images, 0, 0, image_data.len(), 0, 0);
+    media
+        .validate_resolved_image_count()
+        .map_err(anyhow::Error::from)?;
+    let image_prompts = kimi_k3_image_prompts(renderer, &image_data)?;
 
     // `thinking` is K3's own kwarg name; `enable_thinking` is mlxcel's
     // cross-family one and is also what `map_reasoning_control_kwargs` fills
@@ -1019,7 +1039,7 @@ fn prepare_kimi_k3_chat_request(
         thinking_effort,
         tool_choice,
         response_format: request.response_format.as_ref(),
-        image_prompts: None,
+        image_prompts: (!image_prompts.is_empty()).then_some(image_prompts.as_slice()),
     };
     let rendered = renderer.render(&request.messages, effective_tools, &options)?;
 
@@ -1028,12 +1048,59 @@ fn prepare_kimi_k3_chat_request(
         prompt_token_ids: Some(rendered.ids),
         assistant_prefill: None,
         history_prompt: None,
-        image_data: Vec::new(),
-        media: MediaRequestMetadata::new(0, 0, 0, 0, 0, 0),
+        image_data,
+        media,
         image_soft_tokens: None,
         audio_data: Vec::new(),
         videos: Vec::new(),
     })
+}
+
+/// One pre-encoded image prompt per resolved image, in request order, sized
+/// from the image header's pixel dimensions.
+///
+/// Only the header is parsed here; the worker decodes the pixels later under
+/// the same `ImageInputLimits`, and the runtime refuses a `<|media_pad|>` run
+/// that disagrees with the grid the decoded image produced. The dimension
+/// limits are applied here as well so an oversized image fails at the
+/// request boundary instead of after a full render.
+fn kimi_k3_image_prompts(
+    renderer: &super::kimi_k3_chat::KimiK3Renderer,
+    image_data: &[Vec<u8>],
+) -> Result<Vec<super::kimi_k3_chat::K3ImagePrompt>> {
+    let limits = super::media::current_image_input_limits();
+    let mut prompts = Vec::with_capacity(image_data.len());
+    let mut media_tokens = Vec::with_capacity(image_data.len());
+    for (index, bytes) in image_data.iter().enumerate() {
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| anyhow::anyhow!("image {index}: unreadable image header: {e}"))?
+            .into_dimensions()
+            .map_err(|e| anyhow::anyhow!("image {index}: unreadable image dimensions: {e}"))?;
+        if width > limits.max_width || height > limits.max_height {
+            anyhow::bail!(
+                "image {index}: {width}x{height} exceeds the configured image limits \
+                 ({}x{})",
+                limits.max_width,
+                limits.max_height
+            );
+        }
+        media_tokens.push(
+            renderer
+                .navit_config()
+                .plan(width, height)
+                .map_err(|e| anyhow::anyhow!("image {index}: {e}"))?
+                .num_tokens,
+        );
+        prompts.push(renderer.image_prompt(width, height)?);
+    }
+    // The per-request media budget, checked here because this is the first
+    // point that knows every image's token cost. Without it one request can
+    // ask for hundreds of thousands of media tokens, and the tower's
+    // attention is quadratic in the patch count of each image.
+    crate::vision::processors::kimi_k3::check_media_token_budget(media_tokens)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(prompts)
 }
 
 /// Read a boolean chat-template kwarg, rejecting a value of the wrong type
