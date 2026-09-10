@@ -68,7 +68,7 @@
 //!
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
-//! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type) | |
+//! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type); the `glm4_moe_lite_mtp` drafter resolves to this kind here but is built by the binary crate's `mlxcel::models::drafter_loader` (issue #1326) | |
 //! | [`DrafterKind::Dflash`] | `DFlashDraftModel` | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
@@ -227,6 +227,14 @@ pub fn drafter_kind_by_model_type() -> &'static HashMap<&'static str, DrafterKin
         // `Qwen35MtpDraftModel` via [`load_drafter`]'s per-model_type Mtp
         // dispatch.
         m.insert(QWEN35_MTP_MODEL_TYPE, DrafterKind::Mtp);
+        // The GLM-4.7-Flash next-token-prediction block split out by
+        // `mlxcel split-mtp` (issue #1326). The drafter model itself lives in
+        // the `mlxcel` binary crate because it reuses the `glm4_moe_lite`
+        // decoder block; [`load_drafter`] refuses it with a named error and
+        // the binary-side `mlxcel::models::drafter_loader::load_drafter`
+        // builds it. The kind still has to resolve here so `--draft-model`
+        // auto-detects MTP without a `--draft-kind` flag.
+        m.insert(GLM4_MOE_LITE_MTP_MODEL_TYPE, DrafterKind::Mtp);
         m
     })
 }
@@ -377,6 +385,19 @@ pub enum DrafterError {
         temperature: f32,
         top_k: i32,
     },
+
+    /// The drafter's `model_type` names a drafter whose model is built in
+    /// the `mlxcel` binary crate (it reuses a target family's decoder block,
+    /// which `mlxcel-core` cannot name). [`load_drafter`] refuses it so the
+    /// directory never falls into the Gemma 4 assistant loader by default;
+    /// the binary-side `mlxcel::models::drafter_loader::load_drafter` wrapper
+    /// builds it and delegates everything else here.
+    #[error(
+        "drafter model_type {model_type:?} is built in the mlxcel binary crate; load it \
+         through mlxcel::models::drafter_loader::load_drafter instead of \
+         mlxcel_core::drafter::load_drafter"
+    )]
+    BinaryCrateDrafter { model_type: String },
 }
 
 /// Subset of the drafter's `config.json` that [`resolve_drafter_kind`] and
@@ -396,6 +417,11 @@ struct DrafterConfigPeek {
 /// independently.
 const QWEN35_MTP_MODEL_TYPE: &str = "qwen3_5_mtp";
 
+/// `model_type` value that identifies a GLM-4.7-Flash MTP drafter directory
+/// produced by `mlxcel split-mtp` (issue #1326). Public so the binary-side
+/// drafter loader dispatches on the same spelling the kind map registers.
+pub const GLM4_MOE_LITE_MTP_MODEL_TYPE: &str = "glm4_moe_lite_mtp";
+
 fn read_drafter_config_peek(model_path: &Path) -> Option<DrafterConfigPeek> {
     let cfg_path = model_path.join("config.json");
     let bytes = fs::read(&cfg_path).ok()?;
@@ -407,8 +433,20 @@ fn read_drafter_config_peek(model_path: &Path) -> Option<DrafterConfigPeek> {
 /// this mirrors upstream's blanket `(FileNotFoundError, json.JSONDecodeError,
 /// OSError) -> None` behaviour, which is load-bearing for the DFlash
 /// fallback path (DFlash configs intentionally omit `model_type`).
-fn peek_drafter_model_type(model_path: &Path) -> Result<Option<String>, DrafterError> {
+pub fn peek_drafter_model_type(model_path: &Path) -> Result<Option<String>, DrafterError> {
     Ok(read_drafter_config_peek(model_path).and_then(|peek| peek.model_type))
+}
+
+/// Top-level `block_size` of `model_path/config.json`, but ONLY when its
+/// `model_type` is exactly `expected_model_type`. The narrow peeks below are
+/// thin wrappers so a same-named field in an unrelated drafter shape can
+/// never be misinterpreted as a block-size hint.
+fn peek_configured_block_size_for(model_path: &Path, expected_model_type: &str) -> Option<usize> {
+    let peek = read_drafter_config_peek(model_path)?;
+    if peek.model_type.as_deref() != Some(expected_model_type) {
+        return None;
+    }
+    peek.block_size
 }
 
 /// Read `model_path/config.json` and return its top-level `block_size`
@@ -438,11 +476,20 @@ fn peek_drafter_model_type(model_path: &Path) -> Result<Option<String>, DrafterE
 /// `mtp_num_hidden_layers` at full load time, which this lightweight peek
 /// does not replicate).
 pub fn peek_qwen35_mtp_configured_block_size(model_path: &Path) -> Option<usize> {
-    let peek = read_drafter_config_peek(model_path)?;
-    if peek.model_type.as_deref() != Some(QWEN35_MTP_MODEL_TYPE) {
-        return None;
-    }
-    peek.block_size
+    peek_configured_block_size_for(model_path, QWEN35_MTP_MODEL_TYPE)
+}
+
+/// Read `model_path/config.json` and return its top-level `block_size`
+/// field, but ONLY when `model_type == "glm4_moe_lite_mtp"`, the same
+/// narrow peek [`peek_qwen35_mtp_configured_block_size`] performs for its
+/// family and for the same reason: `mlxcel split-mtp` writes the block size
+/// the checkpoint was split for (`num_nextn_predict_layers + 1`, or
+/// `--block-size`), and the operator-visible `--draft-block-size` default
+/// should reflect that rather than the flat Gemma-4-derived constant.
+///
+/// Used by `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_glm4_moe_lite_mtp_configured_block_size(model_path: &Path) -> Option<usize> {
+    peek_configured_block_size_for(model_path, GLM4_MOE_LITE_MTP_MODEL_TYPE)
 }
 
 /// Derive Inkling's default verify width (`num_mtp_layers + 2`) from its
@@ -1211,6 +1258,13 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                     let model = qwen3_5_mtp::Qwen35MtpDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
                 }
+                // Built in the binary crate (it reuses the glm4_moe_lite
+                // decoder block). Refuse by name rather than letting the
+                // directory fall into the Gemma 4 assistant loader below,
+                // whose weight-inventory error would blame the wrong family.
+                Some(GLM4_MOE_LITE_MTP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
+                    model_type: GLM4_MOE_LITE_MTP_MODEL_TYPE.to_string(),
+                }),
                 _ => {
                     let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
@@ -1334,9 +1388,62 @@ mod tests {
         // The Qwen 3.5 / 3.6 / 3.8 split-out MTP head also resolves to the
         // MTP round loop (upstream `"qwen3_5_mtp": "mtp"`).
         assert_eq!(map.get("qwen3_5_mtp"), Some(&DrafterKind::Mtp));
-        // The three MTP spellings, nothing else: parity with upstream
-        // `DRAFTER_KIND_BY_MODEL_TYPE`.
-        assert_eq!(map.len(), 3);
+        // The GLM-4.7-Flash split-out MTP block (issue #1326).
+        assert_eq!(map.get("glm4_moe_lite_mtp"), Some(&DrafterKind::Mtp));
+        // The four MTP spellings, nothing else: upstream's three plus the
+        // GLM-4.7-Flash drafter this tree produces itself.
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn glm4_moe_lite_mtp_resolves_to_mtp_kind() {
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("glm4_moe_lite_mtp"));
+        let resolved = resolve(dir.path(), None).unwrap();
+        assert_eq!(resolved, DrafterKind::Mtp);
+    }
+
+    #[test]
+    fn peek_configured_block_size_reads_the_glm4_moe_lite_mtp_value() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "glm4_moe_lite_mtp", "block_size": 2}"#,
+        )
+        .expect("write config.json");
+        assert_eq!(
+            super::peek_glm4_moe_lite_mtp_configured_block_size(dir.path()),
+            Some(2)
+        );
+        // The Qwen peek must not read the GLM value, and vice versa.
+        assert_eq!(
+            super::peek_qwen35_mtp_configured_block_size(dir.path()),
+            None
+        );
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "qwen3_5_mtp", "block_size": 3}"#,
+        )
+        .expect("write config.json");
+        assert_eq!(
+            super::peek_glm4_moe_lite_mtp_configured_block_size(dir.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn load_drafter_refuses_glm4_moe_lite_mtp_by_name() {
+        // The GLM drafter is built in the binary crate; the core loader must
+        // name that rather than fall into the Gemma 4 assistant loader and
+        // report a weight-inventory error about the wrong family.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("glm4_moe_lite_mtp"));
+        let err = load(dir.path(), None).expect_err("must refuse");
+        assert!(
+            matches!(err, DrafterError::BinaryCrateDrafter { .. }),
+            "unexpected error: {err}"
+        );
+        assert!(err.to_string().contains("drafter_loader"), "{err}");
     }
 
     #[test]

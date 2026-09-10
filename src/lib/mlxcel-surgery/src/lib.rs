@@ -57,7 +57,10 @@ pub use config::{
     parse_config_file, parse_config_str,
 };
 pub use error::SurgeryError;
-pub use ops::{AddOp, InterpolateOp, PruneOp, PruneSelector, ReplaceOp, ScaleOp};
+pub use ops::{
+    AddOp, InterpolateOp, PruneOp, PruneSelector, ReplaceOp, ScaleOp, SplitMtpOptions,
+    SplitMtpReport, SplitMtpResult, split_mtp, split_mtp_dir,
+};
 pub use pipeline::SurgeryPipeline;
 
 /// A single weight-load surgical operation.

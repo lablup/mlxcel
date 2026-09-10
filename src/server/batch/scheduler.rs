@@ -58,6 +58,9 @@ impl BatchScheduler {
             }
             LoadedModel::Inkling(inkling) => compat_and_bind(drafter, inkling),
             LoadedModel::InklingVLM(vlm) => compat_and_bind(drafter, &vlm.text),
+            // GLM-4.7-Flash (#1326): the drafter borrows nothing, bind only
+            // re-checks the hidden width and vocabulary.
+            LoadedModel::Glm4MoeLite(glm) => compat_and_bind(drafter, glm),
             // Unreachable per the callers' variant gates; produce a clean
             // per-request error rather than panicking.
             _ => Err(
@@ -104,7 +107,8 @@ impl BatchScheduler {
         if !crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block_size) {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is not \
-                 Gemma 4 (text, VLM, or Unified) or Qwen 3.5 (text or VLM), \
+                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), Inkling, \
+                 or GLM-4.7-Flash (glm4_moe_lite), \
                  or its verify block is not byte-identical to classic decode \
                  at block_size={block_size} on this hardware (see the \
                  exactness-probe log line above); falling back to classic decode",
@@ -133,6 +137,18 @@ impl BatchScheduler {
                     return Some(seq);
                 }
             };
+        if prefill_start_offset > 0
+            && !crate::server::batch::speculative_burst::mtp_adopted_prefix_reusable(&self.model)
+        {
+            tracing::debug!(
+                "MTP speculative slice declined for seq {}: prefill_start_offset={} but this \
+                 family's MTP adapter cannot reuse an adopted prompt-cache prefix; falling back \
+                 to classic decode",
+                seq.seq_id,
+                seq.prefill_start_offset,
+            );
+            return Some(seq);
+        }
 
         // Drafter: lazy-load, take, compat-check, bind, the identical
         // contracts as `run_mtp_burst` (bind is NOT called inside the
@@ -287,6 +303,30 @@ impl BatchScheduler {
                     Some(seq.seq_id),
                 )
                 .with_prefill_start_offset(prefill_start_offset);
+                Ok(
+                    crate::server::batch::speculative_slice::begin_slice_session(
+                        adapter,
+                        drafter,
+                        seq,
+                        &self.tokenizer,
+                        model_eos,
+                        block_size,
+                        probe_rounds,
+                        prefill_start_offset,
+                        &token_history,
+                    ),
+                )
+            }
+            // GLM-4.7-Flash (#1326): stateless per-tick view over the model's
+            // MTP-only sequence slot; the adopted-prefix decline above keeps
+            // `prefill_start_offset` at 0 for this family.
+            LoadedModel::Glm4MoeLite(glm) => {
+                let adapter =
+                    crate::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter::new(
+                        glm,
+                        Some(seq.seq_id),
+                    )
+                    .with_prefill_start_offset(prefill_start_offset);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -491,6 +531,20 @@ impl BatchScheduler {
                     Some(job.seq.seq_id),
                 )
                 .with_prefill_start_offset(job.prefill_start_offset);
+                crate::server::batch::speculative_slice::step_slice_session(
+                    adapter,
+                    &mut job,
+                    &self.tokenizer,
+                );
+                true
+            }
+            LoadedModel::Glm4MoeLite(glm) => {
+                let adapter =
+                    crate::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter::new(
+                        glm,
+                        Some(job.seq.seq_id),
+                    )
+                    .with_prefill_start_offset(job.prefill_start_offset);
                 crate::server::batch::speculative_slice::step_slice_session(
                     adapter,
                     &mut job,

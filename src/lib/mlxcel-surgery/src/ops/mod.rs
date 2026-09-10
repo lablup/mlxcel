@@ -22,6 +22,10 @@
 //!   ([`scale::ScaleOp`], [`add::AddOp`], [`prune::PruneOp`],
 //!   [`replace::ReplaceOp`], [`interpolate::InterpolateOp`]). Each is
 //!   `Send + Sync` and stateless across `apply` calls.
+//! - [`split_mtp`] is the one whole-checkpoint transform rather than a
+//!   pipeline op: it reads a raw GLM-4.7-Flash checkpoint and writes a
+//!   standalone `glm4_moe_lite_mtp` drafter directory (issue #1326), so it
+//!   exposes free functions instead of implementing [`crate::SurgeryOp`].
 //! - Construction goes through a `from_spec` constructor that consumes
 //!   the already-validated `OpSpec::*` variant from the YAML parser
 //!   ([`crate::config`]). The factory in `crate::config` is the only
@@ -35,6 +39,7 @@ pub mod interpolate;
 pub mod prune;
 pub mod replace;
 pub mod scale;
+pub mod split_mtp;
 
 #[cfg(test)]
 mod add_apply_tests;
@@ -48,3 +53,4 @@ pub use interpolate::InterpolateOp;
 pub use prune::{PruneOp, PruneSelector};
 pub use replace::ReplaceOp;
 pub use scale::ScaleOp;
+pub use split_mtp::{SplitMtpOptions, SplitMtpReport, SplitMtpResult, split_mtp, split_mtp_dir};

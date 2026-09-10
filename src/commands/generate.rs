@@ -55,7 +55,8 @@ use mlxcel_core::sampling::{TokenBiasMap, sample_token_optimized};
 
 use mlxcel::cli::speculative_args::resolve_draft_block_size;
 use mlxcel::cli::turbo_args::{resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode};
-use mlxcel_core::drafter::{DrafterKind, load_drafter, resolve_drafter_kind};
+use mlxcel::models::drafter_loader::load_drafter;
+use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
 
 use super::generate_vlm;
 use crate::GenerateArgs;
@@ -1789,7 +1790,38 @@ where
         &cancel,
         &logprobs,
     );
+    // The CLI installs no tracing subscriber, so the acceptance facts an A/B
+    // needs (rounds, proposed and accepted draft tokens, the realized tokens
+    // per round including the bonus) are printed here, as the classic
+    // speculative path prints its `acceptance_stats().summary_line()`.
+    if let Some(acceptance) = generator.last_acceptance() {
+        println!("{}", mtp_acceptance_line(&acceptance));
+    }
     (tokens, stats)
+}
+
+/// One-line acceptance summary of an offline MTP run.
+///
+/// `mean accepted length` is the realized tokens per speculative round
+/// (accepted draft tokens plus the bonus), so a value above 1.0 means the
+/// drafter contributed; `rate` is accepted / proposed.
+fn mtp_acceptance_line(a: &mlxcel_core::speculative::mtp::MtpAcceptanceSummary) -> String {
+    let per_round = if a.rounds == 0 {
+        0.0
+    } else {
+        (a.accepted_draft_tokens + a.rounds) as f64 / a.rounds as f64
+    };
+    format!(
+        "[MTP acceptance: rounds={} proposed={} accepted={} mean accepted length={per_round:.3} \
+         rate={:.3} block={}..{} probe_rounds={}]",
+        a.rounds,
+        a.proposed_tokens,
+        a.accepted_draft_tokens,
+        a.acceptance_rate(),
+        a.effective_block_min,
+        a.effective_block_max,
+        a.probe_rounds,
+    )
 }
 
 /// Construct and drive the MTP speculative round loop for the offline
@@ -1900,6 +1932,21 @@ fn run_offline_mtp(
     {
         return Err(gemma4_mtp_declined(block_size));
     }
+    // GLM-4.7-Flash exactness gate (#1326): the same single call the server's
+    // `mtp_capable_target` makes. There is no static kernel prerequisite for
+    // this family, so the measured block-vs-chain probe is the whole condition.
+    if let LoadedModel::Glm4MoeLite(glm) = model
+        && !glm.mtp_exactness_allows(block_size)
+    {
+        return Err(anyhow!(
+            "GLM-4.7-Flash MTP speculative decoding declined: at --draft-block-size \
+             {block_size} this GPU's multi-token verify block is not byte-identical \
+             to the single-token decode chain, so temperature-0 output would \
+             silently differ from `mlxcel generate` without --draft-model. Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+             engage anyway and forfeit the byte-identity contract."
+        ));
+    }
 
     // Resolve the concrete target reference the drafter binds to, and reject any
     // non-MTP-capable target. Mirrors the server burst dispatch
@@ -1932,10 +1979,12 @@ fn run_offline_mtp(
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
+        LoadedModel::Glm4MoeLite(glm) => glm as &dyn LanguageModel,
         _ => {
             return Err(anyhow!(
                 "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
-                 Unified), Qwen 3.5 (text or VLM), and Inkling (text or VLM) targets; the loaded target \
+                 Unified), Qwen 3.5 (text or VLM), Inkling (text or VLM), and \
+                 GLM-4.7-Flash (glm4_moe_lite) targets; the loaded target \
                  is not MTP-capable. Omit --draft-kind to use the classic \
                  SpeculativeGenerator with your --draft-model drafter."
             ));
@@ -2039,6 +2088,17 @@ fn run_offline_mtp(
         ),
         LoadedModel::InklingVLM(vlm) => drive_offline_mtp(
             mlxcel::models::inkling_mtp_target::InklingVLMtpTargetAdapter::new(vlm, None),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        // GLM-4.7-Flash (#1326): `seq_id = None` selects the model's internal
+        // MTP fallback slot, the offline / single-row CLI shape.
+        LoadedModel::Glm4MoeLite(glm) => drive_offline_mtp(
+            mlxcel::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter::new(glm, None),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2648,6 +2708,21 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         }
         generation
     };
+    // `MLXCEL_PRINT_TOKEN_IDS`: dump the generated ids to stderr so two runs
+    // (classic versus `--draft-model`, fused MoE on versus off) can be
+    // compared on ids rather than on decoded text, which can round-trip two
+    // different id sequences to the same string.
+    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
+        eprintln!(
+            "[token ids ({}): {}]",
+            generated_tokens.len(),
+            generated_tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
     let visible = filter_reasoning_for_display(
         &tokenizer,
