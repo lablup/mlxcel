@@ -35,6 +35,7 @@ use crate::minicpmo_prompt::{
 };
 use crate::moondream2_prompt::{Moondream2PromptMode, prepare_moondream2_prompt_tokens};
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
+use crate::multimodal::got_ocr_prompt::prepare_got_prompt_tokens;
 use crate::multimodal::llmjp_vl_prompt::{insert_llmjp_image_tokens, text_token_count};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
@@ -282,6 +283,16 @@ pub enum VlmPreparationSummary {
     InternVL {
         image_blocks: usize,
         total_image_tokens: usize,
+    },
+    /// GOT-OCR 2.0 assembled its fixed conversation around a single
+    /// `<img> + <imgpad> * image_token_len + </img>` block. `pre_templated`
+    /// records whether the caller's text already carried the framing (the
+    /// server render) or was a bare instruction the builder wrapped (the CLI).
+    GotOcr {
+        image_blocks: usize,
+        total_image_tokens: usize,
+        total_tokens: usize,
+        pre_templated: bool,
     },
     /// LLM-jp-VL framed each image as `<|image_start|> + <|image_pad|> *
     /// (num_image_token * tiles) + <|image_end|>`. `tile_budget` is the
@@ -1875,6 +1886,49 @@ where
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
                 preparation,
+            }))
+        }
+        VlmRuntimeRef::GotOcr(got) => {
+            // GOT ships no chat template of its own, so `prompt` is either the
+            // raw `-p` instruction (CLI) or the render of the builtin GOT
+            // template (server). The builder recognizes the framing and wraps
+            // only what needs wrapping, so both converge on one prompt.
+            let (tokens, stats) =
+                prepare_got_prompt_tokens(prompt, images.len(), got.image_token_len, &mut encode)
+                    .map_err(|err| anyhow::anyhow!("{}", err))?;
+            *prompt_tokens = tokens;
+
+            // The scatter writes one feature row per `<imgpad>`. If the
+            // tokenizer resolved the tags to something other than the
+            // checkpoint's ids (a HunYuan special table, say) the placeholder
+            // count collapses to zero and this is where that surfaces, rather
+            // than as a model that quietly ignores the page.
+            ensure_image_token_feature_cardinality(
+                "GOT-OCR 2.0",
+                prompt_tokens,
+                got.im_patch_token_id,
+                (0..images.len()).map(|_| 1usize),
+                got.image_token_len,
+            )?;
+
+            let pixel_values = got.processor.preprocess(images);
+
+            // One 1024x1024 view per request, so the opportunistic vision cache
+            // buys nothing here (it is off for InternVL and Youtu-VL too).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = got.get_input_embeddings(&input_ids_arr, &pixel_values);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::GotOcr {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                    total_tokens: prompt_tokens.len(),
+                    pre_templated: stats.pre_templated,
+                }),
             }))
         }
         VlmRuntimeRef::LlmJpVl(llmjp) => {

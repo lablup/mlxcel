@@ -264,6 +264,24 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::GotOcr {
+            image_blocks,
+            total_image_tokens,
+            total_tokens,
+            pre_templated,
+        } => {
+            println!(
+                "GOT-OCR 2.0: inserted {} image block(s), {} image token(s) into the {} conversation ({} total prompt tokens)",
+                image_blocks,
+                total_image_tokens,
+                if pre_templated {
+                    "rendered"
+                } else {
+                    "built-in"
+                },
+                total_tokens
+            );
+        }
         VlmPreparationSummary::LlmJpVl {
             image_blocks,
             total_image_tokens,

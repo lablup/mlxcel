@@ -58,6 +58,8 @@ mod florence2;
 mod gemma;
 #[path = "vlm_gemma_unified.rs"]
 mod gemma_unified;
+#[path = "vlm_got_ocr.rs"]
+mod got_ocr;
 #[path = "vlm_granite4_vision.rs"]
 mod granite4_vision;
 #[path = "vlm_granite_vision.rs"]
@@ -119,6 +121,7 @@ pub(crate) use fastvlm::load_fastvlm_vlm;
 pub(crate) use florence2::load_florence2_vlm;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
+pub(crate) use got_ocr::load_got_ocr_vlm;
 pub(crate) use granite_vision::load_granite_vision_vlm;
 pub(crate) use granite4_vision::load_granite4_vision_vlm;
 pub(crate) use hunyuan_vl::load_hunyuan_vlm;

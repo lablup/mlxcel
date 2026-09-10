@@ -1588,3 +1588,61 @@ fn llmjpvl_model_type_is_detected_for_both_released_backbones() {
         fs::remove_dir_all(model_dir).unwrap();
     }
 }
+
+#[test]
+fn got_model_type_is_detected_for_both_released_layouts() {
+    // GOT-OCR 2.0 writes its `model_type` in upper case (`"GOT"`), so this
+    // depends on the lowercase normalization the detector applies before
+    // matching; a raw comparison would miss it and the loader would report
+    // "Unsupported model type: GOT".
+    //
+    // The two shapes below are the released `config.json` files. The 4-bit MLX
+    // conversion adds a `quantization` block and an *empty* `vision_config`,
+    // which must not route the checkpoint anywhere else, and the original
+    // carries no `vision_config` at all even though it is a VLM: GOT's tower
+    // geometry is fixed in `got_vision_b.py` rather than configured.
+    for (name, extra) in [
+        ("got_ocr2_original", ""),
+        (
+            "got_ocr2_4bit",
+            r#""vision_config": {}, "quantization": {"group_size": 64, "bits": 4},"#,
+        ),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            format!(
+                r#"{{
+                    "architectures": ["GOTQwenForCausalLM"],
+                    "model_type": "GOT",
+                    {extra}
+                    "hidden_size": 1024,
+                    "num_hidden_layers": 24,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 16,
+                    "intermediate_size": 2816,
+                    "rms_norm_eps": 1e-06,
+                    "rope_theta": 1000000.0,
+                    "max_position_embeddings": 32768,
+                    "vocab_size": 151860,
+                    "tie_word_embeddings": true,
+                    "use_sliding_window": false,
+                    "bos_token_id": 151643,
+                    "eos_token_id": 151643,
+                    "image_token_len": 256,
+                    "im_start_token": 151857,
+                    "im_end_token": 151858,
+                    "im_patch_token": 151859,
+                    "use_im_start_end": true
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::GotOcrVLM, "{name}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}

@@ -115,6 +115,8 @@ pub enum LoadedModel {
     /// LLM-jp-VL (`llmjpvl`): SigLIP2 tower + pixel-shuffle `mlp1` + a Llama
     /// (llm-jp-4-vl-9B) or Qwen3 (Jagle-VL-2.2B) decoder.
     LlmJpVL(vision::LlmJpVlModel),
+    /// GOT-OCR 2.0 (`GOT`): SAM ViT-B tower + linear projector + Qwen2-0.5B.
+    GotOcrVLM(vision::GotOcrVlModel),
     KimiVL(vision::KimiVLModel),
     LocateAnythingVLM(vision::LocateAnythingVLM),
     SmolVLM(vision::SmolVLMModel),
@@ -290,6 +292,7 @@ macro_rules! delegate_language_model {
             LoadedModel::YoutuVL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::InternVLChatVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LlmJpVL(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::GotOcrVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiVL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LocateAnythingVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SmolVLM(inner) => LanguageModel::$method(inner, $($arg),*),

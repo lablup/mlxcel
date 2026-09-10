@@ -420,6 +420,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // dispatch table total and the planner's supported-architecture
         // validation rejects this string.
         ModelType::LlmJpVLM => "llmjpvl",
+        // GOT-OCR 2.0's decoder is Qwen2, but the vision tower has no sharded
+        // runtime and TP is refused for VLM-kind models before this point. The
+        // placeholder keeps the dispatch table total; the planner's
+        // supported-architecture validation rejects this string.
+        ModelType::GotOcrVLM => "got",
         // Text-only Youtu-LLM is not tensor-parallel enabled either: its MLA
         // decoder has no sharded runtime. The planner's supported-architecture
         // validation rejects this string before any TP load is attempted; the

@@ -1837,6 +1837,46 @@ const FLORENCE2_CHAT_TEMPLATE: &str = concat!(
     "{%- endfor %}"
 );
 
+/// GOT-OCR 2.0's serving template (issue #1359).
+///
+/// `stepfun-ai/GOT-OCR2_0` ships no template, and the generic
+/// `User:`/`Assistant:` fallback renders a framing the model never saw. The
+/// checkpoint's `modeling_GOT.py::chat` builds one fixed MPT-style conversation
+/// instead, and this reproduces it byte-for-byte: the system turn is a constant
+/// carrying eight literal spaces of the reference's Python source indentation,
+/// `<|im_end|>` closes a turn with no newline after it, and the generation
+/// prompt is `<|im_start|>assistant\n`.
+///
+/// The system turn is emitted unconditionally and a caller-supplied `system`
+/// message is dropped rather than rendered. That is not politeness: the vision
+/// features are scattered onto placeholders in a prompt whose prefix the model
+/// saw on every training example, and substituting a client's system text there
+/// degrades OCR accuracy with no error to point at.
+///
+/// The image block is not rendered here. It carries 256 `<imgpad>` tokens whose
+/// count has to match the tower's feature rows, so
+/// [`crate::multimodal::got_ocr_prompt::build_got_prompt`] splices it into the
+/// user turn after rendering, the way every other token-level VLM family in the
+/// tree does.
+const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
+    "<|im_start|>system\n",
+    "        You should follow the instructions carefully and explain your answers in detail.<|im_end|>",
+    "{%- for message in messages %}",
+    "{%- if message['role'] != 'system' %}",
+    "{{- '<|im_start|>' + message['role'] + '\n' }}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{{- '<|im_end|>' }}",
+    "{%- endif %}",
+    "{%- endfor %}",
+    "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
+);
+
 /// A chat template for a checkpoint that ships none of its own.
 ///
 /// Reached only when `tokenizer_config.json`, `chat_template.jinja` and
@@ -1862,6 +1902,7 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
     match crate::models::get_model_type(model_path).ok()? {
         crate::models::ModelType::JinaVLM => Some(JINA_VLM_CHAT_TEMPLATE),
         crate::models::ModelType::Florence2VLM => Some(FLORENCE2_CHAT_TEMPLATE),
+        crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
         _ => None,
     }
 }

@@ -434,6 +434,9 @@ pub enum ModelType {
     /// LLM-jp-VL (`llmjpvl`): SigLIP2 tower + pixel-shuffle `mlp1` + a
     /// Llama (llm-jp-4-vl-9B) or Qwen3 (Jagle-VL-2.2B) decoder.
     LlmJpVLM,
+    /// GOT-OCR 2.0 (`GOT`): SAM ViT-B tower + `Linear(1024, 1024)` projector +
+    /// Qwen2-0.5B decoder, on a fixed 256-token image block.
+    GotOcrVLM,
     LocateAnythingVLM, // LocateAnything: MoonViT + MLP connector + Qwen2 text (grounding)
     SmolVLM,  // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
     Idefics2, // Idefics2 (idefics2): SigLIP + perceiver-resampler connector + Mistral text
@@ -704,6 +707,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::LlmJpVLM,
+    ModelType::GotOcrVLM,
     ModelType::LocateAnythingVLM,
     ModelType::SmolVLM,
     ModelType::Idefics2,
@@ -1172,6 +1176,10 @@ impl ModelType {
                 "LLM-jp VL (SigLIP2 + pixel-shuffle mlp1 + Llama/Qwen3)",
                 "Other VLM",
             ),
+            ModelType::GotOcrVLM => (
+                "GOT-OCR 2.0 (SAM ViT-B + linear projector + Qwen2-0.5B)",
+                "Other VLM",
+            ),
             ModelType::LocateAnythingVLM => (
                 "LocateAnything (MoonViT + MLP connector + Qwen2, grounding)",
                 "Other VLM",
@@ -1309,6 +1317,7 @@ mod metadata_tests {
             YoutuVLM,
             InternVLChatVLM,
             LlmJpVLM,
+            GotOcrVLM,
             LocateAnythingVLM,
             SmolVLM,
             Idefics2,
