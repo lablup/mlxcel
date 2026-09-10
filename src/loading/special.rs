@@ -80,6 +80,7 @@ enum SpecialWeightLoaderKind {
     OwnedConfig,
     NemotronH,
     KimiLinear,
+    KimiK3,
     Inkling,
     Longcat,
     Rwkv7,
@@ -101,6 +102,7 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
         | ModelType::RecurrentGemma => Some(SpecialWeightLoaderKind::OwnedConfig),
         ModelType::NemotronH => Some(SpecialWeightLoaderKind::NemotronH),
         ModelType::KimiLinear => Some(SpecialWeightLoaderKind::KimiLinear),
+        ModelType::KimiK3 => Some(SpecialWeightLoaderKind::KimiK3),
         ModelType::Inkling => Some(SpecialWeightLoaderKind::Inkling),
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => {
             Some(SpecialWeightLoaderKind::Longcat)
@@ -267,6 +269,20 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             model.set_eos_token_ids(super::read_eos_token_ids(model_path));
             LoadedModel::KimiLinear(model)
+        }
+        SpecialWeightLoaderKind::KimiK3 => {
+            // The top-level config: `text_config` is nested, and the top-level
+            // `eos_token_id` is the stop token.
+            let config = models::kimi_k3::KimiK3Config::from_json_str(config_str)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let mut owned = copy_weight_map(weights);
+            owned = models::KimiK3Model::sanitize_weights(owned, &config.text_config)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let mut model = models::KimiK3Model::from_weights(&owned, &config.text_config)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            model.set_eos_token_ids(config.eos_token_ids());
+            model.set_eos_token_ids(super::read_eos_token_ids(model_path));
+            LoadedModel::KimiK3(model)
         }
         SpecialWeightLoaderKind::Inkling => {
             let args =

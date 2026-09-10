@@ -362,6 +362,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::NemotronNAS => "nemotron_nas",
         ModelType::Rwkv7 => "rwkv7",
         ModelType::KimiLinear => "kimi_linear",
+        // Kimi K3 has no tensor-parallel port (issue #1334 scopes it to a
+        // single device plus the pipeline profile); the label only decides what
+        // a config with no architecture reports, and the plan generator refuses
+        // it downstream.
+        ModelType::KimiK3 => "kimi_k3",
         // Kimi-VL / Kimi-VL 2.5 use a DeepSeek-V3-style MoE text backbone.
         ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",

@@ -161,8 +161,8 @@ impl KimiLinearConfig {
 /// Per-head linear projection used in MLA.
 /// Weight shape: [num_heads, output_dims, input_dims]
 ///
-/// Used by: KimiLinear (MLA attention)
-struct MultiLinear {
+/// Used by: KimiLinear (MLA attention), KimiK3 (MLA attention)
+pub(crate) struct MultiLinear {
     weight: UniquePtr<MlxArray>,
     scales: Option<UniquePtr<MlxArray>>,
     biases: Option<UniquePtr<MlxArray>>,
@@ -177,7 +177,7 @@ struct MultiLinear {
 }
 
 impl MultiLinear {
-    fn forward(&self, x: &MlxArray, transpose: bool) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray, transpose: bool) -> UniquePtr<MlxArray> {
         if self.is_quantized {
             let biases_ptr = self
                 .biases
@@ -240,7 +240,7 @@ impl MultiLinear {
     /// from a checkpoint layout other than the one issue #1026 was filed
     /// against. `src/models/gpt_oss.rs` `ExpertLinear::from_weights` is the
     /// in-tree precedent for the shape of it.
-    fn from_weights(
+    pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         group_size: i32,
@@ -299,15 +299,32 @@ impl MultiLinear {
 /// Short depthwise convolution with manual state management.
 /// Used for preprocessing Q, K, V in delta attention layers.
 ///
-/// Used by: KimiLinear (Delta attention)
-struct ShortConv1d {
-    conv_weight: UniquePtr<MlxArray>,
-    kernel_size: usize,
-    channels: usize,
+/// Used by: KimiLinear (Delta attention, one per projection), KimiK3 (Delta
+/// attention, one fused instance over the concatenated q/k/v channels)
+pub(crate) struct ShortConv1d {
+    /// `[channels, kernel, 1]`, the MLX depthwise layout.
+    pub(crate) conv_weight: UniquePtr<MlxArray>,
+    pub(crate) kernel_size: usize,
+    pub(crate) channels: usize,
 }
 
 impl ShortConv1d {
-    fn forward(
+    /// Wrap an already-sanitized `[channels, kernel, 1]` weight.
+    ///
+    /// Used by: KimiK3
+    pub(crate) fn new(
+        conv_weight: UniquePtr<MlxArray>,
+        kernel_size: usize,
+        channels: usize,
+    ) -> Self {
+        Self {
+            conv_weight,
+            kernel_size,
+            channels,
+        }
+    }
+
+    pub(crate) fn forward(
         &self,
         x: &MlxArray,
         state: Option<&MlxArray>,
@@ -1092,6 +1109,107 @@ impl KimiDecoderLayer {
     }
 }
 
+/// Decompose one MLA layer's `kv_b_proj.weight` into the dense per-head
+/// `embed_q.weight` (`[num_heads, kv_lora_rank, qk_nope]`) and
+/// `unembed_out.weight` (`[num_heads, v_head, kv_lora_rank]`) pair the
+/// absorbed attention path multiplies with.
+///
+/// A no-op when `{attn_prefix}.kv_b_proj.weight` is absent (already
+/// decomposed, or a checkpoint that ships the pair itself), which is what
+/// makes the callers' sanitizers idempotent. An affine-quantized `kv_b_proj`
+/// is dequantized first; a `.scales`-only plane is refused by name rather
+/// than unwrapped (issue #1026), and the solved `(group_size, bits)` pair is
+/// bounded before it reaches `dequantize` (issue #958).
+///
+/// Used by: KimiLinear, KimiK3
+pub(crate) fn decompose_kv_b_proj(
+    weights: &mut WeightMap,
+    attn_prefix: &str,
+    layer_idx: usize,
+    num_heads: i32,
+    qk_nope: i32,
+    v_head: i32,
+    kv_lora_rank: i32,
+) -> Result<(), String> {
+    let kv_b_key = format!("{}.kv_b_proj.weight", attn_prefix);
+    if !weights.contains_key(&kv_b_key) {
+        return Ok(());
+    }
+    let l = layer_idx;
+
+    let is_quantized = weights.contains_key(&format!("{}.kv_b_proj.scales", attn_prefix));
+
+    let v = if is_quantized {
+        // Dequantize first
+        let w = weights.remove(&kv_b_key).unwrap();
+        let scales = weights
+            .remove(&format!("{}.kv_b_proj.scales", attn_prefix))
+            .unwrap();
+        // `is_quantized` gates on `.scales` alone, and the
+        // block-float modes (mxfp4 / nvfp4 / mxfp8) ship scales
+        // with no zero points, so a block-float export satisfies
+        // that gate and arrives here carrying no `.biases` plane.
+        // The `.unwrap()` this replaces turned that into a panic
+        // during sanitization, which in the server takes the
+        // process down rather than rejecting one model load
+        // (issue #1026). `dequantize` below is hardcoded
+        // `"affine"` and so could not decompose such a plane in
+        // any case; what this buys is a load error naming the key
+        // that is missing.
+        let biases_key = format!("{}.kv_b_proj.biases", attn_prefix);
+        let biases = weights.remove(&biases_key).ok_or_else(|| {
+            format!(
+                "layer {l}: kv_b_proj has scales but no biases at key \
+                 `{biases_key}`; the checkpoint may be corrupted or only \
+                 partially converted"
+            )
+        })?;
+        // Solve the packed pair from the shapes and bound it
+        // before it reaches `dequantize`. The shared helper checks
+        // each divisor before dividing: `kv_lora_rank` is a config
+        // field and the scales axis is checkpoint data, so the naive
+        // form panics on a zero divisor and overflows i32 on a large
+        // packed axis, both before the bound could fire (issue #958).
+        let (group_size, bits) = mlxcel_core::layers::infer_mla_quantization_params(
+            &mlxcel_core::array_shape(&w),
+            &mlxcel_core::array_shape(&scales),
+            kv_lora_rank,
+            &format!("{attn_prefix}.kv_b_proj"),
+        )?;
+        unsafe {
+            mlxcel_core::dequantize(
+                &w,
+                &scales,
+                &*biases as *const _,
+                group_size,
+                bits,
+                "affine",
+            )
+        }
+    } else {
+        weights.remove(&kv_b_key).unwrap()
+    };
+
+    // Reshape to [num_heads, qk_nope + v_head, kv_lora_rank]
+    let v = mlxcel_core::reshape(&v, &[num_heads, qk_nope + v_head, -1]);
+
+    // Split: wk = v[:, :qk_nope, :].swapaxes(-1, -2), wv = v[:, qk_nope:, :]
+    // Note: MLX slice stop=-1 means dim_size-1 (excludes last), not "to end"
+    let v_last_dim = mlxcel_core::array_shape(&v)[2];
+    let wk = mlxcel_core::slice(&v, &[0, 0, 0], &[num_heads, qk_nope, v_last_dim]);
+    let wk = mlxcel_core::swap_axes(&wk, -1, -2); // [num_heads, kv_lora_rank, qk_nope]
+    let wv = mlxcel_core::slice(
+        &v,
+        &[0, qk_nope, 0],
+        &[num_heads, qk_nope + v_head, v_last_dim],
+    );
+
+    // Store as dense MultiLinear weights (no re-quantization)
+    weights.insert(format!("{}.embed_q.weight", attn_prefix), wk);
+    weights.insert(format!("{}.unembed_out.weight", attn_prefix), wv);
+    Ok(())
+}
+
 // KimiLinear Model.
 pub struct KimiLinearModel {
     pub embed_tokens: UnifiedEmbedding,
@@ -1338,85 +1456,15 @@ impl KimiLinearModel {
             }
 
             let attn_prefix = format!("model.layers.{}.self_attn", l);
-            let kv_b_key = format!("{}.kv_b_proj.weight", attn_prefix);
-
-            if weights.contains_key(&kv_b_key) {
-                let qk_nope = config.qk_nope() as i32;
-                let v_head = config.v_head() as i32;
-                let num_heads = config.num_attention_heads as i32;
-
-                let is_quantized =
-                    weights.contains_key(&format!("{}.kv_b_proj.scales", attn_prefix));
-
-                let v = if is_quantized {
-                    // Dequantize first
-                    let w = weights.remove(&kv_b_key).unwrap();
-                    let scales = weights
-                        .remove(&format!("{}.kv_b_proj.scales", attn_prefix))
-                        .unwrap();
-                    // `is_quantized` gates on `.scales` alone, and the
-                    // block-float modes (mxfp4 / nvfp4 / mxfp8) ship scales
-                    // with no zero points, so a block-float export satisfies
-                    // that gate and arrives here carrying no `.biases` plane.
-                    // The `.unwrap()` this replaces turned that into a panic
-                    // during sanitization, which in the server takes the
-                    // process down rather than rejecting one model load
-                    // (issue #1026). `dequantize` below is hardcoded
-                    // `"affine"` and so could not decompose such a plane in
-                    // any case; what this buys is a load error naming the key
-                    // that is missing.
-                    let biases_key = format!("{}.kv_b_proj.biases", attn_prefix);
-                    let biases = weights.remove(&biases_key).ok_or_else(|| {
-                        format!(
-                            "layer {l}: kv_b_proj has scales but no biases at key \
-                             `{biases_key}`; the checkpoint may be corrupted or only \
-                             partially converted"
-                        )
-                    })?;
-                    // Solve the packed pair from the shapes and bound it
-                    // before it reaches `dequantize`. The shared helper checks
-                    // each divisor before dividing: `kv_lora_rank` is a config
-                    // field and the scales axis is checkpoint data, so the naive
-                    // form panics on a zero divisor and overflows i32 on a large
-                    // packed axis, both before the bound could fire (issue #958).
-                    let (group_size, bits) = mlxcel_core::layers::infer_mla_quantization_params(
-                        &mlxcel_core::array_shape(&w),
-                        &mlxcel_core::array_shape(&scales),
-                        config.kv_lora_rank as i32,
-                        &format!("{attn_prefix}.kv_b_proj"),
-                    )?;
-                    unsafe {
-                        mlxcel_core::dequantize(
-                            &w,
-                            &scales,
-                            &*biases as *const _,
-                            group_size,
-                            bits,
-                            "affine",
-                        )
-                    }
-                } else {
-                    weights.remove(&kv_b_key).unwrap()
-                };
-
-                // Reshape to [num_heads, qk_nope + v_head, kv_lora_rank]
-                let v = mlxcel_core::reshape(&v, &[num_heads, qk_nope + v_head, -1]);
-
-                // Split: wk = v[:, :qk_nope, :].swapaxes(-1, -2), wv = v[:, qk_nope:, :]
-                // Note: MLX slice stop=-1 means dim_size-1 (excludes last), not "to end"
-                let v_last_dim = mlxcel_core::array_shape(&v)[2];
-                let wk = mlxcel_core::slice(&v, &[0, 0, 0], &[num_heads, qk_nope, v_last_dim]);
-                let wk = mlxcel_core::swap_axes(&wk, -1, -2); // [num_heads, kv_lora_rank, qk_nope]
-                let wv = mlxcel_core::slice(
-                    &v,
-                    &[0, qk_nope, 0],
-                    &[num_heads, qk_nope + v_head, v_last_dim],
-                );
-
-                // Store as dense MultiLinear weights (no re-quantization)
-                weights.insert(format!("{}.embed_q.weight", attn_prefix), wk);
-                weights.insert(format!("{}.unembed_out.weight", attn_prefix), wv);
-            }
+            decompose_kv_b_proj(
+                &mut weights,
+                &attn_prefix,
+                l,
+                config.num_attention_heads as i32,
+                config.qk_nope() as i32,
+                config.v_head() as i32,
+                config.kv_lora_rank as i32,
+            )?;
         }
 
         Ok(weights)

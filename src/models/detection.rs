@@ -723,6 +723,10 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "nemotron-nas" => Ok(ModelType::NemotronNAS),
         "rwkv7" => Ok(ModelType::Rwkv7),
         "kimi_linear" => Ok(ModelType::KimiLinear),
+        // Kimi K3 is the text backbone in this wave even though `config.json`
+        // carries `vision_config` and the checkpoint ships `vision_tower.*`
+        // tensors; the sanitizer drops them. #1342 splits text / VLM.
+        "kimi_k3" => Ok(ModelType::KimiK3),
         "kimi_vl" => Ok(ModelType::KimiVL),
         "kimi_k25" => Ok(ModelType::KimiK25),
         // LocateAnything: MoonViT tower + MLP connector + Qwen2 text decoder.

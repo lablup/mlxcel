@@ -58,6 +58,20 @@ Limitations:
 PP splits the model by layer range. It is useful when a model exceeds a single
 device's memory or when hosts have uneven memory capacity.
 
+Kimi K3 (`kimi_k3`) is the family that needs it outright: the full 93-layer,
+2.8T-parameter checkpoint occupies about 1.4 TB at 4 bits (the mxfp4 experts
+plus bf16 attention, shared experts, embeddings and `lm_head`), which is more
+than twice the memory of the largest single Apple Silicon host, so it runs
+only as a pipeline across at least three 512 GB nodes. The partition profile
+(`src/distributed/pipeline/partition_profile_heuristics.rs`) prices each of its
+layers by type, so an automatic split accounts for the dense layer 0, the
+cheaper q-LoRA MLA layers at every fourth position and the 15 to 16 GB MoE
+layers everywhere else, rather than assuming a uniform per-layer cost. A
+layer-truncated local copy (lower `text_config.num_hidden_layers` in
+`config.json`; the sanitizer drops the layers past it) is the single-host
+check for loading, shapes and finite logits, and its output text is meaningless
+by construction.
+
 ### In-process CLI path
 
 ```bash

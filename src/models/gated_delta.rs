@@ -17,7 +17,7 @@
 //! This module provides the core gated delta net primitives used by models
 //! that employ hybrid transformer + linear attention architectures.
 //!
-//! Used by: Qwen3Next, Qwen3.5, KimiLinear
+//! Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gated_delta.py
 
@@ -100,7 +100,8 @@ impl Default for GatedDeltaCache {
 /// so the ops-path state accumulation stays in higher precision (the Python
 /// Metal kernel path uses float32 state internally for the same reason).
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3 (through
+/// [`compute_g_lower_bounded`] with `lower_bound = None`)
 pub fn compute_g(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> UniquePtr<MlxArray> {
     let a_plus_dt = mlxcel_core::add(a, dt_bias);
     let sp = softplus(&a_plus_dt);
@@ -110,6 +111,42 @@ pub fn compute_g(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> UniquePt
     let neg_product = mlxcel_core::negative(&mlxcel_core::multiply(&exp_a_log, &sp));
     // Keep result in float32 (no cast back to input dtype)
     mlxcel_core::exp(&neg_product)
+}
+
+/// Gating values with an optional lower bound on the log-gate.
+///
+/// `lower_bound = None` is [`compute_g`] exactly (the same graph, so the two
+/// agree bit for bit). With `lower_bound = Some(lb)` the gate is
+///
+/// ```text
+/// g = exp(lb * sigmoid(exp(A_log[h]) * (a + dt_bias[h, :])))
+/// ```
+///
+/// which is the `safe_gate` / `lower_bound` form of FLA's KDA kernels
+/// (`chunk_kda` / `fused_recurrent_kda` with `use_gate_in_kernel=True`), as
+/// used by Kimi K3 with the published `gate_lower_bound = -5.0`: the log-gate
+/// is bounded to `(lb, 0)`, so `g` stays inside `(e^lb, 1)` no matter how
+/// large `a` gets, where the softplus form can decay the state to exactly
+/// zero. Computed and returned in float32, like [`compute_g`], so the kernel
+/// path behind [`gated_delta_ops`] is unchanged: the gate is a plain
+/// `[B, T, H, Dk]` (or `[B, T, H]`) float32 input either way.
+///
+/// Used by: KimiK3
+pub fn compute_g_lower_bounded(
+    a_log: &MlxArray,
+    a: &MlxArray,
+    dt_bias: &MlxArray,
+    lower_bound: Option<f32>,
+) -> UniquePtr<MlxArray> {
+    let Some(lower_bound) = lower_bound else {
+        return compute_g(a_log, a, dt_bias);
+    };
+    let a_plus_dt = mlxcel_core::add(a, dt_bias);
+    let a_plus_dt = mlxcel_core::astype(&a_plus_dt, dtype::FLOAT32);
+    let a_log_f32 = mlxcel_core::astype(a_log, dtype::FLOAT32);
+    let exp_a_log = mlxcel_core::exp(&a_log_f32);
+    let inner = mlxcel_core::sigmoid(&mlxcel_core::multiply(&exp_a_log, &a_plus_dt));
+    mlxcel_core::exp(&mlxcel_core::multiply_scalar(&inner, lower_bound))
 }
 
 /// Single recurrent step of the gated delta rule.
@@ -123,7 +160,7 @@ pub fn compute_g(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> UniquePt
 ///
 /// Returns: (y: [B, H, Dv] in q dtype, new_state: [B, H, Dv, Dk] in float32)
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
 pub fn gated_delta_step(
     q: &MlxArray,
     k: &MlxArray,
@@ -214,7 +251,7 @@ pub fn gated_delta_step(
 ///
 /// Returns: (y: [B, T, Hv, Dv] in q dtype, state: [B, Hv, Dv, Dk] in float32)
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
 pub fn gated_delta_ops(
     q: &MlxArray,
     k: &MlxArray,
@@ -481,7 +518,7 @@ fn gated_delta_ops_with_parity(
 /// `Ainv = (I + T)^{-1}` is formed by the finite Neumann series (T is nilpotent).
 /// All decay ratios are kept in the log domain and clamped so no entry overflows.
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
 #[allow(clippy::too_many_arguments)]
 fn gated_delta_chunked(
     q_ref: &MlxArray,
@@ -677,7 +714,7 @@ fn gated_delta_chunked(
 /// lane, so `Dk` must cover at least one full SIMD group and be exactly
 /// divisible by 32. Its GQA mapping also requires an integral `Hv / Hk`.
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear, `speculative_burst::mtp_capable_target`
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3, `speculative_burst::mtp_capable_target`
 /// (the Qwen 3.5 MTP capability gate, issue #1165 hardening)
 pub(crate) fn supports_metal_gated_delta_kernel(hk: i32, hv: i32, dk: i32, dv: i32) -> bool {
     hk > 0 && hv > 0 && dv > 0 && dk >= 32 && dk % 32 == 0 && hv >= hk && hv % hk == 0
@@ -700,11 +737,36 @@ pub fn gated_delta_update(
     state: Option<&MlxArray>,
     mask: Option<&MlxArray>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    gated_delta_update_with_lower_bound(q, k, v, a, b, a_log, dt_bias, state, mask, None)
+}
+
+/// [`gated_delta_update`] with the optional gate lower bound of
+/// [`compute_g_lower_bounded`].
+///
+/// `lower_bound = None` is [`gated_delta_update`] exactly. The bound only
+/// changes how the float32 gate is computed before [`gated_delta_ops`], so
+/// the Metal kernel path (`supports_metal_gated_delta_kernel`) and the ops
+/// fallback are shared with every other caller unchanged.
+///
+/// Used by: KimiK3 (`gate_lower_bound`), [`gated_delta_update`]
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_update_with_lower_bound(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    a: &MlxArray,
+    b: &MlxArray,
+    a_log: &MlxArray,
+    dt_bias: &MlxArray,
+    state: Option<&MlxArray>,
+    mask: Option<&MlxArray>,
+    lower_bound: Option<f32>,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     // Compute beta = sigmoid(b)
     let beta = mlxcel_core::sigmoid(b);
 
-    // Compute gating g = exp(-exp(A_log.float32) * softplus(a + dt_bias)); stays float32
-    let g = compute_g(a_log, a, dt_bias);
+    // Float32 gate: softplus form, or the lower-bounded sigmoid form.
+    let g = compute_g_lower_bounded(a_log, a, dt_bias, lower_bound);
 
     // Run the ops-based implementation
     gated_delta_ops(q, k, v, &g, &beta, state, mask)
@@ -814,7 +876,7 @@ fn warn_if_chain_parity_forfeited_by_shape(g: &MlxArray, mask: Option<&MlxArray>
 /// attention q/k normalization, avoiding the expanded square/mean/sqrt/divide
 /// graph on every decode step.
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
 pub fn scaled_fast_rms_norm_no_weight(x: &MlxArray, scale: f32, eps: f32) -> UniquePtr<MlxArray> {
     let normed = mlxcel_core::fast_rms_norm_no_weight(x, eps);
     mlxcel_core::multiply_scalar(&normed, scale)
