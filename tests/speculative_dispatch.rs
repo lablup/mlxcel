@@ -482,7 +482,7 @@ fn dflash_drafter_passed_to_dash_m_is_rejected_as_not_a_standalone_model() {
         .to_string();
 
     assert!(
-        error.contains("DFlash speculative drafter"),
+        error.contains("DFlash-family speculative drafter"),
         "the error must name the real problem, got: {error}",
     );
     assert!(
