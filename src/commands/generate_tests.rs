@@ -24,7 +24,7 @@ use super::{
     validate_pipeline_parallel_args, validate_tensor_parallel_args,
     validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
-use mlxcel::server::chat_template::ChatTemplateProcessor;
+use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::drafter::DrafterKind;
 use std::fs;
@@ -1272,6 +1272,8 @@ fn cli_video_fallback_leads_each_clip_with_its_own_frame_count() {
 fn cli_video_fallback_keeps_the_lead_sentences_without_a_content_list() {
     // With no chat template there is no content list to interleave, so the
     // sentences go ahead of the text, one per clip, instead of being dropped.
+    // They are flattened the way the server flattens a turn for a template
+    // without image items, with no separator (issue #1766).
     let groups = vec![
         CliVideoFrameGroup {
             lead_text: "A".to_string(),
@@ -1287,7 +1289,79 @@ fn cli_video_fallback_keeps_the_lead_sentences_without_a_content_list() {
         ..CliPromptMedia::default()
     };
     let prompt = resolve_cli_prompt("Q", true, None, &media).unwrap();
-    assert_eq!(prompt, "A\n\nB\n\nQ");
+    assert_eq!(prompt, "ABQ");
+}
+
+/// A template with no `image` content items, the shape the fallback families
+/// InternVL3, DeepSeek-VL2, FastVLM, Molmo and dots.ocr ship. The server
+/// renders such a template from its typed-message path, which flattens each
+/// turn with `flatten_template_text`. The same template string is pinned in
+/// `server::chat_request::tests::video_frames_render_for_an_imageless_template_is_the_flattened_turn`.
+const IMAGELESS_TEMPLATE: &str = "{% for message in messages %}<|{{ message['role'] }}|>\
+    {{ message['content'] }}<|end|>{% endfor %}\
+    {% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+#[test]
+fn cli_video_fallback_renders_the_server_prompt_for_an_imageless_template() {
+    // Issue #1766 review: for a template without image items the CLI used to
+    // join two clips' sentences and the question with `\n\n` while the server
+    // concatenates them, so the two fronts prefilled different prompts for the
+    // same two clips.
+    let processor = ChatTemplateProcessor::with_template(IMAGELESS_TEMPLATE.to_string());
+    assert!(!processor.supports_image_content());
+    let lead_a = mlxcel::video::video_frames_lead_text(2);
+    let lead_b = mlxcel::video::video_frames_lead_text(3);
+
+    let cli = resolve_cli_prompt(
+        "What moves?",
+        false,
+        Some(&processor),
+        &CliPromptMedia {
+            video_frame_groups: vec![
+                CliVideoFrameGroup {
+                    lead_text: lead_a.clone(),
+                    frames: 2,
+                },
+                CliVideoFrameGroup {
+                    lead_text: lead_b.clone(),
+                    frames: 3,
+                },
+            ],
+            ..CliPromptMedia::default()
+        },
+    )
+    .unwrap();
+
+    // The server's side: the turn `apply_video_frame_expansion` makes of a
+    // body carrying the two clips ahead of the question, flattened by the
+    // helper the typed-message render uses and rendered as one user message.
+    // The server test named on `IMAGELESS_TEMPLATE` renders the same body
+    // through `prepare_chat_request` and pins the same string.
+    let server_turn = serde_json::json!([
+        {"type": "text", "text": lead_a},
+        {"type": "image"},
+        {"type": "image"},
+        {"type": "text", "text": lead_b},
+        {"type": "image"},
+        {"type": "image"},
+        {"type": "image"},
+        {"type": "text", "text": "What moves?"},
+    ]);
+    let server = processor
+        .apply(
+            &[ChatMessage {
+                role: "user".to_string(),
+                content: flatten_template_text(&server_turn),
+            }],
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(cli, server);
+    assert_eq!(
+        cli,
+        format!("<|user|>{lead_a}{lead_b}What moves?<|end|><|assistant|>")
+    );
 }
 
 #[cfg(unix)]

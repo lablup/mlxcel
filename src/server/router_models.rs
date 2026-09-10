@@ -980,8 +980,9 @@ fn build_model_app(
     )?;
     let media_support = super::startup::detect_model_media_support(model_path);
     // This runs on the blocking pool (see the `spawn_blocking` in the loader),
-    // so the allowlist canonicalization and the ffmpeg probe happen here once
-    // per model load rather than on a request's Tokio worker (issue #1766).
+    // so the allowlist canonicalization, its writable-directory warning and
+    // the ffmpeg probe happen here once per model load rather than on a
+    // request's Tokio worker (issue #1766).
     let video_dir_allowlist = super::startup::resolve_video_request_inputs(media_support);
     let state = AppState::with_observability(
         Arc::new(provider),

@@ -41,7 +41,9 @@ use mlxcel::{
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
     select_backend,
-    server::chat_template::{ChatMessage, ChatTemplateProcessor, template_rejection_message},
+    server::chat_template::{
+        ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
+    },
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
     vlm_runtime::prepared_embedding_refs,
@@ -700,8 +702,9 @@ pub(crate) struct CliPromptMedia {
     /// order. Each renders as its lead sentence followed by its frames, after
     /// `images`, which is the order [`CliVideoFrames::splice_into`] appends the
     /// frame files to `--image` in. It is also the layout the server's
-    /// `apply_video_frame_expansion` gives a body carrying the same clips
-    /// ahead of the question, so both fronts render the same prompt.
+    /// `apply_video_frame_expansion` gives a body that lists the same clips
+    /// ahead of its question, so for such a body both fronts render the same
+    /// prompt, with or without image items in the template.
     pub(crate) video_frame_groups: Vec<CliVideoFrameGroup>,
     /// `<|video|>` content parts, for a family that consumes the clip
     /// natively (see [`cli_video_content_part_count`]).
@@ -724,16 +727,23 @@ impl CliPromptMedia {
 
     /// The user text for a render with no content list to place the lead
     /// sentences in (no chat template, a template without image items, or one
-    /// that failed on the list): the sentences go ahead of the text, in clip
-    /// order, so the model is still told what the images are.
-    fn text_with_video_leads(&self, user_prompt: &str) -> String {
-        let mut text = String::new();
-        for group in &self.video_frame_groups {
-            text.push_str(&group.lead_text);
-            text.push_str("\n\n");
-        }
-        text.push_str(user_prompt);
-        text
+    /// that failed on the list): the turn's text items, each clip's lead
+    /// sentence in clip order and then the question, flattened by
+    /// [`flatten_template_text`].
+    ///
+    /// That is the helper the server's typed-message render flattens the same
+    /// turn with, so a template without image items gets identical user text
+    /// from both fronts: the sentences join each other and the question with
+    /// no separator (issue #1766). Without fallback clips this is the question
+    /// unchanged.
+    fn flattened_text(&self, user_prompt: &str) -> String {
+        let mut parts: Vec<serde_json::Value> = self
+            .video_frame_groups
+            .iter()
+            .map(|group| serde_json::json!({"type": "text", "text": group.lead_text}))
+            .collect();
+        parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
+        flatten_template_text(&serde_json::Value::Array(parts))
     }
 }
 
@@ -758,7 +768,7 @@ fn apply_vlm_chat_template(
     // content items.  Templates that don't (e.g. Vicuna, ChatML) would
     // render the raw JSON list as text, producing garbled output.
     if !processor.supports_image_content() {
-        return apply_user_chat_template(processor, &media.text_with_video_leads(user_prompt));
+        return apply_user_chat_template(processor, &media.flattened_text(user_prompt));
     }
 
     // Build a multimodal content list:
@@ -823,7 +833,7 @@ fn apply_vlm_chat_template(
             Err(rejection)
         } else {
             // Fallback: text-only template
-            apply_user_chat_template(processor, &media.text_with_video_leads(user_prompt))
+            apply_user_chat_template(processor, &media.flattened_text(user_prompt))
         }
     })
 }
@@ -835,11 +845,11 @@ fn resolve_cli_prompt(
     media: &CliPromptMedia,
 ) -> Result<String> {
     if no_chat_template {
-        return Ok(media.text_with_video_leads(user_prompt));
+        return Ok(media.flattened_text(user_prompt));
     }
 
     processor.map_or_else(
-        || Ok(media.text_with_video_leads(user_prompt)),
+        || Ok(media.flattened_text(user_prompt)),
         |processor| {
             // Route an audio-bearing request through the VLM template only when
             // the template actually renders audio content items. This keeps the
@@ -852,7 +862,7 @@ fn resolve_cli_prompt(
             if media.image_placeholders() > 0 || media.videos > 0 || emit_audio {
                 apply_vlm_chat_template(processor, user_prompt, media)
             } else {
-                apply_user_chat_template(processor, &media.text_with_video_leads(user_prompt))
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt))
             }
         },
     )

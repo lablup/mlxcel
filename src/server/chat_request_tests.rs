@@ -3810,6 +3810,71 @@ fn video_frame_budget_refusal_names_the_frames() {
     );
 }
 
+/// A template with no `image` content items, the shape the fallback families
+/// InternVL3, DeepSeek-VL2, FastVLM, Molmo and dots.ocr ship. The same template
+/// string is pinned in
+/// `commands::generate::tests::cli_video_fallback_renders_the_server_prompt_for_an_imageless_template`.
+const IMAGELESS_TEMPLATE: &str = "{% for message in messages %}<|{{ message['role'] }}|>\
+    {{ message['content'] }}<|end|>{% endfor %}\
+    {% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+#[tokio::test]
+async fn video_frames_render_for_an_imageless_template_is_the_flattened_turn() {
+    // Issue #1766 review. A template without image items is rendered from the
+    // typed-message path, which flattens the expanded turn with
+    // `flatten_template_text`: the two lead sentences and the question are
+    // concatenated with no separator. The CLI flattens its turn with the same
+    // helper, and the CLI test named on `IMAGELESS_TEMPLATE` pins its render to
+    // this same string, so the two fronts prefill the same prompt.
+    let processor = ChatTemplateProcessor::with_template(IMAGELESS_TEMPLATE.to_string());
+    assert!(!processor.supports_image_content());
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///clip-a.mp4"),
+        video_part("file:///clip-b.mp4"),
+        ContentPart::Text {
+            text: "What moves?".to_string(),
+        },
+    ])]);
+    apply_video_frame_expansion(
+        &mut request,
+        vec![
+            (0, 0, vec![frame_png(1), frame_png(2)]),
+            (0, 1, vec![frame_png(3), frame_png(4), frame_png(5)]),
+        ],
+    );
+
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .expect("an expanded two-clip body renders");
+
+    let lead_a = video_frames_lead_text(2);
+    let lead_b = video_frames_lead_text(3);
+    assert_eq!(
+        prepared.prompt,
+        format!("<|user|>{lead_a}{lead_b}What moves?<|end|><|assistant|>")
+    );
+}
+
+#[test]
+fn has_video_urls_agrees_with_video_urls() {
+    // `has_video_urls` answers the question `video_urls().is_empty()` asked,
+    // without cloning the parts (issue #1766).
+    let text_only = request_with_messages(vec![user_parts(vec![ContentPart::Text {
+        text: "no clip".to_string(),
+    }])]);
+    assert!(!text_only.has_video_urls());
+    assert!(text_only.video_urls().is_empty());
+
+    let with_clip = request_with_messages(vec![
+        user_parts(vec![ContentPart::Text {
+            text: "first turn".to_string(),
+        }]),
+        user_parts(vec![video_part("data:video/mp4;base64,AAAA")]),
+    ]);
+    assert!(with_clip.has_video_urls());
+    assert_eq!(with_clip.video_urls().len(), 1);
+}
+
 #[test]
 fn video_frames_lead_text_names_the_frame_count() {
     assert_eq!(

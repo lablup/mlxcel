@@ -526,11 +526,12 @@ impl ErrorResponse {
     /// Build a `499 Client Closed Request`, the non-standard status nginx logs
     /// when the client went away before the response was ready.
     ///
-    /// Answered only when a handler notices the disconnect itself, as the
-    /// video-frames fallback does through its cancellation token (issue
-    /// #1766). Nobody reads the body; the status keeps the request out of the
-    /// 400s, which would blame the client for a request it never got an
-    /// answer to.
+    /// Defensive (issue #1766): the video-frames fallback maps its
+    /// `Cancelled` error here, which no route receives today, because the
+    /// routes' token is cancelled only by its drop guard while the handler
+    /// future is being dropped. If a later caller cancels while still
+    /// polling, the status keeps that request out of the 400s, which would
+    /// blame the client.
     pub fn client_closed_request() -> Self {
         Self {
             error: ErrorDetail {

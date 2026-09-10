@@ -239,14 +239,17 @@ PNG-encoded, and sent to the model as that many ordinary images in chronological
 order, preceded by the sentence `Here is a video as a sequence of N frames in
 chronological order.` so the model reads them as one clip. Several clips get
 one sentence each, naming that clip's own frame count and placed immediately
-ahead of that clip's frames, so the CLI (`--video` repeated) and the server
-(several `video_url` parts) render the same prompt for the same clips. On the
-CLI the frames are written as PNG files into a private per-run directory under
-the system temp directory (mode 0700, each file 0600 on Unix) and removed when
-the run ends. Nothing about the image pipeline changes: the template emits one
-image placeholder per frame, the vision tower sees stills, and the prompt-cache
-multimodal digest hashes the frame bytes, so two requests for the same clip at
-the same fps and frame cap share a prefix and a different clip does not.
+ahead of that clip's frames. The CLI renders its `--video` clips after any
+`--image` inputs and before the question, so it produces the same prompt as a
+server body that lists the same clips ahead of its question; a template without
+image content items receives the sentences and the question joined with no
+separator on both fronts. On the CLI the frames are written as PNG files into a
+private per-run directory under the system temp directory (mode 0700, each file
+0600 on Unix) and removed when the run ends. Nothing about the image pipeline
+changes: the template emits one image placeholder per frame, the vision tower
+sees stills, and the prompt-cache multimodal digest hashes the frame bytes, so
+two requests for the same clip at the same fps and frame cap share a prefix and
+a different clip does not.
 
 What this costs and what it does not buy:
 

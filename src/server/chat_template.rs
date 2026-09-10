@@ -144,6 +144,31 @@ pub fn template_rejection_message(err: &anyhow::Error) -> Option<&str> {
         .map(TemplateRejection::message)
 }
 
+/// Flatten chat-template content items to the text a template without media
+/// content items receives: the `text` of every item, in order, joined with no
+/// separator. A plain string passes through unchanged; media items carry no
+/// text and drop out.
+///
+/// One definition for both fronts (issue #1766). The server's typed-message
+/// render flattens every message through it, and the CLI flattens its user
+/// turn through it whenever it renders without a content list, so two
+/// video-frames fallback clips reach an `image`-less template as the same text
+/// from `mlxcel generate` and from `/v1/chat/completions`.
+///
+/// Used by: `server::chat_request` (`build_chat_messages_with_thinking` and
+/// `build_raw_json_messages_with_thinking`) and `commands::generate`
+/// (`CliPromptMedia::flattened_text`).
+pub fn flatten_template_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            .collect(),
+        _ => String::new(),
+    }
+}
+
 /// Chat template processor
 #[derive(Clone)]
 pub struct ChatTemplateProcessor {

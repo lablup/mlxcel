@@ -537,6 +537,16 @@ impl MessageContent {
                 .collect(),
         }
     }
+
+    /// Whether this content carries a `video_url` part, without cloning any.
+    pub fn has_video_urls(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::VideoUrl { .. })),
+        }
+    }
 }
 
 pub(crate) fn ordered_image_sentinel(ordinal: usize) -> String {
@@ -1275,6 +1285,15 @@ impl ChatCompletionRequest {
             .iter()
             .flat_map(|m| m.content.video_urls())
             .collect()
+    }
+
+    /// Whether any message carries a `video_url` part.
+    ///
+    /// Use this rather than `video_urls().is_empty()` to ask the question:
+    /// that clones every `VideoUrl`, and a `data:video/` URL can be most of a
+    /// request body the JSON limit lets reach 2 GiB (issue #1766).
+    pub fn has_video_urls(&self) -> bool {
+        self.messages.iter().any(|m| m.content.has_video_urls())
     }
 }
 

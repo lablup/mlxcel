@@ -66,7 +66,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::multimodal::video::video_frames_lead_text;
 
-use super::chat_template::{ChatMessage, ChatTemplateProcessor, template_rejection_message};
+use super::chat_template::{
+    ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
+};
 use super::chat_template_kwargs::{
     ChatTemplateKwargs, extract_request_kwargs, merge_server_and_request, strip_rolling_checkpoint,
     strip_think_block,
@@ -371,10 +373,16 @@ pub(crate) enum VideoFramesError {
     /// A client-facing refusal: `ffmpeg` missing, a clip that cannot be
     /// resolved or decoded, or frames over the per-request image budget.
     Rejected(String),
-    /// The request's cancellation token fired before the expansion finished
-    /// (issue #1766). The routes cancel it when the client disconnects, so
-    /// nobody is waiting for an answer and this must not surface as a 400 the
-    /// client caused.
+    /// The cancellation token fired before the expansion finished (issue
+    /// #1766).
+    ///
+    /// Defensive: no route receives this today. The routes' token has one
+    /// canceller, its own drop guard, which fires only while the handler
+    /// future is being dropped, and by then nothing polls the expansion. What
+    /// the token changes in production is a decode still queued on the
+    /// blocking pool, which returns before it starts. The variant is here for
+    /// a caller that cancels while still polling, and maps to a non-400 so
+    /// such a caller would not blame the client.
     Cancelled,
 }
 
@@ -418,6 +426,11 @@ pub(crate) async fn expand_request_video_parts(
     state: &super::AppState,
     request: &mut ChatCompletionRequest,
 ) -> std::result::Result<usize, VideoFramesError> {
+    // Most requests carry no clip, or reach a checkpoint that does not use the
+    // fallback; they return here without allocating a token.
+    if !state.media_support.video_frames_fallback || !request.has_video_urls() {
+        return Ok(0);
+    }
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     expand_video_parts_to_frames(
@@ -1819,7 +1832,7 @@ fn build_raw_json_messages_with_thinking(
             // Strip think blocks from assistant messages before the checkpoint.
             let stripped = strip_indices.contains(&idx);
             let normalized_content = template_content(&m.content, ordered_media.as_mut());
-            let raw_content = template_text_content(&normalized_content);
+            let raw_content = flatten_template_text(&normalized_content);
             let content = if stripped {
                 serde_json::Value::String(strip_think_block(&raw_content).into_owned())
             } else {
@@ -1962,17 +1975,6 @@ fn template_content(
     }
 }
 
-fn template_text_content(content: &serde_json::Value) -> String {
-    match content {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
-            .collect(),
-        _ => String::new(),
-    }
-}
-
 /// Normalize each tool call's `function.arguments` from a JSON-encoded string
 /// into a parsed object so dict-iterating chat templates can consume it.
 ///
@@ -2094,7 +2096,7 @@ fn build_chat_messages_with_thinking(
         .enumerate()
         .map(|(idx, message)| {
             let normalized_content = template_content(&message.content, ordered_media.as_mut());
-            let raw = template_text_content(&normalized_content);
+            let raw = flatten_template_text(&normalized_content);
             let content = if strip_indices.contains(&idx) {
                 strip_think_block(&raw).into_owned()
             } else {

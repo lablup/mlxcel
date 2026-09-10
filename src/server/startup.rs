@@ -1063,6 +1063,9 @@ pub(super) fn resolve_dry_penalty_last_n(value: i32) -> usize {
 ///
 /// A directory that does not exist yet when the server starts is dropped with
 /// a warning and stays dropped: the list is resolved here and not per request.
+/// The list is also scanned for group- or world-writable directories
+/// ([`warn_on_insecure_video_allowlist`]) here rather than in [`start_server`]
+/// alone, so a model the router loads warns the same way.
 ///
 /// Used by: [`start_server`] (single-model server) and
 /// `router_models::build_model_app` (one call per model the router loads).
@@ -1074,15 +1077,22 @@ pub(crate) fn resolve_video_request_inputs(support: ModelMediaSupport) -> Arc<Ve
              the process: restart the server after installing ffmpeg."
         );
     }
-    Arc::new(super::media::video_dir_allowlist_from_env())
+    let allowlist = super::media::video_dir_allowlist_from_env();
+    // A loose-mode allowlist directory is an operator-policy red flag even
+    // though the fd-passing resolver closes the canonicalize-to-open race:
+    // anyone with shell access can drop files into it.
+    warn_on_insecure_video_allowlist(&allowlist);
+    Arc::new(allowlist)
 }
 
-/// Walk the directories named in `MLXCEL_VIDEO_DIR_ALLOWLIST` once at
-/// startup and emit a `tracing::warn!` for any entry whose group or world
-/// write bits are set (hardening / follow-up).
+/// Walk the directories named in `MLXCEL_VIDEO_DIR_ALLOWLIST` once per model
+/// load (server startup, or each model the router loads) and emit a
+/// `tracing::warn!` for any entry whose group or world write bits are set
+/// (hardening / follow-up).
 ///
-/// Takes the list [`resolve_video_request_inputs`] resolved, so startup reads
-/// the env var once, and delegates the actual permission check to
+/// Called from [`resolve_video_request_inputs`] with the list it resolved, so
+/// each model load reads the env var once, and delegates the actual
+/// permission check to
 /// [`super::media::scan_insecure_allowlist_dirs`]. An empty list (the env var
 /// empty or unset) makes this a no-op for operators who haven't opted into
 /// the feature.
@@ -2989,18 +2999,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // Resolved here, before the listener is bound, so the video-frames
     // fallback neither canonicalizes the allowlist nor spawns the ffmpeg probe
     // on a request's Tokio worker (issue #1766).
+    // It also runs the writable-allowlist-directory warning.
     let video_dir_allowlist = resolve_video_request_inputs(media_support);
-
-    // hardening: scan the operator-provided
-    // `MLXCEL_VIDEO_DIR_ALLOWLIST` directories for world/group-writable
-    // entries. The technical TOCTOU race (attacker swaps the file between
-    // canonicalize and ffmpeg open) is now closed's
-    // fd-passing fix in `media::extract_chat_video_paths_with_allowlist`,
-    // but a loose-mode allowlist directory still violates operator-policy
-    // hygiene and can re-enable the race if a future ffmpeg version
-    // interprets `/dev/fd/N` differently. We keep the warning as
-    // defence-in-depth.
-    warn_on_insecure_video_allowlist(&video_dir_allowlist);
 
     // build the Responses-API stores from the resolved limits.
     // `max_entries = 0` disables the store entirely; otherwise build with

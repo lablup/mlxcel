@@ -542,10 +542,14 @@ impl PrivateTempDir {
     /// Create `<system temp dir>/<prefix>-<uuid>`.
     ///
     /// # Errors
-    /// Returns the I/O error from creating the directory. The create is
-    /// exclusive, so an entry already at that path, a planted symlink
+    /// Refuses a `prefix` that is not a plain file name, since a separator or
+    /// `..` would put the directory somewhere other than directly under the
+    /// temp directory, possibly inside a directory another user controls.
+    /// Otherwise returns the I/O error from creating the directory. The create
+    /// is exclusive, so an entry already at that path, a planted symlink
     /// included, is an error rather than something to reuse.
     pub fn create(prefix: &str) -> io::Result<Self> {
+        require_plain_file_name(prefix)?;
         let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -574,12 +578,7 @@ impl PrivateTempDir {
     pub fn write_file(&self, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         use std::io::Write as _;
 
-        if Path::new(name).file_name().and_then(|file| file.to_str()) != Some(name) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{name:?} is not a plain file name"),
-            ));
-        }
+        require_plain_file_name(name)?;
         let path = self.path.join(name);
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -600,6 +599,20 @@ impl Drop for PrivateTempDir {
         {
             tracing::warn!("PrivateTempDir: failed to remove {:?}: {}", self.path, err);
         }
+    }
+}
+
+/// Refuse anything but a single, plain path component: no separator, no `.`
+/// or `..`, no root, not empty. `Path::join` replaces the base outright for an
+/// absolute component, so a name that fails this check could land anywhere.
+fn require_plain_file_name(name: &str) -> io::Result<()> {
+    if Path::new(name).file_name().and_then(|file| file.to_str()) == Some(name) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} is not a plain file name"),
+        ))
     }
 }
 

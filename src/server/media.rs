@@ -544,8 +544,10 @@ pub(crate) async fn extract_chat_video_paths(
     // `prepare_chat_request_with_cache` calls this for every request, so a
     // body with no clip, which includes every body the video-frames fallback
     // has already rewritten into images, returns before reading the
-    // environment or touching the filesystem (issue #1766).
-    if request.video_urls().is_empty() {
+    // environment or touching the filesystem (issue #1766). `has_video_urls`
+    // rather than `video_urls().is_empty()`, which would clone every inline
+    // `data:video/` payload just to count them.
+    if !request.has_video_urls() {
         return Vec::new();
     }
     // The native-video path still reads the allowlist per request, because
