@@ -2287,6 +2287,21 @@ mod ffi {
         /// counters. The state is process-wide; tests need a clean slate.
         fn sampling_dispatch_reset();
 
+        /// Test-only. Stash a launch into slot 0 of the pending-verification
+        /// ring whose event is valid, signalled, and carries an error, the
+        /// shape a genuinely failed command buffer produces at MLX 81ba1c6a
+        /// (ml-explore/mlx#3742). Exercises the Failed branch of the deferred
+        /// drain without needing a real command-buffer failure.
+        fn sampling_dispatch_stash_failed_launch_for_test();
+
+        /// Test-only. True while the error the stash above attached has not
+        /// been consumed by `Error::check()` (which `array::is_available()`
+        /// would have done through `Event::check_error()`).
+        fn sampling_dispatch_stashed_test_error_is_valid() -> bool;
+
+        /// Test-only. True once slot 0 no longer holds a stashed launch.
+        fn sampling_dispatch_stashed_test_slot_is_empty() -> bool;
+
         // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
         /// Cumulative sum along axis
         fn cumsum(a: &MlxArray, axis: i32, reverse: bool, inclusive: bool) -> UniquePtr<MlxArray>;

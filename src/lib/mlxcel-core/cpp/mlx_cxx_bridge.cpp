@@ -5653,6 +5653,75 @@ static void drain_pending_verification() {
     (void)unconverged;
 }
 
+// -- Test-only fixture for the Failed branch of `drain_pending_verification` --
+//
+// A real Failed launch takes an actual command-buffer error, which nothing in
+// a unit test process triggers on purpose. This hand-builds the same state
+// using only the public `Event`/`Error` API (`mlx/event.h`, `mlx/error.h`): a
+// real event, signalled through a real, successful command, with a synthetic
+// error attached AFTERWARDS so nothing has called `Error::check()` on it
+// (which would consume it) before the test does.
+namespace {
+    // Leaked like `pending_verification()` above: `Event::set_error` stores a
+    // raw pointer, so the error has to outlive every event that points at it,
+    // including one a prior stash left behind.
+    mlx::core::Error& stashed_test_error() {
+        static mlx::core::Error* error = new mlx::core::Error();
+        return *error;
+    }
+}
+
+// Test-only. Stash a launch into slot 0 of the pending-verification ring
+// whose shared event is valid, signalled, and carries an error, mirroring a
+// genuinely failed command buffer at MLX 81ba1c6a (ml-explore/mlx#3742).
+// `array::is_available()` would call `Event::check_error()` on this and
+// throw, consuming the error; `stashed_launch_state` must not.
+void sampling_dispatch_stash_failed_launch_for_test() {
+    auto stream = mlx::core::default_stream(mlx::core::default_device());
+    mlx::core::Event event(stream);
+    event.set_value(1);
+    event.signal(stream);
+    // Land the signal for real before an error is attached: `synchronize`
+    // commits and waits on it, which is safe here because nothing has stored
+    // an error on the event yet for it to `check()` and consume.
+    mlx::core::synchronize(stream);
+
+    auto& error = stashed_test_error();
+    error.set_message(std::make_shared<std::string>(
+        "mlxcel test: synthetic launch failure"));
+    event.set_error(error);
+
+    const uint32_t zero = 0;
+    mlx::core::array ok(&zero, mlx::core::Shape{1}, mlx::core::uint32);
+    mlx::core::array rounds(&zero, mlx::core::Shape{1}, mlx::core::uint32);
+    ok.set_status(mlx::core::array::Status::evaluated);
+    rounds.set_status(mlx::core::array::Status::evaluated);
+    ok.attach_event(event);
+    rounds.attach_event(event);
+
+    auto& pending = pending_verification();
+    std::lock_guard<std::mutex> lock(pending.mu);
+    pending.ok[0] = std::move(ok);
+    pending.rounds[0] = std::move(rounds);
+    pending.cap[0] = 1;
+}
+
+// Test-only. True while the error the stash above attached has not been
+// consumed, i.e. nothing called `Error::check()` on it (which
+// `Event::check_error()`, and so `array::is_available()`, would have done).
+bool sampling_dispatch_stashed_test_error_is_valid() {
+    return stashed_test_error().valid();
+}
+
+// Test-only. True once slot 0 no longer holds a stashed launch, which is what
+// dropping a Failed launch looks like from outside
+// `drain_pending_verification`.
+bool sampling_dispatch_stashed_test_slot_is_empty() {
+    auto& pending = pending_verification();
+    std::lock_guard<std::mutex> lock(pending.mu);
+    return !pending.ok[0].has_value() && !pending.rounds[0].has_value();
+}
+
 // The overflow counting rule and its report, shared by the deferred drain and
 // by the test hook so there is exactly one implementation of both.
 //

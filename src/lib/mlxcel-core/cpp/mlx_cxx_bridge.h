@@ -1483,6 +1483,18 @@ void sampling_dispatch_drain_pending();
 // Clear every recorded dispatch outcome and both cap-overflow counters.
 void sampling_dispatch_reset();
 
+// Test-only. Stash a launch into slot 0 of the pending-verification ring
+// whose event is valid, signalled, and carries an error, the shape a failed
+// command buffer produces at MLX 81ba1c6a (ml-explore/mlx#3742).
+void sampling_dispatch_stash_failed_launch_for_test();
+
+// Test-only. True while the error the stash above attached has not been
+// consumed.
+bool sampling_dispatch_stashed_test_error_is_valid();
+
+// Test-only. True once slot 0 no longer holds a stashed launch.
+bool sampling_dispatch_stashed_test_slot_is_empty();
+
 // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
 // Cumulative sum along axis
 std::unique_ptr<MlxArray> cumsum(const MlxArray& a, int32_t axis, bool reverse, bool inclusive);
