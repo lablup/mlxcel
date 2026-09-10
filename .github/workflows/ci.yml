@@ -104,6 +104,11 @@ jobs:
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
+              # The CUDA half of the same link line: mlxcel-core's build
+              # script names the CUDA libraries, and the MLX pin decides which
+              # of them libmlx.a needs. See the `xla-link` job comment.
+              - 'src/lib/mlxcel-core/build.rs'
+              - 'src/lib/mlx-cpp/CMakeLists.txt'
             # Everything that can compile differently per CUDA architecture: the
             # MLX overlays and turbo kernels, the pinned MLX commit, and the
             # build scripts that hand CMake the architecture list. Rust sources
@@ -519,6 +524,15 @@ jobs:
   # #1274 (found by hand later, not by CI). Running on every Rust PR was
   # rejected because the release link is minutes of shared-runner time and the
   # overwhelming majority of Rust PRs cannot affect the link line.
+  #
+  # `src/lib/mlxcel-core/build.rs` and `src/lib/mlx-cpp/CMakeLists.txt` are on
+  # the causal path as well. The former lists the CUDA libraries every
+  # `--features cuda` link resolves `libmlx.a` against; the latter holds the MLX
+  # pin, and a pin bump can add one without touching any build script. That is
+  # how ml-explore/mlx#4208's cuSOLVER dependency arrived with the 81ba1c6a bump
+  # (#1769): MLX links it PRIVATE, `cargo check` never links, and no job on the
+  # PR linked CUDA. A pin bump invalidates `mlxcel-core`'s MLX build, so those
+  # runs pay the cold figure below rather than the warm one.
   #
   # Measured cost of this job's link command on the GB10 runner: 15m40s from a
   # purged `CARGO_TARGET_DIR`, most of which is MLX's CUDA sources compiling
