@@ -153,6 +153,16 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 video_count, frame_slots, total_tokens
             );
         }
+        VlmPreparationSummary::Gemma4VideoAudio {
+            video_count,
+            frame_slots,
+            audio_tokens,
+            total_tokens,
+        } => {
+            println!(
+                "Gemma4: expanded {video_count} video(s) into {frame_slots} frame slot(s) and audio into {audio_tokens} soft tokens ({total_tokens} total tokens)"
+            );
+        }
         VlmPreparationSummary::MuseGlimmer {
             image_blocks,
             image_tokens,
@@ -448,13 +458,25 @@ pub(crate) fn compute_vlm_embeddings(
     no_chat_template: bool,
 ) -> Result<Option<InputEmbeddings>> {
     // Handle video-only or video + image mode for Gemma4.
-    // Video and audio cannot coexist in this CLI surface yet, surface a
-    // clean error rather than silently accept one.
+    // Gemma 4 Unified merges video frames and audio in one prompt (issue
+    // #1349); every other family still has no path that scatters both, so
+    // surface a clean error rather than silently drop one modality.
     if !video_paths.is_empty() {
-        if audio_path.is_some() {
-            return Err(anyhow::anyhow!(
-                "Combined --video and --audio inputs are not supported yet"
-            ));
+        if let Some(audio) = audio_path {
+            let LoadedModel::Gemma4Unified(unified) = model else {
+                return Err(anyhow::anyhow!(
+                    "Combined --video and --audio inputs are not supported yet"
+                ));
+            };
+            return compute_gemma4_unified_video_and_audio_embeddings(
+                unified,
+                prompt_tokens,
+                image_paths,
+                video_paths,
+                audio,
+                target_fps,
+                image_soft_tokens,
+            );
         }
         if let LoadedModel::InklingVLM(inkling) = model {
             let prompt_layout = if no_chat_template {
@@ -1124,6 +1146,139 @@ fn compute_gemma4_multimodal_embeddings(
     Ok(Some(embeddings))
 }
 
+/// Preprocess the companion `--image` paths through the Gemma 4 Unified
+/// encoder-free patch projector and expand their prompt placeholders.
+///
+/// Shared by the audio-only, video-only and video+audio builders so all three
+/// produce the identical image half of the prompt; that is what keeps the
+/// single-modality token streams unchanged by issue #1349.
+fn gemma4_unified_cli_images(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    image_soft_tokens: Option<usize>,
+) -> Result<Vec<mlxcel::vision::processors::gemma4_unified::Gemma4UnifiedImageInput>> {
+    if image_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let images: Vec<image::DynamicImage> = image_paths
+        .iter()
+        .map(|path| open_image(path))
+        .collect::<Result<Vec<_>>>()?;
+    println!("Loaded {} image(s).", images.len());
+    let processed = unified
+        .processor
+        .preprocess_with_budget(&images, image_soft_tokens);
+    let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
+    mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
+        prompt_tokens,
+        unified.image_token_id,
+        unified.boi_token_id,
+        unified.eoi_token_id,
+        &num_soft_tokens,
+    )?;
+    Ok(processed)
+}
+
+/// Decode every `--video` path into sampled frames at `target_fps`.
+///
+/// `target_fps == 0` is rejected downstream by `smart_nframes`, so the ffmpeg
+/// availability check is surfaced here as a clean error first.
+fn gemma4_unified_cli_decode_videos(
+    video_paths: &[PathBuf],
+    target_fps: f64,
+) -> Result<Vec<Vec<image::DynamicImage>>> {
+    if !video::ffmpeg_available() {
+        return Err(anyhow::anyhow!(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+        ));
+    }
+    let videos = video::load_videos(video_paths, Some(target_fps), None)
+        .map_err(|err| anyhow::anyhow!("Failed to load video(s): {}", err))?;
+    println!(
+        "Loaded {} video(s) ({} total frames after sampling).",
+        videos.len(),
+        videos.iter().map(Vec::len).sum::<usize>()
+    );
+    Ok(videos)
+}
+
+/// Patchify every decoded frame through the encoder-free vision embedder and
+/// expand the prompt into per-frame `<boi> video_token*N <eoi>` runs.
+///
+/// Frames stay flat in (video, frame) order so the scatter sees them in the
+/// same order as the expanded `video_token_id` placeholders. Returns the flat
+/// frame list and the total frame count.
+fn gemma4_unified_cli_video_frames(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    decoded_videos: &[Vec<image::DynamicImage>],
+) -> Result<(
+    Vec<mlxcel::vision::processors::gemma4_unified::Gemma4UnifiedImageInput>,
+    usize,
+)> {
+    let mut video_frames: Vec<mlxcel::vision::processors::gemma4_unified::Gemma4UnifiedImageInput> =
+        Vec::new();
+    let mut video_frame_tokens: Vec<Vec<usize>> = Vec::with_capacity(decoded_videos.len());
+    for frames in decoded_videos {
+        let processed = unified.processor.preprocess_video_frames(frames);
+        video_frame_tokens.push(processed.iter().map(|f| f.num_soft_tokens).collect());
+        video_frames.extend(processed);
+    }
+
+    mlxcel::vlm_runtime::expand_gemma4_unified_video_tokens(
+        prompt_tokens,
+        unified.video_token_id,
+        unified.boi_token_id,
+        unified.eoi_token_id,
+        &video_frame_tokens,
+    )?;
+
+    let total_frames: usize = video_frame_tokens.iter().map(Vec::len).sum();
+    Ok((video_frames, total_frames))
+}
+
+/// Load the `--audio` clip, chunk the raw waveform into
+/// `audio_samples_per_token` frames, and expand the prompt's audio run.
+fn gemma4_unified_cli_audio(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    audio_path: &Path,
+) -> Result<mlxcel::vision::processors::gemma4_unified::Gemma4UnifiedAudioInput> {
+    let (samples, sample_rate) =
+        mlxcel::audio::load_wav_file(audio_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!(
+        "Loaded audio: {} samples at {} Hz ({:.1}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate.max(1) as f64
+    );
+
+    let audio_input = unified.processor.process_audio(&samples);
+    expand_gemma4_audio_tokens(
+        prompt_tokens,
+        unified.audio_token_id,
+        unified.boa_token_id,
+        unified.eoa_token_id,
+        audio_input.num_frames,
+    );
+    Ok(audio_input)
+}
+
+/// Reject an audio request against a checkpoint that was loaded without the
+/// Gemma 4 Unified audio embedder.
+fn require_gemma4_unified_audio_embedder(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+) -> Result<()> {
+    if unified.embed_audio.is_none() {
+        return Err(anyhow::anyhow!(
+            "This Gemma 4 Unified model has no audio embedder. Audio input is not supported."
+        ));
+    }
+    Ok(())
+}
+
 /// Compute audio-only or combined image + audio embeddings for Gemma 4
 /// Unified (encoder-free: waveform chunking, no mel spectrogram / Conformer).
 fn compute_gemma4_unified_multimodal_embeddings(
@@ -1133,56 +1288,11 @@ fn compute_gemma4_unified_multimodal_embeddings(
     audio_path: &Path,
     image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
-    use mlxcel::audio;
+    require_gemma4_unified_audio_embedder(unified)?;
 
-    if unified.embed_audio.is_none() {
-        return Err(anyhow::anyhow!(
-            "This Gemma 4 Unified model has no audio embedder. Audio input is not supported."
-        ));
-    }
-
-    // Process images (optional) through the encoder-free patch projector.
-    let processed_images = if image_paths.is_empty() {
-        Vec::new()
-    } else {
-        let images: Vec<image::DynamicImage> = image_paths
-            .iter()
-            .map(|path| open_image(path))
-            .collect::<Result<Vec<_>>>()?;
-        println!("Loaded {} image(s).", images.len());
-        let processed = unified
-            .processor
-            .preprocess_with_budget(&images, image_soft_tokens);
-        let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
-        mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
-            prompt_tokens,
-            unified.image_token_id,
-            unified.boi_token_id,
-            unified.eoi_token_id,
-            &num_soft_tokens,
-        )?;
-        processed
-    };
-
-    // Process audio: raw waveform chunked into audio_samples_per_token frames.
-    let (samples, sample_rate) =
-        audio::load_wav_file(audio_path).map_err(|e| anyhow::anyhow!("{}", e))?;
-    println!(
-        "Loaded audio: {} samples at {} Hz ({:.1}s)",
-        samples.len(),
-        sample_rate,
-        samples.len() as f64 / sample_rate.max(1) as f64
-    );
-
-    let audio_input = unified.processor.process_audio(&samples);
-    let num_audio_tokens = audio_input.num_frames;
-    expand_gemma4_audio_tokens(
-        prompt_tokens,
-        unified.audio_token_id,
-        unified.boa_token_id,
-        unified.eoa_token_id,
-        num_audio_tokens,
-    );
+    let processed_images =
+        gemma4_unified_cli_images(unified, prompt_tokens, image_paths, image_soft_tokens)?;
+    let audio_input = gemma4_unified_cli_audio(unified, prompt_tokens, audio_path)?;
 
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
@@ -1194,7 +1304,7 @@ fn compute_gemma4_unified_multimodal_embeddings(
     );
 
     print_preparation_summary(VlmPreparationSummary::Gemma4Audio {
-        audio_tokens: num_audio_tokens,
+        audio_tokens: audio_input.num_frames,
         total_tokens: prompt_tokens.len(),
     });
 
@@ -1534,67 +1644,13 @@ fn compute_gemma4_unified_video_embeddings(
     target_fps: f64,
     image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
-    if !video::ffmpeg_available() {
-        return Err(anyhow::anyhow!(
-            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
-             on macOS or `apt install ffmpeg` on Linux) and retry."
-        ));
-    }
-
-    // Decode the videos. `target_fps == 0` is rejected by `smart_nframes`,
-    // so guard here with a clean error.
-    let videos = video::load_videos(video_paths, Some(target_fps), None)
-        .map_err(|err| anyhow::anyhow!("Failed to load video(s): {}", err))?;
-    println!(
-        "Loaded {} video(s) ({} total frames after sampling).",
-        videos.len(),
-        videos.iter().map(Vec::len).sum::<usize>()
-    );
-
+    let videos = gemma4_unified_cli_decode_videos(video_paths, target_fps)?;
     // Optional companion images (e.g. user passes both --image and --video).
-    let processed_images = if image_paths.is_empty() {
-        Vec::new()
-    } else {
-        let images: Vec<image::DynamicImage> = image_paths
-            .iter()
-            .map(|path| open_image(path))
-            .collect::<Result<Vec<_>>>()?;
-        println!("Loaded {} image(s).", images.len());
-        let processed = unified
-            .processor
-            .preprocess_with_budget(&images, image_soft_tokens);
-        let num_soft_tokens: Vec<usize> = processed.iter().map(|i| i.num_soft_tokens).collect();
-        mlxcel::vlm_runtime::expand_gemma4_image_tokens_pub(
-            prompt_tokens,
-            unified.image_token_id,
-            unified.boi_token_id,
-            unified.eoi_token_id,
-            &num_soft_tokens,
-        )?;
-        processed
-    };
+    let processed_images =
+        gemma4_unified_cli_images(unified, prompt_tokens, image_paths, image_soft_tokens)?;
+    let (video_frames, total_frames) =
+        gemma4_unified_cli_video_frames(unified, prompt_tokens, &videos)?;
 
-    // Patchify every frame of every video through the encoder-free embedder.
-    // Frames are kept flat (in video, then frame order) so the scatter sees
-    // them in the same order as the expanded video_token_id placeholders.
-    let mut video_frames: Vec<mlxcel::vision::processors::gemma4_unified::Gemma4UnifiedImageInput> =
-        Vec::new();
-    let mut video_frame_tokens: Vec<Vec<usize>> = Vec::with_capacity(videos.len());
-    for frames in &videos {
-        let processed = unified.processor.preprocess_video_frames(frames);
-        video_frame_tokens.push(processed.iter().map(|f| f.num_soft_tokens).collect());
-        video_frames.extend(processed);
-    }
-
-    mlxcel::vlm_runtime::expand_gemma4_unified_video_tokens(
-        prompt_tokens,
-        unified.video_token_id,
-        unified.boi_token_id,
-        unified.eoi_token_id,
-        &video_frame_tokens,
-    )?;
-
-    let total_frames: usize = video_frame_tokens.iter().map(Vec::len).sum();
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let embeddings =
@@ -1603,6 +1659,52 @@ fn compute_gemma4_unified_video_embeddings(
     print_preparation_summary(VlmPreparationSummary::Gemma4Video {
         video_count: videos.len(),
         frame_slots: total_frames,
+        total_tokens: prompt_tokens.len(),
+    });
+
+    Ok(Some(embeddings))
+}
+
+/// Compute embeddings for a Gemma 4 Unified prompt that carries `--video` and
+/// `--audio` together, optionally alongside `--image` (issue #1349).
+///
+/// Runs the same per-modality helpers as the single-modality builders, in
+/// prompt order (images, then video frame runs, then the audio run), and
+/// scatters all three through `merge_multimodal`. Reusing the helpers rather
+/// than duplicating them is what guarantees a video-only or audio-only prompt
+/// still produces the token stream it produced before this path existed.
+fn compute_gemma4_unified_video_and_audio_embeddings(
+    unified: &mlxcel::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    image_paths: &[PathBuf],
+    video_paths: &[PathBuf],
+    audio_path: &Path,
+    target_fps: f64,
+    image_soft_tokens: Option<usize>,
+) -> Result<Option<InputEmbeddings>> {
+    require_gemma4_unified_audio_embedder(unified)?;
+
+    let videos = gemma4_unified_cli_decode_videos(video_paths, target_fps)?;
+    let processed_images =
+        gemma4_unified_cli_images(unified, prompt_tokens, image_paths, image_soft_tokens)?;
+    let (video_frames, total_frames) =
+        gemma4_unified_cli_video_frames(unified, prompt_tokens, &videos)?;
+    let audio_input = gemma4_unified_cli_audio(unified, prompt_tokens, audio_path)?;
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = unified.get_input_embeddings_with_video_and_audio(
+        &input_ids_arr,
+        &processed_images,
+        &video_frames,
+        Some(&audio_input.features),
+        Some(&audio_input.mask),
+    );
+
+    print_preparation_summary(VlmPreparationSummary::Gemma4VideoAudio {
+        video_count: videos.len(),
+        frame_slots: total_frames,
+        audio_tokens: audio_input.num_frames,
         total_tokens: prompt_tokens.len(),
     });
 

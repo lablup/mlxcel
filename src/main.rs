@@ -444,14 +444,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) layout_detections: Option<PathBuf>,
 
-    /// Audio file path for audio-language models (e.g. Gemma4 with audio)
+    /// Audio file path for audio-language models (e.g. Gemma4 with audio).
+    /// May be combined with `--video` on `gemma4_unified` checkpoints, which
+    /// merge video frames and audio into one prompt; other families reject
+    /// that combination.
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,
 
     /// Video file paths for VLMs that support video inputs (e.g. Gemma4,
     /// Kimi-VL, and Qwen-VL). Pass the flag multiple times for multiple
     /// videos: `--video clip1.mp4 --video clip2.mp4`. Frame extraction
-    /// requires `ffmpeg` on PATH.
+    /// requires `ffmpeg` on PATH. `gemma4_unified` also accepts `--video`
+    /// together with `--audio` in the same prompt.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub(crate) video: Vec<PathBuf>,
 

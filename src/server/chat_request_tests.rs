@@ -155,7 +155,13 @@ fn mixed_audio_messages_preserve_global_media_order_across_turns() {
 }
 
 #[tokio::test]
-async fn prepare_chat_request_rejects_combined_audio_and_video_before_resolution() {
+async fn prepare_chat_request_no_longer_owns_the_combined_audio_video_refusal() {
+    // Issue #1349 moved the video+audio capability check to the HTTP boundary
+    // (`media_capability_rejection`, which reads `ModelMediaSupport`) because
+    // preparation cannot see the loaded model, and Gemma 4 Unified merges both
+    // in one prompt. Preparation must therefore no longer reject the
+    // combination on its own; whatever it does with the parts, it must not be
+    // to emit the combined refusal.
     let request = request_with_messages(vec![Message {
         role: Role::User,
         content: MessageContent::Parts(vec![
@@ -179,15 +185,15 @@ async fn prepare_chat_request_rejects_combined_audio_and_video_before_resolution
     }]);
     let processor = ChatTemplateProcessor::with_template("unused".to_string());
 
-    let error = prepare_chat_request(&processor, &request, None)
-        .await
-        .err()
-        .expect("combined audio/video input must be rejected");
-
-    assert_eq!(
-        error.to_string(),
-        "Combined video and audio inputs are not supported"
-    );
+    if let Err(error) = prepare_chat_request(&processor, &request, None).await {
+        // An unresolvable data payload or video path may still fail here; the
+        // point is that the failure is not the capability refusal.
+        assert_ne!(
+            error.to_string(),
+            "Combined video and audio inputs are not supported",
+            "the combined refusal belongs to media_capability_rejection now"
+        );
+    }
 }
 
 #[tokio::test]

@@ -357,11 +357,24 @@ pub(crate) fn media_kind_refusal(kind: &str, model_id: &str) -> String {
     message
 }
 
+/// The refusal for a request that mixes video and audio on a checkpoint whose
+/// merge path takes only one of the two.
+///
+/// Kept byte-for-byte identical to the message request preparation used to
+/// bail with before issue #1349 moved the check to the HTTP boundary, because
+/// that string is what existing clients match on.
+pub(crate) const COMBINED_VIDEO_AUDIO_REFUSAL: &str =
+    "Combined video and audio inputs are not supported";
+
 /// Refuse a request whose media parts the loaded checkpoint cannot consume.
 ///
 /// Runs at the HTTP boundary, before any byte of a referenced image or audio
 /// file is fetched, so a text-only checkpoint never becomes a fetch proxy
-/// either. Returns the first offending modality in a fixed order.
+/// either. Returns the first offending modality in a fixed order, then the
+/// video+audio *combination* for a checkpoint that takes each modality alone
+/// but has no merge path for both (issue #1349). Ordering matters: a text-only
+/// checkpoint has to hear "image input is not supported" rather than a
+/// combination refusal it could not act on either.
 #[must_use]
 pub(crate) fn media_capability_rejection(
     request: &ChatCompletionRequest,
@@ -381,6 +394,18 @@ pub(crate) fn media_capability_rejection(
     }
     if !support.video && !request.video_urls().is_empty() {
         return refuse("video");
+    }
+    if !support.video_with_audio
+        && !request.video_urls().is_empty()
+        && !request.audio_inputs().is_empty()
+    {
+        // 400 / `invalid_request_error` reproduces what the preparation-level
+        // bail mapped to on every generation route, so the status, type and
+        // message a client sees are unchanged by the move.
+        return Some(crate::server::types::ErrorResponse::new(
+            COMBINED_VIDEO_AUDIO_REFUSAL,
+            "invalid_request_error",
+        ));
     }
     None
 }

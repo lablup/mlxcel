@@ -146,6 +146,27 @@ impl Gemma4UnifiedModel {
         self.merge_multimodal(input_ids, images, video_frames, None, None)
     }
 
+    /// Compute merged input embeddings for a prompt that carries video frames
+    /// and audio at once (issue #1349), optionally alongside companion images.
+    ///
+    /// This is the widest of the four wrappers and the only one that reaches
+    /// every argument of [`Self::merge_multimodal`]. Video frames scatter into
+    /// `video_token_id` placeholders exactly as in
+    /// [`Self::get_input_embeddings_with_video`] and the audio frames scatter
+    /// into `audio_token_id` placeholders exactly as in
+    /// [`Self::get_input_embeddings_with_audio`]; the two runs use different
+    /// placeholder ids, so neither scatter can clobber the other.
+    pub fn get_input_embeddings_with_video_and_audio(
+        &self,
+        input_ids: &MlxArray,
+        images: &[Gemma4UnifiedImageInput],
+        video_frames: &[Gemma4UnifiedImageInput],
+        audio_features: Option<&MlxArray>,
+        audio_mask: Option<&MlxArray>,
+    ) -> merge::InputEmbeddings {
+        self.merge_multimodal(input_ids, images, video_frames, audio_features, audio_mask)
+    }
+
     /// Project per-frame video patches into language-model hidden features.
     ///
     /// Encoder-free: each frame's patches run through the same patch projector

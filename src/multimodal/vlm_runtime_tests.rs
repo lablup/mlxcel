@@ -606,6 +606,88 @@ fn server_audio_falls_back_before_last_token_without_end_of_turn() {
     assert_eq!(prompt, vec![2, 11, BOA, AUDIO, AUDIO, EOA, 8]);
 }
 
+// ── Gemma 4 Unified video + audio in one prompt (issue #1349) ────────────────
+//
+// The two expansions address disjoint placeholder ids and disjoint insertion
+// points: the video runs splice in after BOS, the audio run before the LAST
+// `<end_of_turn>`. Composing them is only safe if that stays true, so pin it.
+
+#[test]
+fn server_video_then_audio_expansion_keeps_both_runs_inside_the_user_turn() {
+    // Gemma-shaped generation prompt with no media placeholders, which is what
+    // the server's text-only render produces:
+    // [BOS, <sot>, user, text, <eot>, <sot>, model]
+    let mut prompt = vec![2, SOT, 11, 7, EOT, SOT, 8];
+
+    // Video first, exactly as `prepare_gemma4_unified_video_and_audio_embeddings`
+    // orders it: one clip of two frames, two soft tokens each.
+    expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &[vec![2, 2]]).unwrap();
+    // Then audio: one run of three soft tokens.
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 3, Some(EOT));
+
+    assert_eq!(
+        prompt,
+        vec![
+            2, // BOS
+            201, 100, 100, 202, // video frame 1
+            201, 100, 100, 202, // video frame 2
+            SOT, 11, 7, // user turn text
+            BOA, AUDIO, AUDIO, AUDIO, EOA, // audio run, still inside the user turn
+            EOT, SOT, 8,
+        ]
+    );
+
+    // Exactly one audio run, and it is not split by the video expansion.
+    assert_eq!(prompt.iter().filter(|&&t| t == BOA).count(), 1);
+    assert_eq!(prompt.iter().filter(|&&t| t == EOA).count(), 1);
+    assert_eq!(prompt.iter().filter(|&&t| t == AUDIO).count(), 3);
+    // Every video soft token survived, and the frame framing is intact.
+    assert_eq!(prompt.iter().filter(|&&t| t == 100).count(), 4);
+    assert_eq!(prompt.iter().filter(|&&t| t == 201).count(), 2);
+
+    // Order: the video runs precede the audio run, and the audio run precedes
+    // the turn terminator.
+    let last_video = prompt.iter().rposition(|&t| t == 100).unwrap();
+    let boa_pos = prompt.iter().position(|&t| t == BOA).unwrap();
+    let eot_pos = prompt.iter().rposition(|&t| t == EOT).unwrap();
+    assert!(last_video < boa_pos);
+    assert!(boa_pos < eot_pos);
+}
+
+#[test]
+fn server_video_expansion_does_not_disturb_an_already_placed_audio_run() {
+    // The reverse order is safe too: the audio run is placed first, then the
+    // video splice at index 1 shifts it without breaking it. Pinned so a future
+    // reordering of the worker dispatch cannot silently corrupt the prompt.
+    let mut prompt = vec![2, SOT, 11, 7, EOT, SOT, 8];
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 3, Some(EOT));
+    expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &[vec![2, 2]]).unwrap();
+
+    assert_eq!(
+        prompt,
+        vec![
+            2, 201, 100, 100, 202, 201, 100, 100, 202, SOT, 11, 7, BOA, AUDIO, AUDIO, AUDIO, EOA,
+            EOT, SOT, 8,
+        ]
+    );
+}
+
+#[test]
+fn server_video_and_audio_placeholders_expand_independently() {
+    // Template-rendered path: both a `<|video|>` and an `<|audio|>` marker are
+    // present. Each expansion must consume only its own id.
+    let mut prompt = vec![2, SOT, 100, AUDIO, EOT, SOT, 8];
+    expand_gemma4_unified_video_tokens(&mut prompt, 100, 201, 202, &[vec![3]]).unwrap();
+    expand_gemma4_audio_tokens_for_server(&mut prompt, AUDIO, BOA, EOA, 2, Some(EOT));
+
+    assert_eq!(
+        prompt,
+        vec![
+            2, SOT, 201, 100, 100, 100, 202, BOA, AUDIO, AUDIO, EOA, EOT, SOT, 8,
+        ]
+    );
+}
+
 #[test]
 fn server_audio_falls_back_when_end_of_turn_absent_from_prompt() {
     // `<end_of_turn>` id is known but the prompt does not contain it: the

@@ -177,6 +177,20 @@ impl LoadedModel {
         }
     }
 
+    /// Whether the loaded runtime accepts `video` and `audio` in the *same*
+    /// prompt (issue #1349).
+    ///
+    /// Narrower than `supports_audio_input() && video support`: a family can
+    /// consume each modality on its own and still have no merge path that
+    /// scatters both into one token stream. Only the encoder-free Gemma 4
+    /// Unified model reaches `merge_multimodal` with video frames and audio
+    /// frames together, so it is the only `true` here. Every other family keeps
+    /// the `Combined video and audio inputs are not supported` refusal.
+    #[must_use]
+    pub fn supports_video_with_audio(&self) -> bool {
+        matches!(self, Self::Gemma4Unified(_))
+    }
+
     /// Get the vision module if this is a standard `VisionModule`-backed VLM.
     pub fn vision_module(&self) -> Option<&vision::VisionModule> {
         vision_module_from_runtime(self.vlm_runtime()?)

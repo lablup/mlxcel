@@ -371,9 +371,12 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
     let declared_videos = request.video_urls().len();
-    if declared_audio > 0 && declared_videos > 0 {
-        anyhow::bail!("Combined video and audio inputs are not supported");
-    }
+    // No video+audio refusal here: preparation cannot see the loaded model, and
+    // the Gemma 4 Unified merge path takes both in one prompt (issue #1349).
+    // The capability check runs at the HTTP boundary in
+    // `media_capability_rejection` (which reads `ModelMediaSupport`), and
+    // `prepare_request_vlm_embeddings` on the worker is the backstop for the
+    // routes that bypass the boundary (`router_front`, `prompt_inspection`).
     if declared_audio > 0 {
         validate_no_reserved_media_sentinels(request)?;
     }

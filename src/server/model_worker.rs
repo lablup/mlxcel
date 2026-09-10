@@ -1516,12 +1516,29 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     // video inputs route to the Gemma 4 video embedding path,
     // mirroring the CLI dispatch in `commands/generate_vlm.rs::compute_vlm_embeddings`.
-    // Combining --video with --audio is rejected upstream and at the route
-    // layer; this branch additionally surfaces a clear error if those happen
-    // to coexist (defence in depth).
+    // A request that carries both video and audio is merged only by Gemma 4
+    // Unified (issue #1349); for every other family this branch is the backstop
+    // behind `media_capability_rejection`, and the only guard on the routes that
+    // skip the HTTP boundary (`router_front`, `prompt_inspection`).
     if !videos.is_empty() {
         if !audio.is_empty() {
-            return Err(anyhow!("Combined video and audio inputs are not supported"));
+            let unified = match model {
+                LoadedModel::Gemma4Unified(unified) if model.supports_video_with_audio() => unified,
+                _ => return Err(anyhow!("Combined video and audio inputs are not supported")),
+            };
+            // Resolved here rather than inside the audio-only branch below so
+            // the combined path can place the audio block inside the last user
+            // turn the same way (issue #437).
+            let end_of_turn_token_id = resolve_end_of_turn_token_id(tokenizer);
+            return prepare_gemma4_unified_video_and_audio_embeddings(
+                unified,
+                prompt_tokens,
+                images,
+                videos,
+                audio,
+                end_of_turn_token_id,
+                image_soft_tokens,
+            );
         }
         return prepare_request_video_embeddings(
             model,
@@ -2553,8 +2570,6 @@ fn prepare_gemma4_unified_audio_embeddings(
     end_of_turn_token_id: Option<i32>,
     image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
-    use crate::audio;
-
     let unified = match model {
         LoadedModel::Gemma4Unified(m) => m,
         _ => return Ok(None),
@@ -2564,6 +2579,38 @@ fn prepare_gemma4_unified_audio_embeddings(
         tracing::warn!("Gemma4 Unified model has no audio embedder; ignoring audio input");
         return Ok(None);
     }
+
+    let audio_input =
+        gemma4_unified_server_audio(unified, prompt_tokens, audio_data, end_of_turn_token_id)?;
+
+    // Process images alongside audio (encoder-free patch projector).
+    let processed_images =
+        gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = unified.get_input_embeddings_with_audio(
+        &input_ids_arr,
+        &processed_images,
+        Some(&audio_input.features),
+        Some(&audio_input.mask),
+    );
+
+    Ok(Some(embeddings))
+}
+
+/// Decode the request's single audio clip, chunk the raw waveform into
+/// `audio_samples_per_token` frames, and expand the prompt's audio run.
+///
+/// Shared by the Gemma 4 Unified audio-only and video+audio worker paths
+/// (issue #1349) so both build the audio half of the prompt identically.
+fn gemma4_unified_server_audio(
+    unified: &crate::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
+) -> Result<crate::vision::processors::gemma4_unified::Gemma4UnifiedAudioInput> {
+    use crate::audio;
 
     let audio_bytes = require_single_server_audio_clip("Gemma4 Unified", audio_data)?;
     let (samples, sample_rate) = audio::load_wav_from_bytes(audio_bytes)
@@ -2576,46 +2623,44 @@ fn prepare_gemma4_unified_audio_embeddings(
     );
 
     let audio_input = unified.processor.process_audio(&samples);
-    let num_audio_tokens = audio_input.num_frames;
 
     crate::vlm_runtime::expand_gemma4_audio_tokens_for_server(
         prompt_tokens,
         unified.audio_token_id,
         unified.boa_token_id,
         unified.eoa_token_id,
-        num_audio_tokens,
+        audio_input.num_frames,
         end_of_turn_token_id,
     );
 
-    // Process images alongside audio (encoder-free patch projector).
-    let processed_images = if !images.is_empty() {
-        let decoded_images = decode_request_images(images)?;
-        let processed = unified
-            .processor
-            .preprocess_with_budget(&decoded_images, image_soft_tokens);
-        let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
-        crate::vlm_runtime::expand_gemma4_image_tokens_pub(
-            prompt_tokens,
-            unified.image_token_id,
-            unified.boi_token_id,
-            unified.eoi_token_id,
-            &num_soft_tokens,
-        )?;
-        processed
-    } else {
-        Vec::new()
-    };
+    Ok(audio_input)
+}
 
-    let input_ids_arr =
-        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let embeddings = unified.get_input_embeddings_with_audio(
-        &input_ids_arr,
-        &processed_images,
-        Some(&audio_input.features),
-        Some(&audio_input.mask),
-    );
-
-    Ok(Some(embeddings))
+/// Decode and patchify the request's companion still images and expand their
+/// prompt placeholders. Shared by the Gemma 4 Unified audio, video and
+/// video+audio worker paths.
+fn gemma4_unified_server_images(
+    unified: &crate::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    image_soft_tokens: Option<usize>,
+) -> Result<Vec<crate::vision::processors::gemma4_unified::Gemma4UnifiedImageInput>> {
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decoded_images = decode_request_images(images)?;
+    let processed = unified
+        .processor
+        .preprocess_with_budget(&decoded_images, image_soft_tokens);
+    let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
+    crate::vlm_runtime::expand_gemma4_image_tokens_pub(
+        prompt_tokens,
+        unified.image_token_id,
+        unified.boi_token_id,
+        unified.eoi_token_id,
+        &num_soft_tokens,
+    )?;
+    Ok(processed)
 }
 
 /// Process audio (and optionally images) for the Nemotron H Nano Omni VLM.
@@ -3280,6 +3325,31 @@ fn prepare_gemma4_unified_video_embeddings(
     videos: &[crate::server::media::ResolvedVideo],
     image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
+    let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
+    // Optional companion images (e.g. user passes both image_url and video_url).
+    let processed_images =
+        gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
+    let video_frames = gemma4_unified_server_video_frames(unified, prompt_tokens, &decoded_videos)?;
+
+    let input_ids_arr =
+        mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings =
+        unified.get_input_embeddings_with_video(&input_ids_arr, &processed_images, &video_frames);
+
+    Ok(Some(embeddings))
+}
+
+/// Decode every resolved video into sampled frames, honoring the per-video FPS
+/// override when supplied; otherwise fall back to
+/// `multimodal::video::DEFAULT_FPS` (2.0 fps).
+///
+/// Every `ResolvedVideo` carries a [`crate::multimodal::video::VideoSource`]
+/// handle; on Unix that is fd-backed, so ffmpeg reads from the open file
+/// description the resolver already validated rather than re-opening the
+/// canonical path.
+fn gemma4_unified_server_decode_videos(
+    videos: &[crate::server::media::ResolvedVideo],
+) -> Result<Vec<Vec<image::DynamicImage>>> {
     use crate::multimodal::video;
 
     if !video::ffmpeg_available() {
@@ -3289,8 +3359,6 @@ fn prepare_gemma4_unified_video_embeddings(
         ));
     }
 
-    // Decode each video honoring the per-video FPS override when supplied;
-    // otherwise fall back to `multimodal::video::DEFAULT_FPS` (2.0 fps).
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
@@ -3305,39 +3373,29 @@ fn prepare_gemma4_unified_video_embeddings(
         decoded_videos.push(frames);
     }
 
-    let total_decoded_frames: usize = decoded_videos.iter().map(Vec::len).sum();
     tracing::info!(
         "Gemma4 Unified video request: decoded {} video(s) ({} total frames after sampling)",
         decoded_videos.len(),
-        total_decoded_frames
+        decoded_videos.iter().map(Vec::len).sum::<usize>()
     );
+    Ok(decoded_videos)
+}
 
-    // Optional companion images (e.g. user passes both image_url and video_url).
-    let processed_images = if images.is_empty() {
-        Vec::new()
-    } else {
-        let decoded_images = decode_request_images(images)?;
-        let processed = unified
-            .processor
-            .preprocess_with_budget(&decoded_images, image_soft_tokens);
-        let num_soft_tokens: Vec<usize> = processed.iter().map(|img| img.num_soft_tokens).collect();
-        crate::vlm_runtime::expand_gemma4_image_tokens_pub(
-            prompt_tokens,
-            unified.image_token_id,
-            unified.boi_token_id,
-            unified.eoi_token_id,
-            &num_soft_tokens,
-        )?;
-        processed
-    };
-
-    // Patchify every frame of every video. Frames stay flat in (video, frame)
-    // order so the scatter sees them in the same order as the expanded
-    // video_token_id placeholders.
+/// Patchify every decoded frame and expand the prompt's video placeholders.
+///
+/// Frames stay flat in (video, frame) order so the scatter sees them in the
+/// same order as the expanded `video_token_id` placeholders. Shared by the
+/// video-only and video+audio worker paths (issue #1349).
+fn gemma4_unified_server_video_frames(
+    unified: &crate::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    decoded_videos: &[Vec<image::DynamicImage>],
+) -> Result<Vec<crate::vision::processors::gemma4_unified::Gemma4UnifiedImageInput>> {
+    let total_decoded_frames: usize = decoded_videos.iter().map(Vec::len).sum();
     let mut video_frames: Vec<crate::vision::processors::gemma4_unified::Gemma4UnifiedImageInput> =
         Vec::with_capacity(total_decoded_frames);
     let mut video_frame_tokens: Vec<Vec<usize>> = Vec::with_capacity(decoded_videos.len());
-    for frames in &decoded_videos {
+    for frames in decoded_videos {
         let processed = unified.processor.preprocess_video_frames(frames);
         video_frame_tokens.push(processed.iter().map(|f| f.num_soft_tokens).collect());
         video_frames.extend(processed);
@@ -3350,11 +3408,48 @@ fn prepare_gemma4_unified_video_embeddings(
         unified.eoi_token_id,
         &video_frame_tokens,
     )?;
+    Ok(video_frames)
+}
+
+/// Resolve a Gemma 4 Unified request that carries `video_url` and
+/// `input_audio` in the same turn (issue #1349).
+///
+/// Runs the same per-modality helpers as the single-modality paths, in prompt
+/// order (images, then video frame runs, then the audio run), and scatters all
+/// three through `merge_multimodal`. The video runs splice in after BOS and
+/// the audio run lands before the last `<end_of_turn>`, so the two expansions
+/// address disjoint placeholder ids and neither clobbers the other.
+fn prepare_gemma4_unified_video_and_audio_embeddings(
+    unified: &crate::vision::Gemma4UnifiedModel,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    videos: &[crate::server::media::ResolvedVideo],
+    audio_data: &[Vec<u8>],
+    end_of_turn_token_id: Option<i32>,
+    image_soft_tokens: Option<usize>,
+) -> Result<Option<InputEmbeddings>> {
+    if unified.embed_audio.is_none() {
+        return Err(anyhow!(
+            "This Gemma 4 Unified model has no audio embedder; input_audio is not supported"
+        ));
+    }
+
+    let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
+    let processed_images =
+        gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
+    let video_frames = gemma4_unified_server_video_frames(unified, prompt_tokens, &decoded_videos)?;
+    let audio_input =
+        gemma4_unified_server_audio(unified, prompt_tokens, audio_data, end_of_turn_token_id)?;
 
     let input_ids_arr =
         mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let embeddings =
-        unified.get_input_embeddings_with_video(&input_ids_arr, &processed_images, &video_frames);
+    let embeddings = unified.get_input_embeddings_with_video_and_audio(
+        &input_ids_arr,
+        &processed_images,
+        &video_frames,
+        Some(&audio_input.features),
+        Some(&audio_input.mask),
+    );
 
     Ok(Some(embeddings))
 }

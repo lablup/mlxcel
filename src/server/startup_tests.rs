@@ -1228,6 +1228,12 @@ fn detect_model_media_support_recognises_gemma4_vlm() {
     // The boolean depends on the detection helper's robustness against
     // synthetic configs; the real assertion is that the helper succeeds.
     let _ = support;
+    // Whatever the vision-weight probe decides, the ViT-backed Gemma 4 VLM has
+    // no video+audio merge path (issue #1349).
+    assert!(
+        !support.video_with_audio,
+        "the ViT Gemma 4 VLM must keep the combined refusal, got {support:?}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1250,6 +1256,12 @@ fn detect_model_media_support_recognises_gemma4_unified() {
         support.video,
         "gemma4_unified must enable video_url content blocks, got {support:?}"
     );
+    // Issue #1349: gemma4_unified is the one family whose merge path scatters
+    // video frames and audio into the same token stream.
+    assert!(
+        support.video_with_audio,
+        "gemma4_unified must admit video_url together with input_audio, got {support:?}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1270,6 +1282,10 @@ fn detect_model_media_support_recognises_kimi_k25() {
     assert!(
         support.video,
         "kimi_k25 must enable video_url content blocks, got {support:?}"
+    );
+    assert!(
+        !support.video_with_audio,
+        "Kimi-VL 2.5 must keep the combined video+audio refusal, got {support:?}"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1310,6 +1326,11 @@ fn detect_model_media_support_recognises_inkling_video() {
         support.audio,
         "Inkling VLM must admit input_audio for loaded-tower validation, got {support:?}"
     );
+    // Inkling takes video and audio separately but has no combined merge path.
+    assert!(
+        !support.video_with_audio,
+        "Inkling VLM must keep the combined video+audio refusal, got {support:?}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1330,6 +1351,10 @@ fn detect_model_media_support_recognises_qwen35_vlm_video() {
         support.video,
         "Qwen3.5/Qwen3.8 VLM must enable video_url content blocks, got {support:?}"
     );
+    assert!(
+        !support.video_with_audio,
+        "Qwen3.5/Qwen3.8 VLM must keep the combined video+audio refusal, got {support:?}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1342,6 +1367,11 @@ fn detect_model_media_support_falls_back_for_missing_config() {
         !support.video,
         "missing config.json must default to video=false, got {support:?}"
     );
+    assert!(
+        !support.video_with_audio,
+        "missing config.json must default to video_with_audio=false, got {support:?}"
+    );
+    assert!(!crate::server::state::ModelMediaSupport::none().video_with_audio);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
