@@ -128,6 +128,8 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "remote_pipeline_stage",
     "tensor_parallel",
     "vision_cache_size",
+    "video_max_frames",
+    "video_fps",
     "lang_bias_config",
     "reasoning_budget",
     "chat_template_kwargs",
@@ -495,6 +497,8 @@ fn read_only_reason(field: &str) -> &'static str {
         | "max_batch_prefill_tokens"
         | "decode_storage_backend"
         | "vision_cache_size"
+        | "video_max_frames"
+        | "video_fps"
         | "prompt_cache"
         | "kv_cache_mode"
         | "batch_kv_quant"
@@ -626,6 +630,8 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "remote_pipeline_stage" => debug(&config.remote_pipeline_stage),
         "tensor_parallel" => debug(&config.tensor_parallel),
         "vision_cache_size" => json!(config.vision_cache_size),
+        "video_max_frames" => json!(config.video_max_frames),
+        "video_fps" => json!(config.video_fps),
         "prompt_cache" => debug(&config.prompt_cache),
         "kv_cache_mode" => json!(config.kv_cache_mode.to_string()),
         "batch_kv_quant" => debug(&config.batch_kv_quant),
@@ -690,7 +696,8 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "rerank_batch_size"
         | "prefill_chunk_size"
         | "max_batch_prefill"
-        | "vision_cache_size" => KnobKind::Int,
+        | "vision_cache_size"
+        | "video_max_frames" => KnobKind::Int,
         "model_aliases"
         | "model_tags"
         | "prefill_peers"
@@ -704,7 +711,8 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "prefill_grant_interval"
         | "max_batch_prefill_tokens"
         | "max_kv_size" => KnobKind::IntOrNull,
-        "default_typical_p"
+        "video_fps"
+        | "default_typical_p"
         | "default_top_n_sigma"
         | "default_xtc_probability"
         | "default_xtc_threshold"
