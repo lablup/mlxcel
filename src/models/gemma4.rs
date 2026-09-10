@@ -36,8 +36,8 @@ use crate::models::switch_layers::{SwitchLinear, gather_sort};
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{
-    FusedQKVLinear, KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
-    compiled_gelu_mlp_fp16,
+    FusedQKVLinear, KVCache, RMSNorm, RotatingKVCache, SUPPORTED_AFFINE_BITS, UnifiedEmbedding,
+    UnifiedLinear, compiled_gelu_mlp_fp16,
 };
 use mlxcel_core::utils::{
     create_causal_mask, create_causal_mask_with_left_padding, create_causal_mask_with_window,
@@ -68,10 +68,6 @@ fn default_quant_bits() -> usize {
     4
 }
 
-/// Bit widths mlxcel's affine quantization understands, mirroring
-/// `mlxcel_core::layers::infer_quantization_bits`'s `{2,3,4,5,6,8}` set.
-const SUPPORTED_OVERRIDE_BITS: &[u64] = &[2, 3, 4, 5, 6, 8];
-
 /// Validates a per-module override's `group_size` value, returning an
 /// actionable reason string when it is not a positive integer.
 fn validate_override_group_size(raw: &serde_json::Value) -> Result<i32, String> {
@@ -86,16 +82,21 @@ fn validate_override_group_size(raw: &serde_json::Value) -> Result<i32, String> 
 
 /// Validates a per-module override's `bits` value, returning an actionable
 /// reason string when it is not an integer or not a supported bit width.
+///
+/// Checks against `mlxcel_core::layers::SUPPORTED_AFFINE_BITS`, the single
+/// definition of the set (issue #1778 review): this used to keep its own
+/// `SUPPORTED_OVERRIDE_BITS` copy of the same six literals, which could drift
+/// from the shared constant with no compiler warning either way.
 fn validate_override_bits(raw: &serde_json::Value) -> Result<i32, String> {
     let Some(bits) = raw.as_u64() else {
         return Err(format!("must be a positive integer, got {raw}"));
     };
-    if !SUPPORTED_OVERRIDE_BITS.contains(&bits) {
-        return Err(format!(
+    match i32::try_from(bits) {
+        Ok(bits) if SUPPORTED_AFFINE_BITS.contains(&bits) => Ok(bits),
+        _ => Err(format!(
             "must be one of {{2, 3, 4, 5, 6, 8}} bits, got {bits}"
-        ));
+        )),
     }
-    i32::try_from(bits).map_err(|_| format!("overflows a 32-bit bit width ({bits})"))
 }
 
 impl QuantizationArgs {
