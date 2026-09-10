@@ -23,6 +23,7 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
+mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
