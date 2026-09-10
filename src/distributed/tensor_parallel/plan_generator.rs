@@ -150,6 +150,7 @@ pub fn generate_shard_plan(
         | "rwkv7"
         | "recurrent_gemma"
         | "kimi_linear"
+        | "kimi_k3"
         | "longcat_flash"
         | "longcat_flash_ngram"
         | "qwen3_next" => Ok(build_replicated_plan(architecture, num_layers)),

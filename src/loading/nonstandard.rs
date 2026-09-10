@@ -103,6 +103,10 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             super::load_pair_from_dir(path_str, models::KimiLinearModel::load)
                 .map(LoadedModel::KimiLinear)?,
         ),
+        ModelType::KimiK3 => Some(
+            super::load_pair_from_dir(path_str, models::KimiK3Model::load)
+                .map(LoadedModel::KimiK3)?,
+        ),
         ModelType::LongcatFlash => Some(
             super::load_pair_from_dir(path_str, |path| models::LongcatFlashNgramModel::load(&path))
                 .map(LoadedModel::LongcatFlash)?,

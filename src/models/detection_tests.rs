@@ -264,6 +264,91 @@ fn gpt2_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+const KIMI_K3_CONFIG_WITH_VISION: &str = r#"{
+    "model_type": "kimi_k3",
+    "architectures": ["KimiK3ForConditionalGeneration"],
+    "media_placeholder_token_id": 163605,
+    "text_config": {
+        "model_type": "kimi_linear",
+        "hidden_size": 7168,
+        "num_hidden_layers": 93,
+        "hidden_act": "situ"
+    },
+    "vision_config": {
+        "patch_size": 14,
+        "vt_hidden_size": 1024
+    }
+}"#;
+
+#[test]
+fn kimi_k3_with_vision_config_but_no_vision_weights_is_the_text_backbone() {
+    // `config.json` carries `vision_config`, but the index lists no
+    // `vision_tower.*` tensor: a text-only export. Detection must not route
+    // it to the VLM loader, which would fail on the missing tower.
+    let model_dir = temp_path("kimi_k3_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), KIMI_K3_CONFIG_WITH_VISION).unwrap();
+    fs::write(
+        model_dir.join("model.safetensors.index.json"),
+        r#"{"weight_map": {"language_model.model.embed_tokens.weight": "model-00001-of-00002.safetensors"}}"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::KimiK3);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn kimi_k3_with_vision_config_and_vision_tower_weights_is_the_vlm() {
+    // The published layout (#1342): `vision_config` plus `vision_tower.*` and
+    // `mm_projector.*` tensors in the index.
+    let model_dir = temp_path("kimi_k3_vlm");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), KIMI_K3_CONFIG_WITH_VISION).unwrap();
+    fs::write(
+        model_dir.join("model.safetensors.index.json"),
+        r#"{"weight_map": {
+            "language_model.model.embed_tokens.weight": "model-00094-of-000096.safetensors",
+            "mm_projector.proj.0.weight": "model-00095-of-000096.safetensors",
+            "vision_tower.patch_embed.proj.weight": "model-00096-of-000096.safetensors"
+        }}"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::KimiK3VLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn kimi_k3_without_vision_config_is_the_text_backbone_even_with_tower_weights() {
+    // A config stripped of `vision_config` cannot build the tower, so the
+    // tensors alone do not make it a VLM.
+    let model_dir = temp_path("kimi_k3_no_vision_config");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "kimi_k3",
+            "text_config": {"model_type": "kimi_linear", "hidden_size": 7168, "num_hidden_layers": 93}
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        model_dir.join("model.safetensors.index.json"),
+        r#"{"weight_map": {"vision_tower.patch_embed.proj.weight": "model-00096-of-000096.safetensors"}}"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::KimiK3);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
 #[test]
 fn gpt_bigcode_model_type_is_detected() {
     // GPT-BigCode reuses GPT-2's config field names and its `architectures`
@@ -1022,7 +1107,7 @@ fn dflash_drafter_is_rejected_as_a_standalone_model() {
         .to_string();
 
     assert!(
-        error.contains("DFlash speculative drafter"),
+        error.contains("DFlash-family speculative drafter"),
         "the error must name the real problem, got: {error}",
     );
     assert!(
@@ -1048,6 +1133,13 @@ fn dflash_drafter_is_rejected_on_either_marker_alone() {
             "dflash_config_only",
             r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 248070}}"#,
         ),
+        // The LFM2 DSpark drafters (issue #1339) declare their own
+        // architecture name and are the same kind of object: a backbone with
+        // no embed_tokens and no lm_head, bound to a target at load.
+        (
+            "dspark_architecture_only",
+            r#"{"architectures": ["Lfm2DSparkDraftModel"], "model_type": "qwen3"}"#,
+        ),
     ] {
         let model_dir = temp_path(name);
         fs::create_dir_all(&model_dir).unwrap();
@@ -1057,7 +1149,7 @@ fn dflash_drafter_is_rejected_on_either_marker_alone() {
             .expect_err("marker alone is sufficient")
             .to_string();
         assert!(
-            error.contains("DFlash speculative drafter"),
+            error.contains("DFlash-family speculative drafter"),
             "{name}: {error}"
         );
 
@@ -1096,8 +1188,10 @@ fn laguna_dflash_drafter_is_rejected_as_a_standalone_model() {
         .expect_err("a Laguna DFlash drafter is not a standalone model")
         .to_string();
     assert!(
-        error.contains("DFlash speculative drafter") && error.contains("--draft-model"),
-        "the error must name the drafter and the flag that takes it, got: {error}",
+        error.contains("DFlash-family speculative drafter")
+            && error.contains("Laguna DFlash")
+            && error.contains("--draft-model"),
+        "the error must name the drafter family and the flag that takes it, got: {error}",
     );
 
     // The architecture marker alone is enough: an export that drops the
@@ -1112,7 +1206,10 @@ fn laguna_dflash_drafter_is_rejected_as_a_standalone_model() {
     let error = super::detection::get_model_type(&arch_only)
         .expect_err("architecture marker alone is sufficient")
         .to_string();
-    assert!(error.contains("DFlash speculative drafter"), "{error}");
+    assert!(
+        error.contains("DFlash-family speculative drafter"),
+        "{error}"
+    );
 
     fs::remove_dir_all(model_dir).unwrap();
     fs::remove_dir_all(arch_only).unwrap();

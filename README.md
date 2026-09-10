@@ -21,7 +21,7 @@ The current `main` branch is v0.7.0 plus unreleased work. Install from source to
 - **Multi-model routing and live adapters.** Router mode discovers checkpoints from the model store, a model directory, or INI presets; loads them on demand; and bounds the resident set with LRU eviction. Multiple LoRA adapters can remain unfused for per-request or live scale changes, or be fused for zero decode overhead.
 - **Broader multimodal and retrieval coverage.** Embedding and reranker families include BERT, ModernBERT, SigLIP, Qwen3/Qwen3-VL, Llama/Nemotron, LFM2.5, ColBERT-style models, cross-encoders, and generative rerankers. Qwen-VL video input and Responses-native image parts are supported.
 - **Expanded audio serving.** The compatible transcription boundary recognizes WAV, MP3, and FLAC by content, and chat-model transcription streams one ASR delta per decoded token. Phi-4 Multimodal and Gemma 3n decode all three containers; other current audio families and dedicated Whisper remain WAV-only. Kokoro provides text-to-speech.
-- **Measured speculative decoding.** Gemma 4 and Qwen MTP paths probe greedy exactness before enabling the fast path, and the server exposes the adaptive decision at `GET /v1/internal/mtp-policy`.
+- **Measured speculative decoding.** Gemma 4, Qwen and GLM-4.7-Flash MTP paths, the LFM2 / LFM2.5 DSpark path, and the Muse Glimmer assistant path, probe greedy exactness before enabling the fast path, and the server exposes the adaptive decision at `GET /v1/internal/mtp-policy`. LFM2.5 targets pair with LiquidAI's published DSpark drafters on `mlxcel-server` (`--draft-model`), greedy decoding only. Muse Glimmer pairs with `meta-models/Muse-Glimmer-30B-assistant` on text-only requests, and the round loop measures its verify width instead of fixing it. `mlxcel split-mtp` extracts the GLM-4.7-Flash drafter from the raw checkpoint.
 - **Operational controls.** Optional authenticated live settings, prompt/cache and slot observability, bounded response stores, idle model sleep/wake, GBNF grammars, expanded sampling controls, runtime reasoning placement, and API-key/CORS/TLS controls are available.
 - **DeepSeek-V4 support.** The `deepseek_v4` architecture includes HyperConnections, rotating shared-KV attention, per-layer compression, HiSA sparse selection, and hash-routed early MoE layers.
 - **Inkling across four modalities.** The text backbone runs hybrid sliding/global NoPE attention with per-layer short-convolution state and logsigmoid-normalized experts, and carries HMLP image tiling, adjacent-frame video, dMel audio, and a native MTP drafter.
@@ -184,6 +184,11 @@ mlxcel detect -m models/rt-detr-v2 -i image.jpg --format json
 
 # Inspect the hardware-specific kernel tuning matrix without profiling it.
 mlxcel tune --dry-run
+
+# Split the GLM-4.7-Flash MTP block out of the raw checkpoint into a 4-bit
+# drafter, then pair it with a glm4_moe_lite target.
+mlxcel split-mtp -m models/glm-4.7-flash-bf16 -o models/glm-4.7-flash-mtp-4bit --q-bits 4
+mlxcel generate -m models/glm-4.7-flash-4bit --draft-model models/glm-4.7-flash-mtp-4bit -p "Hello"
 ```
 
 `mlxcel tune` can profile supported kernel tactics into the local autotune cache; set `MLXCEL_AUTOTUNE=cache` to consume recorded winners. Use `mlxcel --help` or a subcommand's `--help` for the complete flag surface.
@@ -319,4 +324,5 @@ Apache License 2.0 unless otherwise noted. See [LICENSE](LICENSE). Third-party a
 - [mlx-lm](https://github.com/ml-explore/mlx-lm), [mlx-vlm](https://github.com/Blaizzy/mlx-vlm), and [mlx-audio](https://github.com/Blaizzy/mlx-audio), whose model coverage and behavior mlxcel ports and mirrors. See [NOTICE](NOTICE).
 - [MLX Community](https://huggingface.co/mlx-community), pre-converted MLX checkpoints.
 - [turboquant_plus](https://github.com/TheTom/turboquant_plus), whose TurboQuant KV-cache algorithms are ported under Apache-2.0. See [NOTICE](NOTICE).
+- [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3), whose tiktoken pre-tokenization pattern and XTML chat grammar are reimplemented in Rust under the Kimi K3 License. See [NOTICE](NOTICE).
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer), whose paged-attention, split-KV, cascade state-merge, and sampling designs inform mlxcel's serving kernels.

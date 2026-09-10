@@ -204,7 +204,7 @@ family-specific fallback; do not silently pad without a quality test.
 ## MLA latent caches are FP16 only
 
 `glm4_moe_lite`, `deepseek_v3`, `deepseek_v32` (also spelled `deepseek_v3.2`),
-`glm_moe_dsa`, `kimi_linear` and `longcat_flash_ngram` store an MLA
+`glm_moe_dsa`, `kimi_linear`, `kimi_k3` and `longcat_flash_ngram` store an MLA
 `(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
 `kv_lora_rank`-wide latent (512 in the shipping checkpoints) and the "V" slot
 holds the `qk_rope_head_dim`-wide RoPE key stream (64). `deepseek_v32`,
@@ -298,23 +298,71 @@ keeps donating.
 
 Hybrid-SSM and linear-attention families remain excluded from block sharing:
 their recurrent hidden state cannot be reconstructed from a radix/APC token
-prefix, and it cannot be truncated to an arbitrary earlier token. For those
+prefix, and it cannot be truncated to an arbitrary earlier token. The same is
+true of any family that owns its caches per `SequenceId` rather than handing
+them to the scheduler's pool, whether or not the state is recurrent. For those
 families, `mlxcel-server` has an orthogonal exact-prefix snapshot bucket. Models
 that implement `supports_snapshot_reuse()` can copy their full model-owned
 state at turn end and restore it into a fresh sequence when the next request's
-tokens begin with that exact stored prefix under the same session key. As of
-v0.2.1, the supported snapshot families are Mamba, Mamba2, Jamba, Nemotron-H,
-Qwen 3.5 / 3.6 text, MoE, and VLM wrappers, and Gemma 4 text, VLM, and Unified
-wrappers.
+tokens begin with that exact stored prefix under the same session key.
+
+The snapshot-capable families are:
+
+- Recurrent and hybrid SSM: Mamba, Mamba2, Jamba, Nemotron-H, Falcon-H1,
+  Granite 4 H, PLaMo 2, LFM2, Qwen3-Next, Bailing MoE Linear, Inkling.
+- Attention-cache families: Gemma 3, Gemma 4, AFMoE, Llama 4, Muse Glimmer,
+  Qwen 3.5 / 3.6 text and MoE.
+- VLM wrappers, which forward the five snapshot hooks to their text model:
+  Gemma 4 VL and Unified, Qwen 3.5 VL, LFM2-VL, Granite 4 Vision, Muse Glimmer
+  VLM, Inkling VL, and the shared `vision::VisionLanguageModel` used by the
+  Gemma 3 and Llama 4 VLM checkpoints. The wrapper carries no per-sequence
+  state of its own, and the prompt-cache key folds in the request's multimodal
+  digest, so a restore cannot serve KV computed from a different image.
+
+Regenerate the list with `grep -rn 'fn supports_snapshot_reuse' src/models
+src/vision` rather than trusting the roster above.
+
+The attention-cache families share one serializer, `src/models/kv_snapshot.rs`,
+which covers the three ordinary cache types and fixes what a truncating restore
+may do to each. Truncation matters because a stored snapshot of N tokens can
+serve a request whose prompt is a proper prefix of those N, but only if the
+shortened cache is indistinguishable from a cold prefill of the shorter prompt:
+
+- `KVCache` (full attention) is always truncatable. Every token keeps its own
+  slot, so dropping the tail is a rewind of `offset`.
+- `RotatingKVCache` (sliding window) is truncatable only while the ring is
+  unwrapped, meaning `buffer_size == 0 && idx == offset && offset <= max_size`.
+  Once the ring wraps, logical token `t` no longer sits at slot `t` and a
+  rewind would expose the wrong window.
+- `ChunkedKVCache` (Llama 4 iGQA) is truncatable only while its front is
+  untrimmed (`start_position == 0`). After a front trim the buffer holds
+  `[start_position, offset)`, while a cold prefill of `target_len` tokens would
+  hold `[target_len - chunk_size, target_len)`, so the truncated restore would
+  attend over strictly fewer tokens than the cold run.
+
+Exact-prefix restore is unaffected by all three rules: a full-length restore
+reproduces the cache as captured, wrapped ring and trimmed front included. Only
+the shorter-prefix variant declines.
+
+A snapshot is keyed on a token vector, so the cached state has to hold exactly
+those tokens and no others. That rules out the M5 neural-accelerator prefill
+alignment for a model-owned family: the scheduler pads the first chunk to a
+32-token tile and then trims the padding back out of the `CachePool`'s caches,
+and a model-owned sequence has none there, so the pad positions would stay in
+the model's own caches and run `offset` past the real token count. Gemma 3,
+Gemma 4, AFMoE and Llama 4 therefore answer `supports_padded_prefill()` with
+`false`. Pool-backed families are unaffected and keep the aligned path.
 
 Snapshot reuse is deliberately conservative with quantized attention caches.
-Gemma 4, Qwen3-Next/Qwen 3.5, Bailing MoE Linear, and LFM2 serialize FP16
-model-owned attention KV state only; if a live layer is configured for Int8 or
-Turbo mode, donation/restoration is refused with an explicit error rather than
-copying only `keys`/`values` and restoring them as FP16. Restores also compare
-the serialized snapshot mode with the live per-layer table, so a snapshot
-captured under a different KV mode falls back to cold prefill instead of
-corrupting the cache.
+Every family listed above serializes FP16 model-owned attention KV state only;
+if a live layer is configured for Int8 or Turbo mode, the shared serializer
+refuses donation and restoration with an explicit error rather than copying only
+`keys`/`values` and restoring them as FP16. Restores also compare the serialized
+snapshot mode with the live per-layer table, so a snapshot captured under a
+different KV mode falls back to cold prefill instead of corrupting the cache.
+`ChunkedKVCache` has no quantized variant, so its Llama 4 layers are FP16 by
+construction and the quantized-mode request is warned about once at cache
+construction instead.
 
 The snapshot bucket has its own byte cap, entry cap, TTL, LRU counters, and
 hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while

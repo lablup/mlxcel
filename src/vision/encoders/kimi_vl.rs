@@ -51,7 +51,8 @@
 //! - `blocks.{i}.mlp.{fc0,fc1}.{weight,bias}` — GELU MLP.
 //! - `final_layernorm.{weight,bias}` — LayerNorm.
 //!
-//! Used by: `vision::kimi_vl::KimiVLModel`.
+//! Used by: `vision::kimi_vl::KimiVLModel`. The `rope` and `pos_emb` helper
+//! modules are also used by `encoders::moonvit3d` (Kimi K3).
 
 use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -63,7 +64,7 @@ use super::{VisionEncoder, VisionEncoderOutput};
 #[path = "kimi_vl_pos_emb.rs"]
 pub(crate) mod pos_emb;
 #[path = "kimi_vl_rope.rs"]
-mod rope;
+pub(crate) mod rope;
 
 use pos_emb::Learnable2DInterpPosEmb;
 use rope::Rope2DPosEmb;
@@ -151,7 +152,10 @@ impl MoonViTMlpActivation {
 /// `mlxcel_core` exposes only erf-based GELU (`gelu` and, despite its name,
 /// `gelu_approx`), so the tanh form is synthesised here the same way
 /// `models::kokoro::ops::gelu_new` does.
-fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
+///
+/// Used by: `MoonViTMlpActivation::GeluTanh` (LocateAnything) and
+/// `encoders::moonvit3d` (Kimi K3, `activation_func: gelu_pytorch_tanh`).
+pub(crate) fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
     const SQRT_2_OVER_PI: f32 = 0.797_884_6;
     let x2 = mlxcel_core::multiply(x, x);
     let x3 = mlxcel_core::multiply(&x2, x);

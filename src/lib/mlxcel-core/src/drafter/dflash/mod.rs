@@ -62,8 +62,13 @@ pub mod cache;
 pub mod config;
 pub mod drafter;
 pub mod layer;
+/// DSpark low-rank Markov token-transition head (issue #1339).
+pub mod markov;
 pub mod mlp;
 pub mod model;
+/// Muse Glimmer assistant drafter (issue #1343): five sliding-attention
+/// layers under a bidirectional sliding mask, on the same round loop.
+pub mod muse;
 /// DFlash speculative-decoding round-loop driver (sub-12). B=1 only; batched DFlash lives in [`round_loop_batched`].
 pub mod round_loop;
 /// DFlash speculative-decoding round-loop driver, B > 1 with continuous
@@ -73,12 +78,19 @@ pub mod round_loop_batched;
 pub use attention::DFlashAttention;
 pub use cache::DFlashKVCache;
 pub use config::{
-    DFLASH_DRAFT_ARCHITECTURE, DFlashConfig, is_dflash_drafter_config, is_dflash_drafter_dir,
+    DFLASH_DRAFT_ARCHITECTURE, DFlashConfig, DSPARK_DEFAULT_VERIFY_WIDTH,
+    DSPARK_DRAFT_ARCHITECTURE, DSPARK_MAX_VERIFY_WIDTH, is_dflash_drafter_config,
+    is_dflash_drafter_dir,
 };
 pub use drafter::DFlashDrafter;
 pub use layer::DFlashDecoderLayer;
+pub use markov::VanillaMarkovHead;
 pub use mlp::DFlashMlp;
 pub use model::DFlashDraftModel;
+pub use muse::{
+    MUSE_ASSISTANT_ARCHITECTURE, MUSE_ASSISTANT_MODEL_TYPE, MuseAssistantDrafter,
+    is_muse_assistant_config, is_muse_assistant_dir, peek_muse_assistant_configured_block_size,
+};
 pub use round_loop::{
     DEFAULT_BLOCK_SIZE, DEFAULT_MASK_TOKEN_ID, DFlashGenerator, DFlashRunOutput, SpeculativeTarget,
 };
@@ -90,7 +102,8 @@ use crate::ffi::{self, MlxArray};
 /// contiguous copy.
 ///
 /// Used by: `DFlashDrafter::draft_block`, `DFlashDrafter::draft_block_batched`,
-/// `DFlashDraftModel::draft_block`, `DFlashGenerator::run`.
+/// `DFlashDraftModel::draft_block`, `DFlashGenerator::run`,
+/// `MuseAssistantModel::draft_block`, `MuseAssistantDrafter::draft_block`.
 pub(crate) fn materialize_argmax_i32_vec(argmax: &MlxArray, expected_len: usize) -> Vec<i32> {
     let itemsize = ffi::array_itemsize(argmax);
     let bytes = ffi::array_to_raw_bytes(argmax);

@@ -71,6 +71,7 @@
 use crate::drafter::{Drafter, DrafterError};
 use crate::ffi::{self, MlxArray};
 use crate::generate::{GenerationStats, SamplingConfig};
+use crate::speculative::mtp::adaptive::BlockThroughputController;
 use cxx::UniquePtr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -181,6 +182,32 @@ pub trait SpeculativeTarget {
     ) -> Self::VerifyOut {
         let _ = capture_layer_ids;
         self.verify_forward(verify_input, caches)
+    }
+
+    /// The same forward, run over the PROMPT rather than over a verify block
+    /// (issue #1339).
+    ///
+    /// The burst's first call is the prompt prefill: it needs the captured
+    /// hidden states, which is why it goes through a capture-aware forward at
+    /// all, and it never needs the rollback snapshots, because a prefill is
+    /// never rolled back. The default is
+    /// [`Self::verify_forward_with_capture_layers`], so a target that carries
+    /// no rollback state, or whose rollback state is small, ignores this hook.
+    ///
+    /// A target whose rollback snapshots are PROMPT-SIZED should override it
+    /// to skip them. LFM2 is the case that motivated the hook: its short-conv
+    /// rollback snapshot holds the layer's gated input `[1, S, hidden]`, and
+    /// LFM2 is conv-dominant, so capturing on the prefill pins roughly one
+    /// prompt-sized buffer per conv layer alive through the eval that
+    /// materializes the prefill (about 670 MB at an 8k prompt on a 30-layer
+    /// 2.6B checkpoint, about 2.7 GB at 32k) for something nothing reads.
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        self.verify_forward_with_capture_layers(verify_input, caches, capture_layer_ids)
     }
 
     /// Rewind the target's caches to the accepted-prefix position.
@@ -656,6 +683,36 @@ impl DFlashGenerator {
         let decode_start = Instant::now();
 
         let block_size_cfg = self.block_size as usize;
+        // Verify-width policy (issue #1343). A drafter that declares a
+        // configured depth below the requested width, and does not insist
+        // on the requested width, runs the same throughput comparator the
+        // MTP loop runs: warm up at the configured depth, then alternate
+        // measurement windows between the depth and the requested ceiling
+        // and hold whichever emits more tokens per millisecond. The Muse
+        // Glimmer assistant is the case: on an M5 Max its published 16-row
+        // block measures below classic decode on natural text (1.9 accepted
+        // per round, 13 to 18 tok/s against 18) and 2x above it at 4 rows
+        // (34 to 41 tok/s), while repetitive text accepts 14 of 15 at 16 rows
+        // (94 tok/s), so neither fixed width is right. The Qwen 3.5 DFlash
+        // drafter declares no depth and the DSpark drafter prefers its
+        // requested width, so both keep running at `block_size` unchanged.
+        let mut width_controller = if self.drafter.prefer_requested_block_size() {
+            None
+        } else {
+            self.drafter
+                .configured_block_size()
+                .filter(|&depth| depth > 1 && depth < block_size_cfg)
+                .map(|depth| {
+                    tracing::debug!(
+                        requested = block_size_cfg,
+                        configured = depth,
+                        "DFlash verify width starts at the drafter's configured depth and \
+                         widens to the requested ceiling only when a measurement window \
+                         emits more tokens per millisecond there"
+                    );
+                    BlockThroughputController::new(block_size_cfg, depth)
+                })
+        };
         let mut bonus = first_bonus;
         let mut hidden: UniquePtr<MlxArray> = first_hidden;
         // `emitted` counts ALL tokens the caller will see, including
@@ -684,10 +741,14 @@ impl DFlashGenerator {
             }
             // Upstream: bs = min(block_total, max_tokens - emitted + 1)
             let remaining_plus_one = max_tokens - emitted + 1;
-            let bs = block_size_cfg.min(remaining_plus_one);
+            let bs = match &width_controller {
+                Some(controller) => controller.decide(remaining_plus_one),
+                None => block_size_cfg.min(remaining_plus_one),
+            };
             if bs <= 1 {
                 break;
             }
+            let round_started = Instant::now();
 
             // ---- Draft ----
             let phase_start = Instant::now();
@@ -813,6 +874,15 @@ impl DFlashGenerator {
                 if emitted >= max_tokens {
                     break;
                 }
+            }
+            // Feed the width comparator what this round delivered against
+            // what it cost, the same window sums the MTP loop reads.
+            if let Some(controller) = &mut width_controller {
+                controller.record_round(
+                    bs,
+                    new_tokens.len(),
+                    round_started.elapsed().as_secs_f64() * 1000.0,
+                );
             }
             if hit_eos {
                 break;
@@ -1366,6 +1436,16 @@ mod tests {
         bind_calls: u32,
         reset_calls: u32,
         target_layer_ids: Option<Vec<usize>>,
+        /// `configured_block_size()` answer; `None` keeps the trait default.
+        configured_depth: Option<usize>,
+        /// `prefer_requested_block_size()` answer.
+        prefer_requested: bool,
+        /// Row count (`shape[1]`) of the `hidden` tensor each `draft_block`
+        /// call received, in call order. A DSpark drafter appends every
+        /// row to its own context cache, so the DSpark parity test pins
+        /// that the first round sees the whole prompt and every later
+        /// round sees exactly the rows committed since.
+        seen_hidden_rows: Rc<Cell<Vec<i32>>>,
     }
 
     impl SyntheticDrafter {
@@ -1375,12 +1455,25 @@ mod tests {
                 bind_calls: 0,
                 reset_calls: 0,
                 target_layer_ids: None,
+                configured_depth: None,
+                prefer_requested: false,
+                seen_hidden_rows: Rc::new(Cell::new(Vec::new())),
             }
         }
 
         fn with_target_layer_ids(mut self, target_layer_ids: Vec<usize>) -> Self {
             self.target_layer_ids = Some(target_layer_ids);
             self
+        }
+
+        fn with_configured_depth(mut self, depth: usize, prefer_requested: bool) -> Self {
+            self.configured_depth = Some(depth);
+            self.prefer_requested = prefer_requested;
+            self
+        }
+
+        fn hidden_rows_recorder(&self) -> Rc<Cell<Vec<i32>>> {
+            self.seen_hidden_rows.clone()
         }
     }
 
@@ -1409,6 +1502,14 @@ mod tests {
             self.target_layer_ids.as_deref()
         }
 
+        fn configured_block_size(&self) -> Option<usize> {
+            self.configured_depth
+        }
+
+        fn prefer_requested_block_size(&self) -> bool {
+            self.prefer_requested
+        }
+
         fn set_shared_kv(
             &mut self,
             _shared_kv: SharedKv<'_>,
@@ -1423,10 +1524,15 @@ mod tests {
         fn draft_block(
             &mut self,
             last_bonus: i32,
-            _hidden: Option<&MlxArray>,
+            hidden: Option<&MlxArray>,
             block_size: usize,
             _sampler: &SamplingConfig,
         ) -> Result<Vec<i32>, DrafterError> {
+            if let Some(h) = hidden {
+                let mut rows = self.seen_hidden_rows.take();
+                rows.push(ffi::array_shape(h)[1]);
+                self.seen_hidden_rows.set(rows);
+            }
             // DFlash drafter returns `block_size - 1` proposals.
             let proposals = (self.propose)(last_bonus, block_size);
             debug_assert_eq!(
@@ -1494,6 +1600,72 @@ mod tests {
     // --------------------------------------------------------------
     // Round-loop control-flow tests
     // --------------------------------------------------------------
+
+    /// A drafter that declares a configured depth below the requested width
+    /// (the Muse Glimmer assistant, issue #1343) is drafted at that depth
+    /// through the warm-up and the first measurement window, never at the
+    /// ceiling; a drafter that prefers the requested width (DSpark) and one
+    /// that declares no depth (Qwen 3.5 DFlash) draft at the requested width
+    /// from the first round.
+    #[test]
+    fn dflash_round_loop_starts_at_the_configured_depth() {
+        let widths_for = |configured: Option<(usize, bool)>| -> Vec<usize> {
+            let seen: Rc<Cell<Vec<usize>>> = Rc::new(Cell::new(Vec::new()));
+            let recorder = seen.clone();
+            let target = SyntheticTarget::new(vec![1, 8, 15, 22, 29], 5 * 8, |_s, prev| prev + 1);
+            let mut caches: Vec<SyntheticCache> =
+                (0..3).map(|_| SyntheticCache::default()).collect();
+            let mut drafter = SyntheticDrafter::new(move |bonus, bs| {
+                let mut widths = recorder.take();
+                widths.push(bs);
+                recorder.set(widths);
+                (1..bs as i32).map(|s| bonus + s).collect()
+            });
+            if let Some((depth, prefer)) = configured {
+                drafter = drafter.with_configured_depth(depth, prefer);
+            }
+            let mut r#gen =
+                DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
+            r#gen.block_size = 6;
+            let first_hidden = ffi::zeros(&[1, 1, 5 * 8], crate::dtype::FLOAT32);
+            r#gen
+                .run(
+                    &target,
+                    &EmbedOnlyLm,
+                    &mut caches,
+                    0,
+                    first_hidden,
+                    &[],
+                    60,
+                    &AtomicBool::new(false),
+                    &crate::sampling::LogprobsConfig::default(),
+                )
+                .expect("synthetic round loop must not fail");
+            seen.take()
+        };
+
+        let configured = widths_for(Some((3, false)));
+        assert!(configured.len() >= 8, "sixty tokens need several rounds");
+        assert!(
+            configured.iter().all(|&w| w == 3),
+            "every round of a 60-token run stays inside the warm-up and first window at the \
+             configured depth 3, never the requested 6: {configured:?}"
+        );
+
+        let dspark_like = widths_for(Some((3, true)));
+        assert!(
+            dspark_like.iter().all(|&w| w == 6 || w < 6 && w > 1),
+            "a drafter that prefers the requested width drafts at 6 (narrower only at the \
+             budget's end): {dspark_like:?}"
+        );
+        assert_eq!(dspark_like[0], 6);
+
+        let plain = widths_for(None);
+        assert_eq!(
+            plain[0], 6,
+            "no configured depth: the requested width from round one"
+        );
+    }
 
     /// The round loop must prefer the drafter checkpoint's
     /// `target_layer_ids` over the target-side fallback. This is
@@ -1835,6 +2007,130 @@ mod tests {
             out3.tokens, out.tokens,
             "byte-identical output with an oracle drafter (full-accept hot path)"
         );
+    }
+
+    /// DSpark greedy parity (issue #1339) over 64 tokens.
+    ///
+    /// Two things differ from the Qwen 3.5 DFlash round above and both are
+    /// pinned here. First, the caller feeds the drafter EVERY prompt row on
+    /// the first round (`first_hidden` is `[1, S, dim]`, not `[1, 1, dim]`)
+    /// so the drafter's own context cache holds the whole prompt; the loop
+    /// must pass that tensor through untouched and then hand the drafter
+    /// exactly the rows committed by each verify (`accepted + 1` after a
+    /// partial accept, the full block after a full accept). Second, a DSpark
+    /// drafter proposes a Markov chain seeded from the anchor; a chain that
+    /// is right for a prefix and wrong after it is the common case, and the
+    /// exact-match walk must still emit the target's own greedy stream.
+    #[test]
+    fn dspark_round_loop_greedy_parity_for_sixty_four_tokens() {
+        fn chain_next(prev: i32) -> i32 {
+            (prev.rem_euclid(103) * 11 + 17).rem_euclid(200) + 30
+        }
+        let argmax_fn = |_s: i32, prev_token: i32| chain_next(prev_token);
+
+        let first_bonus = 77i32;
+        let max_tokens = 65; // first bonus + 64 round-loop emissions
+        let mut reference: Vec<i32> = Vec::with_capacity(max_tokens);
+        reference.push(first_bonus);
+        for _ in 1..max_tokens {
+            let prev = *reference.last().unwrap();
+            reference.push(chain_next(prev));
+        }
+
+        // A DSpark-shaped drafter: a chain from the anchor that is exact for
+        // a round-dependent prefix and then wanders (the sentinel 1 is
+        // outside the chain's image [30, 230)).
+        let round = Rc::new(Cell::new(0usize));
+        let round_for_drafter = round.clone();
+        let propose = move |anchor: i32, bs: usize| -> Vec<i32> {
+            let r = round_for_drafter.get();
+            round_for_drafter.set(r + 1);
+            let correct_prefix = match r % 4 {
+                0 => bs - 1, // full accept
+                1 => 0,      // zero accept
+                2 => 2,
+                _ => (bs - 1) / 2,
+            };
+            let mut out = Vec::with_capacity(bs - 1);
+            let mut prev = anchor;
+            for i in 0..bs - 1 {
+                let next = chain_next(prev);
+                out.push(if i < correct_prefix { next } else { 1 });
+                prev = next;
+            }
+            out
+        };
+
+        const PROMPT_ROWS: i32 = 5;
+        const HIDDEN_DIM: i32 = 5 * 8;
+        let target = SyntheticTarget::new(vec![2, 9, 17, 21, 27], HIDDEN_DIM, argmax_fn);
+        let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
+        let drafter = SyntheticDrafter::new(propose);
+        let seen_rows = drafter.hidden_rows_recorder();
+        let lm = EmbedOnlyLm;
+        let block_size = 8u32;
+        let mut r#gen = DFlashGenerator::new(
+            Box::new(drafter),
+            SamplingConfig::greedy(),
+            block_size,
+            125_017,
+        );
+        // Whole-prompt first hidden: one row per prompt token.
+        let first_hidden = ffi::zeros(&[1, PROMPT_ROWS, HIDDEN_DIM], crate::dtype::FLOAT32);
+
+        let out = r#gen
+            .run(
+                &target,
+                &lm,
+                &mut caches,
+                first_bonus,
+                first_hidden,
+                &[],
+                max_tokens,
+                &AtomicBool::new(false),
+                &crate::sampling::LogprobsConfig::default(),
+            )
+            .expect("DSpark synthetic round loop must not fail");
+
+        let reference_tail = &reference[1..];
+        assert_eq!(out.tokens.len(), reference_tail.len());
+        for (i, (got, want)) in out.tokens.iter().zip(reference_tail.iter()).enumerate() {
+            assert_eq!(
+                got, want,
+                "token {i} diverged from the greedy reference: got {got}, want {want}"
+            );
+        }
+
+        // The accept pattern followed the drafter's round schedule, so the
+        // loop really exercised full, zero and partial accepts.
+        assert!(out.accept_lens.len() >= 4, "{:?}", out.accept_lens);
+        assert_eq!(out.accept_lens[0], block_size - 1, "round 0 full accept");
+        assert_eq!(out.accept_lens[1], 0, "round 1 zero accept");
+        assert_eq!(out.accept_lens[2], 2, "round 2 partial accept");
+
+        // Hidden rows handed to the drafter: the whole prompt first, then
+        // exactly the committed rows of each verify.
+        let rows = seen_rows.take();
+        assert_eq!(rows.len(), out.accept_lens.len());
+        assert_eq!(
+            rows[0], PROMPT_ROWS,
+            "first draft must see every prompt row"
+        );
+        let verify_lens = target.verify_call_lens();
+        for (i, accepted) in out.accept_lens.iter().enumerate().take(rows.len() - 1) {
+            let bs = verify_lens[i];
+            let expected = if (*accepted as i32) < bs - 1 {
+                *accepted as i32 + 1
+            } else {
+                bs
+            };
+            assert_eq!(
+                rows[i + 1],
+                expected,
+                "round {} draft must see the rows committed by round {i} (accepted {accepted}, bs {bs})",
+                i + 1
+            );
+        }
     }
 
     /// EOS handling: when an emitted token equals an EOS id, the round

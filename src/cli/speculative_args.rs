@@ -62,7 +62,11 @@ use mlxcel_core::drafter::{DrafterKind, KNOWN_DRAFTER_KINDS};
 ///   when no Qwen 3.5 MTP hint is found.
 /// - **DFlash** → `16`: the Qwen 3.5 DFlash drafter's `block_size`
 ///   declared in https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py#L31.
-///   Mirrors [`mlxcel_core::drafter::dflash::DEFAULT_BLOCK_SIZE`].
+///   Mirrors [`mlxcel_core::drafter::dflash::DEFAULT_BLOCK_SIZE`]. An LFM2
+///   DSpark drafter (also `DrafterKind::Dflash`) instead resolves to its own
+///   runtime verify width through
+///   `mlxcel_core::drafter::peek_dspark_configured_block_size` (8 on the
+///   published checkpoints, `block_size + 1 = 10` with `--draft-block-size 10`).
 pub const DEFAULT_MTP_BLOCK_SIZE: u32 = 4;
 pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
 
@@ -233,6 +237,34 @@ pub fn resolve_draft_block_size(
     if kind == DrafterKind::Mtp
         && let Some(configured) =
             mlxcel_core::drafter::peek_inkling_mtp_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
+    if kind == DrafterKind::Mtp
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_glm4_moe_lite_mtp_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
+    // An LFM2 DSpark drafter (issue #1339) counts proposals in `block_size`
+    // and runs at `min(block_size + 1, runtime_block_size)` rows by default
+    // (8 on the published checkpoints); the flat DFlash default of 16 would
+    // ask it for 15 proposals from a 9-proposal head.
+    if kind == DrafterKind::Dflash
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_dspark_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
+    // The Muse Glimmer assistant (issue #1343) publishes `block_size 16`,
+    // which is the flat DFlash default; the peek exists so a checkpoint that
+    // narrows it through `runtime_block_size` is honoured.
+    if kind == DrafterKind::Dflash
+        && let Some(configured) =
+            mlxcel_core::drafter::dflash::peek_muse_assistant_configured_block_size(model_path)
         && let Ok(n) = u32::try_from(configured)
     {
         return n;

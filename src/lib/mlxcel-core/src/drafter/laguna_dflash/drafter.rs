@@ -221,6 +221,10 @@ impl Drafter for LagunaDFlashDrafter {
             .map_err(|reason| DrafterError::LoadFailed { reason })
     }
 
+    fn is_laguna_dflash(&self) -> bool {
+        true
+    }
+
     fn kind(&self) -> DrafterKind {
         DrafterKind::Dflash
     }

@@ -20,8 +20,9 @@
 
 use image::DynamicImage;
 use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::drafter::dflash::SpeculativeTarget;
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
-use mlxcel_core::layers::KVCache;
+use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::models::muse_glimmer_config::{
@@ -181,6 +182,14 @@ impl LanguageModel for MuseGlimmerVlmModel {
         LanguageModel::embed_tokens(&self.text, input_ids)
     }
 
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        LanguageModel::embed_tokens_module(&self.text)
+    }
+
+    fn lm_head_module(&self) -> Option<UnifiedLinear> {
+        LanguageModel::lm_head_module(&self.text)
+    }
+
     fn reset_runtime_state(&self) {
         LanguageModel::reset_runtime_state(&self.text);
     }
@@ -297,5 +306,60 @@ impl LanguageModel for MuseGlimmerVlmModel {
             mask,
             context,
         )
+    }
+}
+
+/// DFlash target adapter for text-only requests on the Muse Glimmer VLM
+/// checkpoint (issue #1343). Vision is fully prefilled before a verify
+/// round could start and the burst declines multimodal requests, so every
+/// hook delegates to the text decoder.
+///
+/// Used by: the server DFlash burst.
+impl SpeculativeTarget for MuseGlimmerVlmModel {
+    type Cache = crate::models::muse_glimmer::MuseCache;
+    type VerifyOut = crate::models::muse_glimmer::VerifyOutput;
+
+    fn capture_layer_ids(&self) -> &[usize] {
+        SpeculativeTarget::capture_layer_ids(&self.text)
+    }
+
+    fn verify_forward(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+    ) -> Self::VerifyOut {
+        SpeculativeTarget::verify_forward(&self.text, verify_input, caches)
+    }
+
+    fn verify_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        SpeculativeTarget::verify_forward_with_capture_layers(
+            &self.text,
+            verify_input,
+            caches,
+            capture_layer_ids,
+        )
+    }
+
+    fn rollback_partial(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: i32,
+        block_size: i32,
+    ) {
+        SpeculativeTarget::rollback_partial(&self.text, caches, verify_out, accepted, block_size);
+    }
+
+    fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
+        SpeculativeTarget::concat_hidden_for_drafter(&self.text, verify_out)
+    }
+
+    fn verify_logits<'a>(&self, verify_out: &'a Self::VerifyOut) -> &'a MlxArray {
+        SpeculativeTarget::verify_logits(&self.text, verify_out)
     }
 }

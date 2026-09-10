@@ -215,6 +215,20 @@ enum Commands {
     /// `MLXCEL_AUTOTUNE=1` to additionally tune unseen shapes on first use.
     #[command(verbatim_doc_comment)]
     Tune(commands::TuneArgs),
+
+    /// Split the GLM-4.7-Flash MTP block into a standalone drafter directory.
+    ///
+    /// Reads the raw `zai-org/GLM-4.7-Flash` checkpoint (the community 4-bit
+    /// conversions drop the `model.layers.47.*` next-token-prediction
+    /// tensors) and writes a `glm4_moe_lite_mtp` directory that
+    /// `mlxcel generate --draft-model` and `mlxcel-server --model-draft`
+    /// pair with any `glm4_moe_lite` target of the same geometry:
+    ///
+    ///     mlxcel split-mtp -m models/glm-4.7-flash-bf16 -o models/glm-4.7-flash-mtp-4bit --q-bits 4
+    ///     mlxcel generate -m models/glm-4.7-flash-4bit --draft-model models/glm-4.7-flash-mtp-4bit -p "Hi"
+    #[cfg(feature = "surgery")]
+    #[command(name = "split-mtp", verbatim_doc_comment)]
+    SplitMtp(commands::SplitMtpArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -451,11 +465,14 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,
 
-    /// Video file paths for VLMs that support video inputs (e.g. Gemma4,
-    /// Kimi-VL, and Qwen-VL). Pass the flag multiple times for multiple
-    /// videos: `--video clip1.mp4 --video clip2.mp4`. Frame extraction
-    /// requires `ffmpeg` on PATH. `gemma4_unified` also accepts `--video`
-    /// together with `--audio` in the same prompt.
+    /// Video file paths. Families with a native video path (Gemma 4, Inkling,
+    /// Kimi-VL, Qwen-VL) consume the clip through their own temporal
+    /// processor; every other VLM with a vision tower decodes the clip and
+    /// sends the sampled frames as ordered images (see `--video-max-frames`).
+    /// Pass the flag multiple times for multiple videos: `--video clip1.mp4
+    /// --video clip2.mp4`. Frame extraction requires `ffmpeg` on PATH.
+    /// `gemma4_unified` also accepts `--video` together with `--audio` in the
+    /// same prompt.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub(crate) video: Vec<PathBuf>,
 
@@ -464,6 +481,20 @@ pub(crate) struct GenerationOptions {
     /// vision tower. Defaults to 2.0.
     #[arg(long, value_name = "FLOAT", default_value_t = 2.0)]
     pub(crate) fps: f64,
+
+    /// Maximum frames kept when `--video` is served as ordered still images,
+    /// because the loaded checkpoint has no native video path.
+    ///
+    /// The clip is decoded at `--fps`, then evenly subsampled to this many
+    /// frames, always keeping the first and the last. Ignored by families with
+    /// a native video path. Values below 2 are raised to 2.
+    #[arg(
+        long = "video-max-frames",
+        env = "MLXCEL_VIDEO_MAX_FRAMES",
+        value_name = "N",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES
+    )]
+    pub(crate) video_max_frames: usize,
 
     /// Write synthesized speech for the generated answer to this WAV path
     /// (24 kHz mono PCM16). Qwen3-Omni models only; the talker + code2wav
@@ -627,6 +658,30 @@ pub(crate) struct InspectArgs {
     /// number is the same the banner prints.
     #[arg(long)]
     pub(crate) json: bool,
+
+    /// Tokenize FILE with this model's tokenizer and print one compact JSON id
+    /// array per input line, then exit.
+    ///
+    /// Lines are split on `\n`; a trailing `\r` stays part of the line and the
+    /// newline itself is excluded. Special-token spellings written into the
+    /// text are NOT recognized (`<|open|>` encodes as ordinary characters),
+    /// which is the convention a chat renderer encodes message bodies with.
+    /// Nothing else runs in this mode: no safetensors scan and no memory
+    /// estimate, so it works on a tokenizer-only directory.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) tokenize: Option<PathBuf>,
+
+    /// With `--tokenize`, encode the whole file as one document and print a
+    /// single id array instead of one per line.
+    ///
+    /// Exercises the pattern's newline alternatives, which per-line encoding
+    /// never reaches.
+    ///
+    /// `requires` rather than a silent no-op: on its own this flag reads like
+    /// a request to tokenize something, and answering it with the ordinary
+    /// memory estimate would look like the tokenizer disagreeing.
+    #[arg(long, requires = "tokenize")]
+    pub(crate) tokenize_whole: bool,
 
     // Shared TurboQuant KV-cache flag group, gives `inspect` the same
     // `--cache-type-k` / `--cache-type-v` surface as `generate` so the
@@ -2185,6 +2240,34 @@ pub(crate) struct ServeArgs {
     #[arg(long = "vision-cache-size", default_value_t = 20, value_name = "N")]
     vision_cache_size: usize,
 
+    /// Maximum sampled frames kept when a `video_url` block is served as
+    /// ordered still images.
+    ///
+    /// Applies only when the loaded checkpoint has no native video path; a
+    /// native video family samples through its own processor and ignores this.
+    /// Values below 2 are raised to 2, so the first and last sampled frame are
+    /// always kept. Also reads `MLXCEL_VIDEO_MAX_FRAMES`.
+    #[arg(
+        long = "video-max-frames",
+        env = "MLXCEL_VIDEO_MAX_FRAMES",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+        value_name = "N"
+    )]
+    video_max_frames: usize,
+
+    /// Frames-per-second the video-to-images fallback decodes a clip at when
+    /// the request carries no per-`video_url` `fps` of its own.
+    ///
+    /// Applies only when the loaded checkpoint has no native video path. Also
+    /// reads `MLXCEL_VIDEO_FPS`.
+    #[arg(
+        long = "video-fps",
+        env = "MLXCEL_VIDEO_FPS",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FPS,
+        value_name = "FLOAT"
+    )]
+    video_fps: f64,
+
     /// Maximum encoded bytes accepted for each image input.
     ///
     /// Also reads `LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE`.
@@ -2848,6 +2931,8 @@ fn main() -> anyhow::Result<()> {
             args.models_dir.as_deref(),
         ),
         Commands::Tune(args) => commands::run_tune(args),
+        #[cfg(feature = "surgery")]
+        Commands::SplitMtp(args) => commands::run_split_mtp(args),
     }
 }
 

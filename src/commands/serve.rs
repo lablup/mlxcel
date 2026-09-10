@@ -712,6 +712,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         tp_embedding_mode: args.tp_embedding_mode,
         tp_lm_head_mode: args.tp_lm_head_mode,
         vision_cache_size: args.vision_cache_size,
+        video_max_frames: args.video_max_frames,
+        video_fps: args.video_fps,
         max_image_payload_size: args.max_image_payload_size,
         max_images_per_request: args.max_images_per_request,
         max_image_width: args.max_image_width,

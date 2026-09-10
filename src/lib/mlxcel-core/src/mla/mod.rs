@@ -83,6 +83,7 @@ use std::sync::OnceLock;
 pub mod absorb;
 pub mod cache;
 pub mod decode;
+pub mod kv_b_split;
 pub mod split_kv;
 pub mod stats;
 
@@ -95,6 +96,7 @@ pub use cache::{
     decompressed_bytes_per_token, latent_bytes_per_token, latent_layout_supports_mode,
 };
 pub use decode::{absorb_queries, absorbed_decode};
+pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};
 

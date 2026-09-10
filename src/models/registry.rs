@@ -124,6 +124,8 @@ const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
 const MTP: &[Drafter] = &[Drafter::Mtp];
 const MTP_DFLASH: &[Drafter] = &[Drafter::Mtp, Drafter::Dflash];
+/// DFlash round loop only: the Muse Glimmer assistant drafter (issue #1343).
+const DFLASH: &[Drafter] = &[Drafter::Dflash];
 
 const EMPTY_KEYS: &[&str] = &[];
 const QWEN35_ALIASES: &[&str] = &["Qwen 3.8"];
@@ -358,6 +360,8 @@ impl ModelType {
             ModelType::Plamo2 => "plamo2",
             ModelType::GraniteMoeHybrid => "granitemoehybrid",
             ModelType::KimiLinear => "kimi_linear",
+            ModelType::KimiK3 => "kimi_k3",
+            ModelType::KimiK3VLM => "kimi_k3_vlm",
             ModelType::KimiVL => "kimi_vl",
             ModelType::KimiK25 => "kimi_k25",
             ModelType::LongcatFlash => "longcat_flash",
@@ -441,6 +445,7 @@ impl ModelType {
             | ModelType::Qwen35VLM
             | ModelType::Qwen35Moe
             | ModelType::Qwen35MoeVLM => MTP_DFLASH,
+            ModelType::MuseGlimmerVLM => DFLASH,
             _ => NO_DRAFTERS,
         };
         let cuda = match self {
@@ -486,6 +491,8 @@ impl ModelType {
             ModelType::DiffusionGemma | ModelType::Llada2Moe => "diffusion",
             ModelType::BailingMoeLinear
             | ModelType::KimiLinear
+            | ModelType::KimiK3
+            | ModelType::KimiK3VLM
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
             | ModelType::Qwen3Next => "linear_attention",
@@ -729,6 +736,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::NemotronNAS => &["nemotron-nas"],
         ModelType::Rwkv7 => &["rwkv7"],
         ModelType::KimiLinear => &["kimi_linear"],
+        ModelType::KimiK3 | ModelType::KimiK3VLM => &["kimi_k3"],
         ModelType::KimiVL => &["kimi_vl"],
         ModelType::KimiK25 => &["kimi_k25"],
         ModelType::LocateAnythingVLM => &["locateanything"],
@@ -1083,6 +1091,8 @@ mod tests {
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
             ModelType::KimiLinear,
+            ModelType::KimiK3,
+            ModelType::KimiK3VLM,
             ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(

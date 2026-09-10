@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::models::recurrent_snapshot::{push_i32, push_optional, restore_i32, restore_optional};
-use mlxcel_core::cache::{KVCacheMode, RotatingKVCacheSnapshotState};
+use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{KVCache, RotatingKVCache};
 use mlxcel_core::{MlxArray, UniquePtr};
+
+/// Tensor-name and error-message vocabulary Muse Glimmer hands to the shared
+/// serializers in [`crate::models::kv_snapshot`]. The `full` / `sliding`
+/// segments are what Muse Glimmer has always written, so a snapshot taken by
+/// an earlier build still restores.
+const MUSE_KV_SNAPSHOT_NAMES: KvSnapshotNames =
+    KvSnapshotNames::new("Muse Glimmer", "full", "sliding");
 
 pub enum MuseCache {
     Standard(KVCache),
@@ -44,6 +50,28 @@ impl MuseCache {
         matches!(self, Self::Rotating(_))
     }
 
+    /// Rewind `n` positions after a partial speculative accept (issue
+    /// #1343). No data moves on either variant: `offset` (and the rotating
+    /// write index) step back and the next append overwrites the rejected
+    /// rows. Returns the positions actually rewound.
+    pub(crate) fn trim(&mut self, n: i32) -> i32 {
+        match self {
+            Self::Standard(cache) => cache.trim(n),
+            Self::Rotating(cache) => cache.trim(n),
+        }
+    }
+
+    /// Arm a sliding cache with `buffer_size` rows of speculative slack so
+    /// a verify block appended past the ring boundary can be trimmed back
+    /// without overwriting still-visible window entries. A no-op on a full
+    /// layer's growing cache, which can always be trimmed.
+    pub(crate) fn enable_speculative_buffer(&mut self, buffer_size: i32) -> Result<(), String> {
+        match self {
+            Self::Standard(_) => Ok(()),
+            Self::Rotating(cache) => cache.enable_speculative_buffer(buffer_size),
+        }
+    }
+
     pub(crate) fn update_and_fetch(
         &mut self,
         k: UniquePtr<MlxArray>,
@@ -61,8 +89,12 @@ impl MuseCache {
         prefix: &str,
     ) -> Result<(), String> {
         match self {
-            Self::Standard(cache) => snapshot_standard(cache, snapshot, prefix),
-            Self::Rotating(cache) => snapshot_rotating(cache, snapshot, prefix),
+            Self::Standard(cache) => {
+                kv_snapshot::snapshot_standard(cache, snapshot, prefix, MUSE_KV_SNAPSHOT_NAMES)
+            }
+            Self::Rotating(cache) => {
+                kv_snapshot::snapshot_rotating(cache, snapshot, prefix, MUSE_KV_SNAPSHOT_NAMES)
+            }
         }
     }
 
@@ -72,145 +104,12 @@ impl MuseCache {
         prefix: &str,
     ) -> Result<(), String> {
         match self {
-            Self::Standard(cache) => restore_standard(cache, snapshot, prefix),
-            Self::Rotating(cache) => restore_rotating(cache, snapshot, prefix),
+            Self::Standard(cache) => {
+                kv_snapshot::restore_standard(cache, snapshot, prefix, MUSE_KV_SNAPSHOT_NAMES)
+            }
+            Self::Rotating(cache) => {
+                kv_snapshot::restore_rotating(cache, snapshot, prefix, MUSE_KV_SNAPSHOT_NAMES)
+            }
         }
-    }
-}
-
-fn snapshot_standard(
-    cache: &KVCache,
-    snapshot: &mut ModelStateSnapshot,
-    prefix: &str,
-) -> Result<(), String> {
-    if cache.keys.is_none() && cache.values.is_none() {
-        return Ok(());
-    }
-    if cache.keys.is_some() != cache.values.is_some() {
-        return Err(format!(
-            "Muse Glimmer snapshot {prefix}: full cache has only one of keys/values"
-        ));
-    }
-    if cache.mode != KVCacheMode::Fp16 {
-        return Err(format!(
-            "Muse Glimmer snapshot {prefix}: full cache mode {:?} is not supported by model-state snapshots",
-            cache.mode
-        ));
-    }
-    push_optional(snapshot, format!("{prefix}.full.keys"), &cache.keys);
-    push_optional(snapshot, format!("{prefix}.full.values"), &cache.values);
-    push_i32(snapshot, format!("{prefix}.full.offset"), cache.offset);
-    push_i32(snapshot, format!("{prefix}.full.mode"), 0);
-    Ok(())
-}
-
-fn snapshot_rotating(
-    cache: &RotatingKVCache,
-    snapshot: &mut ModelStateSnapshot,
-    prefix: &str,
-) -> Result<(), String> {
-    if cache.keys.is_none() && cache.values.is_none() {
-        return Ok(());
-    }
-    if cache.keys.is_some() != cache.values.is_some() {
-        return Err(format!(
-            "Muse Glimmer snapshot {prefix}: sliding cache has only one of keys/values"
-        ));
-    }
-    let state = cache.snapshot_state();
-    if state.mode != KVCacheMode::Fp16 {
-        return Err(format!(
-            "Muse Glimmer snapshot {prefix}: sliding cache mode {:?} is not supported by model-state snapshots",
-            state.mode
-        ));
-    }
-    push_optional(snapshot, format!("{prefix}.sliding.keys"), &cache.keys);
-    push_optional(snapshot, format!("{prefix}.sliding.values"), &cache.values);
-    push_i32(
-        snapshot,
-        format!("{prefix}.sliding.max_size"),
-        state.max_size,
-    );
-    push_i32(
-        snapshot,
-        format!("{prefix}.sliding.buffer_size"),
-        state.buffer_size,
-    );
-    push_i32(snapshot, format!("{prefix}.sliding.offset"), state.offset);
-    push_i32(
-        snapshot,
-        format!("{prefix}.sliding.start_position"),
-        state.start_position,
-    );
-    push_i32(snapshot, format!("{prefix}.sliding.idx"), state.idx);
-    push_i32(snapshot, format!("{prefix}.sliding.step"), state.step);
-    push_i32(snapshot, format!("{prefix}.sliding.mode"), 0);
-    Ok(())
-}
-
-fn restore_standard(
-    cache: &mut KVCache,
-    snapshot: &ModelStateSnapshot,
-    prefix: &str,
-) -> Result<(), String> {
-    let keys = restore_optional(snapshot, format!("{prefix}.full.keys"));
-    let values = restore_optional(snapshot, format!("{prefix}.full.values"));
-    if keys.is_none() && values.is_none() {
-        return Ok(());
-    }
-    if keys.is_some() != values.is_some() {
-        return Err(format!(
-            "Muse Glimmer restore {prefix}: full snapshot has only one of keys/values"
-        ));
-    }
-    validate_fp16_mode(snapshot, format!("{prefix}.full.mode"))?;
-    cache.keys = keys;
-    cache.values = values;
-    cache.offset = restore_i32(snapshot, format!("{prefix}.full.offset"))
-        .unwrap_or(snapshot.token_len() as i32);
-    cache.mode = KVCacheMode::Fp16;
-    Ok(())
-}
-
-fn restore_rotating(
-    cache: &mut RotatingKVCache,
-    snapshot: &ModelStateSnapshot,
-    prefix: &str,
-) -> Result<(), String> {
-    let keys = restore_optional(snapshot, format!("{prefix}.sliding.keys"));
-    let values = restore_optional(snapshot, format!("{prefix}.sliding.values"));
-    if keys.is_none() && values.is_none() {
-        return Ok(());
-    }
-    if keys.is_some() != values.is_some() {
-        return Err(format!(
-            "Muse Glimmer restore {prefix}: sliding snapshot has only one of keys/values"
-        ));
-    }
-    validate_fp16_mode(snapshot, format!("{prefix}.sliding.mode"))?;
-    let current = cache.snapshot_state();
-    let state = RotatingKVCacheSnapshotState {
-        max_size: restore_i32(snapshot, format!("{prefix}.sliding.max_size"))
-            .unwrap_or(current.max_size),
-        buffer_size: restore_i32(snapshot, format!("{prefix}.sliding.buffer_size")).unwrap_or(0),
-        offset: restore_i32(snapshot, format!("{prefix}.sliding.offset"))
-            .unwrap_or(snapshot.token_len() as i32),
-        start_position: restore_i32(snapshot, format!("{prefix}.sliding.start_position"))
-            .unwrap_or(0),
-        idx: restore_i32(snapshot, format!("{prefix}.sliding.idx"))
-            .unwrap_or(snapshot.token_len() as i32),
-        step: restore_i32(snapshot, format!("{prefix}.sliding.step")).unwrap_or(current.step),
-        mode: KVCacheMode::Fp16,
-        turbo_seed: current.turbo_seed,
-    };
-    cache.restore_fp16_snapshot_state(state, keys, values)
-}
-
-fn validate_fp16_mode(snapshot: &ModelStateSnapshot, name: String) -> Result<(), String> {
-    match restore_i32(snapshot, &name).unwrap_or(0) {
-        0 => Ok(()),
-        value => Err(format!(
-            "Muse Glimmer restore {name}: snapshot cache mode {value} is not supported"
-        )),
     }
 }

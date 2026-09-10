@@ -46,6 +46,7 @@ pub mod granite_vision_prompt;
 pub mod host_preprocessor;
 pub mod inkling_audio;
 pub mod internvl_prompt;
+pub mod kimi_k3_prompt;
 pub mod kimi_vl_prompt;
 pub mod lfm2_vl_prompt;
 pub mod llmjp_vl_prompt;

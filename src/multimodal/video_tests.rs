@@ -1475,3 +1475,96 @@ fn extract_frames_preserves_moving_square_position() {
         );
     }
 }
+
+// ─── Fallback subsampling (issue #1322) ──────────────────────────────────────
+
+/// Distinct 1x1 frames whose single pixel encodes the frame index, so a test
+/// can assert which frames survived rather than only how many.
+fn indexed_frames(count: usize) -> Vec<DynamicImage> {
+    (0..count)
+        .map(|index| {
+            let mut buffer = image::RgbImage::new(1, 1);
+            let index = u8::try_from(index).expect("fixture frame count fits in u8");
+            buffer.put_pixel(0, 0, image::Rgb([index, 0, 0]));
+            DynamicImage::ImageRgb8(buffer)
+        })
+        .collect()
+}
+
+fn frame_indices(frames: &[DynamicImage]) -> Vec<u8> {
+    frames
+        .iter()
+        .map(|frame| frame.to_rgb8().get_pixel(0, 0)[0])
+        .collect()
+}
+
+#[test]
+fn subsample_evenly_keeps_first_and_last() {
+    // The endpoints carry the change the caller is asking about: a clip whose
+    // first and last frame were dropped answers a question about a shorter
+    // clip than the one that was sent.
+    let kept = subsample_evenly(indexed_frames(20), 5);
+    let indices = frame_indices(&kept);
+    assert_eq!(indices.len(), 5);
+    assert_eq!(indices.first().copied(), Some(0));
+    assert_eq!(indices.last().copied(), Some(19));
+}
+
+#[test]
+fn subsample_evenly_identity_when_under_cap() {
+    for count in [1usize, 7, 16] {
+        let kept = subsample_evenly(indexed_frames(count), 16);
+        assert_eq!(
+            frame_indices(&kept),
+            (0..count as u8).collect::<Vec<_>>(),
+            "a clip that sampled to {count} frame(s) must pass through untouched under a cap of 16"
+        );
+    }
+}
+
+#[test]
+fn subsample_evenly_indices_match_formula() {
+    // round(i * (sampled - 1) / (max - 1)) for sampled = 37, max = 16.
+    assert_eq!(
+        evenly_spaced_indices(37, 16),
+        vec![0, 2, 5, 7, 10, 12, 14, 17, 19, 22, 24, 26, 29, 31, 34, 36]
+    );
+    let kept = subsample_evenly(indexed_frames(37), 16);
+    assert_eq!(
+        frame_indices(&kept),
+        vec![0, 2, 5, 7, 10, 12, 14, 17, 19, 22, 24, 26, 29, 31, 34, 36]
+    );
+}
+
+#[test]
+fn subsample_evenly_indices_are_strictly_increasing() {
+    // The splice in `apply_video_frame_expansion` consumes the kept indices in
+    // order, so a duplicate would silently drop a frame. The step is at least
+    // 1 whenever the cap is below the sampled count, which is what makes that
+    // safe; pin it rather than trusting the arithmetic.
+    for len in [3usize, 17, 37, 200, 768] {
+        for max in [2usize, 3, 8, 16] {
+            let indices = evenly_spaced_indices(len, max);
+            // Under the cap the whole clip is kept, which is the identity case
+            // `subsample_evenly` short-circuits on.
+            let expected = max.min(len);
+            assert_eq!(indices.len(), expected, "len={len} max={max}");
+            assert!(
+                indices.windows(2).all(|pair| pair[0] < pair[1]),
+                "len={len} max={max} produced repeated indices: {indices:?}"
+            );
+            assert_eq!(indices[expected - 1], len - 1, "len={len} max={max}");
+        }
+    }
+}
+
+#[test]
+fn frames_to_png_round_trips_every_frame_in_order() {
+    let encoded = frames_to_png(&indexed_frames(4)).expect("PNG encoding of 1x1 frames");
+    assert_eq!(encoded.len(), 4);
+    for (index, bytes) in encoded.iter().enumerate() {
+        assert_eq!(&bytes[..8], PNG_SIGNATURE, "frame {index} is not a PNG");
+        let decoded = image::load_from_memory(bytes).expect("frame decodes back");
+        assert_eq!(decoded.to_rgb8().get_pixel(0, 0)[0], index as u8);
+    }
+}

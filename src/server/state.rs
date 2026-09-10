@@ -374,10 +374,22 @@ pub struct ModelMediaSupport {
     /// a multimodal checkpoint without an audio tower still refuses later, on
     /// the worker, where the loaded family is known.
     pub audio: bool,
-    /// `true` when the loaded model supports `video_url` content blocks.
-    /// Currently this is exactly the Gemma 4 VLM family; expand the
-    /// detection logic alongside any new video-capable model.
-    pub video: bool,
+    /// `true` when the loaded model has a native video path: a temporal
+    /// encoder (or a per-frame scatter) that consumes `video_url` content
+    /// blocks as a clip. Gemma 4 VLM / Unified, Inkling, Kimi-VL and Qwen-VL
+    /// qualify; expand the detection logic alongside any new one.
+    pub video_native: bool,
+    /// `true` when the loaded model has no native video path but does have a
+    /// vision tower, so a `video_url` block is served by decoding the clip and
+    /// sending the sampled frames as ordered images (issue #1322).
+    ///
+    /// Separate from [`Self::video_native`] because the two differ in what
+    /// reaches the model, not only in whether the request is admitted: the
+    /// fallback rewrites the request into `image_url` parts before rendering,
+    /// so the worker sees images and `prepared.videos` is empty. Anything that
+    /// only needs to know whether a `video_url` part is admitted at all should
+    /// read [`Self::video`].
+    pub video_frames_fallback: bool,
     /// `true` when the loaded model accepts `video_url` and `input_audio`
     /// content blocks in the *same* request (issue #1349).
     ///
@@ -405,9 +417,21 @@ impl ModelMediaSupport {
         Self {
             image: false,
             audio: false,
-            video: false,
+            video_native: false,
+            video_frames_fallback: false,
             video_with_audio: false,
         }
+    }
+
+    /// `true` when a `video_url` content block is admitted at all, natively or
+    /// through the frame fallback.
+    ///
+    /// This is what the HTTP boundary gate keys on, and it keeps the meaning
+    /// the single `video` field carried before issue #1322 split it: "this
+    /// checkpoint can answer a question about a clip".
+    #[must_use]
+    pub const fn video(&self) -> bool {
+        self.video_native || self.video_frames_fallback
     }
 }
 
@@ -545,6 +569,76 @@ fn build_slot_registry(config: &ServerConfig, slots_debug: bool) -> Arc<SlotRegi
     ))
 }
 
+/// Share the loaded tokenizer and attach any native (non-Jinja) chat renderer
+/// it implies (#1338).
+///
+/// Kimi K3 ships no chat template, so `resolve_chat_template` hands back the
+/// generic default processor and the real format lives in
+/// `server::kimi_k3_chat`. Doing the attachment here rather than in
+/// `server::startup` means every construction path (the server, the
+/// disaggregated worker, and every route test that builds an `AppState`) gets
+/// the same wiring from the same two values it already owns.
+#[cfg(test)]
+pub(crate) fn attach_native_chat_renderer(
+    tokenizer: MlxcelTokenizer,
+    chat_template: ChatTemplateProcessor,
+) -> (Arc<MlxcelTokenizer>, ChatTemplateProcessor) {
+    attach_native_chat_renderer_for_model(tokenizer, chat_template, None)
+}
+
+/// [`attach_native_chat_renderer`] that also reads the checkpoint's
+/// `preprocessor_config.json`, so Kimi K3 image prompts are sized with the
+/// navit parameters the worker's processor will use (#1342). A missing or
+/// unreadable file keeps the published defaults, which are what the worker
+/// falls back to as well.
+pub(crate) fn attach_native_chat_renderer_for_model(
+    tokenizer: MlxcelTokenizer,
+    mut chat_template: ChatTemplateProcessor,
+    model_dir: Option<&std::path::Path>,
+) -> (Arc<MlxcelTokenizer>, ChatTemplateProcessor) {
+    let tokenizer = Arc::new(tokenizer);
+    if let Some(renderer) = super::kimi_k3_chat::KimiK3Renderer::new(Arc::clone(&tokenizer)) {
+        tracing::info!("Kimi K3 tiktoken vocabulary detected; using the native XTML chat renderer");
+        let renderer = match model_dir
+            .map(crate::vision::processors::kimi_k3::KimiK3ImageProcessor::from_model_dir)
+        {
+            Some(Ok(processor)) => renderer.with_navit_config(processor.navit),
+            Some(Err(err)) => {
+                tracing::warn!(
+                    "Kimi K3: preprocessor_config.json is unreadable ({err}); image prompts use \
+                     the published navit parameters"
+                );
+                renderer
+            }
+            None => renderer,
+        };
+        chat_template.attach_kimi_k3(Arc::new(renderer));
+    } else if tokenizer
+        .tiktoken()
+        .is_some_and(|t| t.family() == crate::tokenizer::TiktokenFamily::KimiK3)
+    {
+        // Same fail-open shape the disaggregated router was fixed for in
+        // a6aac844 (#1743 security review): `KimiK3Renderer::new` requires
+        // all six control-token spellings, and a checkpoint whose
+        // `added_tokens_decoder` names only some of them still has a live
+        // control block `MlxcelTokenizer::encode` recognizes with special
+        // parsing on. Falling through here to the generic template would let
+        // `prepare_chat_request_with_cache` render user text as a plain
+        // string and hand it to that special-parsing encode, re-tokenizing
+        // any `<|open|>` / `<|sep|>` spellings a message body wrote as the
+        // real control ids. Gated the same way the router gates it, on the
+        // vocabulary family rather than on `kimi_k3_control_ids()`, which is
+        // all-or-nothing and would report `None` here regardless.
+        tracing::error!(
+            "Kimi K3 tiktoken vocabulary detected, but its control-token names are incomplete; \
+             refusing to fall back to the generic chat template, which would let message text \
+             re-tokenize as control ids"
+        );
+        chat_template.mark_kimi_k3_family_unrenderable();
+    }
+    (tokenizer, chat_template)
+}
+
 impl AppState {
     /// Create `AppState` with all required components.
     pub fn new(
@@ -566,6 +660,8 @@ impl AppState {
             );
         let startup_live = Arc::new(startup_settings);
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
+        let (tokenizer, chat_template) =
+            attach_native_chat_renderer_for_model(tokenizer, chat_template, Some(&model_path));
         Self {
             model_provider,
             config: Arc::new(config),
@@ -574,7 +670,7 @@ impl AppState {
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
             thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
-            tokenizer: Arc::new(tokenizer),
+            tokenizer,
             model_path,
             media_support: ModelMediaSupport::default(),
             batch_metrics,
@@ -624,6 +720,8 @@ impl AppState {
             );
         let startup_live = Arc::new(startup_settings);
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
+        let (tokenizer, chat_template) =
+            attach_native_chat_renderer_for_model(tokenizer, chat_template, Some(&model_path));
         Self {
             model_provider,
             config: Arc::new(config),
@@ -632,7 +730,7 @@ impl AppState {
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
             thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
-            tokenizer: Arc::new(tokenizer),
+            tokenizer,
             model_path,
             media_support: ModelMediaSupport::default(),
             batch_metrics,

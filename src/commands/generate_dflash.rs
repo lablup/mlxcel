@@ -73,6 +73,21 @@ pub(super) fn run_offline_dflash(
              decode"
         ));
     };
+    // The same measured block-versus-chain gate the server burst runs
+    // (`DFlashTargetModel::exactness_allows`): a host where a `block_size`-row
+    // verify block is not byte-identical to the single-token chain would
+    // silently differ from `mlxcel generate` without --draft-model at
+    // temperature 0. Fails closed; `MLXCEL_MTP_ALLOW_INEXACT=1` engages anyway.
+    if !wrapper.model.dflash_exactness_allows(block_size) {
+        return Err(anyhow!(
+            "Laguna DFlash speculative decoding declined: at --draft-block-size {block_size} \
+             this GPU's multi-token verify block is not byte-identical to the single-token \
+             decode chain, so temperature-0 output would silently differ from `mlxcel \
+             generate` without --draft-model (see the probe verdict logged above). Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to engage anyway \
+             and forfeit the byte-identity contract."
+        ));
+    }
 
     println!("Loading DFlash drafter from {draft_model_path:?}...");
     let (mut drafter, kind) = load_drafter(draft_model_path, Some(DrafterKind::Dflash))

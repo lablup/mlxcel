@@ -38,14 +38,15 @@ thiserror = "2.0"
 # `anyhow::Error` interfaces.
 anyhow = "1.0"
 
+# `safetensors` writer for the `split-mtp` op, which materializes the
+# extracted GLM-4.7-Flash MTP block as a standalone drafter directory.
+# Pinned to the same major series the top-level `mlxcel` crate already
+# uses to keep one safetensors version in the dependency graph.
+safetensors = "0.7.0"
+
 [dev-dependencies]
 # `tempfile` lets the integration tests build a YAML file plus
 # adjacent donor `.safetensors` so the parser's relative-path
 # resolution can be exercised without polluting the workspace.
 tempfile = "3"
 
-# `safetensors` writer used by AddOp / ReplaceOp unit and integration
-# tests to build synthetic donor task-vector / replacement files.
-# Pinned to the same major series the top-level `mlxcel` crate already
-# uses to keep one safetensors version in the dependency graph.
-safetensors = "0.7.0"

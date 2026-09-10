@@ -46,6 +46,18 @@ fn is_gemma4_model_config(config: &Value) -> bool {
             == Some("gemma4")
 }
 
+/// Whether `config.json` declares any quantization, at the top level or under
+/// `text_config`, under either the MLX `quantization` key or the HuggingFace
+/// `quantization_config` key. This is the predicate the load-time bf16 -> f16
+/// policy keys on: a quantized checkpoint keeps its bf16 side-data.
+///
+/// The nested `quantization_config` case is what keeps Kimi K3 bf16
+/// (issue #1334): its top level has no MLX `quantization` block, and its
+/// `text_config.quantization_config` is a compressed-tensors
+/// `mxfp4-pack-quantized` declaration (`quant_method: "compressed-tensors"`)
+/// rather than an MLX pair, but it is quantization metadata all the same, so
+/// the model loads bf16 like every other quantized family instead of having
+/// its dense projections converted around uint8 / uint32 expert planes.
 pub(crate) fn config_has_quantization_metadata(config: &Value) -> bool {
     fn has_quantization(obj: &Value) -> bool {
         obj.get("quantization").is_some() || obj.get("quantization_config").is_some()
@@ -2716,6 +2728,43 @@ mod tests {
     }
 
     // --- normalize_nvfp4_keys tests ---
+
+    #[test]
+    fn config_has_quantization_metadata_sees_nested_compressed_tensors_config() {
+        // Kimi K3 (issue #1334): no MLX `quantization` block anywhere, and the
+        // only declaration is the compressed-tensors `quantization_config`
+        // nested under `text_config`. That must count as quantized so the
+        // Apple Silicon bf16 -> f16 conversion is skipped and the model
+        // stays uniformly bf16 around its uint8 / uint32 mxfp4 experts.
+        let kimi_k3 = serde_json::json!({
+            "model_type": "kimi_k3",
+            "text_config": {
+                "model_type": "kimi_linear",
+                "quantization_config": {
+                    "format": "mxfp4-pack-quantized",
+                    "quant_method": "compressed-tensors"
+                }
+            },
+            "vision_config": {}
+        });
+        assert!(config_has_quantization_metadata(&kimi_k3));
+
+        // The same shape with nothing declared converts as usual.
+        let dense = serde_json::json!({
+            "model_type": "kimi_k3",
+            "text_config": { "model_type": "kimi_linear" },
+            "vision_config": {}
+        });
+        assert!(!config_has_quantization_metadata(&dense));
+
+        // And the MLX spelling at either level still counts.
+        assert!(config_has_quantization_metadata(&serde_json::json!({
+            "quantization": { "group_size": 64, "bits": 4 }
+        })));
+        assert!(config_has_quantization_metadata(&serde_json::json!({
+            "text_config": { "quantization": { "group_size": 64, "bits": 4 } }
+        })));
+    }
 
     #[test]
     fn gemma3n_bf16_key_keeps_every_tensor_not_just_the_language_mlp() {

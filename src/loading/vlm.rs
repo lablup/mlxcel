@@ -74,6 +74,8 @@ mod inkling;
 mod internvl;
 #[path = "vlm_jina_vlm.rs"]
 mod jina_vlm;
+#[path = "vlm_kimi_k3.rs"]
+mod kimi_k3_loader;
 #[path = "vlm_kimi_vl.rs"]
 mod kimi_vl_loader;
 #[path = "vlm_lfm2_vl.rs"]
@@ -129,6 +131,7 @@ pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use inkling::load_inkling_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use jina_vlm::load_jina_vlm;
+pub(crate) use kimi_k3_loader::load_kimi_k3_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;
 pub(crate) use lfm2_vl::load_lfm2_vl;
 #[cfg(feature = "xla-iree")]

@@ -27,6 +27,7 @@ use super::{
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
 use crate::server::media::scan_insecure_allowlist_dirs;
+use crate::server::state::ModelMediaSupport;
 use crate::server::{DecodeStorageBackend, PipelineParallelRuntimeConfig};
 // Env-var-sensitive tests must serialize through the crate-wide `ENV_LOCK`
 // per-module locks race with env mutations in unrelated
@@ -1253,7 +1254,7 @@ fn detect_model_media_support_recognises_gemma4_unified() {
 
     let support = detect_model_media_support(&dir);
     assert!(
-        support.video,
+        support.video_native,
         "gemma4_unified must enable video_url content blocks, got {support:?}"
     );
     // Issue #1349: gemma4_unified is the one family whose merge path scatters
@@ -1280,7 +1281,7 @@ fn detect_model_media_support_recognises_kimi_k25() {
 
     let support = detect_model_media_support(&dir);
     assert!(
-        support.video,
+        support.video_native,
         "kimi_k25 must enable video_url content blocks, got {support:?}"
     );
     assert!(
@@ -1319,7 +1320,7 @@ fn detect_model_media_support_recognises_inkling_video() {
 
     let support = detect_model_media_support(&dir);
     assert!(
-        support.video,
+        support.video_native,
         "Inkling VLM must enable video_url content blocks, got {support:?}"
     );
     assert!(
@@ -1348,7 +1349,7 @@ fn detect_model_media_support_recognises_qwen35_vlm_video() {
 
     let support = detect_model_media_support(&dir);
     assert!(
-        support.video,
+        support.video_native,
         "Qwen3.5/Qwen3.8 VLM must enable video_url content blocks, got {support:?}"
     );
     assert!(
@@ -1358,13 +1359,179 @@ fn detect_model_media_support_recognises_qwen35_vlm_video() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Write a minimal `config.json` into a fresh temp directory and resolve the
+/// media-support flags from it. Shared by the issue #1322 split tests below,
+/// which each care about one `model_type` and nothing else in the checkpoint.
+fn media_support_for_config(name: &str, config: serde_json::Value) -> ModelMediaSupport {
+    let dir = temp_path(name);
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+    let support = detect_model_media_support(&dir);
+    std::fs::remove_dir_all(dir).unwrap();
+    support
+}
+
+#[test]
+fn media_support_marks_image_only_vlms_as_frames_fallback() {
+    // Neither family has a temporal path, and both have a vision tower, so a
+    // `video_url` block is served by decoding the clip into ordered frames
+    // (issue #1322) instead of being refused at the boundary.
+    for (name, config) in [
+        (
+            "media-gemma3-fallback",
+            serde_json::json!({
+                "model_type": "gemma3",
+                "architectures": ["Gemma3ForConditionalGeneration"],
+                "text_config": { "model_type": "gemma3_text" },
+                "vision_config": { "model_type": "siglip_vision_model", "image_size": 896 }
+            }),
+        ),
+        (
+            "media-idefics3-fallback",
+            serde_json::json!({
+                "model_type": "idefics3",
+                "architectures": ["Idefics3ForConditionalGeneration"],
+                "text_config": { "model_type": "llama" },
+                "vision_config": { "model_type": "idefics3" }
+            }),
+        ),
+    ] {
+        let support = media_support_for_config(name, config);
+        assert!(
+            support.video_frames_fallback,
+            "{name} must serve video_url through the frames fallback, got {support:?}"
+        );
+        assert!(
+            !support.video_native,
+            "{name} has no native video path, got {support:?}"
+        );
+        assert!(
+            support.video(),
+            "{name} must admit video_url at the boundary, got {support:?}"
+        );
+        // The fallback rewrites the clip into images. It grants no merge path
+        // for a clip plus an audio track, so the combination stays refused.
+        assert!(
+            !support.video_with_audio,
+            "{name} must keep the combined video+audio refusal, got {support:?}"
+        );
+    }
+}
+
+#[test]
+fn media_support_keeps_native_video_families_native() {
+    // Qwen2.5-VL is in this list, not the fallback one: issue #1166 gave the
+    // Qwen-VL families a real `video_grid_thw` path, so the substitution the
+    // issue #1322 plan assumed for them must not engage.
+    for (name, config, expect_video_with_audio) in [
+        (
+            "media-gemma4-unified-native",
+            serde_json::json!({
+                "model_type": "gemma4_unified",
+                "text_config": { "model_type": "gemma4_unified_text" },
+                "vision_config": { "model_type": "gemma4_unified_vision" }
+            }),
+            true,
+        ),
+        (
+            "media-kimi-vl-native",
+            serde_json::json!({
+                "model_type": "kimi_vl",
+                "architectures": ["KimiVLForConditionalGeneration"],
+                "text_config": { "model_type": "deepseek_v3" },
+                "vision_config": { "model_type": "moonvit" }
+            }),
+            false,
+        ),
+        (
+            "media-qwen25-vl-native",
+            serde_json::json!({
+                "model_type": "qwen2_5_vl",
+                "architectures": ["Qwen2_5_VLForConditionalGeneration"]
+            }),
+            false,
+        ),
+    ] {
+        let support = media_support_for_config(name, config);
+        assert!(
+            support.video_native,
+            "{name} must keep its native video path, got {support:?}"
+        );
+        assert!(
+            !support.video_frames_fallback,
+            "{name} must not be routed through the frames fallback, got {support:?}"
+        );
+        assert_eq!(
+            support.video_with_audio, expect_video_with_audio,
+            "{name} video_with_audio must be unchanged by issue #1322, got {support:?}"
+        );
+    }
+}
+
+#[test]
+fn media_support_gives_the_vit_gemma4_vlm_no_frames_fallback() {
+    // The ViT-backed Gemma 4 VLM detection runs a vision-weight probe that a
+    // synthetic config cannot satisfy deterministically, so this pins only the
+    // half that does not depend on it: whichever way the probe lands, this
+    // family never reaches the fallback, because both outcomes
+    // (`gemma4` VLM and `gemma4` text) are handled elsewhere.
+    let support = media_support_for_config(
+        "media-gemma4-vlm-native",
+        serde_json::json!({
+            "model_type": "gemma4",
+            "text_config": { "model_type": "gemma4_text" },
+            "vision_config": { "model_type": "siglip_vision_model", "image_size": 224 }
+        }),
+    );
+    assert!(
+        support.video_native || !support.video_frames_fallback,
+        "Gemma 4 VLM must reach its own video path, not the frames fallback, got {support:?}"
+    );
+    assert!(
+        !support.video_with_audio,
+        "the ViT Gemma 4 VLM must keep the combined refusal, got {support:?}"
+    );
+}
+
+#[test]
+fn media_support_denies_the_frames_fallback_to_text_only_and_muse_glimmer() {
+    // A checkpoint with no vision tower has nowhere to send frames.
+    let text_only = media_support_for_config(
+        "media-llama-text-fallback",
+        serde_json::json!({ "model_type": "llama" }),
+    );
+    assert!(
+        !text_only.video_frames_fallback && !text_only.video(),
+        "a text-only checkpoint must keep refusing video_url, got {text_only:?}"
+    );
+
+    // Muse Glimmer refuses `--video` by name on the CLI
+    // (`validate_muse_glimmer_cli_unsupported_options`); admitting it here
+    // alone would leave the two fronts disagreeing about one checkpoint.
+    let muse = media_support_for_config(
+        "media-muse-glimmer-fallback",
+        serde_json::json!({
+            "model_type": "muse_glimmer",
+            "text_config": { "model_type": "llama" },
+            "vision_config": { "model_type": "muse_glimmer_vision" }
+        }),
+    );
+    assert!(
+        muse.image,
+        "Muse Glimmer keeps its image path, got {muse:?}"
+    );
+    assert!(
+        !muse.video(),
+        "Muse Glimmer must keep refusing video_url on both fronts, got {muse:?}"
+    );
+}
+
 #[test]
 fn detect_model_media_support_falls_back_for_missing_config() {
     let dir = temp_path("media-missing-config");
     // No config.json → get_model_type fails → fallback yields "no video".
     let support = detect_model_media_support(&dir);
     assert!(
-        !support.video,
+        !support.video(),
         "missing config.json must default to video=false, got {support:?}"
     );
     assert!(
@@ -1386,7 +1553,7 @@ fn detect_model_media_support_text_only_disables_video() {
 
     let support = detect_model_media_support(&dir);
     assert!(
-        !support.video,
+        !support.video(),
         "text-only llama must report video=false, got {support:?}"
     );
     std::fs::remove_dir_all(dir).unwrap();

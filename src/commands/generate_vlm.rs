@@ -348,6 +348,18 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::KimiK3 {
+            image_blocks,
+            total_image_tokens,
+            prerendered,
+        } => {
+            println!(
+                "Kimi K3: {} {} image block(s) ({} <|media_pad|> tokens)",
+                if prerendered { "verified" } else { "spliced" },
+                image_blocks,
+                total_image_tokens
+            );
+        }
         VlmPreparationSummary::KimiVLVideo {
             media_blocks,
             video_count,
@@ -552,8 +564,14 @@ pub(crate) fn compute_vlm_embeddings(
                 target_fps,
             );
         }
+        // Reachable only for a checkpoint the frames fallback declined, which
+        // today means a model with no vision tower at all: `run_generate_once`
+        // rewrites `--video` into `--image` frames before the model is loaded
+        // for every other family (issue #1322).
         return Err(anyhow::anyhow!(
-            "--video input is currently only supported by Inkling, Gemma 4, Kimi-VL, and Qwen-VL VLMs"
+            "--video input needs either a native video path (Inkling, Gemma 4, Kimi-VL, Qwen-VL) \
+             or a vision tower the sampled frames can be sent to as images; this checkpoint has \
+             neither"
         ));
     }
 

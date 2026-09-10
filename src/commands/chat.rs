@@ -51,6 +51,7 @@
 
 use std::io::{self, IsTerminal, Write as IoWrite};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -63,7 +64,10 @@ use mlxcel::cli::max_tokens::{
 use mlxcel::reasoning_stream;
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
+use mlxcel::server::kimi_k3_chat::{K3RenderOptions, KimiK3Renderer};
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
+use mlxcel::server::types::Role;
+use mlxcel::server::types::request::{Message, MessageContent};
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
 use mlxcel::{LanguageModel, SamplingConfig, Session, initialize_runtime_checked, select_backend};
 use mlxcel_core::cache::KVCacheMode;
@@ -223,7 +227,7 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
              mlxcel generate -m <model> --image <image> -p '<CAPTION>' (or <OD>, <OCR>, ...)"
         ));
     }
-    let tokenizer = load_tokenizer(&model_path)?;
+    let tokenizer = Arc::new(load_tokenizer(&model_path)?);
     println!(
         "Model loaded in {:.2}s.",
         load_start.elapsed().as_secs_f64()
@@ -253,7 +257,19 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
             .ok()
             .flatten()
     };
-    if processor.is_none() && !opts.no_chat_template {
+    // Kimi K3 ships no chat template; its XTML format is rendered in code and
+    // produces token ids directly (#1338). When it is active the template
+    // discovery above is irrelevant, so the "no chat template" advice below
+    // must not fire.
+    let native_k3 = if opts.no_chat_template {
+        None
+    } else {
+        KimiK3Renderer::new(Arc::clone(&tokenizer))
+    };
+    if native_k3.is_some() {
+        println!("Kimi K3 detected: rendering turns with the native XTML chat format.");
+    }
+    if processor.is_none() && native_k3.is_none() && !opts.no_chat_template {
         eprintln!(
             "Note: this model ships no chat template and is likely a base (non-instruction-tuned) model."
         );
@@ -318,6 +334,11 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     print_banner(interactive);
 
     let mut conversation: Vec<ChatMessage> = Vec::new();
+    // Per-turn reasoning, index-aligned with `conversation`. The CLI transcript
+    // type carries only role and content, but the K3 history form renders a
+    // prior assistant turn's reasoning in its own channel, so it is kept
+    // alongside rather than folded into the content.
+    let mut reasonings: Vec<Option<String>> = Vec::new();
 
     loop {
         let action = read_input(&mut editor, interactive);
@@ -336,6 +357,7 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
                     SlashOutcome::Cleared => {
                         // `/clear` already reset the transcript; also drop any
                         // session-side state for a clean next prefill.
+                        reasonings.clear();
                         session.reset_with_model(&model);
                         continue;
                     }
@@ -347,10 +369,17 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
                     role: "user".to_string(),
                     content: user_text,
                 });
+                reasonings.push(None);
 
-                let prompt =
-                    render_prompt(processor.as_ref(), &conversation, opts.no_chat_template);
-                let reply = stream_turn(
+                let prompt = match native_k3.as_ref() {
+                    Some(renderer) => render_k3_prompt(renderer, &conversation, &reasonings)?,
+                    None => TurnPrompt::Text(render_prompt(
+                        processor.as_ref(),
+                        &conversation,
+                        opts.no_chat_template,
+                    )),
+                };
+                let turn = stream_turn(
                     &mut session,
                     &model,
                     &tokenizer,
@@ -363,8 +392,9 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
 
                 conversation.push(ChatMessage {
                     role: "assistant".to_string(),
-                    content: reply,
+                    content: turn.content,
                 });
+                reasonings.push(turn.reasoning);
             }
         }
     }
@@ -606,19 +636,30 @@ fn stream_turn<M: LanguageModel>(
     session: &mut Session,
     model: &M,
     tokenizer: &MlxcelTokenizer,
-    prompt: &str,
+    prompt: &TurnPrompt,
     max_tokens: usize,
     context_window: usize,
     sampling_config: &SamplingConfig,
     show_reasoning: bool,
-) -> Result<String> {
-    let add_special = !tokenizer.prompt_carries_bos(prompt);
-    let prompt_tokens: Vec<i32> = tokenizer
-        .encode(prompt, add_special)
-        .map_err(|e| anyhow!("Tokenization failed: {e}"))?
-        .iter()
-        .map(|&x| x as i32)
-        .collect();
+) -> Result<TurnReply> {
+    let prompt_text = prompt.text();
+    let prompt_tokens: Vec<i32> = match prompt {
+        // A native renderer already produced the exact ids; re-encoding its
+        // text form would re-recognize control-token spellings that came out
+        // of the user's own message.
+        TurnPrompt::Native { ids, .. } => ids.clone(),
+        TurnPrompt::Text(text) => {
+            // Same `add_special` rule every other tokenize site uses (#1347),
+            // so a template that emits its own BOS is not doubled.
+            let add_special = !tokenizer.prompt_carries_bos(text);
+            tokenizer
+                .encode(text, add_special)
+                .map_err(|e| anyhow!("Tokenization failed: {e}"))?
+                .iter()
+                .map(|&x| x as i32)
+                .collect()
+        }
+    };
 
     // llama.cpp parity (issue #476): an unlimited `-n -1` becomes the remaining
     // context (window minus this turn's rendered prompt) so the reply runs until
@@ -639,7 +680,7 @@ fn stream_turn<M: LanguageModel>(
     // primed thought body and its raw `</think>` close marker would print, since
     // the open marker is in the prompt rather than the generated tokens.
     let markers = tokenizer.infer_thinking_markers();
-    let mut filter = if reasoning_stream::prompt_primed_open_thinking(&markers, prompt) {
+    let mut filter = if reasoning_stream::prompt_primed_open_thinking(&markers, prompt_text) {
         reasoning_stream::ReasoningFilter::new_primed_open_thinking(&markers)
     } else {
         reasoning_stream::ReasoningFilter::new(&markers)
@@ -697,7 +738,15 @@ fn stream_turn<M: LanguageModel>(
     // Decode the full assistant turn (skip special tokens so template markers do
     // not leak into the next turn's rendered history). Kept as the byte-exact
     // turn text used for the transcript.
-    let reply = tokenizer.decode(&generated_ids, true).unwrap_or_default();
+    //
+    // A native XTML turn is the exception: its structure IS control tokens, so
+    // dropping them would splice the tag names into the answer
+    // (`reasoningthinkanswerresponse`). Decode those with the markers intact
+    // and split the channels below instead.
+    let native = matches!(prompt, TurnPrompt::Native { .. });
+    let reply = tokenizer
+        .decode(&generated_ids, !native)
+        .unwrap_or_default();
 
     // The turn generated tokens but none of them left the reasoning channel, so
     // nothing printed above. Say that, rather than leaving a blank turn.
@@ -709,7 +758,86 @@ fn stream_turn<M: LanguageModel>(
         println!();
     }
 
-    Ok(reply)
+    if !native {
+        return Ok(TurnReply {
+            content: reply,
+            reasoning: None,
+        });
+    }
+
+    // Replay the raw turn through a fresh filter (the display one is spent) to
+    // split the channels for the transcript. The generation prompt primed the
+    // open think tag, so the filter starts inside it.
+    let mut split = reasoning_stream::ReasoningFilter::new_primed_open_thinking(&markers);
+    let first = split.feed(&reply);
+    let tail = split.flush();
+    let reasoning = format!("{}{}", first.reasoning, tail.reasoning);
+    Ok(TurnReply {
+        content: format!("{}{}", first.content, tail.content),
+        reasoning: (!reasoning.is_empty()).then_some(reasoning),
+    })
+}
+
+/// One turn's prompt: rendered text, or the token ids a native chat renderer
+/// produced together with their text form.
+enum TurnPrompt {
+    Text(String),
+    Native { text: String, ids: Vec<i32> },
+}
+
+impl TurnPrompt {
+    /// The prompt as text. For the native form this is the reference
+    /// rendering, used for the primed-open-thinking check and the slot banner,
+    /// never for tokenization.
+    fn text(&self) -> &str {
+        match self {
+            Self::Text(text) => text,
+            Self::Native { text, .. } => text,
+        }
+    }
+}
+
+/// One finished assistant turn, split into the transcript's content and the
+/// reasoning that belongs beside it.
+struct TurnReply {
+    content: String,
+    reasoning: Option<String>,
+}
+
+/// Render the accumulated conversation through the native Kimi K3 XTML
+/// renderer (#1338).
+///
+/// Thinking is on with the reference default effort, and no tools are
+/// declared: the REPL has no tool surface. A prior assistant turn is rendered
+/// with its own reasoning in the `think` channel, which is why the caller
+/// keeps `reasonings` alongside the transcript.
+fn render_k3_prompt(
+    renderer: &KimiK3Renderer,
+    conversation: &[ChatMessage],
+    reasonings: &[Option<String>],
+) -> Result<TurnPrompt> {
+    let messages: Vec<Message> = conversation
+        .iter()
+        .enumerate()
+        .map(|(index, message)| Message {
+            role: match message.role.as_str() {
+                "assistant" => Role::Assistant,
+                "system" => Role::System,
+                "tool" => Role::Tool,
+                _ => Role::User,
+            },
+            content: MessageContent::Text(message.content.clone()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: reasonings.get(index).cloned().flatten(),
+        })
+        .collect();
+    let rendered = renderer.render(&messages, None, &K3RenderOptions::reference_defaults())?;
+    Ok(TurnPrompt::Native {
+        text: rendered.text,
+        ids: rendered.ids,
+    })
 }
 
 #[cfg(test)]

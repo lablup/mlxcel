@@ -91,7 +91,21 @@ pub struct ReasoningFilter {
     buffer: String,
     /// `false` for non-thinking models: `feed` returns its input unchanged.
     active: bool,
+    /// Markers removed from the visible stream without changing state.
+    ///
+    /// Kimi K3 wraps its answer in `<|open|>response<|sep|>` ...
+    /// `<|close|>response<|sep|>`: the tags are structure, but what they
+    /// enclose is the content the user is meant to read, so they are dropped
+    /// rather than suppressing a span. Empty for every other family, which
+    /// makes the drain loop below reduce to exactly its pre-existing form.
+    strip_markers: Vec<String>,
 }
+
+/// Kimi K3's think marker pair (see
+/// `MlxcelTokenizer::infer_thinking_markers`), and the response tags that
+/// bracket the visible answer inside the same stream.
+const KIMI_K3_THINK_START: &str = "<|open|>think<|sep|>";
+const KIMI_K3_RESPONSE_MARKERS: [&str; 2] = ["<|open|>response<|sep|>", "<|close|>response<|sep|>"];
 
 impl ReasoningFilter {
     /// Build a filter from a tokenizer's resolved reasoning markers.
@@ -106,6 +120,17 @@ impl ReasoningFilter {
                 state: State::Content,
                 buffer: String::new(),
                 active: true,
+                // Derived from the marker pair rather than passed in, so every
+                // caller (CLI chat, one-shot generate) gets the same answer
+                // without knowing the family.
+                strip_markers: if start == KIMI_K3_THINK_START {
+                    KIMI_K3_RESPONSE_MARKERS
+                        .iter()
+                        .map(|m| m.to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             },
             _ => Self::inactive(),
         }
@@ -142,6 +167,7 @@ impl ReasoningFilter {
             state: State::Content,
             buffer: String::new(),
             active: false,
+            strip_markers: Vec::new(),
         }
     }
 
@@ -195,15 +221,42 @@ impl ReasoningFilter {
             }
             match self.state {
                 State::Content => {
-                    if let Some(pos) = self.buffer.find(&self.think_start) {
-                        content.push_str(&self.buffer[..pos]);
-                        self.buffer.drain(..pos + self.think_start.len());
-                        self.state = State::Thinking;
-                    } else {
-                        let safe = self.safe_emit_len(&self.think_start);
-                        content.push_str(&self.buffer[..safe]);
-                        self.buffer.drain(..safe);
-                        break;
+                    // Earliest match wins across the think opener and any
+                    // strip-only markers; a longer marker wins a tie. With no
+                    // strip markers (every family but Kimi K3) this is exactly
+                    // "find the think opener".
+                    let mut best: Option<(usize, usize, bool)> = self
+                        .buffer
+                        .find(&self.think_start)
+                        .map(|pos| (pos, self.think_start.len(), true));
+                    for marker in &self.strip_markers {
+                        let Some(pos) = self.buffer.find(marker.as_str()) else {
+                            continue;
+                        };
+                        let better = match best {
+                            None => true,
+                            Some((best_pos, best_len, _)) => {
+                                pos < best_pos || (pos == best_pos && marker.len() > best_len)
+                            }
+                        };
+                        if better {
+                            best = Some((pos, marker.len(), false));
+                        }
+                    }
+                    match best {
+                        Some((pos, len, enters_thinking)) => {
+                            content.push_str(&self.buffer[..pos]);
+                            self.buffer.drain(..pos + len);
+                            if enters_thinking {
+                                self.state = State::Thinking;
+                            }
+                        }
+                        None => {
+                            let safe = self.safe_emit_len_for_content();
+                            content.push_str(&self.buffer[..safe]);
+                            self.buffer.drain(..safe);
+                            break;
+                        }
                     }
                 }
                 State::Thinking => {
@@ -222,6 +275,17 @@ impl ReasoningFilter {
         }
 
         ReasoningSplit { content, reasoning }
+    }
+
+    /// The safe emit length in the content state: the shortest across the
+    /// think opener and every strip-only marker, so no partial marker of any
+    /// kind is released across a fragment boundary.
+    fn safe_emit_len_for_content(&self) -> usize {
+        let mut safe = self.safe_emit_len(&self.think_start);
+        for marker in &self.strip_markers {
+            safe = safe.min(self.safe_emit_len(marker));
+        }
+        safe
     }
 
     /// Byte length of the buffer prefix that cannot be part of a `marker` that
@@ -790,5 +854,97 @@ mod tests {
         let visible = render_full(&qwen_markers(), text, true, false, false);
         assert_eq!(visible.trim(), "");
         assert!(is_reasoning_only(text, !visible.trim().is_empty(), false));
+    }
+
+    // -- Kimi K3 XTML --
+
+    /// The K3 markers `MlxcelTokenizer::infer_thinking_markers` synthesizes
+    /// from the control ids, with placeholder token sequences (the CLI filter
+    /// works on decoded text, so only the strings matter here).
+    fn kimi_k3_markers() -> ThinkingMarkers {
+        ThinkingMarkers {
+            think_start: Some("<|open|>think<|sep|>".to_string()),
+            think_end: Some("<|close|>think<|sep|>".to_string()),
+            think_start_tokens: Some(vec![163587, 39964, 163589]),
+            think_end_tokens: Some(vec![163588, 39964, 163589]),
+            tool_call_start: Some("<|open|>tools<|sep|>".to_string()),
+            tool_call_end: Some("<|close|>tools<|sep|>".to_string()),
+            ..ThinkingMarkers::default()
+        }
+    }
+
+    #[test]
+    fn kimi_k3_primed_open_thinking_hides_reasoning_and_strips_response_tags() {
+        let mut f = ReasoningFilter::new_primed_open_thinking(&kimi_k3_markers());
+        let out = f.feed(
+            "weighing it<|close|>think<|sep|><|open|>response<|sep|>The answer.\
+             <|close|>response<|sep|>",
+        );
+        let tail = f.flush();
+        assert_eq!(
+            format!("{}{}", out.reasoning, tail.reasoning),
+            "weighing it"
+        );
+        assert_eq!(format!("{}{}", out.content, tail.content), "The answer.");
+    }
+
+    #[test]
+    fn kimi_k3_response_tags_are_stripped_token_by_token() {
+        // The response tags are stripped rather than state-changing, so a
+        // marker split across fragments must still never reach the screen.
+        let mut f = ReasoningFilter::new_primed_open_thinking(&kimi_k3_markers());
+        let pieces = [
+            "think",
+            "ing",
+            "<|close",
+            "|>th",
+            "ink<|sep|>",
+            "<|open",
+            "|>resp",
+            "onse<|sep|>",
+            "Vis",
+            "ible",
+            "<|close|>resp",
+            "onse<|sep|>",
+        ];
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for piece in pieces {
+            let out = f.feed(piece);
+            assert!(
+                !out.content.contains("<|"),
+                "leaked markup: {:?}",
+                out.content
+            );
+            content.push_str(&out.content);
+            reasoning.push_str(&out.reasoning);
+        }
+        let tail = f.flush();
+        content.push_str(&tail.content);
+        reasoning.push_str(&tail.reasoning);
+        assert_eq!(reasoning, "thinking");
+        assert_eq!(content, "Visible");
+    }
+
+    #[test]
+    fn kimi_k3_model_opened_think_block_still_splits() {
+        let out = split_once(
+            &kimi_k3_markers(),
+            "before<|open|>think<|sep|>hidden<|close|>think<|sep|>after",
+        );
+        assert_eq!(out.content, "beforeafter");
+        assert_eq!(out.reasoning, "hidden");
+    }
+
+    #[test]
+    fn strip_markers_are_empty_for_every_other_family() {
+        // The response-tag stripping is derived from the K3 think marker, so a
+        // Qwen or Gemma stream keeps its pre-existing behavior byte for byte.
+        for markers in [qwen_markers(), gemma_markers()] {
+            let f = ReasoningFilter::new(&markers);
+            assert!(f.strip_markers.is_empty());
+        }
+        let out = split_once(&qwen_markers(), "a<|open|>response<|sep|>b");
+        assert_eq!(out.content, "a<|open|>response<|sep|>b");
     }
 }

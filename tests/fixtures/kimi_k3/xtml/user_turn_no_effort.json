@@ -1,0 +1,42 @@
+{
+  "name": "user_turn_no_effort",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, K3!"
+    }
+  ],
+  "tools": null,
+  "kwargs": {
+    "thinking_effort": null
+  },
+  "text": "<|open|>message role=\"user\"<|sep|>Hello, K3!<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+  "ids": [
+    163587,
+    2778,
+    6244,
+    878,
+    2482,
+    1,
+    163589,
+    19180,
+    11,
+    1040,
+    18,
+    0,
+    163588,
+    2778,
+    163589,
+    163586,
+    163587,
+    2778,
+    6244,
+    878,
+    69702,
+    1,
+    163589,
+    163587,
+    39964,
+    163589
+  ]
+}

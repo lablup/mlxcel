@@ -64,6 +64,8 @@ pub enum VlmRuntimeRef<'a> {
     GotOcr(&'a vision::GotOcrVlModel),
     /// Kimi-VL / Kimi-VL 2.5 (MoonViT) runtime.
     KimiVL(&'a vision::KimiVLModel),
+    /// Kimi K3 (MoonViT3D) runtime.
+    KimiK3(&'a vision::KimiK3VLModel),
     /// LocateAnything (MoonViT + Qwen2 grounding) runtime.
     LocateAnything(&'a vision::LocateAnythingVLM),
     /// Llama 3.2 Vision (mllama) cross-attention runtime.
@@ -238,6 +240,7 @@ impl LoadedModel {
             Self::LlmJpVL(model) => Some(VlmRuntimeRef::LlmJpVl(model)),
             Self::GotOcrVLM(model) => Some(VlmRuntimeRef::GotOcr(model)),
             Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
+            Self::KimiK3VLM(model) => Some(VlmRuntimeRef::KimiK3(model)),
             Self::LocateAnythingVLM(model) => Some(VlmRuntimeRef::LocateAnything(model)),
             Self::MllamaVLM(model) => Some(VlmRuntimeRef::Mllama(model)),
             Self::SmolVLM(model) => Some(VlmRuntimeRef::SmolVLM(model)),

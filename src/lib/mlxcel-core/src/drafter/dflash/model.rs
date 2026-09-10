@@ -34,6 +34,7 @@ use cxx::UniquePtr;
 
 use super::config::DFlashConfig;
 use super::layer::DFlashDecoderLayer;
+use super::markov::VanillaMarkovHead;
 
 /// LM head selector: own checkpoint weights, embedding-tied projection, or
 /// target-bound untied projection.
@@ -105,6 +106,43 @@ pub struct DFlashDraftModel {
 
     /// LM head dispatch: own, tied, or target-bound untied.
     lm_head: LmHead,
+
+    /// DSpark Markov token-transition head (issue #1339). `Some` iff
+    /// `config.is_dspark()`; it chains the block's all-position logits
+    /// into sequential proposals in [`Self::draft_block_dspark_array`].
+    markov: Option<VanillaMarkovHead>,
+
+    /// DSpark confidence head (`confidence_head.proj.*`). Loaded so a
+    /// checkpoint that ships it is consumed in full, never called: no
+    /// early-exit policy is built on it.
+    confidence_head: Option<Linear>,
+}
+
+/// Check that a vocabulary-sized table has the row count the config declares,
+/// before the loader turns it into a layer.
+///
+/// Rows come first in every MLX 2-D weight this is used on, and a quantized
+/// tensor bit-packs only its last axis, so the row count reads the same at any
+/// bit depth and the check needs no `bits`.
+///
+/// Used by: [`DFlashDraftModel::from_weights`], for a DSpark checkpoint that
+/// ships its own `embed_tokens` or `lm_head` rather than binding the target's.
+fn validate_vocab_rows(weights: &WeightMap, name: &str, vocab: usize) -> Result<(), String> {
+    let tensor = weights
+        .get(name)
+        .ok_or_else(|| format!("Weight not found: {name}"))?;
+    let shape = ffi::array_shape(tensor);
+    let Some(rows) = shape.first() else {
+        return Err(format!("{name} must be a 2-D table, got shape {shape:?}"));
+    };
+    if usize::try_from(*rows).ok() != Some(vocab) {
+        return Err(format!(
+            "{name} has {rows} rows but the DSpark drafter config declares vocab_size {vocab}; \
+             the drafter gathers this table at mask_token_id and at every chained proposal, and \
+             MLX range-checks no positive gather index"
+        ));
+    }
+    Ok(())
 }
 
 impl DFlashDraftModel {
@@ -136,6 +174,18 @@ impl DFlashDraftModel {
         let has_embed_tokens = weights.contains_key("embed_tokens.weight")
             || weights.contains_key("embed_tokens.scales");
         let embed_tokens = if has_embed_tokens {
+            // A DSpark drafter's `mask_token_id` is bounded against
+            // `config.vocab_size` in `dspark_config_pairing_error`, and that
+            // bound only bounds the actual gather because the table the id
+            // indexes has `vocab_size` rows. On the lazy-bind path the target
+            // half of the same gate pins that. A checkpoint that ships its own
+            // table takes the `else` arm of `bind` and never has its table
+            // compared to anything, so the row count is checked here instead;
+            // MLX range-checks no positive gather index, so a short table
+            // would read past its own buffer into the drafter hidden state.
+            if config.is_dspark() {
+                validate_vocab_rows(weights, "embed_tokens.weight", config.vocab_size)?;
+            }
             Some(UnifiedEmbedding::from_weights(
                 weights,
                 "embed_tokens",
@@ -176,11 +226,42 @@ impl DFlashDraftModel {
         // explicit `lm_head` during `bind()`, with an embedding-tied fallback
         // if the target has no separate head.
         let lm_head = if weights.contains_key("lm_head.weight") {
+            // Same reason as `embed_tokens` above, one step later in the
+            // graph: a DSpark draft step adds the Markov head's
+            // `[1, gamma, vocab_size]` transition logits to this head's
+            // output, and the Markov factors ARE measured against
+            // `config.vocab_size`. A head of a different width therefore
+            // fails inside `ffi::add` as a broadcast error, which crosses the
+            // cxx bridge as a process abort rather than a load error.
+            if config.is_dspark() {
+                validate_vocab_rows(weights, "lm_head.weight", config.vocab_size)?;
+            }
             LmHead::Own(Linear::from_weights(weights, "lm_head")?)
         } else if config.tie_word_embeddings {
             LmHead::Tied
         } else {
             LmHead::TargetBound(None)
+        };
+
+        // DSpark (issue #1339): the Markov head is what makes the drafter
+        // a DSpark drafter, so a config that declares a rank without the
+        // tensors is a broken checkpoint, not a plain DFlash one.
+        let markov = if config.is_dspark() {
+            Some(VanillaMarkovHead::from_weights(
+                weights,
+                "markov_head",
+                config.vocab_size,
+                config.markov_rank,
+                group_size,
+                bits,
+            )?)
+        } else {
+            None
+        };
+        let confidence_head = if weights.contains_key("confidence_head.proj.weight") {
+            Some(Linear::from_weights(weights, "confidence_head.proj")?)
+        } else {
+            None
         };
 
         Ok(Self {
@@ -191,7 +272,27 @@ impl DFlashDraftModel {
             layers,
             norm,
             lm_head,
+            markov,
+            confidence_head,
         })
+    }
+
+    /// Whether this drafter is an LFM2 / LFM2.5 DSpark drafter (DFlash
+    /// backbone plus Markov head). Decides which draft step
+    /// [`Self::draft_block`] runs.
+    pub fn is_dspark(&self) -> bool {
+        self.markov.is_some()
+    }
+
+    /// The DSpark Markov head, when the checkpoint carries one.
+    pub fn markov_head(&self) -> Option<&VanillaMarkovHead> {
+        self.markov.as_ref()
+    }
+
+    /// Whether the checkpoint shipped a confidence head. Diagnostic only;
+    /// the head is never evaluated.
+    pub fn has_confidence_head(&self) -> bool {
+        self.confidence_head.is_some()
     }
 
     /// Install the target's embedding table into the lazy-bind tombstone.
@@ -335,6 +436,58 @@ impl DFlashDraftModel {
         }
     }
 
+    /// One DSpark draft round as a `[1, verify_width - 1]` int32 device
+    /// array (issue #1339).
+    ///
+    /// With `gamma = verify_width - 1` proposals to make, the drafter runs
+    /// one non-causal forward over `[anchor, mask, ..., mask]` (`[1,
+    /// gamma]`; the anchor is the last committed token) against
+    /// `target_hidden` (`[1, S, num_target_layers * hidden]`, the target's
+    /// residual streams for the `S` tokens committed since the last draft),
+    /// keeps the logits of every one of the `gamma` positions, and chains
+    /// them through the Markov head starting from the anchor. Unlike the
+    /// DFlash step, position 0 is a proposal, not scaffolding: the anchor
+    /// row already sits one past the committed context.
+    pub fn draft_block_dspark_array(
+        &self,
+        anchor: i32,
+        target_hidden: &MlxArray,
+        cache: &mut [KVCache],
+        verify_width: usize,
+    ) -> UniquePtr<MlxArray> {
+        assert!(
+            verify_width >= 2,
+            "DSpark draft requires a verify width >= 2 (got {verify_width})",
+        );
+        let markov = self
+            .markov
+            .as_ref()
+            .expect("draft_block_dspark_array requires a DSpark drafter (Markov head loaded)");
+        let gamma = verify_width - 1;
+        let mask_id = self.config.mask_token_id;
+        let mut block: Vec<i32> = Vec::with_capacity(gamma);
+        block.push(anchor);
+        for _ in 1..gamma {
+            block.push(mask_id);
+        }
+        let inputs = ffi::from_slice_i32(&block, &[1, gamma as i32]);
+        let logits = self.forward(&inputs, target_hidden, cache);
+        markov.sample_block_array(&logits, anchor)
+    }
+
+    /// Host-side [`Self::draft_block_dspark_array`]: `verify_width - 1`
+    /// proposal ids.
+    pub fn draft_block_dspark(
+        &self,
+        anchor: i32,
+        target_hidden: &MlxArray,
+        cache: &mut [KVCache],
+        verify_width: usize,
+    ) -> Vec<i32> {
+        let proposals = self.draft_block_dspark_array(anchor, target_hidden, cache, verify_width);
+        super::materialize_argmax_i32_vec(&proposals, verify_width - 1)
+    }
+
     /// Run a single masked-forward draft block and argmax-sample one
     /// token per proposal position.
     ///
@@ -345,6 +498,11 @@ impl DFlashDraftModel {
     /// row.
     ///
     /// Returns `Vec<i32>` of length `block_size - 1`.
+    ///
+    /// A DSpark drafter ([`Self::is_dspark`]) takes
+    /// [`Self::draft_block_dspark`] instead: the same proposal count from a
+    /// `[anchor, mask * (block_size - 2)]` input chained through the
+    /// Markov head.
     ///
     /// This is the B = 1 variant; the trait surface uses `B = 1` for the
     /// classic single-stream draft loop. A batched variant lives behind a
@@ -360,6 +518,9 @@ impl DFlashDraftModel {
             block_size >= 2,
             "DFlash draft_block requires block_size >= 2 (got {block_size})",
         );
+        if self.is_dspark() {
+            return self.draft_block_dspark(last_bonus, target_hidden, cache, block_size);
+        }
 
         let mask_id = self.config.mask_token_id;
         let mut block: Vec<i32> = Vec::with_capacity(block_size);
@@ -584,6 +745,154 @@ mod tests {
         assert!(
             !model.needs_embed_binding(),
             "needs_embed_binding() must report false for a self-contained checkpoint",
+        );
+    }
+
+    /// A DSpark config (`markov_rank > 0`, issue #1339) loads its Markov
+    /// head and optional confidence head; the embedding stays a lazy-bind
+    /// tombstone exactly as for the Qwen 3.5 DFlash checkpoints.
+    #[test]
+    fn from_weights_builds_markov_head_for_dspark_config() {
+        let mut weights = tiny_weights_without_embed();
+        // vocab 8, rank 2: w1 is [vocab, rank], w2 is [vocab, rank].
+        weights.insert(
+            "markov_head.markov_w1.weight".to_string(),
+            ffi::zeros(&[8, 2], dtype::FLOAT32),
+        );
+        weights.insert(
+            "markov_head.markov_w2.weight".to_string(),
+            ffi::zeros(&[8, 2], dtype::FLOAT32),
+        );
+        weights.insert(
+            "confidence_head.proj.weight".to_string(),
+            ffi::zeros(&[1, 6], dtype::FLOAT32),
+        );
+        weights.insert(
+            "confidence_head.proj.bias".to_string(),
+            ffi::zeros(&[1], dtype::FLOAT32),
+        );
+        let config = DFlashConfig {
+            markov_rank: 2,
+            rope_is_neox_style: false,
+            enable_confidence_head: true,
+            ..tiny_config()
+        };
+        let model = DFlashDraftModel::from_weights(&weights, config)
+            .expect("DSpark checkpoint must construct");
+        assert!(model.is_dspark());
+        assert_eq!(model.markov_head().map(|m| m.rank()), Some(2));
+        assert!(model.has_confidence_head());
+        assert!(
+            model.needs_embed_binding(),
+            "DSpark borrows embed_tokens from the LFM2 target at bind"
+        );
+        assert!(
+            model.layers[0].self_attn.rope_traditional,
+            "rope_is_neox_style: false must reach the attention layers"
+        );
+    }
+
+    /// A DSpark checkpoint that ships its own `embed_tokens` or `lm_head`
+    /// has its vocabulary axis measured at load.
+    ///
+    /// `mask_token_id` is bounded against `config.vocab_size` in
+    /// `dspark_config_pairing_error`, and that bound only bounds the actual
+    /// gather because the table the id indexes has `vocab_size` rows. On the
+    /// lazy-bind path the target half of the same gate pins that. A
+    /// self-contained checkpoint takes the other arm of `bind` and its table
+    /// is never compared to anything, so a short table would be gathered out
+    /// of bounds (MLX range-checks no positive gather index) and a head of the
+    /// wrong width would fail broadcasting against the Markov transition
+    /// logits, inside MLX, which aborts the process rather than failing the
+    /// load.
+    ///
+    /// A plain DFlash checkpoint is deliberately not measured here: it has no
+    /// Markov head and no mask id indexing a borrowed table, and adding the
+    /// check there would change which Qwen pairings load.
+    #[test]
+    fn a_self_contained_dspark_checkpoint_has_its_vocab_axis_measured() {
+        let dspark = || DFlashConfig {
+            markov_rank: 2,
+            ..tiny_config()
+        };
+        let with_markov = |mut weights: WeightMap| -> WeightMap {
+            weights.insert(
+                "markov_head.markov_w1.weight".to_string(),
+                ffi::zeros(&[8, 2], dtype::FLOAT32),
+            );
+            weights.insert(
+                "markov_head.markov_w2.weight".to_string(),
+                ffi::zeros(&[8, 2], dtype::FLOAT32),
+            );
+            weights
+        };
+
+        // vocab_size is 8. A four-row table is short by half.
+        let mut short_embed = with_markov(tiny_weights_without_embed());
+        short_embed.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[4, 4], dtype::FLOAT32),
+        );
+        let Err(err) = DFlashDraftModel::from_weights(&short_embed, dspark()) else {
+            panic!("a short embedding table must fail the load");
+        };
+        assert!(err.contains("embed_tokens.weight has 4 rows"), "{err}");
+
+        let mut wrong_head = with_markov(tiny_weights_without_embed());
+        wrong_head.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        );
+        wrong_head.insert(
+            "lm_head.weight".to_string(),
+            ffi::zeros(&[9, 4], dtype::FLOAT32),
+        );
+        let Err(err) = DFlashDraftModel::from_weights(&wrong_head, dspark()) else {
+            panic!("an lm_head of the wrong width must fail the load");
+        };
+        assert!(err.contains("lm_head.weight has 9 rows"), "{err}");
+
+        // Both at the declared vocabulary: admitted.
+        let mut correct = with_markov(tiny_weights_without_embed());
+        correct.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        );
+        correct.insert(
+            "lm_head.weight".to_string(),
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        );
+        assert!(DFlashDraftModel::from_weights(&correct, dspark()).is_ok());
+
+        // A plain DFlash checkpoint with the same short table still loads.
+        let mut dflash_short = tiny_weights_without_embed();
+        dflash_short.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[4, 4], dtype::FLOAT32),
+        );
+        assert!(DFlashDraftModel::from_weights(&dflash_short, tiny_config()).is_ok());
+    }
+
+    /// A DFlash config (no `markov_rank`) never looks for the Markov
+    /// tensors, and a DSpark config without them is a broken checkpoint.
+    #[test]
+    fn from_weights_requires_markov_tensors_only_for_dspark() {
+        let weights = tiny_weights_without_embed();
+        let dflash = DFlashDraftModel::from_weights(&weights, tiny_config())
+            .expect("DFlash checkpoint without a Markov head must construct");
+        assert!(!dflash.is_dspark());
+        assert!(!dflash.has_confidence_head());
+
+        let config = DFlashConfig {
+            markov_rank: 2,
+            ..tiny_config()
+        };
+        let Err(err) = DFlashDraftModel::from_weights(&weights, config) else {
+            panic!("markov_rank > 0 without markov_head tensors must fail");
+        };
+        assert!(
+            err.contains("markov_head"),
+            "error must name the missing Markov tensor: {err}"
         );
     }
 

@@ -14,12 +14,13 @@
 
 //! Shared SwitchLinear / SwitchGLU for MoE models
 //!
-//! Used by: KimiLinear, LongcatFlashNgram, DeepSeekV3, DeepSeekV32, GLM4Moe,
-//!          GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe, PhiMoE,
-//!          OLMoE, Inkling, etc.
+//! Used by: KimiLinear, KimiK3, LongcatFlashNgram, DeepSeekV3, DeepSeekV32,
+//!          GLM4Moe, GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe,
+//!          PhiMoE, OLMoE, Inkling, etc.
 //!
 //! SwitchLinear: per-expert 3D matmul (quantized via gather_qmm, regular via gather_mm)
-//! SwitchGLU: SwiGLU MLP routing through SwitchLinear
+//! SwitchGLU: gated MLP routing through SwitchLinear (SwiGLU by default, SiTU
+//!            for Kimi K3 through [`SwitchGluActivation`])
 //! group_mask_scores: group-based expert masking for MoE gates with n_group > 1
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -840,13 +841,101 @@ fn stack_individual_experts_with_count(
     Some((weight, scales, biases, idx))
 }
 
+/// The gating nonlinearity a [`SwitchGLU`] applies between its `gate_proj` /
+/// `up_proj` pair and `down_proj`.
+///
+/// Every existing caller keeps [`SwitchGluActivation::SwiGlu`] (the default,
+/// `silu(gate) * up` through the compiled kernel). Kimi K3 routes its
+/// `hidden_act: "situ"` experts through [`SwitchGluActivation::SiTU`], which is
+/// [`situ_activation`] with the config's `activation_situ_beta` and
+/// `activation_situ_linear_beta`.
+///
+/// Used by: KimiK3 (SiTU); every other `SwitchGLU` caller stays on SwiGlu.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SwitchGluActivation {
+    /// `silu(gate) * up`.
+    #[default]
+    SwiGlu,
+    /// `(beta * tanh(gate / beta) * sigmoid(gate)) * (linear_beta * tanh(up / linear_beta))`,
+    /// with the second factor reducing to `up` when `linear_beta` is `None`.
+    SiTU { beta: f32, linear_beta: Option<f32> },
+}
+
+/// SiTU gated activation (Moonshot's `SituAndMul`), computed in float32 and
+/// cast back to `up`'s dtype:
+///
+/// ```text
+/// situ(up, gate) = (beta * tanh(gate / beta) * sigmoid(gate)) * (linear_beta * tanh(up / linear_beta))
+/// ```
+///
+/// When `linear_beta` is `None` the second factor is `up` itself. The float32
+/// promotion mirrors the reference, which upcasts both halves before the
+/// products and casts the result back (`SituAndMul.forward` in
+/// https://huggingface.co/moonshotai/Kimi-K3/blob/main/modeling_kimi_linear.py).
+///
+/// Used by: KimiK3 (`KimiK3MLP`, and `SwitchGLU` through
+/// [`SwitchGluActivation::SiTU`])
+pub fn situ_activation(
+    gate: &MlxArray,
+    up: &MlxArray,
+    beta: f32,
+    linear_beta: Option<f32>,
+) -> UniquePtr<MlxArray> {
+    let out_dtype = mlxcel_core::array_dtype(up);
+    let gate_f32 = mlxcel_core::astype(gate, mlxcel_core::dtype::FLOAT32);
+    let up_f32 = mlxcel_core::astype(up, mlxcel_core::dtype::FLOAT32);
+    let bounded = mlxcel_core::multiply_scalar(
+        &mlxcel_core::tanh(&mlxcel_core::multiply_scalar(&gate_f32, 1.0 / beta)),
+        beta,
+    );
+    let situ_a = mlxcel_core::multiply(&bounded, &mlxcel_core::sigmoid(&gate_f32));
+    let linear = match linear_beta {
+        Some(lb) => mlxcel_core::multiply_scalar(
+            &mlxcel_core::tanh(&mlxcel_core::multiply_scalar(&up_f32, 1.0 / lb)),
+            lb,
+        ),
+        None => up_f32,
+    };
+    let product = mlxcel_core::multiply(&situ_a, &linear);
+    if out_dtype == mlxcel_core::dtype::FLOAT32 {
+        product
+    } else {
+        mlxcel_core::astype(&product, out_dtype)
+    }
+}
+
 pub struct SwitchGLU {
     gate_proj: SwitchLinear,
     up_proj: SwitchLinear,
     down_proj: SwitchLinear,
+    /// Gating nonlinearity; SwiGLU unless a caller opts into SiTU through
+    /// [`SwitchGLU::with_activation`].
+    activation: SwitchGluActivation,
 }
 
 impl SwitchGLU {
+    /// Replace the gating nonlinearity. Every constructor starts at
+    /// [`SwitchGluActivation::SwiGlu`]; Kimi K3 chains this to select SiTU.
+    pub fn with_activation(mut self, activation: SwitchGluActivation) -> Self {
+        self.activation = activation;
+        self
+    }
+
+    /// The gating nonlinearity this layer applies.
+    pub fn activation(&self) -> SwitchGluActivation {
+        self.activation
+    }
+
+    /// Apply the configured activation to a gate / up pair.
+    fn activate(&self, x_gate: &MlxArray, x_up: &MlxArray) -> UniquePtr<MlxArray> {
+        match self.activation {
+            SwitchGluActivation::SwiGlu => mlxcel_core::compiled_swiglu_activation(x_gate, x_up),
+            SwitchGluActivation::SiTU { beta, linear_beta } => {
+                situ_activation(x_gate, x_up, beta, linear_beta)
+            }
+        }
+    }
+
     pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let n_tokens = indices_shape[0];
@@ -861,13 +950,13 @@ impl SwitchGLU {
             let (sorted_x, sorted_idx, inv_order) = gather_sort(&x_exp, indices);
             let x_gate = self.gate_proj.forward(&sorted_x, &sorted_idx, true);
             let x_up = self.up_proj.forward(&sorted_x, &sorted_idx, true);
-            let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+            let activated = self.activate(&x_gate, &x_up);
             let output = self.down_proj.forward(&activated, &sorted_idx, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
         } else {
             let x_gate = self.gate_proj.forward(&x_exp, indices, false);
             let x_up = self.up_proj.forward(&x_exp, indices, false);
-            let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+            let activated = self.activate(&x_gate, &x_up);
             let output = self.down_proj.forward(&activated, indices, false);
             mlxcel_core::squeeze_axis(&output, -2)
         }
@@ -905,7 +994,7 @@ impl SwitchGLU {
             let selected = mlxcel_core::astype(&selected, mlxcel_core::array_dtype(&x_gate));
             x_gate = mlxcel_core::multiply(&x_gate, &selected);
         }
-        let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+        let activated = self.activate(&x_gate, &x_up);
         let mut output = self.down_proj.forward(&activated, indices, false);
         if let Some(scale) = out_scale {
             let selected = mlxcel_core::take(scale, indices, 0);
@@ -930,14 +1019,19 @@ impl SwitchGLU {
     /// supported. Returns `None` (caller falls back to `forward` +
     /// `moe_weighted_sum`) for any unsupported config: non-affine, gate/up not
     /// 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch, group_size mismatch
-    /// across gate/up/down, missing biases, or a non-single-token `x`. Gated by
-    /// the caller (`MLXCEL_FUSED_MOE`).
+    /// across gate/up/down, missing biases, a non-single-token `x`, or a
+    /// non-SwiGLU activation (the kernel fuses `silu(gate) * up` and nothing
+    /// else, so Kimi K3's SiTU experts stay on the gather path). Gated by the
+    /// caller (`MLXCEL_FUSED_MOE`).
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
         indices: &MlxArray,
         scores: &MlxArray,
     ) -> Option<UniquePtr<MlxArray>> {
+        if self.activation != SwitchGluActivation::SwiGlu {
+            return None;
+        }
         let gate = self.gate_proj.quantized_parts()?;
         let up = self.up_proj.quantized_parts()?;
         let down = self.down_proj.quantized_parts()?;
@@ -1030,12 +1124,16 @@ impl SwitchGLU {
 
     /// Load a stacked SwiGLU expert plane with an explicit quantization mode.
     ///
-    /// Most families use affine experts and call [`Self::from_weights`]. Two
-    /// carry native NVFP4 planes without zero-point biases and must pass
-    /// `"nvfp4"` through to every projection: Inkling, from a ModelOpt export,
-    /// and Laguna, from a `compressed-tensors` `nvfp4-pack-quantized` export
-    /// that [`crate::models::laguna_sanitize`] transcodes at load and which
-    /// additionally carries a per-expert `.global_scale` sidecar.
+    /// Most families use affine experts and call [`Self::from_weights`]. Three
+    /// carry native non-affine planes without zero-point biases and must pass
+    /// their mode through to every projection: Inkling, from a ModelOpt NVFP4
+    /// export; Laguna, from a `compressed-tensors` `nvfp4-pack-quantized`
+    /// export that [`crate::models::laguna_sanitize`] transcodes at load and
+    /// which additionally carries a per-expert `.global_scale` sidecar; and
+    /// Kimi K3, from a `compressed-tensors` `mxfp4-pack-quantized` export
+    /// (uint32 packed codes and uint8 E8M0 scales, no biases).
+    ///
+    /// Used by: Inkling (nvfp4), Laguna (nvfp4), KimiK3 (mxfp4).
     pub fn from_weights_with_mode(
         weights: &WeightMap,
         prefix: &str,
@@ -1065,6 +1163,7 @@ impl SwitchGLU {
                 bits,
                 mode,
             )?,
+            activation: SwitchGluActivation::SwiGlu,
         })
     }
 
@@ -1105,6 +1204,7 @@ impl SwitchGLU {
                 group_size,
                 bits,
             )?,
+            activation: SwitchGluActivation::SwiGlu,
         })
     }
 }
@@ -1153,9 +1253,9 @@ pub(crate) fn scatter_unsort(
 ///
 /// Used by: BailingMoe, DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe,
 ///          Ernie4_5Moe, GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, Jamba,
-///          KimiLinear, MiniMax, Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE,
-///          Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5,
-///          Laguna
+///          KimiK3, KimiLinear, Laguna, MiniMax, Mistral4, Mixtral, Moondream3,
+///          OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe,
+///          SolarOpen, Step3p5
 ///
 /// The old `nkh,nk->nh` einsum contraction promotes the combine to float32
 /// on M5 for bf16/f16 activations. Match mlx-lm's `y * scores[..., None]`

@@ -303,6 +303,10 @@ pub struct ServerStartupInput {
     /// Maximum number of cached post-projection image features per loaded model.
     /// `0` disables the cache entirely.
     pub vision_cache_size: usize,
+    /// Frame cap for the no-native-video-path fallback (`--video-max-frames`).
+    pub video_max_frames: usize,
+    /// Sampling rate for the no-native-video-path fallback (`--video-fps`).
+    pub video_fps: f64,
     pub max_image_payload_size: usize,
     pub max_images_per_request: usize,
     pub max_image_width: u32,
@@ -1126,6 +1130,8 @@ impl ServerStartupInput {
             tp_embedding_mode: self.tp_embedding_mode,
             tp_lm_head_mode: self.tp_lm_head_mode,
             vision_cache_size: self.vision_cache_size,
+            video_max_frames: self.video_max_frames,
+            video_fps: self.video_fps,
             max_image_payload_size: self.max_image_payload_size,
             max_images_per_request: self.max_images_per_request,
             max_image_width: self.max_image_width,

@@ -96,7 +96,7 @@ async fn render_chat_prompt(
     state: &AppState,
     live: &LiveSettings,
     request: &ChatCompletionRequest,
-) -> Result<String, ErrorResponse> {
+) -> Result<RenderedPrompt, ErrorResponse> {
     if let Some(rejection) = crate::server::media_capability_rejection(
         request,
         state.media_support,
@@ -107,6 +107,28 @@ async fn render_chat_prompt(
     if let Err(message) = super::chat::validate_chat_tool_inputs(request) {
         return Err(ErrorResponse::new(message, "invalid_request_error"));
     }
+    // These routes exist to answer "what prompt would the generating route
+    // build for this body?", so they have to run the same video-to-frames
+    // substitution the generating route does (issue #1322); otherwise the
+    // reported prompt would carry no image placeholders for a clip that
+    // /v1/chat/completions expands into as many as sixteen. Rewritten on a
+    // local copy because the caller's request is borrowed and these handlers
+    // never generate.
+    let mut expanded;
+    let request = if state.media_support.video_frames_fallback && !request.video_urls().is_empty() {
+        expanded = request.clone();
+        crate::server::chat_request::expand_video_parts_to_frames(
+            &mut expanded,
+            state.media_support,
+            crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
+            state.display_model_id(),
+        )
+        .await
+        .map_err(|message| ErrorResponse::new(message, "invalid_request_error"))?;
+        &expanded
+    } else {
+        request
+    };
     let prompt_cache_enabled = state.prompt_cache.is_some();
     prepare_chat_request_with_cache(
         &state.chat_template,
@@ -118,20 +140,45 @@ async fn render_chat_prompt(
         &state.thinking_markers,
     )
     .await
-    .map(|prepared| prepared.prompt)
+    .map(|prepared| RenderedPrompt {
+        prompt: prepared.prompt,
+        token_ids: prepared.prompt_token_ids,
+    })
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))
+}
+
+/// One rendered prompt, plus the ids a native renderer produced for it.
+///
+/// Kimi K3's XTML renderer (#1338) emits ids directly, so `token_ids` is the
+/// authoritative count for it and `prompt` is the text form the generation
+/// path also carries. `token_ids` is `None` for every template-rendered
+/// request, and the count then comes from encoding `prompt` exactly as before.
+struct RenderedPrompt {
+    prompt: String,
+    token_ids: Option<Vec<i32>>,
 }
 
 /// Count the tokens a rendered prompt occupies.
 ///
-/// `add_special` follows `prompt_carries_bos`, the same rule the generation
-/// path uses, which is what makes the number comparable to `tokens_evaluated`.
-/// Passing `true` unconditionally over-counted by one for every template that
-/// emits its own BOS (Laguna, and the whole Llama 3 lineage since #1347).
-fn count_prompt_tokens(state: &AppState, prompt: &str) -> Result<usize, ErrorResponse> {
+/// A native renderer's ids (#1338) are authoritative, so they are counted
+/// directly. Otherwise `add_special` follows `prompt_carries_bos`, the same
+/// rule the generation path uses, which is what makes the number comparable to
+/// `tokens_evaluated`. Passing `true` unconditionally over-counted by one for
+/// every template that emits its own BOS (Laguna, and the whole Llama 3
+/// lineage since #1347).
+fn count_prompt_tokens(
+    state: &AppState,
+    rendered: &RenderedPrompt,
+) -> Result<usize, ErrorResponse> {
+    if let Some(ids) = rendered.token_ids.as_ref() {
+        return Ok(ids.len());
+    }
     state
         .tokenizer
-        .encode(prompt, !state.tokenizer.prompt_carries_bos(prompt))
+        .encode(
+            &rendered.prompt,
+            !state.tokenizer.prompt_carries_bos(&rendered.prompt),
+        )
         .map(|ids| ids.len())
         .map_err(|e| {
             ErrorResponse::new(format!("Tokenization error: {e}"), "invalid_request_error")
@@ -155,11 +202,21 @@ pub async fn apply_template(
         Err(err) => return err.into_response(),
     };
     match render_chat_prompt(&state, &live, &request).await {
-        Ok(prompt) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "prompt": prompt })),
-        )
-            .into_response(),
+        // A native renderer's id count is reported alongside the text so an
+        // operator inspecting a Kimi K3 prompt sees the length the model
+        // actually prefills, which is not what re-encoding the text gives.
+        Ok(rendered) => {
+            let mut body = serde_json::json!({ "prompt": rendered.prompt });
+            if let Some(ids) = rendered.token_ids.as_ref()
+                && let Some(object) = body.as_object_mut()
+            {
+                object.insert(
+                    "prompt_token_count".to_string(),
+                    serde_json::Value::from(ids.len()),
+                );
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Err(err) => err.into_response(),
     }
 }
@@ -174,11 +231,11 @@ pub async fn chat_input_tokens(
         Ok(request) => request,
         Err(err) => return err.into_response(),
     };
-    let prompt = match render_chat_prompt(&state, &live, &request).await {
-        Ok(prompt) => prompt,
+    let rendered = match render_chat_prompt(&state, &live, &request).await {
+        Ok(rendered) => rendered,
         Err(err) => return err.into_response(),
     };
-    match count_prompt_tokens(&state, &prompt) {
+    match count_prompt_tokens(&state, &rendered) {
         Ok(count) => (
             StatusCode::OK,
             Json(serde_json::json!({ "input_tokens": count })),
@@ -213,11 +270,11 @@ pub async fn responses_input_tokens(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
-    let prompt = match render_chat_prompt(&state, &live, &translated.chat_request).await {
-        Ok(prompt) => prompt,
+    let rendered = match render_chat_prompt(&state, &live, &translated.chat_request).await {
+        Ok(rendered) => rendered,
         Err(err) => return err.into_response(),
     };
-    match count_prompt_tokens(&state, &prompt) {
+    match count_prompt_tokens(&state, &rendered) {
         Ok(count) => (
             StatusCode::OK,
             Json(serde_json::json!({ "input_tokens": count })),

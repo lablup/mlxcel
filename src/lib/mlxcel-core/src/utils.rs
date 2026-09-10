@@ -92,7 +92,7 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 44 non-test files under `src/models`, in four groups.
+/// commit that is 45 non-test files under `src/models`, in four groups.
 /// Hybrid and mixed-layer stacks that build one mask at the full-attention
 /// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, Qwen3Next,
 /// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma.
@@ -103,7 +103,7 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 /// Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and custom-attention
 /// decoders that add the mask to scores by hand: DeepSeekV3, DeepSeekV3.2,
 /// MiniCPM3, GptOss, AFMoE, Step3P5, LongcatFlashNgram, BailingMoeLinear,
-/// GLM4MoeLite, Qwen3.5. Outside `src/models` the callers are `lib.rs`,
+/// GLM4MoeLite, Qwen3.5, KimiK3. Outside `src/models` the callers are `lib.rs`,
 /// `layers.rs`, the tensor-parallel Llama runtime, the GLM4 pipeline stage
 /// executor, and disaggregated handoff.
 ///

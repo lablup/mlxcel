@@ -2996,9 +2996,17 @@ fn prepare_request_video_embeddings(
     let gemma4_vl = match model {
         LoadedModel::Gemma4VLM(model) => model,
         _ => {
+            // Backstop, not the refusal a caller normally meets. An
+            // image-capable checkpoint without a native video path has its
+            // clip rewritten into ordered frame images at the HTTP boundary
+            // (issue #1322), so its request arrives here with no videos at
+            // all. Reaching this arm means a route skipped
+            // `expand_video_parts_to_frames`, which is a wiring bug rather
+            // than a client error.
             return Err(anyhow!(
-                "video inputs are only supported by Inkling, Gemma 4, Kimi-VL, and Qwen-VL VLM models in \
-                 this build"
+                "native video input is only supported by Inkling, Gemma 4, Kimi-VL, and Qwen-VL \
+                 VLM models in this build; every other vision model is served by the \
+                 video-to-frames fallback, which did not run for this request"
             ));
         }
     };

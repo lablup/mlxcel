@@ -371,6 +371,15 @@ pub struct ServerStartupConfig {
     /// [`DEFAULT_VISION_CACHE_SIZE`](crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE).
     pub vision_cache_size: usize,
 
+    /// Cap on the frames kept when a `video_url` block is served as ordered
+    /// images because the checkpoint has no native video path (issue #1322).
+    /// Clamped to at least
+    /// [`MIN_FALLBACK_MAX_FRAMES`](crate::multimodal::video::MIN_FALLBACK_MAX_FRAMES).
+    pub video_max_frames: usize,
+    /// Sampling rate the video frame fallback decodes at when the request
+    /// carries no `video_url.fps` of its own.
+    pub video_fps: f64,
+
     /// Maximum encoded image payload bytes accepted per image content block.
     pub max_image_payload_size: usize,
     /// Maximum number of image content blocks accepted in one request.
@@ -718,6 +727,8 @@ impl Default for ServerStartupConfig {
             tp_embedding_mode: "replicated".to_string(),
             tp_lm_head_mode: "replicated".to_string(),
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
+            video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+            video_fps: crate::multimodal::video::DEFAULT_FPS,
             max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
             max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
             max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -1140,26 +1151,13 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // 2.5 (MoonViT 3D) also consume video via the shared Kimi media path
     // (issue #551). Inkling encodes evenly spaced adjacent frame pairs in its
     // HMLP temporal planes (#1323). Qwen-VL video follows the same Qwen runtime
-    // used by CLI prompt expansion (#1166). Mirror the dispatch in
-    // `commands/generate_vlm::compute_vlm_embeddings` and add new variants here
-    // when more video-capable models land.
-    let video = matches!(
-        model_type,
-        ModelType::Gemma4VLM
-            | ModelType::Gemma4Unified
-            | ModelType::InklingVLM
-            | ModelType::KimiVL
-            | ModelType::KimiK25
-            | ModelType::Qwen2VL
-            | ModelType::Qwen25VL
-            | ModelType::Qwen3VL
-            | ModelType::Qwen3VLMoe
-            | ModelType::Qwen35VLM
-            | ModelType::Qwen35MoeVLM
-    );
-    if video {
+    // used by CLI prompt expansion (#1166). The list itself lives next to
+    // `get_model_type` so the CLI's `--video` handling reads the same one
+    // (issue #1322).
+    let video_native = crate::models::model_type_has_native_video(model_type);
+    if video_native {
         tracing::info!(
-            "model_type={:?}: enabling video_url content block support",
+            "model_type={:?}: enabling native video_url content block support",
             model_type
         );
     }
@@ -1179,10 +1177,32 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // when another family gains it.
     let video_with_audio = matches!(model_type, ModelType::Gemma4Unified);
 
+    // Every other checkpoint with a vision tower answers a `video_url` block by
+    // decoding the clip and sending the sampled frames as ordered images
+    // (issue #1322). Keyed on `multimodal` rather than on a family list so a
+    // new VLM gains the fallback the day it lands, and gated on
+    // `!video_native` so a family that grows a real temporal path silently
+    // stops using the substitute rather than doing both.
+    // Muse Glimmer is the one exclusion: the CLI refuses `--video` for it by
+    // name (`validate_muse_glimmer_cli_unsupported_options`), and admitting
+    // the clip on the HTTP boundary alone would leave the two fronts
+    // disagreeing about the same checkpoint. Lift both guards together when
+    // the family is qualified for multi-image prompts.
+    let video_frames_fallback =
+        multimodal && !video_native && !matches!(model_type, ModelType::MuseGlimmerVLM);
+    if video_frames_fallback {
+        tracing::info!(
+            "model_type={:?}: no native video path; video_url content blocks will be served as \
+             ordered sampled frames",
+            model_type
+        );
+    }
+
     ModelMediaSupport {
         image: multimodal,
         audio: multimodal,
-        video,
+        video_native,
+        video_frames_fallback,
         video_with_audio,
     }
 }
@@ -1218,13 +1238,38 @@ fn validate_muse_glimmer_unsupported_startup(startup: &ServerStartupConfig) -> R
         startup.adapter_path.is_none(),
         "Muse Glimmer VLM does not support LoRA/adapters; remove --adapter/--lora"
     );
-    anyhow::ensure!(
-        startup.draft_model_path.is_none()
-            && startup.draft_kind.is_none()
-            && startup.draft_block_size.is_none(),
-        "Muse Glimmer VLM does not support speculative decoding or DFlash; remove \
-         --draft-model/--model-draft, --draft-kind, and --draft-block-size"
-    );
+    // Speculative decoding on Muse Glimmer is the DFlash round loop with the
+    // Muse Glimmer assistant drafter only (issue #1343): no MTP drafter
+    // exists for the family, and any other DFlash-family drafter reads
+    // residual streams of a width this target does not produce.
+    match &startup.draft_model_path {
+        None => anyhow::ensure!(
+            startup.draft_kind.is_none() && startup.draft_block_size.is_none(),
+            "Muse Glimmer VLM takes --draft-kind and --draft-block-size only together with \
+             --draft-model/--model-draft pointing at the Muse Glimmer assistant drafter \
+             (model_type muse_glimmer_assistant); remove them or add the drafter"
+        ),
+        Some(draft_model_path) => {
+            anyhow::ensure!(
+                mlxcel_core::drafter::dflash::is_muse_assistant_dir(draft_model_path),
+                "Muse Glimmer VLM supports speculative decoding only with the Muse Glimmer \
+                 assistant drafter (model_type muse_glimmer_assistant, for example \
+                 meta-models/Muse-Glimmer-30B-assistant); {} does not declare it. Point \
+                 --draft-model/--model-draft at that drafter or remove it",
+                draft_model_path.display()
+            );
+            anyhow::ensure!(
+                startup
+                    .draft_kind
+                    .as_deref()
+                    .is_none_or(|kind| kind.eq_ignore_ascii_case("dflash")),
+                "Muse Glimmer VLM runs its assistant drafter on the DFlash round loop only; \
+                 --draft-kind {:?} is not a Muse Glimmer pairing, pass --draft-kind dflash \
+                 or leave it unset",
+                startup.draft_kind.as_deref().unwrap_or_default()
+            );
+        }
+    }
     anyhow::ensure!(
         startup.kv_cache_mode == mlxcel_core::cache::KVCacheMode::Fp16
             && !startup.batch_kv_quant.is_enabled(),
@@ -1578,6 +1623,17 @@ pub(super) fn build_server_config(
         remote_pipeline_stage: None,
         tensor_parallel,
         vision_cache_size: startup.vision_cache_size,
+        // Clamped here rather than at the flag so every front (mlxcel serve,
+        // mlxcel-server, the router's per-model configs) gets the same floor
+        // without each one repeating the check.
+        video_max_frames: startup
+            .video_max_frames
+            .max(crate::multimodal::video::MIN_FALLBACK_MAX_FRAMES),
+        video_fps: if startup.video_fps > 0.0 {
+            startup.video_fps
+        } else {
+            crate::multimodal::video::DEFAULT_FPS
+        },
         lang_bias_config: startup.lang_bias_config.clone(),
         reasoning_budget: startup.reasoning_budget,
         chat_template_kwargs: startup.chat_template_kwargs.clone(),
@@ -1773,6 +1829,7 @@ fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             grammar: None,
             // Warmup is text-only; no image budget to override.
             image_soft_tokens: None,
+            pre_rendered_prompt_tokens: None,
         },
     )?;
     Ok(())
@@ -2744,8 +2801,19 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
         let reply_to = crate::distributed::transport::Transport::local_addr(transport.as_ref())?;
         let config_arc = std::sync::Arc::new(config.clone());
+        // Attach the native chat renderer here too (#1338). `AppState` does
+        // this for every other construction path, and the router's own refusal
+        // of the Kimi K3 format keys off the renderer having produced token
+        // ids; without the attachment that refusal never fires and the request
+        // falls through to the generic template, whose rendered text is then
+        // re-tokenized with control-token spellings recognized.
+        let (tokenizer_arc, chat_template) =
+            crate::server::state::attach_native_chat_renderer_for_model(
+                tokenizer,
+                chat_template,
+                Some(&startup.model_path),
+            );
         let chat_template_arc = std::sync::Arc::new(chat_template);
-        let tokenizer_arc = std::sync::Arc::new(tokenizer);
         let state = std::sync::Arc::new(crate::server::router_front::RouterState::build(
             config_arc,
             transport,

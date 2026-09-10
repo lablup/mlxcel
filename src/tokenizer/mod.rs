@@ -26,7 +26,7 @@ use std::path::Path;
 
 pub use fim::{FimToken, FimTokens, FimTriple};
 pub use thinking::{ThinkingMarkers, find_subseq, rfind_subseq};
-pub use tiktoken::TiktokenTokenizer;
+pub use tiktoken::{KimiK3ControlIds, TiktokenFamily, TiktokenTokenizer};
 
 /// Unified tokenizer supporting HuggingFace (tokenizer.json), SentencePiece (tokenizer.model),
 /// and Tiktoken (.tiktoken) formats
@@ -266,6 +266,30 @@ impl MlxcelTokenizer {
         }
     }
 
+    /// The underlying tiktoken tokenizer, when this instance was constructed
+    /// from a `.tiktoken` vocabulary.
+    ///
+    /// `None` for the HuggingFace and SentencePiece backends. The Kimi K3 XTML
+    /// renderer reaches `encode_text` / `control_id` through this accessor.
+    pub fn tiktoken(&self) -> Option<&TiktokenTokenizer> {
+        match self {
+            Self::Tiktoken(t) => Some(t),
+            Self::HuggingFace(_) | Self::SentencePiece(_) => None,
+        }
+    }
+
+    /// The Kimi K3 XTML control ids when the loaded tokenizer is a K3 tiktoken
+    /// vocabulary, `None` otherwise.
+    ///
+    /// This is the single gate downstream code uses to decide that the native
+    /// XTML chat renderer is active. It keys off the loaded tokenizer rather
+    /// than a model enum so the CLI, the server chat route and the prompt
+    /// inspector all agree without a per-family branch of their own, and so a
+    /// tokenizer-only checkpoint directory (no weights) still renders.
+    pub fn kimi_k3_control_ids(&self) -> Option<KimiK3ControlIds> {
+        self.tiktoken()?.kimi_k3_control_ids()
+    }
+
     /// Returns the underlying HuggingFace `tokenizers::Tokenizer` when this
     /// instance was constructed from a `tokenizer.json` file.
     ///
@@ -469,6 +493,15 @@ impl MlxcelTokenizer {
     /// than consuming this method.  Migrating it to use the multi-token
     /// sequences returned here is a separate follow-up task.
     pub fn infer_thinking_markers(&self) -> ThinkingMarkers {
+        // Kimi K3 has no HF vocabulary to probe: its reasoning and tool-call
+        // spans are XTML tags built from control tokens, so the markers are
+        // synthesized from the control ids plus the encoded tag name. Giving
+        // them the same `ThinkingMarkers` shape as every other family is what
+        // plugs K3 into the primed-open-thinking detection, the CLI reasoning
+        // filter and the thinking-budget tracker with no per-family branch.
+        if let Some(markers) = self.kimi_k3_thinking_markers() {
+            return markers;
+        }
         let Some(hf) = self.hf_tokenizer() else {
             return ThinkingMarkers::default();
         };
@@ -526,6 +559,35 @@ impl MlxcelTokenizer {
         }
 
         ThinkingMarkers::default()
+    }
+
+    /// The Kimi K3 XTML think / tool-call marker pair, or `None` for every
+    /// other tokenizer.
+    ///
+    /// `<|open|>think<|sep|>` opens the reasoning channel and
+    /// `<|close|>think<|sep|>` closes it; the tool-call block is the same shape
+    /// with the `tools` tag. Both are multi-token sequences (one control id,
+    /// the BPE pieces of the tag name, one control id), which the marker
+    /// consumers already handle for Gemma 4's `<|channel>thought`.
+    fn kimi_k3_thinking_markers(&self) -> Option<ThinkingMarkers> {
+        let tiktoken = self.tiktoken()?;
+        let ids = tiktoken.kimi_k3_control_ids()?;
+        let tag_ids = |tag: &str, first: u32| -> Option<Vec<u32>> {
+            let mut seq = vec![first];
+            seq.extend(tiktoken.encode_text(tag).ok()?);
+            seq.push(ids.sep);
+            Some(seq)
+        };
+        Some(ThinkingMarkers {
+            think_start: Some("<|open|>think<|sep|>".to_string()),
+            think_end: Some("<|close|>think<|sep|>".to_string()),
+            think_start_tokens: Some(tag_ids("think", ids.open)?),
+            think_end_tokens: Some(tag_ids("think", ids.close)?),
+            tool_call_start: Some("<|open|>tools<|sep|>".to_string()),
+            tool_call_end: Some("<|close|>tools<|sep|>".to_string()),
+            tool_call_start_tokens: Some(tag_ids("tools", ids.open)?),
+            tool_call_end_tokens: Some(tag_ids("tools", ids.close)?),
+        })
     }
 
     /// Encode an explicit tool-call start/end string pair into token-id
@@ -1038,7 +1100,7 @@ fn remote_tokenizer_repo_for_model(model_path: &Path) -> Option<&'static str> {
     remote_tokenizer_repo_for_model_type(&model_type)
 }
 
-fn read_config_model_type(model_path: &Path) -> Option<String> {
+pub(crate) fn read_config_model_type(model_path: &Path) -> Option<String> {
     let config_path = model_path.join("config.json");
     let content = std::fs::read_to_string(config_path).ok()?;
     let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;

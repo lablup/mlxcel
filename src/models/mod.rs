@@ -23,6 +23,7 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
+mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
@@ -111,6 +112,9 @@ pub mod deepseek_v32;
 pub mod deepseek_v4;
 pub mod diffusion_gemma;
 pub mod dots1;
+/// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` drafter and
+/// delegates every other kind to `mlxcel_core::drafter::load_drafter`.
+pub mod drafter_loader;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
 pub mod ernie4_5_moe_vl;
@@ -131,6 +135,9 @@ pub mod gemma4_mtp_target;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;
+pub mod glm4_moe_lite_mtp_config;
+pub mod glm4_moe_lite_mtp_drafter;
+pub mod glm4_moe_lite_mtp_target;
 pub mod glm4v;
 pub mod glm4v_moe;
 pub mod glm_moe_dsa;
@@ -150,6 +157,7 @@ pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
 pub mod jina_vlm;
+pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
 pub mod laguna;
@@ -256,8 +264,8 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
-pub use detection::get_model_type;
 pub(crate) use detection::is_sequence_classification_architecture;
+pub use detection::{get_model_type, model_type_has_native_video, model_type_is_vision_capable};
 pub use diffusion_gemma::DiffusionGemmaModel;
 pub use dots1::Dots1Model;
 pub use ernie4_5::Ernie45Model;
@@ -300,6 +308,7 @@ pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
+pub use kimi_k3::KimiK3Model;
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
 pub use laguna::{LagunaModel, LagunaWrapper};
@@ -614,7 +623,9 @@ pub enum ModelType {
 
     // Kimi models
     KimiLinear,
-    KimiVL,  // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
+    KimiK3, // Kimi K3 text backbone (fused-QKV KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)
+    KimiK3VLM, // Kimi K3 VLM (MoonViT3D tower + patchmergerv2 projector + the K3 backbone)
+    KimiVL, // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
     KimiK25, // Kimi-VL 2.5 (MoonViT + DeepSeek-V3-style MoE, image path)
 
     // Longcat models
@@ -840,6 +851,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::GraniteMoeHybrid,
     // Kimi models
     ModelType::KimiLinear,
+    ModelType::KimiK3,
+    ModelType::KimiK3VLM,
     ModelType::KimiVL,
     ModelType::KimiK25,
     // Longcat models
@@ -1061,6 +1074,11 @@ impl ModelType {
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::Dbrx => ("Databricks DBRX (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
+            ModelType::KimiK3 => (
+                "Kimi K3 (KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)",
+                "MoE (other)",
+            ),
+            ModelType::KimiK3VLM => ("Kimi K3 VLM (MoonViT3D + K3 latent MoE)", "Kimi VLM"),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
@@ -1433,6 +1451,8 @@ mod metadata_tests {
             Plamo2,
             GraniteMoeHybrid,
             KimiLinear,
+            KimiK3,
+            KimiK3VLM,
             KimiVL,
             KimiK25,
             LongcatFlash,

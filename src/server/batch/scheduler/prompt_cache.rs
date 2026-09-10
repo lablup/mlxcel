@@ -102,6 +102,18 @@ impl BatchScheduler {
     /// token path. Text-only requests pass `false` and keep accepting partial
     /// (APC block-aligned) matches.
     ///
+    /// The gate covers BOTH adopt branches. It used to sit only on the KV
+    /// branch, and that was already a gap: `vision::gemma4_vl` and
+    /// `vision::gemma4_unified` have forwarded `snapshot_truncatable_to` to
+    /// their text model since Gemma 4 first answered it, so a multimodal
+    /// request could already reach a truncating snapshot restore with the
+    /// whole-entry rule never consulted. #1335 widens the reach to
+    /// `vision::VisionLanguageModel` (the Gemma 3 and Llama 4 VLM checkpoints)
+    /// rather than creating it. The snapshot branch has to decline for the same
+    /// reason the KV branch does: the caller drops the prepared VLM embeddings
+    /// as soon as `prefill_start_offset > 0` (`admission.rs`), so placeholder
+    /// tokens left in the suffix would be forwarded as ordinary ids.
+    ///
     /// Both dense and paged entries are adopted in-place: dense via
     /// [`CachePool::adopt`], paged via [`CachePool::adopt_paged`] (which shares
     /// the cached prefix's refcounted pool blocks so the prefix is never
@@ -162,6 +174,32 @@ impl BatchScheduler {
             matched_len,
         } = snapshot_outcome
         {
+            // A `matched_len` shorter than the stored entry means the store
+            // adopted at the longest common prefix, which only happens when
+            // the model agreed it could truncate there (#1145).
+            let partial = matched_len < snapshot_entry.tokens.len();
+            // #124 step c, on the snapshot branch. Same rule and same reason as
+            // the KV branch below: a partial match can leave image or audio
+            // placeholder tokens in the suffix, and the suffix runs through the
+            // token path with the prepared embeddings dropped. Decline before
+            // allocating anything, so the entry stays available for a later
+            // exact match. Reachable before #1335 as well, through the Gemma
+            // 4 VL and Unified wrappers, which already forwarded
+            // `snapshot_truncatable_to`; an exact-prefix restore is unaffected
+            // because it leaves `partial` false.
+            if require_whole_entry && partial {
+                tracing::debug!(
+                    matched = matched_len,
+                    stored = snapshot_entry.tokens.len(),
+                    "prompt-cache snapshot partial match declined for a multimodal request"
+                );
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::ModeMismatch,
+                    None,
+                    matched_len,
+                );
+                return None;
+            }
             let seq_id = match self.allocate_sequence_state() {
                 Ok(id) => id,
                 Err(err) => {
@@ -171,10 +209,6 @@ impl BatchScheduler {
                     return None;
                 }
             };
-            // A `matched_len` shorter than the stored entry means the store
-            // adopted at the longest common prefix, which only happens when
-            // the model agreed it could truncate there (#1145).
-            let partial = matched_len < snapshot_entry.tokens.len();
             let restore = snapshot_entry.with_snapshot(|snapshot| {
                 if partial {
                     self.model

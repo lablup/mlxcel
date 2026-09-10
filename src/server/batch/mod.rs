@@ -27,6 +27,10 @@
 //! - [`BatchScheduler`] -- core iteration-level scheduler.
 
 mod active;
+/// DFlash / DSpark target contract shared by the B = 1 and batched DFlash
+/// bursts (issue #1339): `DFlashTargetModel`, its per-family impls and the
+/// generic target drivers.
+pub(crate) mod dflash_target;
 /// b10621's per-request generation bounds (`n_indent`, `t_max_predict_ms`),
 /// issue #1477: stop rules that end a healthy request and report
 /// `stop_type: "limit"`.
