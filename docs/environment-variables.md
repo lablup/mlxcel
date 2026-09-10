@@ -413,7 +413,7 @@ both be on `PATH` and must be **ffmpeg 5.0 (2022) or newer**. See
 
 | Variable | Values | Default | Notes |
 |----------|--------|---------|-------|
-| `MLXCEL_VIDEO_DIR_ALLOWLIST` | comma-separated directories | unset | Local `video_url` file paths are rejected unless they resolve under one of these canonicalized directories. Keep directories owner-writable only; group/world-writable entries warn at startup. |
+| `MLXCEL_VIDEO_DIR_ALLOWLIST` | comma-separated directories | unset | Local `video_url` file paths are rejected unless they resolve under one of these canonicalized directories. Keep directories owner-writable only; group/world-writable entries warn at startup. The video-frames fallback resolves the list once when the server starts (once per model the router loads), so an entry that does not exist yet at that point is dropped with a warning until the next restart; the native-video families still read it per request. |
 | `MLXCEL_VIDEO_MAX_PIXELS` | unsigned integer | `16777216` | Rejects source videos whose `width × height` exceeds the cap. |
 | `MLXCEL_VIDEO_MAX_DURATION_SEC` | float seconds | `600` | Rejects source videos longer than the cap. |
 | `MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES` | unsigned integer bytes | `268435456` | Per-frame cap for the ffmpeg PNG stream splitter. |

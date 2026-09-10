@@ -237,11 +237,19 @@ paragraph below.
 most `--video-max-frames` frames with the first and last always kept,
 PNG-encoded, and sent to the model as that many ordinary images in chronological
 order, preceded by the sentence `Here is a video as a sequence of N frames in
-chronological order.` so the model reads them as one clip. Nothing about the
-image pipeline changes: the template emits one image placeholder per frame, the
-vision tower sees stills, and the prompt-cache multimodal digest hashes the
-frame bytes, so two requests for the same clip at the same fps and frame cap
-share a prefix and a different clip does not.
+chronological order.` so the model reads them as one clip. Several clips get
+one sentence each, naming that clip's own frame count and placed immediately
+ahead of that clip's frames. The CLI renders its `--video` clips after any
+`--image` inputs and before the question, so it produces the same prompt as a
+server body that lists the same clips ahead of its question; a template without
+image content items receives the sentences and the question joined with no
+separator on both fronts. On the CLI the frames are written as PNG files into a
+private per-run directory under the system temp directory (mode 0700, each file
+0600 on Unix) and removed when the run ends. Nothing about the image pipeline
+changes: the template emits one image placeholder per frame, the vision tower
+sees stills, and the prompt-cache multimodal digest hashes the frame bytes, so
+two requests for the same clip at the same fps and frame cap share a prefix and
+a different clip does not.
 
 What this costs and what it does not buy:
 
@@ -271,7 +279,10 @@ from <file> as ordered images` is what says the substitution happened.
 **Supported ffmpeg range: 5.0 (2022) or newer**, on both the CLI (`--video`)
 and the server (`video_url`). Both binaries must be on `PATH`; neither is a
 build-time dependency, and a missing one produces a named error rather than a
-crash. The floor is set by one flag: the extraction command passes
+crash. The server checks for them once, at startup, when the loaded checkpoint
+takes video, logs a warning if either is missing, and keeps that answer for the
+life of the process, so install ffmpeg before starting the server. The floor is
+set by one flag: the extraction command passes
 `-fps_mode vfr`, which ffmpeg added in 5.0 at the same time it deprecated the
 older `-vsync`. ffmpeg 8 removed `-vsync` outright, so the previous spelling
 made every video request fail at argument parsing, before a frame was decoded

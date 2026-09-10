@@ -41,7 +41,9 @@ use mlxcel::{
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
     select_backend,
-    server::chat_template::{ChatMessage, ChatTemplateProcessor, template_rejection_message},
+    server::chat_template::{
+        ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
+    },
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
     vlm_runtime::prepared_embedding_refs,
@@ -677,6 +679,74 @@ fn apply_user_chat_template(
     })
 }
 
+/// Where one clip the video-frames fallback turned into stills sits in the
+/// rendered CLI user turn: its lead sentence, then one image placeholder per
+/// frame (issue #1766).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CliVideoFrameGroup {
+    /// [`mlxcel::video::video_frames_lead_text`] for this clip's own frame
+    /// count.
+    pub(crate) lead_text: String,
+    /// Frames of this clip, which is how many image placeholders follow the
+    /// sentence.
+    pub(crate) frames: usize,
+}
+
+/// The non-text inputs of the CLI user turn, in the order the chat template
+/// renders them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CliPromptMedia {
+    /// The caller's own `--image` inputs, rendered first.
+    pub(crate) images: usize,
+    /// Clips the video-frames fallback replaced with stills, in `--video`
+    /// order. Each renders as its lead sentence followed by its frames, after
+    /// `images`, which is the order [`CliVideoFrames::splice_into`] appends the
+    /// frame files to `--image` in. It is also the layout the server's
+    /// `apply_video_frame_expansion` gives a body that lists the same clips
+    /// ahead of its question, so for such a body both fronts render the same
+    /// prompt, with or without image items in the template.
+    pub(crate) video_frame_groups: Vec<CliVideoFrameGroup>,
+    /// `<|video|>` content parts, for a family that consumes the clip
+    /// natively (see [`cli_video_content_part_count`]).
+    pub(crate) videos: usize,
+    /// `--audio` inputs.
+    pub(crate) audios: usize,
+}
+
+impl CliPromptMedia {
+    /// Image placeholders in total: the caller's own images plus every
+    /// fallback frame.
+    fn image_placeholders(&self) -> usize {
+        self.images
+            + self
+                .video_frame_groups
+                .iter()
+                .map(|group| group.frames)
+                .sum::<usize>()
+    }
+
+    /// The user text for a render with no content list to place the lead
+    /// sentences in (no chat template, a template without image items, or one
+    /// that failed on the list): the turn's text items, each clip's lead
+    /// sentence in clip order and then the question, flattened by
+    /// [`flatten_template_text`].
+    ///
+    /// That is the helper the server's typed-message render flattens the same
+    /// turn with, so a template without image items gets identical user text
+    /// from both fronts: the sentences join each other and the question with
+    /// no separator (issue #1766). Without fallback clips this is the question
+    /// unchanged.
+    fn flattened_text(&self, user_prompt: &str) -> String {
+        let mut parts: Vec<serde_json::Value> = self
+            .video_frame_groups
+            .iter()
+            .map(|group| serde_json::json!({"type": "text", "text": group.lead_text}))
+            .collect();
+        parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
+        flatten_template_text(&serde_json::Value::Array(parts))
+    }
+}
+
 /// Apply chat template with image / video / audio placeholders for VLM models.
 ///
 /// Creates multimodal content entries that Gemma3-style templates can
@@ -692,15 +762,13 @@ fn apply_user_chat_template(
 fn apply_vlm_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
-    num_images: usize,
-    num_videos: usize,
-    num_audios: usize,
+    media: &CliPromptMedia,
 ) -> Result<String> {
     // Only attempt multimodal rendering when the template handles image
     // content items.  Templates that don't (e.g. Vicuna, ChatML) would
     // render the raw JSON list as text, producing garbled output.
     if !processor.supports_image_content() {
-        return apply_user_chat_template(processor, user_prompt);
+        return apply_user_chat_template(processor, &media.flattened_text(user_prompt));
     }
 
     // Build a multimodal content list:
@@ -727,20 +795,30 @@ fn apply_vlm_chat_template(
     // server. Keep audio last so the CLI and server render the identical audio
     // user turn.
     // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/prompt_utils.py
-    let emit_video = num_videos > 0 && processor.supports_video_content();
-    let emit_audio = num_audios > 0 && processor.supports_audio_content();
+    let emit_video = media.videos > 0 && processor.supports_video_content();
+    let emit_audio = media.audios > 0 && processor.supports_audio_content();
     let mut content_parts: Vec<serde_json::Value> = Vec::new();
-    for _ in 0..num_images {
+    for _ in 0..media.images {
         content_parts.push(serde_json::json!({"type": "image"}));
     }
+    // Clips the fallback turned into stills (issue #1766): each clip's own
+    // lead sentence immediately ahead of that clip's frames, so two clips reach
+    // the model as two announced runs of frames rather than one undivided run
+    // under a sentence naming their sum.
+    for group in &media.video_frame_groups {
+        content_parts.push(serde_json::json!({"type": "text", "text": group.lead_text}));
+        for _ in 0..group.frames {
+            content_parts.push(serde_json::json!({"type": "image"}));
+        }
+    }
     if emit_video {
-        for _ in 0..num_videos {
+        for _ in 0..media.videos {
             content_parts.push(serde_json::json!({"type": "video"}));
         }
     }
     content_parts.push(serde_json::json!({"type": "text", "text": user_prompt}));
     if emit_audio {
-        for _ in 0..num_audios {
+        for _ in 0..media.audios {
             content_parts.push(serde_json::json!({"type": "audio"}));
         }
     }
@@ -755,7 +833,7 @@ fn apply_vlm_chat_template(
             Err(rejection)
         } else {
             // Fallback: text-only template
-            apply_user_chat_template(processor, user_prompt)
+            apply_user_chat_template(processor, &media.flattened_text(user_prompt))
         }
     })
 }
@@ -764,16 +842,14 @@ fn resolve_cli_prompt(
     user_prompt: &str,
     no_chat_template: bool,
     processor: Option<&ChatTemplateProcessor>,
-    num_images: usize,
-    num_videos: usize,
-    num_audios: usize,
+    media: &CliPromptMedia,
 ) -> Result<String> {
     if no_chat_template {
-        return Ok(user_prompt.to_string());
+        return Ok(media.flattened_text(user_prompt));
     }
 
     processor.map_or_else(
-        || Ok(user_prompt.to_string()),
+        || Ok(media.flattened_text(user_prompt)),
         |processor| {
             // Route an audio-bearing request through the VLM template only when
             // the template actually renders audio content items. This keeps the
@@ -782,11 +858,11 @@ fn resolve_cli_prompt(
             // letting Gemma 4 emit a `<|audio|>` marker in the user turn so the
             // per-family token expansion finds and expands it in place
             // (issue #436).
-            let emit_audio = num_audios > 0 && processor.supports_audio_content();
-            if num_images > 0 || num_videos > 0 || emit_audio {
-                apply_vlm_chat_template(processor, user_prompt, num_images, num_videos, num_audios)
+            let emit_audio = media.audios > 0 && processor.supports_audio_content();
+            if media.image_placeholders() > 0 || media.videos > 0 || emit_audio {
+                apply_vlm_chat_template(processor, user_prompt, media)
             } else {
-                apply_user_chat_template(processor, user_prompt)
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt))
             }
         },
     )
@@ -797,9 +873,7 @@ fn load_cli_prompt(
     tokenizer: &crate::MlxcelTokenizer,
     user_prompt: &str,
     no_chat_template: bool,
-    num_images: usize,
-    num_videos: usize,
-    num_audios: usize,
+    media: &CliPromptMedia,
 ) -> Result<String> {
     let processor = if no_chat_template {
         None
@@ -830,14 +904,7 @@ fn load_cli_prompt(
         processor
     };
 
-    resolve_cli_prompt(
-        user_prompt,
-        no_chat_template,
-        processor.as_ref(),
-        num_images,
-        num_videos,
-        num_audios,
-    )
+    resolve_cli_prompt(user_prompt, no_chat_template, processor.as_ref(), media)
 }
 
 /// Number of `<|video|>` content parts to render into the CLI chat prompt.
@@ -865,16 +932,82 @@ fn cli_video_content_part_count(model_path: &Path, num_videos: usize) -> usize {
     }
 }
 
-/// Frames a `--video` clip was replaced with, plus the guards that delete the
-/// temporary PNGs when the run ends (issue #1322).
-pub(crate) struct CliVideoFrames {
-    /// Temporary PNG paths, in chronological order, to append to `--image`.
-    pub(crate) frame_paths: Vec<std::path::PathBuf>,
-    /// Sentence telling the model the images are one clip.
+/// One `--video` clip the fallback replaced with stills (issue #1322).
+pub(crate) struct CliVideoClipFrames {
+    /// [`mlxcel::video::video_frames_lead_text`] for this clip's own frame
+    /// count, so two clips get two sentences rather than one naming their sum
+    /// (issue #1766).
     pub(crate) lead_text: String,
-    /// RAII guards. Held for the life of the run; dropping them unlinks the
-    /// PNGs, so they must outlive the vision-tower read.
-    pub(crate) _guards: Vec<mlxcel::video::TempFile>,
+    /// The clip's frames as PNG files, in chronological order.
+    pub(crate) frame_paths: Vec<std::path::PathBuf>,
+}
+
+/// Frames the `--video` clips were replaced with, one entry per clip in
+/// `--video` order, plus the directory that holds them (issues #1322, #1766).
+pub(crate) struct CliVideoFrames {
+    pub(crate) clips: Vec<CliVideoClipFrames>,
+    /// Private per-run directory holding every frame: mode 0700 on Unix, and
+    /// each PNG in it 0600. Dropping it removes the directory and the frames,
+    /// so it has to outlive the vision-tower read.
+    dir: mlxcel::video::PrivateTempDir,
+}
+
+impl CliVideoFrames {
+    /// Create the empty private directory the frames are written into.
+    pub(crate) fn create() -> Result<Self> {
+        let dir = mlxcel::video::PrivateTempDir::create("mlxcel-video-frames").map_err(|err| {
+            anyhow!("Failed to create a private temporary directory for video frames: {err}")
+        })?;
+        Ok(Self {
+            clips: Vec::new(),
+            dir,
+        })
+    }
+
+    /// Write one clip's PNG frames, in chronological order, and record the
+    /// lead sentence naming this clip's own frame count.
+    pub(crate) fn push_clip(&mut self, pngs: &[Vec<u8>]) -> Result<()> {
+        let clip_index = self.clips.len();
+        let mut frame_paths = Vec::with_capacity(pngs.len());
+        for (frame_index, png) in pngs.iter().enumerate() {
+            let name = format!("clip{clip_index:03}-frame{frame_index:04}.png");
+            let path = self.dir.write_file(&name, png).map_err(|err| {
+                anyhow!(
+                    "Failed to write video frame {name} into {}: {err}",
+                    self.dir.path().display()
+                )
+            })?;
+            frame_paths.push(path);
+        }
+        self.clips.push(CliVideoClipFrames {
+            lead_text: mlxcel::video::video_frames_lead_text(pngs.len()),
+            frame_paths,
+        });
+        Ok(())
+    }
+
+    /// Hand the frames to the run. They join `images` after the caller's own
+    /// `--image` inputs, clip by clip, and `videos` empties so
+    /// `compute_vlm_embeddings` never sees a clip. Returns the per-clip layout
+    /// the prompt renderer needs, in the same order, and the directory guard,
+    /// which the caller holds until the vision tower has read the files.
+    pub(crate) fn splice_into(
+        self,
+        images: &mut Vec<std::path::PathBuf>,
+        videos: &mut Vec<std::path::PathBuf>,
+    ) -> (Vec<CliVideoFrameGroup>, mlxcel::video::PrivateTempDir) {
+        let Self { clips, dir } = self;
+        let mut groups = Vec::with_capacity(clips.len());
+        for clip in clips {
+            groups.push(CliVideoFrameGroup {
+                lead_text: clip.lead_text,
+                frames: clip.frame_paths.len(),
+            });
+            images.extend(clip.frame_paths);
+        }
+        videos.clear();
+        (groups, dir)
+    }
 }
 
 /// Decode `--video` into ordered still images when the checkpoint has no
@@ -886,10 +1019,10 @@ pub(crate) struct CliVideoFrames {
 /// checkpoint with no vision tower also returns `Ok(None)`: there is nowhere to
 /// send frames, and the refusal it already produces names that.
 ///
-/// The clip is decoded at `target_fps`, evenly subsampled to `max_frames`
-/// (first and last always kept), PNG-encoded, and written to the system temp
-/// directory. Server-side the equivalent rewrite happens in
-/// `server::chat_request::expand_video_parts_to_frames`.
+/// Each clip is decoded at `target_fps`, evenly subsampled to `max_frames`
+/// (first and last always kept), PNG-encoded, and written into one private
+/// per-run directory (see [`CliVideoFrames`]). Server-side the equivalent
+/// rewrite happens in `server::chat_request::expand_video_parts_to_frames`.
 pub(crate) fn expand_cli_videos_to_frames(
     model_path: &Path,
     video_paths: &[std::path::PathBuf],
@@ -915,10 +1048,7 @@ pub(crate) fn expand_cli_videos_to_frames(
     );
 
     let max_frames = max_frames.max(mlxcel::video::MIN_FALLBACK_MAX_FRAMES);
-    let temp_dir = std::env::temp_dir();
-    let mut frame_paths = Vec::new();
-    let mut guards = Vec::new();
-    let mut total_frames = 0usize;
+    let mut expansion = CliVideoFrames::create()?;
     for path in video_paths {
         // The bounded decode the server front uses: reading the clip at
         // `target_fps` alone would hold up to `FPS_MAX_FRAMES` full-resolution
@@ -939,28 +1069,10 @@ pub(crate) fn expand_cli_videos_to_frames(
             sampled,
             path.display()
         );
-        total_frames += encoded.len();
-        for png in encoded {
-            let frame_path =
-                temp_dir.join(format!("mlxcel-video-frame-{}.png", uuid::Uuid::new_v4()));
-            std::fs::write(&frame_path, png).map_err(|err| {
-                anyhow!(
-                    "Failed to write video frame {}: {err}",
-                    frame_path.display()
-                )
-            })?;
-            guards.push(mlxcel::video::TempFile::new(frame_path.clone()));
-            frame_paths.push(frame_path);
-        }
+        expansion.push_clip(&encoded)?;
     }
 
-    Ok(Some(CliVideoFrames {
-        frame_paths,
-        lead_text: format!(
-            "Here is a video as a sequence of {total_frames} frames in chronological order."
-        ),
-        _guards: guards,
-    }))
+    Ok(Some(expansion))
 }
 
 fn tokenize_prompt(
@@ -2366,7 +2478,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
 /// One-shot (`-p`-supplied) text generation: the historical `generate` flow.
 fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Safe: the only caller (`run_generate`) guarantees `prompt` is `Some`.
-    let mut user_prompt = args
+    let user_prompt = args
         .generation
         .prompt
         .clone()
@@ -2517,21 +2629,23 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // meaning, and before the prompt is rendered so the template emits one
     // image placeholder per frame. On the fallback path
     // `compute_vlm_embeddings` never sees a video: the clip is already an
-    // ordered run of `--image` inputs by then. The guards live until this
-    // function returns, which is after the vision tower has read the PNGs.
-    let _video_frame_guards = match expand_cli_videos_to_frames(
+    // ordered run of `--image` inputs by then. Each clip's lead sentence is
+    // rendered immediately ahead of that clip's own frames, as the server does
+    // (issue #1766). The frame directory lives until this function returns,
+    // which is after the vision tower has read the PNGs.
+    let explicit_images = args.generation.image.len();
+    let (video_frame_groups, _video_frame_dir) = match expand_cli_videos_to_frames(
         &args.model.model,
         &args.generation.video,
         args.generation.fps,
         args.generation.video_max_frames,
     )? {
         Some(expansion) => {
-            args.generation.image.extend(expansion.frame_paths);
-            user_prompt = format!("{}\n\n{}", expansion.lead_text, user_prompt);
-            args.generation.video.clear();
-            Some(expansion._guards)
+            let (groups, dir) =
+                expansion.splice_into(&mut args.generation.image, &mut args.generation.video);
+            (groups, Some(dir))
         }
-        None => None,
+        None => (Vec::new(), None),
     };
 
     let tokenizer = load_tokenizer(&args.model.model)?;
@@ -2540,9 +2654,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &tokenizer,
         &user_prompt,
         args.generation.no_chat_template,
-        args.generation.image.len(),
-        cli_video_content_part_count(&args.model.model, args.generation.video.len()),
-        usize::from(args.generation.audio.is_some()),
+        &CliPromptMedia {
+            images: explicit_images,
+            video_frame_groups,
+            videos: cli_video_content_part_count(&args.model.model, args.generation.video.len()),
+            audios: usize::from(args.generation.audio.is_some()),
+        },
     )?;
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
 

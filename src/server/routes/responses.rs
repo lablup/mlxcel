@@ -108,15 +108,13 @@ pub async fn create_response(
     // after the capability gate, before any render. Both `create_response`
     // handlers below read `translated`, so rewriting once here covers the
     // streaming and non-streaming paths alike.
-    if let Err(message) = crate::server::chat_request::expand_video_parts_to_frames(
+    if let Err(err) = crate::server::chat_request::expand_request_video_parts(
+        &state,
         &mut translated.chat_request,
-        state.media_support,
-        crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
-        state.display_model_id(),
     )
     .await
     {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
+        return err.into_error_response().into_response();
     }
 
     // Reject requests with no effective input before any model dispatch

@@ -518,6 +518,104 @@ impl Drop for TempFile {
     }
 }
 
+/// RAII guard for a private per-run directory under the system temp
+/// directory: created mode 0700 on Unix, and removed together with everything
+/// in it when the guard drops (issue #1766).
+///
+/// [`TempFile`] guards one file and leaves its mode to whoever created it. The
+/// CLI video-frames fallback writes a whole clip's worth of decoded frames, and
+/// a default-mode file in a shared `/tmp` (0644 minus umask) lets any local
+/// user read the frames of a private clip for as long as the run lasts. The
+/// 0700 directory keeps other users out, and [`Self::write_file`] creates each
+/// file 0600 as well, so neither layer depends on the other holding.
+///
+/// Built on `std` rather than the `tempfile` crate, which is a dev-dependency
+/// only.
+///
+/// Used by: `commands::generate::CliVideoFrames` (CLI video-frames fallback).
+#[derive(Debug)]
+pub struct PrivateTempDir {
+    path: PathBuf,
+}
+
+impl PrivateTempDir {
+    /// Create `<system temp dir>/<prefix>-<uuid>`.
+    ///
+    /// # Errors
+    /// Refuses a `prefix` that is not a plain file name, since a separator or
+    /// `..` would put the directory somewhere other than directly under the
+    /// temp directory, possibly inside a directory another user controls.
+    /// Otherwise returns the I/O error from creating the directory. The create
+    /// is exclusive, so an entry already at that path, a planted symlink
+    /// included, is an error rather than something to reuse.
+    pub fn create(prefix: &str) -> io::Result<Self> {
+        require_plain_file_name(prefix)?;
+        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Self { path })
+    }
+
+    /// Borrow the directory path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Write `bytes` to a new file called `name` inside the directory, created
+    /// mode 0600 on Unix, and return its path.
+    ///
+    /// # Errors
+    /// Refuses a `name` that is not a plain file name (a separator, `..`, or
+    /// an absolute path would place the file outside the directory), refuses
+    /// to overwrite an existing entry, and otherwise returns the I/O error
+    /// from creating or writing the file.
+    pub fn write_file(&self, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+        use std::io::Write as _;
+
+        require_plain_file_name(name)?;
+        let path = self.path.join(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&path)?.write_all(bytes)?;
+        Ok(path)
+    }
+}
+
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_dir_all(&self.path)
+            && self.path.exists()
+        {
+            tracing::warn!("PrivateTempDir: failed to remove {:?}: {}", self.path, err);
+        }
+    }
+}
+
+/// Refuse anything but a single, plain path component: no separator, no `.`
+/// or `..`, no root, not empty. `Path::join` replaces the base outright for an
+/// absolute component, so a name that fails this check could land anywhere.
+fn require_plain_file_name(name: &str) -> io::Result<()> {
+    if Path::new(name).file_name().and_then(|file| file.to_str()) == Some(name) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} is not a plain file name"),
+        ))
+    }
+}
+
 // ─── VideoSource: TOCTOU-safe video handle ─────────────────────
 
 /// A video input that can be safely passed to `ffmpeg` / `ffprobe` without
@@ -1591,6 +1689,23 @@ pub fn frames_to_png(frames: &[DynamicImage]) -> Result<Vec<Vec<u8>>, VideoError
             Ok(bytes)
         })
         .collect()
+}
+
+/// The sentence spliced in front of one clip's frames, so the model reads the
+/// images that follow as a single video rather than as unrelated pictures
+/// (issue #1322).
+///
+/// One definition for both fronts, because the CLI and the server have to
+/// render the same sentence at the same position for the same clip, or the
+/// same question gets two different prompts (issue #1766).
+///
+/// Used by: `server::chat_request::apply_video_frame_expansion` (HTTP
+/// fallback, one sentence per `video_url` part) and
+/// `commands::generate::CliVideoFrames::push_clip` (CLI fallback, one sentence
+/// per `--video` clip).
+#[must_use]
+pub fn video_frames_lead_text(frames: usize) -> String {
+    format!("Here is a video as a sequence of {frames} frames in chronological order.")
 }
 
 /// Decode a clip for the video-to-images fallback, reading only the frames

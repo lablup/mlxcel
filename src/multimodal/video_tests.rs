@@ -354,6 +354,60 @@ fn temp_file_drop_on_panic_cleanup() {
     );
 }
 
+// ─── PrivateTempDir (issue #1766) ────────────────────────────────────────────
+
+#[test]
+fn private_temp_dir_keeps_files_inside_and_refuses_overwrites() {
+    let dir = PrivateTempDir::create("mlxcel-test-private-dir").expect("create private dir");
+    let root = dir.path().to_path_buf();
+    assert_ne!(root, std::env::temp_dir(), "a fresh directory, not TMPDIR");
+
+    let written = dir.write_file("frame.png", b"bytes").expect("plain name");
+    assert_eq!(written.parent(), Some(root.as_path()));
+    assert_eq!(std::fs::read(&written).unwrap(), b"bytes");
+
+    // A name that is not a plain file name would place the file somewhere
+    // else, and an existing entry is never reused or truncated.
+    for name in [
+        "../escape.png",
+        "nested/frame.png",
+        "/abs.png",
+        "..",
+        ".",
+        "",
+    ] {
+        let err = dir
+            .write_file(name, b"x")
+            .expect_err("only plain file names are accepted");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+    }
+    let err = dir
+        .write_file("frame.png", b"other")
+        .expect_err("an existing file is not overwritten");
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&written).unwrap(), b"bytes");
+
+    drop(dir);
+    assert!(
+        !root.exists(),
+        "the directory and its files go with the guard"
+    );
+}
+
+#[test]
+fn private_temp_dir_refuses_a_prefix_that_is_not_a_plain_name() {
+    // The prefix becomes the leading part of the directory's own name. A
+    // separator or `..` in it would create the directory somewhere other than
+    // directly under the temp directory, such as inside a directory another
+    // local user made in a shared `/tmp`.
+    for prefix in ["other-user/frames", "../frames", "/abs", "..", ".", ""] {
+        let err = PrivateTempDir::create(prefix).expect_err("only plain prefixes are accepted");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{prefix:?}");
+    }
+    let dir = PrivateTempDir::create("mlxcel-test-plain-prefix").expect("a plain prefix works");
+    assert_eq!(dir.path().parent(), Some(std::env::temp_dir().as_path()));
+}
+
 // ─── Extraction flag contract (no ffmpeg needed) ─────────────────────────────
 
 /// The frame-rate mode flag must be `-fps_mode`, never `-vsync`.
