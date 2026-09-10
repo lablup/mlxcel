@@ -618,7 +618,12 @@ impl TransformerBlock {
 
     /// Residual join, post-attention norm, SwiGLU MLP, second residual join.
     /// Identical in both passes.
-    fn feed_forward(&self, x: &MlxArray, attn_out: &MlxArray) -> UniquePtr<MlxArray> {
+    ///
+    /// `pub(crate)` so `iquestloopcoder_tests` can build a reference layer
+    /// output to compare [`Self::forward_pass2`] against. The differential tests
+    /// have to call the real `forward_pass2`, so their reference side needs the
+    /// same tail.
+    pub(crate) fn feed_forward(&self, x: &MlxArray, attn_out: &MlxArray) -> UniquePtr<MlxArray> {
         let (normed, h) = fused_add_rms_norm(&self.post_attention_layernorm, attn_out, x);
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)

@@ -470,16 +470,21 @@ enum Variant {
     GlobalReadsPass2Kv,
     /// Local branch attends the whole history instead of the window.
     LocalUnwindowed,
+    /// The gate weights the local branch where it should weight the global one.
+    BranchesSwapped,
 }
 
-/// An independent expression of pass 2's attention output, before `o_proj`.
+/// An independent expression of one pass-2 layer, returning the same layer
+/// output [`TransformerBlock::forward_pass2`] returns.
 ///
-/// It reuses [`super::iquestloopcoder::Attention`]'s projection and SDPA
-/// helpers (there is no point re-deriving RoPE here), but composes them itself:
-/// *which* query feeds the gate, *which* cache feeds the global branch, and
-/// whether the local branch is windowed are all decided in this function. Those
-/// three choices are exactly what the implementation must get right.
-fn reference_pass2_attention(
+/// It reuses [`super::iquestloopcoder::Attention`]'s projection and SDPA helpers
+/// and the block's own `feed_forward` tail (there is no point re-deriving RoPE
+/// or SwiGLU here), but composes the four decisions itself: *which* query feeds
+/// the gate, *which* cache feeds the global branch, whether the local branch is
+/// windowed, and which way round the gate weights the two branches. Those four
+/// are exactly what the implementation must get right, and each has a `Variant`
+/// that gets it wrong.
+fn reference_pass2_layer(
     block: &TransformerBlock,
     gate: &LoopGate,
     x: &MlxArray,
@@ -517,7 +522,12 @@ fn reference_pass2_attention(
     };
     let local = attn.attend(&q2, &k2, &v2, local_window);
 
-    mix_gated(&g, &global, &local)
+    let mixed = if variant == Variant::BranchesSwapped {
+        mix_gated(&g, &local, &global)
+    } else {
+        mix_gated(&g, &global, &local)
+    };
+    block.feed_forward(x, &attn.project_out(&mixed))
 }
 
 /// Run one layer's pass 1 and then compare pass 2 against each reference
@@ -535,31 +545,25 @@ fn pass2_variant_diffs(seq_len: i32, window: usize) -> (f32, Vec<(Variant, f32)>
     let mut pass1_cache = mlxcel_core::layers::KVCache::new();
     let (h, k1, v1) = block.forward_pass1(&x0, &mut pass1_cache, 0);
 
-    // The implementation's pass 2, unwound to its attention output so the
-    // comparison is not blurred by the MLP.
+    // The real thing. Transcribing `forward_pass2`'s body here instead would
+    // compare a copy of the code against variants of the same copy, and would
+    // pass with the branches swapped or the gate on the pre-RoPE query. Both of
+    // those were confirmed by mutation before this was changed to a real call.
     let mut pass2_cache = mlxcel_core::layers::RotatingKVCache::new(window);
-    let implementation = {
-        let attn = &block.self_attn;
-        let normed = block.input_layernorm.forward(&h);
-        let (q2, k2, v2) = attn.get_qkv(&normed, 0);
-        let g = gate.forward(&q2);
-        let global = attn.attend(&q2, &k1, &v1, 0);
-        let (k2_all, v2_all) = pass2_cache.update_and_fetch(k2, v2);
-        let local = attn.attend(&q2, &k2_all, &v2_all, window);
-        mix_gated(&g, &global, &local)
-    };
+    let implementation = block.forward_pass2(&h, &k1, &v1, gate, &mut pass2_cache, 0, window);
 
-    let correct = reference_pass2_attention(block, gate, &h, &k1, &v1, 0, window, Variant::Correct);
+    let correct = reference_pass2_layer(block, gate, &h, &k1, &v1, 0, window, Variant::Correct);
     let diff_correct = max_abs_diff(&implementation, &correct);
 
     let wrong = [
         Variant::GateFromPreRope,
         Variant::GlobalReadsPass2Kv,
         Variant::LocalUnwindowed,
+        Variant::BranchesSwapped,
     ]
     .into_iter()
     .map(|variant| {
-        let other = reference_pass2_attention(block, gate, &h, &k1, &v1, 0, window, variant);
+        let other = reference_pass2_layer(block, gate, &h, &k1, &v1, 0, window, variant);
         (variant, max_abs_diff(&implementation, &other))
     })
     .collect();
