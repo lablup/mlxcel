@@ -289,6 +289,19 @@ fn ssm_models_are_replicated() {
     }
 }
 
+// ---- Kimi K3 has no tensor-parallel port (issue #1334); it is replicated
+// next to its `kimi_linear` sibling rather than sharded like a dense
+// transformer would be. ----
+
+#[test]
+fn kimi_k3_is_replicated() {
+    let config = ShardConfig::with_tp_size(2);
+    let plan = generate_shard_plan("kimi_k3", 61, &config).unwrap();
+    assert_eq!(plan.tp_size, 1, "kimi_k3 (hybrid) should be replicated");
+    assert_eq!(plan.architecture, "kimi_k3");
+    assert!(plan.layer_plans.is_empty());
+}
+
 // ---- Unknown architecture falls back to generic ----
 
 #[test]
