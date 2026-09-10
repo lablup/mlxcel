@@ -133,7 +133,7 @@ fn offline_draft_model_rejects_a_dflash_drafter_directory() {
         .to_string();
 
     assert!(
-        error.contains("DFlash speculative drafter"),
+        error.contains("DFlash-family speculative drafter"),
         "the error must say what the directory is, got: {error}",
     );
     assert!(

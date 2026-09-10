@@ -24,6 +24,13 @@
 //! hiddens → drafter `draft_block` → target verify → rollback) lands
 //! in epic- sub-12. This file ships only what the trait
 //! surface needs today.
+//!
+//! The same wrapper serves the LFM2 / LFM2.5 DSpark drafters (issue
+//! #1339): a DSpark checkpoint is a DFlash backbone plus a Markov head, so
+//! it loads through the same path and differs only in the draft step
+//! (`DFlashDraftModel::draft_block_dspark_array`), in being greedy-only,
+//! and in the block-size policy (`configured_block_size` /
+//! `prefer_requested_block_size`).
 
 use crate::cache::KVCache;
 use crate::drafter::{Drafter, DrafterError, DrafterKind};
@@ -33,7 +40,7 @@ use crate::weights::WeightMap;
 use cxx::UniquePtr;
 use std::path::Path;
 
-use super::config::DFlashConfig;
+use super::config::{DFlashConfig, DSPARK_MAX_VERIFY_WIDTH};
 use super::model::DFlashDraftModel;
 
 /// Boxed [`Drafter`] implementation for the Qwen 3.5 DFlash drafter.
@@ -189,7 +196,221 @@ pub(crate) fn convert_bf16_to_f16_non_quantized(weights: &mut WeightMap) {
     }
 }
 
+/// Whether `sampler` selects tokens by argmax, the only mode a DSpark
+/// drafter can draft under. Mirrors the greedy test the per-position DFlash
+/// sampling helpers below use.
+///
+/// Used by: `DFlashDrafter::draft_block*`, the server DFlash dispatch gate.
+pub fn sampler_is_greedy(sampler: &SamplingConfig) -> bool {
+    sampler.temperature == 0.0 || sampler.top_k == 1
+}
+
+/// Structural half of the DSpark pairing gate: whether the drafter's own
+/// config and `fc` projection agree with each other, with no target in
+/// hand. `fc_in_features` is the `fc` weight's input width.
+///
+/// Returns the operator-facing reason on failure, `None` when the config is
+/// self-consistent. A free function so it can be tested without a drafter
+/// checkpoint on disk.
+///
+/// Used by: [`DFlashDrafter::validate_target_compat`].
+pub(crate) fn dspark_config_pairing_error(
+    config: &DFlashConfig,
+    fc_in_features: usize,
+) -> Option<String> {
+    let ids = &config.target_layer_ids;
+    let strictly_increasing = ids.windows(2).all(|w| w[0] < w[1]);
+    if ids.is_empty() || !strictly_increasing {
+        return Some(format!(
+            "DSpark drafter target_layer_ids {ids:?} must be non-empty and strictly increasing"
+        ));
+    }
+    if ids
+        .last()
+        .is_some_and(|&last| last >= config.num_target_layers)
+    {
+        return Some(format!(
+            "DSpark drafter target_layer_ids {ids:?} reach past num_target_layers = {}",
+            config.num_target_layers
+        ));
+    }
+    let expected = ids.len() * config.hidden_size;
+    if fc_in_features != expected {
+        return Some(format!(
+            "DSpark drafter fc projection reads {fc_in_features} features but \
+             len(target_layer_ids) * hidden_size = {} * {} = {expected}",
+            ids.len(),
+            config.hidden_size
+        ));
+    }
+    // The mask id indexes the TARGET's embedding table, because a DSpark
+    // drafter ships none of its own, and MLX range-checks no positive gather
+    // index: an id past the last row reads whatever follows the table in the
+    // buffer and feeds it to the logits. The target half of this gate pins the
+    // target's vocabulary to `vocab_size`, so bounding the id against
+    // `vocab_size` here bounds the gather.
+    if config.mask_token_id < 0
+        || usize::try_from(config.mask_token_id).is_ok_and(|id| id >= config.vocab_size)
+    {
+        return Some(format!(
+            "DSpark drafter mask_token_id {} is outside the drafter vocabulary [0, {})",
+            config.mask_token_id, config.vocab_size
+        ));
+    }
+    if config.runtime_verify_width() < 2 {
+        return Some(format!(
+            "DSpark drafter runs at {} verify row(s) (block_size = {}, runtime_block_size = \
+             {:?}); a verify width below 2 proposes nothing and the round loop would emit one \
+             token per burst",
+            config.runtime_verify_width(),
+            config.block_size,
+            config.runtime_block_size
+        ));
+    }
+    // High side of the same bound. `runtime_verify_width()` already clamps at
+    // the ceiling, which is what protects the exactness probe (it runs on the
+    // scheduler thread, one target forward per row, before this gate is ever
+    // reached). Refusing the config here as well is so an operator whose
+    // drafter asks for an impossible width is told, rather than quietly
+    // served at 32.
+    if config.requested_verify_width() > DSPARK_MAX_VERIFY_WIDTH {
+        return Some(format!(
+            "DSpark drafter asks for {} verify rows (block_size = {}, runtime_block_size = \
+             {:?}), above the {} ceiling; the published checkpoints run at 8 to 10 rows, and \
+             each row costs one target forward in the block-versus-chain exactness probe",
+            config.requested_verify_width(),
+            config.block_size,
+            config.runtime_block_size,
+            DSPARK_MAX_VERIFY_WIDTH
+        ));
+    }
+    None
+}
+
+/// Target half of the DSpark pairing gate. `target_vocab` is `None` when the
+/// target does not hand out a tied embedding to measure, in which case the
+/// vocabulary check is skipped rather than guessed.
+///
+/// Used by: [`DFlashDrafter::validate_target_compat`].
+pub(crate) fn dspark_target_pairing_error(
+    config: &DFlashConfig,
+    target_hidden: usize,
+    target_layers: usize,
+    target_vocab: Option<usize>,
+) -> Option<String> {
+    if target_hidden != config.hidden_size {
+        return Some(format!(
+            "DSpark drafter is incompatible with this target: drafter hidden_size = {} but the \
+             target's hidden size = {target_hidden}. The drafter's fc projection reads the \
+             target's residual streams, so these must be equal (pair the LFM2.5-2.6B target with \
+             LFM2.5-2.6B-DSpark, the 8B-A1B target with 8B-A1B-DSpark, and so on).",
+            config.hidden_size
+        ));
+    }
+    if target_layers != config.num_target_layers {
+        return Some(format!(
+            "DSpark drafter is incompatible with this target: drafter num_target_layers = {} but \
+             the target has {target_layers} layers. The captured target_layer_ids {:?} index \
+             into the target's layer stack, so the drafter must be the one published for this \
+             exact target.",
+            config.num_target_layers, config.target_layer_ids
+        ));
+    }
+    if let Some(vocab) = target_vocab
+        && vocab != config.vocab_size
+    {
+        return Some(format!(
+            "DSpark drafter vocabulary is incompatible with this target: drafter vocab_size = {} \
+             but the target's tied LM head emits {vocab} logits. The Markov head is a transition \
+             table over the target vocabulary, so the two must match.",
+            config.vocab_size
+        ));
+    }
+    None
+}
+
+impl DFlashDrafter {
+    /// Whether this wrapper drives a DSpark drafter (issue #1339).
+    pub fn is_dspark(&self) -> bool {
+        self.model.is_dspark()
+    }
+
+    /// DSpark cannot draft under a stochastic sampler; every other DFlash
+    /// checkpoint samples each masked position under the caller's config.
+    fn ensure_sampler_supported(&self, sampler: &SamplingConfig) -> Result<(), DrafterError> {
+        if self.is_dspark() && !sampler_is_greedy(sampler) {
+            return Err(DrafterError::GreedyOnly {
+                kind: self.kind(),
+                temperature: sampler.temperature,
+                top_k: sampler.top_k,
+            });
+        }
+        Ok(())
+    }
+
+    /// The structural half of the DSpark pairing check: the drafter's own
+    /// config must be self-consistent before the target is consulted.
+    fn validate_dspark_config(&self) -> Result<(), DrafterError> {
+        let fc_in = ffi::array_shape(&self.model.fc.weight)
+            .last()
+            .copied()
+            .unwrap_or(0) as usize;
+        match dspark_config_pairing_error(&self.model.config, fc_in) {
+            Some(reason) => Err(DrafterError::BindFailed { reason }),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Drafter for DFlashDrafter {
+    /// DSpark pairing gate (issue #1339). A DSpark drafter consumes the
+    /// target's residual streams at `target_layer_ids` through an `fc`
+    /// projection sized `len(target_layer_ids) * hidden_size`, borrows the
+    /// target's tied embedding table as both its input embedding and its
+    /// LM head, and chains proposals over the target's vocabulary, so the
+    /// target's hidden size, layer count and vocabulary must all match the
+    /// drafter config. A Qwen 3.5 DFlash drafter keeps the no-op default:
+    /// the Qwen family has no such gate today and adding one would change
+    /// which pairings it accepts.
+    ///
+    /// The three measured quantities stand in for the `model_type in {lfm2,
+    /// lfm2_moe}` check the issue describes, because [`LanguageModel`]
+    /// exposes no architecture string and the server's own dispatch gate
+    /// already restricts the burst to the LFM2 `LoadedModel` variants. They
+    /// are also the stricter test: two different LFM2 checkpoints are both
+    /// `lfm2` and still cannot be paired with each other's drafter.
+    fn validate_target_compat(&self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
+        if !self.is_dspark() {
+            return Ok(());
+        }
+        self.validate_dspark_config()?;
+        let config = &self.model.config;
+
+        let sentinel = ffi::from_slice_i32(&[0_i32], &[1, 1]);
+        let embedded =
+            target
+                .embed_tokens(&sentinel)
+                .ok_or(DrafterError::TargetMissingFeature {
+                    feature: "embed_tokens",
+                })?;
+        let target_hidden = ffi::array_shape(&embedded).last().copied().unwrap_or(0) as usize;
+        // The tied head is what the drafter borrows as its LM head, so its
+        // width is the vocabulary the Markov chain must index. A target that
+        // hands out no embedding module leaves the check unmeasured rather
+        // than guessed.
+        let target_vocab = target.embed_tokens_module().map(|embed_module| {
+            let zero_hidden = ffi::zeros(&[1, 1, target_hidden as i32], crate::dtype::FLOAT32);
+            let logits = embed_module.as_linear(&zero_hidden);
+            ffi::array_shape(&logits).last().copied().unwrap_or(0) as usize
+        });
+
+        match dspark_target_pairing_error(config, target_hidden, target.num_layers(), target_vocab)
+        {
+            Some(reason) => Err(DrafterError::BindFailed { reason }),
+            None => Ok(()),
+        }
+    }
+
     fn bind(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
         // Two embedding cases, mirroring upstream Python's lazy-bind shape
         // (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py
@@ -218,9 +439,9 @@ impl Drafter for DFlashDrafter {
                         "DFlash drafter checkpoint omits embed_tokens.weight \
                          and the target does not expose embed_tokens_module(); \
                          a lazy-bind DFlash drafter requires a target that \
-                         hands out its embedding table (the Qwen 3.5 family \
-                         does — check the target is a Qwen 3.5 checkpoint) \
-                         (kind = {})",
+                         hands out its embedding table (the Qwen 3.5 and LFM2 \
+                         families do; check the target family matches the \
+                         drafter) (kind = {})",
                         self.kind()
                     ),
                 })?;
@@ -275,6 +496,48 @@ impl Drafter for DFlashDrafter {
         Some(&self.model.config.target_layer_ids)
     }
 
+    /// DSpark (issue #1339): the verify width the checkpoint runs at by
+    /// default, `min(block_size + 1, runtime_block_size)`. A plain DFlash
+    /// drafter keeps the trait default (`None`).
+    ///
+    /// Declarative on this drafter, not load-bearing. The only readers of
+    /// this hook and of [`Self::prefer_requested_block_size`] are the MTP
+    /// generator and its batched round loop; the DFlash round loop uses the
+    /// `block_size` it was constructed with and never adapts it, so the
+    /// no-backoff property below holds for DSpark whatever this returns.
+    /// The width a DSpark run actually gets is decided one layer up, before
+    /// the drafter is loaded: `resolve_draft_block_size` peeks the drafter
+    /// config through `peek_dspark_configured_block_size` and passes the
+    /// same `runtime_verify_width()` in as `block_size`, unless
+    /// `--draft-block-size` overrides it. Kept implemented so the two agree
+    /// if the DFlash loop ever grows an adaptive width.
+    fn configured_block_size(&self) -> Option<usize> {
+        self.is_dspark()
+            .then(|| self.model.config.runtime_verify_width())
+    }
+
+    /// DSpark never backs its block size off on low acceptance; the
+    /// requested width (the config default or `--draft-block-size`) is the
+    /// width it runs at. See [`Self::configured_block_size`] for why this is
+    /// currently a declaration rather than a control input.
+    fn prefer_requested_block_size(&self) -> bool {
+        self.is_dspark()
+    }
+
+    fn greedy_only(&self) -> bool {
+        self.is_dspark()
+    }
+
+    /// Delegates to the inherent [`DFlashDrafter::is_dspark`] by its
+    /// qualified name rather than repeating its body. An inherent method and
+    /// a trait method of the same name both resolve here (the inherent one
+    /// wins on a concrete `DFlashDrafter`, the trait one through
+    /// `dyn Drafter`), and two copies of the same expression would be free to
+    /// drift apart without any call site noticing.
+    fn is_dspark(&self) -> bool {
+        DFlashDrafter::is_dspark(self)
+    }
+
     fn draft_block(
         &mut self,
         last_bonus: i32,
@@ -295,6 +558,15 @@ impl Drafter for DFlashDrafter {
                      block_size 1 has no masked positions to sample"
                 ),
             });
+        }
+        self.ensure_sampler_supported(sampler)?;
+        if self.is_dspark() {
+            return Ok(self.model.draft_block_dspark(
+                last_bonus,
+                target_hidden,
+                &mut self.caches,
+                block_size,
+            ));
         }
 
         let mask_id = self.model.config.mask_token_id;
@@ -334,6 +606,15 @@ impl Drafter for DFlashDrafter {
                 ),
             });
         }
+        self.ensure_sampler_supported(sampler)?;
+        if self.is_dspark() {
+            return Ok(self.model.draft_block_dspark_array(
+                last_bonus,
+                target_hidden,
+                &mut self.caches,
+                block_size,
+            ));
+        }
 
         let mask_id = self.model.config.mask_token_id;
         let mut block: Vec<i32> = Vec::with_capacity(block_size);
@@ -371,6 +652,13 @@ impl Drafter for DFlashDrafter {
         if last_bonus.is_empty() {
             return Err(DrafterError::DraftFailed {
                 reason: "DFlash drafter (batched) requires B >= 1 bonus tokens".to_string(),
+            });
+        }
+        if self.is_dspark() {
+            return Err(DrafterError::DraftFailed {
+                reason: "DSpark drafter is B = 1 only; the batched DFlash path must decline \
+                         to classic decode for this pairing"
+                    .to_string(),
             });
         }
 
@@ -658,6 +946,154 @@ mod tests {
             ffi::array_dtype(weights.get("b").unwrap()),
             dtype::FLOAT32,
             "f32 must remain f32"
+        );
+    }
+
+    /// The published `LFM2.5-2.6B-DSpark` pairing shape (issue #1339).
+    fn dspark_config() -> DFlashConfig {
+        DFlashConfig {
+            hidden_size: 2048,
+            vocab_size: 128_000,
+            block_size: 9,
+            mask_token_id: 125_017,
+            markov_rank: 256,
+            target_layer_ids: vec![2, 9, 17, 21, 27],
+            num_target_layers: 30,
+            ..DFlashConfig::default()
+        }
+    }
+
+    /// The structural half of the DSpark pairing gate accepts the published
+    /// config against its own `fc` width and names each way it can be wrong.
+    #[test]
+    fn dspark_config_pairing_gate_checks_layer_ids_and_fc_width() {
+        let config = dspark_config();
+        // 5 captured layers x 2048 hidden = the fc input width.
+        assert!(dspark_config_pairing_error(&config, 5 * 2048).is_none());
+
+        let err = dspark_config_pairing_error(&config, 4 * 2048).expect("fc width mismatch");
+        assert!(err.contains("fc projection reads 8192"), "{err}");
+
+        let unsorted = DFlashConfig {
+            target_layer_ids: vec![2, 17, 9, 21, 27],
+            ..dspark_config()
+        };
+        let err = dspark_config_pairing_error(&unsorted, 5 * 2048).expect("unsorted ids");
+        assert!(err.contains("strictly increasing"), "{err}");
+
+        let past_end = DFlashConfig {
+            target_layer_ids: vec![2, 9, 17, 21, 30],
+            ..dspark_config()
+        };
+        let err = dspark_config_pairing_error(&past_end, 5 * 2048).expect("id past the stack");
+        assert!(err.contains("reach past num_target_layers = 30"), "{err}");
+
+        let empty = DFlashConfig {
+            target_layer_ids: vec![],
+            ..dspark_config()
+        };
+        assert!(dspark_config_pairing_error(&empty, 0).is_some());
+    }
+
+    /// The same gate bounds the two checkpoint-supplied numbers that index a
+    /// buffer or size the round: a mask id outside the vocabulary would be
+    /// gathered from the target's embedding table (MLX range-checks no
+    /// positive gather index), and a verify width below two rows proposes
+    /// nothing.
+    #[test]
+    fn dspark_config_pairing_gate_bounds_the_mask_id_and_the_verify_width() {
+        let past_vocab = DFlashConfig {
+            mask_token_id: 128_000,
+            ..dspark_config()
+        };
+        let err = dspark_config_pairing_error(&past_vocab, 5 * 2048).expect("mask id past vocab");
+        assert!(err.contains("mask_token_id 128000"), "{err}");
+
+        let negative = DFlashConfig {
+            mask_token_id: -1,
+            ..dspark_config()
+        };
+        assert!(dspark_config_pairing_error(&negative, 5 * 2048).is_some());
+
+        let degenerate = DFlashConfig {
+            block_size: 0,
+            ..dspark_config()
+        };
+        let err = dspark_config_pairing_error(&degenerate, 5 * 2048).expect("degenerate width");
+        assert!(err.contains("verify row(s)"), "{err}");
+
+        let clamped_low = DFlashConfig {
+            runtime_block_size: Some(1),
+            ..dspark_config()
+        };
+        assert!(dspark_config_pairing_error(&clamped_low, 5 * 2048).is_some());
+    }
+
+    /// The verify width is the one checkpoint-supplied number that becomes a
+    /// server-wide control input: `resolve_draft_block_size` peeks the drafter
+    /// config and hands `runtime_verify_width()` to the scheduler, which then
+    /// reaches the block-versus-chain exactness probe. That probe runs one
+    /// target forward per row on the scheduler thread and memoizes its
+    /// verdict, so an absurd width there is a hang and not a slow request, and
+    /// it runs BEFORE this gate. Both halves of the answer are pinned: the
+    /// clamp, which is what actually holds ahead of the gate, and the gate's
+    /// refusal, which is what tells the operator.
+    #[test]
+    fn a_dspark_config_cannot_put_an_absurd_verify_width_into_effect() {
+        let absurd = DFlashConfig {
+            block_size: 1_000_000,
+            runtime_block_size: Some(1_000_000),
+            ..dspark_config()
+        };
+        assert_eq!(absurd.requested_verify_width(), 1_000_000);
+        assert_eq!(absurd.runtime_verify_width(), DSPARK_MAX_VERIFY_WIDTH);
+        let err = dspark_config_pairing_error(&absurd, 5 * 2048).expect("absurd width");
+        assert!(err.contains("above the"), "{err}");
+
+        // `usize::MAX` is the case `verify_width`'s saturating add exists for:
+        // it must not wrap to a zero-row width, and it must not escape the
+        // ceiling either.
+        let saturating = DFlashConfig {
+            block_size: usize::MAX,
+            runtime_block_size: Some(usize::MAX),
+            ..dspark_config()
+        };
+        assert_eq!(saturating.runtime_verify_width(), DSPARK_MAX_VERIFY_WIDTH);
+        assert!(dspark_config_pairing_error(&saturating, 5 * 2048).is_some());
+
+        // The published width is untouched by the ceiling and still admitted.
+        let published = dspark_config();
+        assert_eq!(published.requested_verify_width(), 8);
+        assert_eq!(published.runtime_verify_width(), 8);
+        assert!(dspark_config_pairing_error(&published, 5 * 2048).is_none());
+    }
+
+    /// The target half rejects a target whose hidden size, layer count or
+    /// tied-head vocabulary does not match the drafter, and skips the
+    /// vocabulary check when the target hands out no embedding module.
+    #[test]
+    fn dspark_target_pairing_gate_rejects_a_mismatched_target() {
+        let config = dspark_config();
+        assert!(dspark_target_pairing_error(&config, 2048, 30, Some(128_000)).is_none());
+
+        let err = dspark_target_pairing_error(&config, 4096, 30, Some(128_000))
+            .expect("hidden size mismatch");
+        assert!(err.contains("target's hidden size = 4096"), "{err}");
+
+        let err = dspark_target_pairing_error(&config, 2048, 24, Some(128_000))
+            .expect("layer count mismatch");
+        assert!(err.contains("the target has 24 layers"), "{err}");
+
+        // The local `lfm2-8b-a1b-4bit` checkpoint pairs this way: right
+        // hidden size, right layer count for its own drafter, wrong
+        // vocabulary for the Markov transition table.
+        let err = dspark_target_pairing_error(&config, 2048, 30, Some(65_536))
+            .expect("vocabulary mismatch");
+        assert!(err.contains("emits 65536 logits"), "{err}");
+
+        assert!(
+            dspark_target_pairing_error(&config, 2048, 30, None).is_none(),
+            "an unmeasurable vocabulary must not be guessed at"
         );
     }
 

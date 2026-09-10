@@ -63,6 +63,11 @@ pub struct DFlashAttention {
     pub head_dim: i32,
     pub scale: f32,
     pub rope_base: f32,
+    /// `true` rotates dimension `i` with `i + 1` (GPT-J style, MLX
+    /// `traditional`), which the LFM2 DSpark drafters use
+    /// (`rope_is_neox_style: false`); `false` rotates `i` with
+    /// `i + head_dim / 2` (NeoX style, the Qwen 3.5 DFlash checkpoints).
+    pub rope_traditional: bool,
 }
 
 impl DFlashAttention {
@@ -129,11 +134,12 @@ impl DFlashAttention {
         let past_offset = cache.offset;
         let after_ctx_offset = past_offset + s;
 
-        // rope_dims = head_dim (full RoPE, traditional=False)
+        // rope_dims = head_dim (full RoPE). The pairing follows the
+        // checkpoint's `rope_is_neox_style` (see `rope_traditional`).
         let queries = ffi::fast_rope(
             &queries,
             self.head_dim,
-            false,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             after_ctx_offset,
@@ -141,7 +147,7 @@ impl DFlashAttention {
         let ctx_keys = ffi::fast_rope(
             &ctx_keys,
             self.head_dim,
-            false,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             past_offset,
@@ -149,7 +155,7 @@ impl DFlashAttention {
         let prop_keys = ffi::fast_rope(
             &prop_keys,
             self.head_dim,
-            false,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             after_ctx_offset,
@@ -238,6 +244,7 @@ impl DFlashAttention {
             head_dim,
             scale,
             rope_base: config.rope_theta,
+            rope_traditional: !config.rope_is_neox_style,
         })
     }
 }
@@ -259,6 +266,11 @@ mod tests {
     ///   keep the test reproducible across runs.
     /// - Norm weights are 1.0 so RMSNorm passes through (no further scaling).
     fn build_synthetic_attention() -> DFlashAttention {
+        build_synthetic_attention_with_rope(true)
+    }
+
+    /// [`build_synthetic_attention`] with an explicit `rope_is_neox_style`.
+    fn build_synthetic_attention_with_rope(rope_is_neox_style: bool) -> DFlashAttention {
         let mut weights: WeightMap = std::collections::HashMap::new();
         // q_proj: [8 out, 8 in] populated with identity (so q = x).
         let mut q_data = vec![0.0_f32; 64];
@@ -318,8 +330,51 @@ mod tests {
             mask_token_id: 31,
             target_layer_ids: vec![0],
             num_target_layers: 1,
+            rope_is_neox_style,
+            ..DFlashConfig::default()
         };
         DFlashAttention::from_weights(&weights, "self_attn", &cfg, 64, 4).unwrap()
+    }
+
+    /// `rope_is_neox_style: false` (the DSpark checkpoints, issue #1339)
+    /// selects MLX's traditional (interleaved) RoPE, and the choice reaches
+    /// the forward: the same input rotates differently under the two
+    /// pairings.
+    #[test]
+    fn rope_is_neox_style_false_selects_traditional_rope() {
+        let neox = build_synthetic_attention_with_rope(true);
+        let traditional = build_synthetic_attention_with_rope(false);
+        assert!(!neox.rope_traditional, "NeoX style is the DFlash default");
+        assert!(
+            traditional.rope_traditional,
+            "rope_is_neox_style: false must select traditional RoPE"
+        );
+
+        let x_ctx = ffi::from_slice_f32(
+            &[
+                0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, //
+                0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, //
+                0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, //
+            ],
+            &[1, 3, 8],
+        );
+        let x = ffi::from_slice_f32(
+            &[
+                1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, //
+                0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, //
+            ],
+            &[1, 2, 8],
+        );
+        let mut cache_a = KVCache::new();
+        let mut cache_b = KVCache::new();
+        let out_neox = neox.forward(&x, &x_ctx, &mut cache_a);
+        let out_trad = traditional.forward(&x, &x_ctx, &mut cache_b);
+        let diff = ffi::subtract(&out_neox, &out_trad);
+        let max_abs = ffi::item_f32(&ffi::max_all(&ffi::abs(&diff)));
+        assert!(
+            max_abs > 1e-6,
+            "the RoPE pairing must change the attention output; max|diff| = {max_abs}"
+        );
     }
 
     /// Acceptance pin:

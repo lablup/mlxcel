@@ -83,6 +83,14 @@
 //!   variants for text-only requests. True multimodal requests still
 //!   fall back to classic decode until the burst path can consume the
 //!   vision/audio prefill embeddings safely.
+//! - **DSpark / LFM2** (issue #1339): [`crate::LoadedModel::Lfm2`],
+//!   [`crate::LoadedModel::Lfm2Moe`] and text-only requests on
+//!   [`crate::LoadedModel::Lfm2VL`], paired with a LiquidAI DSpark drafter
+//!   through the same `SpeculativeDispatch::DFlash` variant. Greedy only
+//!   (`temperature > 0` with `top_k != 1` declines to classic decode with
+//!   one warning), B = 1 only, and gated on the block-versus-chain
+//!   exactness probe (`Lfm2Model::dflash_exactness_allows`) like the MTP
+//!   arms. The per-target plumbing lives in [`super::dflash_target`].
 //!
 //! B > 1 batched bursts are deferred to a peer follow-up — they require
 //! the batched `MtpTarget` / `SpeculativeTarget` methods on the adapter
@@ -184,13 +192,17 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use mlxcel_core::drafter::dflash::{DFlashBatchedGenerator, DFlashGenerator, SpeculativeTarget};
+use mlxcel_core::drafter::dflash::drafter::sampler_is_greedy;
 use mlxcel_core::drafter::{Drafter, DrafterKind, load_drafter};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
 use mlxcel_core::generation_policy::{initial_token_history, merged_eos_token_ids};
 use mlxcel_core::sampling::TokenLogprobData;
 use mlxcel_core::speculative::mtp::{MtpAcceptanceSummary, MtpBatchedGenerator, MtpGenerator};
 
+use super::dflash_target::{
+    BatchedBurstTokens, DFlashTargetModel, DFlashTargetRun, run_dflash_batched_on_target,
+    run_dflash_on_target,
+};
 use super::mtp_policy::MtpBurstProfile;
 use crate::LoadedModel;
 use crate::models::gemma4_mtp_target::{
@@ -200,37 +212,6 @@ use crate::models::gemma4_mtp_target::{
 use crate::server::model_provider::{GenerateEvent, SpeculativeStats};
 
 use super::sequence::{FinishReason, SequenceInfo, SequenceState};
-
-/// Narrow target contract used by the server-side Qwen 3.5 DFlash burst.
-///
-/// `DFlashGenerator` already accepts any [`SpeculativeTarget`], but the
-/// server prefill side also needs a fresh heterogeneous Qwen 3.5 cache vector.
-/// Both the text-only model and the Qwen 3.5 VLM wrapper satisfy that contract:
-/// the VLM wrapper delegates speculative hooks to its inner text backbone and
-/// allocates the same cache shape. This lets text-only requests against
-/// VLM-wrapped checkpoints run DFlash without opening the true multimodal tail
-/// path yet.
-trait Qwen35DFlashTarget:
-    LanguageModel
-    + SpeculativeTarget<
-        Cache = crate::models::qwen3_next::Qwen3NextCache,
-        VerifyOut = crate::models::qwen3_5::VerifyOutput,
-    >
-{
-    fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache>;
-}
-
-impl Qwen35DFlashTarget for crate::models::Qwen35Model {
-    fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
-        self.make_speculative_caches()
-    }
-}
-
-impl Qwen35DFlashTarget for crate::vision::Qwen35VLModel {
-    fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
-        self.text_model.make_speculative_caches()
-    }
-}
 
 /// Lazy-loaded drafter slot held on the scheduler.
 ///
@@ -308,6 +289,12 @@ impl WorkerDrafterSlot {
             return Ok(Some(elapsed));
         }
         Ok(None)
+    }
+
+    /// Borrow the loaded drafter, if any, for a policy read (for example
+    /// [`Drafter::greedy_only`]) that must not move it out of the slot.
+    pub(crate) fn drafter_ref(&self) -> Option<&dyn Drafter> {
+        self.drafter.as_deref()
     }
 
     /// Take ownership of the loaded drafter, leaving the slot empty. The
@@ -406,8 +393,9 @@ pub(crate) fn should_burst_for_sequence(
         if matches!(dispatch, crate::server::SpeculativeDispatch::DFlash { .. }) {
             tracing::warn!(
                 "DFlash speculative dispatch declined for seq {}: multimodal VLM request \
-                 detected; VLM-wrapped text-only Qwen 3.5 targets are supported, but \
-                 multimodal speculative tail is not yet enabled; falling back to classic decode",
+                 detected; VLM-wrapped text-only Qwen 3.5 and LFM2 targets are supported, \
+                 but multimodal speculative tail is not yet enabled; falling back to classic \
+                 decode",
                 seq.seq_id,
             );
         } else {
@@ -1015,7 +1003,7 @@ pub(crate) struct FinalizeOutcome {
 }
 
 /// Burst error / decline.
-enum BurstOutcome {
+pub(crate) enum BurstOutcome {
     /// The burst declined this request; the scheduler should re-route
     /// through the classic non-speculative path.
     DeclineToClassic,
@@ -1538,20 +1526,28 @@ where
     )
 }
 
-/// DFlash B=1 burst — Qwen 3.5 text target or Qwen 3.5 VLM wrapper serving a
-/// text-only request.
+/// DFlash B=1 burst: a Qwen 3.5 text target (or VLM wrapper serving a
+/// text-only request) with a DFlash drafter, or an LFM2 / LFM2.5 text target
+/// (or LFM2-VL wrapper) with a DSpark drafter (issue #1339).
 ///
 /// **Variant gate runs before drafter load.** Same rationale as
 /// [`run_mtp_burst`]: surfacing "unsupported target" decline-to-classic
 /// before any drafter IO is cheaper for the operator-facing UX. An
 /// unsupported pairing (e.g. `--model gemma4 --draft-kind dflash`)
 /// short-circuits here without ever attempting to read the drafter
-/// checkpoint.
+/// checkpoint. The gate also runs the target's exactness probe
+/// ([`DFlashTargetModel::exactness_allows`]; a measured block-versus-chain
+/// gate on LFM2, permissive on Qwen 3.5) so a host that cannot honour the
+/// temperature-0 contract declines before loading anything.
+///
+/// **Greedy-only drafters decline stochastic requests.** After the drafter
+/// is resident, a [`Drafter::greedy_only`] drafter (DSpark) declines any
+/// request whose sampler is not argmax with one warning, leaving the
+/// drafter in its slot.
 ///
 /// **Drafter bind happens inside the round loop.**
-/// [`DFlashGenerator::run`] calls `self.drafter.bind(target_lm)?`
-/// internally on every invocation (see
-/// `src/lib/mlxcel-core/src/drafter/dflash/round_loop.rs::run`). Do
+/// [`DFlashGenerator::run`](mlxcel_core::drafter::dflash::DFlashGenerator::run)
+/// calls `self.drafter.bind(target_lm)?` internally on every invocation. Do
 /// NOT call bind here — that would double-bind. (Contrast with
 /// [`run_mtp_burst`] where `MtpGenerator::generate` does NOT bind
 /// internally and we must bind here.)
@@ -1563,7 +1559,7 @@ fn run_dflash_burst(
     if seq.vlm_embeddings.is_some() || !seq.images.is_empty() || !seq.audio.is_empty() {
         tracing::warn!(
             "DFlash speculative dispatch declined for seq {}: multimodal VLM request \
-             detected; VLM-wrapped text-only Qwen 3.5 targets are supported, but \
+             detected; VLM-wrapped text-only Qwen 3.5 and LFM2 targets are supported, but \
              multimodal speculative tail is not yet enabled; falling back to classic decode",
             seq.seq_id,
         );
@@ -1593,21 +1589,40 @@ fn run_dflash_burst(
         return Err(BurstOutcome::DeclineToClassic);
     }
 
-    // HOIST: validate the model variant BEFORE loading the drafter.
-    // See the function-level docstring above.
-    match ctx.model {
-        LoadedModel::Qwen35(_)
-        | LoadedModel::Qwen35Moe(_)
-        | LoadedModel::Qwen35VLM(_)
-        | LoadedModel::Qwen35MoeVLM(_) => {}
+    // HOIST: validate the model variant and its exactness gate BEFORE loading
+    // the drafter. See the function-level docstring above.
+    let bs = block_size as usize;
+    let exact = match ctx.model {
+        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => m.exactness_allows(bs),
+        LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => m.exactness_allows(bs),
+        LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => m.exactness_allows(bs),
+        LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
         _ => {
             tracing::warn!(
-                "DFlash speculative dispatch declined: target is {:?}, expected \
-                 Qwen 3.5 text or VLM-wrapped text-only; falling back to classic decode",
+                "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
+                 text or VLM-wrapped text-only (DFlash drafter) or LFM2 / LFM2.5 text or \
+                 LFM2-VL text-only (DSpark drafter); falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
         }
+    };
+    if !exact {
+        // `warn`, not `debug`, and named for this dispatch: the probe's own
+        // verdict line comes from the shared `mtp_exactness_gate` and says
+        // "MTP declined", which an operator who configured `--draft-model`
+        // with a DSpark drafter has no reason to connect to their request
+        // falling back to classic decode. Per-request like the sibling MTP
+        // gate in `scheduler.rs`; the probe itself is memoized and runs once.
+        tracing::warn!(
+            "DFlash speculative dispatch declined for seq {}: the block-versus-chain \
+             exactness probe did not pass at block_size={block_size} on this host, so a \
+             {block_size}-row verify block would not reproduce classic decode's tokens; \
+             falling back to classic decode (see the probe verdict logged above; \
+             MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)",
+            seq.seq_id,
+        );
+        return Err(BurstOutcome::DeclineToClassic);
     }
 
     if let Some(load) = ctx
@@ -1617,6 +1632,28 @@ fn run_dflash_burst(
     {
         seq.created_at += load;
     }
+
+    // Greedy-only drafters (DSpark, issue #1339) have no stochastic
+    // acceptance rule: a request that samples must be served classically.
+    // Decided here, after the load and before the take, so the drafter
+    // stays resident for the next greedy request.
+    if ctx
+        .drafter_slot
+        .drafter_ref()
+        .is_some_and(|d| d.greedy_only())
+        && !sampler_is_greedy(&seq.sampling)
+    {
+        tracing::warn!(
+            "DFlash speculative dispatch declined for seq {}: the drafter is greedy-only \
+             (DSpark) and the request samples with temperature {} / top_k {}; serving it \
+             with classic decode",
+            seq.seq_id,
+            seq.sampling.temperature,
+            seq.sampling.top_k,
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+
     let owned_drafter = ctx
         .drafter_slot
         .take()
@@ -1649,49 +1686,43 @@ fn run_dflash_burst(
     // same payload as the classic decode path.
     let logprobs_config = seq.logprobs_config.clone();
 
-    // DFlash supports Qwen35 text models and Qwen35 VLM wrappers for
-    // text-only requests. The multimodal gate above rejects image/audio
-    // payloads before this point.
+    // The multimodal gate above rejects image/audio payloads, so a VLM
+    // wrapper here is serving a text-only request through its text backbone.
     let prefill_start = Instant::now();
+    macro_rules! drive {
+        ($target:expr) => {
+            run_dflash_on_target(
+                $target,
+                &prompt,
+                &sampling,
+                &token_history,
+                &eos_token_ids,
+                owned_drafter,
+                block_size,
+                max_tokens,
+                ctx.drafter_slot,
+                cancel,
+                &logprobs_config,
+            )?
+        };
+    }
     let DFlashTargetRun {
         tokens,
         logprobs,
         decode_time_ms,
         speculative,
     } = match ctx.model {
-        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_dflash_on_qwen35(
-            qwen,
-            &prompt,
-            &sampling,
-            &token_history,
-            &eos_token_ids,
-            owned_drafter,
-            block_size,
-            max_tokens,
-            ctx.drafter_slot,
-            cancel,
-            &logprobs_config,
-        )?,
-        LoadedModel::Qwen35VLM(qwen) | LoadedModel::Qwen35MoeVLM(qwen) => run_dflash_on_qwen35(
-            qwen,
-            &prompt,
-            &sampling,
-            &token_history,
-            &eos_token_ids,
-            owned_drafter,
-            block_size,
-            max_tokens,
-            ctx.drafter_slot,
-            cancel,
-            &logprobs_config,
-        )?,
+        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => drive!(m),
+        LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => drive!(m),
+        LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => drive!(m),
+        LoadedModel::Lfm2VL(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
             // variant addition surfaces as a clean error instead of
             // a runtime panic. Restore the drafter to the slot
             // since we took it without using it.
-            ctx.drafter_slot.drafter = Some(owned_drafter);
+            ctx.drafter_slot.restore_unused(owned_drafter);
             return Err(BurstOutcome::Error(format!(
                 "DFlash burst: unsupported target {:?} after variant gate (should not happen)",
                 model_variant_label(ctx.model),
@@ -1712,261 +1743,6 @@ fn run_dflash_burst(
         profile: None,
         speculative,
     })
-}
-
-/// What one DFlash target run hands back to [`run_dflash_burst`].
-///
-/// A struct rather than a tuple because the run grew a fourth member with
-/// issue #1314 and a four-element tuple of two vectors, a float and an option
-/// is read once and then guessed at forever.
-struct DFlashTargetRun {
-    /// Every token the run emitted, the first bonus included.
-    tokens: Vec<i32>,
-    /// Per-token logprob payloads, index-aligned with [`Self::tokens`]; empty
-    /// when the request did not ask for logprobs.
-    logprobs: Vec<Option<TokenLogprobData>>,
-    /// Round-loop decode wall clock in milliseconds.
-    decode_time_ms: f64,
-    /// Client-facing drafter acceptance counters (issue #1314); `None` when
-    /// the run executed no verify round.
-    speculative: Option<SpeculativeStats>,
-}
-
-/// DFlash burst on a Qwen 3.5 text target (including a Qwen 3.5 VLM wrapper
-/// serving a text-only request) — handles prefill, first-bonus + first-hidden
-/// extraction, and `DFlashGenerator::run` driving.
-///
-/// `token_history` is the history-dependent-penalty context for the
-/// first-bonus sample (repetition / frequency / presence / DRY); it is
-/// forwarded to `sample_token_optimized` so a penalty-bearing request's
-/// first bonus is byte-identical to the classic decode path. The round loop itself runs greedy at temp=0 today, so the
-/// per-round target argmax is unaffected — only the first bonus reads
-/// the history.
-///
-/// `cancel` is the cooperative-cancellation flag forwarded to
-/// [`DFlashGenerator::run`]; it is checked once per round so a
-/// disconnected client's burst stops occupying the worker thread
-///
-/// `logprobs_config` controls per-token log-probability capture. When
-/// enabled, the returned `Vec<Option<TokenLogprobData>>` carries one
-/// entry per emitted token (index-aligned with the returned tokens):
-/// the first-bonus logprob is computed here from the same
-/// penalty-adjusted logits the bonus was sampled from, and the
-/// round-loop tokens' logprobs come back in `DFlashRunOutput::logprobs`
-#[allow(clippy::too_many_arguments)]
-fn run_dflash_on_qwen35<T>(
-    qwen: &T,
-    prompt_tokens: &[i32],
-    sampling: &SamplingConfig,
-    token_history: &[i32],
-    eos_token_ids: &[i32],
-    owned_drafter: Box<dyn Drafter>,
-    block_size: u32,
-    max_tokens: usize,
-    drafter_slot: &mut WorkerDrafterSlot,
-    cancel: &AtomicBool,
-    logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
-) -> Result<DFlashTargetRun, BurstOutcome>
-where
-    T: Qwen35DFlashTarget,
-{
-    // Build a fresh per-layer cache vector for this request. We do NOT
-    // touch the scheduler-owned `sequence_state` map — the speculative
-    // burst's caches are independent of the prompt-cache adoption
-    // pipeline. Because these caches start empty, an adopted prefix
-    // cannot be reused here, which is exactly why `run_dflash_burst`
-    // declines `prefill_start_offset > 0` to classic decode (issue #518);
-    // by the time control reaches this helper the offset is guaranteed 0.
-    //
-    // The target-specific cache factory returns the heterogeneous
-    // attention+linear cache vec the round loop needs, while the
-    // `LanguageModel::make_caches(&self) -> Vec<KVCache>` trait method
-    // returns an empty vec for Qwen 3.5 (the model owns its caches
-    // internally). Use the narrow `Qwen35DFlashTarget` helper to
-    // disambiguate against the trait method by name.
-    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> = qwen.make_dflash_caches();
-
-    // Prefill the prompt through the target's speculative verify hook,
-    // capturing the same per-layer hidden states the DFlash round loop
-    // captures for candidate blocks. The capture list comes from the
-    // drafter checkpoint's `target_layer_ids` (4B uses [1,8,15,22,29];
-    // larger drafts such as 27B use their own list).
-    let capture_layer_ids = owned_drafter
-        .dflash_target_layer_ids()
-        .filter(|ids| !ids.is_empty())
-        .map(<[usize]>::to_vec)
-        .unwrap_or_else(|| qwen.capture_layer_ids().to_vec());
-    let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let prefill_verify_start = Instant::now();
-    let verify_out =
-        qwen.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
-    let prefill_verify_ms = prefill_verify_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Sample the first bonus token from the last-position logits.
-    let first_bonus_start = Instant::now();
-    let last_pos = prompt_tokens.len() as i32 - 1;
-    let logits_shape = mlxcel_core::array_shape(&verify_out.logits);
-    let vocab = logits_shape[2];
-    let last_logits = mlxcel_core::slice(
-        &verify_out.logits,
-        &[0, last_pos, 0],
-        &[logits_shape[0], last_pos + 1, vocab],
-    );
-    // `token_history` carries the history-dependent-penalty context
-    // (repetition / frequency / presence / DRY) so the first bonus is
-    // byte-identical to the classic decode path's first token. The subsequent round-loop tokens are produced by the
-    // target's greedy argmax inside `DFlashGenerator::run` (DFlash is
-    // greedy-only today), which carries no history dependence.
-    // `adjusted_logits` is the penalty-adjusted `[1, vocab]` slice the
-    // bonus was sampled from; it feeds `compute_logprobs` so the
-    // first-bonus logprob is byte-identical to the classic path's
-    // first-token logprob.
-    let (first_bonus_arr, first_bonus_adjusted_logits) =
-        mlxcel_core::sampling::sample_token_optimized(&last_logits, sampling, token_history);
-    mlxcel_core::eval(&first_bonus_arr);
-    let first_bonus = mlxcel_core::item_i32(&first_bonus_arr);
-    let first_bonus_lp = mlxcel_core::sampling::compute_logprobs(
-        &first_bonus_adjusted_logits,
-        first_bonus,
-        logprobs_config,
-    );
-    let first_bonus_ms = first_bonus_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Build first_hidden = concat(hidden_states, axis=-1)[:, last_pos:last_pos+1, :].
-    // The DFlash round loop expects shape [1, 1, num_layers * hidden_size].
-    let first_hidden_start = Instant::now();
-    if verify_out.hidden_states.is_empty() {
-        // Drafter slot ownership: we took the drafter at the top; we
-        // must not silently drop it on error.
-        drafter_slot.drafter = Some(owned_drafter);
-        return Err(BurstOutcome::Error(
-            "DFlash prefill returned no captured hidden layers".to_string(),
-        ));
-    }
-    let mut concatenated = mlxcel_core::copy(
-        verify_out.hidden_states[0]
-            .as_ref()
-            .expect("hidden state must be non-null"),
-    );
-    for slab in verify_out.hidden_states.iter().skip(1) {
-        concatenated = mlxcel_core::concatenate(
-            &concatenated,
-            slab.as_ref().expect("hidden state must be non-null"),
-            -1,
-        );
-    }
-    let concatenated_shape = mlxcel_core::array_shape(&concatenated);
-    debug_assert_eq!(
-        concatenated_shape.len(),
-        3,
-        "concatenated hidden must be 3-D"
-    );
-    let feature_dim = concatenated_shape[2];
-    let first_hidden = mlxcel_core::slice(
-        &concatenated,
-        &[0, last_pos, 0],
-        &[concatenated_shape[0], last_pos + 1, feature_dim],
-    );
-    let first_hidden_ms = first_hidden_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Drive the round loop. `run` returns the tokens EXCLUDING the
-    // first bonus; we prepend it on success so the caller sees a
-    // complete output stream.
-    let mut generator = DFlashGenerator::new(
-        owned_drafter,
-        sampling.clone(),
-        block_size,
-        mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
-    );
-    let result = generator.run(
-        qwen,
-        qwen as &dyn LanguageModel,
-        &mut caches,
-        first_bonus,
-        first_hidden,
-        eos_token_ids,
-        max_tokens,
-        cancel,
-        logprobs_config,
-    );
-
-    // Whatever the round-loop's outcome, recover the drafter so the
-    // slot is consistent for the next request.
-    let recovered = generator.into_drafter();
-    drafter_slot.return_drafter(recovered, qwen as &dyn LanguageModel);
-
-    match result {
-        Ok(output) => {
-            let diagnostics = output.diagnostics.clone();
-            // b10621 spec_decode_* Prometheus counters (#1440).
-            super::observability::spec_counters::record(
-                diagnostics.proposed_tokens,
-                diagnostics.accepted_tokens,
-                diagnostics.rounds,
-            );
-            tracing::info!(
-                block_size = diagnostics.block_size,
-                rounds = diagnostics.rounds,
-                proposed_tokens = diagnostics.proposed_tokens,
-                accepted_tokens = diagnostics.accepted_tokens,
-                acceptance_rate = diagnostics.acceptance_rate(),
-                emitted_per_verify = diagnostics.emitted_per_verify(),
-                zero_accept_rounds = diagnostics.zero_accept_rounds,
-                partial_accept_rounds = diagnostics.partial_accept_rounds,
-                full_accept_rounds = diagnostics.full_accept_rounds,
-                prefill_verify_ms,
-                first_bonus_ms,
-                first_hidden_ms,
-                bind_reset_ms = diagnostics.bind_reset_time_ms,
-                draft_ms = diagnostics.draft_time_ms,
-                verify_ms = diagnostics.verify_time_ms,
-                target_argmax_sync_ms = diagnostics.target_argmax_time_ms,
-                logprobs_ms = diagnostics.logprobs_time_ms,
-                walk_ms = diagnostics.walk_time_ms,
-                hidden_concat_ms = diagnostics.hidden_concat_time_ms,
-                rollback_ms = diagnostics.rollback_time_ms,
-                decode_ms = diagnostics.total_decode_time_ms,
-                "DFlash diagnostics"
-            );
-            let mut tokens = Vec::with_capacity(output.tokens.len() + 1);
-            tokens.push(first_bonus);
-            tokens.extend(output.tokens);
-            // Assemble the per-token logprobs the same way as `tokens`:
-            // the first-bonus logprob (computed above from the prefill's
-            // adjusted logits) prepended to the round loop's per-token
-            // logprobs. Stays empty when logprobs are disabled — the
-            // round loop returns an empty `output.logprobs` and
-            // `first_bonus_lp` is `None`, so the burst's
-            // `finalize_burst_success` falls through to plain `Token`
-            // events.
-            let logprobs: Vec<Option<TokenLogprobData>> = if logprobs_config.enabled {
-                let mut lp = Vec::with_capacity(output.logprobs.len() + 1);
-                lp.push(first_bonus_lp);
-                lp.extend(output.logprobs);
-                lp
-            } else {
-                Vec::new()
-            };
-            Ok(DFlashTargetRun {
-                tokens,
-                logprobs,
-                decode_time_ms: output.stats.decode_time_ms,
-                // Client-facing acceptance counters (issue #1314), from the
-                // same `diagnostics` the log line above reports. The kind is
-                // `Dflash` because this is the DFlash driver itself, which
-                // `SpeculativeDispatch::DFlash` is the only route into.
-                speculative: SpeculativeStats::from_counts(
-                    DrafterKind::Dflash,
-                    diagnostics.rounds,
-                    diagnostics.proposed_tokens,
-                    diagnostics.accepted_tokens,
-                ),
-            })
-        }
-        Err(e) => Err(BurstOutcome::Error(format!(
-            "DFlash round loop failed: {e}"
-        ))),
-    }
 }
 
 /// Apply thinking-budget enforcement to one burst-produced
@@ -2574,9 +2350,6 @@ pub(crate) fn try_run_burst_batched(
     }
 }
 
-/// Per-row emitted-token output of a batched burst dispatch arm.
-type BatchedBurstTokens = Vec<Vec<i32>>;
-
 /// MTP batched burst — Gemma 4 / Gemma 4 VLM target (B > 1).
 ///
 /// Mirrors [`run_mtp_burst`] but drives [`MtpBatchedGenerator`] over the
@@ -2746,10 +2519,14 @@ where
 /// DFlash batched burst — Qwen 3.5 text target or Qwen 3.5 VLM wrapper serving
 /// text-only requests (B > 1).
 ///
-/// Mirrors [`run_dflash_burst`] / [`run_dflash_on_qwen35`] but drives
-/// [`DFlashBatchedGenerator`]. The variant gate runs before drafter IO;
-/// the drafter bind happens **inside** `DFlashBatchedGenerator::run_batched`
+/// Mirrors [`run_dflash_burst`] but drives
+/// [`run_dflash_batched_on_target`]. The variant gate runs before drafter
+/// IO; the drafter bind happens **inside** `DFlashBatchedGenerator::run_batched`
 /// (same asymmetry as the B = 1 path — do NOT add a manual bind here).
+///
+/// LFM2 DSpark is B = 1 only (issue #1339): its drafter has no batched draft
+/// and the family's short-conv state has no per-row rollback, so an LFM2
+/// window declines here and its rows are served classically.
 fn run_dflash_burst_batched(
     ctx: BurstContext<'_>,
     seqs: &mut [SequenceInfo],
@@ -2774,6 +2551,13 @@ fn run_dflash_burst_batched(
         | LoadedModel::Qwen35Moe(_)
         | LoadedModel::Qwen35VLM(_)
         | LoadedModel::Qwen35MoeVLM(_) => {}
+        LoadedModel::Lfm2(_) | LoadedModel::Lfm2Moe(_) | LoadedModel::Lfm2VL(_) => {
+            tracing::warn!(
+                "DFlash batched speculative dispatch declined: LFM2 DSpark is B = 1 only; \
+                 falling back to classic decode for this window"
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
         _ => {
             tracing::warn!(
                 "DFlash batched speculative dispatch declined: target is {:?}, expected \
@@ -2803,20 +2587,10 @@ fn run_dflash_burst_batched(
     let eos_token_ids = merged_eos_token_ids(ctx.model.eos_token_ids(), &sampling.stop_token_ids);
     let prompts: Vec<Vec<i32>> = seqs.iter().map(|s| s.prompt_tokens.clone()).collect();
 
-    match ctx.model {
-        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_dflash_batched_on_qwen35(
-            qwen,
-            &prompts,
-            &sampling,
-            &eos_token_ids,
-            owned_drafter,
-            block_size,
-            max_tokens,
-            ctx.drafter_slot,
-        ),
-        LoadedModel::Qwen35VLM(qwen) | LoadedModel::Qwen35MoeVLM(qwen) => {
-            run_dflash_batched_on_qwen35(
-                qwen,
+    macro_rules! drive {
+        ($target:expr) => {
+            run_dflash_batched_on_target(
+                $target,
                 &prompts,
                 &sampling,
                 &eos_token_ids,
@@ -2825,167 +2599,21 @@ fn run_dflash_burst_batched(
                 max_tokens,
                 ctx.drafter_slot,
             )
-        }
+        };
+    }
+    match ctx.model {
+        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => drive!(m),
+        LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => drive!(m),
         _ => {
             // Defensive: unreachable per the variant gate above. Restore
             // the drafter to the slot since we took it without using it.
-            ctx.drafter_slot.drafter = Some(owned_drafter);
+            ctx.drafter_slot.restore_unused(owned_drafter);
             Err(BurstOutcome::Error(format!(
                 "DFlash batched burst: unsupported target {:?} after variant gate",
                 model_variant_label(ctx.model),
             )))
         }
     }
-}
-
-/// DFlash batched burst on a Qwen 3.5 text target (including a Qwen 3.5 VLM
-/// wrapper serving text-only requests) — `[B, L]` prefill, per-row first-bonus
-/// + first-hidden extraction, and `DFlashBatchedGenerator::run_batched`.
-///
-/// Mirrors [`run_dflash_on_qwen35`] for the B > 1 path. The prompts are
-/// equal length (window-collector contract) so the `[B, L]` prefill is
-/// byte-identical to B separate `[1, L]` prefills.
-#[allow(clippy::too_many_arguments)]
-fn run_dflash_batched_on_qwen35<T>(
-    qwen: &T,
-    prompts: &[Vec<i32>],
-    sampling: &SamplingConfig,
-    eos_token_ids: &[i32],
-    owned_drafter: Box<dyn Drafter>,
-    block_size: u32,
-    max_tokens: usize,
-    drafter_slot: &mut WorkerDrafterSlot,
-) -> Result<(BatchedBurstTokens, Instant), BurstOutcome>
-where
-    T: Qwen35DFlashTarget,
-{
-    let batch_size = prompts.len();
-    let prompt_len = prompts[0].len();
-
-    // Build the `[B, ...]` per-layer cache vector. As with the B = 1
-    // path, we do NOT touch the scheduler-owned `sequence_state` map.
-    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> = qwen.make_dflash_caches();
-
-    // `[B, L]` prefill through the target's speculative forward. Capture the
-    // hidden layers requested by this specific DFlash checkpoint.
-    let capture_layer_ids = owned_drafter
-        .dflash_target_layer_ids()
-        .filter(|ids| !ids.is_empty())
-        .map(<[usize]>::to_vec)
-        .unwrap_or_else(|| qwen.capture_layer_ids().to_vec());
-    let mut flat_prompt: Vec<i32> = Vec::with_capacity(batch_size * prompt_len);
-    for row in prompts {
-        flat_prompt.extend_from_slice(row);
-    }
-    let prompt_arr =
-        mlxcel_core::from_slice_i32(&flat_prompt, &[batch_size as i32, prompt_len as i32]);
-    let verify_out =
-        qwen.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
-
-    // Per-row first bonus from the `[B, prompt_len, vocab]` last-position
-    // logits.
-    let logits_shape = mlxcel_core::array_shape(&verify_out.logits);
-    let last_pos = prompt_len as i32 - 1;
-    let vocab = logits_shape[2];
-    let last_logits = mlxcel_core::slice(
-        &verify_out.logits,
-        &[0, last_pos, 0],
-        &[logits_shape[0], last_pos + 1, vocab],
-    );
-    let (first_bonus_arr, _) =
-        mlxcel_core::sampling::sample_token_optimized(&last_logits, sampling, &[]);
-    mlxcel_core::eval(&first_bonus_arr);
-    let first_bonus_per_row = scalar_tokens_from_array(&first_bonus_arr, batch_size);
-    // Target prefill done, first bonus sampled: round 0 starts here.
-    let prefill_end = Instant::now();
-
-    // Build `first_hidden` = concat(hidden_states, axis=-1)[:, last:last+1, :]
-    // at shape `[B, 1, num_layers * hidden_size]`.
-    if verify_out.hidden_states.is_empty() {
-        drafter_slot.drafter = Some(owned_drafter);
-        return Err(BurstOutcome::Error(
-            "DFlash batched prefill returned no captured hidden layers".to_string(),
-        ));
-    }
-    let mut concatenated = mlxcel_core::copy(
-        verify_out.hidden_states[0]
-            .as_ref()
-            .expect("hidden state must be non-null"),
-    );
-    for slab in verify_out.hidden_states.iter().skip(1) {
-        concatenated = mlxcel_core::concatenate(
-            &concatenated,
-            slab.as_ref().expect("hidden state must be non-null"),
-            -1,
-        );
-    }
-    let concatenated_shape = mlxcel_core::array_shape(&concatenated);
-    debug_assert_eq!(
-        concatenated_shape.len(),
-        3,
-        "concatenated hidden must be 3-D"
-    );
-    let feature_dim = concatenated_shape[2];
-    let first_hidden = mlxcel_core::slice(
-        &concatenated,
-        &[0, last_pos, 0],
-        &[concatenated_shape[0], last_pos + 1, feature_dim],
-    );
-
-    // Drive the batched round loop. `run_batched` returns per-row tokens
-    // EXCLUDING the first bonus; we prepend each row's bonus on success.
-    let mut generator = DFlashBatchedGenerator::new(
-        owned_drafter,
-        sampling.clone(),
-        block_size,
-        mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
-    );
-    let run = generator.run_batched(
-        qwen,
-        qwen as &dyn LanguageModel,
-        &mut caches,
-        &first_bonus_per_row,
-        first_hidden,
-        eos_token_ids,
-        max_tokens,
-    );
-
-    // Recover the drafter so the slot is consistent for the next burst.
-    let recovered = generator.into_drafter();
-    drafter_slot.return_drafter(recovered, qwen as &dyn LanguageModel);
-
-    match run {
-        Ok(output) => {
-            debug_assert_eq!(output.tokens.len(), batch_size);
-            let mut rows: BatchedBurstTokens = Vec::with_capacity(batch_size);
-            for (r, row_tokens) in output.tokens.into_iter().enumerate() {
-                let mut full = Vec::with_capacity(row_tokens.len() + 1);
-                full.push(first_bonus_per_row[r]);
-                full.extend(row_tokens);
-                rows.push(full);
-            }
-            Ok((rows, prefill_end))
-        }
-        Err(e) => Err(BurstOutcome::Error(format!(
-            "DFlash batched round loop failed: {e}"
-        ))),
-    }
-}
-
-/// Materialise a per-row `Vec<i32>` from a `[B]` / `[B, 1]` token tensor
-/// produced by `sample_token_optimized`. Mirrors the helper in
-/// `gemma4_mtp_target.rs`; duplicated rather than re-exported because the
-/// burst module is binary-side glue and the helper is a single-call
-/// utility.
-fn scalar_tokens_from_array(token_arr: &mlxcel_core::MlxArray, batch_size: usize) -> Vec<i32> {
-    let flat = mlxcel_core::reshape(token_arr, &[batch_size as i32]);
-    let mut out: Vec<i32> = Vec::with_capacity(batch_size);
-    for r in 0..batch_size as i32 {
-        let cell = mlxcel_core::slice(&flat, &[r], &[r + 1]);
-        let scalar = mlxcel_core::reshape(&cell, &[]);
-        out.push(mlxcel_core::item_i32(&scalar));
-    }
-    out
 }
 
 /// Whether two [`SamplingConfig`]s would drive the speculative round
@@ -3085,6 +2713,9 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Qwen35MoeVLM(_) => "Qwen35MoeVLM",
         LoadedModel::Inkling(_) => "Inkling",
         LoadedModel::InklingVLM(_) => "InklingVLM",
+        LoadedModel::Lfm2(_) => "Lfm2",
+        LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
+        LoadedModel::Lfm2VL(_) => "Lfm2VL",
         _ => "other",
     }
 }

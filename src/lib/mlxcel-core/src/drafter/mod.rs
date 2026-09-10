@@ -362,6 +362,21 @@ pub enum DrafterError {
     /// MTP path rejects `None` here.
     #[error("Gemma 4 assistant drafter requires `hidden` to be Some(_) for the MTP path")]
     DraftBlockMissingHidden,
+
+    /// A greedy-only drafter ([`Drafter::greedy_only`]) was asked to draft
+    /// under a sampler that is not argmax. The LFM2 DSpark drafter (issue
+    /// #1339) is trained for greedy chains and has no stochastic acceptance
+    /// rule; dispatch declines such requests to classic decode before this
+    /// can fire, so reaching it means a caller skipped that gate.
+    #[error(
+        "{kind} drafter is greedy-only (temperature 0 or top_k 1) and cannot draft under \
+         temperature {temperature} / top_k {top_k}; serve the request with classic decode"
+    )]
+    GreedyOnly {
+        kind: DrafterKind,
+        temperature: f32,
+        top_k: i32,
+    },
 }
 
 /// Subset of the drafter's `config.json` that [`resolve_drafter_kind`] and
@@ -435,6 +450,30 @@ pub fn peek_qwen35_mtp_configured_block_size(model_path: &Path) -> Option<usize>
 pub fn peek_inkling_mtp_configured_block_size(model_path: &Path) -> Option<usize> {
     let config = inkling_mtp::InklingMtpConfig::from_dir(model_path).ok()?;
     Some(config.block_size())
+}
+
+/// Read the default verify width of an LFM2 DSpark drafter at `model_path`
+/// (issue #1339): `min(block_size + 1, runtime_block_size)`, with a missing
+/// `runtime_block_size` reading as the eight-row default
+/// ([`dflash::DSPARK_DEFAULT_VERIFY_WIDTH`]).
+///
+/// Returns `None` for anything that is not a DSpark drafter (a plain DFlash
+/// checkpoint included, whose `block_size` already counts the bonus row and
+/// keeps the flat DFlash default), or when the config is missing or
+/// unparseable. Same narrow-peek discipline as
+/// [`peek_qwen35_mtp_configured_block_size`]: the DSpark `block_size` counts
+/// proposals, so reading it as a verify width would run the drafter one row
+/// short of its trained block.
+///
+/// Used by: `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_dspark_configured_block_size(model_path: &Path) -> Option<usize> {
+    let bytes = fs::read(model_path.join("config.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if !dflash::is_dflash_drafter_config(&json) {
+        return None;
+    }
+    let config = dflash::DFlashConfig::from_json(&json).ok()?;
+    config.is_dspark().then(|| config.runtime_verify_width())
 }
 
 /// Reconcile the caller's `kind` choice with the drafter's actual
@@ -943,6 +982,37 @@ pub trait Drafter {
     /// Upstream Qwen 3.5 MTP sets `prefer_requested_block_size = True`.
     /// Gemma 4 assistant leaves this false.
     fn prefer_requested_block_size(&self) -> bool {
+        false
+    }
+
+    /// Whether this drafter can only draft under an argmax sampler.
+    ///
+    /// The LFM2 DSpark drafter (issue #1339) chains its block through a
+    /// Markov head trained for greedy decoding and has no stochastic
+    /// acceptance rule, so any request with `temperature > 0` and
+    /// `top_k != 1` must be served by classic decode. Dispatch reads this
+    /// before taking the drafter and declines with one named log line; a
+    /// drafter that is asked anyway answers
+    /// [`DrafterError::GreedyOnly`]. Every other drafter keeps the default.
+    fn greedy_only(&self) -> bool {
+        false
+    }
+
+    /// Whether this drafter is an LFM2 / LFM2.5 DSpark drafter (issue #1339).
+    ///
+    /// DSpark and the Qwen 3.5 DFlash drafters share [`DrafterKind::Dflash`],
+    /// one loader and one round loop, and differ in the target they can read:
+    /// a DSpark `fc` projection is sized for the LFM2 residual streams it was
+    /// published against, a DFlash one for Qwen 3.5's. The server's DFlash
+    /// target gate reads this to refuse an LFM2 target paired with a plain
+    /// DFlash drafter before any forward runs. [`Self::validate_target_compat`]
+    /// cannot make that call itself: it sees the target as a
+    /// [`LanguageModel`], which carries no architecture string, so a DFlash
+    /// drafter has no way to tell an LFM2 target from the Qwen 3.5 one it was
+    /// published for. Left unrefused, the pairing lands as an MLX shape throw
+    /// inside the drafter forward, and an MLX C++ exception crossing the cxx
+    /// bridge aborts the process instead of failing the request.
+    fn is_dspark(&self) -> bool {
         false
     }
 
