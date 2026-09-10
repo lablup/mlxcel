@@ -105,7 +105,9 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 /// DeepSeekV3.2, MiniCPM3, GptOss, AFMoE, Step3P5, LongcatFlashNgram,
 /// BailingMoeLinear, GLM4MoeLite, Qwen3.5, KimiK3. Outside `src/models` the
 /// callers are `lib.rs`, `layers.rs`, the tensor-parallel Llama runtime, the
-/// GLM4 pipeline stage executor, and disaggregated handoff.
+/// GLM4 pipeline stage executor, and disaggregated handoff; the grep also
+/// matches `cache.rs` (calls inside its `#[cfg(test)]` module) and
+/// `drafter/qwen3_5_mtp/layer.rs` (a comment mention, not a call).
 ///
 /// Not used by the mainstream dense decoders (Llama3, Mixtral, Gemma, Gemma2,
 /// Cohere, Phi, GLM4, StarCoder2, Qwen3Moe, OLMoE and similar): they pass
@@ -668,9 +670,14 @@ pub fn create_causal_bool_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 }
 
 /// Create a causal attention mask with sliding window.
-/// Used by: Gemma4 and the tensor-parallel Llama runtime directly. Gemma2,
-/// Gemma3, Gemma3n, Qwen3, Ministral and other windowed-attention callers
-/// arrive indirectly, through `lib.rs`'s shared `causal_attention` dispatch.
+/// Used by: Gemma4 and the tensor-parallel Llama runtime directly. The rest
+/// arrive indirectly, through `lib.rs`'s shared `causal_attention` dispatch
+/// whenever it is called with a nonzero window: Baichuan, Cohere2,
+/// Cohere2MoE, CohereCompass, Exaone4, ExaoneMoE, Gemma3n, Gemma4,
+/// IQuestLoopCoder, Laguna, Mellum, Ministral3, MuseGlimmer, Step3P5. Gemma2
+/// and Qwen3 also call `causal_attention`, but always pass window `0`, so
+/// they never reach this function; Gemma3 does not call `causal_attention`
+/// at all (its window mask comes from `create_sliding_window_prefill_mask`).
 ///
 /// # Arguments
 /// * `size` - Size of the query sequence
@@ -773,11 +780,13 @@ pub fn create_causal_mask_with_window(
 /// Create a sliding-window causal mask sized to the *full* key axis, without
 /// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
 /// Used by: Gemma4 and Laguna directly, plus `lib.rs`'s shared dispatch for a
-/// single-pass prefill longer than the sliding window. Gemma3, Cohere2,
-/// Cohere2MoE, CohereCompass, Gemma3n and Olmo3 dense prefill (#413) reach it
-/// only indirectly, through the [`create_sliding_window_prefill_mask`] /
-/// [`create_sliding_window_prefill_mask_dense`] wrappers below, not via a
-/// direct call site.
+/// single-pass prefill longer than the sliding window (#413). Every caller of
+/// [`create_sliding_window_prefill_mask`] (GptOss, Mellum, Exaone4, ExaoneMoE,
+/// Ministral3, Step3P5, Gemma3, Gemma4, AFMoE, DeepSeekV4, the tensor-parallel
+/// Llama runtime) and of [`create_sliding_window_prefill_mask_dense`]
+/// (Cohere2, Cohere2MoE, CohereCompass, Gemma3n, Olmo3) reaches this function
+/// only indirectly, through those wrappers below, not via a direct call
+/// site.
 ///
 /// # Arguments
 /// * `size` - Size of the query sequence
@@ -1023,11 +1032,12 @@ pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///// Numerically stable softplus activation: log(1 + exp(x)).
 /// Uses logaddexp(x, 0) internally to match Python's mx.logaddexp(x, 0).
 /// This avoids float16 overflow for values >= ~11.09 (exp(x) > float16 max).
-/// Used by: Mamba, Mamba2, Jamba, GatedDelta, RecurrentGemma, Laguna, Apertus,
-/// DeepSeekV4MoE, FalconH1, GraniteMoeHybrid, NemotronH, Plamo2 (SSM and
-/// gated-recurrence families), the shared audio attention tower
-/// (`audio/attention.rs`, `audio/gemma3n/attention.rs`), and `lib.rs`'s
-/// generic dispatch.
+/// Used by: this wrapper is called directly by GatedDelta, Laguna and
+/// DeepSeekV4MoE. Mamba, Mamba2, Jamba, RecurrentGemma, FalconH1,
+/// GraniteMoeHybrid, NemotronH, Plamo2, and the shared audio attention tower
+/// (`audio/attention.rs`, `audio/gemma3n/attention.rs`) instead call the raw
+/// `ffi::softplus` this wraps directly (re-exported as
+/// `mlxcel_core::softplus`), bypassing this function.
 #[inline]
 pub fn softplus(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::softplus(x)
@@ -1348,21 +1358,28 @@ mod embedding_mask_tests;
 mod tests {
     use super::*;
 
-    /// Guards the `create_causal_mask` caller-roster count in the doc
-    /// comment above (`src/lib/mlxcel-core/src/utils.rs:95`) against silent
-    /// drift. See issue #1767: five files joined the caller set across four
-    /// PRs while the stated count stayed frozen; #1141 tracks the broader
-    /// `// Used by:` staleness problem this only guards for
-    /// `create_causal_mask`.
+    /// Guards the `create_causal_mask` caller-roster count sentence in this
+    /// file's doc comment against silent drift. See issue #1767: five files
+    /// joined the caller set across four PRs while the stated count stayed
+    /// frozen; #1141 tracks the broader `// Used by:` staleness problem this
+    /// only guards for `create_causal_mask`.
     #[test]
     fn create_causal_mask_roster_count_matches_repo() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let models_dir = repo_root.join("src/models");
-        if !models_dir.exists() {
-            // A vendored or packaged build of mlxcel-core has no `src/models`
-            // sibling in its tree; there is nothing to check.
+        let repo_utils_rs = repo_root.join("src/lib/mlxcel-core/src/utils.rs");
+        if !repo_utils_rs.exists() {
+            // Not a full workspace checkout (e.g. mlxcel-core vendored or
+            // published standalone), so there is no `src/models` sibling
+            // tree to walk.
             return;
         }
+        let models_dir = repo_root.join("src/models");
+        assert!(
+            models_dir.is_dir(),
+            "expected {} to exist alongside {}",
+            models_dir.display(),
+            repo_utils_rs.display()
+        );
 
         let mut rs_files = Vec::new();
         collect_rs_files(&models_dir, &mut rs_files);
@@ -1389,35 +1406,49 @@ mod tests {
         let measured = caller_files.len();
 
         let utils_src = include_str!("utils.rs");
-        let stated = extract_stated_causal_mask_count(utils_src).unwrap_or_else(|| {
+        let (marker_pos, stated) = find_stated_causal_mask_count(utils_src).unwrap_or_else(|| {
             panic!(
-                "the create_causal_mask roster lost its count sentence in \
-                 src/lib/mlxcel-core/src/utils.rs"
+                "the create_causal_mask doc comment lost its count sentence: expected to find \
+                 `that is <N> non-test files under` in src/lib/mlxcel-core/src/utils.rs"
             )
         });
+        let count_line = line_number_at(utils_src, marker_pos);
 
         assert_eq!(
             stated, measured,
-            "create_causal_mask roster drift: src/lib/mlxcel-core/src/utils.rs:95 states \
-             {stated} non-test caller files under src/models, but {measured} were found: \
-             {caller_files:?}. To fix, update the count sentence at \
-             src/lib/mlxcel-core/src/utils.rs:95 and regenerate the roster with: \
+            "create_causal_mask roster drift: src/lib/mlxcel-core/src/utils.rs:{count_line} \
+             states {stated} non-test caller files under src/models, but {measured} were \
+             found: {caller_files:?}. To fix, update the count sentence at \
+             src/lib/mlxcel-core/src/utils.rs:{count_line} and regenerate the roster with: \
              grep -rln '\\bcreate_causal_mask(' src/models --include='*.rs' | grep -v 'tests\\.rs$'"
         );
     }
 
-    /// Recursively collects every `*.rs` file under `dir` into `out`.
+    /// Recursively collects every `*.rs` file under `dir` into `out`. Uses
+    /// `DirEntry::file_type()` (an `lstat`, not a `stat`) rather than
+    /// `Path::is_dir()`/`is_file()`, so a symlinked directory or file is
+    /// neither recursed into nor collected, matching `grep -r`'s default of
+    /// not following symlinks.
     fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                out.push(path);
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("failed to read directory {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| {
+                panic!(
+                    "failed to read a directory entry under {}: {e}",
+                    dir.display()
+                )
+            });
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|e| panic!("failed to stat {}: {e}", entry.path().display()));
+            if file_type.is_dir() {
+                collect_rs_files(&entry.path(), out);
+            } else if file_type.is_file() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
             }
         }
     }
@@ -1431,7 +1462,12 @@ mod tests {
     /// calls to this function; requiring the literal trailing `(` in the
     /// needle already rules those out; the preceding-character check further
     /// guards against a hypothetical differently-prefixed identifier ending
-    /// in the same name.
+    /// in the same name. A preceding `:` still counts as a valid match: 14
+    /// files under `src/models` call the qualified `utils::create_causal_mask(`
+    /// or `mlxcel_core::utils::create_causal_mask(`, and `\b` in the frozen
+    /// grep definition matches there too (`:` is not a word character), so
+    /// excluding it would measure 35 instead of the grep's 49 and disagree
+    /// with the definition this test exists to enforce.
     fn calls_create_causal_mask(contents: &str) -> bool {
         const NEEDLE: &str = "create_causal_mask(";
         let bytes = contents.as_bytes();
@@ -1451,26 +1487,43 @@ mod tests {
         false
     }
 
-    /// Extracts the caller count from the fixed sentence prefix `that is `
-    /// / ` non-test files under` in the `create_causal_mask` doc comment
-    /// (`src/lib/mlxcel-core/src/utils.rs:95`), taking the first match of
-    /// the full pattern (digits between the two fixed strings).
-    fn extract_stated_causal_mask_count(utils_src: &str) -> Option<usize> {
+    /// Locates the fixed sentence prefix `that is ` / ` non-test files
+    /// under` in the `create_causal_mask` doc comment, taking the first
+    /// match of the full pattern (digits between the two fixed strings).
+    /// Returns the byte offset of the `that is ` prefix together with the
+    /// parsed count; the offset lets the caller compute the sentence's
+    /// current line number instead of hardcoding one that would go stale if
+    /// lines are ever inserted above it.
+    fn find_stated_causal_mask_count(utils_src: &str) -> Option<(usize, usize)> {
         const MARKER: &str = "that is ";
         const SUFFIX: &str = " non-test files under";
         let mut search_start = 0;
         while let Some(rel_pos) = utils_src[search_start..].find(MARKER) {
-            let marker_end = search_start + rel_pos + MARKER.len();
+            let marker_start = search_start + rel_pos;
+            let marker_end = marker_start + MARKER.len();
             let after = &utils_src[marker_end..];
             let digits_end = after
                 .find(|c: char| !c.is_ascii_digit())
                 .unwrap_or(after.len());
-            if digits_end > 0 && after[digits_end..].starts_with(SUFFIX) {
-                return after[..digits_end].parse().ok();
+            if digits_end > 0
+                && after[digits_end..].starts_with(SUFFIX)
+                && let Ok(count) = after[..digits_end].parse::<usize>()
+            {
+                return Some((marker_start, count));
             }
             search_start = marker_end;
         }
         None
+    }
+
+    /// 1-based line number of byte offset `pos` within `text`, counting the
+    /// newlines that precede it.
+    fn line_number_at(text: &str, pos: usize) -> usize {
+        text.as_bytes()[..pos]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1
     }
 
     #[test]

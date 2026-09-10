@@ -72,7 +72,7 @@ Past roughly a dozen callers, a hand-written roster is wrong by the next release
 ///
 /// The caller set is too large to enumerate by name without going stale, so
 /// the groups above are a summary. Regenerate the exact list with
-/// `grep -rln '\bcreate_causal_mask(' src --include='*.rs'`.
+/// `grep -rln '\bcreate_causal_mask(' src/models --include='*.rs' | grep -v 'tests\.rs$'`.
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 ```
 
