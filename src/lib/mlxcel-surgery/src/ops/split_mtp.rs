@@ -555,7 +555,7 @@ fn index_names_nextn_layer(model_dir: &Path, layer: usize) -> Result<bool, Surge
 /// the destination with `O_TRUNC`. This has to run before any mutation,
 /// including the CLI's own overwrite guard, which cannot tell "the shard I'm
 /// looking at belongs to the source" from "it belongs to a stray previous
-/// output" (issue #1778 review).
+/// output" (PR #1778 review).
 ///
 /// Used by: [`split_mtp_dir`], and
 ///          `crate::commands::split_mtp::run_split_mtp` (through its

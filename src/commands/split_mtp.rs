@@ -128,7 +128,7 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
 /// the drafter's own single-file output, is excluded on purpose: the
 /// loader's `glob_safetensors` (`weights.rs`) reads every `*.safetensors` in
 /// a directory once no index is present, so any other safetensors file left
-/// beside it would silently join the drafter as one checkpoint (issue #1778
+/// beside it would silently join the drafter as one checkpoint (PR #1778
 /// review).
 ///
 /// Used by: [`existing_checkpoint_marker`], [`find_foreign_safetensors_file`].
@@ -143,7 +143,7 @@ fn is_foreign_safetensors_file(name: &str) -> bool {
 /// Fails closed on a listing error rather than reporting "no weight files
 /// found": [`prepare_output_dir`] would otherwise proceed to delete a stale
 /// index (or, previously, nothing at all) believing the directory was clear
-/// when it was merely unreadable (issue #1778 review).
+/// when it was merely unreadable (PR #1778 review).
 ///
 /// Used by: [`prepare_output_dir`].
 fn find_foreign_safetensors_file(dir: &std::path::Path) -> std::io::Result<Option<String>> {
@@ -168,7 +168,7 @@ fn find_foreign_safetensors_file(dir: &std::path::Path) -> std::io::Result<Optio
 /// directory by hand (the "shard" it named was the source's), and
 /// `-m X -o X --force` on a single-file source deleted the source's own
 /// stale index before the same-path refusal in `split_mtp_dir` ever ran
-/// (issue #1778 review).
+/// (PR #1778 review).
 ///
 /// Used by: [`run_split_mtp`].
 fn preflight_checks(
@@ -275,7 +275,7 @@ mod tests {
     /// The guard this replaces probed only `model.safetensors`, so a sharded
     /// checkpoint passed it and lost its `config.json` and tokenizer files to
     /// the drafter's (issue #1326). `consolidated.safetensors` covers the
-    /// broader case (issue #1778 review): the loader's `glob_safetensors`
+    /// broader case (PR #1778 review): the loader's `glob_safetensors`
     /// reads every `*.safetensors` file, not only ones named `model-*`.
     #[test]
     fn marker_names_every_shape_of_existing_checkpoint() {
@@ -355,7 +355,7 @@ mod tests {
     /// file that is not a `model-*`-named shard: `consolidated.safetensors`
     /// passes the loader's `glob_safetensors` glob just as readily as a
     /// numbered shard would, and would be silently read alongside the
-    /// drafter's own `model.safetensors` (issue #1778 review).
+    /// drafter's own `model.safetensors` (PR #1778 review).
     #[test]
     fn force_refuses_a_directory_with_a_foreign_safetensors_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -376,7 +376,7 @@ mod tests {
     /// weight files found": the old `.ok()?` / `.flatten()` shape silently
     /// treated an unreadable directory as shard-free, after which
     /// `prepare_output_dir` would go on to delete a stale index believing
-    /// nothing else was there (issue #1778 review).
+    /// nothing else was there (PR #1778 review).
     #[cfg(unix)]
     #[test]
     fn find_foreign_safetensors_file_fails_closed_on_an_unlistable_directory() {
@@ -403,7 +403,7 @@ mod tests {
     /// ordering, `prepare_output_dir` ran first and either misdirected the
     /// user (telling them to remove their own source directory by hand) or,
     /// for a single-file source, deleted the source's own stale index before
-    /// this refusal ever ran (issue #1778 review).
+    /// this refusal ever ran (PR #1778 review).
     #[test]
     fn preflight_refuses_an_output_that_equals_the_model_directory() {
         let dir = tempfile::tempdir().expect("tempdir");

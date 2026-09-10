@@ -6112,7 +6112,7 @@ mod tests {
     /// Mirrors `quantization_mode_allowlist_mirrors_mlx_exactly`, but for the
     /// group sizes MLX's `affine_quantize` implements rather than the mode
     /// string: every value in `SUPPORTED_AFFINE_GROUP_SIZES` must be accepted,
-    /// and every value it excludes (issue #1778 review: a group size split-mtp
+    /// and every value it excludes (PR #1778 review: a group size split-mtp
     /// could otherwise pass through to a real quantize call and abort the
     /// process) must be refused naming the offending value and the accepted
     /// set.

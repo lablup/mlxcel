@@ -602,7 +602,7 @@ fn split_accepts_block_sizes_up_to_the_ceiling() {
 /// `model.layers.*` tensor at all, so if the bits guard ran after the rename
 /// pass (which needs at least one such tensor) this would instead fail with
 /// "no model.layers... tensor", proving the guard runs before any tensor
-/// work touches `weights` (issue #1778 review).
+/// work touches `weights` (PR #1778 review).
 #[test]
 fn split_refuses_an_unsupported_q_bits() {
     for bits in [1, 7, 9, 16, 32] {
@@ -637,7 +637,7 @@ fn split_accepts_every_supported_affine_bit_width() {
 /// MLX's affine quantize kernel only implements group sizes `{32, 64, 128}`;
 /// a group size outside that set must be refused before any tensor work,
 /// naming the value and the accepted set, the same way an unsupported
-/// `--q-bits` is (issue #1778 review). Uses an empty `WeightMap` for the same
+/// `--q-bits` is (PR #1778 review). Uses an empty `WeightMap` for the same
 /// before-tensor-work reason as `split_refuses_an_unsupported_q_bits`.
 #[test]
 fn split_refuses_an_unsupported_q_group_size() {

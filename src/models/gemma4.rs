@@ -84,7 +84,7 @@ fn validate_override_group_size(raw: &serde_json::Value) -> Result<i32, String> 
 /// reason string when it is not an integer or not a supported bit width.
 ///
 /// Checks against `mlxcel_core::layers::SUPPORTED_AFFINE_BITS`, the single
-/// definition of the set (issue #1778 review): this used to keep its own
+/// definition of the set (PR #1778 review): this used to keep its own
 /// `SUPPORTED_OVERRIDE_BITS` copy of the same six literals, which could drift
 /// from the shared constant with no compiler warning either way.
 fn validate_override_bits(raw: &serde_json::Value) -> Result<i32, String> {
