@@ -1455,6 +1455,76 @@ fn sanitize_refuses_mismatched_expert_plane_shapes() {
     assert!(err.contains("differs from"), "{err}");
 }
 
+/// `concatenate` aborts the process on planes that disagree away from the
+/// concatenated axis, so the q / k / v fuse has to reject them itself rather
+/// than hand them to MLX.
+#[test]
+fn sanitize_refuses_mismatched_fused_qkv_plane_shapes() {
+    let config = tiny_text_config();
+
+    // Layer 0 is KDA. A `k_proj` one column wider than `q_proj` is what a
+    // partially converted or mis-paired checkpoint looks like.
+    let mut raw = raw_checkpoint(
+        &config,
+        RawLayout {
+            legacy_residual_keys: false,
+        },
+    );
+    raw.insert(
+        "language_model.model.layers.0.self_attn.k_proj.weight".to_string(),
+        noise_arr(&[kda_p() as i32, HIDDEN as i32 + 1], 91, 0.5),
+    );
+    let err = KimiK3Model::sanitize_weights(raw, &config)
+        .err()
+        .expect("a mismatched q/k/v plane must be refused");
+    assert!(err.contains("k_proj"), "{err}");
+    assert!(err.contains("concatenated on axis 0"), "{err}");
+
+    // The fused conv weights go through the same path.
+    let mut raw = raw_checkpoint(
+        &config,
+        RawLayout {
+            legacy_residual_keys: false,
+        },
+    );
+    raw.insert(
+        "language_model.model.layers.0.self_attn.v_conv1d.weight".to_string(),
+        noise_arr(&[kda_p() as i32, 1, CONV_KERNEL as i32 + 1], 92, 0.5),
+    );
+    let err = KimiK3Model::sanitize_weights(raw, &config)
+        .err()
+        .expect("a mismatched conv plane must be refused");
+    assert!(err.contains("v_conv1d"), "{err}");
+    assert!(err.contains("concatenated on axis 0"), "{err}");
+}
+
+/// The Attention Residuals score weight is built by hand from two tensors and
+/// then multiplied against the residual stream. A width that disagrees with
+/// `hidden_size` aborts the process inside MLX (in `multiply` at load when the
+/// pair disagrees with each other, in `matmul` at the first forward pass when
+/// they agree with each other but not with the config), so both are named at
+/// load instead.
+#[test]
+fn attn_res_weights_are_cross_checked_against_hidden_size() {
+    let config = tiny_text_config();
+    let base = sanitized(&config);
+    assert!(KimiK3Model::from_weights(&base, &config).is_ok());
+
+    for key in [
+        "model.layers.0.self_attention_res_norm.weight",
+        "model.layers.0.mlp_res_proj.weight",
+        "model.output_attn_res_proj.weight",
+    ] {
+        let mut weights = sanitized(&config);
+        weights.insert(key.to_string(), noise_arr(&[1, HIDDEN as i32 + 1], 93, 0.5));
+        let err = KimiK3Model::from_weights(&weights, &config)
+            .err()
+            .unwrap_or_else(|| panic!("{key} must be refused"));
+        assert!(err.contains(key), "{err}");
+        assert!(err.contains("hidden_size"), "{err}");
+    }
+}
+
 /// The published `config.json`, trimmed to the fields the loader reads.
 const PUBLISHED_CONFIG: &str = r#"{
     "architectures": ["KimiK3ForConditionalGeneration"],

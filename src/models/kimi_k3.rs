@@ -595,11 +595,23 @@ pub(crate) fn attn_res_mix(
 /// `w_eff = res_norm.weight.f32 * res_proj.weight.reshape(D)` as a `[D, 1]`
 /// float32 column, precomputed once at load so the mix is one matmul per
 /// stored block.
+///
+/// Both tensors are cross-checked against `hidden_size` first. Neither MLX
+/// call below reports anything the caller can catch: a norm and a projection
+/// of different widths abort the process inside `multiply` here, and a pair
+/// that agrees with each other but not with `hidden_size` survives load and
+/// aborts inside [`attn_res_mix`]'s `matmul` on the first forward pass, with
+/// no key to name. Both are checkpoint data (a partially converted export, a
+/// hand-edited `text_config`, a checkpoint paired with the wrong config), so
+/// they are named here instead.
 fn load_attn_res_weight(
     weights: &WeightMap,
     proj_key: &str,
     norm_key: &str,
+    hidden_size: usize,
 ) -> Result<UniquePtr<MlxArray>, String> {
+    check_numel(weights, proj_key, hidden_size, "hidden_size")?;
+    check_numel(weights, norm_key, hidden_size, "hidden_size")?;
     let proj = weights
         .get(proj_key)
         .ok_or_else(|| format!("Missing attention-residual projection: {proj_key}"))?;
@@ -1683,11 +1695,13 @@ impl KimiK3DecoderLayer {
                     weights,
                     &format!("{prefix}.self_attention_res_proj.weight"),
                     &format!("{prefix}.self_attention_res_norm.weight"),
+                    config.hidden_size,
                 )?,
                 w_mlp: load_attn_res_weight(
                     weights,
                     &format!("{prefix}.mlp_res_proj.weight"),
                     &format!("{prefix}.mlp_res_norm.weight"),
+                    config.hidden_size,
                 )?,
                 eps: config.rms_norm_eps,
             }),
@@ -1867,6 +1881,7 @@ impl KimiK3Model {
                     weights,
                     "model.output_attn_res_proj.weight",
                     "model.output_attn_res_norm.weight",
+                    config.hidden_size,
                 )?,
                 config.rms_norm_eps,
             ))

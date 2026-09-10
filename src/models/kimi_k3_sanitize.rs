@@ -107,6 +107,40 @@ fn move_planes(weights: &mut WeightMap, src: &str, dst: &str, name: &str) {
     }
 }
 
+/// Reject a concatenation [`fuse_axis0`] would abort on: planes whose ranks
+/// disagree, or whose extents differ on any axis other than the concatenated
+/// one.
+///
+/// `concatenate` is the third MLX call in this file that takes the process
+/// down on a bad argument instead of returning (see [`stack_expert_plane`] for
+/// `stack` and `view`), and its arguments here are checkpoint data: a
+/// partially converted or truncated q / k / v plane set reaches it with
+/// mismatched shapes and aborts during sanitize, before any of the load-time
+/// checks in `kimi_k3.rs` can name the tensor.
+fn check_concat_compatible(sources: &[UniquePtr<MlxArray>], keys: &[String]) -> Result<(), String> {
+    let Some(first) = sources.first() else {
+        return Ok(());
+    };
+    let expected = mlxcel_core::array_shape(first);
+    for (w, key) in sources.iter().zip(keys.iter()).skip(1) {
+        let shape = mlxcel_core::array_shape(w);
+        let compatible = shape.len() == expected.len()
+            && shape
+                .iter()
+                .zip(expected.iter())
+                .skip(1)
+                .all(|(a, b)| a == b);
+        if !compatible {
+            return Err(format!(
+                "{key}: shape {shape:?} cannot be concatenated on axis 0 with {}'s {expected:?}; \
+                 every axis but the first must match",
+                keys[0]
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Concatenate `{prefix}.{part}.{suffix}` for the given parts along axis 0
 /// into `{prefix}.{fused}.{suffix}` when every part is present. Leaves the
 /// map untouched (and returns `Ok(false)`) when the first part is absent,
@@ -132,6 +166,7 @@ fn fuse_axis0(
             .ok_or_else(|| format!("{prefix}: cannot fuse {fused}.{suffix}, missing {key}"))?;
         sources.push(w);
     }
+    check_concat_compatible(&sources, &keys)?;
     let refs: Vec<&MlxArray> = sources.iter().map(|w| w.as_ref().unwrap()).collect();
     let fused_array = eval_owned(mlxcel_core::concatenate_many(&refs, 0));
     weights.insert(format!("{prefix}.{fused}.{suffix}"), fused_array);
