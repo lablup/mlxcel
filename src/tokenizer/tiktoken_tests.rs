@@ -603,3 +603,166 @@ fn char_chunks_slices_by_character_not_byte() {
     // Three-byte characters: a byte-based split would land mid-character.
     assert_eq!(char_chunks("漢字仮名", 2), vec!["漢字", "仮名"]);
 }
+
+// ---------------------------------------------------------------------------
+// Special-token splitting (#1743 security review)
+// ---------------------------------------------------------------------------
+
+/// Load a synthetic K3 vocabulary whose control block is named by an explicit
+/// `added_tokens_decoder`, so a test can pin overlapping spellings.
+fn synthetic_k3_with_named_controls(
+    dir: &std::path::Path,
+    named: &[(u32, &str)],
+) -> TiktokenTokenizer {
+    std::fs::write(dir.join("config.json"), br#"{"model_type": "kimi_k3"}"#).expect("write config");
+    let entries: Vec<String> = named
+        .iter()
+        .map(|(id, content)| format!("\"{id}\": {{\"content\": \"{content}\"}}"))
+        .collect();
+    std::fs::write(
+        dir.join("tokenizer_config.json"),
+        format!("{{\"added_tokens_decoder\": {{{}}}}}", entries.join(", ")),
+    )
+    .expect("write tokenizer_config");
+    let vocab = write_synthetic_tiktoken(dir);
+    TiktokenTokenizer::from_file(&vocab, dir).expect("load")
+}
+
+/// The special-token split keeps leftmost-longest semantics and never slices a
+/// multi-byte character.
+///
+/// The scan walks bytes, so the guard that it only ever cuts on a character
+/// boundary is worth pinning: a continuation byte can never equal the first
+/// byte of a control token, which is what makes the byte walk safe.
+#[test]
+fn special_token_split_is_leftmost_longest_and_utf8_safe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 260 is a prefix of 261's spelling, so a shortest-first scan would split
+    // `<|open|>x` into two segments instead of matching the longer control.
+    let tok = synthetic_k3_with_named_controls(
+        dir.path(),
+        &[(260, "<|open|>"), (261, "<|open|>x"), (262, "<|sep|>")],
+    );
+    let open = tok.control_id("<|open|>").expect("open id");
+    let open_x = tok.control_id("<|open|>x").expect("open_x id");
+    let sep = tok.control_id("<|sep|>").expect("sep id");
+    assert_eq!(open, 260);
+    assert_eq!(open_x, 261);
+
+    // Multi-byte text on both sides of a control token, and an unterminated
+    // `<|` that must stay ordinary text rather than advance past a boundary.
+    let text = "漢字<|open|>x🙂<|sep|>ｱ<|不完全";
+    let ids = tok.encode(text, false).expect("encode");
+    let want: Vec<u32> = tok
+        .encode_text("漢字")
+        .expect("han")
+        .into_iter()
+        .chain([open_x])
+        .chain(tok.encode_text("🙂").expect("emoji"))
+        .chain([sep])
+        .chain(tok.encode_text("ｱ<|不完全").expect("tail"))
+        .collect();
+    assert_eq!(ids, want);
+    assert_eq!(tok.decode(&ids, false).expect("decode"), text);
+
+    // The bare prefix still matches on its own when nothing longer follows.
+    let ids = tok.encode("<|open|>y", false).expect("encode");
+    assert_eq!(ids[0], open);
+}
+
+/// Splitting on special tokens is linear in the input length.
+///
+/// Text that alternates ordinary characters with control-token spellings used
+/// to cost one full scan of the remaining input per occurrence, for all 256
+/// control tokens, which is quadratic. `POST /tokenize` defaults
+/// `parse_special` to `true`, so that scan ran on arbitrary request text, and
+/// it sits ahead of the bounded-chunk guard rather than behind it. At 72 KB the
+/// old shape took 8.5 s and grew 4x per doubling; 1 MB of request body was
+/// tens of minutes of one core.
+///
+/// The wall-clock bound is deliberately loose (this machine is shared): the
+/// point is the two orders of magnitude between linear and quadratic here, not
+/// a precise number.
+#[test]
+fn special_token_split_is_linear_on_interleaved_spellings() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tok = synthetic_k3_with_named_controls(dir.path(), &[(260, "<|open|>")]);
+    let open = tok.control_id("<|open|>").expect("open id");
+    let unit_ids = tok.encode_text("a").expect("encode a");
+
+    // ~400 KB alternating one ordinary character with one control spelling.
+    let repeats = 45_000usize;
+    let text = "a<|open|>".repeat(repeats);
+    assert!(text.len() > 400_000);
+
+    let started = std::time::Instant::now();
+    let ids = tok.encode(&text, false).expect("encode");
+    let elapsed = started.elapsed();
+
+    let mut want = Vec::with_capacity(repeats * (unit_ids.len() + 1));
+    for _ in 0..repeats {
+        want.extend_from_slice(&unit_ids);
+        want.push(open);
+    }
+    assert_eq!(ids, want, "interleaved control spellings must round-trip");
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "special-token split went superlinear: {elapsed:?} for {} bytes",
+        text.len()
+    );
+
+    // The new scan's own worst case: every byte is a candidate first byte, so
+    // every position tries the whole bucket and fails.
+    let dense = "<".repeat(400_000);
+    let started = std::time::Instant::now();
+    let ids = tok.encode(&dense, false).expect("encode");
+    let elapsed = started.elapsed();
+    assert_eq!(ids, tok.encode_text(&dense).expect("encode_text"));
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "dense candidate-byte input went superlinear: {elapsed:?}"
+    );
+}
+
+/// The bounded-chunk guard is reached through the special-parsing entry point,
+/// not only through `encode_text`.
+///
+/// `encode` splits on control spellings first and encodes each segment, so the
+/// guard has to apply per segment. A pathological run routed through `encode`
+/// must give exactly the ids the reference gives, which for a run past the
+/// 25 000-character bound is the concatenation of the bounded pieces.
+#[test]
+fn encode_reaches_the_chunk_guard_through_special_parsing() {
+    let Some(tok) = k3_tokenizer("encode_reaches_the_chunk_guard_through_special_parsing") else {
+        return;
+    };
+    let open = tok.control_id("<|open|>").expect("open id");
+
+    // 30 000 non-whitespace characters exceed the 25 000 bound, wrapped in
+    // control tokens so the input takes the special-splitting path.
+    let run = "x".repeat(30_000);
+    let text = format!("<|open|>{run}<|open|>");
+
+    let started = std::time::Instant::now();
+    let ids = tok.encode(&text, false).expect("encode");
+    let elapsed = started.elapsed();
+
+    let mut want = vec![open];
+    want.extend(tok.encode_text(&run[..25_000]).expect("head"));
+    want.extend(tok.encode_text(&run[25_000..]).expect("tail"));
+    want.push(open);
+    assert_eq!(
+        ids, want,
+        "the guard must bound the run inside `encode` too"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "guarded encode took {elapsed:?}"
+    );
+
+    // Text with no control spelling must agree between the two entry points.
+    assert_eq!(
+        tok.encode(&run, false).expect("encode"),
+        tok.encode_text(&run).expect("encode_text")
+    );
+}

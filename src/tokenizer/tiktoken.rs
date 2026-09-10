@@ -144,8 +144,16 @@ pub struct TiktokenTokenizer {
     special_encoder: HashMap<String, u32>,
     /// Maps special token IDs back to strings
     special_decoder: HashMap<u32, String>,
-    /// Special tokens sorted by length descending for greedy matching
-    special_tokens_sorted: Vec<(String, u32)>,
+    /// Special tokens bucketed by their first byte, each bucket ordered by
+    /// spelling length descending so the longest match at a position wins.
+    ///
+    /// A 256-entry table indexed by byte value. It exists so
+    /// [`Self::split_with_special_tokens`] can walk the input once and try
+    /// only the handful of spellings that could begin at the current byte.
+    /// The previous shape (`find` for every special token, restarted after
+    /// every match) was quadratic in the input length, which `POST /tokenize`
+    /// reaches with `parse_special: true` on arbitrary request text.
+    special_by_first_byte: Vec<Vec<(String, u32)>>,
     /// Pre-tokenization regex
     pat: Regex,
     /// Which family's pattern and control-token naming this instance uses.
@@ -246,11 +254,24 @@ impl TiktokenTokenizer {
             }
         }
 
-        let mut special_tokens_sorted: Vec<(String, u32)> = special_encoder
-            .iter()
-            .map(|(k, &v)| (k.clone(), v))
-            .collect();
-        special_tokens_sorted.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+        let mut special_by_first_byte: Vec<Vec<(String, u32)>> = vec![Vec::new(); 256];
+        for (name, &id) in &special_encoder {
+            // An empty spelling would match at every position without
+            // consuming anything, so the scan below would never advance.
+            // `tokenizer_config.json` is checkpoint-supplied, so drop it here
+            // rather than trust the file.
+            let Some(&first) = name.as_bytes().first() else {
+                continue;
+            };
+            special_by_first_byte[first as usize].push((name.clone(), id));
+        }
+        for bucket in &mut special_by_first_byte {
+            // Length descending, then by spelling, so the order does not
+            // depend on `HashMap` iteration order. Two distinct spellings of
+            // equal length cannot both match at one position, so the tiebreak
+            // only pins determinism; it does not choose between candidates.
+            bucket.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        }
 
         let pat = Regex::new(family.pattern())?;
 
@@ -259,7 +280,7 @@ impl TiktokenTokenizer {
             decoder,
             special_encoder,
             special_decoder,
-            special_tokens_sorted,
+            special_by_first_byte,
             pat,
             family,
         })
@@ -469,12 +490,18 @@ impl TiktokenTokenizer {
     /// reference's, and narrowing them would change the pre-tokenization and
     /// with it the ids, so they are not tuning knobs.
     ///
-    /// It does not bound [`Self::bpe_encode`], which is quadratic in the length
-    /// of a single piece. A 25 000-character run of punctuation matches the
-    /// ` ?[^\s\p{L}\p{N}]+[\r\n]*` alternative as one piece and stays slow. That
-    /// is the pre-existing shape of `bpe_encode` (HunYuan reaches it with no
-    /// guard at all), not something this family introduces, and fixing it means
-    /// replacing the merge loop for every tiktoken checkpoint at once.
+    /// It does not bound [`Self::bpe_encode`], which is quadratic in the *byte*
+    /// length of a single piece while the guard counts *characters*. A
+    /// 25 000-character run of punctuation matches the
+    /// ` ?[^\s\p{L}\p{N}]+[\r\n]*` alternative as one 25 000-byte piece and
+    /// measures about 26 s; the same alternative over 25 000 four-byte
+    /// characters (emoji are neither whitespace, letter nor number) is a
+    /// 100 000-byte piece and about 160 s. Both are the pre-existing shape of
+    /// `bpe_encode`, and the guard is strictly an improvement on it: HunYuan
+    /// reaches the same loop with no bound at all, so its worst case is the
+    /// whole input rather than one run. Fixing the loop itself means replacing
+    /// the merge step (a fresh `Vec` allocation and a hash of the merged bytes
+    /// per adjacent pair per iteration) for every tiktoken checkpoint at once.
     fn encode_text_into(&self, text: &str, out: &mut Vec<u32>) -> Result<()> {
         match self.family {
             // Byte-identical to the pre-K3 path: one regex sweep, no chunking.
@@ -651,38 +678,60 @@ impl TiktokenTokenizer {
     }
 
     /// Split text into segments at special token boundaries (greedy longest-match-first).
+    ///
+    /// One left-to-right pass. At each byte, only the special tokens that
+    /// begin with that byte are tried, longest spelling first, which is the
+    /// same leftmost-longest choice the previous implementation made and so
+    /// produces the same segments and the same ids.
+    ///
+    /// The pass is linear in the input length. It used to be quadratic: every
+    /// unmatched position ran `find` for all 256 K3 control tokens (210 for
+    /// HunYuan) across the whole remainder, and a match reset that scan, so
+    /// text alternating ordinary characters with control-token spellings paid
+    /// one full sweep per occurrence. That is request-reachable through
+    /// `POST /tokenize`, whose `parse_special` defaults to `true`, and it sits
+    /// ahead of the bounded-chunk guard in [`Self::encode_text_into`] rather
+    /// than behind it, so the guard did not bound it.
     fn split_with_special_tokens(&self, text: &str) -> Vec<String> {
-        if self.special_tokens_sorted.is_empty() {
+        if self.special_encoder.is_empty() {
             return vec![text.to_string()];
         }
 
+        let bytes = text.as_bytes();
         let mut segments = Vec::new();
-        let mut remaining = text;
+        let mut segment_start = 0usize;
+        let mut i = 0usize;
 
-        while !remaining.is_empty() {
-            let mut matched = false;
-            for (token, _) in &self.special_tokens_sorted {
-                if remaining.starts_with(token.as_str()) {
-                    segments.push(token.clone());
-                    remaining = &remaining[token.len()..];
-                    matched = true;
+        while i < bytes.len() {
+            // Every index the bucket lookup can hit is a character boundary:
+            // a UTF-8 continuation byte is `0x80..=0xBF`, which is disjoint
+            // from both ASCII and every UTF-8 leading byte, so no continuation
+            // byte can equal the first byte of a special token and a
+            // non-empty bucket implies `text.is_char_boundary(i)`. The slices
+            // below are therefore always on boundaries.
+            let mut hit: Option<&String> = None;
+            for (token, _) in &self.special_by_first_byte[bytes[i] as usize] {
+                if bytes[i..].starts_with(token.as_bytes()) {
+                    hit = Some(token);
                     break;
                 }
             }
 
-            if !matched {
-                // Find the next special token occurrence
-                let mut next_pos = remaining.len();
-                for (token, _) in &self.special_tokens_sorted {
-                    if let Some(pos) = remaining.find(token.as_str())
-                        && pos < next_pos
-                    {
-                        next_pos = pos;
+            match hit {
+                Some(token) => {
+                    if segment_start < i {
+                        segments.push(text[segment_start..i].to_string());
                     }
+                    segments.push(token.clone());
+                    i += token.len();
+                    segment_start = i;
                 }
-                segments.push(remaining[..next_pos].to_string());
-                remaining = &remaining[next_pos..];
+                None => i += 1,
             }
+        }
+
+        if segment_start < bytes.len() {
+            segments.push(text[segment_start..].to_string());
         }
 
         segments
