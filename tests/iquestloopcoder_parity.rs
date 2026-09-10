@@ -295,3 +295,59 @@ fn iquestloopcoder_greedy_continuation_matches_the_oracle() {
         "greedy continuation must match the oracle token for token"
     );
 }
+
+/// Chunked prefill must land where a single-pass prefill lands.
+///
+/// This is the regime the two caches disagree about most easily. A continuation
+/// chunk finds the pass-1 cache holding every prior key and the pass-2 rotating
+/// cache holding at most `loop_window_size - 1` of them, so
+/// `RotatingKVCache::update_concat` returns `kept + L` keys while the pass-1
+/// cache returns `S + L`, and the windowed mask
+/// [`mlxcel_core::causal_attention`] builds has to match the first of those,
+/// not the second. An off-by-one there windows the wrong keys, which stays
+/// fluent.
+///
+/// `prefill_matches_incremental_decode` in
+/// `src/models/iquestloopcoder_tests.rs` covers the same seam on a synthetic
+/// one-layer model; this pins it on the real 80-layer checkpoint, across chunk
+/// sizes that land on, inside and across the 64-token window boundary.
+#[test]
+fn iquestloopcoder_chunked_prefill_matches_single_pass() {
+    if !checkpoint_present() {
+        eprintln!("skipping iquestloopcoder parity: {MODEL_DIR} not present");
+        return;
+    }
+    let (model, _args) = IQuestLoopCoderModel::load(MODEL_DIR).expect("load IQuest-Coder Loop");
+
+    let chunked = |chunk: usize| -> Vec<(i32, f32)> {
+        let mut caches = model.make_caches();
+        let mut logits = None;
+        let mut start = 0;
+        while start < LONG_CHAT_IDS.len() {
+            let end = (start + chunk).min(LONG_CHAT_IDS.len());
+            let piece = &LONG_CHAT_IDS[start..end];
+            let arr = mlxcel_core::from_slice_i32(piece, &[1, piece.len() as i32]);
+            logits =
+                Some(model.forward_last_logits_with_caches(&arr, &mut caches, piece.len() - 1));
+            start = end;
+        }
+        top_k(logits.as_ref().expect("at least one chunk"), 5)
+    };
+
+    let single = chunked(LONG_CHAT_IDS.len());
+    for chunk in [128, 97, 64, 32] {
+        let split = chunked(chunk);
+        assert_eq!(
+            split.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            single.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "chunk {chunk}: top-5 ids diverged from the single-pass prefill; got {split:?} \
+             against {single:?}"
+        );
+        for ((id, value), (_, reference)) in split.iter().zip(&single) {
+            assert!(
+                (value - reference).abs() <= 0.25,
+                "chunk {chunk}: logit for token {id} is {value}, single-pass says {reference}"
+            );
+        }
+    }
+}
