@@ -117,9 +117,10 @@ fn gemma3n_ordered_prompt_expands_media_in_place_without_clustering() {
         ordered_image_sentinel(1),
         ordered_audio_sentinel(2)
     );
-    let mut tokens = encode_ordered_media_prompt(&prompt, IMAGE, AUDIO, 1, 2, encode_test_text)
-        .unwrap()
-        .unwrap();
+    let mut tokens =
+        encode_ordered_media_prompt(&prompt, false, IMAGE, AUDIO, 1, 2, encode_test_text)
+            .unwrap()
+            .unwrap();
     assert_eq!(
         tokens,
         vec![
@@ -234,7 +235,7 @@ fn inkling_ordered_prompt_preserves_history_and_mixed_part_order() {
         Ok(tokens)
     };
     let tokens = tokenize_inkling_ordered_media_prompt(
-        &prompt, prompt_ids, audio_ids, IMAGE, AUDIO, 1, 2, encode,
+        &prompt, false, prompt_ids, audio_ids, IMAGE, AUDIO, 1, 2, encode,
     )
     .unwrap();
 
@@ -321,6 +322,7 @@ fn inkling_ordered_prompt_rejects_raw_reserved_media_tokens() {
         let prompt = format!("[{{raw{}}}", ordered_audio_sentinel(1));
         let error = tokenize_inkling_ordered_media_prompt(
             &prompt,
+            false,
             prompt_ids,
             audio_ids,
             IMAGE,

@@ -759,7 +759,10 @@ pub async fn anthropic_count_tokens(
         Err(err) => return AnthropicErrorResponse::bad_request(err.to_string()).into_response(),
     };
 
-    let token_count = match state.tokenizer.encode(&prepared.prompt, true) {
+    // Same `add_special` rule the generation path uses, so the reported count
+    // matches what a request would actually evaluate (issue #1347).
+    let add_special = !state.tokenizer.prompt_carries_bos(&prepared.prompt);
+    let token_count = match state.tokenizer.encode(&prepared.prompt, add_special) {
         Ok(ids) => ids.len(),
         Err(e) => {
             return AnthropicErrorResponse::bad_request(format!("Tokenization error: {e}"))

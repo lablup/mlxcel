@@ -770,7 +770,7 @@ pub fn create_causal_mask_with_window(
 
 /// Create a sliding-window causal mask sized to the *full* key axis, without
 /// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
-/// Used by: Gemma 3, Gemma 4 single-pass prefill longer than the sliding window, Cohere2/Gemma3n/Olmo3 dense prefill (#413)
+/// Used by: Gemma 3, Gemma 4 single-pass prefill longer than the sliding window, Cohere2/Gemma3n/Olmo3 dense prefill (#413), Laguna sliding layers
 ///
 /// # Arguments
 /// * `size` - Size of the query sequence
@@ -1014,7 +1014,7 @@ pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///// Numerically stable softplus activation: log(1 + exp(x)).
 /// Uses logaddexp(x, 0) internally to match Python's mx.logaddexp(x, 0).
 /// This avoids float16 overflow for values >= ~11.09 (exp(x) > float16 max).
-/// Used by: Mamba, Mamba2, Jamba, GatedDelta, RecurrentGemma
+/// Used by: Mamba, Mamba2, Jamba, GatedDelta, RecurrentGemma, Laguna
 #[inline]
 pub fn softplus(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::softplus(x)

@@ -124,12 +124,14 @@ async fn render_chat_prompt(
 
 /// Count the tokens a rendered prompt occupies.
 ///
-/// `add_special` is `true` so the count includes the BOS the generation path
-/// adds, which is what makes the number comparable to `tokens_evaluated`.
+/// `add_special` follows `prompt_carries_bos`, the same rule the generation
+/// path uses, which is what makes the number comparable to `tokens_evaluated`.
+/// Passing `true` unconditionally over-counted by one for every template that
+/// emits its own BOS (Laguna, and the whole Llama 3 lineage since #1347).
 fn count_prompt_tokens(state: &AppState, prompt: &str) -> Result<usize, ErrorResponse> {
     state
         .tokenizer
-        .encode(prompt, true)
+        .encode(prompt, !state.tokenizer.prompt_carries_bos(prompt))
         .map(|ids| ids.len())
         .map_err(|e| {
             ErrorResponse::new(format!("Tokenization error: {e}"), "invalid_request_error")

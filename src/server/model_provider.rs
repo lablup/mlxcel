@@ -2068,10 +2068,13 @@ impl ModelProvider {
 /// Tokenize a rendered prompt into `i32` ids using the same `add_special`
 /// convention the scheduler applies (issue #633).
 ///
-/// `add_special` is suppressed when the prompt already begins with a literal BOS
-/// marker (`<bos>` / `<s>`), matching `BatchScheduler::enqueue_request` so that
-/// pre-tokenizing on the dispatch thread is byte-identical to tokenizing on the
-/// scheduler thread. This is the single source of truth for both sites.
+/// `add_special` is suppressed exactly when
+/// [`crate::tokenizer::MlxcelTokenizer::prompt_carries_bos`] says the rendered
+/// prompt already starts with a BOS, matching `BatchScheduler::enqueue_request`
+/// so that pre-tokenizing on the dispatch thread is byte-identical to
+/// tokenizing on the scheduler thread. This is the single source of truth for
+/// both sites; the rule itself lives on the tokenizer so every caller shares
+/// one definition.
 pub(crate) fn tokenize_prompt_for_generation(
     tokenizer: &crate::tokenizer::MlxcelTokenizer,
     prompt: &str,
@@ -2092,7 +2095,7 @@ pub(crate) fn tokenize_prompt_for_generation_with_ordered_media(
     } else {
         std::borrow::Cow::Borrowed(prompt)
     };
-    let add_special = !plain_prompt.starts_with("<bos>") && !plain_prompt.starts_with("<s>");
+    let add_special = !tokenizer.prompt_carries_bos(&plain_prompt);
     let ids = tokenizer.encode(&plain_prompt, add_special)?;
     Ok(ids.iter().map(|&x| x as i32).collect())
 }
