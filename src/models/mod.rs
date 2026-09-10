@@ -46,6 +46,11 @@ pub(crate) mod conv_decode;
 // every dynamic and every absent block, and `internlm2` dropped its
 // `rope_scaling` block at deserialization so the base never moved.
 pub mod dynamic_ntk_rope;
+// `fp8_block` reads the vendor fine-grained FP8 checkpoints (E4M3 bytes plus a
+// bf16 inverse scale per 128x128 block) and requantizes them to MLX-native
+// mxfp8 at load. It is a pre-pass rather than part of `sanitize`, which is
+// already 3k lines and carries no MLX-op-heavy conversion of this size.
+pub mod fp8_block;
 pub mod gated_delta;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
 // `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
@@ -354,6 +359,10 @@ pub(crate) use sanitize::{
 // The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
 // reference loader, so an unconditional re-export is dead in a default build
 // and `-D warnings` rejects it.
+pub use fp8_block::{
+    Fp8BlockQuantization, has_block_fp8_weights, merge_fp8_block_quantization,
+    qwen_fp8_block_quantization, requantize_block_fp8_weights,
+};
 #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub(crate) use sanitize::load_weights_from_dir_with_filter;
 pub use sanitize::{

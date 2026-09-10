@@ -55,6 +55,16 @@ pub(crate) fn qwen35_text_config(config: &serde_json::Value) -> Result<serde_jso
         text_config_obj.insert("quantization".to_string(), config["quantization"].clone());
     }
 
+    // A vendor fine-grained FP8 release declares `quantization_config` and no
+    // `quantization`; the weights are converted to MLX-native mxfp8 at load,
+    // so the config has to say so before the model constructor reads it.
+    if let Some(detected) =
+        models::qwen_fp8_block_quantization(config).map_err(|error| anyhow::anyhow!("{error}"))?
+    {
+        models::merge_fp8_block_quantization(&mut text_config, detected)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+
     Ok(text_config)
 }
 
@@ -118,6 +128,13 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map_err(|err| anyhow::anyhow!("Failed to parse config: {}", err))?;
             args.validate_supported()?;
             let owned = copy_weight_map(weights);
+            let owned = match models::qwen_fp8_block_quantization(&value)
+                .map_err(|error| anyhow::anyhow!("{error}"))?
+            {
+                Some(detected) => models::requantize_block_fp8_weights(owned, detected.block_rows)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?,
+                None => owned,
+            };
             let owned = models::qwen3_5::sanitize_moe_weights(owned, &args);
             let model = models::Qwen35Model::from_weights(&owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;

@@ -86,7 +86,7 @@ fn is_gemma4_unified_weight(name: &str) -> bool {
 /// F8_E4M3FN format: 1 sign bit, 4 exponent bits (bias=7), 3 mantissa bits.
 /// No infinity representation; the all-ones exponent with non-zero mantissa encodes NaN.
 /// Range: ±448.0.
-fn f8_e4m3_to_f32(bits: u8) -> f32 {
+pub(crate) fn f8_e4m3_to_f32(bits: u8) -> f32 {
     let sign = (bits >> 7) & 1;
     let exp = (bits >> 3) & 0xF; // 4-bit exponent
     let mant = bits & 0x7; // 3-bit mantissa
