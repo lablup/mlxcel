@@ -6,7 +6,7 @@ is an independent numpy transcription of the tower, merger, projector and
 image preprocessing as specified in issue #1342 and in the checkpoint's own
 Python sources (`kimi_k3_vision_processing.py`, `media_utils.py`), computed in
 float32 from the bf16 vision shards of a local Kimi K3 checkpoint. The Rust
-`kimi_k3_tower_real_weights` harness (`src/vision/encoders/moonvit3d_tests.rs`)
+`kimi_k3_tower_real_weights` harness (`src/vision/encoders/moonvit3d_real_weights_tests.rs`)
 compares its projected features against this file, which is what makes the
 dump an oracle for the port rather than a copy of its output.
 
@@ -18,11 +18,14 @@ Usage (from the repository root):
 
     python3 tests/fixtures/kimi_k3_vision/generate_reference.py \
         --checkpoint models/kimi-k3-8l-mxfp4 \
-        --image tests/fixtures/test_image.png
+        --image tests/fixtures/kimi_k3_vision/navit_probe.png
 
-The image defaults to a 224x224 RGB fixture already in the repository, which
-the navit rule keeps at its size (s = 1, no padding), so the dump does not
-depend on Pillow's resampling kernel: only the tower math is under test.
+The image defaults to `navit_probe.png`, a 303x181 RGB crop with 230 distinct
+colours. The navit rule keeps it at its size (s = 1), so the dump does not
+depend on Pillow's resampling kernel and only the tower math is under test,
+but neither side is a multiple of 28, so both axes are padded and no two
+patches are alike: the patch order, the intra-patch layout and the padding are
+all observable in the result, which a uniform square fixture leaves untested.
 """
 
 from __future__ import annotations
@@ -305,7 +308,7 @@ def run_tower(weights: dict[str, np.ndarray], vcfg: dict, patches: np.ndarray, g
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", default="models/kimi-k3-8l-mxfp4", help="checkpoint directory (relative to the repo root)")
-    parser.add_argument("--image", default="tests/fixtures/test_image.png", help="image path (relative to the repo root)")
+    parser.add_argument("--image", default="tests/fixtures/kimi_k3_vision/navit_probe.png", help="image path (relative to the repo root)")
     parser.add_argument("--output", default=str(FIXTURE_DIR / "reference.json"))
     parser.add_argument("--sample-col-stride", type=int, default=64)
     args = parser.parse_args()

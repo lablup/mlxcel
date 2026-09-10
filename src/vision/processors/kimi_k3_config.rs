@@ -62,6 +62,12 @@ struct RawMediaProcCfg {
     image_mean: [f32; 3],
     #[serde(default = "default_norm")]
     image_std: [f32; 3],
+    /// `fixed_output_tokens` pins every image to one token count regardless
+    /// of its size. The reference honours it; this port does not implement
+    /// it, so a checkpoint that sets it is refused rather than silently
+    /// resized by the ordinary rule.
+    #[serde(default)]
+    fixed_output_tokens: Option<u32>,
     #[serde(default)]
     transparent_bg_config: Option<RawTransparentBg>,
     #[serde(default = "default_fill_stage")]
@@ -80,6 +86,12 @@ impl KimiK3ImageProcessor {
     pub fn from_media_proc_cfg(cfg: &serde_json::Value) -> Result<Self, String> {
         let raw: RawMediaProcCfg = serde_json::from_value(cfg.clone())
             .map_err(|e| format!("Kimi K3 media_proc_cfg: {e}"))?;
+        if let Some(fixed) = raw.fixed_output_tokens {
+            return Err(format!(
+                "Kimi K3 media_proc_cfg: fixed_output_tokens = {fixed} is not supported; this \
+                 port sizes every image by the navit rule"
+            ));
+        }
         let background = match raw.transparent_bg_config {
             None => None,
             Some(bg) => Some(match bg.pattern.as_str() {

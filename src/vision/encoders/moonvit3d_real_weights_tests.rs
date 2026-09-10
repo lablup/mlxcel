@@ -49,6 +49,16 @@ fn json_f32s(v: &serde_json::Value) -> Vec<f32> {
 /// `tests/fixtures/kimi_k3_vision/generate_reference.py` computes in numpy
 /// from the same shards and the same image, independently of this code.
 ///
+/// The image is `navit_probe.png`, a 303x181 crop with 230 distinct colours,
+/// so every one of the 308 patches differs and both axes are padded: the
+/// patch order, the intra-patch layout and the padding are all under the
+/// comparison, which a flat square fixture leaves untested.
+///
+/// Two arms run: the weights cast to f32, gated against the numpy oracle, and
+/// the checkpoint's own bf16, gated against the oracle loosely and against
+/// this run's own f32 arm tightly. The second comparison is the one that does
+/// not drift when MLX changes a kernel, because both sides move together.
+///
 /// Run with:
 /// `cargo test --profile test-fast --features metal,accelerate --lib vision::encoders::moonvit3d -- --ignored kimi_k3_tower_real_weights --nocapture`
 #[test]
@@ -136,7 +146,11 @@ fn kimi_k3_tower_real_weights() {
     let ref_projected_mean_abs = reference["projected"]["mean_abs"].as_f64().unwrap();
     let text_hidden = cfg.text_hidden_size;
 
+    // The tower must not silently promote the stream: the rope tables are f32,
+    // and a missing cast back would run all 27 blocks' bf16 weights against
+    // f32 activations.
     let mut results = Vec::new();
+    let mut f32_projected: Option<Vec<f32>> = None;
     for (label, target_dtype, gate) in [
         ("f32", Some(dtype::FLOAT32), 1e-2),
         ("bf16 (checkpoint dtype)", None, 5e-2),
@@ -160,6 +174,11 @@ fn kimi_k3_tower_real_weights() {
         let grids = prepared.grids();
 
         let final_norm = tower.forward(&pv, &grids).expect("tower forward");
+        assert_eq!(
+            mlxcel_core::array_dtype(&final_norm[0]),
+            run_dtype,
+            "{label}: the tower changed the activation dtype"
+        );
         let final_norm = to_vec(&final_norm[0]);
         let final_mean_abs =
             final_norm.iter().map(|v| f64::from(v.abs())).sum::<f64>() / final_norm.len() as f64;
@@ -194,6 +213,19 @@ fn kimi_k3_tower_real_weights() {
              per-token mean_abs rel err {row_err:.3e}; gate {gate:.0e}",
             sample.len()
         );
+        // The bf16 arm against this run's own f32 arm: same code, same MLX,
+        // so the only difference is the execution precision. That comparison
+        // does not move when a kernel changes, which the oracle gate does.
+        if let Some(reference_f32) = &f32_projected {
+            let cross = rel_mean_abs(&projected, reference_f32);
+            println!("{label}: rel mean-abs against this run's f32 arm {cross:.3e}");
+            assert!(
+                cross < 5e-2,
+                "{label}: {cross:.3e} against the f32 arm of the same run"
+            );
+        } else {
+            f32_projected = Some(projected.clone());
+        }
         results.push((label, sample_err, row_err, gate));
     }
     for (label, sample_err, row_err, gate) in results {

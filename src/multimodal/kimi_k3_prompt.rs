@@ -157,7 +157,8 @@ where
             return Err(anyhow!(
                 "Kimi K3: the prompt carries <|media_pad|> runs of {runs:?} but the {} image(s) \
                  need {expected:?} (grid_h * grid_w / 4 each); the rendered prompt and the \
-                 preprocessed images disagree",
+                 images that reached the worker disagree, which also happens when one of the \
+                 request's images failed to decode and was dropped",
                 images.len()
             ));
         }
@@ -203,20 +204,27 @@ where
     if images.is_empty() {
         return Err(anyhow!("Kimi K3 image embedding requested with no images"));
     }
-    let prepared = model
+    // Geometry first: it is what sizes the placeholder runs, and it is
+    // cheap. A prompt that disagrees with the images, or a request over the
+    // media-token budget, is refused before any pixel is normalized and any
+    // tower block runs.
+    let planned = model
         .processor
-        .preprocess_with_grid(images)
+        .plan_images(images)
         .map_err(|e| anyhow!("{e}"))?;
-    let stats = place_kimi_k3_image_tokens(
-        prompt_tokens,
-        &prepared.images,
-        model.media_token_ids,
-        encode,
-    )?;
+    let stats = place_kimi_k3_image_tokens(prompt_tokens, &planned, model.media_token_ids, encode)?;
+    let features = model
+        .project_image_stream(images, &planned)
+        .map_err(|e| anyhow!("{e}"))?;
     let input_ids = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
-    let embeddings = model
-        .get_input_embeddings(&input_ids, &prepared.pixel_values, &prepared.grids())
-        .map_err(|e| anyhow!("{e}"))?;
+    let inputs_embeds = model.text.embed_tokens.forward(&input_ids);
+    let embeddings = crate::vision::kimi_k3_vl::merge_media_features(
+        model.media_placeholder_token_id,
+        &features,
+        &inputs_embeds,
+        &input_ids,
+    )
+    .map_err(|e| anyhow!("{e}"))?;
     Ok((embeddings, stats))
 }
 

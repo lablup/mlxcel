@@ -33,7 +33,10 @@
 //!   therefore run in bf16 next to the bf16 attention and dense planes of the
 //!   text side, exactly as the text-only route leaves them.
 //!
-//! Surgery pipelines are not applied on this route.
+//! The Axis A weight-load surgery hook runs here as it does on the text and
+//! the common VLM routes, on the raw keys before the vision / text split.
+//! Reading the shards directly, as this route does, is what made `--surgery`
+//! a silent no-op on it before.
 
 use anyhow::{Result, anyhow};
 use mlxcel_core::weights::WeightMap;
@@ -45,7 +48,7 @@ use crate::models::{KimiK3Model, bf16_to_f16_at_load, config_has_quantization_me
 use crate::multimodal::kimi_k3_prompt::read_media_token_ids;
 use crate::vision::encoders::moonvit3d::{MoonViT3DConfig, MoonViT3DVisionModel};
 use crate::vision::kimi_k3_vl::{KimiK3VLModel, sanitize_kimi_k3_vision_weights};
-use crate::vision::processors::kimi_k3::KimiK3ImageProcessor;
+use crate::vision::processors::kimi_k3::{KimiK3ImageProcessor, KimiK3NavitConfig};
 
 use super::{parse_required_vlm_subconfig, read_sanitized_vlm_config};
 
@@ -71,6 +74,37 @@ pub(crate) fn keep_kimi_k3_vlm_weight(key: &str, num_hidden_layers: usize) -> bo
 
 pub(crate) fn is_kimi_k3_vision_key(key: &str) -> bool {
     VISION_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// Refuse a checkpoint whose `preprocessor_config.json` cuts patches the
+/// tower cannot consume.
+///
+/// The processor decides the `<|media_pad|>` count (`gh * gw / merge^2`) and
+/// the patch size it cuts; the tower decides the merge that turns encoder
+/// tokens into projected rows and the kernel the patch embedding expects.
+/// When the two disagree the failure surfaces much later as a count mismatch
+/// at merge time or a shape error inside the tower, so it is named here.
+pub(crate) fn check_processor_matches_vision_config(
+    vision: &MoonViT3DConfig,
+    navit: &KimiK3NavitConfig,
+) -> Result<(), String> {
+    if vision.patch_size != navit.patch_size as usize {
+        return Err(format!(
+            "Kimi K3: vision_config.patch_size ({}) does not match \
+             preprocessor_config.json media_proc_cfg.patch_size ({})",
+            vision.patch_size, navit.patch_size
+        ));
+    }
+    let (kh, kw) = vision.merge();
+    let proc_merge = navit.merge_kernel_size as i32;
+    if kh != proc_merge || kw != proc_merge {
+        return Err(format!(
+            "Kimi K3: vision_config.merge_kernel_size ({kh}, {kw}) does not match \
+             preprocessor_config.json media_proc_cfg.merge_kernel_size ({proc_merge}); the \
+             placeholder count and the projected row count would disagree on every image"
+        ));
+    }
+    Ok(())
 }
 
 /// Split the raw map into `(vision, text)`.
@@ -113,6 +147,8 @@ pub(crate) fn load_kimi_k3_vlm(model_path: &Path) -> Result<LoadedModel> {
         ));
     }
     let processor = KimiK3ImageProcessor::from_model_dir(model_path).map_err(|e| anyhow!("{e}"))?;
+    check_processor_matches_vision_config(&vision_config, &processor.navit)
+        .map_err(|e| anyhow!("{e}"))?;
 
     let num_layers = config.text_config.num_hidden_layers;
     println!("[KimiK3-VLM] Loading weights...");
@@ -127,6 +163,19 @@ pub(crate) fn load_kimi_k3_vlm(model_path: &Path) -> Result<LoadedModel> {
     ) && crate::models::convert_bf16_weights(&mut weights)
     {
         crate::models::warn_bf16_precision();
+    }
+
+    // Axis A weight-load surgery, resolved the way `load_text_weights` and
+    // `finish_vlm_weights_common` resolve it: the CLI-installed active
+    // pipeline, applied to the raw keys with the parsed config. The dtype
+    // policy above stays this route's own, which is why the common helper is
+    // not called wholesale.
+    #[cfg(feature = "surgery")]
+    if let Some(pipeline) = crate::surgery::snapshot_active_pipeline() {
+        let transform: &dyn mlxcel_core::weights::WeightTransform = pipeline.as_ref();
+        transform
+            .apply(&mut weights, &full_config)
+            .map_err(|e| anyhow!("Kimi K3 surgery pipeline: {e}"))?;
     }
 
     let (vision_weights, text_weights) = split_kimi_k3_vision_weights(weights);
@@ -200,6 +249,28 @@ mod tests {
             "language_model.model.mtp.layers.0.x",
             4
         ));
+    }
+
+    #[test]
+    fn processor_and_vision_config_must_agree_on_patch_and_merge() {
+        let vision: MoonViT3DConfig =
+            serde_json::from_value(serde_json::json!({})).expect("published defaults");
+        let navit = KimiK3NavitConfig::default();
+        assert!(check_processor_matches_vision_config(&vision, &navit).is_ok());
+
+        let wrong_patch = KimiK3NavitConfig {
+            patch_size: 16,
+            ..navit
+        };
+        let err = check_processor_matches_vision_config(&vision, &wrong_patch).unwrap_err();
+        assert!(err.contains("patch_size"), "{err}");
+
+        let wrong_merge = KimiK3NavitConfig {
+            merge_kernel_size: 4,
+            ..navit
+        };
+        let err = check_processor_matches_vision_config(&vision, &wrong_merge).unwrap_err();
+        assert!(err.contains("merge_kernel_size"), "{err}");
     }
 
     #[test]

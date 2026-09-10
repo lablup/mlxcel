@@ -2808,7 +2808,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         // falls through to the generic template, whose rendered text is then
         // re-tokenized with control-token spellings recognized.
         let (tokenizer_arc, chat_template) =
-            crate::server::state::attach_native_chat_renderer(tokenizer, chat_template);
+            crate::server::state::attach_native_chat_renderer_for_model(
+                tokenizer,
+                chat_template,
+                Some(&startup.model_path),
+            );
         let chat_template_arc = std::sync::Arc::new(chat_template);
         let state = std::sync::Arc::new(crate::server::router_front::RouterState::build(
             config_arc,

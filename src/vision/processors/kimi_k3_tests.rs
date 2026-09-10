@@ -56,6 +56,52 @@ fn navit_resize_rule() {
     assert_eq!((plan.grid_h, plan.grid_w), (258, 258));
 
     assert!(cfg.plan(0, 10).is_err());
+
+    // Geometry out of range is refused by name before any arithmetic.
+    for (field, cfg) in [
+        (
+            "patch_size",
+            KimiK3NavitConfig {
+                patch_size: 100_000,
+                ..cfg
+            },
+        ),
+        (
+            "merge_kernel_size",
+            KimiK3NavitConfig {
+                merge_kernel_size: 0,
+                ..cfg
+            },
+        ),
+        (
+            "in_patch_limit",
+            KimiK3NavitConfig {
+                in_patch_limit: u32::MAX,
+                ..cfg
+            },
+        ),
+        (
+            "patch_limit_on_one_side",
+            KimiK3NavitConfig {
+                patch_limit_on_one_side: 0,
+                ..cfg
+            },
+        ),
+    ] {
+        let err = cfg.plan(100, 100).unwrap_err();
+        assert!(err.contains(field), "{field}: {err}");
+    }
+
+    // In-range but large geometry still cannot wrap the grid arithmetic into
+    // an allocation size: the patch tensor has to fit an i32 shape.
+    let big = KimiK3NavitConfig {
+        patch_size: MAX_PATCH_SIZE,
+        merge_kernel_size: 2,
+        in_patch_limit: MAX_IN_PATCH_LIMIT,
+        patch_limit_on_one_side: MAX_PATCH_LIMIT_ON_ONE_SIDE,
+    };
+    let err = big.plan(1_000_000, 1_000_000).unwrap_err();
+    assert!(err.contains("past what one tensor can hold"), "{err}");
 }
 
 #[test]
@@ -175,6 +221,59 @@ fn patchify_is_row_major_channel_first_and_pads_black() {
     // Patch 4 is (row 1, col 0): y in 14..28, rows 14 and 15 red, then padding.
     assert_eq!(at(4, 0, 0, 0), 1.0);
     assert_eq!(at(4, 0, 2, 0), -1.0);
+
+    // The channels-last layout the tower reads holds the same values with the
+    // channel as the fastest axis, and the array form carries the same grid.
+    let mut last = Vec::new();
+    let same_item = proc
+        .prepare_into(
+            &DynamicImage::ImageRgb8(RgbImage::from_fn(30, 16, |x, _| {
+                if x < 15 {
+                    Rgb([255, 0, 0])
+                } else {
+                    Rgb([0, 0, 255])
+                }
+            })),
+            PatchLayout::ChannelsLast,
+            &mut last,
+        )
+        .unwrap();
+    assert_eq!(same_item.grid, item.grid);
+    assert_eq!(last.len(), values.len());
+    for patch in 0..8 {
+        for c in 0..3 {
+            for y in 0..14 {
+                for x in 0..14 {
+                    let nhwc = last[((patch * 14 + y) * 14 + x) * 3 + c];
+                    assert_eq!(nhwc, at(patch, c, y, x), "patch {patch} c {c} y {y} x {x}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn media_token_budget_bounds_a_request() {
+    let budget = max_media_tokens_per_request();
+    assert_eq!(budget, DEFAULT_MAX_MEDIA_TOKENS_PER_REQUEST);
+
+    // One worst-case image fits; the navit rule alone tops out just under
+    // 17,000 merged tokens.
+    assert!(check_media_token_budget([16_698]).is_ok());
+    assert!(check_media_token_budget([budget]).is_ok());
+    assert!(check_media_token_budget(std::iter::empty()).is_ok());
+
+    // Sixteen 4000x3000 photos are 247,104 media tokens, well past it, and
+    // the error names the total and the override.
+    let photo = KimiK3NavitConfig::default().plan(4000, 3000).unwrap();
+    assert_eq!(photo.num_tokens, 15_444);
+    let err = check_media_token_budget(std::iter::repeat_n(photo.num_tokens, 16)).unwrap_err();
+    assert!(err.contains("247104"), "{err}");
+    assert!(err.contains(MAX_MEDIA_TOKENS_ENV), "{err}");
+
+    // The sum is taken in u64, so a batch that would wrap u32 still refuses.
+    let err = check_media_token_budget(std::iter::repeat_n(u32::MAX, 4)).unwrap_err();
+    assert!(err.contains("over the per-request budget"), "{err}");
 }
 
 #[test]

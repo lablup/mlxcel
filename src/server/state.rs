@@ -578,6 +578,7 @@ fn build_slot_registry(config: &ServerConfig, slots_debug: bool) -> Arc<SlotRegi
 /// `server::startup` means every construction path (the server, the
 /// disaggregated worker, and every route test that builds an `AppState`) gets
 /// the same wiring from the same two values it already owns.
+#[cfg(test)]
 pub(crate) fn attach_native_chat_renderer(
     tokenizer: MlxcelTokenizer,
     chat_template: ChatTemplateProcessor,

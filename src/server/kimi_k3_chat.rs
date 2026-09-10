@@ -331,6 +331,22 @@ impl KimiK3Renderer {
         opts: &K3RenderOptions<'_>,
     ) -> Result<K3Rendered> {
         let tools = tools.filter(|t| !t.is_empty());
+        // A run of tool results is reordered below to follow the assistant's
+        // tool-call order, while the caller's image prompts and the worker's
+        // pixels are both in wire order. An image on a tool message would
+        // therefore be described by the prompt of whichever tool result landed
+        // in its place, and two same-sized images would pass every count check
+        // while swapping their features. Refuse instead: the XTML grammar
+        // renders a tool result as text and has no place to put an image.
+        if let Some(index) = messages
+            .iter()
+            .position(|m| m.role == Role::Tool && !m.content.image_parts().is_empty())
+        {
+            bail!(
+                "Kimi K3 chat rendering does not accept an image_url content part on a tool \
+                 message (message {index}); tool results render as text"
+            );
+        }
         let messages = normalize_xtml_tool_result_messages(messages);
 
         let mut sink = Sink::new(self);
@@ -584,7 +600,7 @@ impl<'a> Sink<'a> {
                     match part {
                         ContentPart::Text { text } => self.text_with_placeholders(text, images)?,
                         ContentPart::ImageUrl { .. } => {
-                            let prompt = images.next_prompt()?;
+                            let prompt = images.next_image_part_prompt()?;
                             self.image_prompt(&prompt)?;
                         }
                         ContentPart::VideoUrl { .. } => {
@@ -721,6 +737,24 @@ impl<'a> ImagePromptState<'a> {
             .ok_or_else(|| anyhow::anyhow!("More image placeholders than image prompts"))?;
         self.index += 1;
         Ok(prompt.clone())
+    }
+
+    /// The next image prompt for an `image_url` content part.
+    ///
+    /// The literal fallback of [`Self::next_prompt`] belongs to the text
+    /// path, where `<|kimi_image_placeholder|>` is ordinary text that the
+    /// caller re-encodes. An `image_url` part has no such text spelling: with
+    /// no prompt supplied it would put the placeholder into
+    /// [`K3Rendered::text`] and nothing into the ids, dropping the image from
+    /// the prompt the model actually reads. Refuse instead (#1342).
+    fn next_image_part_prompt(&mut self) -> Result<K3ImagePrompt> {
+        if self.prompts.is_none() {
+            bail!(
+                "Kimi K3: an image_url content part needs a pre-encoded image prompt, and the \
+                 renderer was given none"
+            );
+        }
+        self.next_prompt()
     }
 
     fn assert_consumed(&self) -> Result<()> {

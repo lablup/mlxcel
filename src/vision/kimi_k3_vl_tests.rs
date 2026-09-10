@@ -54,6 +54,11 @@ fn projector_shapes_and_merge_count_mismatch_errors() {
     let wrong = mlxcel_core::from_slice_f32(&[0.0; 18], &[3, 3, 2]);
     assert!(projector.forward(&wrong).is_err());
 
+    // A rank-1 array is refused by the same check rather than indexed into
+    // a shape that is not there.
+    let rank1 = mlxcel_core::from_slice_f32(&[0.0; 8], &[8]);
+    assert!(projector.forward(&rank1).is_err());
+
     // Merge: 3 rows need exactly 3 placeholders (id 99).
     let embeds = mlxcel_core::zeros(&[1, 5, 6], dtype::FLOAT32);
     let ids_ok = mlxcel_core::from_slice_i32(&[1, 99, 99, 99, 2], &[1, 5]);

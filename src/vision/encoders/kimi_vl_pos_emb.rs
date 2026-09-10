@@ -51,6 +51,9 @@ use super::KimiMediaGrid;
 /// Row 0 is therefore `sin(0) = 0` across columns `0..half` and `cos(0) = 1`
 /// across columns `half..2*half`. When `dim` is odd the sin/cos halves cover
 /// `dim - 1` columns, so a single zero column is appended to reach `dim`.
+///
+/// Used by: `encoders::kimi_vl` (MoonViT video position term) and
+/// `encoders::moonvit3d_pos_emb::time_embedding` (Kimi K3, `t > 1`).
 pub(crate) fn temporal_sinusoid(t: i32, dim: i32) -> UniquePtr<MlxArray> {
     let half = dim / 2;
     // pos = [0, 1, ..., t-1]; shape [t].

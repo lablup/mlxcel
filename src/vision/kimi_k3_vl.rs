@@ -43,7 +43,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::KimiK3Model;
 use crate::vision::encoders::moonvit3d::{MoonViT3DConfig, MoonViT3DGrid, MoonViT3DVisionModel};
 use crate::vision::merge::{self, InputEmbeddings};
-use crate::vision::processors::kimi_k3::KimiK3ImageProcessor;
+use crate::vision::processors::kimi_k3::{KimiK3ImageProcessor, KimiK3PreparedImage};
 
 /// The ids of the four media control tokens the image prompt is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,9 @@ impl KimiK3Projector {
     /// `merged`: `[M, kh*kw, vision_hidden]`. Returns `[M, text_hidden]`.
     pub fn forward(&self, merged: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
         let shape = mlxcel_core::array_shape(merged);
-        let rows = shape[0];
+        // The rank check comes first: `shape[0]` on a rank-0 array panics,
+        // and a caller that hands the projector the wrong array deserves an
+        // error rather than an abort.
         let width: i32 = shape.iter().skip(1).product();
         if shape.len() < 2 || width != self.merged_hidden {
             return Err(format!(
@@ -100,6 +102,7 @@ impl KimiK3Projector {
                 self.merged_hidden
             ));
         }
+        let rows = shape[0];
         let x = mlxcel_core::reshape(merged, &[rows, self.merged_hidden]);
         let x = self.proj_0.forward(&x);
         let x = mlxcel_core::gelu(&x);
@@ -196,6 +199,10 @@ impl KimiK3VLModel {
 
     /// Tower + merge + projector: `pixel_values` `[N, 3, p, p]` (the
     /// processor's channels-first layout) to `[M, text_hidden]`.
+    ///
+    /// The whole-batch form. The request path uses
+    /// [`Self::project_image_stream`], which never holds more than one
+    /// image's pixels and activations at a time.
     pub fn project_images(
         &self,
         pixel_values: &MlxArray,
@@ -206,6 +213,59 @@ impl KimiK3VLModel {
         let pv = mlxcel_core::transpose_axes(&pv, &[0, 2, 3, 1]);
         let merged = self.vision.forward_merged(&pv, grids)?;
         self.projector.forward(&merged)
+    }
+
+    /// Preprocess, run the tower and project one image at a time, returning
+    /// the `[sum(M_i), text_hidden]` rows in image order.
+    ///
+    /// Attention is per image, so the batch tensor a whole-request path would
+    /// build is sliced back apart inside the tower anyway; building it costs
+    /// one host f32 buffer plus its device copy for every image at once, and
+    /// with 16 images at the navit ceiling that is gigabytes before a single
+    /// block runs. Each image is evaluated before the next one starts so its
+    /// tower activations are released rather than accumulating in one lazy
+    /// graph.
+    ///
+    /// `planned` must be [`KimiK3ImageProcessor::plan_images`] over the same
+    /// images, in the same order: the caller has already sized the prompt
+    /// from it, so a geometry that disagrees here is refused rather than
+    /// projected into placeholders that no longer match.
+    pub fn project_image_stream(
+        &self,
+        images: &[image::DynamicImage],
+        planned: &[KimiK3PreparedImage],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        if images.len() != planned.len() {
+            return Err(format!(
+                "kimi_k3: {} image(s) against {} planned geometries",
+                images.len(),
+                planned.len()
+            ));
+        }
+        let dtype = self.text.activation_dtype();
+        let merge = self.vision.merge_kernel();
+        let mut projected = Vec::with_capacity(images.len());
+        for (index, (image, plan)) in images.iter().zip(planned).enumerate() {
+            let (pixels, item) = self.processor.prepare_image_array(image, dtype)?;
+            if item.grid != plan.grid {
+                return Err(format!(
+                    "kimi_k3: image {index} preprocessed to grid {:?} but the prompt was sized \
+                     from {:?}",
+                    item.grid, plan.grid
+                ));
+            }
+            let features = self.vision.forward(&pixels, &[item.grid])?;
+            let merged =
+                crate::vision::encoders::moonvit3d::tpool_merge(&features[0], item.grid, merge)?;
+            let rows = self.projector.forward(&merged)?;
+            mlxcel_core::eval(&rows);
+            projected.push(rows);
+        }
+        let refs: Vec<&MlxArray> = projected.iter().map(|r| r.as_ref().unwrap()).collect();
+        if refs.len() == 1 {
+            return Ok(mlxcel_core::copy(refs[0]));
+        }
+        Ok(mlxcel_core::concatenate_many(&refs, 0))
     }
 
     /// Merged input embeddings for a request that carries images: the text

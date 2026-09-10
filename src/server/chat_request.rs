@@ -1070,6 +1070,7 @@ fn kimi_k3_image_prompts(
 ) -> Result<Vec<super::kimi_k3_chat::K3ImagePrompt>> {
     let limits = super::media::current_image_input_limits();
     let mut prompts = Vec::with_capacity(image_data.len());
+    let mut media_tokens = Vec::with_capacity(image_data.len());
     for (index, bytes) in image_data.iter().enumerate() {
         let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
@@ -1084,8 +1085,21 @@ fn kimi_k3_image_prompts(
                 limits.max_height
             );
         }
+        media_tokens.push(
+            renderer
+                .navit_config()
+                .plan(width, height)
+                .map_err(|e| anyhow::anyhow!("image {index}: {e}"))?
+                .num_tokens,
+        );
         prompts.push(renderer.image_prompt(width, height)?);
     }
+    // The per-request media budget, checked here because this is the first
+    // point that knows every image's token cost. Without it one request can
+    // ask for hundreds of thousands of media tokens, and the tower's
+    // attention is quadratic in the patch count of each image.
+    crate::vision::processors::kimi_k3::check_media_token_budget(media_tokens)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(prompts)
 }
 

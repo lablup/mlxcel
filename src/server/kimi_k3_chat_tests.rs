@@ -1181,3 +1181,82 @@ fn image_prompt_places_media_ids_around_the_pad_run() {
     );
     assert!(rendered.text.contains("<|media_end|>what is it?"));
 }
+
+#[test]
+fn an_image_url_part_without_image_prompts_is_refused() {
+    // The literal `<|kimi_image_placeholder|>` fallback belongs to the text
+    // path. An `image_url` part rendered with no prompt supplied would put
+    // the placeholder in `text` and nothing in `ids`, so the model would
+    // never see the image; that has to be an error, not a silent drop.
+    let (_dir, renderer) = synthetic_renderer();
+    let message = Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            crate::server::types::request::ContentPart::Text {
+                text: "look:".to_string(),
+            },
+            crate::server::types::request::ContentPart::ImageUrl {
+                image_url: crate::server::types::request::ImageUrl::new(
+                    "data:image/png;base64,AA==",
+                ),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+        reasoning: None,
+    };
+    let err = renderer
+        .render(
+            &[message],
+            None,
+            &K3RenderOptions {
+                thinking_effort: None,
+                image_prompts: None,
+                ..K3RenderOptions::reference_defaults()
+            },
+        )
+        .expect_err("an image part with no prompt cannot render");
+    assert!(err.to_string().contains("image_url content part"), "{err}");
+}
+
+#[test]
+fn an_image_on_a_tool_message_is_refused() {
+    // A run of tool results is reordered to the assistant's tool-call order,
+    // while images stay in wire order, so an image on a tool message would be
+    // paired with the wrong prompt without any count check noticing.
+    let (_dir, renderer) = synthetic_renderer_with_media();
+    let media = renderer.media_token_ids().expect("media ids");
+    let prompt = renderer.image_prompt(100, 100).expect("image prompt");
+    assert!(prompt.ids.contains(&media.pad));
+    let tool_with_image = Message {
+        role: Role::Tool,
+        content: MessageContent::Parts(vec![
+            crate::server::types::request::ContentPart::Text {
+                text: "result".to_string(),
+            },
+            crate::server::types::request::ContentPart::ImageUrl {
+                image_url: crate::server::types::request::ImageUrl::new(
+                    "data:image/png;base64,AA==",
+                ),
+            },
+        ]),
+        name: Some("lookup".to_string()),
+        tool_call_id: Some("call_1".to_string()),
+        tool_calls: None,
+        reasoning: None,
+    };
+    let prompts = vec![prompt];
+    let err = renderer
+        .render(
+            &[user("go"), tool_with_image],
+            None,
+            &K3RenderOptions {
+                thinking_effort: None,
+                image_prompts: Some(&prompts),
+                ..K3RenderOptions::reference_defaults()
+            },
+        )
+        .expect_err("an image on a tool message cannot render");
+    assert!(err.to_string().contains("tool message"), "{err}");
+}

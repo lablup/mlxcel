@@ -188,6 +188,7 @@ impl Attention {
     /// `x`: `[L, hidden]` of one image; `cos`/`sin`: `[L, head_dim/2]`.
     fn forward(&self, x: &MlxArray, cos: &MlxArray, sin: &MlxArray) -> UniquePtr<MlxArray> {
         let l = mlxcel_core::array_shape(x)[0];
+        let dtype = mlxcel_core::array_dtype(x);
         let qkv = self.wqkv.forward(x);
         let qkv = mlxcel_core::reshape(&qkv, &[l, 3, self.num_heads, self.head_dim]);
         let pick = |i: i32| {
@@ -201,6 +202,14 @@ impl Attention {
         let (q, k) = apply_rope(&pick(0), &pick(1), cos, sin);
         let v = pick(2);
 
+        // The rotation runs against the f32 angle tables, so it promotes q and
+        // k. Cast them back: without this the attention output is f32, `wo`
+        // returns f32, the residual add promotes the stream, and every one of
+        // the 27 blocks runs its bf16 weights against an f32 activation
+        // (`docs/code-guidelines.md`, "Bridge Helpers Return the Input Dtype").
+        let q = mlxcel_core::astype(&q, dtype);
+        let k = mlxcel_core::astype(&k, dtype);
+
         // [1, heads, L, head_dim]; full bidirectional attention over the image.
         let to_heads = |a: &MlxArray| {
             let a = mlxcel_core::transpose_axes(a, &[1, 0, 2]);
@@ -209,8 +218,14 @@ impl Attention {
         let q = to_heads(&q);
         let k = to_heads(&k);
         let v = to_heads(&v);
+        // The fast kernel, not the graph path: the graph form materializes the
+        // `[1, heads, L, L]` score matrix, and `L` here is the whole image's
+        // patch count. At the navit ceiling of about 67,000 patches that is
+        // hundreds of gigabytes for one image, so the graph path is not an
+        // option at this width even though the image budget bounds how many
+        // such images one request may send.
         let attn = unsafe {
-            mlxcel_core::scaled_dot_product_attention(&q, &k, &v, self.scale, std::ptr::null())
+            mlxcel_core::fast_scaled_dot_product_attention(&q, &k, &v, self.scale, std::ptr::null())
         };
         let attn = mlxcel_core::reshape(&attn, &[self.num_heads, l, self.head_dim]);
         let attn = mlxcel_core::transpose_axes(&attn, &[1, 0, 2]);
