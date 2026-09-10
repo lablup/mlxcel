@@ -3893,3 +3893,41 @@ async fn video_part_expands_through_a_real_clip() {
         assert!(url.starts_with("data:image/png;base64,"));
     }
 }
+
+#[tokio::test]
+async fn video_expansion_refuses_more_clips_than_the_image_budget_before_decoding() {
+    // One frame per clip is the floor, so a body with more `video_url` parts
+    // than the per-request image limit can never be served. The refusal has to
+    // land before the resolver runs: the URLs below point at nothing, so
+    // reaching resolution would report a missing file instead, and reaching the
+    // decoder would spawn one ffprobe per clip for a request already refused.
+    let limit = crate::server::media::current_image_input_limits().max_images_per_request;
+    let clips = (0..=limit)
+        .map(|index| video_part(&format!("file:///no/such/clip-{index}.mp4")))
+        .collect::<Vec<_>>();
+    let mut request = request_with_messages(vec![user_parts(clips)]);
+
+    let message = expand_video_parts_to_frames_with_allowlist(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 16,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+        &[],
+    )
+    .await
+    .expect_err("more clips than the image budget is refused");
+
+    assert!(
+        message.contains(&format!("{} video part(s)", limit + 1))
+            && message.contains(&format!("limit of {limit}")),
+        "the refusal must name the clips and the limit: {message}"
+    );
+    assert_eq!(
+        request.video_urls().len(),
+        limit + 1,
+        "a refused request must be left untouched"
+    );
+}

@@ -1593,6 +1593,53 @@ pub fn frames_to_png(frames: &[DynamicImage]) -> Result<Vec<Vec<u8>>, VideoError
         .collect()
 }
 
+/// Decode a clip for the video-to-images fallback, reading only the frames
+/// that survive the `max_frames` cap (issue #1322).
+///
+/// [`load_video_source`] answers `target_fps` with up to [`FPS_MAX_FRAMES`]
+/// decoded frames held at once, and the fallback then keeps at most
+/// `max_frames` of them. Decoding the rest is peak memory and ffmpeg time
+/// spent on frames that are dropped before anything encodes them: at the
+/// default caps a 600 s 4096x4096 clip resolves to 768 frames of full-
+/// resolution RGB, tens of gigabytes, to keep sixteen. The frames kept here
+/// are the same even spread over the whole clip, because a uniform sample of
+/// a uniform sample is one.
+///
+/// Returns the kept frames together with the count `target_fps` alone would
+/// have sampled, so the caller can still report "kept of sampled".
+///
+/// # Errors
+/// The failures [`load_video_source`] returns: ffmpeg missing, an unprobeable
+/// container, a resource cap exceeded, or no frame decoded.
+pub fn load_video_source_frames_fallback(
+    source: &VideoSource,
+    target_fps: f64,
+    max_frames: usize,
+) -> Result<(Vec<DynamicImage>, usize), VideoError> {
+    if !ffmpeg_available() {
+        return Err(VideoError::FfmpegMissing);
+    }
+    let limits = VideoLimits::from_env();
+    let canonical = source.canonical_path().to_path_buf();
+    let meta = probe_video(source, &limits)?;
+    let sampled = smart_nframes(meta.total_frames, meta.fps, Some(target_fps), None).map_err(
+        |err| match err {
+            VideoError::Extract { message, .. } => VideoError::Extract {
+                path: canonical.clone(),
+                message,
+            },
+            other => other,
+        },
+    )?;
+    let decoded = sampled.min(max_frames.max(MIN_FALLBACK_MAX_FRAMES));
+    let indices = uniform_indices(meta.total_frames, decoded);
+    let frames = extract_frames_single_pass(source, &indices, meta.fps, &limits)?;
+    if frames.is_empty() {
+        return Err(VideoError::EmptyVideo(canonical));
+    }
+    Ok((frames, sampled))
+}
+
 /// Compute `nframes` evenly-spaced frame indices across
 /// `[0, total_frames - 1]`. Mirrors the Python `np.linspace(...).round()
 /// .astype(int)` call used in `load_video`.

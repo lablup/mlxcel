@@ -434,6 +434,26 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
         return Ok(0);
     }
 
+    let image_limit = super::media::current_image_input_limits().max_images_per_request;
+    // Counted once: the splice that adds the frames runs after the loop below,
+    // so the caller's own image count cannot move underneath it.
+    let existing_images = request.image_urls().len();
+    // Every clip contributes at least one frame image, so a body carrying more
+    // `video_url` parts than the per-request image budget can hold is already
+    // refused. Say so before the first ffprobe: the per-clip budget check in
+    // the loop would otherwise reach the same answer only after decoding every
+    // clip in a body that the JSON limit lets hold millions of them. Ahead of
+    // the ffmpeg probe too, because the request is the wrong shape whether or
+    // not a decoder is installed.
+    if existing_images.saturating_add(targets.len()) > image_limit {
+        return Err(format!(
+            "The request carries {} video part(s) alongside {existing_images} image input(s), and \
+             each clip expands to at least one frame image, over the per-request limit of \
+             {image_limit}. Send fewer clips or raise --max-images.",
+            targets.len()
+        ));
+    }
+
     if !crate::multimodal::video::ffmpeg_available() {
         return Err(
             "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
@@ -443,6 +463,7 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
     }
 
     let max_frames = settings.effective_max_frames();
+    let mut injected = 0usize;
     let mut expansions: Vec<(usize, usize, Vec<Vec<u8>>)> = Vec::with_capacity(targets.len());
     for (message_index, part_index, video_url) in targets {
         let resolved = super::media::resolve_video_url(&video_url, allowlist)
@@ -461,9 +482,11 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
         // runs on the blocking pool like the image decode path does rather than
         // parking a Tokio worker.
         let (kept, sampled) = tokio::task::spawn_blocking(move || {
-            let frames =
-                crate::multimodal::video::load_video_source(&resolved.source, Some(fps), None)?;
-            let sampled = frames.len();
+            let (frames, sampled) = crate::multimodal::video::load_video_source_frames_fallback(
+                &resolved.source,
+                fps,
+                max_frames,
+            )?;
             let kept = crate::multimodal::video::subsample_evenly(frames, max_frames);
             crate::multimodal::video::frames_to_png(&kept).map(|png| (png, sampled))
         })
@@ -476,19 +499,17 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
              from {label} as ordered images",
             kept.len()
         );
+        injected += kept.len();
+        // The frames become ordinary image parts, so they spend the same
+        // per-request image budget. Refuse here, naming the frames, rather than
+        // letting `validate_image_count` report a count the caller never sent.
+        // Checked per clip so a request that is already over budget stops at
+        // the clip that broke it instead of decoding the rest of the body.
+        if let Some(message) = video_frame_budget_rejection(existing_images, injected, image_limit)
+        {
+            return Err(message);
+        }
         expansions.push((message_index, part_index, kept));
-    }
-
-    // The frames become ordinary image parts, so they spend the same per-request
-    // image budget. Refuse here, naming the frames, rather than letting
-    // `validate_image_count` report a count the caller never sent.
-    let injected: usize = expansions.iter().map(|(_, _, frames)| frames.len()).sum();
-    if let Some(message) = video_frame_budget_rejection(
-        request.image_urls().len(),
-        injected,
-        super::media::current_image_input_limits().max_images_per_request,
-    ) {
-        return Err(message);
     }
 
     apply_video_frame_expansion(request, expansions);
