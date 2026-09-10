@@ -1879,3 +1879,42 @@ fn iquestloopcoder_without_loop_num_takes_the_vendor_default() {
         ModelType::IQuestLoopCoder
     );
 }
+
+#[test]
+fn iquestloopcoder_architecture_beats_an_iquestcoder_model_type() {
+    // The likelier relabel than `llama`: someone marks the Loop checkpoint as
+    // its non-loop sibling. That arm routes to the shared Llama decoder, which
+    // would run the 80-layer stack once instead of twice and never read a
+    // `gate_projections` tensor, so the architecture string has to win.
+    let mut config = iquest_loop_coder_config();
+    config["model_type"] = json!("iquestcoder");
+    assert_eq!(
+        detect_iquest_loop_coder("iquestloopcoder_as_iquestcoder", config).unwrap(),
+        ModelType::IQuestLoopCoder
+    );
+}
+
+#[test]
+fn iquestloopcoder_architecture_beats_any_model_type_spelling() {
+    for spelling in ["mistral", "qwen2", "iquest_loop_coder", "something-else"] {
+        let mut config = iquest_loop_coder_config();
+        config["model_type"] = json!(spelling);
+        assert_eq!(
+            detect_iquest_loop_coder("iquestloopcoder_spelling", config).unwrap(),
+            ModelType::IQuestLoopCoder,
+            "model_type {spelling:?} must not outrank the Loop architecture string"
+        );
+    }
+}
+
+#[test]
+fn iquestcoder_architecture_is_untouched_by_the_loop_guard() {
+    // The sibling must keep routing to its own decoder; the two architecture
+    // strings differ only by an infix and are compared for exact equality.
+    let mut config = iquest_coder_config();
+    config["model_type"] = json!("llama");
+    assert_eq!(
+        detect_iquest_coder("iquestcoder_as_llama", config).unwrap(),
+        ModelType::IQuestCoder
+    );
+}

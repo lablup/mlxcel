@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -116,14 +116,25 @@ impl IQuestLoopCoderModel {
         // `supports_padded_prefill` is false, so nothing hands this a stacked
         // batch; a batch would silently share one cache pair across rows.
         debug_assert_eq!(mlxcel_core::array_shape(input_ids)[0], 1);
+        // Both caches take the same tokens on every call, so they cannot drift.
+        // Pass 2 rotating at the pass-1 offset depends on that, so state it.
+        debug_assert_eq!(
+            caches[0].pass1.offset, caches[0].pass2.offset,
+            "the two caches must advance in lockstep; the shared RoPE offset assumes it"
+        );
         let offset = caches[0].pass1.offset;
 
         let mut h = self.embed_tokens.forward(input_ids);
 
         // Pass 1. Each layer's returned K/V is past history plus the tokens
-        // written this call; pass 2 attends exactly these arrays. They are MLX
-        // views over the cache buffers, so holding all of them costs no extra
-        // device memory beyond the caches themselves.
+        // written this call; pass 2 attends exactly these arrays. In `Fp16`,
+        // `update_and_fetch` returns `slice` views, which MLX implements as
+        // `copy_shared_buffer`, so holding all of them costs no extra device
+        // memory beyond the caches themselves. That is *only* true in `Fp16`:
+        // the `Int8` and `Turbo*` arms dequantize on read and hand back
+        // materialized tensors, so this loop would then pin one full K/V window
+        // per layer. See `set_kv_cache_layer_modes`, which is why those modes
+        // are refused rather than wired.
         let mut pass1_kv = Vec::with_capacity(self.layers.len());
         for (i, layer) in self.layers.iter().enumerate() {
             let (out, keys, values) = layer.forward_pass1(&h, &mut caches[i].pass1, offset);
@@ -428,6 +439,35 @@ impl LanguageModel for IQuestLoopCoderWrapper {
         self.reset_caches();
     }
 
+    /// FP16 KV only, stated rather than silently ignored.
+    ///
+    /// The scheduler injects a per-layer mode table through here for every
+    /// model-owned family, and the trait default drops it on the floor. It also
+    /// logs `kv_cache_mode_applied_layers` from the *configured* table rather
+    /// than from anything the model did, so an operator passing
+    /// `--kv-cache-mode int8` would otherwise get no memory saving and a log
+    /// line claiming the mode reached all 80 layers.
+    ///
+    /// Wiring the quantized modes is not a small change and is deliberately not
+    /// attempted: `KVCache::update_and_fetch` returns dequantized *copies* in
+    /// `Int8` and `Turbo*`, not views, and `hidden_states` holds every layer's
+    /// pass-1 return alive across the whole of pass 2, so a quantized pass-1
+    /// cache would multiply peak device memory by the layer count instead of
+    /// reducing it. `supports_turbo_kv` already omits this family, so
+    /// `mlxcel arch` reports FP16 only; this makes the runtime agree.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        if modes.iter().any(|mode| *mode != KVCacheMode::Fp16) {
+            tracing::warn!(
+                "iquestloopcoder serves FP16 KV only; the requested per-layer KV cache modes \
+                 are ignored"
+            );
+        }
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        Some(vec![KVCacheMode::Fp16; self.num_layers])
+    }
+
     /// Chunked prefill is safe here, and this states it rather than leaving it
     /// to the default.
     ///
@@ -437,7 +477,7 @@ impl LanguageModel for IQuestLoopCoderWrapper {
     /// chunk and the windowed mask has to match the ring's. Verified on the real
     /// 40B checkpoint at chunk sizes landing on, inside and across the window
     /// boundary (218 single-pass against 128, 97, 64 and 32): identical top-5
-    /// token ids, logits within one f16 ulp. See
+    /// token ids, logits within the 0.25 the test asserts. See
     /// `check_chunked_prefill` in `tests/iquestloopcoder_parity.rs`.
     fn supports_chunked_prefill(&self) -> bool {
         true

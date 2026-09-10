@@ -666,13 +666,14 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // it loadable by a stack that will not run its `auto_map` code) routes
         // to the same decoder either way, but it has to pass the same config
         // guards; see `declares_iquest_coder_architecture`.
-        // A relabelled IQuest-Coder Loop checkpoint, guarded ahead of the plain
-        // Llama arm for the reason in `declares_iquest_loop_coder_architecture`.
-        // The two architecture strings are distinct, so the order relative to
-        // the IQuest-Coder arm below is readability only.
-        "llama" | "mistral" if declares_iquest_loop_coder_architecture(&v) => {
-            iquest_loop_coder_model_type(&v)
-        }
+        // The IQuest-Coder Loop architecture string beats every `model_type`
+        // spelling, not just `llama`. Guarding only the `llama` relabel left the
+        // likelier mistake open: `"model_type": "iquestcoder"` with
+        // `IQuestLoopCoderForCausalLM` fell through to the `iquestcoder` arm
+        // below, which routes to the shared Llama decoder and would run the
+        // stack once instead of twice, never reading a `gate_projections`
+        // tensor. That output is fluent, so it has to be refused here.
+        _ if declares_iquest_loop_coder_architecture(&v) => iquest_loop_coder_model_type(&v),
         "llama" | "mistral" if declares_iquest_coder_architecture(&v) => {
             iquest_coder_model_type(&v)
         }
