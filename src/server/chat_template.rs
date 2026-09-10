@@ -206,6 +206,19 @@ pub struct ChatTemplateProcessor {
     /// loaded tokenizer, so every route and every test that builds an
     /// `AppState` gets the same wiring.
     kimi_k3: Option<Arc<super::kimi_k3_chat::KimiK3Renderer>>,
+    /// The loaded tokenizer's vocabulary family is Kimi K3 but [`Self::kimi_k3`]
+    /// is `None` (#1743 security review).
+    ///
+    /// `KimiK3Renderer::new` requires all six control-token spellings named in
+    /// the vocabulary; a checkpoint whose `added_tokens_decoder` names only
+    /// some of them (the structural four, say) still has a live control block
+    /// that `MlxcelTokenizer::encode` recognizes with special parsing on, but
+    /// gets no renderer to keep message text away from it. Falling back to the
+    /// generic template in that case is the same fail-open shape the router
+    /// path was fixed for in a6aac844, just reached through `AppState`
+    /// instead of the disaggregated router. `prepare_chat_request_with_cache`
+    /// refuses the request instead of reaching that fallback when this is set.
+    kimi_k3_family_unrenderable: bool,
     #[cfg(test)]
     template_compile_count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -367,6 +380,7 @@ impl ChatTemplateProcessor {
             default_enable_thinking: false,
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
             kimi_k3: None,
+            kimi_k3_family_unrenderable: false,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -387,6 +401,7 @@ impl ChatTemplateProcessor {
             default_enable_thinking: false,
             generation_prompt_suffix: None,
             kimi_k3: None,
+            kimi_k3_family_unrenderable: false,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -436,6 +451,22 @@ impl ChatTemplateProcessor {
     /// tokenizer side.
     pub(crate) fn kimi_k3(&self) -> Option<&Arc<super::kimi_k3_chat::KimiK3Renderer>> {
         self.kimi_k3.as_ref()
+    }
+
+    /// Record that the loaded tokenizer's vocabulary family is Kimi K3 but no
+    /// renderer could be attached (#1743 security review). See
+    /// [`Self::kimi_k3_family_unrenderable`] on the field for why this must
+    /// not be treated the same as an ordinary template checkpoint.
+    pub(crate) fn mark_kimi_k3_family_unrenderable(&mut self) {
+        self.kimi_k3_family_unrenderable = true;
+    }
+
+    /// Whether request preparation must refuse rather than fall back to the
+    /// generic template: the family is Kimi K3 (gated the same way the
+    /// disaggregated router gates it, on the vocabulary family rather than on
+    /// `kimi_k3_control_ids()`) and [`Self::kimi_k3`] is `None`.
+    pub(crate) fn kimi_k3_family_unrenderable(&self) -> bool {
+        self.kimi_k3_family_unrenderable
     }
 
     /// Set whether to add a generation prompt at the end

@@ -562,6 +562,28 @@ pub(crate) fn attach_native_chat_renderer(
     if let Some(renderer) = super::kimi_k3_chat::KimiK3Renderer::new(Arc::clone(&tokenizer)) {
         tracing::info!("Kimi K3 tiktoken vocabulary detected; using the native XTML chat renderer");
         chat_template.attach_kimi_k3(Arc::new(renderer));
+    } else if tokenizer
+        .tiktoken()
+        .is_some_and(|t| t.family() == crate::tokenizer::TiktokenFamily::KimiK3)
+    {
+        // Same fail-open shape the disaggregated router was fixed for in
+        // a6aac844 (#1743 security review): `KimiK3Renderer::new` requires
+        // all six control-token spellings, and a checkpoint whose
+        // `added_tokens_decoder` names only some of them still has a live
+        // control block `MlxcelTokenizer::encode` recognizes with special
+        // parsing on. Falling through here to the generic template would let
+        // `prepare_chat_request_with_cache` render user text as a plain
+        // string and hand it to that special-parsing encode, re-tokenizing
+        // any `<|open|>` / `<|sep|>` spellings a message body wrote as the
+        // real control ids. Gated the same way the router gates it, on the
+        // vocabulary family rather than on `kimi_k3_control_ids()`, which is
+        // all-or-nothing and would report `None` here regardless.
+        tracing::error!(
+            "Kimi K3 tiktoken vocabulary detected, but its control-token names are incomplete; \
+             refusing to fall back to the generic chat template, which would let message text \
+             re-tokenize as control ids"
+        );
+        chat_template.mark_kimi_k3_family_unrenderable();
     }
     (tokenizer, chat_template)
 }

@@ -377,6 +377,21 @@ pub(crate) async fn prepare_chat_request_with_cache(
     prefill_assistant: bool,
     thinking_markers: &crate::tokenizer::ThinkingMarkers,
 ) -> Result<PreparedChatRequest> {
+    // Refuse rather than fall back to the generic template when the loaded
+    // tokenizer's vocabulary family is Kimi K3 but no native renderer could be
+    // attached (#1743 security review). The fallback below would render user
+    // text as a plain string and pass it to `MlxcelTokenizer::encode`, which
+    // still recognizes the checkpoint's live control-token spellings with
+    // special parsing on; see `ChatTemplateProcessor::kimi_k3_family_unrenderable`
+    // for why this cannot be gated on `kimi_k3_control_ids()` instead.
+    if processor.kimi_k3_family_unrenderable() {
+        anyhow::bail!(
+            "the loaded tokenizer's Kimi K3 control-token vocabulary is incomplete: refusing \
+             to render through the generic chat template, which would let message text \
+             re-tokenize as control ids"
+        );
+    }
+
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
     let declared_videos = request.video_urls().len();

@@ -3245,6 +3245,36 @@ mod reasoning_format_route_tests {
         assert_eq!(streamed_content(PLAIN, 3, None), PLAIN);
     }
 
+    /// Kimi K3's think block is always prompt-primed open in practice, so this
+    /// mirrors `a_primed_block_synthesizes_its_open_marker_in_the_stream` for
+    /// the K3 marker pair (#1743 security review: `canonical_thinking_pair`
+    /// had no K3 arm, so the close marker in the streamed form never matched
+    /// the non-streaming `with_thoughts` form under `--reasoning-format
+    /// none`).
+    #[test]
+    fn a_primed_k3_think_block_closes_byte_for_byte_in_the_stream() {
+        const K3_PRIMED: &str = "let me check the weather<|close|>think<|sep|>the answer";
+        let answer = clean_structural_tokens(K3_PRIMED);
+        let reasoning = super::extract_reasoning_content(K3_PRIMED, true);
+        let with_thoughts = content_with_thinking_block(K3_PRIMED, &answer, reasoning.as_deref());
+        assert_eq!(answer, "the answer");
+        // The non-streaming form synthesizes the open marker the prompt
+        // primed away, exactly as it does for the Qwen-style primed case
+        // above; the raw generation never carried it.
+        assert_eq!(
+            with_thoughts,
+            "<|open|>think<|sep|>let me check the weather<|close|>think<|sep|>the answer",
+            "the open marker is synthesized, not carried by the raw generation"
+        );
+        for fragments in 1..=8 {
+            assert_eq!(
+                streamed_content(K3_PRIMED, fragments, Some("<|close|>think<|sep|>")),
+                with_thoughts,
+                "fragments = {fragments}"
+            );
+        }
+    }
+
     #[test]
     fn a_gemma_style_channel_block_keeps_its_delimiters_too() {
         // Reconstructing from the extracted reasoning preserves the Gemma

@@ -41,9 +41,8 @@ fn synthetic_tokenizer(
     std::fs::write(dir.path().join("vocab.tiktoken"), vocab).expect("write vocab");
     std::fs::write(dir.path().join("tokenizer_config.json"), tokenizer_config)
         .expect("write config");
-    let tokenizer =
-        TiktokenTokenizer::from_file(&dir.path().join("vocab.tiktoken"), dir.path())
-            .expect("load tiktoken");
+    let tokenizer = TiktokenTokenizer::from_file(&dir.path().join("vocab.tiktoken"), dir.path())
+        .expect("load tiktoken");
     (dir, tokenizer)
 }
 

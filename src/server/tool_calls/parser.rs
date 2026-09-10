@@ -114,6 +114,13 @@ fn strip_thinking(text: &str) -> String {
 /// Used by: tool_calls::parser
 fn clean_content_markers(text: &str) -> String {
     let text = atem::strip_atem_markup(text);
+    // Kimi K3: a leftover tool-call block, contents included, reaches this
+    // pass on the no-tools request path (`should_parse_tool_calls` is false,
+    // so `try_kimi_k3` never runs) or when the claim predicate in
+    // `formats::try_kimi_k3` declined. Dropped whole so it agrees with what
+    // the streaming `CHAT_DELIMITERS` table suppresses for the same markers
+    // (#1743 security review).
+    let text = formats::strip_kimi_k3_tools_block(&text);
     text.replace("<turn|>", "")
         .replace("<|turn>", "")
         .replace("<|think|>", "")
@@ -125,9 +132,13 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|content_text|>", "")
         .replace("<|end_message|>", "")
         // Kimi K3: a stray `response` tag when the model closed the channel
-        // without opening it, or opened it without closing.
+        // without opening it, or opened it without closing, and the outer
+        // per-turn `message` close, which the model always emits (#1743
+        // security review: it is in no strip table upstream of this one and
+        // was reaching `message.content` verbatim).
         .replace("<|open|>response<|sep|>", "")
         .replace("<|close|>response<|sep|>", "")
+        .replace("<|close|>message<|sep|>", "")
         .trim()
         .to_string()
 }
@@ -914,6 +925,39 @@ mod tests {
         let input = "<|turn>content<turn|><|think|>";
         let result = clean_content_markers(input);
         assert_eq!(result, "content");
+    }
+
+    /// #1743 security review: the outer per-turn `<|close|>message<|sep|>`
+    /// closer reaches `message.content` on the non-thinking non-streaming
+    /// path (no `<|open|>` / `<|close|>` / `<|sep|>` bare-marker sweep runs
+    /// here the way it does inside `formats::strip_kimi_k3_markers`, so
+    /// leaving it out of this table let it survive verbatim).
+    #[test]
+    fn clean_content_markers_strips_kimi_k3_message_close() {
+        let input = "the answer<|close|>message<|sep|>";
+        assert_eq!(clean_content_markers(input), "the answer");
+    }
+
+    /// #1743 security review: a no-tools request (`should_parse_tool_calls`
+    /// false) never reaches `formats::try_kimi_k3`, so a stray K3 tool-call
+    /// block previously reached `message.content` raw, disagreeing with what
+    /// the streaming `CHAT_DELIMITERS` table suppresses for the same
+    /// generation.
+    #[test]
+    fn clean_structural_tokens_drops_a_leftover_kimi_k3_tools_block() {
+        let raw = concat!(
+            "the answer ",
+            "<|open|>tools<|sep|>",
+            r#"<|open|>call tool="get_weather" index="1"<|sep|>"#,
+            r#"<|open|>argument key="location" type="string"<|sep|>Seoul<|close|>argument<|sep|>"#,
+            "<|close|>call<|sep|><|close|>tools<|sep|>",
+            "<|close|>message<|sep|>",
+        );
+        let cleaned = clean_structural_tokens(raw);
+        assert_eq!(cleaned, "the answer");
+        for leaked in ["get_weather", "Seoul", "<|open|>", "<|close|>"] {
+            assert!(!cleaned.contains(leaked), "leaked {leaked:?}: {cleaned:?}");
+        }
     }
 
     // -- Prompt-primed Gemma 4 (enable_thinking=true) --

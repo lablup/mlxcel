@@ -137,10 +137,17 @@ pub struct FilterOutput {
 
 /// The canonical thinking marker pair a matched delimiter belongs to (#1470).
 ///
-/// Deliberately the same two pairs `tool_calls::parser::THINKING_MARKER_PAIRS`
+/// Deliberately the same marker pairs `tool_calls::parser::THINKING_MARKER_PAIRS`
 /// carries, because the streamed markers have to equal the ones the
 /// non-streaming content form writes. A family absent from that list reports
 /// `None` here and is undelimited on both paths.
+///
+/// Kimi K3's pair was missing here until #1743's security review: the open
+/// was still echoed correctly under `--reasoning-format none` because
+/// `ThinkingDelimiterEcho` resolves it separately, from the primed close
+/// marker via `thinking_marker_pair_for_close` rather than through this
+/// function, but the close never was, since `FilterOutput::thinking_close`
+/// is populated only from a match reported here.
 fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static str)> {
     match delimiter {
         "<think>" | "</think>" => Some(("<think>", "</think>")),
@@ -148,6 +155,9 @@ fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static st
             Some(("<|content_thinking|>", "<|end_message|>"))
         }
         "<|channel>thought" | "<|channel>" | "<channel|>" => Some(("<|channel>", "<channel|>")),
+        "<|open|>think<|sep|>" | "<|close|>think<|sep|>" => {
+            Some(("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
+        }
         _ => None,
     }
 }
@@ -281,15 +291,22 @@ const MUSE_PRIMED_SELF_SPACED: &str = " to=self<|message|>";
 ///   shares a prefix with any other entry in this table (the closest is
 ///   Gemma 4's `<|tool_call>` / `<tool_call|>`, which start with `<|` / `<t`
 ///   rather than `<s` / `<e`), so this family cannot partial-match another.
-/// - Kimi K3 XTML (`<|open|>TAG<|sep|>` / `<|close|>TAG<|sep|>`) contributes six
-///   entries: the `think` pair drives the reasoning split, the `response` pair
-///   is stripped (it wraps the visible answer rather than hiding it), and the
-///   `tools` pair brackets the tool-call block. They cannot partial-match any
-///   other entry: every other `<|`-prefixed marker in this table continues with
-///   `c`, `t`, `s`, `e` or `m` at byte 2, while K3's continue with `o` and `c`
-///   and then diverge again (`<|cl` vs `<|co`). Nor do they contain another
-///   entry as a substring: `>think<` is not `<think>`. All six stay under the
-///   existing longest delimiter, so the partial-match window is unchanged.
+/// - Kimi K3 XTML (`<|open|>TAG<|sep|>` / `<|close|>TAG<|sep|>`) contributes
+///   seven entries: the `think` pair drives the reasoning split, the
+///   `response` pair is stripped (it wraps the visible answer rather than
+///   hiding it), the `tools` pair brackets the tool-call block, and the
+///   `<|close|>message<|sep|>` closer for the outer per-turn wrapper is
+///   stripped the same way `response` is. That closer has no opener of its
+///   own to pair with here (the wrapper is opened by the generation prompt or
+///   a prior turn's history, never by the model), and the model always emits
+///   it, so leaving it out let it reach `delta.content` verbatim (#1743
+///   security review). They cannot partial-match any other entry: every other
+///   `<|`-prefixed marker in this table continues with `c`, `t`, `s`, `e` or
+///   `m` at byte 2, while K3's continue with `o` and `c` and then diverge
+///   again on the tag name (`think` / `response` / `tools` / `message`). Nor
+///   do they contain another entry as a substring: `>think<` is not
+///   `<think>`. All seven stay under the existing longest delimiter, so the
+///   partial-match window is unchanged.
 /// - ATEM `<atem:function_calls>` is a regular fixed delimiter. The
 ///   attribute-bearing `<atem:invoke ...>` and `<atem:parameter ...>` openers
 ///   are matched dynamically from their fixed prefixes so arbitrary names do
@@ -372,6 +389,11 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|close|>response<|sep|>", DelimiterAction::Strip),
     ("<|close|>tools<|sep|>", DelimiterAction::ExitToolCall),
     ("<|open|>tools<|sep|>", DelimiterAction::EnterToolCall),
+    // Closes the outer per-turn `message` wrapper. The model always emits
+    // this (the wrapper's open is primed by the generation prompt or belongs
+    // to a prior turn, never generated), so it is stripped unconditionally
+    // like the `response` tags rather than paired with an enter/exit action.
+    ("<|close|>message<|sep|>", DelimiterAction::Strip),
     // ATEM (Muse/Onyx): the outer function-call wrapper is fixed. Invoke and
     // parameter open tags carry attributes and are handled by the dynamic
     // matcher below; their close tags are fixed and depth-aware so inner closes
@@ -2583,6 +2605,34 @@ mod tests {
             drain_char_by_char(&mut filter, "<|channel>thought\nhidden<channel|>visible");
         assert_eq!(content, "visible");
         assert!(reasoning.contains("hidden"));
+    }
+
+    /// #1743 security review: `canonical_thinking_pair` had no K3 arm, so
+    /// `FilterOutput::thinking_close` stayed `None` on the delimiter match that
+    /// exits the K3 `think` channel, even though `thinking_open` was populated
+    /// (the non-primed case matches an `EnterThinking` delimiter here too).
+    /// Under `--reasoning-format none` this broke the #1470 byte-for-byte
+    /// stream-against-non-stream invariant: the open marker was echoed and the
+    /// close never was.
+    #[test]
+    fn kimi_k3_open_think_marker_reports_both_canonical_delimiters() {
+        let mut filter = StreamFilter::new();
+        let output = filter.feed("<|open|>think<|sep|>reasoning<|close|>think<|sep|>answer");
+        assert_eq!(output.thinking_open, Some("<|open|>think<|sep|>"));
+        assert_eq!(output.thinking_close, Some("<|close|>think<|sep|>"));
+    }
+
+    /// The primed-open case: the filter starts inside `Thinking`, so the exit
+    /// delimiter is the only one matched, and `thinking_close` must still be
+    /// populated (the open marker is synthesized separately by
+    /// `routes::chat::ThinkingDelimiterEcho` from the primed close marker, not
+    /// from this field).
+    #[test]
+    fn kimi_k3_primed_open_think_marker_reports_the_close_delimiter() {
+        let mut filter = StreamFilter::new_primed_open_thinking();
+        let output = filter.feed("reasoning<|close|>think<|sep|>answer");
+        assert_eq!(output.thinking_open, None);
+        assert_eq!(output.thinking_close, Some("<|close|>think<|sep|>"));
     }
 }
 
