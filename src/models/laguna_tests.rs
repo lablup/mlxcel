@@ -876,3 +876,173 @@ fn switch_linear_applies_per_expert_global_scale_after_gather_qmm() {
     w.insert("sw.global_scale".into(), f32_array(&[0.5, 2.0, 1.0], &[3]));
     assert!(SwitchLinear::from_weights_with_mode(&w, "sw", 64, 4, "affine").is_err());
 }
+
+/// `config.json` is untrusted input on the `mlxcel generate -m <org>/<repo>`
+/// path. Each value here reaches MLX as an out-of-range `argpartition` pivot or
+/// as a NaN that never throws, and an MLX C++ exception crossing the cxx bridge
+/// aborts the process rather than failing the load.
+#[test]
+fn validate_rejects_routing_values_that_abort_inside_mlx() {
+    let base: ModelArgs = serde_json::from_str(TINY_CONFIG).unwrap();
+    base.validate().expect("the tiny config is valid");
+
+    // The serde default. A config that declares sparse layers through
+    // `mlp_layer_types` but omits `num_experts_per_tok` yields 0, and
+    // `kth = num_experts - 0` is one past the end of the score row.
+    let mut args = base.clone();
+    args.num_experts_per_tok = 0;
+    let err = args.validate().expect_err("k = 0 must be rejected");
+    assert!(err.contains("num_experts_per_tok"), "{err}");
+
+    for bad_k in [base.num_experts + 1, usize::MAX] {
+        let mut args = base.clone();
+        args.num_experts_per_tok = bad_k;
+        assert!(args.validate().is_err(), "k = {bad_k}");
+    }
+
+    let mut args = base.clone();
+    args.num_experts = 0;
+    assert!(args.validate().is_err());
+
+    let mut args = base.clone();
+    args.num_hidden_layers = 1_000_000;
+    assert!(args.validate().is_err());
+
+    for bad in [f32::INFINITY, f32::NAN] {
+        let mut args = base.clone();
+        args.moe_routed_scaling_factor = bad;
+        assert!(args.validate().is_err(), "routed_scaling_factor {bad}");
+        let mut args = base.clone();
+        args.moe_router_logit_softcapping = bad;
+        assert!(args.validate().is_err(), "softcapping {bad}");
+    }
+
+    // A `head_dim` below 2 used to panic inside `Ord::clamp` (which asserts
+    // `min <= max`) while resolving the partial-rotary width.
+    for bad_dim in [0usize, 1] {
+        let mut args = base.clone();
+        args.head_dim = Some(bad_dim);
+        assert!(args.validate().is_err(), "head_dim {bad_dim}");
+        // And the helper itself no longer panics on the way there.
+        let _ = args.layer_rope(SLIDING_ATTENTION).rotated_dims;
+    }
+
+    // A dense-only config never touches the router, so the MoE keys stay free.
+    let mut args = base.clone();
+    args.mlp_layer_types = Some(vec!["dense".into(); args.num_hidden_layers]);
+    args.num_experts = 0;
+    args.num_experts_per_tok = 0;
+    args.validate().expect("dense-only config needs no router");
+}
+
+/// The partition pivot is clamped into the score row the router actually
+/// emitted, so no `num_experts_per_tok` can reach `argpartition` out of range.
+#[test]
+fn router_select_clamps_the_partition_pivot_into_the_score_row() {
+    let scores = f32_array(&[0.1, 0.9, 0.5, 0.3], &[1, 4]);
+
+    // k = 0 used to compute `kth = 4` on a 4-wide row, which MLX rejects by
+    // throwing; the clamp keeps one expert.
+    let (indices, weights) = router_select(&scores, None, 0, true, 1.0);
+    assert_eq!(mlxcel_core::array_shape(&indices), vec![1, 1]);
+    assert_eq!(to_vec(&indices), vec![1.0]);
+    assert_eq!(to_vec(&weights), vec![1.0]);
+
+    // k past the row width used to slice a negative start out of the partition
+    // order, silently returning fewer than k experts instead of failing.
+    let (indices, _) = router_select(&scores, None, 9, true, 1.0);
+    assert_eq!(mlxcel_core::array_shape(&indices), vec![1, 4]);
+
+    // The in-range case is untouched.
+    let (indices, _) = router_select(&scores, None, 2, true, 1.0);
+    let mut chosen = to_vec(&indices);
+    chosen.sort_by(f32::total_cmp);
+    assert_eq!(chosen, vec![1.0, 2.0]);
+}
+
+/// The router width and the stacked expert planes come from different tensors,
+/// and `router_select` sizes the index range from the router. Planes shorter
+/// than the router are an out-of-bounds `gather_qmm` read on an ordinary token.
+#[test]
+fn a_router_wider_than_the_expert_planes_is_rejected() {
+    let args: ModelArgs = serde_json::from_str(TINY_CONFIG).unwrap();
+    LagunaModel::from_weights(&tiny_weights(&args), &args).expect("baseline builds");
+
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        let mut w = tiny_weights(&args);
+        let key = format!("model.layers.1.mlp.switch_mlp.{proj}.weight");
+        let shape = mlxcel_core::array_shape(w.get(&key).expect("stacked plane"));
+        let short = vec![shape[0] - 1, shape[1], shape[2]];
+        let n: i32 = short.iter().product();
+        w.insert(key, f32_array(&vec![0.1; n as usize], &short));
+        let err = LagunaModel::from_weights(&w, &args)
+            .err()
+            .expect("short plane must be rejected");
+        assert!(err.contains("expert planes"), "{proj}: {err}");
+    }
+
+    // A correction bias that cannot broadcast onto the score row is refused at
+    // load; MLX would throw on the add instead.
+    let mut w = tiny_weights(&args);
+    w.insert(
+        "model.layers.1.mlp.gate.e_score_correction_bias".into(),
+        f32_array(&[0.0; 3], &[3]),
+    );
+    let err = LagunaModel::from_weights(&w, &args)
+        .err()
+        .expect("bias width must match");
+    assert!(err.contains("e_score_correction_bias"), "{err}");
+}
+
+/// An expert plane past the declared count means the config under-reports the
+/// checkpoint. Stacking only the declared experts leaves the router able to
+/// index past the stack, and it sends every leftover plane through the dense
+/// transcode as a linear nothing ever reads.
+#[test]
+fn sanitize_rejects_an_expert_past_the_declared_count() {
+    let mut args = xs_config();
+    args.num_hidden_layers = 2;
+    args.num_experts = 2;
+    let (mut w, _, _) = compressed_tensors_weights(3);
+    let err = sanitize_weights(&mut w, &args).expect_err("3 planes, 2 declared");
+    assert!(err.contains("num_experts = 2"), "{err}");
+
+    // Same rule on the per-expert bf16 path.
+    let mut args = xs_config();
+    args.num_hidden_layers = 1;
+    args.num_experts = 1;
+    args.quantization_config = None;
+    let mut w: WeightMap = std::collections::HashMap::new();
+    for e in 0..2 {
+        w.insert(
+            format!("model.layers.0.mlp.experts.{e}.down_proj.weight"),
+            f32_array(&[e as f32; 4], &[2, 2]),
+        );
+    }
+    let err = sanitize_weights(&mut w, &args).expect_err("2 planes, 1 declared");
+    assert!(err.contains("num_experts = 1"), "{err}");
+}
+
+/// Expert planes that disagree on shape or dtype abort inside
+/// `mlx::core::stack`, which throws and is therefore an uncatchable abort
+/// mid-load rather than a load error.
+#[test]
+fn sanitize_rejects_mismatched_expert_planes() {
+    let mut args = xs_config();
+    args.num_hidden_layers = 2;
+    args.num_experts = 2;
+    let (mut w, _, _) = compressed_tensors_weights(2);
+    // Expert 1 declares twice the input width. It is self-consistent on its own
+    // (16 codes per block scale) and only the cross-expert check catches it.
+    let packed: Vec<u8> = (0..64).map(|i| i as u8).collect();
+    w.insert(
+        "model.layers.1.mlp.experts.1.gate_proj.weight_packed".into(),
+        mlxcel_core::from_bytes(&packed, &[4, 16], mlxcel_core::dtype::UINT8),
+    );
+    w.insert(
+        "model.layers.1.mlp.experts.1.gate_proj.weight_scale".into(),
+        mlxcel_core::astype(&f32_array(&[1.0; 8], &[4, 2]), mlxcel_core::dtype::FLOAT16),
+    );
+    let err = sanitize_weights(&mut w, &args).expect_err("unstackable planes");
+    assert!(err.contains("share one shape and dtype"), "{err}");
+}

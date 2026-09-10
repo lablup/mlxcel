@@ -51,6 +51,15 @@ use std::path::Path;
 pub const FULL_ATTENTION: &str = "full_attention";
 pub const SLIDING_ATTENTION: &str = "sliding_attention";
 
+/// Upper bounds on the architecture scalars a Laguna `config.json` may declare.
+/// Same rationale as the other ports: `config.json` is untrusted input on the
+/// `mlxcel generate -m <org>/<repo>` path, and these keep a hostile value from
+/// sizing a loop, an allocation or a partition pivot. Both sit well above
+/// Laguna S 2.1, the largest published member (48 layers, 256 experts).
+const MAX_NUM_LAYERS: usize = 1024;
+/// See [`MAX_NUM_LAYERS`].
+const MAX_NUM_EXPERTS: usize = 4096;
+
 /// Top-level `config.json` fields the loader reads.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelArgs {
@@ -329,7 +338,13 @@ impl ModelArgs {
             .and_then(|v| v.as_f64())
             .or(self.partial_rotary_factor)
             .unwrap_or(1.0);
-        let rotated_dims = ((head_dim as f64 * partial).round() as usize).clamp(2, head_dim) & !1;
+        // The lower bound tracks `head_dim` because `Ord::clamp` asserts
+        // `min <= max` and panics otherwise, and `head_dim` is a config value.
+        // [`ModelArgs::validate`] rejects a `head_dim` below 2 before any load
+        // reaches here; this keeps the helper itself panic-free for callers
+        // that build a `ModelArgs` directly.
+        let rotated_dims =
+            ((head_dim as f64 * partial).round() as usize).clamp(2.min(head_dim), head_dim) & !1;
         let base = merged
             .get("rope_theta")
             .and_then(|v| v.as_f64())
@@ -348,6 +363,71 @@ impl ModelArgs {
             rotated_dims,
             yarn,
         }
+    }
+
+    /// Reject config values that reach MLX as an out-of-range partition pivot,
+    /// an out-of-bounds gather index, or a NaN factory.
+    ///
+    /// The routing half mirrors [`crate::models::afmoe`] and
+    /// [`crate::models::bailing_moe`]: the router selects `num_experts_per_tok`
+    /// indices out of a row of `num_experts` scores through
+    /// `argpartition(kth = num_experts - num_experts_per_tok)`, and MLX signals
+    /// an out-of-range `kth` by throwing. An MLX C++ exception crossing the cxx
+    /// bridge is an uncatchable abort at the first routed forward pass, not a
+    /// load error, so it lands after the whole checkpoint is already resident.
+    /// `num_experts_per_tok` reaches that state from the serde default alone: a
+    /// config that declares sparse layers through `mlp_layer_types` but omits
+    /// `num_experts_per_tok` yields 0, and `kth` is then the full expert count.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.num_hidden_layers == 0 || self.num_hidden_layers > MAX_NUM_LAYERS {
+            return Err(format!(
+                "Laguna num_hidden_layers ({}) must be between 1 and {MAX_NUM_LAYERS}",
+                self.num_hidden_layers
+            ));
+        }
+        let head_dim = self.head_dim();
+        if head_dim < 2 {
+            return Err(format!(
+                "Laguna head_dim ({head_dim}) must be at least 2; RoPE rotates feature pairs, and \
+                 the partial-rotary width `layer_rope` derives from it has no valid value below 2"
+            ));
+        }
+        if !(0..self.num_hidden_layers).any(|i| self.is_moe_layer(i)) {
+            return Ok(());
+        }
+        if self.num_experts == 0 || self.num_experts > MAX_NUM_EXPERTS {
+            return Err(format!(
+                "Laguna num_experts ({}) must be between 1 and {MAX_NUM_EXPERTS}",
+                self.num_experts
+            ));
+        }
+        if self.num_experts_per_tok == 0 || self.num_experts_per_tok > self.num_experts {
+            return Err(format!(
+                "Laguna num_experts_per_tok ({}) must be between 1 and num_experts ({}); the \
+                 router selects that many indices out of a row of num_experts scores with \
+                 argpartition, and an out-of-range pivot is an MLX throw, which crosses the cxx \
+                 bridge as an uncatchable abort on a token rather than a load error",
+                self.num_experts_per_tok, self.num_experts
+            ));
+        }
+        if !self.moe_routed_scaling_factor.is_finite() {
+            return Err(format!(
+                "Laguna moe_routed_scaling_factor ({}) must be finite; it multiplies every routed \
+                 expert weight, so a non-finite value makes every MoE output NaN and that NaN \
+                 reaches the logits without anything throwing",
+                self.moe_routed_scaling_factor
+            ));
+        }
+        if !self.moe_router_logit_softcapping.is_finite() {
+            return Err(format!(
+                "Laguna moe_router_logit_softcapping ({}) must be finite; the softcap divides the \
+                 router logits and multiplies the tanh back, so a non-finite cap turns every \
+                 router score into NaN",
+                self.moe_router_logit_softcapping
+            ));
+        }
+        self.router_score_func()?;
+        Ok(())
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -448,6 +528,9 @@ impl LagunaModel {
         let args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {e}"))?;
 
+        // Ahead of the sanitizer, which walks `num_hidden_layers` and stacks
+        // `num_experts` planes per MoE layer straight from this config.
+        args.validate()?;
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
         sanitize_weights(&mut weights, &args)?;
         let model = Self::from_weights(&weights, &args)?;
@@ -472,6 +555,7 @@ impl LagunaModel {
                 args.num_hidden_layers
             ));
         }
+        args.validate()?;
         let nvfp4_planes = weights.keys().any(|k| k.ends_with(".global_scale"));
         let quant = args.quant_spec(nvfp4_planes);
 

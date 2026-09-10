@@ -63,7 +63,7 @@ pub fn sanitize_weights(weights: &mut WeightMap, args: &ModelArgs) -> Result<usi
         let prefix = format!("model.layers.{layer}");
         split_prestacked_gate_up(weights, &prefix);
         for proj in PROJECTIONS {
-            stack_bf16_experts(weights, &prefix, proj, args.num_experts);
+            stack_bf16_experts(weights, &prefix, proj, args.num_experts)?;
         }
     }
 
@@ -157,12 +157,28 @@ fn transcode_expert_planes(
                 "{probe} is present but config.json declares num_experts = 0"
             ));
         }
+        check_no_expert_beyond(weights, prefix, proj, num_experts, "weight_packed")?;
         let mut packed = Vec::with_capacity(num_experts);
         let mut scales = Vec::with_capacity(num_experts);
         let mut globals = Vec::with_capacity(num_experts);
+        let mut layout: Option<PlaneLayout> = None;
         for e in 0..num_experts {
             let base = format!("{prefix}.mlp.experts.{e}.{proj}");
             let triplet = take_triplet(weights, &base)?;
+            let found = PlaneLayout::of(&triplet);
+            match &layout {
+                None => layout = Some(found),
+                Some(first) if *first != found => {
+                    return Err(format!(
+                        "{base}: every expert plane must share one shape and dtype; expert 0 is \
+                         {first:?} and expert {e} is {found:?}. mlx::core::stack throws on a \
+                         mismatch, and that throw crosses the cxx bridge as an uncatchable abort \
+                         mid-load. A promoted mixed dtype would be worse: the packed view would \
+                         reinterpret it at the wrong width and load silently."
+                    ));
+                }
+                _ => {}
+            }
             packed.push(triplet.0);
             scales.push(triplet.1);
             globals.push(triplet.2);
@@ -217,6 +233,54 @@ type Triplet = (
     UniquePtr<MlxArray>,
     UniquePtr<MlxArray>,
 );
+
+/// Shape and dtype of one expert's packed weight and block scales.
+#[derive(Debug, PartialEq, Eq)]
+struct PlaneLayout {
+    packed_shape: Vec<i32>,
+    packed_dtype: i32,
+    scale_shape: Vec<i32>,
+    scale_dtype: i32,
+}
+
+impl PlaneLayout {
+    fn of(triplet: &Triplet) -> Self {
+        Self {
+            packed_shape: mlxcel_core::array_shape(&triplet.0),
+            packed_dtype: mlxcel_core::array_dtype(&triplet.0),
+            scale_shape: mlxcel_core::array_shape(&triplet.1),
+            scale_dtype: mlxcel_core::array_dtype(&triplet.1),
+        }
+    }
+}
+
+/// Refuse a checkpoint that carries an expert past the declared count.
+///
+/// Stacking only the first `num_experts` planes leaves the router able to emit
+/// an index past the end of the stack, because the router width comes from
+/// `mlp.gate.proj` and not from this key, and `gather_qmm` does not range-check
+/// a positive index. On the packed path it would additionally send every
+/// leftover plane through [`transcode_dense_planes`] as a dense linear nothing
+/// ever reads, which for a 256-expert 40-layer export declaring 8 experts is
+/// tens of thousands of pointless f32 materializations and E4M3 re-encodes.
+fn check_no_expert_beyond(
+    weights: &WeightMap,
+    prefix: &str,
+    proj: &str,
+    num_experts: usize,
+    suffix: &str,
+) -> Result<(), String> {
+    let overflow = format!("{prefix}.mlp.experts.{num_experts}.{proj}.{suffix}");
+    if weights.contains_key(&overflow) {
+        return Err(format!(
+            "{overflow} is present but config.json declares num_experts = {num_experts}; the \
+             router is sized by mlp.gate.proj, so stacking only the declared experts would let it \
+             index past the stacked plane and gather_qmm reads a positive index without a range \
+             check"
+        ));
+    }
+    Ok(())
+}
 
 fn take_triplet(weights: &mut WeightMap, base: &str) -> Result<Triplet, String> {
     let packed_key = format!("{base}.weight_packed");
@@ -375,12 +439,18 @@ fn split_prestacked_gate_up(weights: &mut WeightMap, prefix: &str) {
 
 /// Stack per-expert `{prefix}.mlp.experts.{e}.{proj}.{suffix}` tensors into
 /// `{prefix}.mlp.switch_mlp.{proj}.{suffix}`.
-fn stack_bf16_experts(weights: &mut WeightMap, prefix: &str, proj: &str, num_experts: usize) {
+fn stack_bf16_experts(
+    weights: &mut WeightMap,
+    prefix: &str,
+    proj: &str,
+    num_experts: usize,
+) -> Result<(), String> {
     for suffix in ["weight", "scales", "biases"] {
         let first = format!("{prefix}.mlp.experts.0.{proj}.{suffix}");
         if !weights.contains_key(&first) {
             continue;
         }
+        check_no_expert_beyond(weights, prefix, proj, num_experts, suffix)?;
         // Check the whole run before removing any of it: a half-stacked export
         // would otherwise leave the map short of the experts already taken,
         // and the failure would surface as a missing `switch_mlp` plane with
@@ -392,13 +462,28 @@ fn stack_bf16_experts(weights: &mut WeightMap, prefix: &str, proj: &str, num_exp
             continue;
         }
         let mut parts = Vec::with_capacity(num_experts);
+        let mut layout: Option<(Vec<i32>, i32)> = None;
         for key in &keys {
-            match weights.remove(key) {
-                Some(w) => parts.push(w),
-                None => return,
+            let Some(w) = weights.remove(key) else {
+                return Err(format!("Weight not found: {key}"));
+            };
+            let found = (mlxcel_core::array_shape(&w), mlxcel_core::array_dtype(&w));
+            match &layout {
+                None => layout = Some(found),
+                Some(expected) if *expected != found => {
+                    return Err(format!(
+                        "{key}: every expert plane must share one shape and dtype; expert 0 is \
+                         {expected:?} and this one is {found:?}. mlx::core::stack throws on a \
+                         mismatch, and that throw crosses the cxx bridge as an uncatchable abort \
+                         mid-load."
+                    ));
+                }
+                _ => {}
             }
+            parts.push(w);
         }
         let stacked = mlxcel_core::stack_owned(&parts, 0);
         weights.insert(format!("{prefix}.mlp.switch_mlp.{proj}.{suffix}"), stacked);
     }
+    Ok(())
 }

@@ -417,10 +417,22 @@ pub(crate) fn router_select(
         Some(b) => mlxcel_core::add(scores, b),
         None => mlxcel_core::copy(scores),
     };
-    let k = num_experts_per_tok as i32;
     let shape = mlxcel_core::array_shape(&selection);
     let n_experts = shape[shape.len() - 1];
-    let kth = n_experts - k;
+    // The expert count comes from the real score row and the pivot is clamped
+    // into it, so a `num_experts_per_tok` that disagrees with the router width
+    // cannot reach `argpartition` out of range. MLX throws on an out-of-range
+    // `kth`, and that throw crosses the cxx bridge as an uncatchable abort on a
+    // token rather than a load error. `ModelArgs::validate` and
+    // `validate_router_geometry` reject the configs and checkpoints that get
+    // here; this keeps the kernel call in range regardless of who built the
+    // block. An unclamped `n_experts - k` also slices a *negative* start out of
+    // `order` when `k > n_experts`, which silently returns fewer than k experts
+    // instead of failing.
+    let k = i32::try_from(num_experts_per_tok)
+        .unwrap_or(i32::MAX)
+        .clamp(1, n_experts.max(1));
+    let kth = (n_experts - k).max(0);
     let order = mlxcel_core::argpartition(&selection, kth, -1);
     let order_shape = mlxcel_core::array_shape(&order);
     let indices = mlxcel_core::slice(&order, &[0, kth], &[order_shape[0], order_shape[1]]);
@@ -449,6 +461,82 @@ pub struct SparseMoeBlock {
     pub routed_scaling_factor: f32,
     pub softcap: f32,
     pub score_func: RouterScoreFunc,
+}
+
+/// Reject an expert plane the router is able to index past.
+///
+/// [`router_select`] derives the expert count from the router's own score row,
+/// so the gather axis of `gather_qmm` (and of the per-expert `.global_scale`
+/// `take` behind it) is the stacked plane count while the index range is the
+/// router width. MLX's gather adds the axis size to a negative index but does
+/// not range-check a positive one, so a checkpoint whose `switch_mlp` planes
+/// are shorter than the router turns an ordinary token into an out-of-bounds
+/// read whose result reaches the logits. This is the hazard AFMoE guards in
+/// `validate_stacked_experts`, and Laguna reaches it from `config.json` alone:
+/// [`crate::models::laguna_sanitize`] stacks exactly `num_experts` planes, and
+/// `num_experts` is a config key while the router width is a tensor shape.
+///
+/// Used by: `SparseMoeBlock::from_weights`
+fn validate_router_geometry(
+    weights: &WeightMap,
+    prefix: &str,
+    num_experts_per_tok: usize,
+) -> Result<(), String> {
+    let router_key = format!("{prefix}.gate.proj.weight");
+    let router = weights
+        .get(&router_key)
+        .ok_or_else(|| format!("Weight not found: {router_key}"))?;
+    let router_shape = mlxcel_core::array_shape(router);
+    let router_width = router_shape.first().copied().unwrap_or(0);
+    if router_shape.len() != 2 || router_width < 1 {
+        return Err(format!(
+            "unexpected {router_key} shape {router_shape:?}: expected a 2-D [num_experts, hidden] \
+             router weight routing over at least one expert"
+        ));
+    }
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        let key = format!("{prefix}.switch_mlp.{proj}.weight");
+        // Only the already-stacked layout is checked here; a checkpoint that
+        // still carries per-expert planes is stacked by `SwitchLinear` itself,
+        // which runs its own shape reconciliation.
+        let Some(plane) = weights.get(&key) else {
+            continue;
+        };
+        let shape = mlxcel_core::array_shape(plane);
+        if shape.len() != 3 {
+            return Err(format!(
+                "unexpected {key} shape {shape:?}: expected a 3-D [num_experts, out, in] stacked \
+                 expert tensor"
+            ));
+        }
+        if shape[0] < router_width {
+            return Err(format!(
+                "{key} carries {} expert planes but {router_key} routes over {router_width}. The \
+                 router emits indices below {router_width} and the gather behind gather_qmm does \
+                 not range-check a positive index, so the missing planes would be read out of \
+                 bounds and the result would reach the logits.",
+                shape[0]
+            ));
+        }
+    }
+    let bias_key = format!("{prefix}.gate.e_score_correction_bias");
+    if let Some(bias) = weights.get(&bias_key) {
+        let bias_shape = mlxcel_core::array_shape(bias);
+        if bias_shape.len() != 1 || bias_shape[0] != router_width {
+            return Err(format!(
+                "unexpected {bias_key} shape {bias_shape:?}: expected [{router_width}]; it is \
+                 added to a row of that many router scores, and MLX throws on a broadcast it \
+                 cannot resolve"
+            ));
+        }
+    }
+    if num_experts_per_tok == 0 || num_experts_per_tok > router_width as usize {
+        return Err(format!(
+            "{prefix}: num_experts_per_tok ({num_experts_per_tok}) must be between 1 and the \
+             {router_width} experts {router_key} routes over"
+        ));
+    }
+    Ok(())
 }
 
 impl SparseMoeBlock {
@@ -511,6 +599,7 @@ impl SparseMoeBlock {
         quant: &QuantSpec,
         prefix: &str,
     ) -> Result<Self, String> {
+        validate_router_geometry(weights, prefix, args.num_experts_per_tok)?;
         let gate = UnifiedLinear::from_weights_with_mode(
             weights,
             &format!("{prefix}.gate.proj"),
