@@ -2485,12 +2485,14 @@ namespace {
             auto gate = mlx::core::gather_qmm(
                 x, gate_w, gate_s, std::optional<array>(gate_b),
                 std::nullopt, std::optional<array>(rhs_indices),
-                transpose, group_size, bits, "affine", sorted_indices);
+                transpose, group_size, bits, "affine",
+                /* global_scale = */ std::nullopt, sorted_indices);
 
             auto up = mlx::core::gather_qmm(
                 x, up_w, up_s, std::optional<array>(up_b),
                 std::nullopt, std::optional<array>(rhs_indices),
-                transpose, group_size, bits, "affine", sorted_indices);
+                transpose, group_size, bits, "affine",
+                /* global_scale = */ std::nullopt, sorted_indices);
 
             // GeGLU: Python mlx-lm uses nn.gelu_approx(gate) * up.
             auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
@@ -2498,7 +2500,8 @@ namespace {
             auto down = mlx::core::gather_qmm(
                 activated, down_w, down_s, std::optional<array>(down_b),
                 std::nullopt, std::optional<array>(rhs_indices),
-                transpose, group_size, bits, "affine", sorted_indices);
+                transpose, group_size, bits, "affine",
+                /* global_scale = */ std::nullopt, sorted_indices);
 
             return {down};
         };
@@ -2559,12 +2562,12 @@ std::unique_ptr<MlxArray> compiled_switch_qgeglu_forward(
         x.inner, gate_w.inner, gate_s.inner, gb_opt,
         std::nullopt, rhs_opt, true,
         std::optional<int>(group_size), std::optional<int>(bits),
-        mode_str, false);
+        mode_str, /* global_scale = */ std::nullopt, false);
     auto up = mlx::core::gather_qmm(
         x.inner, up_w.inner, up_s.inner, ub_opt,
         std::nullopt, rhs_opt, true,
         std::optional<int>(group_size), std::optional<int>(bits),
-        mode_str, false);
+        mode_str, /* global_scale = */ std::nullopt, false);
 
     auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
 
@@ -2572,7 +2575,7 @@ std::unique_ptr<MlxArray> compiled_switch_qgeglu_forward(
         activated, down_w.inner, down_s.inner, db_opt,
         std::nullopt, rhs_opt, true,
         std::optional<int>(group_size), std::optional<int>(bits),
-        mode_str, false);
+        mode_str, /* global_scale = */ std::nullopt, false);
 
     return std::make_unique<MlxArray>(std::move(down));
 }
@@ -3219,13 +3222,13 @@ std::unique_ptr<MlxArray> gather_qmm(
             x.inner, w.inner, scales.inner, biases_opt,
             lhs_opt, rhs_opt, transpose,
             std::optional<int>(group_size), std::optional<int>(bits),
-            "affine", sorted_indices));
+            "affine", /* global_scale = */ std::nullopt, sorted_indices));
     }
     return std::make_unique<MlxArray>(mlx::core::gather_qmm(
         x.inner, w.inner, scales.inner, biases_opt,
         lhs_opt, rhs_opt, transpose,
         std::optional<int>(group_size), std::optional<int>(bits),
-        std::string(mode.data(), mode.size()), sorted_indices));
+        std::string(mode.data(), mode.size()), /* global_scale = */ std::nullopt, sorted_indices));
 }
 
 std::unique_ptr<MlxArray> quantized_matmul(

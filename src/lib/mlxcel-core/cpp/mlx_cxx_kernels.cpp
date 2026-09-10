@@ -1362,13 +1362,13 @@ std::unique_ptr<MlxArray> fused_moe_forward(
         auto h = gather_qmm(
             x_exp, fc1_weight.inner, fc1_scales.inner, fc1_biases.inner,
             std::nullopt, topk_indices,
-            true, group_size, bits, "affine", false);
+            true, group_size, bits, "affine", /* global_scale = */ std::nullopt, false);
         // relu² = relu(x)²
         { MlxArray h_w{h}; h = compiled_relu_squared(h_w)->inner; }
         h = gather_qmm(
             h, fc2_weight.inner, fc2_scales.inner, fc2_biases.inner,
             std::nullopt, topk_indices,
-            true, group_size, bits, "affine", false);
+            true, group_size, bits, "affine", /* global_scale = */ std::nullopt, false);
         h = squeeze(h, -2);  // [tokens, top_k, hidden]
         if (profile_nemotron_moe) {
             h.eval();
@@ -2082,12 +2082,12 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
             x4, gate_w.inner, gate_s.inner, std::optional<array>(gate_b.inner),
             std::nullopt, std::optional<array>(idx2), true,
             std::optional<int>(group_size), std::optional<int>(gu_bits),
-            "affine", false);
+            "affine", /* global_scale = */ std::nullopt, false);
         auto up = mlx::core::gather_qmm(
             x4, up_w.inner, up_s.inner, std::optional<array>(up_b.inner),
             std::nullopt, std::optional<array>(idx2), true,
             std::optional<int>(group_size), std::optional<int>(gu_bits),
-            "affine", false);
+            "affine", /* global_scale = */ std::nullopt, false);
         array act_ref = (act == 1)
             ? multiply(gelu_tanh_approx(gate), up)
             : multiply(multiply(gate, sigmoid(gate)), up);
@@ -2095,7 +2095,7 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
             act_ref, down_w.inner, down_s.inner, std::optional<array>(down_b.inner),
             std::nullopt, std::optional<array>(idx2), true,
             std::optional<int>(group_size), std::optional<int>(d_bits),
-            "affine", false);
+            "affine", /* global_scale = */ std::nullopt, false);
         auto per_expert = reshape(astype(down, float32), {k, din});
         auto w_col = reshape(astype(scores.inner, float32), {k, 1});
         auto ref = sum(multiply(per_expert, w_col), /*axis=*/0, false);
