@@ -130,6 +130,10 @@ struct OracleDrafter {
     reference: Vec<i32>,
     schedule: Vec<usize>,
     round: usize,
+    /// Reference index of the bonus the next round must start from; advanced
+    /// by the accept length the schedule forces, so a wrong bonus means the
+    /// previous round did not accept exactly that many tokens.
+    expected_bonus_index: usize,
     vocab: i32,
     bound: bool,
 }
@@ -155,22 +159,26 @@ impl Drafter for OracleDrafter {
         let hidden = hidden.expect("round loop always passes the captured hidden");
         let shape = mlxcel_core::array_shape(hidden);
         assert_eq!(shape.len(), 3);
-        // The bonus is the reference token at some position `k`; propose
-        // the tokens after it. The round loop guarantees the bonus lies on
-        // the reference path while the previous rounds accepted correctly.
-        let k = self
-            .reference
-            .iter()
-            .position(|t| *t == last_bonus)
-            .expect("bonus stays on the greedy reference path");
+        // The bonus must be the reference token the forced accept lengths
+        // lead to; propose the tokens after it and corrupt the scheduled
+        // position so the target accepts exactly that many.
+        let k = self.expected_bonus_index;
+        assert_eq!(
+            self.reference.get(k).copied(),
+            Some(last_bonus),
+            "round {}: bonus is off the forced accept path",
+            self.round
+        );
         let mut proposals: Vec<i32> = (1..block_size)
             .map(|j| self.reference.get(k + j).copied().unwrap_or(0))
             .collect();
         let corrupt_at = self.schedule[self.round % self.schedule.len()];
         self.round += 1;
+        let accepted = corrupt_at.min(proposals.len());
         if corrupt_at < proposals.len() {
             proposals[corrupt_at] = (proposals[corrupt_at] + 1) % self.vocab;
         }
+        self.expected_bonus_index = k + accepted + 1;
         Ok(proposals)
     }
 
@@ -217,6 +225,7 @@ fn greedy_invariant_with_forced_rejections() {
         reference: reference.clone(),
         schedule: schedule.clone(),
         round: 0,
+        expected_bonus_index: 0,
         vocab: args.vocab_size as i32,
         bound: false,
     };
@@ -315,7 +324,7 @@ fn greedy_invariant_with_real_drafter() {
 
     let cfg = tiny_drafter_config();
     let weights = tiny_drafter_weights(&cfg, 0x1351);
-    let mut drafter = LagunaDFlashDrafter::from_weights(&weights, cfg).expect("drafter builds");
+    let drafter = LagunaDFlashDrafter::from_weights(&weights, cfg).expect("drafter builds");
     // `validate_target_compat` reads the target depth and vocabulary.
     drafter
         .validate_target_compat(&wrapper as &dyn LanguageModel)
