@@ -448,6 +448,138 @@ fn family_names_select_the_stored_tensor_names() {
     assert!(rotating_snapshot.tensor("layer0.rotating.keys").is_none());
 }
 
+// ---------------------------------------------------------------------------
+// Restore-time geometry validation
+// ---------------------------------------------------------------------------
+//
+// A snapshot only ever comes from this process's own live caches today, so
+// these shapes are unreachable through the server. They are still refused
+// rather than installed: `restore_*` is the boundary at which a stored state
+// becomes a live GPU cache, and a state whose declared length runs past its own
+// buffer makes the next append slice past the end of the sequence axis, which
+// surfaces as an MLX throw at the FFI boundary rather than as a declined
+// restore.
+
+#[test]
+fn standard_restore_refuses_an_offset_past_its_buffer() {
+    let mut source = KVCache::new();
+    source.keys = Some(keys_at(0, 4));
+    source.values = Some(values_at(0, 4));
+    source.offset = 9;
+
+    let mut snapshot = ModelStateSnapshot::new("test", 9);
+    snapshot_standard(&source, &mut snapshot, "layer0", TEST_NAMES).expect("snapshot");
+
+    let mut restored = KVCache::new();
+    let err = restore_standard(&mut restored, &snapshot, "layer0", TEST_NAMES)
+        .expect_err("offset past the stored buffer");
+    assert!(
+        err.contains("declares 9 tokens but its buffer holds 4"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        restored.keys.is_none() && restored.offset == 0,
+        "a refused restore must leave the cache untouched"
+    );
+}
+
+#[test]
+fn standard_restore_refuses_keys_and_values_of_different_lengths() {
+    let mut source = KVCache::new();
+    source.keys = Some(keys_at(0, 4));
+    source.values = Some(values_at(0, 6));
+    source.offset = 4;
+
+    let mut snapshot = ModelStateSnapshot::new("test", 4);
+    snapshot_standard(&source, &mut snapshot, "layer0", TEST_NAMES).expect("snapshot");
+
+    let mut restored = KVCache::new();
+    let err = restore_standard(&mut restored, &snapshot, "layer0", TEST_NAMES)
+        .expect_err("keys and values of different lengths");
+    assert!(
+        err.contains("disagree on batch, heads or length"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn chunked_restore_refuses_a_window_past_its_buffer() {
+    let mut source = ChunkedKVCache::new(8);
+    source.keys = Some(keys_at(0, 4));
+    source.values = Some(values_at(0, 4));
+    source.offset = 20;
+    source.start_position = 0;
+
+    let mut snapshot = ModelStateSnapshot::new("test", 20);
+    snapshot_chunked(&source, &mut snapshot, "layer0", TEST_NAMES).expect("snapshot");
+
+    let mut restored = ChunkedKVCache::new(8);
+    let err = restore_chunked(&mut restored, &snapshot, "layer0", TEST_NAMES)
+        .expect_err("visible window past the stored buffer");
+    assert!(
+        err.contains("declares 20 tokens but its buffer holds 4"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        restored.keys.is_none() && restored.offset == 0 && restored.start_position == 0,
+        "a refused restore must leave the cache untouched"
+    );
+}
+
+#[test]
+fn chunked_restore_refuses_an_inverted_window() {
+    let mut source = ChunkedKVCache::new(8);
+    source.keys = Some(keys_at(0, 4));
+    source.values = Some(values_at(0, 4));
+    source.offset = 2;
+    source.start_position = 5;
+
+    let mut snapshot = ModelStateSnapshot::new("test", 5);
+    snapshot_chunked(&source, &mut snapshot, "layer0", TEST_NAMES).expect("snapshot");
+
+    let mut restored = ChunkedKVCache::new(8);
+    let err = restore_chunked(&mut restored, &snapshot, "layer0", TEST_NAMES)
+        .expect_err("start_position past offset");
+    assert!(
+        err.contains("is not a valid range"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn rotating_restore_refuses_a_window_mismatch() {
+    let mut source = RotatingKVCache::new(16);
+    fill_rotating_one_at_a_time(&mut source, 10);
+    let mut snapshot = ModelStateSnapshot::new("test", 10);
+    snapshot_rotating(&source, &mut snapshot, "layer0", TEST_NAMES).expect("snapshot");
+
+    let mut restored = RotatingKVCache::new(8);
+    let err = restore_rotating(&mut restored, &snapshot, "layer0", TEST_NAMES)
+        .expect_err("window mismatch");
+    assert!(
+        err.contains("does not match configured window"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        restored.keys.is_none(),
+        "a refused restore must leave the cache untouched"
+    );
+}
+
+#[test]
+fn truncate_refuses_a_negative_target() {
+    let mut standard = KVCache::new();
+    fill_standard(&mut standard, 6);
+    let err = truncate_standard(&mut standard, -1, TEST_NAMES).expect_err("negative target");
+    assert!(err.contains("is negative"), "unexpected error: {err}");
+
+    let mut chunked = ChunkedKVCache::new(8);
+    let _ = chunked.update_and_fetch(keys_at(0, 6), values_at(0, 6));
+    let err = truncate_chunked(&mut chunked, -1, TEST_NAMES).expect_err("negative target");
+    assert!(err.contains("is negative"), "unexpected error: {err}");
+    assert_eq!(chunked.offset, 6, "a refused truncate must not move offset");
+}
+
 #[test]
 fn error_messages_carry_the_family_label() {
     let mut cache = ChunkedKVCache::new(8);

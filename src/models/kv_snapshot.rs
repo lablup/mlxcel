@@ -48,6 +48,7 @@ use crate::models::recurrent_snapshot::{
 use mlxcel_core::cache::{KVCacheMode, RotatingKVCacheSnapshotState};
 use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{ChunkedKVCache, KVCache, RotatingKVCache};
+use mlxcel_core::{MlxArray, UniquePtr};
 
 /// Tensor-name and error-message vocabulary for one family.
 ///
@@ -173,10 +174,14 @@ pub(crate) fn restore_standard(
             cache.mode
         ));
     }
+    let offset = restore_i32(snapshot, format!("{prefix}.{kind}.offset"))
+        .unwrap_or(snapshot.token_len() as i32);
+    // Validate before assigning, so a snapshot that fails leaves the fresh
+    // cache untouched and the caller falls back to a cold prefill.
+    check_restored_buffers(keys.as_ref(), values.as_ref(), offset, family, kind, prefix)?;
     cache.keys = keys;
     cache.values = values;
-    cache.offset = restore_i32(snapshot, format!("{prefix}.{kind}.offset"))
-        .unwrap_or(snapshot.token_len() as i32);
+    cache.offset = offset;
     Ok(())
 }
 
@@ -345,9 +350,20 @@ pub(crate) fn restore_rotating(
             current.mode
         ));
     }
+    // The window width is model configuration, not sequence state. Taking it
+    // from the snapshot would let a state captured under a different config
+    // silently re-open the live cache's window instead of declining, so it has
+    // to agree, exactly as `restore_chunked` requires of `chunk_size`.
+    let max_size =
+        restore_i32(snapshot, format!("{prefix}.{kind}.max_size")).unwrap_or(current.max_size);
+    if max_size != current.max_size {
+        return Err(format!(
+            "{family} restore {prefix}: {kind} snapshot window {max_size} does not match configured window {}",
+            current.max_size
+        ));
+    }
     let state = RotatingKVCacheSnapshotState {
-        max_size: restore_i32(snapshot, format!("{prefix}.{kind}.max_size"))
-            .unwrap_or(current.max_size),
+        max_size,
         buffer_size: restore_i32(snapshot, format!("{prefix}.{kind}.buffer_size")).unwrap_or(0),
         offset: restore_i32(snapshot, format!("{prefix}.{kind}.offset"))
             .unwrap_or(snapshot.token_len() as i32),
@@ -523,12 +539,29 @@ pub(crate) fn restore_chunked(
             cache.chunk_size
         ));
     }
+    let offset = restore_i32(snapshot, format!("{prefix}.{CHUNKED}.offset"))
+        .unwrap_or(snapshot.token_len() as i32);
+    let start_position =
+        restore_i32(snapshot, format!("{prefix}.{CHUNKED}.start_position")).unwrap_or(0);
+    if start_position < 0 || offset < start_position {
+        return Err(format!(
+            "{family} restore {prefix}: {CHUNKED} snapshot window [{start_position}, {offset}) is not a valid range"
+        ));
+    }
+    // A chunked buffer holds only the untrimmed part of the window, so the
+    // count it has to cover is `offset - start_position`, not `offset`.
+    check_restored_buffers(
+        keys.as_ref(),
+        values.as_ref(),
+        offset - start_position,
+        family,
+        CHUNKED,
+        prefix,
+    )?;
     cache.keys = keys;
     cache.values = values;
-    cache.offset = restore_i32(snapshot, format!("{prefix}.{CHUNKED}.offset"))
-        .unwrap_or(snapshot.token_len() as i32);
-    cache.start_position =
-        restore_i32(snapshot, format!("{prefix}.{CHUNKED}.start_position")).unwrap_or(0);
+    cache.offset = offset;
+    cache.start_position = start_position;
     Ok(())
 }
 
@@ -596,18 +629,13 @@ pub(crate) fn truncate_chunked(
     if target_len == offset {
         return Ok(());
     }
-    cache.keys = Some(slice_leading_tokens(
-        cache.keys.as_ref(),
-        target_len,
-        family,
-        "keys",
-    )?);
-    cache.values = Some(slice_leading_tokens(
-        cache.values.as_ref(),
-        target_len,
-        family,
-        "values",
-    )?);
+    // Both slices are built before either is installed: a failure on the
+    // second must not leave the cache holding a shortened key buffer beside a
+    // full-length value buffer.
+    let keys = slice_leading_tokens(cache.keys.as_ref(), target_len, family, "keys")?;
+    let values = slice_leading_tokens(cache.values.as_ref(), target_len, family, "values")?;
+    cache.keys = Some(keys);
+    cache.values = Some(values);
     cache.offset = target_len;
     Ok(())
 }
@@ -630,6 +658,12 @@ fn check_truncate_target(
     offset: i32,
     names: KvSnapshotNames,
 ) -> Result<(), String> {
+    if target_len < 0 {
+        return Err(format!(
+            "{} truncate: target {target_len} is negative",
+            names.family
+        ));
+    }
     if target_len > offset {
         return Err(format!(
             "{} truncate: target {target_len} exceeds cached offset {offset}",
@@ -649,14 +683,80 @@ fn check_trimmed(trimmed: i32, drop: i32, names: KvSnapshotNames) -> Result<(), 
     Ok(())
 }
 
+/// Validate a restored key/value pair against the token count the caller is
+/// about to declare for it.
+///
+/// The sliding-window path gets this for free:
+/// [`RotatingKVCache::restore_fp16_snapshot_state`] checks the ring geometry
+/// against the buffers it is handed. The full-attention and chunked paths
+/// assign their scalars directly, so the same class of check has to live here.
+/// Without it a state whose declared length runs past its own buffer installs
+/// cleanly and the next append slices past the end of the sequence axis
+/// (`KVCache::update_fp16` normalizes to `buffer_idx()` before it grows), which
+/// surfaces as an MLX throw at the FFI boundary rather than as a declined
+/// restore.
+///
+/// `held` is the number of token slots the buffers must physically contain:
+/// `offset` for a full-attention cache, `offset - start_position` for a chunked
+/// one, since a chunked buffer keeps only the untrimmed part of the window.
+fn check_restored_buffers(
+    keys: Option<&UniquePtr<MlxArray>>,
+    values: Option<&UniquePtr<MlxArray>>,
+    held: i32,
+    family: &str,
+    kind: &str,
+    prefix: &str,
+) -> Result<(), String> {
+    let k_shape = restored_rank4_shape(keys, family, kind, prefix, "keys")?;
+    let v_shape = restored_rank4_shape(values, family, kind, prefix, "values")?;
+    if k_shape[..3] != v_shape[..3] {
+        return Err(format!(
+            "{family} restore {prefix}: {kind} snapshot keys {k_shape:?} and values {v_shape:?} disagree on batch, heads or length"
+        ));
+    }
+    if held < 0 {
+        return Err(format!(
+            "{family} restore {prefix}: {kind} snapshot declares a negative length {held}"
+        ));
+    }
+    if held > k_shape[2] {
+        return Err(format!(
+            "{family} restore {prefix}: {kind} snapshot declares {held} tokens but its buffer holds {}",
+            k_shape[2]
+        ));
+    }
+    Ok(())
+}
+
+/// Shape of a restored cache buffer, refusing anything that is not the
+/// `[B, H_kv, T, D]` an attention cache is indexed as.
+fn restored_rank4_shape(
+    array: Option<&UniquePtr<MlxArray>>,
+    family: &str,
+    kind: &str,
+    prefix: &str,
+    field: &str,
+) -> Result<Vec<i32>, String> {
+    let array = array.and_then(|a| a.as_ref()).ok_or_else(|| {
+        format!("{family} restore {prefix}: {kind} snapshot is missing its {field} buffer")
+    })?;
+    let shape = mlxcel_core::array_shape(array);
+    if shape.len() != 4 {
+        return Err(format!(
+            "{family} restore {prefix}: expected rank-4 {kind} {field}, got shape {shape:?}"
+        ));
+    }
+    Ok(shape)
+}
+
 /// Slice the leading `target_len` positions off the sequence axis of a cache
 /// buffer.
 fn slice_leading_tokens(
-    array: Option<&mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
+    array: Option<&UniquePtr<MlxArray>>,
     target_len: i32,
     family: &str,
     field: &str,
-) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>, String> {
+) -> Result<UniquePtr<MlxArray>, String> {
     let array = array.and_then(|a| a.as_ref()).ok_or_else(|| {
         format!("{family} truncate: {CHUNKED} cache is missing its {field} buffer")
     })?;
