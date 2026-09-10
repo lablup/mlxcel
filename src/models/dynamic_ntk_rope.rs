@@ -209,6 +209,13 @@ impl DynamicNtkRope {
         self.mode
     }
 
+    /// Whether `apply` rotates adjacent pairs (`true`) or the two halves of
+    /// the head (`false`).
+    // Used by: InternLM2 (tests)
+    pub fn traditional(&self) -> bool {
+        self.traditional
+    }
+
     /// The position scale to hand `fast_rope`.
     ///
     /// `1.0` for `Default` **and** for `Dynamic`: the dynamic schedule adjusts
@@ -257,14 +264,116 @@ impl DynamicNtkRope {
     /// `seq_len` is `L + offset`.
     // Used by: InternLM3, InternLM2
     pub fn apply(&self, x: &MlxArray, offset: i32, seq_len: i32) -> UniquePtr<MlxArray> {
+        let base_eff = self.base_for(seq_len);
+        // Ask the subscriber before the dedup set's lock, so a run without
+        // `RUST_LOG` never takes it. The gate sits here rather than inside
+        // `log_dynamic_rescale_once` because the tests call that directly and
+        // assert on its return value, with no subscriber installed.
+        //
+        // This check declares no fields, while the `tracing::debug!` it guards
+        // declares six, so the two agree on level and target but not on
+        // fields. An `EnvFilter` directive that selects on a field, say
+        // `RUST_LOG=[{seq_len}]=debug`, would enable the event and not this
+        // guard, and the diagnostic would go missing. Every documented way in
+        // to it is a level directive: `-v` and `--verbosity 4` both expand to
+        // one in `server::logging`, and the issue's own recipe is
+        // `RUST_LOG=debug`.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let _ = self.log_dynamic_rescale_once(seq_len, base_eff);
+        }
         mlxcel_core::fast_rope(
             x,
             self.dims,
             self.traditional,
-            self.base_for(seq_len),
+            base_eff,
             self.scale(),
             offset,
         )
+    }
+
+    /// Log the rescaled base the first time this schedule crosses
+    /// `max_position_embeddings`, and return whether this call was that time.
+    ///
+    /// The value reported is a snapshot taken at that first crossing, not the
+    /// base in force for the rest of the run: the key below deliberately omits
+    /// `seq_len`, so a request that goes on to a longer context rescales
+    /// further without logging again.
+    ///
+    /// This is a validation aid for the case a short prompt cannot exercise
+    /// (`base_for` is a no-op below the boundary), not telemetry, so it is
+    /// gated at debug level and fires only in [`DynamicNtkRopeMode::Dynamic`].
+    /// It never touches `base_eff`, so `apply`'s arithmetic is unaffected
+    /// whether or not `RUST_LOG` is set.
+    ///
+    /// Deduplicated on the schedule's own parameters rather than through a
+    /// process-wide flag, for the reason
+    /// `rope_utils::report_unusable_rope_scaling_once` already records: a
+    /// process can hold more than one model (the server's `--models-dir`
+    /// routing, the pipeline stage executors, the tensor-parallel ranks), and
+    /// a single flag would let the first checkpoint past the boundary silence
+    /// every later one. `DynamicNtkRope` is `Copy` and carries no label, so
+    /// those parameters are also what identifies the emitted line: two
+    /// checkpoints that agree on all four are the same schedule and have
+    /// nothing to distinguish in the log anyway.
+    ///
+    /// Past the boundary the lock is taken once per call, which `apply`
+    /// reaches twice per layer per forward, so the steady state after the line
+    /// has been emitted is a lookup that can only answer "already present".
+    /// At roughly 40ns uncontended that is a few microseconds per forward
+    /// against a decode step of tens of milliseconds at these context lengths,
+    /// and the caller in `apply` skips it outright when no debug subscriber is
+    /// installed.
+    fn log_dynamic_rescale_once(&self, seq_len: i32, base_eff: f32) -> bool {
+        use std::collections::BTreeSet;
+        use std::sync::{Mutex, OnceLock};
+
+        /// `(dims, base bits, max_position_embeddings, factor bits)`. Raw bits
+        /// rather than the `f32`s so the key is `Ord` without a total-order
+        /// wrapper. `from_scaling` screens `factor` through
+        /// `is_usable_scalar` but not `base`, so this is an identity on bit
+        /// patterns rather than on values: the worst a `base` of `-0.0` or a
+        /// NaN could do is split one schedule across two log lines, which no
+        /// real checkpoint produces and which costs nothing if it happens.
+        type ScheduleKey = (i32, u32, usize, u32);
+
+        static LOGGED: OnceLock<Mutex<BTreeSet<ScheduleKey>>> = OnceLock::new();
+
+        let DynamicNtkRopeMode::Dynamic { factor } = self.mode else {
+            return false;
+        };
+        let max_pos = i64::try_from(self.max_position_embeddings).unwrap_or(i64::MAX);
+        if (seq_len as i64) <= max_pos {
+            return false;
+        }
+
+        let key: ScheduleKey = (
+            self.dims,
+            self.base.to_bits(),
+            self.max_position_embeddings,
+            factor.to_bits(),
+        );
+        let logged = LOGGED.get_or_init(|| Mutex::new(BTreeSet::new()));
+        // The guard is dropped before the event below, so a panicking
+        // subscriber cannot poison this lock; only a panic inside `insert`
+        // could, which in practice means nothing, since allocation failure
+        // aborts rather than unwinds. Recover anyway: the set stays a valid
+        // set either way, and losing every later line is worse.
+        let mut logged = logged.lock().unwrap_or_else(|err| err.into_inner());
+        if !logged.insert(key) {
+            return false;
+        }
+        drop(logged);
+
+        tracing::debug!(
+            seq_len,
+            max_position_embeddings = self.max_position_embeddings,
+            factor,
+            dims = self.dims,
+            base = self.base,
+            base_eff,
+            "dynamic NTK rope base rescaled past max_position_embeddings"
+        );
+        true
     }
 }
 

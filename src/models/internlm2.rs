@@ -23,9 +23,9 @@
 //!
 //! `ModelArgs` did not declare `rope_scaling` at all, so the
 //! `{"type": "dynamic", "factor": 2.0}` that InternLM2 checkpoints ship
-//! (`models/internlm2-7b-4bit`, and the long-context 1M variants) was dropped
-//! at deserialization and the rotary base stayed at `rope_theta` for every
-//! sequence length. Inside `max_position_embeddings` that is the correct
+//! (`models/internlm2_5-7b-chat-4bit`, and the long-context 1M variants) was
+//! dropped at deserialization and the rotary base stayed at `rope_theta` for
+//! every sequence length. Inside `max_position_embeddings` that is the correct
 //! schedule, which is why nothing shorter than a 32768-token prompt could
 //! observe it; past that boundary the base has to grow and did not.
 //!
@@ -34,6 +34,11 @@
 //! [`mlx_lm/models/internlm2.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/internlm2.py):
 //! upstream computes `rope_scale = ... else 2.0` and so doubles every position
 //! on exactly these checkpoints.
+//!
+//! Issue #1320 tracked this family's half of the fix. The wiring of
+//! `ModelArgs` and `Attention` to the schedule above landed with #1389; #1320
+//! then added the family-level config tests and the per-schedule `base_eff`
+//! debug log in `dynamic_ntk_rope::apply`.
 
 use crate::models::dynamic_ntk_rope::DynamicNtkRope;
 use crate::models::rope_utils::RopeScalingSpec;

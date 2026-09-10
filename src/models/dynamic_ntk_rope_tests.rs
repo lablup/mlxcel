@@ -35,6 +35,13 @@ const DIMS: i32 = 128;
 const BASE: f32 = 50_000_000.0;
 const MAX_POS: usize = 32768;
 
+// `the_rescale_log_fires_once_per_schedule_not_once_per_process` asserts on the
+// process-global dedup set inside `log_dynamic_rescale_once`, so it reserves
+// the geometries `(64, {111_111.0, 222_222.0, 333_333.0}, 1024, {2.0, 4.0})`.
+// A new test that crosses `max_position_embeddings` on one of those would make
+// that test's first assertion depend on execution order. Use the constants
+// above, or a geometry no other test names.
+
 /// Parse a `rope_scaling` block the way a `config.json` delivers it.
 fn spec(json: &str) -> RopeScalingSpec {
     serde_json::from_str(json).unwrap_or_else(|err| panic!("block must parse: {err}\n{json}"))
@@ -114,7 +121,7 @@ fn a_default_block_is_the_unscaled_schedule() {
 #[test]
 fn both_spellings_of_the_scheme_key_resolve() {
     // InternLM3 checkpoints spell it `rope_type`; InternLM2 checkpoints spell
-    // it `type` (`models/internlm2-7b-4bit` ships `{"type": "dynamic",
+    // it `type` (`models/internlm2_5-7b-chat-4bit` ships `{"type": "dynamic",
     // "factor": 2.0}`). One helper serves both families, so it has to read
     // both, and a config carrying both keys has to parse rather than hit
     // serde's `duplicate field`.
@@ -170,7 +177,7 @@ fn the_dynamic_base_grows_past_max_position() {
 
 #[test]
 fn the_dynamic_base_grows_past_max_position_for_internlm2_geometry() {
-    // `models/internlm2-7b-4bit`: factor 2.0, rope_theta 1e6, same head_dim and
+    // `models/internlm2_5-7b-chat-4bit`: factor 2.0, rope_theta 1e6, same head_dim and
     // max_position_embeddings. Its block was dropped at deserialization before
     // this change, so the base never left 1e6 at any length.
     let rope = DynamicNtkRope::from_scaling(
@@ -179,7 +186,7 @@ fn the_dynamic_base_grows_past_max_position_for_internlm2_geometry() {
         false,
         32768,
         Some(&spec(r#"{"type": "dynamic", "factor": 2.0}"#)),
-        "internlm2-7b-4bit",
+        "internlm2_5-7b-chat-4bit",
     )
     .expect("block must resolve");
     assert_eq!(rope.base_for(32768), 1_000_000.0);
@@ -378,4 +385,71 @@ fn apply_honors_the_traditional_flag() {
     assert_eq!(bytes(&got), bytes(&want));
     let interleaved = mlxcel_core::fast_rope(&x, 16, false, BASE, 1.0, 0);
     assert_ne!(bytes(&got), bytes(&interleaved));
+}
+
+#[test]
+fn the_rescale_log_fires_once_per_schedule_not_once_per_process() {
+    // Distinct geometry per schedule so this test cannot collide with the
+    // `apply` tests above, which cross the boundary on the shared constants
+    // and so populate the same dedup set.
+    let probe = |dims: i32, base: f32, max_pos: usize, factor: f64| {
+        DynamicNtkRope::from_scaling(
+            dims,
+            base,
+            false,
+            max_pos,
+            Some(&spec(&format!(
+                r#"{{"rope_type": "dynamic", "factor": {factor}}}"#
+            ))),
+            "dedup-probe",
+        )
+        .expect("block must resolve")
+    };
+
+    let rope = probe(64, 111_111.0, 1024, 2.0);
+    let past = 2048;
+    assert!(
+        rope.log_dynamic_rescale_once(past, rope.base_for(past)),
+        "the first crossing must log"
+    );
+    assert!(
+        !rope.log_dynamic_rescale_once(past, rope.base_for(past)),
+        "the same schedule must not log again"
+    );
+    // `Copy`, so the caller's per-layer rebuild is a distinct value with the
+    // same parameters. It must still be deduped.
+    assert!(
+        !probe(64, 111_111.0, 1024, 2.0).log_dynamic_rescale_once(past, 0.0),
+        "an equal schedule rebuilt per layer must not log again"
+    );
+
+    // A second checkpoint in the same process still gets its line, which is
+    // what a process-wide flag would have swallowed.
+    assert!(
+        probe(64, 222_222.0, 1024, 2.0).log_dynamic_rescale_once(past, 0.0),
+        "a different base must log"
+    );
+    assert!(
+        probe(64, 111_111.0, 1024, 4.0).log_dynamic_rescale_once(past, 0.0),
+        "a different factor must log"
+    );
+
+    // Inside the boundary, and any non-dynamic mode, never logs.
+    assert!(
+        !probe(64, 333_333.0, 1024, 2.0).log_dynamic_rescale_once(1024, 333_333.0),
+        "seq_len == max_position_embeddings is a no-op, so it must not log"
+    );
+    let linear = DynamicNtkRope::from_scaling(
+        64,
+        333_333.0,
+        false,
+        1024,
+        Some(&spec(r#"{"rope_type": "linear", "factor": 2.0}"#)),
+        "dedup-probe",
+    )
+    .expect("block must resolve");
+    assert!(
+        !linear.log_dynamic_rescale_once(2048, 333_333.0),
+        "a linear schedule never rescales the base, so it must not log"
+    );
 }
