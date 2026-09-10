@@ -58,9 +58,13 @@
 //!      participates in the canonicalized map hash.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
+
+use crate::multimodal::video::video_frames_lead_text;
 
 use super::chat_template::{ChatMessage, ChatTemplateProcessor, template_rejection_message};
 use super::chat_template_kwargs::{
@@ -76,7 +80,7 @@ use super::types::request::{
     ContentPart, Message, MessageContent, Tool, ToolChoice, ordered_audio_sentinel,
     ordered_image_sentinel,
 };
-use super::types::{ChatCompletionRequest, Role};
+use super::types::{ChatCompletionRequest, ErrorResponse, Role};
 
 #[cfg(test)]
 thread_local! {
@@ -361,10 +365,70 @@ impl VideoFramesFallback {
     }
 }
 
-/// The sentence inserted ahead of a clip's frames so the model reads them as
-/// one video rather than as unrelated pictures.
-fn video_frames_lead_text(frames: usize) -> String {
-    format!("Here is a video as a sequence of {frames} frames in chronological order.")
+/// Why [`expand_video_parts_to_frames`] left a request unexpanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VideoFramesError {
+    /// A client-facing refusal: `ffmpeg` missing, a clip that cannot be
+    /// resolved or decoded, or frames over the per-request image budget.
+    Rejected(String),
+    /// The request's cancellation token fired before the expansion finished
+    /// (issue #1766). The routes cancel it when the client disconnects, so
+    /// nobody is waiting for an answer and this must not surface as a 400 the
+    /// client caused.
+    Cancelled,
+}
+
+impl VideoFramesError {
+    /// The error a route answers with.
+    pub(crate) fn into_error_response(self) -> ErrorResponse {
+        match self {
+            Self::Rejected(message) => ErrorResponse::new(message, "invalid_request_error"),
+            Self::Cancelled => ErrorResponse::client_closed_request(),
+        }
+    }
+}
+
+/// One clip's frames, decoded and PNG-encoded in chronological order, as the
+/// expansion loop receives them.
+struct DecodedVideoPart {
+    frames: Vec<Vec<u8>>,
+    /// How many frames `fps` alone would have sampled, for the "kept of
+    /// sampled" log line.
+    sampled: usize,
+    /// The resolved clip, for the log line and error messages.
+    label: String,
+}
+
+/// Run [`expand_video_parts_to_frames`] for one route handler, with the
+/// resolved allowlist from [`AppState`] and a cancellation token tied to the
+/// handler (issue #1766).
+///
+/// The token's drop guard lives in this future, and so in the handler's: a
+/// client that disconnects drops the handler future, the guard cancels the
+/// token, and a decode still queued on the blocking pool returns before it
+/// starts instead of running its clip to `--video-max-frames` for a response
+/// nobody will read. A decode already running is not interrupted, because that
+/// means killing its ffmpeg child, so at most one clip's decode is wasted.
+///
+/// [`AppState`]: super::AppState
+///
+/// Used by: `routes::chat::chat_completions`, `routes::responses::create_response`
+/// and `routes::prompt_inspection::render_chat_prompt`.
+pub(crate) async fn expand_request_video_parts(
+    state: &super::AppState,
+    request: &mut ChatCompletionRequest,
+) -> std::result::Result<usize, VideoFramesError> {
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    expand_video_parts_to_frames(
+        request,
+        state.media_support,
+        VideoFramesFallback::from_config(&state.config),
+        state.display_model_id(),
+        &state.video_dir_allowlist,
+        &cancel,
+    )
+    .await
 }
 
 /// Rewrite every `video_url` content part into the sampled frames of that clip,
@@ -377,36 +441,62 @@ fn video_frames_lead_text(frames: usize) -> String {
 /// checkpoint with a native video path: those keep their own temporal
 /// processor and `prepared.videos`.
 ///
+/// `allowlist` is the resolved `MLXCEL_VIDEO_DIR_ALLOWLIST`, which routes take
+/// from `AppState` where startup put it, so no request canonicalizes it again
+/// (issue #1766). `cancel` is checked before the clip loop, before each clip is
+/// resolved, and when a decode leaves the blocking-pool queue.
+///
 /// [`media_capability_rejection`]: crate::server::media_capability_rejection
 ///
 /// # Errors
-/// Returns a client-facing message when `ffmpeg` is missing, a referenced clip
+/// [`VideoFramesError::Rejected`] when `ffmpeg` is missing, a referenced clip
 /// cannot be resolved or decoded, or the substituted frames would push the
-/// request past the per-request image limit.
+/// request past the per-request image limit. [`VideoFramesError::Cancelled`]
+/// when `cancel` fires first. Either way the request is left untouched.
 pub(crate) async fn expand_video_parts_to_frames(
     request: &mut ChatCompletionRequest,
     support: super::state::ModelMediaSupport,
     settings: VideoFramesFallback,
     model_id: &str,
-) -> std::result::Result<usize, String> {
-    let allowlist = super::media::video_dir_allowlist_from_env();
-    expand_video_parts_to_frames_with_allowlist(request, support, settings, model_id, &allowlist)
-        .await
+    allowlist: &[PathBuf],
+    cancel: &CancellationToken,
+) -> std::result::Result<usize, VideoFramesError> {
+    expand_video_parts_with(
+        request,
+        support,
+        settings,
+        model_id,
+        cancel,
+        move |video_url, max_frames| {
+            decode_video_part(
+                video_url,
+                settings.default_fps,
+                max_frames,
+                allowlist,
+                cancel,
+            )
+        },
+    )
+    .await
 }
 
-/// Test-friendly variant of [`expand_video_parts_to_frames`] that takes the
-/// directory allowlist directly.
+/// The loop behind [`expand_video_parts_to_frames`], with the per-clip I/O
+/// (resolve, decode, PNG-encode) passed in as `decode`.
 ///
-/// Same split `extract_chat_video_paths_with_allowlist` uses, and for the same
-/// reason: `MLXCEL_VIDEO_DIR_ALLOWLIST` is process-global state, so a test that
-/// set it would have to hold the crate env lock across this function's awaits.
-pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
+/// Split out so a test can drive the cancellation checks, the budget checks
+/// and the splice with synthetic frames on a host that has no ffmpeg.
+async fn expand_video_parts_with<F, Fut>(
     request: &mut ChatCompletionRequest,
     support: super::state::ModelMediaSupport,
     settings: VideoFramesFallback,
     model_id: &str,
-    allowlist: &[std::path::PathBuf],
-) -> std::result::Result<usize, String> {
+    cancel: &CancellationToken,
+    mut decode: F,
+) -> std::result::Result<usize, VideoFramesError>
+where
+    F: FnMut(crate::server::types::request::VideoUrl, usize) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<DecodedVideoPart, VideoFramesError>>,
+{
     if !support.video_frames_fallback {
         return Ok(0);
     }
@@ -433,6 +523,12 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
     if targets.is_empty() {
         return Ok(0);
     }
+    // Before the clip loop, and before the budget check: a request whose
+    // client is already gone gets neither a 400 nobody will read nor any work
+    // on the ffmpeg probe, the resolver or the decoder.
+    if cancel.is_cancelled() {
+        return Err(VideoFramesError::Cancelled);
+    }
 
     let image_limit = super::media::current_image_input_limits().max_images_per_request;
     // Counted once: the splice that adds the frames runs after the loop below,
@@ -446,55 +542,31 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
     // the ffmpeg probe too, because the request is the wrong shape whether or
     // not a decoder is installed.
     if existing_images.saturating_add(targets.len()) > image_limit {
-        return Err(format!(
+        return Err(VideoFramesError::Rejected(format!(
             "The request carries {} video part(s) alongside {existing_images} image input(s), and \
              each clip expands to at least one frame image, over the per-request limit of \
              {image_limit}. Send fewer clips or raise --max-images.",
             targets.len()
-        ));
-    }
-
-    if !crate::multimodal::video::ffmpeg_available() {
-        return Err(
-            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
-             on macOS or `apt install ffmpeg` on Linux) and retry."
-                .to_string(),
-        );
+        )));
     }
 
     let max_frames = settings.effective_max_frames();
     let mut injected = 0usize;
     let mut expansions: Vec<(usize, usize, Vec<Vec<u8>>)> = Vec::with_capacity(targets.len());
     for (message_index, part_index, video_url) in targets {
-        let resolved = super::media::resolve_video_url(&video_url, allowlist)
-            .await
-            .ok_or_else(|| {
-                format!(
-                    "Could not read the video referenced by {:?}. Local paths must sit inside a \
-                     directory listed in {}.",
-                    video_url.url,
-                    super::media::VIDEO_DIR_ALLOWLIST_ENV
-                )
-            })?;
-        let fps = video_url.fps.unwrap_or(settings.default_fps);
-        let label = resolved.canonical_path().display().to_string();
-        // ffmpeg decode plus PNG encode is seconds of CPU on a long clip, so it
-        // runs on the blocking pool like the image decode path does rather than
-        // parking a Tokio worker.
-        let (kept, sampled) = tokio::task::spawn_blocking(move || {
-            let (frames, sampled) = crate::multimodal::video::load_video_source_frames_fallback(
-                &resolved.source,
-                fps,
-                max_frames,
-            )?;
-            let kept = crate::multimodal::video::subsample_evenly(frames, max_frames);
-            crate::multimodal::video::frames_to_png(&kept).map(|png| (png, sampled))
-        })
-        .await
-        .map_err(|err| format!("Video frame extraction task failed: {err}"))?
-        .map_err(|err| format!("Failed to load video {label:?}: {err}"))?;
+        // Per clip, ahead of resolving it: resolution can download a remote
+        // clip, and a disconnect between clips should cost no more than the
+        // clip that was already decoding.
+        if cancel.is_cancelled() {
+            return Err(VideoFramesError::Cancelled);
+        }
+        let DecodedVideoPart {
+            frames,
+            sampled,
+            label,
+        } = decode(video_url, max_frames).await?;
 
-        injected += kept.len();
+        injected += frames.len();
         // The frames become ordinary image parts, so they spend the same
         // per-request image budget. Refuse here, naming the frames, rather than
         // letting `validate_image_count` report a count the caller never sent.
@@ -504,18 +576,94 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
         // saying the clip that broke the budget was sent.
         if let Some(message) = video_frame_budget_rejection(existing_images, injected, image_limit)
         {
-            return Err(message);
+            return Err(VideoFramesError::Rejected(message));
         }
         tracing::info!(
             "model {model_id} has no native video path; sending {} of {sampled} sampled frames \
              from {label} as ordered images",
-            kept.len()
+            frames.len()
         );
-        expansions.push((message_index, part_index, kept));
+        expansions.push((message_index, part_index, frames));
     }
 
     apply_video_frame_expansion(request, expansions);
     Ok(injected)
+}
+
+/// Resolve one `video_url` part against the allowlist, then decode and
+/// PNG-encode its frames on the blocking pool.
+///
+/// The ffmpeg check here is a memoized read: server startup runs the probe
+/// once for any checkpoint that takes video, so no request pays for the
+/// process spawn (issue #1766). It still comes first, so a host without
+/// ffmpeg is told so before any clip is downloaded.
+async fn decode_video_part(
+    video_url: crate::server::types::request::VideoUrl,
+    default_fps: f64,
+    max_frames: usize,
+    allowlist: &[PathBuf],
+    cancel: &CancellationToken,
+) -> std::result::Result<DecodedVideoPart, VideoFramesError> {
+    if !crate::multimodal::video::ffmpeg_available() {
+        return Err(VideoFramesError::Rejected(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+                .to_string(),
+        ));
+    }
+    let resolved = super::media::resolve_video_url(&video_url, allowlist)
+        .await
+        .ok_or_else(|| {
+            VideoFramesError::Rejected(format!(
+                "Could not read the video referenced by {:?}. Local paths must sit inside a \
+                 directory listed in {}.",
+                video_url.url,
+                super::media::VIDEO_DIR_ALLOWLIST_ENV
+            ))
+        })?;
+    let fps = video_url.fps.unwrap_or(default_fps);
+    let label = resolved.canonical_path().display().to_string();
+    let cancel = cancel.clone();
+    // ffmpeg decode plus PNG encode is seconds of CPU on a long clip, so it
+    // runs on the blocking pool like the image decode path does rather than
+    // parking a Tokio worker.
+    let decoded = tokio::task::spawn_blocking(move || {
+        decode_video_frames_blocking(&resolved.source, fps, max_frames, &cancel)
+    })
+    .await
+    .map_err(|err| {
+        VideoFramesError::Rejected(format!("Video frame extraction task failed: {err}"))
+    })?
+    .map_err(|err| VideoFramesError::Rejected(format!("Failed to load video {label:?}: {err}")))?;
+    let (frames, sampled) = decoded.ok_or(VideoFramesError::Cancelled)?;
+    Ok(DecodedVideoPart {
+        frames,
+        sampled,
+        label,
+    })
+}
+
+/// The blocking half of [`decode_video_part`]: decode the kept frames and
+/// PNG-encode them, or return `Ok(None)` without touching ffmpeg when `cancel`
+/// has already fired.
+///
+/// The check sits here, at the start of the blocking task, because dropping
+/// the `JoinHandle` does not cancel a blocking task: a decode queued behind
+/// other work on the shared pool would otherwise still start, and run to
+/// `--video-max-frames`, after its client has gone (issue #1766).
+fn decode_video_frames_blocking(
+    source: &crate::multimodal::video::VideoSource,
+    fps: f64,
+    max_frames: usize,
+    cancel: &CancellationToken,
+) -> std::result::Result<Option<(Vec<Vec<u8>>, usize)>, crate::multimodal::video::VideoError> {
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    let (frames, sampled) =
+        crate::multimodal::video::load_video_source_frames_fallback(source, fps, max_frames)?;
+    let kept = crate::multimodal::video::subsample_evenly(frames, max_frames);
+    crate::multimodal::video::frames_to_png(&kept).map(|png| Some((png, sampled)))
 }
 
 /// Refuse a request whose substituted frames would not fit the per-request

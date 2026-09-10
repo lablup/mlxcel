@@ -541,7 +541,20 @@ pub(crate) const VIDEO_DIR_ALLOWLIST_ENV: &str = "MLXCEL_VIDEO_DIR_ALLOWLIST";
 pub(crate) async fn extract_chat_video_paths(
     request: &ChatCompletionRequest,
 ) -> Vec<ResolvedVideo> {
-    let allowlist = video_dir_allowlist_from_env();
+    // `prepare_chat_request_with_cache` calls this for every request, so a
+    // body with no clip, which includes every body the video-frames fallback
+    // has already rewritten into images, returns before reading the
+    // environment or touching the filesystem (issue #1766).
+    if request.video_urls().is_empty() {
+        return Vec::new();
+    }
+    // The native-video path still reads the allowlist per request, because
+    // request preparation does not see `AppState`; the canonicalization at
+    // least runs on the blocking pool rather than on this Tokio worker. A
+    // failed task resolves to the empty, fail-closed list.
+    let allowlist = tokio::task::spawn_blocking(video_dir_allowlist_from_env)
+        .await
+        .unwrap_or_default();
     extract_chat_video_paths_with_allowlist(request, &allowlist).await
 }
 
@@ -576,12 +589,16 @@ pub(crate) async fn extract_chat_video_paths_with_allowlist(
 /// fail-closed default — no `file://` URI or bare local path can resolve
 /// until an operator opts in.
 ///
-/// Callable from sync contexts (used by [`crate::server::startup`] for the
-/// startup-time writability check). The hot path on the request side reads
-/// the result via the async [`extract_chat_video_paths`] wrapper which then
-/// passes it down by reference, so the blocking `std::fs::canonicalize` here
-/// runs once at startup and once per request handler — both off the Tokio
-/// hot loop, so it is acceptable to keep this synchronous.
+/// Synchronous, and it calls the blocking `std::fs::canonicalize`, so keep it
+/// off Tokio workers. Startup resolves it once per model load
+/// ([`crate::server::startup::resolve_video_request_inputs`]) into
+/// `AppState`, which is what the video-frames fallback reads (issue #1766);
+/// the native-video path in [`extract_chat_video_paths`] still calls it per
+/// request that carries a clip, through `spawn_blocking`.
+///
+/// Deliberately not memoized: tests set the variable and read it back, and
+/// the `_with_allowlist` entry points exist so the rest of the tests can
+/// inject a list instead.
 pub(crate) fn video_dir_allowlist_from_env() -> Vec<PathBuf> {
     let raw = std::env::var(VIDEO_DIR_ALLOWLIST_ENV).unwrap_or_default();
     if raw.trim().is_empty() {

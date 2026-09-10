@@ -95,44 +95,34 @@ fn parse_with_default_model<T: serde::de::DeserializeOwned>(
 async fn render_chat_prompt(
     state: &AppState,
     live: &LiveSettings,
-    request: &ChatCompletionRequest,
+    mut request: ChatCompletionRequest,
 ) -> Result<RenderedPrompt, ErrorResponse> {
     if let Some(rejection) = crate::server::media_capability_rejection(
-        request,
+        &request,
         state.media_support,
         state.display_model_id(),
     ) {
         return Err(rejection);
     }
-    if let Err(message) = super::chat::validate_chat_tool_inputs(request) {
+    if let Err(message) = super::chat::validate_chat_tool_inputs(&request) {
         return Err(ErrorResponse::new(message, "invalid_request_error"));
     }
     // These routes exist to answer "what prompt would the generating route
     // build for this body?", so they have to run the same video-to-frames
     // substitution the generating route does (issue #1322); otherwise the
     // reported prompt would carry no image placeholders for a clip that
-    // /v1/chat/completions expands into as many as sixteen. Rewritten on a
-    // local copy because the caller's request is borrowed and these handlers
-    // never generate.
-    let mut expanded;
-    let request = if state.media_support.video_frames_fallback && !request.video_urls().is_empty() {
-        expanded = request.clone();
-        crate::server::chat_request::expand_video_parts_to_frames(
-            &mut expanded,
-            state.media_support,
-            crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
-            state.display_model_id(),
-        )
+    // /v1/chat/completions expands into as many as sixteen. Every caller owns
+    // the request it passes and none of them generates from it, so it is
+    // rewritten in place: a copy would duplicate every base64 image payload
+    // and tool definition in the body just to change its messages (issue
+    // #1766).
+    crate::server::chat_request::expand_request_video_parts(state, &mut request)
         .await
-        .map_err(|message| ErrorResponse::new(message, "invalid_request_error"))?;
-        &expanded
-    } else {
-        request
-    };
+        .map_err(crate::server::chat_request::VideoFramesError::into_error_response)?;
     let prompt_cache_enabled = state.prompt_cache.is_some();
     prepare_chat_request_with_cache(
         &state.chat_template,
-        request,
+        &request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -201,7 +191,7 @@ pub async fn apply_template(
         Ok(request) => request,
         Err(err) => return err.into_response(),
     };
-    match render_chat_prompt(&state, &live, &request).await {
+    match render_chat_prompt(&state, &live, request).await {
         // A native renderer's id count is reported alongside the text so an
         // operator inspecting a Kimi K3 prompt sees the length the model
         // actually prefills, which is not what re-encoding the text gives.
@@ -231,7 +221,7 @@ pub async fn chat_input_tokens(
         Ok(request) => request,
         Err(err) => return err.into_response(),
     };
-    let rendered = match render_chat_prompt(&state, &live, &request).await {
+    let rendered = match render_chat_prompt(&state, &live, request).await {
         Ok(rendered) => rendered,
         Err(err) => return err.into_response(),
     };
@@ -270,7 +260,7 @@ pub async fn responses_input_tokens(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
-    let rendered = match render_chat_prompt(&state, &live, &translated.chat_request).await {
+    let rendered = match render_chat_prompt(&state, &live, translated.chat_request).await {
         Ok(rendered) => rendered,
         Err(err) => return err.into_response(),
     };

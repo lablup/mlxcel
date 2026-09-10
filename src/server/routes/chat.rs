@@ -364,16 +364,12 @@ pub async fn chat_completions(
     // `prepare_chat_request_with_cache` renders, so the template emits one
     // image placeholder per frame and the request the rest of this handler
     // sees is an ordinary multi-image one. Native video families are left
-    // alone and keep `prepared.videos`.
-    if let Err(message) = crate::server::chat_request::expand_video_parts_to_frames(
-        &mut request,
-        state.media_support,
-        crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
-        state.display_model_id(),
-    )
-    .await
+    // alone and keep `prepared.videos`. A client that disconnects mid-decode
+    // cancels the clips not yet decoded (issue #1766).
+    if let Err(err) =
+        crate::server::chat_request::expand_request_video_parts(&state, &mut request).await
     {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
+        return err.into_error_response().into_response();
     }
 
     // Keep tool validation shared with the disaggregated router front so both

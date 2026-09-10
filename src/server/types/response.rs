@@ -523,6 +523,26 @@ impl ErrorResponse {
         }
     }
 
+    /// Build a `499 Client Closed Request`, the non-standard status nginx logs
+    /// when the client went away before the response was ready.
+    ///
+    /// Answered only when a handler notices the disconnect itself, as the
+    /// video-frames fallback does through its cancellation token (issue
+    /// #1766). Nobody reads the body; the status keeps the request out of the
+    /// 400s, which would blame the client for a request it never got an
+    /// answer to.
+    pub fn client_closed_request() -> Self {
+        Self {
+            error: ErrorDetail {
+                message: "The client closed the connection before the request finished.".into(),
+                error_type: "client_closed_request".into(),
+                code: None,
+            },
+            status: axum::http::StatusCode::from_u16(499)
+                .unwrap_or(axum::http::StatusCode::BAD_REQUEST),
+        }
+    }
+
     /// Build b10621's `ERROR_TYPE_NOT_SUPPORTED`: a `501` whose error type is
     /// the `not_supported_error` string upstream emits.
     ///

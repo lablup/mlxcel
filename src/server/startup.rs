@@ -1052,15 +1052,40 @@ pub(super) fn resolve_dry_penalty_last_n(value: i32) -> usize {
     }
 }
 
+/// Resolve, once per model load and off the request path, the two video inputs
+/// a request used to resolve for itself on a Tokio worker (issue #1766).
+///
+/// Returns the `MLXCEL_VIDEO_DIR_ALLOWLIST` directories, canonicalized, for
+/// [`AppState::with_video_dir_allowlist`]. For a checkpoint that takes video at
+/// all, it also runs the ffmpeg/ffprobe probe, whose `OnceLock` is then warm
+/// when the first clip arrives, and says so now when ffmpeg is missing rather
+/// than leaving the operator to find out from a refused request.
+///
+/// A directory that does not exist yet when the server starts is dropped with
+/// a warning and stays dropped: the list is resolved here and not per request.
+///
+/// Used by: [`start_server`] (single-model server) and
+/// `router_models::build_model_app` (one call per model the router loads).
+pub(crate) fn resolve_video_request_inputs(support: ModelMediaSupport) -> Arc<Vec<PathBuf>> {
+    if support.video() && !crate::multimodal::video::ffmpeg_available() {
+        tracing::warn!(
+            "The loaded model accepts video input, but `ffmpeg` and `ffprobe` are not both on \
+             PATH, so every video request will be refused. The check is cached for the life of \
+             the process: restart the server after installing ffmpeg."
+        );
+    }
+    Arc::new(super::media::video_dir_allowlist_from_env())
+}
+
 /// Walk the directories named in `MLXCEL_VIDEO_DIR_ALLOWLIST` once at
 /// startup and emit a `tracing::warn!` for any entry whose group or world
 /// write bits are set (hardening / follow-up).
 ///
-/// Reads the env var via [`super::media::video_dir_allowlist_from_env`]
-/// and delegates the actual permission check to
-/// [`super::media::scan_insecure_allowlist_dirs`]. Both helpers fail closed
-/// when the env var is empty/unset, so this runs as a no-op for operators
-/// who haven't opted into the feature.
+/// Takes the list [`resolve_video_request_inputs`] resolved, so startup reads
+/// the env var once, and delegates the actual permission check to
+/// [`super::media::scan_insecure_allowlist_dirs`]. An empty list (the env var
+/// empty or unset) makes this a no-op for operators who haven't opted into
+/// the feature.
 ///
 /// closed the dominant canonicalise → ffmpeg-open TOCTOU window
 /// at the kernel level: every file open now uses `O_NOFOLLOW` (so a symlink
@@ -1085,8 +1110,7 @@ pub(super) fn resolve_dry_penalty_last_n(value: i32) -> usize {
 /// permissions; the resolver itself is safe against the static path
 /// checks (canonicalise + allowlist prefix + regular-file + extension)
 /// and the fd-passing + `O_NOFOLLOW` guarantee.
-fn warn_on_insecure_video_allowlist() {
-    let allowlist = super::media::video_dir_allowlist_from_env();
+fn warn_on_insecure_video_allowlist(allowlist: &[PathBuf]) {
     if allowlist.is_empty() {
         return;
     }
@@ -1103,7 +1127,7 @@ fn warn_on_insecure_video_allowlist() {
     }
     #[cfg(unix)]
     {
-        let insecure = super::media::scan_insecure_allowlist_dirs(&allowlist);
+        let insecure = super::media::scan_insecure_allowlist_dirs(allowlist);
         for dir in insecure {
             tracing::warn!(
                 "Allowlist directory '{}' is world/group-writable. The dominant \
@@ -2962,6 +2986,10 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // detect static media-input capabilities once at startup so
     // the chat handler can short-circuit unsupported requests with a 400.
     let media_support = detect_model_media_support(&startup.model_path);
+    // Resolved here, before the listener is bound, so the video-frames
+    // fallback neither canonicalizes the allowlist nor spawns the ffmpeg probe
+    // on a request's Tokio worker (issue #1766).
+    let video_dir_allowlist = resolve_video_request_inputs(media_support);
 
     // hardening: scan the operator-provided
     // `MLXCEL_VIDEO_DIR_ALLOWLIST` directories for world/group-writable
@@ -2972,7 +3000,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // hygiene and can re-enable the race if a future ffmpeg version
     // interprets `/dev/fd/N` differently. We keep the warning as
     // defence-in-depth.
-    warn_on_insecure_video_allowlist();
+    warn_on_insecure_video_allowlist(&video_dir_allowlist);
 
     // build the Responses-API stores from the resolved limits.
     // `max_entries = 0` disables the store entirely; otherwise build with
@@ -3135,6 +3163,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         batch_observability,
     )
     .with_media_support(media_support)
+    .with_video_dir_allowlist(video_dir_allowlist)
     .with_pp_tracer(pp_tracer)
     .with_prompt_cache(prompt_cache_store)
     .with_responses_store(responses_store)
