@@ -287,7 +287,7 @@ mod snapshot_prompt_cache {
     const SEQ_BASE: u64 = 1_335_000;
 
     use super::super::{Gemma3Model, Gemma3Wrapper, ModelArgs};
-    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::cache::{KVCacheMode, SequenceId};
     use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
     use mlxcel_core::weights::WeightMap;
     use mlxcel_core::{MlxArray, UniquePtr};
@@ -618,6 +618,32 @@ mod snapshot_prompt_cache {
             .expect_err("a Gemma 4 snapshot must not land in Gemma 3");
         assert!(err.contains("gemma4"), "unexpected error: {err}");
         assert!(!wrapper.snapshot_truncatable_to(&foreign, 2));
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn a_quantized_cache_mode_declines_the_restore() {
+        // The shared serializer refuses to install an Fp16 snapshot into a
+        // cache configured for a quantized mode. `kv_snapshot_tests.rs` pins
+        // that check directly; this pins that Gemma 3's own wiring surfaces
+        // it too, through `set_kv_cache_layer_modes` rather than the raw
+        // cache constructors.
+        let cold = build_wrapper();
+        let seq_cold = SequenceId::from_raw(SEQ_BASE + 11);
+        prefill(&cold, seq_cold, &ids(0..6));
+        let snapshot = cold
+            .snapshot_sequence_state(seq_cold, 6)
+            .expect("Gemma 3 must donate a non-empty snapshot");
+
+        let quantized = build_wrapper();
+        quantized.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; LAYERS]);
+        let err = quantized
+            .restore_sequence_state(SequenceId::from_raw(SEQ_BASE + 12), &snapshot)
+            .expect_err("an Fp16 snapshot must not land in an Int8-configured cache");
+        assert!(
+            err.contains("does not match configured cache mode"),
+            "unexpected error: {err}"
+        );
     }
 }
 

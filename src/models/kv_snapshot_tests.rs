@@ -578,6 +578,41 @@ fn truncate_refuses_a_negative_target() {
     let err = truncate_chunked(&mut chunked, -1, TEST_NAMES).expect_err("negative target");
     assert!(err.contains("is negative"), "unexpected error: {err}");
     assert_eq!(chunked.offset, 6, "a refused truncate must not move offset");
+
+    let mut rotating = RotatingKVCache::new(16);
+    fill_rotating_one_at_a_time(&mut rotating, 6);
+    let err = truncate_rotating(&mut rotating, -1, TEST_NAMES).expect_err("negative target");
+    assert!(err.contains("is negative"), "unexpected error: {err}");
+}
+
+#[test]
+fn chunked_truncate_does_not_shorten_keys_when_the_value_slice_fails() {
+    // `truncate_chunked` builds both slices before installing either, so a
+    // failure slicing the second buffer must not leave the cache holding a
+    // shortened key buffer beside its original, full-length value buffer
+    // (983b8bae). Giving keys and values different physical lengths up front
+    // is the only way to make the second slice fail on its own.
+    let mut cache = ChunkedKVCache::new(8);
+    cache.keys = Some(keys_at(0, 8));
+    cache.values = Some(values_at(0, 4));
+    cache.offset = 8;
+
+    let err = truncate_chunked(&mut cache, 6, TEST_NAMES).expect_err("short values buffer");
+    assert!(
+        err.contains("exceeds") && err.contains("length"),
+        "unexpected error: {err}"
+    );
+    let keys = cache
+        .keys
+        .as_ref()
+        .and_then(|k| k.as_ref())
+        .expect("keys must still be present");
+    assert_eq!(
+        mlxcel_core::array_shape(keys)[2],
+        8,
+        "a refused truncate must not shorten the key buffer either"
+    );
+    assert_eq!(cache.offset, 8, "a refused truncate must not move offset");
 }
 
 #[test]

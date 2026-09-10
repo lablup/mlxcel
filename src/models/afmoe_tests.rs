@@ -774,7 +774,7 @@ mod snapshot_prompt_cache {
     const SEQ_BASE: u64 = 1_335_000;
 
     use super::{AfmoeModel, filled_weights, read_all, small_args};
-    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::cache::{KVCacheMode, SequenceId};
     use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 
     fn model() -> AfmoeModel {
@@ -842,5 +842,58 @@ mod snapshot_prompt_cache {
             .expect_err("a Gemma 3 snapshot must not land in AFMoE");
         assert!(err.contains("gemma3"), "unexpected error: {err}");
         assert!(!model.snapshot_truncatable_to(&foreign, 2));
+    }
+
+    #[test]
+    fn a_quantized_cache_mode_declines_the_restore() {
+        // The shared serializer refuses to install an Fp16 snapshot into a
+        // cache configured for a quantized mode. `kv_snapshot_tests.rs` pins
+        // that check directly; this pins that AFMoE's own wiring surfaces it
+        // too, through `set_kv_cache_layer_modes` rather than the raw cache
+        // constructors.
+        let cold = model();
+        let seq_cold = SequenceId::from_raw(SEQ_BASE + 24);
+        let prompt: Vec<i32> = (0..12).map(|i| i % 90 + 1).collect();
+        prefill(&cold, seq_cold, &prompt);
+        let snapshot = cold
+            .snapshot_sequence_state(seq_cold, prompt.len())
+            .expect("AFMoE must donate a non-empty snapshot");
+
+        let quantized = model();
+        quantized.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; quantized.num_layers()]);
+        let err = quantized
+            .restore_sequence_state(SequenceId::from_raw(SEQ_BASE + 25), &snapshot)
+            .expect_err("an Fp16 snapshot must not land in an Int8-configured cache");
+        assert!(
+            err.contains("does not match configured cache mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_sliding_ring_declines_a_truncating_restore() {
+        // `small_args` puts `sliding_window = 8` under a 12-token prompt, so
+        // every sliding layer has wrapped by the time the snapshot is taken
+        // (see the module doc above), which is the precondition
+        // `RotatingKVCacheSnapshotState::can_truncate_to` refuses.
+        let source = model();
+        let seq = SequenceId::from_raw(SEQ_BASE + 26);
+        let prompt: Vec<i32> = (0..12).map(|i| i % 90 + 1).collect();
+        prefill(&source, seq, &prompt);
+        let snapshot = source
+            .snapshot_sequence_state(seq, prompt.len())
+            .expect("AFMoE must donate a non-empty snapshot");
+        assert!(
+            !source.snapshot_truncatable_to(&snapshot, 4),
+            "a wrapped sliding ring no longer keeps logical token t at slot t"
+        );
+
+        let err = source
+            .restore_sequence_state_truncated(SequenceId::from_raw(SEQ_BASE + 27), &snapshot, 4)
+            .expect_err("a declined truncation must not install a partial state");
+        assert!(
+            err.contains("cannot be truncated"),
+            "unexpected error: {err}"
+        );
     }
 }

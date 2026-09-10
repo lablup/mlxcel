@@ -387,3 +387,51 @@ fn model_owned_paged_family_never_donates_or_adopts_kv() {
         "the adopt gate must return before the K/V store lookup, not after a guaranteed miss"
     );
 }
+
+/// The `require_whole_entry` gate, on the snapshot branch specifically
+/// (adcecb3b, a review finding on #1335 before that fix landed).
+///
+/// `try_adopt_cached_prefix` is exercised directly rather than through
+/// `enqueue`, because driving `require_whole_entry == true` through the
+/// normal admission path needs an actual multimodal request; the gate itself
+/// only reads the flag it is handed; this fixture's single global-attention
+/// layer is always truncatable (#1145), which is what makes a partial
+/// snapshot match reachable here without a VLM checkpoint.
+#[test]
+fn snapshot_partial_match_declines_under_require_whole_entry() {
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+
+    let first = prompt(40);
+    let rx = enqueue(&mut sched, first.clone());
+    run_to_completion(&mut sched, &rx);
+    assert_eq!(
+        store.stats().snapshot_entries,
+        1,
+        "turn 1 must donate a snapshot for turn 2 to diverge from"
+    );
+
+    // Turn 2 diverges from the stored entry at token 20: tokens 0..20 match,
+    // then the conversation takes a different turn. The store still reports
+    // a Hit at matched_len == 20, because the model agrees it can truncate
+    // there; whether the caller MAY adopt that partial match is exactly what
+    // `require_whole_entry` decides.
+    let mut second = first[..20].to_vec();
+    second.push(5);
+    second.extend([1, 2, 3, 4]);
+    let ctx = cache_ctx();
+
+    let declined = sched.try_adopt_cached_prefix(&ctx, &second, true);
+    assert!(
+        declined.is_none(),
+        "a partial snapshot match must decline when require_whole_entry is set"
+    );
+
+    // Same lookup, gate off: the partial match the line above declined does
+    // adopt, confirming the decline came from the gate and not from some
+    // other miss (e.g. a bad key or a below-minimum prefix).
+    let adopted = sched
+        .try_adopt_cached_prefix(&ctx, &second, false)
+        .expect("without the gate the same partial match must adopt");
+    assert_eq!(adopted.1, 20, "adopted at the 20-token common prefix");
+}
