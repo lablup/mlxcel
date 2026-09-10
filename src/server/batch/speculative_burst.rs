@@ -78,6 +78,9 @@
 //!   [`crate::LoadedModel::InklingVLM`] for text-only requests. The wrapper
 //!   adapter decodes through `vlm.text`; image-bearing requests retain the
 //!   classic HMLP prepared-embedding prefill path through the multimodal gate.
+//! - **DFlash / Laguna** (#1351) — [`crate::LoadedModel::Laguna`], through
+//!   the `SpeculativeTarget` impl in `crate::models::laguna_speculative`; the
+//!   drafter is seeded with every captured prompt row.
 //! - **DFlash / Qwen 3.5** — [`crate::LoadedModel::Qwen35`],
 //!   [`crate::LoadedModel::Qwen35Moe`], and their Qwen 3.5 VLM-wrapped
 //!   variants for text-only requests. True multimodal requests still
@@ -201,34 +204,68 @@ use crate::server::model_provider::{GenerateEvent, SpeculativeStats};
 
 use super::sequence::{FinishReason, SequenceInfo, SequenceState};
 
-/// Narrow target contract used by the server-side Qwen 3.5 DFlash burst.
+/// Narrow target contract used by the server-side DFlash burst.
 ///
 /// `DFlashGenerator` already accepts any [`SpeculativeTarget`], but the
-/// server prefill side also needs a fresh heterogeneous Qwen 3.5 cache vector.
-/// Both the text-only model and the Qwen 3.5 VLM wrapper satisfy that contract:
-/// the VLM wrapper delegates speculative hooks to its inner text backbone and
-/// allocates the same cache shape. This lets text-only requests against
-/// VLM-wrapped checkpoints run DFlash without opening the true multimodal tail
-/// path yet.
-trait Qwen35DFlashTarget:
-    LanguageModel
-    + SpeculativeTarget<
-        Cache = crate::models::qwen3_next::Qwen3NextCache,
-        VerifyOut = crate::models::qwen3_5::VerifyOutput,
-    >
-{
-    fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache>;
+/// server prefill side also needs a fresh per-request cache vector and a rule
+/// for which captured prompt rows seed the drafter. Qwen 3.5 (text model and
+/// the VLM wrapper, which delegates the speculative hooks to its inner text
+/// backbone) seeds the drafter with the last prompt row, matching the mlx-vlm
+/// port; Laguna (#1351) hands the drafter every prompt row, matching vLLM's
+/// Laguna DFlash proposer, and its drafter keeps the newest window of them.
+trait DFlashBurstTarget: LanguageModel + SpeculativeTarget {
+    /// Fresh per-layer caches for one request. `block_size` lets targets
+    /// reserve rollback slack (Laguna's sliding-window caches).
+    fn make_dflash_caches(&self, block_size: u32) -> Vec<<Self as SpeculativeTarget>::Cache>;
+
+    /// Slice of the concatenated prompt hidden states (`[1, P, dim]`) the
+    /// drafter receives on its first round. Defaults to the last row.
+    fn dflash_first_hidden(
+        &self,
+        concatenated: &mlxcel_core::MlxArray,
+        last_pos: i32,
+    ) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+        let shape = mlxcel_core::array_shape(concatenated);
+        mlxcel_core::slice(
+            concatenated,
+            &[0, last_pos, 0],
+            &[shape[0], last_pos + 1, shape[2]],
+        )
+    }
 }
 
-impl Qwen35DFlashTarget for crate::models::Qwen35Model {
-    fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
+impl DFlashBurstTarget for crate::models::Qwen35Model {
+    fn make_dflash_caches(
+        &self,
+        _block_size: u32,
+    ) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
         self.make_speculative_caches()
     }
 }
 
-impl Qwen35DFlashTarget for crate::vision::Qwen35VLModel {
-    fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
+impl DFlashBurstTarget for crate::vision::Qwen35VLModel {
+    fn make_dflash_caches(
+        &self,
+        _block_size: u32,
+    ) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
         self.text_model.make_speculative_caches()
+    }
+}
+
+impl DFlashBurstTarget for crate::models::LagunaWrapper {
+    fn make_dflash_caches(
+        &self,
+        block_size: u32,
+    ) -> Vec<crate::models::laguna_layers::LagunaCache> {
+        self.model.make_speculative_caches(block_size as usize)
+    }
+
+    fn dflash_first_hidden(
+        &self,
+        concatenated: &mlxcel_core::MlxArray,
+        _last_pos: i32,
+    ) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+        mlxcel_core::copy(concatenated)
     }
 }
 
@@ -1599,11 +1636,13 @@ fn run_dflash_burst(
         LoadedModel::Qwen35(_)
         | LoadedModel::Qwen35Moe(_)
         | LoadedModel::Qwen35VLM(_)
-        | LoadedModel::Qwen35MoeVLM(_) => {}
+        | LoadedModel::Qwen35MoeVLM(_)
+        | LoadedModel::Laguna(_) => {}
         _ => {
             tracing::warn!(
                 "DFlash speculative dispatch declined: target is {:?}, expected \
-                 Qwen 3.5 text or VLM-wrapped text-only; falling back to classic decode",
+                 Qwen 3.5 text or VLM-wrapped text-only, or Laguna; falling back to \
+                 classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1650,8 +1689,8 @@ fn run_dflash_burst(
     let logprobs_config = seq.logprobs_config.clone();
 
     // DFlash supports Qwen35 text models and Qwen35 VLM wrappers for
-    // text-only requests. The multimodal gate above rejects image/audio
-    // payloads before this point.
+    // text-only requests, and Laguna (#1351). The multimodal gate above
+    // rejects image/audio payloads before this point.
     let prefill_start = Instant::now();
     let DFlashTargetRun {
         tokens,
@@ -1659,7 +1698,7 @@ fn run_dflash_burst(
         decode_time_ms,
         speculative,
     } = match ctx.model {
-        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_dflash_on_qwen35(
+        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_dflash_on_target(
             qwen,
             &prompt,
             &sampling,
@@ -1672,8 +1711,21 @@ fn run_dflash_burst(
             cancel,
             &logprobs_config,
         )?,
-        LoadedModel::Qwen35VLM(qwen) | LoadedModel::Qwen35MoeVLM(qwen) => run_dflash_on_qwen35(
+        LoadedModel::Qwen35VLM(qwen) | LoadedModel::Qwen35MoeVLM(qwen) => run_dflash_on_target(
             qwen,
+            &prompt,
+            &sampling,
+            &token_history,
+            &eos_token_ids,
+            owned_drafter,
+            block_size,
+            max_tokens,
+            ctx.drafter_slot,
+            cancel,
+            &logprobs_config,
+        )?,
+        LoadedModel::Laguna(laguna) => run_dflash_on_target(
+            laguna,
             &prompt,
             &sampling,
             &token_history,
@@ -1732,9 +1784,10 @@ struct DFlashTargetRun {
     speculative: Option<SpeculativeStats>,
 }
 
-/// DFlash burst on a Qwen 3.5 text target (including a Qwen 3.5 VLM wrapper
-/// serving a text-only request) — handles prefill, first-bonus + first-hidden
-/// extraction, and `DFlashGenerator::run` driving.
+/// DFlash burst on one [`DFlashBurstTarget`] (a Qwen 3.5 text target, a
+/// Qwen 3.5 VLM wrapper serving a text-only request, or a Laguna target) —
+/// handles prefill, first-bonus + first-hidden extraction, and
+/// `DFlashGenerator::run` driving.
 ///
 /// `token_history` is the history-dependent-penalty context for the
 /// first-bonus sample (repetition / frequency / presence / DRY); it is
@@ -1754,7 +1807,7 @@ struct DFlashTargetRun {
 /// penalty-adjusted logits the bonus was sampled from, and the
 /// round-loop tokens' logprobs come back in `DFlashRunOutput::logprobs`
 #[allow(clippy::too_many_arguments)]
-fn run_dflash_on_qwen35<T>(
+fn run_dflash_on_target<T>(
     qwen: &T,
     prompt_tokens: &[i32],
     sampling: &SamplingConfig,
@@ -1768,7 +1821,7 @@ fn run_dflash_on_qwen35<T>(
     logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
 ) -> Result<DFlashTargetRun, BurstOutcome>
 where
-    T: Qwen35DFlashTarget,
+    T: DFlashBurstTarget,
 {
     // Build a fresh per-layer cache vector for this request. We do NOT
     // touch the scheduler-owned `sequence_state` map — the speculative
@@ -1782,9 +1835,9 @@ where
     // attention+linear cache vec the round loop needs, while the
     // `LanguageModel::make_caches(&self) -> Vec<KVCache>` trait method
     // returns an empty vec for Qwen 3.5 (the model owns its caches
-    // internally). Use the narrow `Qwen35DFlashTarget` helper to
+    // internally). Use the narrow `DFlashBurstTarget` helper to
     // disambiguate against the trait method by name.
-    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> = qwen.make_dflash_caches();
+    let mut caches = qwen.make_dflash_caches(block_size);
 
     // Prefill the prompt through the target's speculative verify hook,
     // capturing the same per-layer hidden states the DFlash round loop
@@ -1796,6 +1849,14 @@ where
         .filter(|ids| !ids.is_empty())
         .map(<[usize]>::to_vec)
         .unwrap_or_else(|| qwen.capture_layer_ids().to_vec());
+    if capture_layer_ids.is_empty() {
+        // Drafter slot ownership: we took the drafter at the top; we
+        // must not silently drop it on error.
+        drafter_slot.drafter = Some(owned_drafter);
+        return Err(BurstOutcome::Error(
+            "DFlash drafter declares no target layers to capture".to_string(),
+        ));
+    }
     let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let prefill_verify_start = Instant::now();
     let verify_out =
@@ -1805,10 +1866,11 @@ where
     // Sample the first bonus token from the last-position logits.
     let first_bonus_start = Instant::now();
     let last_pos = prompt_tokens.len() as i32 - 1;
-    let logits_shape = mlxcel_core::array_shape(&verify_out.logits);
+    let verify_logits = qwen.verify_logits(&verify_out);
+    let logits_shape = mlxcel_core::array_shape(verify_logits);
     let vocab = logits_shape[2];
     let last_logits = mlxcel_core::slice(
-        &verify_out.logits,
+        verify_logits,
         &[0, last_pos, 0],
         &[logits_shape[0], last_pos + 1, vocab],
     );
@@ -1832,41 +1894,18 @@ where
     );
     let first_bonus_ms = first_bonus_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Build first_hidden = concat(hidden_states, axis=-1)[:, last_pos:last_pos+1, :].
-    // The DFlash round loop expects shape [1, 1, num_layers * hidden_size].
+    // Build first_hidden from concat(hidden_states, axis=-1): the last prompt
+    // row (`[1, 1, num_layers * hidden_size]`) for Qwen 3.5, every prompt row
+    // for Laguna (see `DFlashBurstTarget::dflash_first_hidden`).
     let first_hidden_start = Instant::now();
-    if verify_out.hidden_states.is_empty() {
-        // Drafter slot ownership: we took the drafter at the top; we
-        // must not silently drop it on error.
-        drafter_slot.drafter = Some(owned_drafter);
-        return Err(BurstOutcome::Error(
-            "DFlash prefill returned no captured hidden layers".to_string(),
-        ));
-    }
-    let mut concatenated = mlxcel_core::copy(
-        verify_out.hidden_states[0]
-            .as_ref()
-            .expect("hidden state must be non-null"),
-    );
-    for slab in verify_out.hidden_states.iter().skip(1) {
-        concatenated = mlxcel_core::concatenate(
-            &concatenated,
-            slab.as_ref().expect("hidden state must be non-null"),
-            -1,
-        );
-    }
+    let concatenated = qwen.concat_hidden_for_drafter(&verify_out);
     let concatenated_shape = mlxcel_core::array_shape(&concatenated);
     debug_assert_eq!(
         concatenated_shape.len(),
         3,
         "concatenated hidden must be 3-D"
     );
-    let feature_dim = concatenated_shape[2];
-    let first_hidden = mlxcel_core::slice(
-        &concatenated,
-        &[0, last_pos, 0],
-        &[concatenated_shape[0], last_pos + 1, feature_dim],
-    );
+    let first_hidden = qwen.dflash_first_hidden(&concatenated, last_pos);
     let first_hidden_ms = first_hidden_start.elapsed().as_secs_f64() * 1000.0;
 
     // Drive the round loop. `run` returns the tokens EXCLUDING the
@@ -2746,7 +2785,7 @@ where
 /// DFlash batched burst — Qwen 3.5 text target or Qwen 3.5 VLM wrapper serving
 /// text-only requests (B > 1).
 ///
-/// Mirrors [`run_dflash_burst`] / [`run_dflash_on_qwen35`] but drives
+/// Mirrors [`run_dflash_burst`] / [`run_dflash_on_target`] but drives
 /// [`DFlashBatchedGenerator`]. The variant gate runs before drafter IO;
 /// the drafter bind happens **inside** `DFlashBatchedGenerator::run_batched`
 /// (same asymmetry as the B = 1 path — do NOT add a manual bind here).
@@ -2842,7 +2881,7 @@ fn run_dflash_burst_batched(
 /// wrapper serving text-only requests) — `[B, L]` prefill, per-row first-bonus
 /// + first-hidden extraction, and `DFlashBatchedGenerator::run_batched`.
 ///
-/// Mirrors [`run_dflash_on_qwen35`] for the B > 1 path. The prompts are
+/// Mirrors [`run_dflash_on_target`] for the B > 1 path. The prompts are
 /// equal length (window-collector contract) so the `[B, L]` prefill is
 /// byte-identical to B separate `[1, L]` prefills.
 #[allow(clippy::too_many_arguments)]
@@ -2857,14 +2896,18 @@ fn run_dflash_batched_on_qwen35<T>(
     drafter_slot: &mut WorkerDrafterSlot,
 ) -> Result<(BatchedBurstTokens, Instant), BurstOutcome>
 where
-    T: Qwen35DFlashTarget,
+    T: DFlashBurstTarget<
+            Cache = crate::models::qwen3_next::Qwen3NextCache,
+            VerifyOut = crate::models::qwen3_5::VerifyOutput,
+        >,
 {
     let batch_size = prompts.len();
     let prompt_len = prompts[0].len();
 
     // Build the `[B, ...]` per-layer cache vector. As with the B = 1
     // path, we do NOT touch the scheduler-owned `sequence_state` map.
-    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> = qwen.make_dflash_caches();
+    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> =
+        qwen.make_dflash_caches(block_size);
 
     // `[B, L]` prefill through the target's speculative forward. Capture the
     // hidden layers requested by this specific DFlash checkpoint.

@@ -431,7 +431,8 @@ impl BatchScheduler {
     ///      `Qwen35Model` / `Qwen35VLModel` (`qwen3_5_mtp` drafter, Metal
     ///      only, see [`crate::models::qwen3_5_mtp_target`]).
     ///    - **DFlash**: `Qwen35Model` / `Qwen35VLModel` — see the
-    ///      `SpeculativeTarget` impl in `crate::models::qwen3_5`.
+    ///      `SpeculativeTarget` impl in `crate::models::qwen3_5`; and
+    ///      `LagunaWrapper` (#1351) — see `crate::models::laguna_speculative`.
     /// 3. The drafter weights are loadable at the recorded
     ///    `draft_model_path`. Drafter loading itself happens lazily on
     ///    the worker thread the first time the dispatch arm is selected

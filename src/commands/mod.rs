@@ -23,6 +23,7 @@ pub(crate) mod detect;
 pub(crate) mod download;
 pub(crate) mod embed;
 pub(crate) mod generate;
+mod generate_dflash;
 mod generate_diffusion;
 mod generate_falcon_ocr;
 mod generate_florence2;

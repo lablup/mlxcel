@@ -459,11 +459,10 @@ impl LagunaModel {
     /// residual stream is returned alongside the logits (in that order); an
     /// empty slice captures nothing.
     ///
-    /// Every caller today passes an empty slice: the capture arm and
-    /// [`crate::models::laguna_layers::LagunaCache::trim`] are staged for the
-    /// DFlash drafter (#1351), which the port keeps out of scope, and neither
-    /// is reachable until `verify_forward_with_capture_layers` is implemented
-    /// for this family.
+    /// The plain forward passes an empty slice; the DFlash verify forward
+    /// ([`crate::models::laguna_speculative`], #1351) passes the drafter's
+    /// `target_layer_ids` and pairs the capture with
+    /// [`crate::models::laguna_layers::LagunaCache::trim`] on rollback.
     pub fn forward_with_capture(
         &self,
         input_ids: &MlxArray,

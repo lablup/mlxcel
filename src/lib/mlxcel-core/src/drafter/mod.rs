@@ -69,7 +69,7 @@
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
 //! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type) | |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel`, and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type) | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
@@ -77,6 +77,7 @@
 //! sub-issue, so calling code gets a clear actionable message instead of
 //! an opaque `unimplemented!` panic.
 
+pub mod laguna_dflash;
 pub mod masks;
 
 use crate::ffi::MlxArray;
@@ -1119,8 +1120,15 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
     let resolved = resolve_drafter_kind(path, kind)?;
     match resolved {
         DrafterKind::Dflash => {
-            // Wired in by load weights, sanitize, build the model,
-            // hand back the boxed trait object.
+            // Two DFlash drafter families share the kind. The Poolside Laguna
+            // drafters declare `model_type: "laguna"` (fused qkv, per-head
+            // gate, sliding-window context, #1351); everything else is the
+            // Qwen 3.5 shape.
+            let model_type = peek_drafter_model_type(path)?;
+            if model_type.as_deref() == Some(laguna_dflash::LAGUNA_MODEL_TYPE) {
+                let drafter = laguna_dflash::LagunaDFlashDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
             let drafter = dflash::drafter::DFlashDrafter::load(path)?;
             Ok((Box::new(drafter), resolved))
         }

@@ -267,7 +267,8 @@ pub const DFLASH_DRAFT_ARCHITECTURE: &str = "DFlashDraftModel";
 ///   legitimate, currently-working pairing.
 ///
 /// What a DFlash drafter really carries is a nested `dflash_config` object
-/// and/or `architectures: ["DFlashDraftModel"]`. Either marker alone is
+/// and/or `architectures: ["DFlashDraftModel"]` (the Poolside Laguna drafters
+/// declare `["DFlashLagunaForCausalLM"]` instead, #1351). Either marker alone is
 /// sufficient: `dflash_config` is what [`DFlashConfig::from_json`] itself
 /// keys on, and `architectures` is what HuggingFace `AutoModel` dispatch keys
 /// on. A checkpoint carrying neither is not a DFlash drafter.
@@ -283,9 +284,11 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
         .get("architectures")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|architectures| {
-            architectures
-                .iter()
-                .any(|arch| arch.as_str() == Some(DFLASH_DRAFT_ARCHITECTURE))
+            architectures.iter().any(|arch| {
+                arch.as_str() == Some(DFLASH_DRAFT_ARCHITECTURE)
+                    || arch.as_str()
+                        == Some(crate::drafter::laguna_dflash::LAGUNA_DFLASH_ARCHITECTURE)
+            })
         })
 }
 

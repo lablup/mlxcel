@@ -494,7 +494,7 @@ fn sample_block_per_position_batched(
 /// Greedy (temperature == 0.0 OR `top_k == 1`) uses per-position argmax.
 /// Stochastic uses `fused_sample` per position over the `[1, vocab]`
 /// slice for that position.
-fn sample_block_per_position(
+pub(crate) fn sample_block_per_position(
     logits: &MlxArray,
     block_size: usize,
     sampler: &SamplingConfig,
@@ -560,7 +560,7 @@ fn sample_block_per_position(
 /// mx.concatenate([bonus, draft_tokens], axis=1)` pipeline. Stochastic
 /// sampling falls back to the scalar helper because stochastic DFlash parity
 /// is outside the hot path optimized.
-fn sample_block_per_position_array(
+pub(crate) fn sample_block_per_position_array(
     logits: &MlxArray,
     block_size: usize,
     sampler: &SamplingConfig,

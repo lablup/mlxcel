@@ -1545,6 +1545,32 @@ pub(super) fn run_generation_mode(
             );
         }
 
+        // issue #1351: a DFlash drafter paired with a target that has an
+        // offline DFlash arm (Laguna) runs the `DFlashGenerator` round loop
+        // here, explicit `--draft-kind dflash` or auto-detected alike (a
+        // DFlash drafter directory cannot take the classic path in any case).
+        if resolved_kind == DrafterKind::Dflash
+            && super::generate_dflash::offline_dflash_target_supported(model)
+            && mlxcel_core::drafter::dflash::is_dflash_drafter_dir(draft_model_path)
+        {
+            if vlm_embeddings.is_some() {
+                return Err(anyhow!(
+                    "--draft-kind dflash does not support multimodal input in the offline \
+                     `mlxcel generate` path; rerun with a text-only prompt, or omit \
+                     --draft-model"
+                ));
+            }
+            return super::generate_dflash::run_offline_dflash(
+                model,
+                draft_model_path,
+                prompt_tokens,
+                args.generation.max_tokens,
+                sampling_config,
+                block_size as usize,
+                token_bias,
+            );
+        }
+
         // The classic `SpeculativeGenerator` below needs a full `LoadedModel`
         // for the drafter, which a DFlash checkpoint is not. Reject it here,
         // before the load prints a "Loading draft model" line it cannot honor
@@ -2084,7 +2110,7 @@ fn run_offline_mtp(
 /// emits tokens after an EOS, so truncating at the first occurrence is
 /// equivalent to (and more robust than) dropping only a trailing one. An empty
 /// `eos_tokens` set is a no-op.
-fn strip_trailing_eos(mut tokens: Vec<i32>, eos_tokens: &[i32]) -> Vec<i32> {
+pub(super) fn strip_trailing_eos(mut tokens: Vec<i32>, eos_tokens: &[i32]) -> Vec<i32> {
     if let Some(pos) = tokens.iter().position(|t| eos_tokens.contains(t)) {
         tokens.truncate(pos);
     }
@@ -2662,6 +2688,11 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.generation.show_reasoning,
     );
     print_generation_result(&visible, &stats, args.generation.profile, reasoning_only)?;
+    // Raw ids for parity checks between decode paths (speculative versus
+    // classic): decoded text can hide an id-level difference, the ids cannot.
+    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
+        println!("[token ids: {generated_tokens:?}]");
+    }
 
     // Cleanup
     mlxcel_core::clear_memory_cache();
