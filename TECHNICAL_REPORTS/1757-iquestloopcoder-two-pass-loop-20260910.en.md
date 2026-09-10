@@ -15,7 +15,7 @@ PR #1757 adds `model_type: "iquestloopcoder"`, the two-pass decoder released as 
 
 Pass 1 is plain causal attention and stores its K/V. In pass 2 each layer's attention output is a per-head sigmoid-gated mix of two branches: a global branch attending the K/V pass 1 produced for that same layer, and a local branch attending pass 2's own K/V through a 64-token sliding window. The gate is `sigmoid(q2 . gate_w[h] + gate_b[h])`, computed from the post-RoPE pass-2 query. `model.gate_projections.{i}.weight` `[40,128]` and `.bias` `[40]` are the only pass-2-specific weights and the only tensors in the checkpoint that are never quantized. Every layer therefore owns two caches: a dense `KVCache` for pass 1 and a `RotatingKVCache(64)` for pass 2.
 
-Validation is a streaming float32 NumPy oracle written from the checkpoint's own `modeling_iquestloopcoder.py`, cross-checked against the vendor classes at 1.1e-06 on 16 of 16 shape cases. Greedy argmax matches on both test prompts and the 12-token continuation is identical. The window itself could not be validated that way, and section 6 gives the measurement that shows why: every layer's gate bias is exactly +2.0, so the local branch carries about 12 percent of the output and removing the window entirely changes no argmax and no top-10 order at 218 or 521 tokens. 14 files, +2681, 17 new unit tests plus a real-checkpoint parity harness of five checks.
+Validation is a streaming float32 NumPy oracle written from the checkpoint's own `modeling_iquestloopcoder.py`, cross-checked against the vendor classes at 1.1e-06 on 16 of 16 shape cases. Greedy argmax matches on both test prompts and the 12-token continuation is identical. The window itself could not be validated that way, and section 6 gives the measurement that shows why: every layer's gate bias is exactly +2.0, so the local branch carries about 12 percent of the output and removing the window entirely changes no argmax and no top-10 order at 218 or 521 tokens. 16 files, 17 new unit tests plus a real-checkpoint parity harness of five checks.
 
 ---
 
@@ -82,7 +82,18 @@ One further finding concerns `_forward_loop` itself. With `use_cache=False` the 
 
 All three failure modes in 1.2 produce fluent output when wrong, so the tests build the wrong variant explicitly and assert the implementation does not match it.
 
-`pass2_matches_only_the_correct_reference` compares the implementation's pass-2 attention output against a reference composed in the test, in four variants: correct, `GateFromPreRope`, `GlobalReadsPass2Kv`, and `LocalUnwindowed`. It requires a max abs difference below 1e-5 against the correct one and above 1e-3 against each wrong one, on a 12-token run against a window of 4.
+`pass2_matches_only_the_correct_reference` calls `TransformerBlock::forward_pass2` and compares its layer output against a reference composed in the test, in five variants: correct, `GateFromPreRope`, `GlobalReadsPass2Kv`, `LocalUnwindowed`, and `BranchesSwapped`. It requires a max abs difference below 1e-5 against the correct one and above 1e-3 against each wrong one, on a 12-token run against a window of 4.
+
+It did not always call the real function. The first version transcribed `forward_pass2`'s body inline as its "implementation" side, so it compared a copy of the logic against variants of the same copy, and `forward_pass2` had no test caller anywhere in the tree. Mutation testing is what surfaced that, and it is the reason this section exists in its current form: a test named after a function it never calls reads exactly like a test that works. The fix was to call it and to add the fifth variant, which nothing had covered.
+
+| mutation applied to `forward_pass2` | transcribed test | test that calls it |
+| --- | --- | --- |
+| global and local branches swapped | 17 passed | 1 failed, max abs diff 0.147 |
+| gate computed from the pre-RoPE query | 17 passed | 1 failed |
+| global branch reads the pass-2 K/V | 2 failed | 2 failed |
+| local branch attends unwindowed | 2 failed | 2 failed |
+
+Both silent-wrong-output bugs were invisible to the version that did not call the function, and both had been claimed as covered. Unmutated, 17 of 17 pass.
 
 `window_limits_local_branch` rewrites keys 0..7 of a 12-token run with window 4 and asserts that position 11 is unchanged (below 1e-5) while position 7 moves (above 1e-3). It separately asserts that an unwindowed branch would have moved position 11, so the test is not vacuous. 17 unit tests in total, all passing.
 
