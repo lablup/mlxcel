@@ -400,7 +400,8 @@ fn apply_optional_string_env_fallback(value: &mut Option<String>, key: &str, fla
 /// documented long before anything performed them (issue #1350):
 ///
 /// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_linear`,
-///   `longcat_flash_ngram`) pack a `(kv_latent, k_pe)` pair into one cache, so
+///   `kimi_k3`, `longcat_flash_ngram`) pack a `(kv_latent, k_pe)` pair into one
+///   cache, so
 ///   no quantized mode is calibrated for what they store. Symmetric `turbo4`
 ///   made the K quantizer read past its sign vectors and every generated token
 ///   came out `!`; the asymmetric modes quietly compressed the RoPE key stream

@@ -1124,12 +1124,16 @@ impl SwitchGLU {
 
     /// Load a stacked SwiGLU expert plane with an explicit quantization mode.
     ///
-    /// Most families use affine experts and call [`Self::from_weights`]. Two
-    /// carry native NVFP4 planes without zero-point biases and must pass
-    /// `"nvfp4"` through to every projection: Inkling, from a ModelOpt export,
-    /// and Laguna, from a `compressed-tensors` `nvfp4-pack-quantized` export
-    /// that [`crate::models::laguna_sanitize`] transcodes at load and which
-    /// additionally carries a per-expert `.global_scale` sidecar.
+    /// Most families use affine experts and call [`Self::from_weights`]. Three
+    /// carry native non-affine planes without zero-point biases and must pass
+    /// their mode through to every projection: Inkling, from a ModelOpt NVFP4
+    /// export; Laguna, from a `compressed-tensors` `nvfp4-pack-quantized`
+    /// export that [`crate::models::laguna_sanitize`] transcodes at load and
+    /// which additionally carries a per-expert `.global_scale` sidecar; and
+    /// Kimi K3, from a `compressed-tensors` `mxfp4-pack-quantized` export
+    /// (uint32 packed codes and uint8 E8M0 scales, no biases).
+    ///
+    /// Used by: Inkling (nvfp4), Laguna (nvfp4), KimiK3 (mxfp4).
     pub fn from_weights_with_mode(
         weights: &WeightMap,
         prefix: &str,
@@ -1249,9 +1253,9 @@ pub(crate) fn scatter_unsort(
 ///
 /// Used by: BailingMoe, DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe,
 ///          Ernie4_5Moe, GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, Jamba,
-///          KimiLinear, MiniMax, Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE,
-///          Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5,
-///          Laguna
+///          KimiK3, KimiLinear, Laguna, MiniMax, Mistral4, Mixtral, Moondream3,
+///          OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe,
+///          SolarOpen, Step3p5
 ///
 /// The old `nkh,nk->nh` einsum contraction promotes the combine to float32
 /// on M5 for bf16/f16 activations. Match mlx-lm's `y * scores[..., None]`

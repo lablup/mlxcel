@@ -1589,8 +1589,9 @@ const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 /// Used by: UnifiedLinear::from_weights, QuantizedEmbedding::from_weights,
 ///          [`QuantizedMultiLinear::new`] and
 ///          [`QuantizedMultiLinear::from_weights`] (MLA `embed_q` /
-///          `unembed_out`), BailingMoe weight validation, and `kimi_linear`'s
-///          private `MultiLinear` in the consuming crate
+///          `unembed_out`), BailingMoe weight validation, `kimi_linear`'s
+///          private `MultiLinear` in the consuming crate, and `kimi_k3`'s
+///          expert-plane probe (`expert_quantization`)
 pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> &'static str {
     if has_biases {
         "affine"
