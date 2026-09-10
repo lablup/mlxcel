@@ -18,8 +18,8 @@
 //! The vLLM-style FP8 releases of the Qwen3.5 family (`Qwen/Qwen3.8-27B-FP8`
 //! and siblings) store every converted projection as two tensors:
 //!
-//! * `<name>.weight` — raw `E4M3` bytes, one per weight element,
-//! * `<name>.weight_scale_inv` — a `bfloat16` multiplier per 128x128 block.
+//! * `<name>.weight`: raw `E4M3` bytes, one per weight element,
+//! * `<name>.weight_scale_inv`: a `bfloat16` multiplier per 128x128 block.
 //!
 //! The true weight is `e4m3_decode(byte) * scale_inv[block]`. MLX has no
 //! float8 dtype and its safetensors reader maps `F8_E4M3` to `uint8`, so the
