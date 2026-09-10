@@ -70,7 +70,7 @@ code 0 블록 크기 스윕(classic 28.70 tok/s): 블록 4는 25.84 tok/s에 수
 
 ### 2.4 코드 품질 관점
 
-- **테스트 커버리지**: core 단위 테스트 7개(config 계약, sanitizer, 컨텍스트 window, 블록 내 인과성, window 가시성, RoPE 민감도), binary greedy-invariant 테스트 2개(수락 길이 0, 1, 2, full을 window wrap 너머까지 강제하는 oracle drafter, 무작위 가중치의 실제 드래프터), detection 테스트 1개, ignored 실제 체크포인트 probe 1개.
+- **테스트 커버리지**: core 단위 테스트 10개(config 계약과 상한, sanitizer, 컨텍스트 window, 블록 내 인과성, window 가시성, RoPE 민감도, offset 연속성, fused q/k/v 행 순서, 로드 시 shape 검사), binary greedy-invariant 테스트 2개(수락 길이 0, 1, 2, full을 window wrap 너머까지 강제하는 oracle drafter, 무작위 가중치의 실제 드래프터), detection 테스트 1개, ignored 실제 체크포인트 probe 1개.
 - **코드 복잡도**: 드래프터는 `dflash`의 형제 모듈로 `DFlashMlp`와 샘플링 헬퍼를 공유하고 라운드 루프는 손대지 않았다.
 - **기술 부채**: 게이트는 MTP와 공유하므로 거부 로그 줄이 여전히 "MTP declined"라고 말한다. 버스트와 오프라인 arm이 그 뒤에 DFlash 이름의 줄을 덧붙인다.
 
@@ -178,7 +178,7 @@ mlxcel-server DFlash burst -> DFlashBurstTarget (Qwen 3.5, Qwen 3.5 VLM, Laguna)
 | 변경된 파일 수 | 23 |
 | 추가된 라인 | +3293 |
 | 삭제된 라인 | -83 |
-| 테스트 추가 | 11 |
+| 테스트 추가 | 15 |
 
 ### 카테고리별 변경
 
@@ -194,6 +194,9 @@ mlxcel-server DFlash burst -> DFlashBurstTarget (Qwen 3.5, Qwen 3.5 VLM, Laguna)
 |------|------|---------|
 | `154aafa1` | feat | add the Laguna DFlash drafter and target |
 | `d64c73af` | merge | integrate Laguna into main's `DFlashTargetModel` design with the exactness gate |
+| `912ac708` | fix | validate projection rows at load and drop a per-round copy |
+| `63af4faf` | fix | close the implementation-review findings (offline pairing and greedy guards, requested block width, pre-`fc` window drop, slack rule, routing predicate) |
+| `a73e249f` | fix | bound untrusted config, `greedy_only` on the server, K/V-only context projection, sanitizer shape checks |
 | `76f16daf` | test | track the oracle drafter's reference position |
 | `fa8f1919` | test | add a real-checkpoint DFlash probe and a RoPE sensitivity test |
 

@@ -70,7 +70,7 @@ Server path: the same request through `mlxcel-server --draft-model ... --draft-k
 
 ### 2.4 Code Quality
 
-- **Test Coverage**: 7 core unit tests (config contract, sanitizer, context window, in-block causality, window visibility, RoPE sensitivity), 2 binary greedy-invariant tests (oracle drafter with forced accept lengths 0, 1, 2 and full across the window wrap; the real drafter with random weights), 1 detection test, and an ignored real-checkpoint probe.
+- **Test Coverage**: 10 core unit tests (config contract and bounds, sanitizer, context window, in-block causality, window visibility, RoPE sensitivity, offset continuity, fused q/k/v row order, load-time shape checks), 2 binary greedy-invariant tests (oracle drafter with forced accept lengths 0, 1, 2 and full across the window wrap; the real drafter with random weights), 1 detection test, and an ignored real-checkpoint probe.
 - **Code Complexity**: the drafter is a sibling module of `dflash`, sharing `DFlashMlp` and the sampling helpers; no changes to the round loop.
 - **Technical Debt**: the gate is the shared MTP one, so its decline log line still says "MTP declined"; the burst and the offline arm add a DFlash-named line after it.
 
@@ -178,7 +178,7 @@ None.
 | Files changed | 23 |
 | Lines added | +3293 |
 | Lines deleted | -83 |
-| Tests added | 11 |
+| Tests added | 15 |
 
 ### Changes by Category
 
@@ -194,6 +194,9 @@ None.
 |------|------|---------|
 | `154aafa1` | feat | add the Laguna DFlash drafter and target |
 | `d64c73af` | merge | integrate Laguna into main's `DFlashTargetModel` design with the exactness gate |
+| `912ac708` | fix | validate projection rows at load and drop a per-round copy |
+| `63af4faf` | fix | close the implementation-review findings (offline pairing and greedy guards, requested block width, pre-`fc` window drop, slack rule, routing predicate) |
+| `a73e249f` | fix | bound untrusted config, `greedy_only` on the server, K/V-only context projection, sanitizer shape checks |
 | `76f16daf` | test | track the oracle drafter's reference position |
 | `fa8f1919` | test | add a real-checkpoint DFlash probe and a RoPE sensitivity test |
 
