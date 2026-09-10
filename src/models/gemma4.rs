@@ -3920,7 +3920,8 @@ pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 
 }
 
 /// Live-window length of the first cache of `layer_type`: the number of prior
-/// keys the next `update_and_fetch` returns in front of the new ones.
+/// keys the next `update_and_fetch` keeps in front of the new ones, before
+/// the append's own `window - 1` clamp.
 ///
 /// This is the mask-sizing companion to [`first_cache_offset`]: prefill masks
 /// must be sized from the live window, not the monotonic `offset`. Under
@@ -3935,10 +3936,13 @@ pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 
 /// `seq_len()`. `seq_len()` is the physical buffer length, which runs ahead of
 /// `offset` in two states Gemma 4 reaches: after a decode step, because
 /// `update_in_place` grows the buffer by `step` (256) slots, and after a
-/// truncated snapshot restore or speculative rollback, because `trim` rewinds
-/// `offset` and leaves the buffer as it was. `update_concat` concatenates only
-/// the `visible_len()` prior keys, so a `seq_len()`-sized mask carried
-/// surplus leading key columns there. #430 read `seq_len()` on the assumption
+/// truncated snapshot restore (or a rollback of an unbuffered cache), because
+/// `trim` rewinds `offset` and leaves the buffer as it was. For an FP16
+/// rotating cache `update_concat` concatenates only the `visible_len()` prior
+/// keys, so a `seq_len()`-sized mask carried surplus leading key columns
+/// there. A turbo-quantized sliding cache (`update_turbo4_concat`) still
+/// returns the whole physical buffer, so its mask is cropped to the keys by
+/// `trim_mask_to_keys` as before. #430 read `seq_len()` on the assumption
 /// that it reported the live window; #1335 showed it does not, and #1764
 /// switched this lookup over. The old value never crashed Gemma 4 because
 /// `attend` crops every mask to the trailing key columns
@@ -3949,7 +3953,7 @@ pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 
 /// RoPE/position bookkeeping and the batched-MTP `per_row_valid_end`
 /// coordinate math keep using [`first_cache_offset`] (the monotonic value).
 ///
-/// Used by: Gemma 4 (`Gemma4Model::forward_with_speculative_sinks` and the
+/// Used by: Gemma 4 (`Gemma4TextModel::forward_with_speculative_sinks` and the
 /// pipeline-parallel `Gemma4StageModel::execute_hidden` prefill masks).
 pub(crate) fn first_cache_live_len(caches: &[Cache], layer_type: &str) -> i32 {
     for cache in caches {

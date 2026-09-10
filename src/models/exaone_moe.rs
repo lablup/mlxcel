@@ -629,9 +629,10 @@ pub enum AnyKVCache {
 }
 
 impl AnyKVCache {
-    /// Number of prior keys the next `update_and_fetch` will return in front
-    /// of the new ones. Prefill masks size from this so the mask key axis
-    /// matches the returned K/V, while `offset()` stays for RoPE.
+    /// Number of prior keys the next `update_and_fetch` will keep in front
+    /// of the new ones, before the append's own `window - 1` clamp. Prefill
+    /// masks size from this so the mask key axis matches the returned K/V,
+    /// while `offset()` stays for RoPE.
     ///
     /// For a `Standard` (`KVCache`) this is `offset - live_start`
     /// (`live_len()`), which shrinks below the monotonic `offset` after a
