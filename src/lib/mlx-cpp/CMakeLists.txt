@@ -31,7 +31,7 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
   # quantized.cpp carries one delta, the MLXCEL_QMV_WIDE off-switch on
   # `use_qmv_wide` (issue #1187). Upstream has no equivalent knob and the
-  # predicate is unchanged as of pin 9a795735, so it has to be overlaid here.
+  # predicate is unchanged as of pin 81ba1c6a, so it has to be overlaid here.
   # Refresh the file wholesale on a bump and re-apply that one hunk.
   set(_metal_patch_files
       "mlx/backend/metal/compiled.cpp"
@@ -119,7 +119,7 @@ else()
     #     `)` as ending the declaration, so one there would hide the tag
     #     instead of being read past.
     # Both parsers fail loudly rather than guess when the shape does not hold.
-    GIT_TAG 9a795735ad9a42664e08f42361b405ed570bcf1a)
+    GIT_TAG 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.

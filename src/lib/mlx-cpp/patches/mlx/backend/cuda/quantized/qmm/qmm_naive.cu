@@ -53,7 +53,7 @@
 //     tensor-core MMA to re-measure the wide tile against. Unset, neither has
 //     any effect.
 //
-// Everything else is byte-identical upstream at the current pin (9a795735).
+// Everything else is byte-identical upstream at the current pin (81ba1c6a).
 
 #include "mlx/backend/cuda/device/qmm_naive.cuh"
 

@@ -231,10 +231,44 @@ fn fp8_block_requantize_matches_direct_path() {
         raw_bytes(&reference_scales),
         "mxfp8 scale plane diverged from quantize(decode(bytes) * expanded_scales)"
     );
+}
 
-    // Dequantizing must reproduce the reconstruction within the mxfp8 step.
-    // E4M3 carries four significant bits, so a value sharing its group's
-    // binade with the group maximum rounds by at most 2^-4 of that maximum.
+/// Dequantizing the requantized planes must land within half an E4M3 step of
+/// the reconstruction, which holds only while every mxfp8 block scale is
+/// rounded up.
+///
+/// The block scale is `amax / 448` encoded as E8M0, a bare power of two.
+/// Rounded up, the block maximum scales into `(224, 448]` and every element
+/// stays inside the E4M3 range, where it rounds to nearest. E4M3 carries four
+/// significant bits, so an element in the top binade (`[256, 448]` after
+/// scaling) moves by at most 16 of those units, which is at most 2^-4 of a
+/// block maximum that is itself at least 256; an element in a lower binade, or
+/// in a block whose maximum scaled below 256, moves by less.
+///
+/// Rounded to nearest in log2 space instead, the scale lands below
+/// `amax / 448` for about half the blocks, their maxima scale past 448 and
+/// saturate, and the loss on a block maximum reaches `1 - 2^-1/2`, about 29%.
+/// No per-element bound between those two holds, one full E4M3 step
+/// (`group_max / 8`) included. Metal and CPU rounded that way until
+/// ml-explore/mlx#4353 while CUDA always rounded up. On an MLX pin that
+/// predates it, 301 of this fixture's 650 blocks saturate, block 0 among them:
+/// its maximum 4.8046875 takes the scale 2^-7 and would scale to 615, so
+/// element 4 (4.00390625, scaled to 512.5) comes back as 3.5.
+///
+/// Same seed and shape as [`fp8_block_requantize_matches_direct_path`]: the
+/// padded trailing blocks are part of what is being bounded.
+#[test]
+fn fp8_block_requantize_round_trip_stays_within_half_an_e4m3_step() {
+    let fixture = block_fp8_fixture("model.layers.0.mlp.down_proj", 130, 160, 0x51D3_9E11);
+    let converted = requantize_block_fp8_weights(fixture.weights, SUPPORTED_FP8_BLOCK)
+        .expect("block FP8 requantization");
+    let packed = converted
+        .get("model.layers.0.mlp.down_proj.weight")
+        .expect("packed weight");
+    let scales = converted
+        .get("model.layers.0.mlp.down_proj.scales")
+        .expect("mxfp8 scales");
+
     let dequantized = unsafe {
         mlxcel_core::dequantize(
             packed.as_ref().expect("packed"),
@@ -249,17 +283,39 @@ fn fp8_block_requantize_matches_direct_path() {
     assert_eq!(recovered.len(), fixture.expanded.len());
 
     let group = MXFP8_GROUP_SIZE as usize;
-    for (index, (expected, actual)) in fixture.expanded.iter().zip(&recovered).enumerate() {
-        let group_start = (index / group) * group;
-        let group_max = fixture.expanded[group_start..group_start + group]
-            .iter()
-            .fold(0f32, |m, v| m.max(v.abs()));
-        let bound = group_max / 16.0 + f32::EPSILON;
-        let error = (expected - actual).abs();
+    let exponents = raw_bytes(scales);
+    assert_eq!(exponents.len(), fixture.expanded.len() / group);
+    let e4m3_max = f8_e4m3_to_f32(0x7E);
+
+    for (g, (block, restored)) in fixture
+        .expanded
+        .chunks_exact(group)
+        .zip(recovered.chunks_exact(group))
+        .enumerate()
+    {
+        let group_max = block.iter().fold(0f32, |m, v| m.max(v.abs()));
+        // E8M0 stores a biased exponent and nothing else.
+        let exponent = i32::from(exponents[g]) - 127;
+        let scale = 2f32.powi(exponent);
         assert!(
-            error <= bound,
-            "element {index}: mxfp8 error {error} exceeded {bound} (group max {group_max})"
+            group_max <= e4m3_max * scale,
+            "block {g}: E8M0 scale 2^{exponent} is below amax / 448 = {}, so its maximum \
+             {group_max} scales to {} and saturates at 448 (the scale was rounded down, \
+             see ml-explore/mlx#4353)",
+            group_max / e4m3_max,
+            group_max / scale
         );
+
+        let bound = group_max / 16.0 + f32::EPSILON;
+        for (k, (expected, actual)) in block.iter().zip(restored).enumerate() {
+            let error = (expected - actual).abs();
+            assert!(
+                error <= bound,
+                "element {}: mxfp8 error {error} exceeded {bound} (group max {group_max}, \
+                 scale 2^{exponent})",
+                g * group + k
+            );
+        }
     }
 }
 
