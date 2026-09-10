@@ -35,6 +35,23 @@ fn muse_model_dir() -> tempfile::TempDir {
     dir
 }
 
+/// A drafter directory whose `config.json` declares `model_type`.
+fn drafter_dir(model_type: &str) -> tempfile::TempDir {
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("failed to create temp drafter dir: {err}"),
+    };
+    if let Err(err) = std::fs::write(
+        dir.path().join("config.json"),
+        format!(
+            r#"{{"model_type":"{model_type}","block_size":16,"mask_token_id":201818,"target_layer_ids":[1,13,25,37,49]}}"#
+        ),
+    ) {
+        panic!("failed to write drafter config: {err}");
+    }
+    dir
+}
+
 fn startup_for(path: &Path) -> ServerStartupConfig {
     ServerStartupConfig {
         model_path: path.to_path_buf(),
@@ -83,18 +100,77 @@ fn muse_glimmer_startup_allows_baseline_and_keeps_video_disabled() {
 }
 
 #[test]
-fn muse_glimmer_startup_rejects_adapters_and_speculative() {
+fn muse_glimmer_startup_rejects_adapters_and_orphan_draft_flags() {
     assert_rejected(
         |startup| startup.adapter_path = Some("adapter.safetensors".into()),
         "LoRA/adapters",
     );
-    assert_rejected(
-        |startup| startup.draft_model_path = Some("draft".into()),
-        "speculative decoding or DFlash",
-    );
+    // A draft kind or block size without a drafter is an operator mistake
+    // the old blanket rejection also caught; it stays rejected.
     assert_rejected(
         |startup| startup.draft_kind = Some("dflash".to_string()),
-        "speculative decoding or DFlash",
+        "only together with --draft-model",
+    );
+    assert_rejected(
+        |startup| startup.draft_block_size = Some(8),
+        "only together with --draft-model",
+    );
+    // A drafter directory with no config at all is not the assistant.
+    assert_rejected(
+        |startup| startup.draft_model_path = Some("draft".into()),
+        "muse_glimmer_assistant",
+    );
+}
+
+/// The one speculative pairing the family supports (issue #1343): the
+/// Muse Glimmer assistant drafter on the DFlash round loop, with or without
+/// an explicit `--draft-kind dflash` and `--draft-block-size`.
+#[test]
+fn muse_glimmer_accepts_assistant_drafter() {
+    let _env_guard = crate::test_support::env_lock::env_lock();
+    let model_dir = muse_model_dir();
+    let drafter = drafter_dir("muse_glimmer_assistant");
+
+    let mut startup = startup_for(model_dir.path());
+    startup.draft_model_path = Some(drafter.path().to_path_buf());
+    if let Err(err) = validate_muse_glimmer_unsupported_startup(&startup) {
+        panic!("the Muse Glimmer assistant drafter must be accepted: {err}");
+    }
+
+    startup.draft_kind = Some("dflash".to_string());
+    startup.draft_block_size = Some(8);
+    if let Err(err) = validate_muse_glimmer_unsupported_startup(&startup) {
+        panic!("an explicit dflash kind and block size must be accepted: {err}");
+    }
+}
+
+/// Any other drafter is refused by name before the server loads anything:
+/// an MTP assistant, a Qwen 3.5 DFlash drafter, an LFM2 DSpark drafter, or
+/// the assistant under a kind the family cannot run.
+#[test]
+fn muse_glimmer_rejects_non_assistant_drafter() {
+    let gemma = drafter_dir("gemma4_assistant");
+    assert_rejected(
+        |startup| startup.draft_model_path = Some(gemma.path().to_path_buf()),
+        "muse_glimmer_assistant",
+    );
+    let qwen_dflash = drafter_dir("qwen3");
+    assert_rejected(
+        |startup| startup.draft_model_path = Some(qwen_dflash.path().to_path_buf()),
+        "muse_glimmer_assistant",
+    );
+    let dspark = drafter_dir("lfm2");
+    assert_rejected(
+        |startup| startup.draft_model_path = Some(dspark.path().to_path_buf()),
+        "muse_glimmer_assistant",
+    );
+    let assistant = drafter_dir("muse_glimmer_assistant");
+    assert_rejected(
+        |startup| {
+            startup.draft_model_path = Some(assistant.path().to_path_buf());
+            startup.draft_kind = Some("mtp".to_string());
+        },
+        "DFlash round loop only",
     );
 }
 

@@ -259,6 +259,16 @@ pub fn resolve_draft_block_size(
     {
         return n;
     }
+    // The Muse Glimmer assistant (issue #1343) publishes `block_size 16`,
+    // which is the flat DFlash default; the peek exists so a checkpoint that
+    // narrows it through `runtime_block_size` is honoured.
+    if kind == DrafterKind::Dflash
+        && let Some(configured) =
+            mlxcel_core::drafter::dflash::peek_muse_assistant_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
     default_block_size_for_kind(kind)
 }
 

@@ -1838,8 +1838,9 @@ fn reject_dflash_drafter_offline(draft_model_path: &Path) -> Result<()> {
 
     Err(anyhow!(
         "--draft-model {path} is a DFlash-family speculative drafter (Qwen 3.5 \
-         DFlash or LFM2 DSpark), not a standalone model, and the offline `mlxcel \
-         generate` path does not construct the `DFlashGenerator` round loop. \
+         DFlash, LFM2 DSpark or Muse Glimmer assistant), not a standalone model, and \
+         the offline `mlxcel generate` path does not construct the `DFlashGenerator` \
+         round loop. \
          Loading it here would route it through the standalone model loader, \
          which fails on the drafter's missing embed_tokens (these drafters borrow \
          embed_tokens and lm_head from the target when they bind). To use this \

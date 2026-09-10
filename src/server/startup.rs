@@ -1238,13 +1238,38 @@ fn validate_muse_glimmer_unsupported_startup(startup: &ServerStartupConfig) -> R
         startup.adapter_path.is_none(),
         "Muse Glimmer VLM does not support LoRA/adapters; remove --adapter/--lora"
     );
-    anyhow::ensure!(
-        startup.draft_model_path.is_none()
-            && startup.draft_kind.is_none()
-            && startup.draft_block_size.is_none(),
-        "Muse Glimmer VLM does not support speculative decoding or DFlash; remove \
-         --draft-model/--model-draft, --draft-kind, and --draft-block-size"
-    );
+    // Speculative decoding on Muse Glimmer is the DFlash round loop with the
+    // Muse Glimmer assistant drafter only (issue #1343): no MTP drafter
+    // exists for the family, and any other DFlash-family drafter reads
+    // residual streams of a width this target does not produce.
+    match &startup.draft_model_path {
+        None => anyhow::ensure!(
+            startup.draft_kind.is_none() && startup.draft_block_size.is_none(),
+            "Muse Glimmer VLM takes --draft-kind and --draft-block-size only together with \
+             --draft-model/--model-draft pointing at the Muse Glimmer assistant drafter \
+             (model_type muse_glimmer_assistant); remove them or add the drafter"
+        ),
+        Some(draft_model_path) => {
+            anyhow::ensure!(
+                mlxcel_core::drafter::dflash::is_muse_assistant_dir(draft_model_path),
+                "Muse Glimmer VLM supports speculative decoding only with the Muse Glimmer \
+                 assistant drafter (model_type muse_glimmer_assistant, for example \
+                 meta-models/Muse-Glimmer-30B-assistant); {} does not declare it. Point \
+                 --draft-model/--model-draft at that drafter or remove it",
+                draft_model_path.display()
+            );
+            anyhow::ensure!(
+                startup
+                    .draft_kind
+                    .as_deref()
+                    .is_none_or(|kind| kind.eq_ignore_ascii_case("dflash")),
+                "Muse Glimmer VLM runs its assistant drafter on the DFlash round loop only; \
+                 --draft-kind {:?} is not a Muse Glimmer pairing, pass --draft-kind dflash \
+                 or leave it unset",
+                startup.draft_kind.as_deref().unwrap_or_default()
+            );
+        }
+    }
     anyhow::ensure!(
         startup.kv_cache_mode == mlxcel_core::cache::KVCacheMode::Fp16
             && !startup.batch_kv_quant.is_enabled(),

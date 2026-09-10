@@ -35,6 +35,15 @@ pub use super::muse_glimmer_config::{
 };
 pub(crate) use super::muse_glimmer_layers::{MuseGlimmerDecoderLayer, MuseRmsNorm};
 
+/// DFlash speculative-decoding target hooks (issue #1343): the verify
+/// forward with residual-stream capture, the trim rollback over the mixed
+/// sliding / full caches, the block-versus-chain exactness probe and the
+/// `SpeculativeTarget` impl. A child module so it can reach the private
+/// model fields without widening their visibility.
+#[path = "muse_glimmer_speculative.rs"]
+mod speculative;
+pub use speculative::{VerifyOutput, speculative_buffer_size};
+
 pub struct MuseGlimmerTextModel {
     embed_tokens: UnifiedEmbedding,
     embed_norm: MuseRmsNorm,
@@ -42,6 +51,8 @@ pub struct MuseGlimmerTextModel {
     norm: MuseRmsNorm,
     lm_head: UnifiedLinear,
     sliding_window: usize,
+    hidden_size: usize,
+    vocab_size: usize,
     eos_token_ids: Vec<i32>,
     suppressed_token_ids: Vec<i32>,
     output_multiplier: f32,
@@ -160,6 +171,8 @@ impl MuseGlimmerTextModel {
             norm,
             lm_head,
             sliding_window: config.sliding_window,
+            hidden_size: config.hidden_size,
+            vocab_size: config.vocab_size,
             eos_token_ids,
             suppressed_token_ids,
             output_multiplier: config.output_multiplier,
@@ -387,6 +400,21 @@ impl LanguageModel for MuseGlimmerTextWrapper {
         Some(self.model.get_embed_tokens(input_ids))
     }
 
+    /// The RAW embedding table, not the `embed_norm`-wrapped lookup that
+    /// [`Self::embed_tokens`] applies: the Muse Glimmer assistant drafter
+    /// (issue #1343) embeds its draft block through this and runs its own
+    /// norms.
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        Some(self.model.embed_tokens.clone_shared())
+    }
+
+    /// The untied head, with no `output_multiplier` and no
+    /// `final_logit_softcapping` behind it; those stay on the target's own
+    /// verify logits.
+    fn lm_head_module(&self) -> Option<UnifiedLinear> {
+        Some(self.model.lm_head.clone_shared())
+    }
+
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         SequenceStateLayout::model_owned(self.model.layers.len())
     }
@@ -500,3 +528,7 @@ impl LanguageModel for MuseGlimmerTextWrapper {
 #[cfg(test)]
 #[path = "muse_glimmer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "muse_glimmer_speculative_tests.rs"]
+mod speculative_tests;
