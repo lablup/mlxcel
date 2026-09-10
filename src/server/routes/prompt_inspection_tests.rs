@@ -443,3 +443,41 @@ async fn a_text_only_body_is_unaffected_by_the_media_gate() {
         "<|system|>be brief<|user|>Hello<|assistant|>"
     );
 }
+
+#[tokio::test]
+async fn a_responses_native_image_part_is_refused_on_the_count_routes_too() {
+    // The two Responses count routes reach the gate through the translator
+    // rather than with the body the client sent, so the chat-shaped cases
+    // above do not cover them: a translation that dropped or renamed a media
+    // part would leave this pair counting a prompt `/v1/responses` refuses.
+    // `input_image` is the Responses-native spelling of `image_url`.
+    for path in ["/responses/input_tokens", "/v1/responses/input_tokens"] {
+        let (status, body) = post(
+            path,
+            serde_json::json!({
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "what is this"},
+                        {"type": "input_image", "image_url": "http://169.254.169.254/latest/meta-data/"}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
+        assert_eq!(
+            body["error"]["type"], "not_supported_error",
+            "{path}: {body}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message string")
+                .starts_with("image input is not supported"),
+            "{path}: {body}"
+        );
+        assert!(body.get("input_tokens").is_none(), "{path}: {body}");
+    }
+}
