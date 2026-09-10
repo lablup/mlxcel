@@ -464,3 +464,33 @@ fn draft_block_depends_on_rope() {
         "changing the RoPE base must change the logits (diff {diff})"
     );
 }
+
+#[test]
+fn from_weights_rejects_projection_rows_that_disagree_with_the_config() {
+    let cfg = tiny_config();
+    let mut w = tiny_weights(&cfg, 4);
+    let h = cfg.hidden_size as i32;
+    w.insert(
+        "layers.0.self_attn.qkv_proj.weight".into(),
+        ffi::zeros(&[h, h], dtype::FLOAT32),
+    );
+    let msg = match LagunaDFlashDrafter::from_weights(&w, cfg.clone()) {
+        Ok(_) => panic!("a qkv_proj row mismatch must be a load error"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(
+        msg.contains("qkv_proj.weight") && msg.contains("rows"),
+        "{msg}"
+    );
+
+    let mut w = tiny_weights(&cfg, 4);
+    w.insert(
+        "fc.weight".into(),
+        ffi::zeros(&[h + 1, 2 * h], dtype::FLOAT32),
+    );
+    let msg = match LagunaDFlashDrafter::from_weights(&w, cfg) {
+        Ok(_) => panic!("an fc row mismatch must be a load error"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(msg.contains("fc.weight"), "{msg}");
+}

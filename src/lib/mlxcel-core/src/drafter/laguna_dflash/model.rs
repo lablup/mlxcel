@@ -91,6 +91,16 @@ impl LagunaDFlashDraftModel {
             }
             aux_hidden_norms.push(norm(&key)?);
         }
+        let fc_rows = weights
+            .get("fc.weight")
+            .map(|w| ffi::array_shape(w)[0])
+            .ok_or_else(|| "Weight not found: fc.weight".to_string())?;
+        if fc_rows != config.hidden_size as i32 {
+            return Err(format!(
+                "fc.weight has {fc_rows} rows but hidden_size is {}",
+                config.hidden_size
+            ));
+        }
         let fc = UnifiedLinear::from_weights(weights, "fc", group_size, bits)?;
         let hidden_norm = norm("hidden_norm.weight")?;
         let final_norm = norm("norm.weight")?;
@@ -162,6 +172,12 @@ impl LagunaDFlashDraftModel {
         }
     }
 
+    /// Borrow `x` as the compute dtype: `None` when it already is, so the
+    /// caller slices the original without a copy.
+    fn cast_if_needed(&self, x: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        (ffi::array_dtype(x) != self.compute_dtype).then(|| ffi::astype(x, self.compute_dtype))
+    }
+
     /// `hidden_norm(fc(concat_i aux_hidden_norms[i](slice_i)))` over the
     /// `[B, T, num_layers * target_hidden]` concatenation.
     pub fn combine_hidden(&self, target_hidden: &MlxArray) -> UniquePtr<MlxArray> {
@@ -176,15 +192,15 @@ impl LagunaDFlashDraftModel {
              {}-wide hidden input",
             shape[2]
         );
-        let hidden = self.to_compute_dtype(ffi::copy(target_hidden));
+        let cast = self.cast_if_needed(target_hidden);
+        let hidden: &MlxArray = match &cast {
+            Some(c) => c,
+            None => target_hidden,
+        };
         let mut normed: Option<UniquePtr<MlxArray>> = None;
         for (i, norm) in self.aux_hidden_norms.iter().enumerate() {
             let start = i as i32 * width;
-            let slab = ffi::slice(
-                &hidden,
-                &[0, 0, start],
-                &[shape[0], shape[1], start + width],
-            );
+            let slab = ffi::slice(hidden, &[0, 0, start], &[shape[0], shape[1], start + width]);
             let slab = norm.forward(&slab);
             normed = Some(match normed {
                 Some(acc) => concatenate(&acc, &slab, -1),

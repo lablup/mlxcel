@@ -197,20 +197,44 @@ impl LagunaDFlashAttention {
         let linear = |leaf: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{leaf}"), group_size, bits)
         };
-        let qkv_proj = linear("qkv_proj")?;
-        let o_proj = linear("o_proj")?;
-        let g_key = format!("{prefix}.g_proj.weight");
-        let g_rows = weights
-            .get(&g_key)
-            .map(|w| ffi::array_shape(w)[0])
-            .ok_or_else(|| format!("Weight not found: {g_key}"))?;
         let n_heads = config.num_attention_heads as i32;
-        if g_rows != n_heads {
+        let n_kv_heads = config.num_key_value_heads as i32;
+        let head_dim = config.head_dim as i32;
+        // Output rows of each projection against the config's geometry. The
+        // forward reshapes on the config, and a checkpoint that disagrees
+        // would otherwise surface as an MLX reshape exception inside the
+        // first draft, which crosses the cxx bridge as a process abort.
+        let rows = |leaf: &str| -> Result<i32, String> {
+            let key = format!("{prefix}.{leaf}.weight");
+            weights
+                .get(&key)
+                .map(|w| ffi::array_shape(w)[0])
+                .ok_or_else(|| format!("Weight not found: {key}"))
+        };
+        let qkv_rows = rows("qkv_proj")?;
+        let expected_qkv = (n_heads + 2 * n_kv_heads) * head_dim;
+        if qkv_rows != expected_qkv {
             return Err(format!(
-                "{g_key} emits {g_rows} gate logits but the per-head gate needs one per query \
-                 head ({n_heads})"
+                "{prefix}.qkv_proj.weight has {qkv_rows} rows but {n_heads} query heads plus \
+                 2 x {n_kv_heads} key/value heads of {head_dim} need {expected_qkv}"
             ));
         }
+        let o_rows = rows("o_proj")?;
+        if o_rows != config.hidden_size as i32 {
+            return Err(format!(
+                "{prefix}.o_proj.weight has {o_rows} rows but hidden_size is {}",
+                config.hidden_size
+            ));
+        }
+        let g_rows = rows("g_proj")?;
+        if g_rows != n_heads {
+            return Err(format!(
+                "{prefix}.g_proj.weight emits {g_rows} gate logits but the per-head gate needs \
+                 one per query head ({n_heads})"
+            ));
+        }
+        let qkv_proj = linear("qkv_proj")?;
+        let o_proj = linear("o_proj")?;
         let g_proj = linear("g_proj")?;
         let norm = |leaf: &str| -> Result<RMSNorm, String> {
             let key = format!("{prefix}.{leaf}.weight");
@@ -221,15 +245,15 @@ impl LagunaDFlashAttention {
             Ok(RMSNorm::new(w, config.rms_norm_eps))
         };
         Ok(Self {
-            rope_dims: config.head_dim as i32,
+            rope_dims: head_dim,
             qkv_proj,
             o_proj,
             g_proj,
             q_norm: norm("q_norm")?,
             k_norm: norm("k_norm")?,
             n_heads,
-            n_kv_heads: config.num_key_value_heads as i32,
-            head_dim: config.head_dim as i32,
+            n_kv_heads,
+            head_dim,
             scale: (config.head_dim as f32).powf(-0.5),
             rope_base: config.rope_theta,
             window: window as i32,
