@@ -1498,6 +1498,56 @@ fn sanitize_refuses_mismatched_fused_qkv_plane_shapes() {
     assert!(err.contains("concatenated on axis 0"), "{err}");
 }
 
+/// `reshape` aborts the process on an element count the requested shape cannot
+/// divide, and the MLA `kv_b_proj` decomposition reshapes checkpoint data with
+/// four dimensions that come from `config.json`. A tensor that disagrees with
+/// them has to be refused by name here: a count the head geometry cannot
+/// describe aborts inside `reshape` during sanitize, and a width that divides
+/// but is not `kv_lora_rank` survives sanitize and aborts inside the absorbed
+/// MLA matmul on the first forward pass instead.
+#[test]
+fn sanitize_refuses_a_kv_b_proj_that_disagrees_with_the_config() {
+    let config = tiny_text_config();
+
+    // Positive control first, so a guard that refused every `kv_b_proj` could
+    // not pass this test.
+    let out = KimiK3Model::sanitize_weights(
+        raw_checkpoint(
+            &config,
+            RawLayout {
+                legacy_residual_keys: false,
+            },
+        ),
+        &config,
+    )
+    .expect("an honest kv_b_proj must still decompose");
+    assert!(out.contains_key("model.layers.1.self_attn.embed_q.weight"));
+
+    // Layer 1 is MLA. One extra row is a count the head geometry cannot
+    // describe; one extra column divides but describes a different latent.
+    let rows = (MLA_HEADS * (QK_NOPE + V_HEAD)) as i32;
+    for (rows, cols, seed) in [
+        (rows + 1, KV_LORA as i32, 95u32),
+        (rows, KV_LORA as i32 + 1, 96),
+    ] {
+        let mut raw = raw_checkpoint(
+            &config,
+            RawLayout {
+                legacy_residual_keys: false,
+            },
+        );
+        raw.insert(
+            "language_model.model.layers.1.self_attn.kv_b_proj.weight".to_string(),
+            noise_arr(&[rows, cols], seed, 0.5),
+        );
+        let err = KimiK3Model::sanitize_weights(raw, &config)
+            .err()
+            .expect("a kv_b_proj that disagrees with the config must be refused");
+        assert!(err.contains("kv_b_proj"), "{err}");
+        assert!(err.contains("kv_lora_rank"), "{err}");
+    }
+}
+
 /// The Attention Residuals score weight is built by hand from two tensors and
 /// then multiplied against the residual stream. A width that disagrees with
 /// `hidden_size` aborts the process inside MLX (in `multiply` at load when the

@@ -539,23 +539,30 @@ pub(crate) fn attn_res_mix(
     let out_dtype = mlxcel_core::array_dtype(partial);
     let n = blocks.len();
 
+    // Every block enters `matmul` and `multiply` in its stored dtype rather
+    // than through a float32 array this function holds. MLX promotes a
+    // half-precision operand against the float32 `w_eff` (and against the
+    // float32 probability column below) inside the op, so the arithmetic is
+    // identical, but the promoted copy is then an op-local temporary MLX
+    // frees as soon as that one op is done. A promotion shared between the
+    // logit matmul and the weighted term would instead be a graph node with
+    // two consumers, and every consumer of the softmax runs after every
+    // logit, so all of them would have to stay resident from the first loop
+    // until the fold: at D = 7168 with a full 12-layer window that is the
+    // whole residual window of a 4096-token prefill live in float32 at once,
+    // about 0.9 GB, which is the allocation this mix exists to avoid.
     let mut logits: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(n + 1);
-    let mut values: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(n + 1);
     for (raw, inv_rms) in blocks.raw.iter().zip(blocks.inv_rms.iter()) {
-        let rf = mlxcel_core::astype(raw, dtype::FLOAT32);
         logits.push(mlxcel_core::multiply(
-            &mlxcel_core::matmul(&rf, w_eff),
+            &mlxcel_core::matmul(raw, w_eff),
             inv_rms,
         ));
-        values.push(rf);
     }
-    let pf = mlxcel_core::astype(partial, dtype::FLOAT32);
-    let inv_p = inv_rms_f32(&pf, eps);
+    let inv_p = inv_rms_f32(partial, eps);
     logits.push(mlxcel_core::multiply(
-        &mlxcel_core::matmul(&pf, w_eff),
+        &mlxcel_core::matmul(partial, w_eff),
         &inv_p,
     ));
-    values.push(pf);
 
     // [B, T, 1] x (n + 1) -> [B, T, n + 1, 1] -> [B, T, n + 1]
     let logits = mlxcel_core::squeeze_axis(&stack_arrays(&logits, -2), -1);
@@ -563,21 +570,25 @@ pub(crate) fn attn_res_mix(
 
     // Fold the weighted sum one term at a time. Stacking the values into
     // [B, T, n + 1, D] and folding with a single matmul is the same
-    // arithmetic, but it allocates a contiguous float32 copy of every stored
-    // block on top of the blocks themselves: at D = 7168 with a full
-    // 12-layer window that is about 0.9 GB of transient for a 4096-token
-    // prefill, and it grows with the block count. The per-term form
-    // broadcasts one [B, T, 1] probability column against one [B, T, D]
-    // block and never holds the stacked copy.
+    // arithmetic up to summation order, but it allocates a contiguous float32
+    // copy of every stored block on top of the blocks themselves: at D = 7168
+    // with a full 12-layer window that is about 0.9 GB of transient for a
+    // 4096-token prefill, and it grows with the block count. The per-term form
+    // broadcasts one [B, T, 1] probability column against one [B, T, D] block,
+    // so only the running accumulator and the current term are resident.
     let probs_shape = mlxcel_core::array_shape(&probs);
     let last = probs_shape.len() - 1;
     let mut mixed: Option<UniquePtr<MlxArray>> = None;
-    for (i, value) in values.iter().enumerate() {
+    for i in 0..=n {
         let mut start = vec![0i32; probs_shape.len()];
         let mut stop = probs_shape.clone();
         start[last] = i as i32;
         stop[last] = i as i32 + 1;
         let weight = mlxcel_core::slice(&probs, &start, &stop);
+        let value: &MlxArray = match blocks.raw.get(i) {
+            Some(raw) => raw,
+            None => partial,
+        };
         let term = mlxcel_core::multiply(value, &weight);
         mixed = Some(match mixed {
             Some(acc) => mlxcel_core::add(&acc, &term),

@@ -1119,7 +1119,9 @@ impl KimiDecoderLayer {
 /// makes the callers' sanitizers idempotent. An affine-quantized `kv_b_proj`
 /// is dequantized first; a `.scales`-only plane is refused by name rather
 /// than unwrapped (issue #1026), and the solved `(group_size, bits)` pair is
-/// bounded before it reaches `dequantize` (issue #958).
+/// bounded before it reaches `dequantize` (issue #958). The tensor is then
+/// cross-checked against the four config dimensions that index it, because
+/// the reshape below aborts the process rather than returning on a mismatch.
 ///
 /// Used by: KimiLinear, KimiK3
 pub(crate) fn decompose_kv_b_proj(
@@ -1189,6 +1191,29 @@ pub(crate) fn decompose_kv_b_proj(
     } else {
         weights.remove(&kv_b_key).unwrap()
     };
+
+    // Cross-check the tensor against the config before the reshape below.
+    // `reshape` is infallible on the Rust side: MLX throws when the element
+    // count does not divide by the requested shape, and that throw crosses the
+    // cxx bridge as an abort during weight sanitization rather than a load
+    // error. Every operand here is untrusted -- `kv_b_proj` is checkpoint data
+    // and the four dimensions come from `config.json` -- so a `text_config`
+    // paired with the wrong checkpoint, or a hand-edited head count, takes the
+    // process down with no key to name unless it is refused here. A width that
+    // divides but disagrees with `kv_lora_rank` is just as bad: it survives
+    // sanitize and aborts inside the absorbed MLA matmul on the first forward
+    // pass instead.
+    let v_shape = mlxcel_core::array_shape(&v);
+    let rows = i64::from(num_heads) * (i64::from(qk_nope) + i64::from(v_head));
+    let expected = rows * i64::from(kv_lora_rank);
+    let numel: i64 = v_shape.iter().map(|&d| i64::from(d)).product();
+    if num_heads < 1 || qk_nope < 1 || v_head < 1 || kv_lora_rank < 1 || numel != expected {
+        return Err(format!(
+            "layer {l}: {kv_b_key} holds {numel} entries with shape {v_shape:?}, but the config \
+             describes num_attention_heads * (qk_nope_head_dim + v_head_dim) * kv_lora_rank = \
+             {num_heads} * ({qk_nope} + {v_head}) * {kv_lora_rank} = {expected}"
+        ));
+    }
 
     // Reshape to [num_heads, qk_nope + v_head, kv_lora_rank]
     let v = mlxcel_core::reshape(&v, &[num_heads, qk_nope + v_head, -1]);

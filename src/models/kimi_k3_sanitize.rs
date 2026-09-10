@@ -290,8 +290,12 @@ fn stack_expert_plane(
 
     // compressed-tensors mxfp4: `weight_packed` (uint8) + `weight_scale` (uint8 E8M0).
     if weights.contains_key(&expert_key(0, "weight_packed")) {
-        let mut packed = Vec::with_capacity(num_experts);
-        let mut scales = Vec::with_capacity(num_experts);
+        // No `with_capacity(num_experts)`: `num_experts` is an unbounded
+        // `config.json` field, and reserving it up front turns an absurd
+        // declaration into a capacity-overflow panic during sanitize instead
+        // of the named shortfall error below.
+        let mut packed = Vec::new();
+        let mut scales = Vec::new();
         let mut e = 0;
         while let Some(w) = weights.remove(&expert_key(e, "weight_packed")) {
             let s = weights
@@ -360,17 +364,23 @@ fn stack_expert_plane(
             if !weights.contains_key(&expert_key(0, plane)) {
                 continue;
             }
-            let mut sources = Vec::with_capacity(num_experts);
+            let mut sources = Vec::new();
             let mut e = 0;
             while let Some(w) = weights.remove(&expert_key(e, plane)) {
                 sources.push(w);
                 e += 1;
             }
-            if plane == "weight" && e != num_experts {
+            // Every plane is counted, not only `.weight`: a `.scales` or
+            // `.biases` set that stops short stacks into a tensor whose expert
+            // axis disagrees with the weight's, which no load-time check reads
+            // and which aborts inside `gather_qmm` on the first routed forward
+            // pass.
+            if e != num_experts {
                 return Err(format!(
                     "{src_prefix}.experts: checkpoint provides only {e} of the {num_experts} \
-                     experts declared by the model config (stacked contiguously from index 0 \
-                     until the first gap); refusing to load a truncated MoE layer"
+                     experts declared by the model config for the {plane} plane (stacked \
+                     contiguously from index 0 until the first gap); refusing to load a \
+                     truncated MoE layer"
                 ));
             }
             check_uniform_shapes(&sources, src_prefix, src_leaf, plane)?;
@@ -414,9 +424,13 @@ fn sanitize_moe_layer(
     // Anything still under `experts.` is a plane this loader has no reader
     // for (a compressed-tensors sidecar such as `weight_shape`); it cannot be
     // consumed, so it is dropped rather than left to fail a later lookup.
+    // The prefix is built once, not once per key: this scan walks the whole
+    // weight map for every MoE layer, and the published checkpoint carries
+    // 896 experts across 92 of them.
+    let experts_prefix = format!("{src}.experts.");
     let leftovers: Vec<String> = weights
         .keys()
-        .filter(|k| k.starts_with(&format!("{src}.experts.")))
+        .filter(|k| k.starts_with(&experts_prefix))
         .cloned()
         .collect();
     if !leftovers.is_empty() {
