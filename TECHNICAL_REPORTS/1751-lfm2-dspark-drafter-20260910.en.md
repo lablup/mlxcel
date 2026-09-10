@@ -198,14 +198,44 @@ The drafter cannot make this call. It reads the target as a `LanguageModel`, whi
 
 ---
 
+## 8b. Security review, and what was done about them
+
+A second pass looked specifically at what a downloaded checkpoint controls. Everything in this section shares one premise: pointing `--model-draft` at a repository makes every field of that repository's `config.json` and every weight shape in it a runtime input, MLX range-checks no positive gather index, and an MLX C++ exception crossing the cxx bridge aborts the process rather than failing the request. It found one HIGH, four MEDIUM and three LOW. Six are fixed; two are left with the reason.
+
+### 8b.1 Fixed
+
+**HIGH: the verify width was bounded below and not above, and this branch is what made it a control input.** Before it, the DFlash runtime block size came only from `--draft-block-size` or the flat constant 16, both operator-supplied. `resolve_draft_block_size` now peeks the drafter checkpoint through `peek_dspark_configured_block_size` and hands `runtime_verify_width()` to the scheduler as the server-wide block size. That width is `min(block_size + 1, runtime_block_size)`, and a config omitting `runtime_block_size` is capped at the eight-row default, so a large `block_size` alone was harmless; a config setting both escaped the cap entirely.
+
+What it reaches first is the worst of the two reach points. The exactness gate runs `exactness_allows(bs)` on the first LFM2 request, before the drafter is even loaded, and `probe_one_draw` runs one single-token target forward per row, three draws over, doubled again by the `qmv_wide` retry, on the scheduler thread. At a million rows that never completes, and because the verdict is memoized on `ProbeKey` it never retries either. It also runs before `validate_target_compat`, so the pairing gate could not have refused the config in time.
+
+The fix is therefore in two places on purpose. `runtime_verify_width()` clamps at `DSPARK_MAX_VERIFY_WIDTH` (32, against 8 to 10 on the published checkpoints and 16 for flat DFlash), which is the bound that actually holds ahead of the probe because every caller goes through that one function. The pairing gate separately refuses a config whose `requested_verify_width()` (the unclamped number, exposed for exactly this) is above the ceiling, so an operator with a broken drafter is told rather than quietly served at 32. The test pins both halves, including the `usize::MAX` case the saturating add in `verify_width()` exists for.
+
+**MEDIUM: the `mask_token_id` bound was vacuous for a self-contained drafter.** The bound added in the review-fix commit argued its soundness from the target half of the pairing gate pinning the target's vocabulary to `vocab_size`. That argument holds only on the lazy-bind path, which is what every published DSpark checkpoint uses. A checkpoint shipping its own `embed_tokens.weight` sets `needs_embed_binding()` false, takes the other arm of `bind`, and its table was never compared to anything, so an eight-row table under a declared `vocab_size` of 128000 still gathered row 125017 out of bounds. `LmHead::Own` had the same gap one step later: its width was never compared to `vocab_size`, which the Markov head IS measured against, so a mismatch failed broadcasting inside `ffi::add`. `from_weights` now measures both against `vocab_size` for a DSpark config. A plain DFlash checkpoint is deliberately left alone: it has no Markov head and no mask id indexing a borrowed table, and checking there would change which Qwen pairings load.
+
+**MEDIUM: the Markov rank check was skipped, not narrowed, for a quantized factor.** The row check (the half that bounds the gather) held either way, but the width check did not run at all when `.scales` was present, so two internally consistent but mutually mismatched factors reached `quantized_matmul` and threw inside MLX. Every mlx-community conversion of these drafters is quantized, so the skipped case is the common one. MLX packs the last axis u32-wise (`packed_in * 32 == bits * in_features`), so the width is derivable: the check now accepts a packed width when some supported bit depth explains it, rather than trusting the loader's declared `bits`, which a per-tensor override can contradict.
+
+**MEDIUM: `first_hidden_for` deep-copied the whole prompt hidden.** `mlxcel_core::copy` is a real MLX `Copy` primitive, not a handle clone, and the every-row arm called it only to satisfy a borrowed signature: a second full `[1, S, len(target_layer_ids) * hidden]` slab per request, 168 MB at an 8k prompt on LFM2.5-2.6B and 671 MB at 32k. It now takes the array by value and returns it unchanged, which also ends the caller's retention of the original across the whole round loop. The slicing arm is unaffected, since a slice holds its own reference to its input.
+
+**MEDIUM: the short-conv rollback snapshots were captured on the prompt prefill.** Nothing reads them there, because a prefill is never rolled back. Each snapshot holds the layer's gated input at the forward's own width, and LFM2 is conv-dominant, so at prompt length this pinned roughly one prompt-sized buffer per conv layer alive through the eval that materializes the prefill: about 670 MB at 8k on a 30-layer 2.6B checkpoint, about 2.7 GB at 32k, on top of the model and the caches. `SpeculativeTarget` gains `prefill_forward_with_capture_layers`, defaulting to the verify hook so no other family changes, and LFM2 and LFM2-VL override it to skip the capture. `forward_speculative` takes the capture as a flag, and the new test pins that the flag changes what is kept and not what is computed, on the logits, the captured hidden and the cache offsets at once. Getting that wrong would break the temperature-0 contract silently, since the prefill and the verify rounds would then disagree.
+
+**LOW: empty prompt and empty window.** `run_dflash_on_target` computed `last_pos = len - 1` and sliced at it; the batched arm indexed `prompts[0]`. Both were inherited unchanged from the Qwen arms, and neither is reachable from the scheduler today, but the LFM2 arms are new callers of the same code and a negative slice start reaches MLX as a process abort. Both are now request errors.
+
+### 8b.2 Left as-is
+
+**`sample_block_array`'s B = 1 invariant stays a `debug_assert`.** In release a `[B > 1, gamma, vocab]` input would silently chain from row 0 and drop the rest. It is not reachable: `draft_block_batched` returns `DraftFailed` for a DSpark drafter and the batched burst declines LFM2 before the take. The function is `pub` on a `pub` type, which is the real argument for hardening it, but the available hardening is a release panic in a request handler, which is itself a denial of service, and narrowing the visibility would be a breaking change to the library crate for a case no caller can reach. Recorded rather than changed.
+
+**The mismatched-pairing decline stays `BurstOutcome::Error`.** `DeclineToClassic` would serve the request rather than fail it, which is more available. It is not chosen because the arm directly above it, `validate_target_compat`'s failure, is an `Error`, and because a silent fallback turns an operator's misconfigured `--model-draft` into a permanent unexplained slowdown. The message names the flag and the fix, and the warmup surfaces it at startup rather than only on the first request.
+
+---
+
 ## 9. Change summary
 
 | Item | Value |
 |------|-------|
 | Files changed | 29 |
-| Lines added | +3788 |
-| Lines deleted | -577 |
-| New tests | 27 |
+| Lines added | +4331 |
+| Lines deleted | -578 |
+| New tests | 34 |
 
 | Area | Summary |
 |------|---------|
@@ -215,13 +245,15 @@ The drafter cannot make this call. It reads the target as a `LanguageModel`, whi
 | CLI | DSpark block-size peek in `resolve_draft_block_size`; offline rejection message names both drafter shapes |
 | Docs | `supported-models.md` DSpark row, `speculative-acceptance.md` greedy-only decline, README |
 
-Verified after the review fixes, rebased on `origin/main`: `cargo check --lib --tests`, `cargo clippy --lib --tests -- -D warnings` and `cargo fmt --all -- --check` clean; `-p mlxcel-core drafter::dflash` 70 passed, and one `--lib` run over `models::lfm2` / `server::batch::speculative_burst` / `server::batch::dflash_target` / `cli::speculative_args` / `models::detection` 181 passed. The two counts each rose by one against the review-time figures, which are the two tests the fixes added.
+Verified after the review and security fixes, rebased on `origin/main`: `cargo check` and `cargo clippy -- -D warnings` clean for the root package AND for `-p mlxcel-core` separately, plus `cargo fmt --all -- --check`. Checking only `--lib --tests` at the workspace root resolves to `-p mlxcel` and does not compile `mlxcel-core`'s test target, which is how two test-only compile errors reached a run of the suite; both packages are checked from here on. `-p mlxcel-core drafter::dflash` 74 passed (69 at review time), and one `--lib` run over `models::lfm2` / `server::batch::speculative_burst` / `server::batch::dflash_target` / `cli::speculative_args` / `models::detection` 184 passed (180 at review time).
 
 ---
 
 ## 10. Follow-up
 
-- Issue #1343 (Muse Glimmer assistant drafter) is the next `DFlashTargetModel` implementor. It needs `enable_speculative_buffers` for its rotating cache, which is present and called by both drivers, and a rotating-cache `rollback_partial`, which is already per-family. Add `supports_batched()` while doing it.
+- Issue #1343 (Muse Glimmer assistant drafter) is the next `DFlashTargetModel` implementor. It needs `enable_speculative_buffers` for its rotating cache, which is present and called by both drivers, and a rotating-cache `rollback_partial`, which is already per-family. Add `supports_batched()` while doing it, and decide there whether Muse wants `prefill_forward_with_capture_layers`: its rotating caches make the prefill the same shape of question LFM2's conv snapshots were.
 - Issue #1289 (order-preserving streamed qmv) is the route to passing the probe on the kernels that decline today. Until then the DSpark burst is a measured decline on generation 15 and newer, not a measured speedup.
 - Batched (B > 1) DSpark and a sampled acceptance rule are explicitly out of scope and remain so.
 - The confidence head is loaded and never called; no early-exit policy is built on it.
+- `ProbeKey` still has no family discriminator, which router mode makes wrong rather than merely narrow. It is pre-existing and shared with the MTP arms, so it belongs to a change that touches the memo itself.
+- The `DSPARK_MAX_VERIFY_WIDTH` ceiling bounds what a CHECKPOINT can put into effect. `--draft-block-size` is still unbounded, which is correct in kind (an operator flag is not untrusted input) but means the probe's per-row cost is reachable by a typo. Worth a warning rather than a gate.

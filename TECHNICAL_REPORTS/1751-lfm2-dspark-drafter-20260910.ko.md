@@ -194,14 +194,44 @@ Greedy 전용 강제는 별개의 게이트이고 이 호스트에서 작동한�
 
 ---
 
+## 8b. 보안 리뷰와 그에 대한 조치
+
+두 번째 패스는 다운로드된 체크포인트가 무엇을 통제하는지만 봤다. 이 절의 모든 항목은 전제를 공유한다. `--model-draft`를 어떤 저장소로 가리키는 순간 그 저장소 `config.json`의 모든 필드와 모든 가중치 shape가 런타임 입력이 되고, MLX는 양수 gather 인덱스를 범위 검사하지 않으며, cxx 브리지를 건너는 MLX C++ 예외는 요청을 실패시키는 대신 프로세스를 abort시킨다. HIGH 하나, MEDIUM 넷, LOW 셋이 나왔다. 여섯은 고쳤고 둘은 이유와 함께 남겼다.
+
+### 8b.1 고친 것
+
+**HIGH: verify 폭이 아래로만 묶이고 위로는 묶이지 않았으며, 그것을 제어 입력으로 만든 것이 이 브랜치다.** 이전에는 DFlash 런타임 블록 크기가 `--draft-block-size`나 평평한 상수 16에서만 왔고 둘 다 운영자가 준 값이었다. 이제 `resolve_draft_block_size`가 `peek_dspark_configured_block_size`로 drafter 체크포인트를 들여다보고 `runtime_verify_width()`를 서버 전역 블록 크기로 스케줄러에 넘긴다. 그 폭은 `min(block_size + 1, runtime_block_size)`이고, `runtime_block_size`를 빠뜨린 config는 8행 기본값에 걸리므로 큰 `block_size`만으로는 무해했다. 둘 다 설정한 config가 상한을 통째로 벗어났다.
+
+두 도달 지점 중 먼저 닿는 쪽이 더 나쁘다. 정확성 게이트는 첫 LFM2 요청에서, drafter가 로드되기도 전에 `exactness_allows(bs)`를 돌리고, `probe_one_draw`는 행마다 단일 토큰 타깃 forward 하나를 스케줄러 스레드에서 세 번 뽑기로, `qmv_wide` 재시도로 다시 두 배로 돌린다. 백만 행에서는 끝나지 않고, 판정이 `ProbeKey`에 메모이즈되므로 재시도도 없다. 게다가 이것은 `validate_target_compat`보다 먼저 돌기 때문에 페어링 게이트가 제때 config를 거부할 수 없었다.
+
+그래서 수정을 일부러 두 곳에 뒀다. `runtime_verify_width()`가 `DSPARK_MAX_VERIFY_WIDTH`(32. 발표된 체크포인트의 8에서 10, 평평한 DFlash의 16에 대비해)에서 클램프한다. 모든 호출자가 이 함수 하나를 지나므로 이것이 프로브보다 앞서 실제로 성립하는 경계다. 페어링 게이트는 따로, `requested_verify_width()`(바로 이 용도로 노출한 클램프 이전 값)가 천장을 넘는 config를 거부한다. 그래야 망가진 drafter를 쓰는 운영자가 조용히 32로 서빙되는 대신 듣는다. 테스트는 `verify_width()`의 포화 덧셈이 존재하는 이유인 `usize::MAX` 경우를 포함해 양쪽을 모두 고정한다.
+
+**MEDIUM: `mask_token_id` 경계가 자기완결형 drafter에서는 공허했다.** 리뷰 수정 커밋이 추가한 경계는 게이트의 타깃 절반이 타깃 어휘를 `vocab_size`에 고정한다는 데서 건전성을 끌어왔다. 그 논증은 lazy-bind 경로에서만 성립하고, 발표된 모든 DSpark 체크포인트가 그 경로를 쓴다. 자기 `embed_tokens.weight`를 싣는 체크포인트는 `needs_embed_binding()`이 false가 되어 `bind`의 다른 갈래를 타고, 그 테이블은 무엇과도 대조된 적이 없었다. 그래서 `vocab_size` 128000을 선언한 8행 테이블에서 여전히 125017행을 범위 밖으로 gather했다. `LmHead::Own`도 한 단계 뒤에 같은 구멍이 있었다. 그 폭은 `vocab_size`와 대조된 적이 없는데 Markov 헤드는 대조되므로, 불일치가 `ffi::add`에서 브로드캐스트 실패로 터졌다. 이제 `from_weights`가 DSpark config일 때 둘 다 `vocab_size`와 대조한다. 평범한 DFlash 체크포인트는 일부러 건드리지 않았다. Markov 헤드도, 빌린 테이블을 인덱싱하는 마스크 id도 없고, 거기서 검사하면 어떤 Qwen 페어링이 로드되는지가 바뀐다.
+
+**MEDIUM: Markov rank 검사가 양자화 인자에서 좁혀진 게 아니라 건너뛰어졌다.** gather를 묶는 절반인 행 검사는 어느 쪽이든 성립했지만, `.scales`가 있으면 폭 검사가 아예 돌지 않았다. 그래서 각자는 일관되지만 서로 어긋난 두 인자가 `quantized_matmul`에 도달해 MLX 안에서 throw했다. 이 drafter들의 mlx-community 변환은 전부 양자화되므로 건너뛴 경우가 흔한 경우다. MLX는 마지막 축을 u32 단위로 팩하므로(`packed_in * 32 == bits * in_features`) 폭은 유도 가능하다. 이제 어떤 지원 비트 깊이가 그 packed 폭을 설명하면 받아들인다. 로더가 선언한 `bits`를 믿지 않는 이유는 텐서별 오버라이드가 그것과 어긋날 수 있기 때문이다.
+
+**MEDIUM: `first_hidden_for`가 프롬프트 hidden 전체를 깊은 복사했다.** `mlxcel_core::copy`는 핸들 복제가 아니라 진짜 MLX `Copy` 프리미티브인데, 전체 행 갈래는 빌린 시그니처를 맞추려고만 그것을 불렀다. 요청당 `[1, S, len(target_layer_ids) * hidden]` 슬랩이 하나 더 잡히고, LFM2.5-2.6B에서 8k 프롬프트면 168 MB, 32k면 671 MB다. 이제 배열을 값으로 받아 그대로 돌려준다. 덕분에 호출자가 라운드 루프 내내 원본을 붙들고 있던 것도 함께 없어진다. 슬라이스 갈래는 영향이 없다. 슬라이스가 자기 입력에 대한 참조를 직접 들고 있기 때문이다.
+
+**MEDIUM: short-conv 롤백 스냅샷이 프롬프트 프리필에서 캡처됐다.** 거기서는 아무도 읽지 않는다. 프리필은 롤백되지 않기 때문이다. 스냅샷 하나는 그 forward 자신의 폭에서 레이어의 게이트된 입력을 들고, LFM2는 conv 우세라 프롬프트 길이에서는 conv 레이어마다 프롬프트 크기 버퍼 하나씩을 프리필을 물질화하는 eval 내내 붙잡아 둔 셈이다. 30레이어 2.6B 체크포인트에서 8k면 약 670 MB, 32k면 약 2.7 GB이고, 모델과 캐시는 별도다. `SpeculativeTarget`에 `prefill_forward_with_capture_layers`를 추가했다. 기본값이 verify 훅이라 다른 계열은 전혀 바뀌지 않고, LFM2와 LFM2-VL이 재정의해 캡처를 건너뛴다. `forward_speculative`는 캡처를 플래그로 받고, 새 테스트가 그 플래그는 무엇을 보관하는지만 바꾸고 무엇을 계산하는지는 바꾸지 않음을 로짓, 캡처된 hidden, 캐시 오프셋 셋에 대해 한꺼번에 고정한다. 이걸 틀리면 프리필과 verify 라운드가 어긋나 온도 0 계약이 조용히 깨진다.
+
+**LOW: 빈 프롬프트와 빈 윈도.** `run_dflash_on_target`은 `last_pos = len - 1`을 계산해 거기서 슬라이스했고, 배치 갈래는 `prompts[0]`을 인덱싱했다. 둘 다 Qwen 갈래에서 그대로 물려받았고 오늘 스케줄러에서 도달 가능하지 않지만, LFM2 갈래가 같은 코드의 새 호출자이고 음수 슬라이스 시작은 MLX에 프로세스 abort로 도달한다. 이제 둘 다 요청 오류다.
+
+### 8b.2 그대로 둔 것
+
+**`sample_block_array`의 B = 1 불변식은 `debug_assert`로 남는다.** 릴리스에서 `[B > 1, gamma, vocab]` 입력은 조용히 0행에서 체인을 돌리고 나머지를 버린다. 도달 불가능하다. `draft_block_batched`는 DSpark drafter에 `DraftFailed`를 돌려주고, 배치 버스트는 take 전에 LFM2를 decline한다. 이 함수가 `pub` 타입의 `pub` 함수라는 것이 강화의 진짜 근거지만, 가능한 강화가 요청 핸들러 안의 릴리스 패닉이고 그것 자체가 서비스 거부다. 가시성을 좁히는 것은 어떤 호출자도 도달할 수 없는 경우를 위해 라이브러리 크레이트에 파괴적 변경을 넣는 일이다. 바꾸는 대신 기록한다.
+
+**잘못된 페어링의 decline은 `BurstOutcome::Error`로 남는다.** `DeclineToClassic`이면 요청을 실패시키는 대신 서빙하니 가용성이 높다. 그것을 고르지 않은 이유는 바로 위 갈래인 `validate_target_compat` 실패가 `Error`이고, 조용한 폴백은 운영자가 잘못 지정한 `--model-draft`를 설명되지 않는 영구 성능 저하로 바꾸기 때문이다. 메시지는 플래그와 해결책을 지목하고, 워밍업이 첫 요청이 아니라 시작 시점에 이를 드러낸다.
+
+---
+
 ## 9. 변경 요약
 
 | 항목 | 값 |
 |-----|---|
 | 변경된 파일 수 | 29 |
-| 추가된 라인 | +3788 |
-| 삭제된 라인 | -577 |
-| 추가된 테스트 | 27 |
+| 추가된 라인 | +4331 |
+| 삭제된 라인 | -578 |
+| 추가된 테스트 | 34 |
 
 | 영역 | 주요 내용 |
 |-----|----------|
@@ -211,13 +241,15 @@ Greedy 전용 강제는 별개의 게이트이고 이 호스트에서 작동한�
 | CLI | `resolve_draft_block_size`의 DSpark 블록 크기 peek. 오프라인 거부 메시지가 두 drafter 형태를 모두 지칭 |
 | 문서 | `supported-models.md` DSpark 행, `speculative-acceptance.md`의 greedy 전용 decline, README |
 
-리뷰 수정 이후 `origin/main`에 리베이스한 상태로 검증: `cargo check --lib --tests`, `cargo clippy --lib --tests -- -D warnings`, `cargo fmt --all -- --check` 전부 통과. `-p mlxcel-core drafter::dflash` 70개 통과, `--lib`로 `models::lfm2` / `server::batch::speculative_burst` / `server::batch::dflash_target` / `cli::speculative_args` / `models::detection`를 한 번에 돌려 181개 통과. 두 수치가 리뷰 시점보다 각각 하나씩 늘었고, 그것이 이번 수정이 추가한 테스트 둘이다.
+리뷰 수정과 보안 수정 이후 `origin/main`에 리베이스한 상태로 검증: 루트 패키지와 `-p mlxcel-core` 각각에 대해 `cargo check`와 `cargo clippy -- -D warnings` 통과, 그리고 `cargo fmt --all -- --check` 통과. 워크스페이스 루트에서 `--lib --tests`만 검사하면 `-p mlxcel`으로 해석되어 `mlxcel-core`의 테스트 타깃을 컴파일하지 않고, 그래서 테스트 전용 컴파일 오류 둘이 스위트 실행까지 갔다. 이후로는 두 패키지를 모두 검사한다. `-p mlxcel-core drafter::dflash` 74개 통과(리뷰 시점 69), `--lib`로 `models::lfm2` / `server::batch::speculative_burst` / `server::batch::dflash_target` / `cli::speculative_args` / `models::detection`를 한 번에 돌려 184개 통과(리뷰 시점 180).
 
 ---
 
 ## 10. 후속 조치
 
-- 이슈 #1343(Muse Glimmer assistant drafter)이 다음 `DFlashTargetModel` 구현자다. 회전 캐시를 위한 `enable_speculative_buffers`가 필요한데 이미 존재하고 두 드라이버가 호출한다. 회전 캐시용 `rollback_partial`도 필요한데 이미 계열별이다. 그 작업을 하면서 `supports_batched()`를 함께 추가할 것.
+- 이슈 #1343(Muse Glimmer assistant drafter)이 다음 `DFlashTargetModel` 구현자다. 회전 캐시를 위한 `enable_speculative_buffers`가 필요한데 이미 존재하고 두 드라이버가 호출한다. 회전 캐시용 `rollback_partial`도 필요한데 이미 계열별이다. 그 작업을 하면서 `supports_batched()`를 함께 추가할 것. 그리고 Muse에 `prefill_forward_with_capture_layers`가 필요한지도 거기서 판단할 것. 회전 캐시 때문에 프리필이 LFM2의 conv 스냅샷과 같은 모양의 질문이 된다.
 - 이슈 #1289(순서 보존 스트리밍 qmv)가 오늘 decline하는 커널에서 프로브를 통과시키는 경로다. 그전까지 DSpark 버스트는 세대 15 이상에서 측정된 속도 향상이 아니라 측정된 decline이다.
 - 배치(B > 1) DSpark와 샘플링 수락 규칙은 명시적으로 범위 밖이며 계속 그렇다.
 - confidence 헤드는 로드되고 호출되지 않는다. 그 위에 조기 종료 정책은 만들어져 있지 않다.
+- `ProbeKey`에는 여전히 계열 구분자가 없고, 라우터 모드는 이를 단지 좁은 것이 아니라 틀린 것으로 만든다. 기존 사안이고 MTP 갈래와 공유하므로 메모 자체를 건드리는 변경의 몫이다.
+- `DSPARK_MAX_VERIFY_WIDTH` 천장은 체크포인트가 실행에 옮길 수 있는 값을 묶는다. `--draft-block-size`는 여전히 무경계인데, 운영자 플래그는 신뢰할 수 없는 입력이 아니므로 종류로는 맞지만 오타 하나로 프로브의 행당 비용에 도달할 수 있다는 뜻이다. 게이트보다는 경고가 어울린다.
