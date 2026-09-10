@@ -370,7 +370,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // `q_proj` / `k_proj` / `v_proj` / `gate_proj` on a model whose
         // projections are `qkv_proj`, `kv_a_proj_with_mqa`, `embed_q` and
         // `switch_mlp`.
-        ModelType::KimiK3 => "kimi_k3",
+        ModelType::KimiK3 | ModelType::KimiK3VLM => "kimi_k3",
         // Kimi-VL / Kimi-VL 2.5 use a DeepSeek-V3-style MoE text backbone.
         ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",

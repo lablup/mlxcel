@@ -222,6 +222,8 @@ pub enum LoadedModel {
     Step3p5(models::Step3p5Model),
     KimiLinear(models::KimiLinearModel),
     KimiK3(models::KimiK3Model),
+    /// Kimi K3 with its MoonViT3D tower (#1342).
+    KimiK3VLM(vision::KimiK3VLModel),
     LongcatFlash(models::LongcatFlashNgramModel),
     LongcatFlashNgram(models::LongcatFlashNgramModel),
     Rwkv7(models::Rwkv7),
@@ -391,6 +393,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Step3p5(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiLinear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiK3(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::KimiK3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LongcatFlash(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LongcatFlashNgram(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Rwkv7(inner) => LanguageModel::$method(inner, $($arg),*),

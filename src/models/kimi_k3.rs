@@ -1796,6 +1796,9 @@ pub struct KimiK3Model {
     output_attn_res: Option<(UniquePtr<MlxArray>, f32)>,
     sequence_state: ModelOwnedSequenceState<KimiK3LayerCache>,
     eos_token_ids: Vec<i32>,
+    /// The dtype of the embedding table, which is the dtype every layer
+    /// runs its activations in (see `activation_dtype`).
+    act_dtype: i32,
 }
 
 impl KimiK3Model {
@@ -1820,13 +1823,46 @@ impl KimiK3Model {
         input_ids: &MlxArray,
         caches: &mut [KimiK3LayerCache],
     ) -> UniquePtr<MlxArray> {
+        let h = self.embed_tokens.forward(input_ids);
+        self.forward_hidden(h, caches)
+    }
+
+    /// The dtype the decoder runs in: that of the embedding table.
+    ///
+    /// Used by: `vision::kimi_k3_vl` (casting pixel values before the tower).
+    pub fn activation_dtype(&self) -> i32 {
+        self.act_dtype
+    }
+
+    /// [`Self::forward`] from pre-computed input embeddings `[B, T, D]`
+    /// instead of token ids: the Kimi K3 VLM scatters projected image
+    /// features into the embedding stream before the first layer (#1342).
+    /// Attention Residuals see the injected embeddings as their layer-0
+    /// block, exactly as they see the looked-up ones.
+    pub fn forward_with_input_embeddings(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [KimiK3LayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let h = if mlxcel_core::array_dtype(inputs_embeds) == self.act_dtype {
+            mlxcel_core::copy(inputs_embeds)
+        } else {
+            mlxcel_core::astype(inputs_embeds, self.act_dtype)
+        };
+        self.forward_hidden(h, caches)
+    }
+
+    fn forward_hidden(
+        &self,
+        h: UniquePtr<MlxArray>,
+        caches: &mut [KimiK3LayerCache],
+    ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
             self.layers.len(),
             "kimi_k3: cache cardinality must match layer count"
         );
 
-        let h = self.embed_tokens.forward(input_ids);
         let l = mlxcel_core::array_shape(&h)[1];
 
         // Every cache advances by the same token count, so any layer's offset
@@ -1964,6 +2000,7 @@ impl KimiK3Model {
             output_attn_res,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
             eos_token_ids,
+            act_dtype,
         })
     }
 
@@ -1978,19 +2015,38 @@ impl KimiK3Model {
         input_ids: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_with_embeddings(input_ids, None, seq_id)
+    }
+
+    /// [`Self::forward_for_sequence`] with optional pre-computed embeddings.
+    ///
+    /// The reset rule is the token-id one: a multi-token forward with no
+    /// sequence id starts a new prompt, whichever form the input takes. When
+    /// `inputs_embeds` is `Some`, `input_ids` only supplies the shape.
+    ///
+    /// Used by: `vision::kimi_k3_vl::KimiK3VLModel` (VLM prefill).
+    pub(crate) fn forward_for_sequence_with_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
                 .replace_internal(self.make_layer_caches());
         }
 
+        let run = |internal: &mut [KimiK3LayerCache]| match inputs_embeds {
+            Some(embeds) => self.forward_with_input_embeddings(embeds, internal),
+            None => self.forward(input_ids, internal),
+        };
         if let Some(seq_id) = seq_id {
             self.sequence_state
-                .with_existing_sequence_state(seq_id, |internal| self.forward(input_ids, internal))
+                .with_existing_sequence_state(seq_id, run)
                 .unwrap_or_else(|err| panic!("KimiK3 {err}"))
         } else {
-            self.sequence_state
-                .with_sequence_state(None, |internal| self.forward(input_ids, internal))
+            self.sequence_state.with_sequence_state(None, run)
         }
     }
 }

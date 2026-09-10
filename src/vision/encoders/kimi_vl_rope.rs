@@ -33,6 +33,10 @@
 //! frequencies exactly as the upstream `mx.stack([x_cis, y_cis], -1)` step does:
 //! even pairs use `col * freq[j]`, odd pairs use `row * freq[j]`, where
 //! `freq[j] = theta ** (-4j / dim)` for `j in 0..dim/4`.
+//!
+//! Used by: `encoders::kimi_vl` (MoonViT, Kimi-VL / Kimi-VL 2.5 / LocateAnything)
+//! and `encoders::moonvit3d` (MoonViT3D, Kimi K3), whose `rope2d` is the same
+//! 32-frequency, x/y-alternating table applied as interleaved pairs.
 
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -42,13 +46,13 @@ use super::KimiMediaGrid;
 ///
 /// `dim` is the attention head dimension (`embed_dim / num_heads`); it must be
 /// divisible by 4 so the x/y interleaving is exact (upstream asserts the same).
-pub(super) struct Rope2DPosEmb {
+pub(crate) struct Rope2DPosEmb {
     dim: i32,
     theta: f32,
 }
 
 impl Rope2DPosEmb {
-    pub(super) fn new(dim: i32) -> Self {
+    pub(crate) fn new(dim: i32) -> Self {
         assert!(
             dim % 4 == 0,
             "MoonViT rope dim must be divisible by 4 (got {dim})"
@@ -72,16 +76,16 @@ impl Rope2DPosEmb {
         mlxcel_core::exp(&exponent)
     }
 
-    /// Build `(cos, sin)` rotation tables of shape `[total_tokens, dim/2]` for
+    /// Build the per-token angle table of shape `[total_tokens, dim/2]` for
     /// the concatenated per-item patch grids. Token order is row-major within
     /// each frame, items concatenated in media order. The rotary angles use only
     /// spatial `(row, col)` positions; the frame index never enters them, so a
     /// video item simply repeats its per-frame `(row, col)` stream `t` times
     /// (frame-major), matching the tiled patch order.
-    pub(super) fn cos_sin(
-        &self,
-        media_grids: &[KimiMediaGrid],
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    ///
+    /// Column `2j` of a token at `(row, col)` holds `col * freq[j]` and column
+    /// `2j + 1` holds `row * freq[j]`.
+    pub(crate) fn angles(&self, media_grids: &[KimiMediaGrid]) -> UniquePtr<MlxArray> {
         let mut col_pos: Vec<f32> = Vec::new();
         let mut row_pos: Vec<f32> = Vec::new();
         for grid in media_grids {
@@ -107,8 +111,16 @@ impl Rope2DPosEmb {
 
         // Interleave: angle[t, 2j] = x_angle[t, j], angle[t, 2j+1] = y_angle[t, j].
         let stacked = mlxcel_core::stack_owned(&[x_angle, y_angle], -1); // [total, dim/4, 2]
-        let angle = mlxcel_core::reshape(&stacked, &[total, self.dim / 2]);
+        mlxcel_core::reshape(&stacked, &[total, self.dim / 2])
+    }
 
+    /// Build `(cos, sin)` rotation tables of shape `[total_tokens, dim/2]`
+    /// from [`Self::angles`].
+    pub(crate) fn cos_sin(
+        &self,
+        media_grids: &[KimiMediaGrid],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let angle = self.angles(media_grids);
         let cos = mlxcel_core::cos(&angle);
         let sin = mlxcel_core::sin(&angle);
         (cos, sin)
@@ -119,7 +131,7 @@ impl Rope2DPosEmb {
 ///
 /// `q`, `k`: `[total_tokens, num_heads, head_dim]`.
 /// `cos`, `sin`: `[total_tokens, head_dim/2]`.
-pub(super) fn apply_rope(
+pub(crate) fn apply_rope(
     q: &MlxArray,
     k: &MlxArray,
     cos: &MlxArray,

@@ -46,6 +46,7 @@ pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
 pub mod moondream3;
+pub mod moonvit3d;
 pub mod muse_glimmer;
 pub mod muse_glimmer_fusion;
 pub mod muse_glimmer_layers;

@@ -623,6 +623,7 @@ pub enum ModelType {
     // Kimi models
     KimiLinear,
     KimiK3, // Kimi K3 text backbone (fused-QKV KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)
+    KimiK3VLM, // Kimi K3 VLM (MoonViT3D tower + patchmergerv2 projector + the K3 backbone)
     KimiVL, // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
     KimiK25, // Kimi-VL 2.5 (MoonViT + DeepSeek-V3-style MoE, image path)
 
@@ -850,6 +851,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Kimi models
     ModelType::KimiLinear,
     ModelType::KimiK3,
+    ModelType::KimiK3VLM,
     ModelType::KimiVL,
     ModelType::KimiK25,
     // Longcat models
@@ -1075,6 +1077,7 @@ impl ModelType {
                 "Kimi K3 (KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)",
                 "MoE (other)",
             ),
+            ModelType::KimiK3VLM => ("Kimi K3 VLM (MoonViT3D + K3 latent MoE)", "Kimi VLM"),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
@@ -1448,6 +1451,7 @@ mod metadata_tests {
             GraniteMoeHybrid,
             KimiLinear,
             KimiK3,
+            KimiK3VLM,
             KimiVL,
             KimiK25,
             LongcatFlash,

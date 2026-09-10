@@ -361,6 +361,7 @@ impl ModelType {
             ModelType::GraniteMoeHybrid => "granitemoehybrid",
             ModelType::KimiLinear => "kimi_linear",
             ModelType::KimiK3 => "kimi_k3",
+            ModelType::KimiK3VLM => "kimi_k3_vlm",
             ModelType::KimiVL => "kimi_vl",
             ModelType::KimiK25 => "kimi_k25",
             ModelType::LongcatFlash => "longcat_flash",
@@ -491,6 +492,7 @@ impl ModelType {
             ModelType::BailingMoeLinear
             | ModelType::KimiLinear
             | ModelType::KimiK3
+            | ModelType::KimiK3VLM
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
             | ModelType::Qwen3Next => "linear_attention",
@@ -734,7 +736,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::NemotronNAS => &["nemotron-nas"],
         ModelType::Rwkv7 => &["rwkv7"],
         ModelType::KimiLinear => &["kimi_linear"],
-        ModelType::KimiK3 => &["kimi_k3"],
+        ModelType::KimiK3 | ModelType::KimiK3VLM => &["kimi_k3"],
         ModelType::KimiVL => &["kimi_vl"],
         ModelType::KimiK25 => &["kimi_k25"],
         ModelType::LocateAnythingVLM => &["locateanything"],
@@ -1090,6 +1092,7 @@ mod tests {
             ModelType::GlmMoeDsa,
             ModelType::KimiLinear,
             ModelType::KimiK3,
+            ModelType::KimiK3VLM,
             ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(

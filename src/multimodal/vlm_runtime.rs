@@ -378,6 +378,14 @@ pub enum VlmPreparationSummary {
         image_blocks: usize,
         total_image_tokens: i32,
     },
+    /// Kimi K3 placed one `<|media_begin|>image WxH<|media_content|>
+    /// <|media_pad|>*n <|media_end|>` block per image (`n = gh * gw / 4`), or
+    /// verified the blocks the XTML renderer had already placed.
+    KimiK3 {
+        image_blocks: usize,
+        total_image_tokens: i32,
+        prerendered: bool,
+    },
     /// Kimi-VL 2.5 expanded one or more video clips (and optional companion
     /// images) into `<|media_pad|>` runs. `frame_slots` is the total number of
     /// sampled frames across all clips; `total_image_tokens` is the merged token
@@ -2446,6 +2454,29 @@ where
             let preparation = stats.map(|s| VlmPreparationSummary::KimiVL {
                 image_blocks: s.image_blocks,
                 total_image_tokens: s.total_image_tokens,
+            });
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::KimiK3(model) => {
+            // MoonViT3D runs each image through the whole tower on its own;
+            // no opportunistic vision cache for this first integration.
+            let _ = active_caches;
+            let _ = image_cache_keys;
+            let (embeddings, stats) =
+                crate::multimodal::kimi_k3_prompt::compute_kimi_k3_image_embeddings(
+                    model,
+                    prompt_tokens,
+                    images,
+                    |label| encode(label, false),
+                )?;
+            let preparation = Some(VlmPreparationSummary::KimiK3 {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+                prerendered: stats.prerendered,
             });
 
             Ok(Some(PreparedVlmEmbeddings {
