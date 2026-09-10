@@ -41,6 +41,7 @@ pub mod deepseekocr_prompt;
 pub mod falcon_ocr_prompt;
 pub mod fastvlm_prompt;
 pub mod gemma4_vl;
+pub mod got_ocr_prompt;
 pub mod granite_vision_prompt;
 pub mod host_preprocessor;
 pub mod inkling_audio;

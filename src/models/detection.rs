@@ -756,6 +756,9 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // (`llm_config.model_type` is `llama` for llm-jp-4-vl-9B-beta and
         // `qwen3` for Jagle-VL-2.2B). Both label themselves `llmjpvl`.
         "llmjpvl" => Ok(ModelType::LlmJpVLM),
+        // GOT-OCR 2.0 declares `model_type: "GOT"` in upper case; the
+        // normalization above lowercases it before this match.
+        "got" => Ok(ModelType::GotOcrVLM),
         // SmolVLM2 ships as `smolvlm`/`smolvlm2`. SmolVLM-Instruct ships as an
         // Idefics3 checkpoint (`idefics3`, `Idefics3ForConditionalGeneration`):
         // a SigLIP vision tower + pixel-shuffle connector + Llama text backbone,

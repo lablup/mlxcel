@@ -60,6 +60,8 @@ pub enum VlmRuntimeRef<'a> {
     /// LLM-jp-VL (llmjpvl) runtime (SigLIP2 tiles + pixel-shuffle mlp1 +
     /// a Llama or Qwen3 decoder).
     LlmJpVl(&'a vision::LlmJpVlModel),
+    /// GOT-OCR 2.0 (GOT) runtime (SAM ViT-B + linear projector + Qwen2-0.5B).
+    GotOcr(&'a vision::GotOcrVlModel),
     /// Kimi-VL / Kimi-VL 2.5 (MoonViT) runtime.
     KimiVL(&'a vision::KimiVLModel),
     /// LocateAnything (MoonViT + Qwen2 grounding) runtime.
@@ -234,6 +236,7 @@ impl LoadedModel {
             Self::YoutuVL(model) => Some(VlmRuntimeRef::YoutuVL(model)),
             Self::InternVLChatVLM(model) => Some(VlmRuntimeRef::InternVL(model)),
             Self::LlmJpVL(model) => Some(VlmRuntimeRef::LlmJpVl(model)),
+            Self::GotOcrVLM(model) => Some(VlmRuntimeRef::GotOcr(model)),
             Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
             Self::LocateAnythingVLM(model) => Some(VlmRuntimeRef::LocateAnything(model)),
             Self::MllamaVLM(model) => Some(VlmRuntimeRef::Mllama(model)),

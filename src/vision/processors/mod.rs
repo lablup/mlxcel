@@ -26,6 +26,7 @@ pub mod fastvlm;
 pub mod florence2;
 pub mod gemma4;
 pub mod gemma4_unified;
+pub mod got_ocr;
 pub mod hunyuan_vl;
 pub mod idefics2;
 pub mod inkling;

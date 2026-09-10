@@ -47,8 +47,12 @@ impl TiktokenTokenizer {
     /// Load a tiktoken tokenizer from a `.tiktoken` BPE file and tokenizer config.
     ///
     /// The `.tiktoken` file format: each line contains `<base64_token> <rank>`.
-    /// Special tokens are derived from the vocabulary size and the standard
-    /// HunYuan special token set.
+    /// Special tokens are derived from the vocabulary size and the special-token
+    /// table the checkpoint's `tokenizer_class` names: `QWenTokenizer` selects
+    /// the QWen table, anything else keeps the HunYuan one. Two families ship a
+    /// bare `.tiktoken` file with an empty `added_tokens_decoder`, so the table
+    /// is the only thing that fixes their ids, and the two tables disagree from
+    /// the second entry onward.
     pub fn from_file(tiktoken_path: &Path, model_path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(tiktoken_path)?;
 
@@ -77,8 +81,13 @@ impl TiktokenTokenizer {
 
         let special_start_id = encoder.len() as u32;
 
-        // Build special tokens: same order as Python HYTokenizer
-        let special_token_names = Self::build_special_token_list();
+        // Build special tokens: same order as the reference tokenizer for the
+        // family the checkpoint declares (Python `HYTokenizer` or `QWenTokenizer`).
+        let special_token_names = if Self::declares_qwen_tokenizer_class(model_path) {
+            Self::build_qwen_special_token_list()
+        } else {
+            Self::build_special_token_list()
+        };
         let mut special_encoder = HashMap::new();
         let mut special_decoder = HashMap::new();
 
@@ -126,6 +135,64 @@ impl TiktokenTokenizer {
             tokens.push(format!("<|extra_{i}|>"));
         }
         tokens
+    }
+
+    /// Build the QWen special token list, in `tokenization_qwen.py` order.
+    ///
+    /// `SPECIAL_TOKENS = (ENDOFTEXT, IMSTART, IMEND) + EXTRAS` followed by
+    /// `IMAGE_ST = (ref/box/quad/img/imgpad tags)`, all numbered from
+    /// `len(mergeable_ranks)`. For the 151643-rank `qwen.tiktoken` GOT-OCR 2.0
+    /// ships this yields `<|endoftext|>` = 151643, `<|im_start|>` = 151644,
+    /// `<|im_end|>` = 151645, `<|extra_0..204|>` = 151646..151850, then
+    /// `<ref>` 151851 .. `<imgpad>` 151859, and 151643 + 217 = 151860 is the
+    /// `vocab_size` the checkpoint declares.
+    ///
+    /// The HunYuan table cannot stand in for this: it has `<|startoftext|>`
+    /// and `<|bos|>` where QWen has `<|im_start|>` and `<|im_end|>`, so a GOT
+    /// checkpoint loaded under it silently gets no id at all for `<|im_end|>`
+    /// (the stop token) or for `<imgpad>` (the image placeholder).
+    fn build_qwen_special_token_list() -> Vec<String> {
+        let mut tokens = vec![
+            "<|endoftext|>".to_string(),
+            "<|im_start|>".to_string(),
+            "<|im_end|>".to_string(),
+        ];
+        for i in 0..205 {
+            tokens.push(format!("<|extra_{i}|>"));
+        }
+        for tag in [
+            "<ref>", "</ref>", "<box>", "</box>", "<quad>", "</quad>", "<img>", "</img>",
+            "<imgpad>",
+        ] {
+            tokens.push(tag.to_string());
+        }
+        tokens
+    }
+
+    /// Whether `tokenizer_config.json` names the QWen tiktoken tokenizer.
+    ///
+    /// Both the `tokenizer_class` field and the `auto_map.AutoTokenizer` entry
+    /// are accepted: GOT-OCR 2.0 sets both, but a conversion that keeps only
+    /// the `auto_map` still has to reach the QWen table.
+    fn declares_qwen_tokenizer_class(model_path: &Path) -> bool {
+        let Ok(content) = std::fs::read_to_string(model_path.join("tokenizer_config.json")) else {
+            return false;
+        };
+        let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return false;
+        };
+        if config
+            .get("tokenizer_class")
+            .and_then(|v| v.as_str())
+            .is_some_and(|class| class == "QWenTokenizer")
+        {
+            return true;
+        }
+        config
+            .get("auto_map")
+            .and_then(|v| v.get("AutoTokenizer"))
+            .map(|entry| entry.to_string().contains("QWenTokenizer"))
+            .unwrap_or(false)
     }
 
     /// Load additional special token mappings from tokenizer_config.json.
@@ -362,6 +429,98 @@ mod tests {
 
     fn tiktoken_file() -> PathBuf {
         test_model_path().join("hy.tiktoken")
+    }
+
+    /// Write a synthetic `.tiktoken` vocabulary of `ranks` single-byte tokens
+    /// plus the `tokenizer_config.json` a family would ship, and load it.
+    fn synthetic_tokenizer(
+        ranks: usize,
+        tokenizer_config: &str,
+    ) -> (tempfile::TempDir, TiktokenTokenizer) {
+        use base64::Engine;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut vocab = String::new();
+        for rank in 0..ranks {
+            let token = base64::engine::general_purpose::STANDARD.encode([b'a' + rank as u8]);
+            vocab.push_str(&format!("{token} {rank}\n"));
+        }
+        std::fs::write(dir.path().join("vocab.tiktoken"), vocab).expect("write vocab");
+        std::fs::write(dir.path().join("tokenizer_config.json"), tokenizer_config)
+            .expect("write config");
+        let tokenizer =
+            TiktokenTokenizer::from_file(&dir.path().join("vocab.tiktoken"), dir.path())
+                .expect("load tiktoken");
+        (dir, tokenizer)
+    }
+
+    /// `tokenizer_class == "QWenTokenizer"` selects the QWen special table, so
+    /// the ids follow `tokenization_qwen.py`: `<|endoftext|>` at
+    /// `len(mergeable_ranks)`, `<|im_start|>`/`<|im_end|>` next, 205 extras,
+    /// then the nine image/reference tags ending at `<imgpad>`.
+    ///
+    /// With a 3-rank vocabulary that is `<|im_end|>` = 5 and `<imgpad>` = 219,
+    /// the same offsets that put them at 151645 and 151859 on GOT-OCR 2.0's
+    /// 151643-rank `qwen.tiktoken`.
+    #[test]
+    fn qwen_tokenizer_class_selects_qwen_specials() {
+        let (_dir, t) = synthetic_tokenizer(
+            3,
+            r#"{"tokenizer_class": "QWenTokenizer", "added_tokens_decoder": {}}"#,
+        );
+        assert_eq!(t.token_to_id("<|endoftext|>"), Some(3));
+        assert_eq!(t.token_to_id("<|im_start|>"), Some(4));
+        assert_eq!(t.token_to_id("<|im_end|>"), Some(5));
+        assert_eq!(t.token_to_id("<|extra_0|>"), Some(6));
+        assert_eq!(t.token_to_id("<|extra_204|>"), Some(210));
+        assert_eq!(t.token_to_id("<ref>"), Some(211));
+        assert_eq!(t.token_to_id("<img>"), Some(217));
+        assert_eq!(t.token_to_id("</img>"), Some(218));
+        assert_eq!(t.token_to_id("<imgpad>"), Some(219));
+        // The HunYuan-only spellings must not exist under the QWen table.
+        assert_eq!(t.token_to_id("<|startoftext|>"), None);
+        assert_eq!(t.token_to_id("<|bos|>"), None);
+    }
+
+    /// A checkpoint that declares the tokenizer only through `auto_map` (no
+    /// `tokenizer_class`) still reaches the QWen table.
+    #[test]
+    fn qwen_auto_map_selects_qwen_specials() {
+        let (_dir, t) = synthetic_tokenizer(
+            3,
+            r#"{"auto_map": {"AutoTokenizer": ["tokenization_qwen.QWenTokenizer", null]}}"#,
+        );
+        assert_eq!(t.token_to_id("<|im_end|>"), Some(5));
+        assert_eq!(t.token_to_id("<imgpad>"), Some(219));
+    }
+
+    /// Without the QWen marker the HunYuan table is unchanged: five named
+    /// specials then 205 extras, and none of the QWen-only spellings resolve.
+    #[test]
+    fn hunyuan_table_unchanged_without_qwen_class() {
+        let (_dir, t) = synthetic_tokenizer(3, r#"{"added_tokens_decoder": {}}"#);
+        assert_eq!(t.token_to_id("<|endoftext|>"), Some(3));
+        assert_eq!(t.token_to_id("<|startoftext|>"), Some(4));
+        assert_eq!(t.token_to_id("<|bos|>"), Some(5));
+        assert_eq!(t.token_to_id("<|eos|>"), Some(6));
+        assert_eq!(t.token_to_id("<|pad|>"), Some(7));
+        assert_eq!(t.token_to_id("<|extra_0|>"), Some(8));
+        assert_eq!(t.token_to_id("<|im_end|>"), None);
+        assert_eq!(t.token_to_id("<imgpad>"), None);
+    }
+
+    /// The QWen framing tags round-trip through encode/decode as single ids,
+    /// which is what lets the fixed GOT conversation carry an image block as
+    /// plain text.
+    #[test]
+    fn qwen_image_tags_encode_as_single_specials() {
+        let (_dir, t) = synthetic_tokenizer(3, r#"{"tokenizer_class": "QWenTokenizer"}"#);
+        let ids = t.encode("<img><imgpad></img>", false).expect("encode");
+        assert_eq!(ids, vec![217, 219, 218]);
+        assert_eq!(
+            t.decode(&ids, false).expect("decode"),
+            "<img><imgpad></img>"
+        );
+        assert_eq!(t.decode(&ids, true).expect("decode"), "");
     }
 
     #[test]

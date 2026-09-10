@@ -146,6 +146,9 @@ pub use startup::{
 pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 
 #[cfg(test)]
+mod got_chat_template_tests;
+
+#[cfg(test)]
 mod llama_compat_tests;
 
 #[cfg(test)]
