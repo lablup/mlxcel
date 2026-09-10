@@ -63,7 +63,7 @@ Past roughly a dozen callers, a hand-written roster is wrong by the next release
 ```rust
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 44 non-test files under `src/models`, in four groups.
+/// commit that is N non-test files under `src/models`, in four groups.
 /// (groups and representatives ...)
 ///
 /// Not used by the mainstream dense decoders (Llama3, Mixtral, Gemma2 and
@@ -72,7 +72,7 @@ Past roughly a dozen callers, a hand-written roster is wrong by the next release
 ///
 /// The caller set is too large to enumerate by name without going stale, so
 /// the groups above are a summary. Regenerate the exact list with
-/// `grep -rln '\bcreate_causal_mask(' src --include='*.rs'`.
+/// `grep -rln '\bcreate_causal_mask(' src/models --include='*.rs' | grep -v 'tests\.rs$'`.
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 ```
 
