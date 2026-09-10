@@ -919,9 +919,14 @@ pub(crate) fn expand_cli_videos_to_frames(
     let mut guards = Vec::new();
     let mut total_frames = 0usize;
     for path in video_paths {
-        let frames = mlxcel::video::load_video(path, Some(target_fps), None)
-            .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
-        let sampled = frames.len();
+        // The bounded decode the server front uses: reading the clip at
+        // `target_fps` alone would hold up to `FPS_MAX_FRAMES` full-resolution
+        // frames to keep `max_frames` of them. Sharing the helper also keeps
+        // the two fronts choosing the same frames out of the same clip.
+        let source = mlxcel::video::VideoSource::from_path(path.clone());
+        let (frames, sampled) =
+            mlxcel::video::load_video_source_frames_fallback(&source, target_fps, max_frames)
+                .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
         let kept = mlxcel::video::subsample_evenly(frames, max_frames);
         let encoded = mlxcel::video::frames_to_png(&kept)
             .map_err(|err| anyhow!("Failed to encode frames of {}: {err}", path.display()))?;

@@ -494,21 +494,23 @@ pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
         .map_err(|err| format!("Video frame extraction task failed: {err}"))?
         .map_err(|err| format!("Failed to load video {label:?}: {err}"))?;
 
-        tracing::info!(
-            "model {model_id} has no native video path; sending {} of {sampled} sampled frames \
-             from {label} as ordered images",
-            kept.len()
-        );
         injected += kept.len();
         // The frames become ordinary image parts, so they spend the same
         // per-request image budget. Refuse here, naming the frames, rather than
         // letting `validate_image_count` report a count the caller never sent.
         // Checked per clip so a request that is already over budget stops at
-        // the clip that broke it instead of decoding the rest of the body.
+        // the clip that broke it instead of decoding the rest of the body, and
+        // ahead of the line below so a refused request does not leave a log
+        // saying the clip that broke the budget was sent.
         if let Some(message) = video_frame_budget_rejection(existing_images, injected, image_limit)
         {
             return Err(message);
         }
+        tracing::info!(
+            "model {model_id} has no native video path; sending {} of {sampled} sampled frames \
+             from {label} as ordered images",
+            kept.len()
+        );
         expansions.push((message_index, part_index, kept));
     }
 
