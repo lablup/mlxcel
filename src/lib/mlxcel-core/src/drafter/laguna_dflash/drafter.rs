@@ -105,11 +105,13 @@ impl LagunaDFlashDrafter {
                     .to_string(),
             });
         }
-        if block_size < 2 {
+        if !(2..=super::config::MAX_BLOCK_SIZE).contains(&block_size) {
             return Err(DrafterError::DraftFailed {
                 reason: format!(
-                    "Laguna DFlash drafter requires block_size >= 2 (got {block_size}); block \
-                     size 1 has no masked position to sample"
+                    "Laguna DFlash drafter requires 2 <= block_size <= {} (got {block_size}); \
+                     block size 1 has no masked position to sample and a wider block would \
+                     size the verify logits and the cache slack by an unbounded value",
+                    super::config::MAX_BLOCK_SIZE
                 ),
             });
         }
@@ -229,6 +231,12 @@ impl Drafter for LagunaDFlashDrafter {
     }
 
     fn is_laguna_dflash(&self) -> bool {
+        true
+    }
+
+    /// The DFlash round loop verifies with a per-position argmax and has no
+    /// stochastic acceptance rule; a sampling request is served classically.
+    fn greedy_only(&self) -> bool {
         true
     }
 

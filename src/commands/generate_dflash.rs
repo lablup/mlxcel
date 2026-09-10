@@ -144,6 +144,16 @@ pub(super) fn run_offline_dflash(
     }
     println!("DFlash drafter loaded and bound (block_size = {block_size}).");
 
+    // The round loop's per-position verify argmax applies no token bias
+    // (only the first bonus goes through `sample_token_optimized`), so a
+    // bias would be honoured for one token and dropped for the rest.
+    if !token_bias.is_empty() {
+        return Err(anyhow!(
+            "--draft-kind dflash cannot honour a token bias (--lang-bias or a model's \
+             suppressed-token set): the verify argmax applies none. Drop --draft-model to \
+             decode classically with the bias."
+        ));
+    }
     let mut sampling = sampling_config.clone();
     sampling.token_bias = token_bias;
     let token_history = initial_token_history(prompt_tokens, sampling.needs_token_history());

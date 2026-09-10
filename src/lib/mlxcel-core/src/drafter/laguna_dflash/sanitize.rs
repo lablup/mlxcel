@@ -45,24 +45,31 @@ pub fn sanitize_weights(
     weights: &mut WeightMap,
     config: &LagunaDFlashConfig,
 ) -> Result<(), String> {
-    strip_model_prefix(weights);
+    strip_model_prefix(weights)?;
     for layer in 0..config.num_hidden_layers {
         fuse_split_qkv(weights, layer)?;
     }
     check_key_set(weights, config)
 }
 
-fn strip_model_prefix(weights: &mut WeightMap) {
+fn strip_model_prefix(weights: &mut WeightMap) -> Result<(), String> {
     let renames: Vec<(String, String)> = weights
         .keys()
         .filter(|k| k.starts_with(MODEL_PREFIX))
         .map(|k| (k.clone(), k[MODEL_PREFIX.len()..].to_string()))
         .collect();
     for (old, new) in renames {
+        if weights.contains_key(&new) {
+            return Err(format!(
+                "both {old} and {new} are present; a prefixed and an unprefixed copy of one \
+                 tensor cannot be reconciled"
+            ));
+        }
         if let Some(v) = weights.remove(&old) {
             weights.insert(new, v);
         }
     }
+    Ok(())
 }
 
 /// Fuse `layers.{i}.self_attn.{q,k,v}_proj.<leaf>` into
@@ -123,6 +130,20 @@ fn fuse_split_qkv(weights: &mut WeightMap, layer: usize) -> Result<(), String> {
         let v = weights
             .remove(&keys[2])
             .ok_or_else(|| format!("missing {}", keys[2]))?;
+        // `concatenate` on tensors that disagree past axis 0 is an MLX throw,
+        // which crosses the cxx bridge as a process abort during load.
+        let (qs, ks, vs) = (
+            ffi::array_shape(&q),
+            ffi::array_shape(&k),
+            ffi::array_shape(&v),
+        );
+        let tail = |s: &[i32]| s.get(1..).map(<[i32]>::to_vec);
+        if qs.len() < 2 || tail(&qs) != tail(&ks) || tail(&qs) != tail(&vs) {
+            return Err(format!(
+                "{attn}: split q/k/v `{leaf}` tensors have shapes {qs:?}, {ks:?}, {vs:?}, which \
+                 cannot be fused along axis 0"
+            ));
+        }
         let qk = concatenate(&q, &k, 0);
         let qkv = concatenate(&qk, &v, 0);
         weights.insert(

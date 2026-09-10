@@ -90,6 +90,15 @@ fn config_rejects_bad_contract() {
     let mut c = xs_2_1_config();
     c["sliding_windows"] = json!([512, 512]);
     cases.push(("sliding_windows", c));
+    let mut c = xs_2_1_config();
+    c["dflash_config"]["block_size"] = json!(65536);
+    cases.push(("block_size", c));
+    let mut c = xs_2_1_config();
+    c["sliding_window"] = json!(1u64 << 40);
+    cases.push(("sliding window", c));
+    let mut c = xs_2_1_config();
+    c["attention_bias"] = json!(true);
+    cases.push(("attention_bias", c));
     for (field, cfg) in cases {
         let err = LagunaDFlashConfig::from_json(&cfg).expect_err(field);
         assert!(
@@ -298,8 +307,8 @@ fn context_trim_keeps_window_minus_one() {
     let mut cache = LagunaDFlashContextCache::new(512);
     let k = ffi::zeros(&[1, 1, 600, 4], dtype::FLOAT32);
     let v = ffi::zeros(&[1, 1, 600, 4], dtype::FLOAT32);
-    let (keys, _) = cache.update_and_fetch(k, v);
-    assert_eq!(ffi::array_shape(&keys)[2], 511);
+    cache.update(k, v);
+    assert_eq!(ffi::array_shape(cache.keys().unwrap())[2], 511);
     assert_eq!(cache.len(), 511);
     assert_eq!(cache.offset(), 600);
     // The attention drops rows before projection and advances the offset
@@ -308,12 +317,12 @@ fn context_trim_keeps_window_minus_one() {
     cache.advance(89);
     let k = ffi::zeros(&[1, 1, 511, 4], dtype::FLOAT32);
     let v = ffi::zeros(&[1, 1, 511, 4], dtype::FLOAT32);
-    cache.update_and_fetch(k, v);
+    cache.update(k, v);
     assert_eq!(cache.offset(), 600);
     let k = ffi::zeros(&[1, 1, 5, 4], dtype::FLOAT32);
     let v = ffi::zeros(&[1, 1, 5, 4], dtype::FLOAT32);
-    let (keys, _) = cache.update_and_fetch(k, v);
-    assert_eq!(ffi::array_shape(&keys)[2], 511);
+    cache.update(k, v);
+    assert_eq!(ffi::array_shape(cache.keys().unwrap())[2], 511);
     assert_eq!(cache.offset(), 605);
 }
 

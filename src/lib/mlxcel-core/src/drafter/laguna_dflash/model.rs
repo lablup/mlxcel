@@ -28,7 +28,6 @@
 
 use crate::ffi::{self, MlxArray};
 use crate::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use crate::ops::concatenate;
 use crate::weights::WeightMap;
 use cxx::UniquePtr;
 
@@ -197,17 +196,21 @@ impl LagunaDFlashDraftModel {
             Some(c) => c,
             None => target_hidden,
         };
-        let mut normed: Option<UniquePtr<MlxArray>> = None;
-        for (i, norm) in self.aux_hidden_norms.iter().enumerate() {
-            let start = i as i32 * width;
-            let slab = ffi::slice(hidden, &[0, 0, start], &[shape[0], shape[1], start + width]);
-            let slab = norm.forward(&slab);
-            normed = Some(match normed {
-                Some(acc) => concatenate(&acc, &slab, -1),
-                None => slab,
-            });
-        }
-        let normed = normed.expect("at least one captured target layer");
+        let normed: Vec<UniquePtr<MlxArray>> = self
+            .aux_hidden_norms
+            .iter()
+            .enumerate()
+            .map(|(i, norm)| {
+                let start = i as i32 * width;
+                let slab = ffi::slice(hidden, &[0, 0, start], &[shape[0], shape[1], start + width]);
+                norm.forward(&slab)
+            })
+            .collect();
+        let refs: Vec<&MlxArray> = normed
+            .iter()
+            .map(|slab| slab.as_ref().expect("normed slab"))
+            .collect();
+        let normed = crate::ops::concatenate_many(&refs, -1);
         let projected = self.fc.forward(&normed);
         self.hidden_norm.forward(&projected)
     }

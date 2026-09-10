@@ -94,15 +94,22 @@ impl LagunaDFlashContextCache {
         }
     }
 
+    /// Retained context keys (`[B, H, len, D]`), temporal order.
+    pub fn keys(&self) -> Option<&MlxArray> {
+        self.keys.as_deref()
+    }
+
+    /// Retained context values (`[B, H, len, D]`), temporal order.
+    pub fn values(&self) -> Option<&MlxArray> {
+        self.values.as_deref()
+    }
+
     /// Append `new_keys` / `new_values` (`[B, H, T, D]`, already RoPE'd at
-    /// positions `offset..offset + T`) and return the retained context
-    /// window in temporal order: the newest `window - 1` positions,
-    /// including the rows just appended.
-    pub fn update_and_fetch(
-        &mut self,
-        new_keys: UniquePtr<MlxArray>,
-        new_values: UniquePtr<MlxArray>,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    /// positions `offset..offset + T`) and retain the newest `window - 1`
+    /// positions in temporal order, the rows just appended included. Read
+    /// them back through [`Self::keys`] / [`Self::values`]; nothing is
+    /// copied out.
+    pub fn update(&mut self, new_keys: UniquePtr<MlxArray>, new_values: UniquePtr<MlxArray>) {
         let incoming = ffi::array_shape(&new_keys)[2];
         let (keys, values) = match (self.keys.take(), self.values.take()) {
             (Some(k), Some(v)) => (
@@ -135,6 +142,5 @@ impl LagunaDFlashContextCache {
         self.offset += incoming;
         self.keys = Some(ffi::contiguous(&keys, false));
         self.values = Some(ffi::contiguous(&values, false));
-        (ffi::copy(&keys), ffi::copy(&values))
     }
 }

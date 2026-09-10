@@ -33,6 +33,17 @@ pub const LAGUNA_MODEL_TYPE: &str = "laguna";
 
 const SLIDING_ATTENTION: &str = "sliding_attention";
 
+/// Largest draft block a checkpoint or a `--draft-block-size` may request.
+/// `config.json` is untrusted input; the block sizes the verify logits
+/// (`[1, block, vocab]`) and the target caches' speculative slack, and an
+/// MLX allocation failure crosses the cxx bridge as a process abort.
+pub const MAX_BLOCK_SIZE: usize = 512;
+
+/// Largest sliding window a drafter layer may declare. The window sizes the
+/// context buffer and enters the additive mask as an `i32` offset
+/// arithmetic term.
+pub const MAX_SLIDING_WINDOW: usize = 1 << 20;
+
 /// Nested `dflash_config` block.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct DFlashBlock {
@@ -248,10 +259,14 @@ impl LagunaDFlashConfig {
             }
             None => vec![raw.sliding_window; layers],
         };
-        if let Some(w) = sliding_windows.iter().find(|w| **w < 2) {
+        if let Some(w) = sliding_windows
+            .iter()
+            .find(|w| !(2..=MAX_SLIDING_WINDOW).contains(*w))
+        {
             return Err(format!(
-                "Laguna DFlash drafter: sliding window {w} is too small; the block needs at \
-                 least one context position inside the window"
+                "Laguna DFlash drafter: sliding window {w} is outside 2..={MAX_SLIDING_WINDOW}; \
+                 the block needs at least one context position inside the window and the \
+                 window sizes the context buffer"
             ));
         }
         let draft_vocab = raw.draft_vocab_size.unwrap_or(raw.vocab_size);
@@ -270,9 +285,10 @@ impl LagunaDFlashConfig {
                     .into(),
             );
         }
-        if block.block_size < 2 {
+        if !(2..=MAX_BLOCK_SIZE).contains(&block.block_size) {
             return Err(format!(
-                "Laguna DFlash drafter: dflash_config.block_size ({}) must be at least 2",
+                "Laguna DFlash drafter: dflash_config.block_size ({}) must be within \
+                 2..={MAX_BLOCK_SIZE}",
                 block.block_size
             ));
         }

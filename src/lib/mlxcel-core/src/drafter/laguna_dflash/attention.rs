@@ -39,6 +39,9 @@ pub struct LagunaDFlashAttention {
     /// rotary factor on the published drafters).
     pub rope_dims: i32,
     pub qkv_proj: UnifiedLinear,
+    /// Rows `[q_size, q_size + 2 * kv_size)` of `qkv_proj` as their own
+    /// projection for the context path; `None` on a quantized checkpoint.
+    pub kv_proj: Option<UnifiedLinear>,
     pub o_proj: UnifiedLinear,
     pub g_proj: UnifiedLinear,
     pub q_norm: RMSNorm,
@@ -79,32 +82,47 @@ impl LagunaDFlashAttention {
         // attended by any proposal row: skip them before projection and
         // advance the absolute offset past them.
         let keep = cache.capacity();
-        let (x_ctx, t) = if t_full > keep {
+        let dropped_ctx;
+        let (x_ctx, t): (&MlxArray, i32) = if t_full > keep {
             let dropped = t_full - keep;
             cache.advance(dropped);
-            (
-                ffi::slice(
-                    x_ctx,
-                    &[0, dropped, 0],
-                    &[ctx_shape[0], t_full, ctx_shape[2]],
-                ),
-                keep,
-            )
+            dropped_ctx = ffi::slice(
+                x_ctx,
+                &[0, dropped, 0],
+                &[ctx_shape[0], t_full, ctx_shape[2]],
+            );
+            (&dropped_ctx, keep)
         } else {
-            (ffi::copy(x_ctx), t_full)
+            (x_ctx, t_full)
         };
 
         let q_size = self.n_heads * self.head_dim;
         let kv_size = self.n_kv_heads * self.head_dim;
 
         let qkv = self.qkv_proj.forward(x);
-        let ctx_qkv = self.qkv_proj.forward(&x_ctx);
         let total = q_size + 2 * kv_size;
         let queries = ffi::slice(&qkv, &[0, 0, 0], &[b, l, q_size]);
         let prop_keys = ffi::slice(&qkv, &[0, 0, q_size], &[b, l, q_size + kv_size]);
         let prop_values = ffi::slice(&qkv, &[0, 0, q_size + kv_size], &[b, l, total]);
-        let ctx_keys = ffi::slice(&ctx_qkv, &[0, 0, q_size], &[b, t, q_size + kv_size]);
-        let ctx_values = ffi::slice(&ctx_qkv, &[0, 0, q_size + kv_size], &[b, t, total]);
+        // The context only needs K/V: the row-sliced projection skips the
+        // query rows (80 percent of `qkv_proj`) when the weight is a plain
+        // tensor; a quantized checkpoint takes the full projection.
+        let (ctx_keys, ctx_values) = match &self.kv_proj {
+            Some(kv_proj) => {
+                let ctx_kv = kv_proj.forward(x_ctx);
+                (
+                    ffi::slice(&ctx_kv, &[0, 0, 0], &[b, t, kv_size]),
+                    ffi::slice(&ctx_kv, &[0, 0, kv_size], &[b, t, 2 * kv_size]),
+                )
+            }
+            None => {
+                let ctx_qkv = self.qkv_proj.forward(x_ctx);
+                (
+                    ffi::slice(&ctx_qkv, &[0, 0, q_size], &[b, t, q_size + kv_size]),
+                    ffi::slice(&ctx_qkv, &[0, 0, q_size + kv_size], &[b, t, total]),
+                )
+            }
+        };
 
         let queries = ffi::reshape(&queries, &[b, l, self.n_heads, self.head_dim]);
         let prop_keys = ffi::reshape(&prop_keys, &[b, l, self.n_kv_heads, self.head_dim]);
@@ -154,10 +172,16 @@ impl LagunaDFlashAttention {
 
         // Only the context K/V enters the cache; the proposal K/V is
         // concatenated for this forward and never stored.
-        let (keys, values) = cache.update_and_fetch(ctx_keys, ctx_values);
-        let prior = ffi::array_shape(&keys)[2];
-        let keys = concatenate(&keys, &prop_keys, 2);
-        let values = concatenate(&values, &prop_values, 2);
+        cache.update(ctx_keys, ctx_values);
+        let cached_keys = cache
+            .keys()
+            .expect("context cache holds keys after an update");
+        let cached_values = cache
+            .values()
+            .expect("context cache holds values after an update");
+        let prior = ffi::array_shape(cached_keys)[2];
+        let keys = concatenate(cached_keys, &prop_keys, 2);
+        let values = concatenate(cached_values, &prop_values, 2);
 
         // Causal sliding window over `[context | block]`: row `j` (absolute
         // position `block_offset + j`) attends every column whose position
@@ -211,19 +235,51 @@ impl LagunaDFlashAttention {
                 .map(|w| ffi::array_shape(w)[0])
                 .ok_or_else(|| format!("Weight not found: {key}"))
         };
+        // Input columns are only meaningful on a plain tensor; a quantized
+        // weight packs them and carries a `.scales` sidecar.
+        let cols = |leaf: &str| -> Result<Option<i32>, String> {
+            if weights.contains_key(&format!("{prefix}.{leaf}.scales")) {
+                return Ok(None);
+            }
+            let key = format!("{prefix}.{leaf}.weight");
+            let shape = weights
+                .get(&key)
+                .map(|w| ffi::array_shape(w))
+                .ok_or_else(|| format!("Weight not found: {key}"))?;
+            if shape.len() != 2 {
+                return Err(format!("{key} must be 2-D, got shape {shape:?}"));
+            }
+            Ok(Some(shape[1]))
+        };
+        let hidden = config.hidden_size as i32;
+        let q_size = n_heads * head_dim;
         let qkv_rows = rows("qkv_proj")?;
-        let expected_qkv = (n_heads + 2 * n_kv_heads) * head_dim;
+        let expected_qkv = q_size + 2 * n_kv_heads * head_dim;
         if qkv_rows != expected_qkv {
             return Err(format!(
                 "{prefix}.qkv_proj.weight has {qkv_rows} rows but {n_heads} query heads plus \
                  2 x {n_kv_heads} key/value heads of {head_dim} need {expected_qkv}"
             ));
         }
-        let o_rows = rows("o_proj")?;
-        if o_rows != config.hidden_size as i32 {
+        if let Some(c) = cols("qkv_proj")?
+            && c != hidden
+        {
             return Err(format!(
-                "{prefix}.o_proj.weight has {o_rows} rows but hidden_size is {}",
-                config.hidden_size
+                "{prefix}.qkv_proj.weight reads {c} features but hidden_size is {hidden}"
+            ));
+        }
+        let o_rows = rows("o_proj")?;
+        if o_rows != hidden {
+            return Err(format!(
+                "{prefix}.o_proj.weight has {o_rows} rows but hidden_size is {hidden}"
+            ));
+        }
+        if let Some(c) = cols("o_proj")?
+            && c != q_size
+        {
+            return Err(format!(
+                "{prefix}.o_proj.weight reads {c} features but {n_heads} heads of {head_dim} \
+                 produce {q_size}"
             ));
         }
         let g_rows = rows("g_proj")?;
@@ -233,7 +289,39 @@ impl LagunaDFlashAttention {
                  one per query head ({n_heads})"
             ));
         }
+        if let Some(c) = cols("g_proj")?
+            && c != hidden
+        {
+            return Err(format!(
+                "{prefix}.g_proj.weight reads {c} features but hidden_size is {hidden}"
+            ));
+        }
+        for leaf in ["q_norm", "k_norm"] {
+            let key = format!("{prefix}.{leaf}.weight");
+            let len = weights
+                .get(&key)
+                .map(|w| ffi::array_shape(w))
+                .ok_or_else(|| format!("Weight not found: {key}"))?;
+            if len != vec![head_dim] {
+                return Err(format!(
+                    "{key} has shape {len:?} but the per-head norm needs [{head_dim}]"
+                ));
+            }
+        }
         let qkv_proj = linear("qkv_proj")?;
+        let kv_proj = if cols("qkv_proj")?.is_some() {
+            let key = format!("{prefix}.qkv_proj.weight");
+            let full = weights
+                .get(&key)
+                .ok_or_else(|| format!("Weight not found: {key}"))?;
+            let kv_rows = ffi::slice(full, &[q_size, 0], &[expected_qkv, hidden]);
+            Some(UnifiedLinear::Regular(crate::layers::Linear::new(
+                ffi::contiguous(&kv_rows, false),
+                None,
+            )))
+        } else {
+            None
+        };
         let o_proj = linear("o_proj")?;
         let g_proj = linear("g_proj")?;
         let norm = |leaf: &str| -> Result<RMSNorm, String> {
@@ -247,6 +335,7 @@ impl LagunaDFlashAttention {
         Ok(Self {
             rope_dims: head_dim,
             qkv_proj,
+            kv_proj,
             o_proj,
             g_proj,
             q_norm: norm("q_norm")?,
