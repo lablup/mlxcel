@@ -155,6 +155,8 @@ pub mod inkling;
 pub mod inkling_mtp_target;
 pub mod internlm2;
 pub mod internlm3;
+pub mod iquestloopcoder;
+pub mod iquestloopcoder_model;
 pub mod jamba;
 pub mod jina_vlm;
 pub mod kimi_k3;
@@ -305,6 +307,7 @@ pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use inkling::InklingModel;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
+pub use iquestloopcoder_model::{IQuestLoopCoderModel, IQuestLoopCoderWrapper};
 pub use jamba::JambaModel;
 pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_k3::KimiK3Model;
@@ -402,6 +405,7 @@ pub enum ModelType {
     // Standard Transformer models
     Llama,             // Llama 1/2/3, Mistral
     IQuestCoder,       // IQuest-Coder V1 (Llama-shaped decoder, `iquestcoder` label)
+    IQuestLoopCoder,   // IQuest-Coder Loop (two-pass looped decoder, gated global/local attention)
     Llama4,            // Llama 4 (MoE)
     Llama4VLM,         // Llama 4 VLM (vision-language)
     MllamaVLM,         // Llama 3.2 Vision (mllama): tiled ViT + gated cross-attention
@@ -680,6 +684,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     // Standard Transformer models
     ModelType::Llama,
     ModelType::IQuestCoder,
+    ModelType::IQuestLoopCoder,
     ModelType::Llama4,
     ModelType::Llama4VLM,
     ModelType::MllamaVLM,
@@ -905,6 +910,10 @@ impl ModelType {
             // ----- Llama -----
             ModelType::Llama => ("Llama 1/2/3", "Llama"),
             ModelType::IQuestCoder => ("IQuest-Coder V1", "Llama"),
+            ModelType::IQuestLoopCoder => (
+                "IQuest-Coder Loop (two-pass looped Llama, gated global/local attention)",
+                "Specialized",
+            ),
             ModelType::Llama4 => ("Llama 4 (MoE)", "Llama"),
             ModelType::Llama4VLM => ("Llama 4 VLM", "Llama VLM"),
             ModelType::MllamaVLM => (
@@ -1299,6 +1308,7 @@ mod metadata_tests {
         let variants = all_variants!(
             Llama,
             IQuestCoder,
+            IQuestLoopCoder,
             Llama4,
             Llama4VLM,
             MllamaVLM,
@@ -1561,6 +1571,9 @@ mod detection_tests;
 #[cfg(test)]
 #[path = "inkling_detection_tests.rs"]
 mod inkling_detection_tests;
+#[cfg(test)]
+#[path = "iquestloopcoder_tests.rs"]
+mod iquestloopcoder_tests;
 
 #[cfg(test)]
 #[path = "gemma3n_helpers_tests.rs"]

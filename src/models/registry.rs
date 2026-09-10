@@ -209,6 +209,7 @@ impl ModelType {
         match self {
             ModelType::Llama => "llama",
             ModelType::IQuestCoder => "iquest_coder",
+            ModelType::IQuestLoopCoder => "iquest_loop_coder",
             ModelType::Llama4 => "llama4",
             ModelType::Llama4VLM => "llama4_vlm",
             ModelType::MllamaVLM => "mllama_vlm",
@@ -632,6 +633,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
     match model_type {
         ModelType::Llama => &["llama", "mistral"],
         ModelType::IQuestCoder => &["iquestcoder"],
+        ModelType::IQuestLoopCoder => &["iquestloopcoder"],
         ModelType::Llama4 | ModelType::Llama4VLM => &["llama4"],
         ModelType::MllamaVLM => &["mllama"],
         ModelType::Qwen2 => &["qwen2"],
