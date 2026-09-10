@@ -52,7 +52,7 @@ struct FloorDivide {
       return cuda::std::floor(x / y);
     }
   }
-  MLX_MIXED_BINARY_OP(cuda::std::trunc(float(x) / float(y)))
+  MLX_MIXED_BINARY_OP(cuda::std::floor(float(x) / float(y)))
 };
 
 struct Divide {

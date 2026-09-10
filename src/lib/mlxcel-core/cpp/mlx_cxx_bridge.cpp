@@ -5565,17 +5565,55 @@ static bool rejection_path_selected(
         rejection_sample_applies(x, temperature, top_k, top_p, min_p);
 }
 
+// Where a stashed launch stands, read without waiting, throwing, or touching
+// the launch's error.
+//
+// `array::is_available()` is not that query any more. Since MLX 81ba1c6a
+// (ml-explore/mlx#3742) it detaches the array's event through
+// `Event::check_error()`, which throws when the launch failed and clears the
+// error while doing so, and every event a failed command buffer signals points
+// at the same encoder error. Called on a slot that another request stashed, it
+// would throw inside `fused_sample`, which is not a `Result` bridge function,
+// so the process would terminate; and it would consume the error that the
+// owning request's own eval exists to report. Status, the event's signal and
+// its error pointer answer the question without either effect. Metal's
+// completion handler and the CPU scheduler both store an event's error before
+// they signal it (CUDA attaches none), so an error is visible by the time
+// `is_signaled()` is.
+enum class StashedLaunch { InFlight, Landed, Failed };
+
+static StashedLaunch stashed_launch_state(const mlx::core::array& a) {
+    using Status = mlx::core::array::Status;
+    if (a.status() == Status::available) {
+        return StashedLaunch::Landed;
+    }
+    if (a.status() != Status::evaluated) {
+        return StashedLaunch::InFlight;
+    }
+    const auto& event = a.event();
+    if (!event.valid()) {
+        return StashedLaunch::Landed;
+    }
+    if (!event.is_signaled()) {
+        return StashedLaunch::InFlight;
+    }
+    const auto* error = event.load_error();
+    return (error != nullptr && error->valid()) ? StashedLaunch::Failed
+                                                : StashedLaunch::Landed;
+}
+
 // Inspect the previous production launch's converged flags, but ONLY if they
 // have already landed. Never waits, so it is safe to call from inside a decode
 // loop's graph-building phase.
 //
-// `array::is_available()` is MLX's non-blocking status query: it is false while
-// the launch is still unscheduled or in flight, and true once the event is
-// signalled. A decode loop reads each step's token before building the next, so
-// in practice the check lands one step late and costs nothing. If it never
-// lands (a caller that discards its tokens) the stash is simply replaced by the
-// next launch and nothing is reported, which is the correct outcome for a
-// sample that was never used.
+// A launch is in flight while it is unscheduled or its event is unsignalled,
+// and landed once the event is signalled (see `stashed_launch_state`). A decode
+// loop reads each step's token before building the next, so in practice the
+// check lands one step late and costs nothing. If it never lands (a caller that
+// discards its tokens) the stash is simply replaced by the next launch and
+// nothing is reported, which is the correct outcome for a sample that was never
+// used. A launch whose command buffer failed is dropped unread: its flags were
+// never written, and its error belongs to the request that owns it.
 static void drain_pending_verification() {
     auto& pending = pending_verification();
     std::vector<std::tuple<mlx::core::array, mlx::core::array, int>> landed;
@@ -5583,9 +5621,20 @@ static void drain_pending_verification() {
         std::lock_guard<std::mutex> lock(pending.mu);
         for (size_t slot = 0; slot < PendingVerification::SLOTS; ++slot) {
             if (!pending.ok[slot].has_value() ||
-                !pending.rounds[slot].has_value() ||
-                !pending.ok[slot]->is_available() ||
-                !pending.rounds[slot]->is_available()) {
+                !pending.rounds[slot].has_value()) {
+                continue;
+            }
+            const auto ok_state = stashed_launch_state(*pending.ok[slot]);
+            const auto rounds_state = stashed_launch_state(*pending.rounds[slot]);
+            if (ok_state == StashedLaunch::Failed ||
+                rounds_state == StashedLaunch::Failed) {
+                pending.ok[slot].reset();
+                pending.rounds[slot].reset();
+                pending.cap[slot] = 0;
+                continue;
+            }
+            if (ok_state != StashedLaunch::Landed ||
+                rounds_state != StashedLaunch::Landed) {
                 continue;
             }
             landed.emplace_back(

@@ -1,8 +1,10 @@
 // Copyright © 2023-2026 Apple Inc.
 // Patched by mlxcel: `use_qmv_wide` gains an off-switch, `MLXCEL_QMV_WIDE=0`.
-// Synced to upstream 81ba1c6a; the only delta is `qmv_wide_enabled()` and the
-// one call it adds to `use_qmv_wide`. Everything else is upstream verbatim, so
-// a bump refreshes this file and re-applies those two hunks.
+// Synced to upstream 81ba1c6a. The delta is three hunks: the includes below,
+// `mlxcel_qmv_wide_flag()` with the one call it adds to `use_qmv_wide`, and the
+// two bridge entry points `mlxcel_set_qmv_wide()` / `mlxcel_qmv_wide()` at the
+// end of the file. Everything else is upstream verbatim, so a bump refreshes
+// this file and re-applies those three hunks.
 //
 // Why it exists (lablup/mlxcel#1186, #1187). `use_qmv_wide` sends `M >= 2`
 // affine quantized matmuls down `qmv_wide` on GPU generation 15 and later

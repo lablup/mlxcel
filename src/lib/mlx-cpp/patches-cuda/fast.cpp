@@ -2,7 +2,8 @@
 //
 // CUDA patch: bf16 scalar/constant generation in normalization ops
 //
-// Modified from upstream MLX v0.31.1 mlx/fast.cpp
+// Modified from upstream MLX 81ba1c6a mlx/fast.cpp (three-way merged at each
+// pin bump; the two fallbacks below are the whole delta)
 //
 // Changes:
 //   - rms_norm() fallback: When out_type is bf16, compute in bf16 instead of
