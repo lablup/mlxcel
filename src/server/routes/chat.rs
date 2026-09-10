@@ -291,7 +291,7 @@ pub(crate) fn build_single_token_chat_logprobs(
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ChatCompletionRequest>,
+    Json(mut request): Json<ChatCompletionRequest>,
 ) -> Response {
     let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
@@ -356,6 +356,24 @@ pub async fn chat_completions(
         state.display_model_id(),
     ) {
         return rejection.into_response();
+    }
+
+    // A checkpoint with a vision tower but no temporal one answers a
+    // `video_url` block by reading the clip as ordered stills (issue #1322).
+    // The substitution happens here, after the capability gate and before
+    // `prepare_chat_request_with_cache` renders, so the template emits one
+    // image placeholder per frame and the request the rest of this handler
+    // sees is an ordinary multi-image one. Native video families are left
+    // alone and keep `prepared.videos`.
+    if let Err(message) = crate::server::chat_request::expand_video_parts_to_frames(
+        &mut request,
+        state.media_support,
+        crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
+        state.display_model_id(),
+    )
+    .await
+    {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
     // Keep tool validation shared with the disaggregated router front so both

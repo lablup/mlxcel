@@ -371,6 +371,15 @@ pub struct ServerStartupConfig {
     /// [`DEFAULT_VISION_CACHE_SIZE`](crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE).
     pub vision_cache_size: usize,
 
+    /// Cap on the frames kept when a `video_url` block is served as ordered
+    /// images because the checkpoint has no native video path (issue #1322).
+    /// Clamped to at least
+    /// [`MIN_FALLBACK_MAX_FRAMES`](crate::multimodal::video::MIN_FALLBACK_MAX_FRAMES).
+    pub video_max_frames: usize,
+    /// Sampling rate the video frame fallback decodes at when the request
+    /// carries no `video_url.fps` of its own.
+    pub video_fps: f64,
+
     /// Maximum encoded image payload bytes accepted per image content block.
     pub max_image_payload_size: usize,
     /// Maximum number of image content blocks accepted in one request.
@@ -718,6 +727,8 @@ impl Default for ServerStartupConfig {
             tp_embedding_mode: "replicated".to_string(),
             tp_lm_head_mode: "replicated".to_string(),
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
+            video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+            video_fps: crate::multimodal::video::DEFAULT_FPS,
             max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
             max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
             max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -1140,26 +1151,13 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // 2.5 (MoonViT 3D) also consume video via the shared Kimi media path
     // (issue #551). Inkling encodes evenly spaced adjacent frame pairs in its
     // HMLP temporal planes (#1323). Qwen-VL video follows the same Qwen runtime
-    // used by CLI prompt expansion (#1166). Mirror the dispatch in
-    // `commands/generate_vlm::compute_vlm_embeddings` and add new variants here
-    // when more video-capable models land.
-    let video = matches!(
-        model_type,
-        ModelType::Gemma4VLM
-            | ModelType::Gemma4Unified
-            | ModelType::InklingVLM
-            | ModelType::KimiVL
-            | ModelType::KimiK25
-            | ModelType::Qwen2VL
-            | ModelType::Qwen25VL
-            | ModelType::Qwen3VL
-            | ModelType::Qwen3VLMoe
-            | ModelType::Qwen35VLM
-            | ModelType::Qwen35MoeVLM
-    );
-    if video {
+    // used by CLI prompt expansion (#1166). The list itself lives next to
+    // `get_model_type` so the CLI's `--video` handling reads the same one
+    // (issue #1322).
+    let video_native = crate::models::model_type_has_native_video(model_type);
+    if video_native {
         tracing::info!(
-            "model_type={:?}: enabling video_url content block support",
+            "model_type={:?}: enabling native video_url content block support",
             model_type
         );
     }
@@ -1179,10 +1177,32 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // when another family gains it.
     let video_with_audio = matches!(model_type, ModelType::Gemma4Unified);
 
+    // Every other checkpoint with a vision tower answers a `video_url` block by
+    // decoding the clip and sending the sampled frames as ordered images
+    // (issue #1322). Keyed on `multimodal` rather than on a family list so a
+    // new VLM gains the fallback the day it lands, and gated on
+    // `!video_native` so a family that grows a real temporal path silently
+    // stops using the substitute rather than doing both.
+    // Muse Glimmer is the one exclusion: the CLI refuses `--video` for it by
+    // name (`validate_muse_glimmer_cli_unsupported_options`), and admitting
+    // the clip on the HTTP boundary alone would leave the two fronts
+    // disagreeing about the same checkpoint. Lift both guards together when
+    // the family is qualified for multi-image prompts.
+    let video_frames_fallback =
+        multimodal && !video_native && !matches!(model_type, ModelType::MuseGlimmerVLM);
+    if video_frames_fallback {
+        tracing::info!(
+            "model_type={:?}: no native video path; video_url content blocks will be served as \
+             ordered sampled frames",
+            model_type
+        );
+    }
+
     ModelMediaSupport {
         image: multimodal,
         audio: multimodal,
-        video,
+        video_native,
+        video_frames_fallback,
         video_with_audio,
     }
 }
@@ -1578,6 +1598,17 @@ pub(super) fn build_server_config(
         remote_pipeline_stage: None,
         tensor_parallel,
         vision_cache_size: startup.vision_cache_size,
+        // Clamped here rather than at the flag so every front (mlxcel serve,
+        // mlxcel-server, the router's per-model configs) gets the same floor
+        // without each one repeating the check.
+        video_max_frames: startup
+            .video_max_frames
+            .max(crate::multimodal::video::MIN_FALLBACK_MAX_FRAMES),
+        video_fps: if startup.video_fps > 0.0 {
+            startup.video_fps
+        } else {
+            crate::multimodal::video::DEFAULT_FPS
+        },
         lang_bias_config: startup.lang_bias_config.clone(),
         reasoning_budget: startup.reasoning_budget,
         chat_template_kwargs: startup.chat_template_kwargs.clone(),

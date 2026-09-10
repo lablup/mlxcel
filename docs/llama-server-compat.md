@@ -468,6 +468,18 @@ Capability comes from the same `config.json`-only model-type probe that already 
 
 One arm of the gate is not a capability gap and does not take that shape. A checkpoint that consumes video alone and audio alone but has no merge path for the pair refuses a request carrying `video_url` and `input_audio` together with `Combined video and audio inputs are not supported`, typed `invalid_request_error` at HTTP 400 rather than 501, because dropping either part leaves a request the checkpoint can serve (issue #1349). `gemma4_unified` merges both and is admitted. The per-modality checks run first, so a text-only checkpoint sent the pair still hears which modality it has no tower for.
 
+### `video_url` on a checkpoint with no native video path
+
+A `video_url` content block used to be refused by every family except the handful with a temporal processor, although each of the refusing ones could read a sequence of still images perfectly well. Since issue #1322 a checkpoint with a vision tower and no native video path serves the block instead: the clip is decoded at the request's `video_url.fps` (falling back to `--video-fps`, default 2.0), evenly subsampled to at most `--video-max-frames` frames with the first and the last always kept, and rewritten into that many `image_url` parts in chronological order, preceded by a text part reading `Here is a video as a sequence of N frames in chronological order.` The rewrite happens on the request, after the capability gate and before the template renders, so the prompt carries one image placeholder per frame and everything downstream (soft-token budgets, the per-request image limit, the prompt-cache multimodal digest) treats the frames as the images they now are.
+
+```text
+model gemma-3-4b-it-4bit has no native video path; sending 8 of 8 sampled frames from /srv/clips/demo.mp4 as ordered images
+```
+
+That `info` line is the only signal that the substitution happened; `GET /props` reports `video: true` either way, because either way the block is accepted. The families with a native path (Gemma 4 VL, Gemma 4 Unified, Inkling, Kimi-VL / Kimi-VL 2.5, and the Qwen-VL generations) are untouched by this and never log it. Muse Glimmer is excluded on purpose: the CLI refuses `--video` for that family by name, and admitting the clip on the HTTP boundary alone would leave the two fronts disagreeing about one checkpoint. A checkpoint with no vision tower keeps its 501.
+
+Two limits are worth knowing. The frames spend the ordinary per-request image budget, so `--video-max-frames` above `--max-images` (default 16 for both) is refused with a message naming the frame count, the caller's own image count and the limit rather than with a bare image-count error. And the substitution carries no temporal information: the model receives ordered pictures and the sentence saying they are one clip, not frame timestamps or motion, so a reply can describe what changes across the frames but cannot be asked about speed or duration. A local `file://` path still has to sit inside a directory named by `MLXCEL_VIDEO_DIR_ALLOWLIST`, which is fail-closed and unchanged.
+
 ### `--image-min-tokens` / `--image-max-tokens` move real pixel bounds
 
 Upstream converts a token budget into pixel bounds in `clip_hparams::set_limit_image_tokens`:

@@ -1470,6 +1470,34 @@ struct ServerArgs {
     #[arg(long = "vision-cache-size", default_value_t = 20, value_name = "N")]
     vision_cache_size: usize,
 
+    /// Maximum sampled frames kept when a `video_url` block is served as
+    /// ordered still images.
+    ///
+    /// Applies only when the loaded checkpoint has no native video path; a
+    /// native video family samples through its own processor and ignores this.
+    /// Values below 2 are raised to 2, so the first and last sampled frame are
+    /// always kept. Also reads `MLXCEL_VIDEO_MAX_FRAMES`.
+    #[arg(
+        long = "video-max-frames",
+        env = "MLXCEL_VIDEO_MAX_FRAMES",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+        value_name = "N"
+    )]
+    video_max_frames: usize,
+
+    /// Frames-per-second the video-to-images fallback decodes a clip at when
+    /// the request carries no per-`video_url` `fps` of its own.
+    ///
+    /// Applies only when the loaded checkpoint has no native video path. Also
+    /// reads `MLXCEL_VIDEO_FPS`.
+    #[arg(
+        long = "video-fps",
+        env = "MLXCEL_VIDEO_FPS",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FPS,
+        value_name = "FLOAT"
+    )]
+    video_fps: f64,
+
     /// Maximum encoded bytes accepted for each image input.
     ///
     /// Also reads `LLAMA_ARG_MAX_IMAGE_PAYLOAD_SIZE`.
@@ -2590,6 +2618,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         tp_embedding_mode: args.tp_embedding_mode,
         tp_lm_head_mode: args.tp_lm_head_mode,
         vision_cache_size: args.vision_cache_size,
+        video_max_frames: args.video_max_frames,
+        video_fps: args.video_fps,
         max_image_payload_size: args.max_image_payload_size,
         max_images_per_request: args.max_images_per_request,
         max_image_width: args.max_image_width,

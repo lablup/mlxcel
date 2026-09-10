@@ -486,6 +486,45 @@ pub(crate) fn is_embedding_checkpoint(
     }
 }
 
+/// `true` when the family consumes a `video_url` / `--video` clip through a
+/// temporal path of its own: a 3D encoder, adjacent-frame planes, or a
+/// per-frame scatter into video placeholders.
+///
+/// The single list both fronts read. `server::startup::detect_model_media_support`
+/// turns it into `ModelMediaSupport::video_native` and
+/// `commands::generate` uses it to decide whether `--video` needs the
+/// frames fallback, so the HTTP boundary and the CLI cannot drift apart.
+/// Mirror the dispatch in `commands/generate_vlm::compute_vlm_embeddings` and
+/// `server::model_worker::prepare_request_video_embeddings` when a family
+/// gains a native path.
+#[must_use]
+pub fn model_type_has_native_video(model_type: ModelType) -> bool {
+    matches!(
+        model_type,
+        ModelType::Gemma4VLM
+            | ModelType::Gemma4Unified
+            | ModelType::InklingVLM
+            | ModelType::KimiVL
+            | ModelType::KimiK25
+            | ModelType::Qwen2VL
+            | ModelType::Qwen25VL
+            | ModelType::Qwen3VL
+            | ModelType::Qwen3VLMoe
+            | ModelType::Qwen35VLM
+            | ModelType::Qwen35MoeVLM
+    )
+}
+
+/// `true` when the family loads as a vision-language model, so image content
+/// can reach a vision tower.
+///
+/// The config.json-only predicate the model registry itself uses, re-exported
+/// because the binary crate's `--video` handling needs it too.
+#[must_use]
+pub fn model_type_is_vision_capable(model_type: ModelType) -> bool {
+    crate::model_metadata::is_vlm_model_type(model_type)
+}
+
 /// Detect model type from config.json
 pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     let config_path = model_path.join("config.json");

@@ -127,6 +127,19 @@ pub const FPS_MIN_FRAMES: usize = 4;
 /// Upper bound on sampled frame count (mirrors upstream `FPS_MAX_FRAMES`).
 pub const FPS_MAX_FRAMES: usize = 768;
 
+/// Default cap on the number of frames the server and CLI keep when a video is
+/// substituted with ordered still images because the loaded checkpoint has no
+/// native video path (issue #1322).
+///
+/// Sixteen is also `DEFAULT_MAX_IMAGES_PER_REQUEST`, so a video-only request
+/// fits the per-request image budget without an operator raising it.
+pub const DEFAULT_FALLBACK_MAX_FRAMES: usize = 16;
+
+/// Floor on `--video-max-frames`. One frame cannot show a change over time,
+/// which is the whole point of sending the clip, so the fallback keeps at
+/// least the first and the last sampled frame.
+pub const MIN_FALLBACK_MAX_FRAMES: usize = 2;
+
 /// Request-wide pair budget used by Inkling's generic video fallback.
 pub const INKLING_MAX_VIDEO_PAIRS: usize = 16;
 
@@ -1496,6 +1509,135 @@ pub fn load_videos_with_policy(
         )?);
     }
     Ok(all)
+}
+
+/// Indices of the `max_frames` frames [`subsample_evenly`] keeps out of
+/// `len` sampled ones.
+///
+/// Same `round(i * (len - 1) / (max - 1))` spacing [`uniform_indices`] uses,
+/// exposed separately because the fallback subsamples an already-decoded frame
+/// vector rather than choosing what to decode. The result is strictly
+/// increasing whenever `max_frames <= len`, because the step is then at
+/// least 1.
+#[must_use]
+pub fn evenly_spaced_indices(len: usize, max_frames: usize) -> Vec<usize> {
+    if max_frames == 0 || len == 0 {
+        return Vec::new();
+    }
+    if len <= max_frames {
+        return (0..len).collect();
+    }
+    if max_frames == 1 {
+        return vec![0];
+    }
+    let last = (len - 1) as f64;
+    let step = last / (max_frames - 1) as f64;
+    (0..max_frames)
+        .map(|i| ((i as f64 * step).round() as usize).min(len - 1))
+        .collect()
+}
+
+/// Keep at most `max_frames` evenly spaced frames, always including the first
+/// and the last (issue #1322).
+///
+/// Identity when the clip already sampled to `max_frames` or fewer, so the
+/// only clips that lose frames are the ones that would otherwise blow past the
+/// per-request image budget. Generic over the element type so a caller can
+/// subsample decoded frames or already-encoded PNG buffers with the same
+/// spacing.
+#[must_use]
+pub fn subsample_evenly<T>(frames: Vec<T>, max_frames: usize) -> Vec<T> {
+    if max_frames == 0 {
+        return Vec::new();
+    }
+    if frames.len() <= max_frames {
+        return frames;
+    }
+    let keep = evenly_spaced_indices(frames.len(), max_frames);
+    let mut keep = keep.into_iter().peekable();
+    frames
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, frame)| {
+            if keep.peek() == Some(&index) {
+                keep.next();
+                Some(frame)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Encode decoded frames as PNG, in order.
+///
+/// PNG rather than JPEG because the frames are re-decoded by the image path a
+/// moment later and a lossy round trip would put artifacts in front of the
+/// vision tower that the source clip does not have.
+///
+/// # Errors
+/// Returns [`VideoError::Extract`] when the encoder rejects a frame.
+pub fn frames_to_png(frames: &[DynamicImage]) -> Result<Vec<Vec<u8>>, VideoError> {
+    frames
+        .iter()
+        .map(|frame| {
+            let mut bytes = Vec::new();
+            frame
+                .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .map_err(|err| VideoError::Extract {
+                    path: PathBuf::new(),
+                    message: format!("could not PNG-encode a sampled video frame: {err}"),
+                })?;
+            Ok(bytes)
+        })
+        .collect()
+}
+
+/// Decode a clip for the video-to-images fallback, reading only the frames
+/// that survive the `max_frames` cap (issue #1322).
+///
+/// [`load_video_source`] answers `target_fps` with up to [`FPS_MAX_FRAMES`]
+/// decoded frames held at once, and the fallback then keeps at most
+/// `max_frames` of them. Decoding the rest is peak memory and ffmpeg time
+/// spent on frames that are dropped before anything encodes them: at the
+/// default caps a 600 s 4096x4096 clip resolves to 768 frames of full-
+/// resolution RGB, tens of gigabytes, to keep sixteen. The frames kept here
+/// are the same even spread over the whole clip, because a uniform sample of
+/// a uniform sample is one.
+///
+/// Returns the kept frames together with the count `target_fps` alone would
+/// have sampled, so the caller can still report "kept of sampled".
+///
+/// # Errors
+/// The failures [`load_video_source`] returns: ffmpeg missing, an unprobeable
+/// container, a resource cap exceeded, or no frame decoded.
+pub fn load_video_source_frames_fallback(
+    source: &VideoSource,
+    target_fps: f64,
+    max_frames: usize,
+) -> Result<(Vec<DynamicImage>, usize), VideoError> {
+    if !ffmpeg_available() {
+        return Err(VideoError::FfmpegMissing);
+    }
+    let limits = VideoLimits::from_env();
+    let canonical = source.canonical_path().to_path_buf();
+    let meta = probe_video(source, &limits)?;
+    let sampled = smart_nframes(meta.total_frames, meta.fps, Some(target_fps), None).map_err(
+        |err| match err {
+            VideoError::Extract { message, .. } => VideoError::Extract {
+                path: canonical.clone(),
+                message,
+            },
+            other => other,
+        },
+    )?;
+    let decoded = sampled.min(max_frames.max(MIN_FALLBACK_MAX_FRAMES));
+    let indices = uniform_indices(meta.total_frames, decoded);
+    let frames = extract_frames_single_pass(source, &indices, meta.fps, &limits)?;
+    if frames.is_empty() {
+        return Err(VideoError::EmptyVideo(canonical));
+    }
+    Ok((frames, sampled))
 }
 
 /// Compute `nframes` evenly-spaced frame indices across

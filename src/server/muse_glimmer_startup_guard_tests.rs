@@ -77,7 +77,7 @@ fn muse_glimmer_startup_allows_baseline_and_keeps_video_disabled() {
 
     let media = detect_model_media_support(model_dir.path());
     assert!(
-        !media.video,
+        !media.video(),
         "Muse Glimmer must not advertise video support"
     );
 }

@@ -213,7 +213,7 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         "model_path": state.model_path.to_string_lossy(),
         "modalities": {
             "vision": state.media_support.image,
-            "video": state.media_support.video,
+            "video": state.media_support.video(),
             "audio": state.media_support.audio,
         },
         // mlxcel's chat surface has no textual media placeholder: media

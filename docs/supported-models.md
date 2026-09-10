@@ -214,6 +214,54 @@ model must also merge the two into one prompt, which today only `gemma4_unified`
 does. Video frame extraction uses the system `ffmpeg`/`ffprobe` binaries at
 runtime.
 
+#### Video on a model with no native video path
+
+Two different things answer a clip, and the difference is worth knowing before
+reading a reply.
+
+**Native video** means the family consumes the clip as a clip: a 3D patch grid,
+adjacent-frame temporal planes, or per-frame scatter into video placeholders.
+Gemma 4 VL, Gemma 4 Unified, Inkling, Kimi-VL / Kimi-VL 2.5 and the Qwen-VL
+families (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3-VL MoE, Qwen3.5/3.6/3.8-VL) all
+do this, each through its own processor, and none of them is affected by the
+paragraph below.
+
+**The frames fallback** is what every other checkpoint with a vision tower does
+(issue #1322). The clip is decoded at the requested fps, evenly subsampled to at
+most `--video-max-frames` frames with the first and last always kept,
+PNG-encoded, and sent to the model as that many ordinary images in chronological
+order, preceded by the sentence `Here is a video as a sequence of N frames in
+chronological order.` so the model reads them as one clip. Nothing about the
+image pipeline changes: the template emits one image placeholder per frame, the
+vision tower sees stills, and the prompt-cache multimodal digest hashes the
+frame bytes, so two requests for the same clip at the same fps and frame cap
+share a prefix and a different clip does not.
+
+What this costs and what it does not buy:
+
+- The prompt grows by the model's per-image token cost times the kept frame
+  count, which for a 16-frame default on a family that spends 256 tokens per
+  image is about 4,096 prompt tokens.
+- The frames spend the per-request image budget (`--max-images`, default 16), so
+  a clip plus the caller's own pictures can exceed it. The refusal names the
+  frame count, the caller's own image count and the limit.
+- There is no temporal encoding. The model sees an ordered set of pictures and
+  the sentence saying they are one video; it does not receive frame timestamps
+  or motion between frames. Expect it to describe what changes across the
+  frames, not to reason about speed or duration.
+
+The fallback is on wherever the checkpoint has a vision tower and no native path
+(Gemma 3, LLaVA, LLaVA-NeXT, Pixtral, SmolVLM / Idefics3, LFM2-VL, InternVL,
+MiniCPM-o, and so on), on the CLI (`--video`) and on the server (`video_url`).
+Muse Glimmer is the one exception: it refuses `--video` and `video_url` by name
+on both fronts until the family is qualified for multi-image prompts. A
+checkpoint with no vision tower at all keeps refusing video, as before.
+
+`GET /props` reports `video: true` for both kinds, because both accept a
+`video_url` block. There is no wire-level flag distinguishing them; the server
+log line `model <id> has no native video path; sending K of N sampled frames
+from <file> as ordered images` is what says the substitution happened.
+
 **Supported ffmpeg range: 5.0 (2022) or newer**, on both the CLI (`--video`)
 and the server (`video_url`). Both binaries must be on `PATH`; neither is a
 build-time dependency, and a missing one produces a named error rather than a
