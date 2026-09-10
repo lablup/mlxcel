@@ -658,7 +658,7 @@ fn verify_forward_captures_requested_layers() {
     let model = speculative_model();
     let mut caches = model.make_speculative_caches();
     let bs = 4;
-    let out = model.forward_speculative(&ids(&[1, 2, 3, 4]), &mut caches, &[0, 1]);
+    let out = model.forward_speculative(&ids(&[1, 2, 3, 4]), &mut caches, &[0, 1], true);
 
     assert_eq!(
         mlxcel_core::array_shape(&out.logits),
@@ -694,6 +694,52 @@ fn verify_forward_captures_requested_layers() {
     assert_eq!(attention_offset(&caches), bs);
 }
 
+/// The conv-capture flag changes what a speculative forward KEEPS, never what
+/// it computes. The prompt prefill runs with it off, because a prefill is
+/// never rolled back and each snapshot holds a prompt-sized `[1, S, hidden]`
+/// slab per conv layer; if turning it off ever moved a logit, the prefill and
+/// the verify rounds would disagree and the temperature-0 contract would
+/// break silently. Pinned on both halves of the output: identical logits and
+/// identical captured hidden, and no snapshots.
+#[test]
+fn conv_capture_off_keeps_nothing_and_changes_no_logit() {
+    let _guard = mlx_test_guard();
+    let model = speculative_model();
+
+    let mut with_capture = model.make_speculative_caches();
+    let captured = model.forward_speculative(&ids(&[1, 2, 3, 4]), &mut with_capture, &[0, 1], true);
+
+    let mut without_capture = model.make_speculative_caches();
+    let bare = model.forward_speculative(&ids(&[1, 2, 3, 4]), &mut without_capture, &[0, 1], false);
+
+    assert!(
+        !captured.conv_states.is_empty(),
+        "the capturing run must produce the snapshots the rollback reads"
+    );
+    assert!(
+        bare.conv_states.is_empty(),
+        "the prefill run must keep no short-conv snapshot"
+    );
+    assert_eq!(
+        max_abs_diff(&captured.logits, &bare.logits),
+        0.0,
+        "capture must not move a logit"
+    );
+    assert_eq!(captured.hidden_states.len(), bare.hidden_states.len());
+    for (a, b) in captured.hidden_states.iter().zip(bare.hidden_states.iter()) {
+        assert_eq!(
+            max_abs_diff(a, b),
+            0.0,
+            "capture must not move a residual stream"
+        );
+    }
+    // Both runs advanced their caches identically.
+    assert_eq!(
+        attention_offset(&with_capture),
+        attention_offset(&without_capture)
+    );
+}
+
 #[test]
 fn conv_rollback_matches_committed_prefix() {
     let _guard = mlx_test_guard();
@@ -705,8 +751,8 @@ fn conv_rollback_matches_committed_prefix() {
 
     // Speculative path: prefill, verify the block, roll back to two rows.
     let mut caches = model.make_speculative_caches();
-    let _ = model.forward_speculative(&ids(&prompt), &mut caches, &[]);
-    let out = model.forward_speculative(&ids(&verify), &mut caches, &[]);
+    let _ = model.forward_speculative(&ids(&prompt), &mut caches, &[], true);
+    let out = model.forward_speculative(&ids(&verify), &mut caches, &[], true);
     assert!(
         out.conv_states[0].prev_state.is_some(),
         "the verify block starts from the prefilled conv state"
@@ -716,7 +762,12 @@ fn conv_rollback_matches_committed_prefix() {
 
     // Reference: the committed sequence consumed in one pass.
     let mut reference_caches = model.make_speculative_caches();
-    let _ = model.forward_speculative(&ids(&[1, 2, 3, 4, 5, 6, 7]), &mut reference_caches, &[]);
+    let _ = model.forward_speculative(
+        &ids(&[1, 2, 3, 4, 5, 6, 7]),
+        &mut reference_caches,
+        &[],
+        true,
+    );
     assert_eq!(attention_offset(&reference_caches), 7);
     let state_diff = max_abs_diff(conv_state(&caches), conv_state(&reference_caches));
     assert!(
@@ -725,8 +776,8 @@ fn conv_rollback_matches_committed_prefix() {
     );
 
     // And the next decode step agrees on both.
-    let next = model.forward_speculative(&ids(&[10]), &mut caches, &[]);
-    let next_ref = model.forward_speculative(&ids(&[10]), &mut reference_caches, &[]);
+    let next = model.forward_speculative(&ids(&[10]), &mut caches, &[], true);
+    let next_ref = model.forward_speculative(&ids(&[10]), &mut reference_caches, &[], true);
     let logit_diff = max_abs_diff(&next.logits, &next_ref.logits);
     assert!(
         logit_diff < 1e-4,
@@ -743,12 +794,12 @@ fn conv_rollback_from_fresh_caches_pads_with_zeros() {
     // `[0, bx0]`: the state a one-token prefill leaves.
     let model = speculative_model();
     let mut caches = model.make_speculative_caches();
-    let out = model.forward_speculative(&ids(&[3, 4, 5, 6]), &mut caches, &[]);
+    let out = model.forward_speculative(&ids(&[3, 4, 5, 6]), &mut caches, &[], true);
     model.rollback_speculative_cache(&mut caches, &out.conv_states, 0, 4);
     assert_eq!(attention_offset(&caches), 1);
 
     let mut reference_caches = model.make_speculative_caches();
-    let _ = model.forward_speculative(&ids(&[3]), &mut reference_caches, &[]);
+    let _ = model.forward_speculative(&ids(&[3]), &mut reference_caches, &[], true);
     let state_diff = max_abs_diff(conv_state(&caches), conv_state(&reference_caches));
     assert!(state_diff < 1e-5, "max|diff| = {state_diff}");
 }
@@ -766,16 +817,16 @@ fn speculative_block_logits_match_single_token_decode() {
     let block = [6, 7, 8, 9];
 
     let mut chain_caches = model.make_speculative_caches();
-    let _ = model.forward_speculative(&ids(&prompt), &mut chain_caches, &[]);
+    let _ = model.forward_speculative(&ids(&prompt), &mut chain_caches, &[], true);
     let mut chain_rows: Vec<UniquePtr<MlxArray>> = Vec::new();
     for tok in block {
-        let out = model.forward_speculative(&ids(&[tok]), &mut chain_caches, &[]);
+        let out = model.forward_speculative(&ids(&[tok]), &mut chain_caches, &[], true);
         chain_rows.push(out.logits);
     }
 
     let mut block_caches = model.make_speculative_caches();
-    let _ = model.forward_speculative(&ids(&prompt), &mut block_caches, &[]);
-    let out = model.forward_speculative(&ids(&block), &mut block_caches, &[]);
+    let _ = model.forward_speculative(&ids(&prompt), &mut block_caches, &[], true);
+    let out = model.forward_speculative(&ids(&block), &mut block_caches, &[], true);
     for (i, chain) in chain_rows.iter().enumerate() {
         let i = i as i32;
         let row = mlxcel_core::slice(&out.logits, &[0, i, 0], &[1, i + 1, SPEC_VOCAB as i32]);

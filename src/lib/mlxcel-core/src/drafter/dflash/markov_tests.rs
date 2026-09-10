@@ -130,3 +130,114 @@ fn markov_head_load_requires_both_factors() {
         "error must name the missing tensor: {err}"
     );
 }
+
+/// Both factors are measured against the config that sizes them, before
+/// either becomes a layer.
+///
+/// The row check is the security-critical half: `markov_w1` is gathered at a
+/// token id once per chain step and MLX range-checks no positive gather
+/// index, so a table with fewer rows than the vocabulary the chain draws from
+/// reads past its own buffer into the logits. The rank check is the
+/// availability half: a `markov_w2` of the wrong width throws inside
+/// `quantized_matmul` or `matmul`, which crosses the cxx bridge as a process
+/// abort rather than a load error.
+#[test]
+fn markov_factors_are_measured_against_the_config() {
+    let full = |rows: i32, cols: i32| {
+        let mut weights: WeightMap = std::collections::HashMap::new();
+        weights.insert(
+            "markov_head.markov_w1.weight".to_string(),
+            ffi::zeros(&[rows, cols], dtype::FLOAT32),
+        );
+        weights.insert(
+            "markov_head.markov_w2.weight".to_string(),
+            ffi::zeros(&[rows, cols], dtype::FLOAT32),
+        );
+        weights
+    };
+
+    let short = full(VOCAB - 1, 4);
+    let Err(err) = VanillaMarkovHead::from_weights(&short, "markov_head", VOCAB as usize, 4, 64, 4)
+    else {
+        panic!("a table shorter than the vocabulary must fail the load");
+    };
+    assert!(err.contains("rows but the drafter config"), "{err}");
+
+    let wide = full(VOCAB, 5);
+    assert!(
+        VanillaMarkovHead::from_weights(&wide, "markov_head", VOCAB as usize, 4, 64, 4).is_err(),
+        "a rank-5 table under a rank-4 config must fail the load"
+    );
+
+    assert!(
+        VanillaMarkovHead::from_weights(&full(VOCAB, 4), "markov_head", VOCAB as usize, 4, 64, 4)
+            .is_ok(),
+        "the declared shape must load"
+    );
+}
+
+/// A quantized factor's stored width is `rank * bits / 32`, so the rank check
+/// runs against the bit depths that could produce that width rather than
+/// against the rank directly. Skipping it entirely is what is not acceptable:
+/// every mlx-community conversion of these drafters is quantized, so the
+/// packed case is the common one, not an exotic one.
+///
+/// `.scales` is what marks a factor quantized here, matching the loaders.
+#[test]
+fn a_quantized_markov_factor_has_its_packed_width_checked() {
+    // rank 64 at 4 bits packs to 64 * 4 / 32 = 8 u32 columns.
+    let packed = |cols: i32| {
+        let mut weights: WeightMap = std::collections::HashMap::new();
+        for factor in ["markov_w1", "markov_w2"] {
+            weights.insert(
+                format!("markov_head.{factor}.weight"),
+                ffi::zeros(&[VOCAB, cols], dtype::UINT32),
+            );
+            weights.insert(
+                format!("markov_head.{factor}.scales"),
+                ffi::zeros(&[VOCAB, 1], dtype::FLOAT32),
+            );
+            weights.insert(
+                format!("markov_head.{factor}.biases"),
+                ffi::zeros(&[VOCAB, 1], dtype::FLOAT32),
+            );
+        }
+        weights
+    };
+
+    // 8 packed columns is rank 64 at 4 bits, and also rank 128 at 2 bits and
+    // rank 32 at 8: every one of those is a width the loader could really be
+    // handed, so all three are admitted.
+    for rank in [64, 128, 32] {
+        assert!(
+            VanillaMarkovHead::from_weights(&packed(8), "markov_head", VOCAB as usize, rank, 64, 4)
+                .is_ok(),
+            "rank {rank} is explained by a supported bit depth at 8 packed columns"
+        );
+    }
+
+    // 8 packed columns cannot be rank 100 at any supported depth.
+    let Err(err) =
+        VanillaMarkovHead::from_weights(&packed(8), "markov_head", VOCAB as usize, 100, 64, 4)
+    else {
+        panic!("an unexplainable packed width must fail the load");
+    };
+    assert!(err.contains("no supported bit depth"), "{err}");
+
+    // The row check still runs on a packed factor.
+    let mut short: WeightMap = std::collections::HashMap::new();
+    for factor in ["markov_w1", "markov_w2"] {
+        short.insert(
+            format!("markov_head.{factor}.weight"),
+            ffi::zeros(&[VOCAB - 1, 8], dtype::UINT32),
+        );
+        short.insert(
+            format!("markov_head.{factor}.scales"),
+            ffi::zeros(&[VOCAB - 1, 1], dtype::FLOAT32),
+        );
+    }
+    assert!(
+        VanillaMarkovHead::from_weights(&short, "markov_head", VOCAB as usize, 64, 64, 4).is_err(),
+        "a short packed table must still fail the row check"
+    );
+}

@@ -211,6 +211,24 @@ fn default_rope_is_neox_style() -> bool {
 /// (`block_size + 1`) of the published checkpoints.
 pub const DSPARK_DEFAULT_VERIFY_WIDTH: usize = 8;
 
+/// Ceiling on the verify width a DSpark drafter's own `config.json` may put
+/// into effect. The published checkpoints run at 8 to 10 and the flat DFlash
+/// default is 16, so this is far above any real width.
+///
+/// It exists because this width is the one checkpoint-supplied number that
+/// becomes a server-wide control input: `resolve_draft_block_size` peeks the
+/// drafter config through `peek_dspark_configured_block_size` and hands
+/// [`DFlashConfig::runtime_verify_width`] to the scheduler as the block size,
+/// which then reaches the block-versus-chain exactness probe. That probe runs
+/// one single-token target forward per row, three times over, on the
+/// scheduler thread and memoizes its verdict, so an absurd width there is a
+/// hang rather than a slow request; it also runs before the pairing gate that
+/// would otherwise refuse the config. Clamping at the one function every
+/// caller goes through is what makes the bound hold ahead of the gate, and
+/// the gate still refuses the config so the operator is told rather than
+/// silently served at a different width.
+pub const DSPARK_MAX_VERIFY_WIDTH: usize = 32;
+
 impl Default for DFlashConfig {
     fn default() -> Self {
         Self {
@@ -322,6 +340,21 @@ impl DFlashConfig {
     /// [`DSPARK_DEFAULT_VERIFY_WIDTH`]. For a DFlash checkpoint this is
     /// simply [`Self::verify_width`].
     pub fn runtime_verify_width(&self) -> usize {
+        if !self.is_dspark() {
+            return self.verify_width();
+        }
+        self.requested_verify_width().min(DSPARK_MAX_VERIFY_WIDTH)
+    }
+
+    /// The verify width the config asks for, before
+    /// [`DSPARK_MAX_VERIFY_WIDTH`] is applied.
+    ///
+    /// Only the pairing gate reads this, and only to tell a config that asks
+    /// for a width above the ceiling apart from one that asks for a width the
+    /// runtime can honour. Everything else wants
+    /// [`Self::runtime_verify_width`], which is the width the drafter
+    /// actually runs at.
+    pub fn requested_verify_width(&self) -> usize {
         let width = self.verify_width();
         if !self.is_dspark() {
             return width;

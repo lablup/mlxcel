@@ -153,9 +153,10 @@ impl VanillaMarkovHead {
 /// before the loader turns it into a layer.
 ///
 /// A quantized factor bit-packs `rank` along its last axis only, so its row
-/// count reads the same either way and its stored width is a function of the
-/// bit depth rather than the rank; the rank check is therefore skipped for a
-/// packed table and the row check is not.
+/// count reads the same either way while its stored width is `rank * bits /
+/// 32`. The row check therefore runs unchanged for a packed table, and the
+/// rank check runs against the bit depths that could produce the stored width
+/// rather than against the rank directly.
 ///
 /// Used by: [`VanillaMarkovHead::from_weights`].
 fn validate_markov_factor(
@@ -181,8 +182,34 @@ fn validate_markov_factor(
              gather index"
         ));
     }
-    if !weights.contains_key(&format!("{key}.scales")) && usize::try_from(*cols).ok() != Some(rank)
-    {
+    if weights.contains_key(&format!("{key}.scales")) {
+        // Quantized: MLX packs the last axis u32-wise, so the stored width is
+        // `rank * bits / 32` (`packed_in * 32 == bits * in_features`, the
+        // invariant `infer_quantization_bits` in `layers.rs` solves). The
+        // width is still checkable, just not directly: accept it when some
+        // supported bit depth explains it. Testing against the depths rather
+        // than against the caller's declared `bits` is deliberate, because a
+        // per-tensor override may store this factor at a different depth from
+        // the rest of the checkpoint, and a false load failure on a valid
+        // checkpoint is worse than the narrower bound. Skipping the check
+        // entirely is what is not acceptable: a `markov_w2` whose width does
+        // not match `markov_w1`'s output reaches `quantized_matmul`, which
+        // throws inside MLX and crosses the cxx bridge as a process abort
+        // rather than a load error, and every mlx-community conversion of
+        // these drafters is quantized.
+        const SUPPORTED_BITS: [i64; 5] = [2, 3, 4, 6, 8];
+        let packed_bits = i64::from(*cols) * 32;
+        let explained = SUPPORTED_BITS
+            .iter()
+            .any(|&b| packed_bits == b * rank as i64);
+        if !explained {
+            return Err(format!(
+                "{name} is a quantized [{rows}, {cols}] table, and no supported bit depth makes \
+                 {cols} packed columns describe the markov_rank {rank} the drafter config \
+                 declares"
+            ));
+        }
+    } else if usize::try_from(*cols).ok() != Some(rank) {
         return Err(format!(
             "{name} is [{rows}, {cols}] but the drafter config declares markov_rank {rank}"
         ));

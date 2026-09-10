@@ -267,18 +267,28 @@ fn dspark_required_pairing_error(requires_dspark: bool, drafter_is_dspark: bool)
 /// Takes the policy rather than the target so the two branches are
 /// testable without a loaded checkpoint; the call sites read it off
 /// [`DFlashTargetModel::first_hidden_rows`].
+///
+/// Takes `concatenated` BY VALUE, because the every-row policy wants exactly
+/// the array it was handed. `mlxcel_core::copy` is a real MLX `Copy`
+/// primitive rather than a handle clone, so returning a copy here allocated a
+/// second full `[1, S, len(target_layer_ids) * hidden]` slab per request (168
+/// MB at an 8k prompt on LFM2.5-2.6B, 671 MB at 32k) only to satisfy a
+/// borrowed signature. Moving ownership in also ends the caller's retention
+/// of the original across the whole round loop. The last-position arm slices,
+/// and a slice holds its own reference to the input, so dropping the owner
+/// here is safe on both arms.
 fn first_hidden_for(
     rows: FirstHiddenRows,
-    concatenated: &MlxArray,
+    concatenated: UniquePtr<MlxArray>,
     last_pos: i32,
 ) -> UniquePtr<MlxArray> {
     match rows {
-        FirstHiddenRows::EveryPromptRow => mlxcel_core::copy(concatenated),
+        FirstHiddenRows::EveryPromptRow => concatenated,
         FirstHiddenRows::LastPromptPosition => {
-            let shape = mlxcel_core::array_shape(concatenated);
+            let shape = mlxcel_core::array_shape(&concatenated);
             debug_assert_eq!(shape.len(), 3, "concatenated hidden must be 3-D");
             mlxcel_core::slice(
-                concatenated,
+                &concatenated,
                 &[0, last_pos, 0],
                 &[shape[0], last_pos + 1, shape[2]],
             )
@@ -322,6 +332,19 @@ pub(crate) fn run_dflash_on_target<T>(
 where
     T: DFlashTargetModel,
 {
+    // An empty prompt would make `last_pos` -1 and hand MLX a negative slice
+    // start, which throws inside C++ and crosses the cxx bridge as a process
+    // abort rather than a failed request. The scheduler does not produce one
+    // today; this is here so it stays a request error if it ever does.
+    if prompt_tokens.is_empty() {
+        drafter_slot.restore_unused(owned_drafter);
+        return Err(BurstOutcome::Error(
+            "DFlash speculative burst got an empty prompt; there is no last position to \
+             sample the first bonus from"
+                .to_string(),
+        ));
+    }
+
     // Fresh caches for this request; the scheduler-owned `sequence_state`
     // map is never touched, which is why `run_dflash_burst` declines an
     // adopted prompt-cache prefix (`prefill_start_offset > 0`) to classic
@@ -367,7 +390,7 @@ where
     let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let prefill_verify_start = Instant::now();
     let verify_out =
-        target.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+        target.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
     let prefill_verify_ms = prefill_verify_start.elapsed().as_secs_f64() * 1000.0;
 
     // First bonus from the last-position logits, under the request's
@@ -404,8 +427,11 @@ where
             "DFlash prefill returned no captured hidden layers".to_string(),
         ));
     }
-    let concatenated = concat_captured_hidden(hidden_states);
-    let first_hidden = first_hidden_for(T::first_hidden_rows(), &concatenated, last_pos);
+    let first_hidden = first_hidden_for(
+        T::first_hidden_rows(),
+        concat_captured_hidden(hidden_states),
+        last_pos,
+    );
     let first_hidden_ms = first_hidden_start.elapsed().as_secs_f64() * 1000.0;
 
     // Release the prefill's rollback snapshots before the round loop starts.
@@ -534,8 +560,16 @@ pub(crate) fn run_dflash_batched_on_target<T>(
 where
     T: DFlashTargetModel,
 {
+    // Same guard as the B = 1 arm, plus the empty window `prompts[0]` would
+    // panic on. Neither is reachable from the scheduler today.
+    let Some(first_prompt) = prompts.first().filter(|p| !p.is_empty()) else {
+        drafter_slot.restore_unused(owned_drafter);
+        return Err(BurstOutcome::Error(
+            "DFlash batched speculative burst got an empty window or an empty prompt".to_string(),
+        ));
+    };
     let batch_size = prompts.len();
-    let prompt_len = prompts[0].len();
+    let prompt_len = first_prompt.len();
 
     // Compatibility gate BEFORE the round loop binds. `DFlashGenerator::run`
     // binds internally, and a bind that succeeds on a mismatched pairing
@@ -580,7 +614,7 @@ where
     let prompt_arr =
         mlxcel_core::from_slice_i32(&flat_prompt, &[batch_size as i32, prompt_len as i32]);
     let verify_out =
-        target.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+        target.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
 
     // Per-row first bonus from the `[B, prompt_len, vocab]` last-position
     // logits.
@@ -607,8 +641,11 @@ where
             "DFlash batched prefill returned no captured hidden layers".to_string(),
         ));
     }
-    let concatenated = concat_captured_hidden(hidden_states);
-    let first_hidden = first_hidden_for(T::first_hidden_rows(), &concatenated, last_pos);
+    let first_hidden = first_hidden_for(
+        T::first_hidden_rows(),
+        concat_captured_hidden(hidden_states),
+        last_pos,
+    );
     // Same reason as the B = 1 arm: the prefill's rollback snapshots are
     // prompt-sized and a prefill is never rolled back.
     drop(verify_out);
@@ -682,14 +719,21 @@ mod tests {
         let _runtime = crate::initialize_runtime();
         // `[1, 4, 6]`: four prompt rows of six features.
         let values: Vec<f32> = (0..24).map(|v| v as f32).collect();
-        let concatenated = mlxcel_core::from_slice_f32(&values, &[1, 4, 6]);
         let last_pos = 3;
 
-        let whole = first_hidden_for(FirstHiddenRows::EveryPromptRow, &concatenated, last_pos);
+        let whole = first_hidden_for(
+            FirstHiddenRows::EveryPromptRow,
+            mlxcel_core::from_slice_f32(&values, &[1, 4, 6]),
+            last_pos,
+        );
         assert_eq!(mlxcel_core::array_shape(&whole), vec![1, 4, 6]);
         assert_eq!(mlxcel_core::utils::array_to_vec_f32(&whole), values);
 
-        let last = first_hidden_for(FirstHiddenRows::LastPromptPosition, &concatenated, last_pos);
+        let last = first_hidden_for(
+            FirstHiddenRows::LastPromptPosition,
+            mlxcel_core::from_slice_f32(&values, &[1, 4, 6]),
+            last_pos,
+        );
         assert_eq!(mlxcel_core::array_shape(&last), vec![1, 1, 6]);
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&last),

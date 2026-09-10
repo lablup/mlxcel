@@ -98,21 +98,33 @@ impl Lfm2Model {
 
     /// One forward over `input_ids` (`[1, L]`) that also captures the
     /// post-layer residual streams at `capture_layer_ids` (before
-    /// `embedding_norm`) and the short-conv rollback snapshots.
+    /// `embedding_norm`) and, when `capture_conv_rollback` is set, the
+    /// short-conv rollback snapshots.
     ///
     /// The arithmetic is the generation forward's: the same causal mask
     /// anchored on the first attention layer's offset, the same
     /// left-padded conv, the same MoE routing. That is the exactness
     /// premise, and the probe below measures whether the kernels honour
-    /// it at this block width.
+    /// it at this block width. `capture_conv_rollback` changes what is kept,
+    /// never what is computed, so a `false` run and a `true` run produce the
+    /// same logits.
     ///
-    /// Used by: `SpeculativeTarget::verify_forward_with_capture_layers`,
-    /// [`Self::probe_block_chain_exactness`].
+    /// Pass `false` unless the caller can roll this forward back. Each
+    /// snapshot holds the layer's gated input `[1, L, hidden]`, and LFM2 is
+    /// conv-dominant, so at prompt length that is roughly one prompt-sized
+    /// buffer per conv layer held alive through the eval that materializes
+    /// the forward. A prefill is never rolled back and the exactness probe
+    /// compares logits only.
+    ///
+    /// Used by: `SpeculativeTarget::verify_forward_with_capture_layers` (with
+    /// capture), `SpeculativeTarget::prefill_forward_with_capture_layers` and
+    /// [`Self::probe_block_chain_exactness`] (without).
     pub fn forward_speculative(
         &self,
         input_ids: &MlxArray,
         caches: &mut [Lfm2LayerCache],
         capture_layer_ids: &[usize],
+        capture_conv_rollback: bool,
     ) -> VerifyOutput {
         let h0 = self.embed_tokens.forward(input_ids);
         let shape = mlxcel_core::array_shape(&h0);
@@ -140,7 +152,8 @@ impl Lfm2Model {
             } else {
                 None
             };
-            h = layer.forward_with_capture(&h, cache, mask, None, Some((i, &mut conv_states)));
+            let conv_capture = capture_conv_rollback.then_some((i, &mut conv_states));
+            h = layer.forward_with_capture(&h, cache, mask, None, conv_capture);
             for (slot, &want) in capture_layer_ids.iter().enumerate() {
                 if want == i {
                     hidden_slots[slot] = Some(mlxcel_core::copy(&h));
@@ -290,16 +303,16 @@ impl Lfm2Model {
         };
 
         let mut chain_caches = self.make_caches();
-        let _ = self.forward_speculative(&as_input(&prompt), &mut chain_caches, &[]);
+        let _ = self.forward_speculative(&as_input(&prompt), &mut chain_caches, &[], false);
         let mut chain_positions: Vec<Vec<u8>> = Vec::with_capacity(block_size);
         for token in &block {
-            let out = self.forward_speculative(&as_input(&[*token]), &mut chain_caches, &[]);
+            let out = self.forward_speculative(&as_input(&[*token]), &mut chain_caches, &[], false);
             chain_positions.push(position_bytes(&out.logits, 0));
         }
 
         let mut block_caches = self.make_caches();
-        let _ = self.forward_speculative(&as_input(&prompt), &mut block_caches, &[]);
-        let out = self.forward_speculative(&as_input(&block), &mut block_caches, &[]);
+        let _ = self.forward_speculative(&as_input(&prompt), &mut block_caches, &[], false);
+        let out = self.forward_speculative(&as_input(&block), &mut block_caches, &[], false);
         let block_positions: Vec<Vec<u8>> = (0..block_size)
             .map(|i| position_bytes(&out.logits, i as i32))
             .collect();
@@ -325,7 +338,7 @@ impl SpeculativeTarget for Lfm2Model {
         verify_input: &MlxArray,
         caches: &mut [Self::Cache],
     ) -> Self::VerifyOut {
-        self.forward_speculative(verify_input, caches, &[])
+        self.forward_speculative(verify_input, caches, &[], true)
     }
 
     fn verify_forward_with_capture_layers(
@@ -334,7 +347,19 @@ impl SpeculativeTarget for Lfm2Model {
         caches: &mut [Self::Cache],
         capture_layer_ids: &[usize],
     ) -> Self::VerifyOut {
-        self.forward_speculative(verify_input, caches, capture_layer_ids)
+        self.forward_speculative(verify_input, caches, capture_layer_ids, true)
+    }
+
+    /// The prompt prefill, which is never rolled back, so the short-conv
+    /// snapshots are skipped. They are prompt-sized here and nothing reads
+    /// them; see [`Lfm2Model::forward_speculative`].
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        self.forward_speculative(verify_input, caches, capture_layer_ids, false)
     }
 
     fn rollback_partial(

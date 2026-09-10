@@ -118,6 +118,33 @@ pub struct DFlashDraftModel {
     confidence_head: Option<Linear>,
 }
 
+/// Check that a vocabulary-sized table has the row count the config declares,
+/// before the loader turns it into a layer.
+///
+/// Rows come first in every MLX 2-D weight this is used on, and a quantized
+/// tensor bit-packs only its last axis, so the row count reads the same at any
+/// bit depth and the check needs no `bits`.
+///
+/// Used by: [`DFlashDraftModel::from_weights`], for a DSpark checkpoint that
+/// ships its own `embed_tokens` or `lm_head` rather than binding the target's.
+fn validate_vocab_rows(weights: &WeightMap, name: &str, vocab: usize) -> Result<(), String> {
+    let tensor = weights
+        .get(name)
+        .ok_or_else(|| format!("Weight not found: {name}"))?;
+    let shape = ffi::array_shape(tensor);
+    let Some(rows) = shape.first() else {
+        return Err(format!("{name} must be a 2-D table, got shape {shape:?}"));
+    };
+    if usize::try_from(*rows).ok() != Some(vocab) {
+        return Err(format!(
+            "{name} has {rows} rows but the DSpark drafter config declares vocab_size {vocab}; \
+             the drafter gathers this table at mask_token_id and at every chained proposal, and \
+             MLX range-checks no positive gather index"
+        ));
+    }
+    Ok(())
+}
+
 impl DFlashDraftModel {
     /// Construct the drafter from a sanitized weight map.
     ///
@@ -147,6 +174,18 @@ impl DFlashDraftModel {
         let has_embed_tokens = weights.contains_key("embed_tokens.weight")
             || weights.contains_key("embed_tokens.scales");
         let embed_tokens = if has_embed_tokens {
+            // A DSpark drafter's `mask_token_id` is bounded against
+            // `config.vocab_size` in `dspark_config_pairing_error`, and that
+            // bound only bounds the actual gather because the table the id
+            // indexes has `vocab_size` rows. On the lazy-bind path the target
+            // half of the same gate pins that. A checkpoint that ships its own
+            // table takes the `else` arm of `bind` and never has its table
+            // compared to anything, so the row count is checked here instead;
+            // MLX range-checks no positive gather index, so a short table
+            // would read past its own buffer into the drafter hidden state.
+            if config.is_dspark() {
+                validate_vocab_rows(weights, "embed_tokens.weight", config.vocab_size)?;
+            }
             Some(UnifiedEmbedding::from_weights(
                 weights,
                 "embed_tokens",
@@ -187,6 +226,16 @@ impl DFlashDraftModel {
         // explicit `lm_head` during `bind()`, with an embedding-tied fallback
         // if the target has no separate head.
         let lm_head = if weights.contains_key("lm_head.weight") {
+            // Same reason as `embed_tokens` above, one step later in the
+            // graph: a DSpark draft step adds the Markov head's
+            // `[1, gamma, vocab_size]` transition logits to this head's
+            // output, and the Markov factors ARE measured against
+            // `config.vocab_size`. A head of a different width therefore
+            // fails inside `ffi::add` as a broadcast error, which crosses the
+            // cxx bridge as a process abort rather than a load error.
+            if config.is_dspark() {
+                validate_vocab_rows(weights, "lm_head.weight", config.vocab_size)?;
+            }
             LmHead::Own(Linear::from_weights(weights, "lm_head")?)
         } else if config.tie_word_embeddings {
             LmHead::Tied
@@ -741,6 +790,87 @@ mod tests {
             model.layers[0].self_attn.rope_traditional,
             "rope_is_neox_style: false must reach the attention layers"
         );
+    }
+
+    /// A DSpark checkpoint that ships its own `embed_tokens` or `lm_head`
+    /// has its vocabulary axis measured at load.
+    ///
+    /// `mask_token_id` is bounded against `config.vocab_size` in
+    /// `dspark_config_pairing_error`, and that bound only bounds the actual
+    /// gather because the table the id indexes has `vocab_size` rows. On the
+    /// lazy-bind path the target half of the same gate pins that. A
+    /// self-contained checkpoint takes the other arm of `bind` and its table
+    /// is never compared to anything, so a short table would be gathered out
+    /// of bounds (MLX range-checks no positive gather index) and a head of the
+    /// wrong width would fail broadcasting against the Markov transition
+    /// logits, inside MLX, which aborts the process rather than failing the
+    /// load.
+    ///
+    /// A plain DFlash checkpoint is deliberately not measured here: it has no
+    /// Markov head and no mask id indexing a borrowed table, and adding the
+    /// check there would change which Qwen pairings load.
+    #[test]
+    fn a_self_contained_dspark_checkpoint_has_its_vocab_axis_measured() {
+        let dspark = || DFlashConfig {
+            markov_rank: 2,
+            ..tiny_config()
+        };
+        let with_markov = |mut weights: WeightMap| -> WeightMap {
+            weights.insert(
+                "markov_head.markov_w1.weight".to_string(),
+                ffi::zeros(&[8, 2], dtype::FLOAT32),
+            );
+            weights.insert(
+                "markov_head.markov_w2.weight".to_string(),
+                ffi::zeros(&[8, 2], dtype::FLOAT32),
+            );
+            weights
+        };
+
+        // vocab_size is 8. A four-row table is short by half.
+        let mut short_embed = with_markov(tiny_weights_without_embed());
+        short_embed.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[4, 4], dtype::FLOAT32),
+        );
+        let Err(err) = DFlashDraftModel::from_weights(&short_embed, dspark()) else {
+            panic!("a short embedding table must fail the load");
+        };
+        assert!(err.contains("embed_tokens.weight has 4 rows"), "{err}");
+
+        let mut wrong_head = with_markov(tiny_weights_without_embed());
+        wrong_head.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        );
+        wrong_head.insert(
+            "lm_head.weight".to_string(),
+            ffi::zeros(&[9, 4], dtype::FLOAT32),
+        );
+        let Err(err) = DFlashDraftModel::from_weights(&wrong_head, dspark()) else {
+            panic!("an lm_head of the wrong width must fail the load");
+        };
+        assert!(err.contains("lm_head.weight has 9 rows"), "{err}");
+
+        // Both at the declared vocabulary: admitted.
+        let mut correct = with_markov(tiny_weights_without_embed());
+        correct.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        );
+        correct.insert(
+            "lm_head.weight".to_string(),
+            ffi::zeros(&[8, 4], dtype::FLOAT32),
+        );
+        assert!(DFlashDraftModel::from_weights(&correct, dspark()).is_ok());
+
+        // A plain DFlash checkpoint with the same short table still loads.
+        let mut dflash_short = tiny_weights_without_embed();
+        dflash_short.insert(
+            "embed_tokens.weight".to_string(),
+            ffi::zeros(&[4, 4], dtype::FLOAT32),
+        );
+        assert!(DFlashDraftModel::from_weights(&dflash_short, tiny_config()).is_ok());
     }
 
     /// A DFlash config (no `markov_rank`) never looks for the Markov

@@ -183,6 +183,32 @@ pub trait SpeculativeTarget {
         self.verify_forward(verify_input, caches)
     }
 
+    /// The same forward, run over the PROMPT rather than over a verify block
+    /// (issue #1339).
+    ///
+    /// The burst's first call is the prompt prefill: it needs the captured
+    /// hidden states, which is why it goes through a capture-aware forward at
+    /// all, and it never needs the rollback snapshots, because a prefill is
+    /// never rolled back. The default is
+    /// [`Self::verify_forward_with_capture_layers`], so a target that carries
+    /// no rollback state, or whose rollback state is small, ignores this hook.
+    ///
+    /// A target whose rollback snapshots are PROMPT-SIZED should override it
+    /// to skip them. LFM2 is the case that motivated the hook: its short-conv
+    /// rollback snapshot holds the layer's gated input `[1, S, hidden]`, and
+    /// LFM2 is conv-dominant, so capturing on the prefill pins roughly one
+    /// prompt-sized buffer per conv layer alive through the eval that
+    /// materializes the prefill (about 670 MB at an 8k prompt on a 30-layer
+    /// 2.6B checkpoint, about 2.7 GB at 32k) for something nothing reads.
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        self.verify_forward_with_capture_layers(verify_input, caches, capture_layer_ids)
+    }
+
     /// Rewind the target's caches to the accepted-prefix position.
     ///
     /// Called only when `accepted < block_size - 1`. The implementation

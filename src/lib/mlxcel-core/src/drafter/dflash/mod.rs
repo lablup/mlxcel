@@ -76,7 +76,8 @@ pub use attention::DFlashAttention;
 pub use cache::DFlashKVCache;
 pub use config::{
     DFLASH_DRAFT_ARCHITECTURE, DFlashConfig, DSPARK_DEFAULT_VERIFY_WIDTH,
-    DSPARK_DRAFT_ARCHITECTURE, is_dflash_drafter_config, is_dflash_drafter_dir,
+    DSPARK_DRAFT_ARCHITECTURE, DSPARK_MAX_VERIFY_WIDTH, is_dflash_drafter_config,
+    is_dflash_drafter_dir,
 };
 pub use drafter::DFlashDrafter;
 pub use layer::DFlashDecoderLayer;

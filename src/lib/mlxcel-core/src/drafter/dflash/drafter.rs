@@ -40,7 +40,7 @@ use crate::weights::WeightMap;
 use cxx::UniquePtr;
 use std::path::Path;
 
-use super::config::DFlashConfig;
+use super::config::{DFlashConfig, DSPARK_MAX_VERIFY_WIDTH};
 use super::model::DFlashDraftModel;
 
 /// Boxed [`Drafter`] implementation for the Qwen 3.5 DFlash drafter.
@@ -265,6 +265,23 @@ pub(crate) fn dspark_config_pairing_error(
             config.runtime_verify_width(),
             config.block_size,
             config.runtime_block_size
+        ));
+    }
+    // High side of the same bound. `runtime_verify_width()` already clamps at
+    // the ceiling, which is what protects the exactness probe (it runs on the
+    // scheduler thread, one target forward per row, before this gate is ever
+    // reached). Refusing the config here as well is so an operator whose
+    // drafter asks for an impossible width is told, rather than quietly
+    // served at 32.
+    if config.requested_verify_width() > DSPARK_MAX_VERIFY_WIDTH {
+        return Some(format!(
+            "DSpark drafter asks for {} verify rows (block_size = {}, runtime_block_size = \
+             {:?}), above the {} ceiling; the published checkpoints run at 8 to 10 rows, and \
+             each row costs one target forward in the block-versus-chain exactness probe",
+            config.requested_verify_width(),
+            config.block_size,
+            config.runtime_block_size,
+            DSPARK_MAX_VERIFY_WIDTH
         ));
     }
     None
@@ -511,8 +528,14 @@ impl Drafter for DFlashDrafter {
         self.is_dspark()
     }
 
+    /// Delegates to the inherent [`DFlashDrafter::is_dspark`] by its
+    /// qualified name rather than repeating its body. An inherent method and
+    /// a trait method of the same name both resolve here (the inherent one
+    /// wins on a concrete `DFlashDrafter`, the trait one through
+    /// `dyn Drafter`), and two copies of the same expression would be free to
+    /// drift apart without any call site noticing.
     fn is_dspark(&self) -> bool {
-        self.model.is_dspark()
+        DFlashDrafter::is_dspark(self)
     }
 
     fn draft_block(
@@ -1004,6 +1027,45 @@ mod tests {
             ..dspark_config()
         };
         assert!(dspark_config_pairing_error(&clamped_low, 5 * 2048).is_some());
+    }
+
+    /// The verify width is the one checkpoint-supplied number that becomes a
+    /// server-wide control input: `resolve_draft_block_size` peeks the drafter
+    /// config and hands `runtime_verify_width()` to the scheduler, which then
+    /// reaches the block-versus-chain exactness probe. That probe runs one
+    /// target forward per row on the scheduler thread and memoizes its
+    /// verdict, so an absurd width there is a hang and not a slow request, and
+    /// it runs BEFORE this gate. Both halves of the answer are pinned: the
+    /// clamp, which is what actually holds ahead of the gate, and the gate's
+    /// refusal, which is what tells the operator.
+    #[test]
+    fn a_dspark_config_cannot_put_an_absurd_verify_width_into_effect() {
+        let absurd = DFlashConfig {
+            block_size: 1_000_000,
+            runtime_block_size: Some(1_000_000),
+            ..dspark_config()
+        };
+        assert_eq!(absurd.requested_verify_width(), 1_000_000);
+        assert_eq!(absurd.runtime_verify_width(), DSPARK_MAX_VERIFY_WIDTH);
+        let err = dspark_config_pairing_error(&absurd, 5 * 2048).expect("absurd width");
+        assert!(err.contains("above the"), "{err}");
+
+        // `usize::MAX` is the case `verify_width`'s saturating add exists for:
+        // it must not wrap to a zero-row width, and it must not escape the
+        // ceiling either.
+        let saturating = DFlashConfig {
+            block_size: usize::MAX,
+            runtime_block_size: Some(usize::MAX),
+            ..dspark_config()
+        };
+        assert_eq!(saturating.runtime_verify_width(), DSPARK_MAX_VERIFY_WIDTH);
+        assert!(dspark_config_pairing_error(&saturating, 5 * 2048).is_some());
+
+        // The published width is untouched by the ceiling and still admitted.
+        let published = dspark_config();
+        assert_eq!(published.requested_verify_width(), 8);
+        assert_eq!(published.runtime_verify_width(), 8);
+        assert!(dspark_config_pairing_error(&published, 5 * 2048).is_none());
     }
 
     /// The target half rejects a target whose hidden size, layer count or

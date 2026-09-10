@@ -261,7 +261,7 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Lfm2VlModel {
         caches: &mut [Self::Cache],
     ) -> Self::VerifyOut {
         self.text_model
-            .forward_speculative(verify_input, caches, &[])
+            .forward_speculative(verify_input, caches, &[], true)
     }
 
     fn verify_forward_with_capture_layers(
@@ -271,7 +271,19 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Lfm2VlModel {
         capture_layer_ids: &[usize],
     ) -> Self::VerifyOut {
         self.text_model
-            .forward_speculative(verify_input, caches, capture_layer_ids)
+            .forward_speculative(verify_input, caches, capture_layer_ids, true)
+    }
+
+    /// Same prefill policy as the text backbone: no short-conv snapshots on a
+    /// forward that is never rolled back.
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        self.text_model
+            .forward_speculative(verify_input, caches, capture_layer_ids, false)
     }
 
     fn rollback_partial(
