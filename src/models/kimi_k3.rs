@@ -946,6 +946,29 @@ impl KimiK3DeltaAttention {
             head_dim,
             "linear_attn_config.head_dim",
         )?;
+        // The gate is reshaped to `[B, T, num_heads, head_dim]` in `forward`,
+        // and `reshape` throws inside MLX on a width that is not
+        // `num_heads * head_dim`. An MLX exception crossing the cxx bridge is
+        // an uncatchable abort, so the width is named here instead.
+        let gate_out_key = if config.linear_attn_config.use_full_rank_gate {
+            format!("{prefix}.g_proj.weight")
+        } else {
+            format!("{prefix}.g_b_proj.weight")
+        };
+        check_axis(
+            weights,
+            &gate_out_key,
+            0,
+            projection_dim,
+            "linear_attn_config num_heads * head_dim",
+        )?;
+        check_axis(
+            weights,
+            &format!("{prefix}.o_proj.weight"),
+            0,
+            config.hidden_size,
+            "hidden_size",
+        )?;
 
         // `[3P, K, 1]` after sanitize. The checkpoint stores it float32; cast to
         // the activation dtype so `conv1d` does not promote the q/k/v stream.
@@ -1214,6 +1237,25 @@ impl KimiK3MLAAttention {
                 "q_lora_rank",
             )?;
         }
+        if config.mla_use_output_gate {
+            // The gate multiplies the `[B, L, num_attention_heads * v_head_dim]`
+            // attention output; a width that neither matches it nor broadcasts
+            // against it throws inside MLX rather than returning.
+            check_axis(
+                weights,
+                &format!("{prefix}.g_proj.weight"),
+                0,
+                config.num_attention_heads * config.v_head_dim,
+                "num_attention_heads * v_head_dim",
+            )?;
+        }
+        check_axis(
+            weights,
+            &format!("{prefix}.o_proj.weight"),
+            0,
+            config.hidden_size,
+            "hidden_size",
+        )?;
 
         let q_proj = if config.q_lora_rank.is_some() {
             let q_a_norm = take_weight(weights, &format!("{prefix}.q_a_layernorm.weight"))?;
@@ -1510,6 +1552,16 @@ impl KimiK3SparseMoE {
                 } else {
                     None
                 };
+                // The up-projection returns the routed branch to the residual
+                // width; `reshape(&y, &orig_shape)` in `forward` throws inside
+                // MLX on anything else.
+                check_axis(
+                    weights,
+                    &format!("{prefix}.routed_expert_up_proj.weight"),
+                    0,
+                    config.hidden_size,
+                    "hidden_size",
+                )?;
                 (
                     Some(UnifiedLinear::from_weights(
                         weights,
@@ -1954,6 +2006,30 @@ impl LanguageModel for KimiK3Model {
 
     fn supports_batching(&self) -> bool {
         false // Mixed model-owned caches (MLA latent + KDA state), like KimiLinear.
+    }
+
+    /// Prefill runs in one pass for this family.
+    ///
+    /// [`Self::forward_for_sequence`] treats a multi-token forward carrying no
+    /// sequence id as the start of a prompt and resets the model-owned KDA and
+    /// MLA state, which is what makes the cache-less `forward` entry point
+    /// safe to call twice for two unrelated prompts. A chunked prefill sends
+    /// exactly that shape once per chunk, so every chunk after the first would
+    /// discard the recurrent state its predecessors built and the model would
+    /// answer from the last `MLXCEL_PREFILL_CHUNK` tokens alone, silently: no
+    /// error, no shape mismatch, just a prompt whose beginning never reached
+    /// the state. `max_position_embeddings` here is 1048576, so that is the
+    /// headline use case rather than an edge case.
+    ///
+    /// Opting out is the conservative half of the fix. It costs the prefill
+    /// memory bound of issue #672 (per-chunk transients instead of one graph
+    /// over the whole prompt) and keeps the answer correct. Carrying state
+    /// across chunks needs `forward_for_sequence` to distinguish "new prompt"
+    /// from "continuation" by something other than the token count, which is a
+    /// change to the shared `ModelOwnedSequenceState` contract that
+    /// `kimi_linear.rs` and `qwen3_next.rs` also sit on.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

@@ -1575,6 +1575,80 @@ fn attn_res_weights_are_cross_checked_against_hidden_size() {
     }
 }
 
+/// The two attention kinds gate their output with a `g_proj` whose width the
+/// forward pass never re-derives, and the latent MoE returns to the residual
+/// width through `routed_expert_up_proj`. A wrong width reaches `reshape` (KDA
+/// gate, MoE up-projection) or a broadcast `multiply` (MLA gate) inside MLX,
+/// which throws, and an MLX exception crossing the cxx bridge is an
+/// uncatchable abort rather than an error this loader could name. Each is
+/// checked at load instead.
+#[test]
+fn attention_gate_and_output_widths_are_cross_checked() {
+    let config = tiny_text_config();
+    assert!(KimiK3Model::from_weights(&sanitized(&config), &config).is_ok());
+
+    let d = HIDDEN as i32;
+    let p = kda_p() as i32;
+    let mla_out = (MLA_HEADS * V_HEAD) as i32;
+    let cases: Vec<(&str, Vec<i32>, &str)> = vec![
+        // Layer 0 is KDA, layer 1 is MLA, and both are followed by their own
+        // output projection back to `hidden_size`.
+        (
+            "model.layers.0.self_attn.g_proj.weight",
+            vec![p + 1, d],
+            "num_heads * head_dim",
+        ),
+        (
+            "model.layers.0.self_attn.o_proj.weight",
+            vec![d + 1, p],
+            "hidden_size",
+        ),
+        (
+            "model.layers.1.self_attn.g_proj.weight",
+            vec![mla_out + 1, d],
+            "num_attention_heads * v_head_dim",
+        ),
+        (
+            "model.layers.1.self_attn.o_proj.weight",
+            vec![d + 1, mla_out],
+            "hidden_size",
+        ),
+        (
+            "model.layers.1.mlp.routed_expert_up_proj.weight",
+            vec![d + 1, LATENT as i32],
+            "hidden_size",
+        ),
+    ];
+
+    for (seed, (key, shape, field)) in cases.into_iter().enumerate() {
+        let mut weights = sanitized(&config);
+        weights.insert(key.to_string(), noise_arr(&shape, 140 + seed as u32, 0.5));
+        let err = KimiK3Model::from_weights(&weights, &config)
+            .err()
+            .unwrap_or_else(|| panic!("{key} must be refused"));
+        assert!(err.contains(key), "{err}");
+        assert!(err.contains(field), "{err}");
+    }
+}
+
+/// Kimi K3 keeps its KDA and MLA state on the model and resets it whenever a
+/// multi-token forward arrives without a sequence id, which is how the
+/// cache-less `forward` entry point stays safe across two unrelated prompts. A
+/// chunked prefill sends exactly that shape once per chunk, so the family has
+/// to opt out or a prompt longer than `MLXCEL_PREFILL_CHUNK` would be answered
+/// from its last chunk alone, with nothing raised.
+#[test]
+fn kimi_k3_opts_out_of_chunked_prefill() {
+    use mlxcel_core::generate::LanguageModel;
+
+    let config = tiny_text_config();
+    let model = KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads");
+    assert!(
+        !model.supports_chunked_prefill(),
+        "a chunked prefill would discard the recurrent state built by every chunk but the last"
+    );
+}
+
 /// The published `config.json`, trimmed to the fields the loader reads.
 const PUBLISHED_CONFIG: &str = r#"{
     "architectures": ["KimiK3ForConditionalGeneration"],
