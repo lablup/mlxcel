@@ -438,3 +438,29 @@ fn draft_block_sees_the_context_within_its_window() {
         );
     }
 }
+
+#[test]
+fn draft_block_depends_on_rope() {
+    // RoPE must reach the attention: changing the base changes the logits
+    // of every block row that attends more than itself.
+    let mut drafter = bound_tiny_drafter(9);
+    let cfg = drafter.model.config.clone();
+    let n = cfg.target_layer_ids.len() as i32;
+    let mut rng = Lcg(23);
+    let hidden = rand_array(&mut rng, &[1, 3, n * cfg.hidden_size as i32], 1.0);
+    let block: Vec<i32> = vec![5, 31, 31, 31];
+    let base = logits_for(&mut drafter, &block, &hidden);
+    for layer in &mut drafter.model.layers {
+        layer.self_attn.rope_base = 1.0;
+    }
+    let changed = logits_for(&mut drafter, &block, &hidden);
+    let diff = base
+        .iter()
+        .zip(&changed)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        diff > 1e-3,
+        "changing the RoPE base must change the logits (diff {diff})"
+    );
+}

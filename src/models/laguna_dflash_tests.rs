@@ -30,6 +30,8 @@
 //!   construction path, `bind`, `reset`, the multi-row first context and the
 //!   per-round context appends.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
 use mlxcel_core::drafter::dflash::{DFlashGenerator, SpeculativeTarget};
@@ -82,11 +84,21 @@ fn run_speculative(
     prompt: &[i32],
     max_tokens: usize,
 ) -> (Vec<i32>, Vec<u32>) {
+    run_speculative_with(wrapper, drafter, prompt, max_tokens, BLOCK_SIZE)
+}
+
+fn run_speculative_with(
+    wrapper: &LagunaWrapper,
+    drafter: Box<dyn Drafter>,
+    prompt: &[i32],
+    max_tokens: usize,
+    block_size: usize,
+) -> (Vec<i32>, Vec<u32>) {
     let capture: Vec<usize> = drafter
         .dflash_target_layer_ids()
         .expect("drafter declares target layers")
         .to_vec();
-    let mut caches = wrapper.model.make_speculative_caches(BLOCK_SIZE);
+    let mut caches = wrapper.model.make_speculative_caches(block_size);
     let ids = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
     let verify_out = wrapper.verify_forward_with_capture_layers(&ids, &mut caches, &capture);
     let first_bonus = argmax_last(wrapper.verify_logits(&verify_out));
@@ -96,7 +108,7 @@ fn run_speculative(
         vec![
             1,
             prompt.len() as i32,
-            2 * wrapper.model.embed_tokens.weight_shape_hidden()
+            capture.len() as i32 * wrapper.model.embed_tokens.weight_shape_hidden()
         ],
         "the whole prompt seeds the drafter context"
     );
@@ -104,7 +116,7 @@ fn run_speculative(
         temperature: 0.0,
         ..SamplingConfig::default()
     };
-    let mut generator = DFlashGenerator::new(drafter, sampler, BLOCK_SIZE as u32, MASK_TOKEN_ID);
+    let mut generator = DFlashGenerator::new(drafter, sampler, block_size as u32, MASK_TOKEN_ID);
     let out = generator
         .run(
             wrapper,
@@ -129,6 +141,7 @@ fn run_speculative(
 struct OracleDrafter {
     reference: Vec<i32>,
     schedule: Vec<usize>,
+    target_layer_ids: Vec<usize>,
     round: usize,
     /// Reference index of the bonus the next round must start from; advanced
     /// by the accept length the schedule forces, so a wrong bonus means the
@@ -145,7 +158,7 @@ impl Drafter for OracleDrafter {
     }
 
     fn dflash_target_layer_ids(&self) -> Option<&[usize]> {
-        Some(&TARGET_LAYER_IDS)
+        Some(&self.target_layer_ids)
     }
 
     fn draft_block(
@@ -224,6 +237,7 @@ fn greedy_invariant_with_forced_rejections() {
     let drafter = OracleDrafter {
         reference: reference.clone(),
         schedule: schedule.clone(),
+        target_layer_ids: TARGET_LAYER_IDS.to_vec(),
         round: 0,
         expected_bonus_index: 0,
         vocab: args.vocab_size as i32,
@@ -352,4 +366,295 @@ fn greedy_invariant_with_real_drafter() {
     // A random drafter rejects almost everything, so rollback runs on
     // nearly every round.
     assert!(accept_lens.iter().any(|a| (*a as usize) < BLOCK_SIZE - 1));
+}
+
+/// Per-round record of the real drafter's proposals: `(reference index of
+/// the bonus, proposals)`.
+type ProposalLog = Rc<RefCell<Vec<(usize, Vec<i32>)>>>;
+
+/// Records the real drafter's proposals every round while answering the
+/// round loop with the reference continuation, so the loop stays on the
+/// reference path (full accepts) and the real drafter's per-position
+/// accuracy can be measured without rejection feedback.
+struct ShadowDrafter {
+    real: Box<dyn Drafter>,
+    oracle: OracleDrafter,
+    log: ProposalLog,
+}
+
+impl Drafter for ShadowDrafter {
+    fn bind(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
+        self.oracle.bind(target)?;
+        self.real.bind(target)
+    }
+
+    fn reset(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
+        self.oracle.reset(target)?;
+        self.real.reset(target)
+    }
+
+    fn dflash_target_layer_ids(&self) -> Option<&[usize]> {
+        // The oracle's list (an optional `MLXCEL_LAGUNA_PROBE_CAPTURE`
+        // override of the drafter's own `target_layer_ids`).
+        Some(&self.oracle.target_layer_ids)
+    }
+
+    fn draft_block(
+        &mut self,
+        last_bonus: i32,
+        hidden: Option<&MlxArray>,
+        block_size: usize,
+        sampler: &SamplingConfig,
+    ) -> Result<Vec<i32>, DrafterError> {
+        let k = self.oracle.expected_bonus_index;
+        let real = self
+            .real
+            .draft_block(last_bonus, hidden, block_size, sampler)?;
+        self.log.borrow_mut().push((k, real));
+        self.oracle
+            .draft_block(last_bonus, hidden, block_size, sampler)
+    }
+
+    fn sanitize(&mut self, _weights: &mut WeightMap) -> Result<(), DrafterError> {
+        Ok(())
+    }
+
+    fn kind(&self) -> DrafterKind {
+        DrafterKind::Dflash
+    }
+}
+
+fn env_ids(name: &str) -> Option<Vec<i32>> {
+    let raw = std::env::var(name).ok()?;
+    let ids: Vec<i32> = raw
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().parse::<i32>().expect("integer token id"))
+        .collect();
+    Some(ids)
+}
+
+/// Real-checkpoint probe. Needs the target and drafter checkpoints and the
+/// classic decode's ids (`MLXCEL_PRINT_TOKEN_IDS=1 mlxcel generate ...`):
+///
+/// ```text
+/// MLXCEL_LAGUNA_PROBE_PROMPT="[...]" MLXCEL_LAGUNA_PROBE_REFERENCE="[...]" \
+///   cargo test --profile test-fast --features cuda --lib -- \
+///   models::laguna_dflash_tests::laguna_real_checkpoint_probe --ignored --nocapture
+/// ```
+///
+/// Reports (a) whether the target verify path reproduces the reference with
+/// an oracle drafter (block-versus-chain agreement on this checkpoint), and
+/// (b) the real drafter's per-position accuracy along the reference path.
+#[test]
+#[ignore = "needs the real Laguna XS 2.1 checkpoints and the classic decode ids"]
+fn laguna_real_checkpoint_probe() {
+    use std::path::Path;
+
+    let target_dir = std::env::var("MLXCEL_LAGUNA_PROBE_TARGET")
+        .unwrap_or_else(|_| "models/mlx/laguna-xs-2.1-nvfp4".to_string());
+    let drafter_dir = std::env::var("MLXCEL_LAGUNA_PROBE_DRAFTER")
+        .unwrap_or_else(|_| "models/mlx/laguna-xs-2.1-dflash".to_string());
+    let prompt = env_ids("MLXCEL_LAGUNA_PROBE_PROMPT").expect("MLXCEL_LAGUNA_PROBE_PROMPT");
+    let reference =
+        env_ids("MLXCEL_LAGUNA_PROBE_REFERENCE").expect("MLXCEL_LAGUNA_PROBE_REFERENCE");
+    let block_size: usize = std::env::var("MLXCEL_LAGUNA_PROBE_BLOCK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let (model, _tokenizer) = crate::backend::select_backend()
+        .load_model(Path::new(&target_dir))
+        .expect("target loads");
+    let crate::LoadedModel::Laguna(wrapper) = &model else {
+        panic!("target is not Laguna");
+    };
+    let (drafter, _kind) =
+        mlxcel_core::drafter::load_drafter(Path::new(&drafter_dir), Some(DrafterKind::Dflash))
+            .expect("drafter loads");
+    let target_layer_ids: Vec<usize> = match std::env::var("MLXCEL_LAGUNA_PROBE_CAPTURE") {
+        Ok(v) => v
+            .split(',')
+            .map(|s| s.trim().parse::<usize>().expect("layer id"))
+            .collect(),
+        Err(_) => drafter
+            .dflash_target_layer_ids()
+            .expect("target layer ids")
+            .to_vec(),
+    };
+    println!("[probe] capture layers {target_layer_ids:?}");
+    let n = reference.len();
+    let oracle = |target_layer_ids: Vec<usize>| OracleDrafter {
+        reference: reference.clone(),
+        schedule: vec![usize::MAX],
+        target_layer_ids,
+        round: 0,
+        expected_bonus_index: 0,
+        vocab: 100_352,
+        bound: false,
+    };
+
+    let mode = std::env::var("MLXCEL_LAGUNA_PROBE_MODE").unwrap_or_else(|_| "ab".to_string());
+    // (a) Block versus chain on the target alone: the same prompt prefill,
+    // then the reference tokens fed as single-token decode steps (the
+    // classic path) and as `block_size`-wide verify blocks (the speculative
+    // path). At the first argmax disagreement, report both arms' top-2
+    // tokens and margins.
+    if mode.contains('a') {
+        probe_block_versus_chain(wrapper, &prompt, &reference, block_size);
+    }
+    if !mode.contains('b') {
+        return;
+    }
+
+    // (b) Real drafter along the reference path.
+    let log: ProposalLog = Rc::new(RefCell::new(Vec::new()));
+    let shadow = ShadowDrafter {
+        real: drafter,
+        oracle: oracle(target_layer_ids),
+        log: Rc::clone(&log),
+    };
+    let (tokens_b, _) = run_speculative_with(wrapper, Box::new(shadow), &prompt, n, block_size);
+    let first_diff_b = tokens_b.iter().zip(&reference).position(|(a, b)| a != b);
+    println!(
+        "[probe b] shadow round loop: first divergence from reference at {:?}",
+        first_diff_b
+    );
+    let mut hits = vec![0usize; block_size - 1];
+    let mut counts = vec![0usize; block_size - 1];
+    let mut prefix_hist = vec![0usize; block_size];
+    for (k, proposals) in log.borrow().iter() {
+        let mut prefix = 0usize;
+        let mut prefix_ok = true;
+        for (j, d) in proposals.iter().enumerate() {
+            let Some(want) = reference.get(k + 1 + j) else {
+                break;
+            };
+            counts[j] += 1;
+            if d == want {
+                hits[j] += 1;
+                if prefix_ok {
+                    prefix += 1;
+                }
+            } else {
+                prefix_ok = false;
+            }
+        }
+        prefix_hist[prefix] += 1;
+        println!(
+            "[probe b] round at reference {k}: proposals {:?} reference {:?}",
+            proposals,
+            &reference[(k + 1).min(n)..(k + 1 + proposals.len()).min(n)]
+        );
+    }
+    let acc: Vec<String> = hits
+        .iter()
+        .zip(&counts)
+        .map(|(h, c)| {
+            if *c == 0 {
+                "-".to_string()
+            } else {
+                format!("{:.2}", *h as f64 / *c as f64)
+            }
+        })
+        .collect();
+    let rounds = log.borrow().len();
+    let mean_prefix: f64 = prefix_hist
+        .iter()
+        .enumerate()
+        .map(|(len, c)| len as f64 * *c as f64)
+        .sum::<f64>()
+        / rounds.max(1) as f64;
+    println!(
+        "[probe b] per-position accuracy d_0..d_{}: {:?}; mean accepted prefix on the \
+         reference path = {mean_prefix:.2} over {rounds} rounds",
+        block_size - 2,
+        acc
+    );
+}
+
+fn top2(logits: &MlxArray, pos: i32) -> ((i32, f32), (i32, f32)) {
+    let shape = mlxcel_core::array_shape(logits);
+    let row = mlxcel_core::slice(logits, &[0, pos, 0], &[1, pos + 1, shape[2]]);
+    let row = mlxcel_core::astype(&row, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&row);
+    let data = mlxcel_core::utils::array_to_vec_f32(&row);
+    let mut best = (0usize, f32::NEG_INFINITY);
+    let mut second = (0usize, f32::NEG_INFINITY);
+    for (i, v) in data.iter().enumerate() {
+        if *v > best.1 {
+            second = best;
+            best = (i, *v);
+        } else if *v > second.1 {
+            second = (i, *v);
+        }
+    }
+    ((best.0 as i32, best.1), (second.0 as i32, second.1))
+}
+
+fn probe_block_versus_chain(
+    wrapper: &LagunaWrapper,
+    prompt: &[i32],
+    reference: &[i32],
+    block_size: usize,
+) {
+    let model = &wrapper.model;
+    // Chain arm: classic prefill then one token per forward.
+    let mut chain_caches = model.make_caches();
+    let ids = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
+    let prefill_logits = model.forward_with_caches(&ids, &mut chain_caches);
+    let chain_first = top2(&prefill_logits, prompt.len() as i32 - 1);
+    let mut chain: Vec<((i32, f32), (i32, f32))> = Vec::with_capacity(reference.len());
+    for tok in reference {
+        let ids = mlxcel_core::from_slice_i32(&[*tok], &[1, 1]);
+        let logits = model.forward_with_caches(&ids, &mut chain_caches);
+        chain.push(top2(&logits, 0));
+    }
+    // Block arm: speculative caches, prefill through the verify hook, then
+    // the reference in `block_size` blocks (each block plays the role of
+    // `[bonus, d_0, ...]` with every proposal correct).
+    let mut block_caches = model.make_speculative_caches(block_size);
+    let out = model.forward_speculative(&ids_of(prompt), &mut block_caches, &[]);
+    let block_first = top2(&out.logits, prompt.len() as i32 - 1);
+    let mut block: Vec<((i32, f32), (i32, f32))> = Vec::with_capacity(reference.len());
+    for chunk in reference.chunks(block_size) {
+        let out = model.forward_speculative(&ids_of(chunk), &mut block_caches, &[]);
+        for pos in 0..chunk.len() {
+            block.push(top2(&out.logits, pos as i32));
+        }
+    }
+    println!(
+        "[probe a] first token: chain {:?} block {:?}",
+        chain_first, block_first
+    );
+    let mut mismatches = 0usize;
+    let mut min_margin = f32::INFINITY;
+    for (i, (c, b)) in chain.iter().zip(&block).enumerate() {
+        let margin = c.0.1 - c.1.1;
+        min_margin = min_margin.min(margin);
+        if c.0.0 != b.0.0 {
+            mismatches += 1;
+            if mismatches <= 5 {
+                println!(
+                    "[probe a] argmax disagreement after reference[{i}] (predicting \
+                     reference[{}] = {:?}): chain top2 {:?} block top2 {:?}",
+                    i + 1,
+                    reference.get(i + 1),
+                    c,
+                    b
+                );
+            }
+        }
+    }
+    println!(
+        "[probe a] {} of {} positions disagree between chain and block; smallest chain \
+         top-2 margin {min_margin:.4}",
+        mismatches,
+        chain.len()
+    );
+}
+
+fn ids_of(tokens: &[i32]) -> UniquePtr<MlxArray> {
+    mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32])
 }

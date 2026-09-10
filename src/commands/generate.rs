@@ -2691,6 +2691,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Raw ids for parity checks between decode paths (speculative versus
     // classic): decoded text can hide an id-level difference, the ids cannot.
     if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
+        println!("[prompt ids: {prompt_tokens:?}]");
         println!("[token ids: {generated_tokens:?}]");
     }
 

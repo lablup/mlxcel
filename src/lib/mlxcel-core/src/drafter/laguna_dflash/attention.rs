@@ -35,6 +35,9 @@ use super::config::LagunaDFlashConfig;
 
 /// One drafter attention block.
 pub struct LagunaDFlashAttention {
+    /// Leading head dims RoPE rotates (`head_dim`: plain RoPE, no partial
+    /// rotary factor on the published drafters).
+    pub rope_dims: i32,
     pub qkv_proj: UnifiedLinear,
     pub o_proj: UnifiedLinear,
     pub g_proj: UnifiedLinear,
@@ -126,7 +129,7 @@ impl LagunaDFlashAttention {
         let block_offset = ctx_offset + t;
         let queries = ffi::fast_rope(
             &queries,
-            self.head_dim,
+            self.rope_dims,
             false,
             self.rope_base,
             1.0,
@@ -134,7 +137,7 @@ impl LagunaDFlashAttention {
         );
         let prop_keys = ffi::fast_rope(
             &prop_keys,
-            self.head_dim,
+            self.rope_dims,
             false,
             self.rope_base,
             1.0,
@@ -142,7 +145,7 @@ impl LagunaDFlashAttention {
         );
         let ctx_keys = ffi::fast_rope(
             &ctx_keys,
-            self.head_dim,
+            self.rope_dims,
             false,
             self.rope_base,
             1.0,
@@ -218,6 +221,7 @@ impl LagunaDFlashAttention {
             Ok(RMSNorm::new(w, config.rms_norm_eps))
         };
         Ok(Self {
+            rope_dims: config.head_dim as i32,
             qkv_proj,
             o_proj,
             g_proj,
