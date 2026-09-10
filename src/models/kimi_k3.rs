@@ -250,6 +250,30 @@ impl KimiK3TextConfig {
         if self.moe_layer_freq == 0 {
             return Err("kimi_k3: text_config.moe_layer_freq must be positive".to_string());
         }
+        if self.num_experts > 0 {
+            // The router calls `argpartition(kth = k - 1)` and slices `[0, k)`
+            // off the result, so a `k` of zero or one above `num_experts`
+            // indexes past the score axis inside MLX rather than here.
+            if self.num_experts_per_token == 0 {
+                return Err(
+                    "kimi_k3: text_config.num_experts_per_token must be at least 1 when \
+                     num_experts is positive"
+                        .to_string(),
+                );
+            }
+            if self.num_experts_per_token > self.num_experts {
+                return Err(format!(
+                    "kimi_k3: text_config.num_experts_per_token ({}) exceeds num_experts ({})",
+                    self.num_experts_per_token, self.num_experts
+                ));
+            }
+        }
+        if self.routed_expert_hidden_size == Some(0) {
+            return Err(
+                "kimi_k3: text_config.routed_expert_hidden_size must be positive or null"
+                    .to_string(),
+            );
+        }
         if self.linear_attn_config.num_heads == 0
             || self.linear_attn_config.head_dim == 0
             || self.linear_attn_config.short_conv_kernel_size == 0
@@ -536,11 +560,31 @@ pub(crate) fn attn_res_mix(
     // [B, T, 1] x (n + 1) -> [B, T, n + 1, 1] -> [B, T, n + 1]
     let logits = mlxcel_core::squeeze_axis(&stack_arrays(&logits, -2), -1);
     let probs = mlxcel_core::softmax(&logits, -1);
-    // [B, T, D] x (n + 1) -> [B, T, n + 1, D]
-    let values = stack_arrays(&values, -2);
-    // [B, T, 1, n + 1] @ [B, T, n + 1, D] -> [B, T, 1, D]
-    let mixed = mlxcel_core::matmul(&mlxcel_core::expand_dims(&probs, -2), &values);
-    let mixed = mlxcel_core::squeeze_axis(&mixed, -2);
+
+    // Fold the weighted sum one term at a time. Stacking the values into
+    // [B, T, n + 1, D] and folding with a single matmul is the same
+    // arithmetic, but it allocates a contiguous float32 copy of every stored
+    // block on top of the blocks themselves: at D = 7168 with a full
+    // 12-layer window that is about 0.9 GB of transient for a 4096-token
+    // prefill, and it grows with the block count. The per-term form
+    // broadcasts one [B, T, 1] probability column against one [B, T, D]
+    // block and never holds the stacked copy.
+    let probs_shape = mlxcel_core::array_shape(&probs);
+    let last = probs_shape.len() - 1;
+    let mut mixed: Option<UniquePtr<MlxArray>> = None;
+    for (i, value) in values.iter().enumerate() {
+        let mut start = vec![0i32; probs_shape.len()];
+        let mut stop = probs_shape.clone();
+        start[last] = i as i32;
+        stop[last] = i as i32 + 1;
+        let weight = mlxcel_core::slice(&probs, &start, &stop);
+        let term = mlxcel_core::multiply(value, &weight);
+        mixed = Some(match mixed {
+            Some(acc) => mlxcel_core::add(&acc, &term),
+            None => term,
+        });
+    }
+    let mixed = mixed.expect("attn_res_mix: at least the partial term is always present");
     if out_dtype == dtype::FLOAT32 {
         mixed
     } else {
@@ -598,6 +642,61 @@ fn take_weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, St
         .get(key)
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Missing weight: {key}"))
+}
+
+/// Cross-check one checkpoint tensor axis against the config value that
+/// indexes it.
+///
+/// Nothing else in the load path compares the two: the projections take their
+/// shapes from the checkpoint while the forward pass slices and reshapes with
+/// the config's head counts, ranks and expert count. When a config is edited
+/// (a layer-truncated debug copy, a hand-written `text_config`) or paired with
+/// the wrong checkpoint, the disagreement surfaces either as an MLX abort in
+/// the middle of a forward pass, with no key to name, or -- when the
+/// mismatched axis still broadcasts -- as fluent nonsense. Checking at load
+/// turns both into a message naming the tensor and the field.
+///
+/// A missing key is not an error here; the loader that needs it reports it.
+/// Quantized planes keep out-features on axis 0, so axis-0 checks hold for
+/// packed weights as well.
+fn check_axis(
+    weights: &WeightMap,
+    key: &str,
+    axis: usize,
+    expected: usize,
+    field: &str,
+) -> Result<(), String> {
+    let Some(w) = weights.get(key) else {
+        return Ok(());
+    };
+    let shape = mlxcel_core::array_shape(w);
+    let Some(&got) = shape.get(axis) else {
+        return Err(format!(
+            "{key}: shape {shape:?} has no axis {axis} to match the config's {field} ({expected})"
+        ));
+    };
+    if got < 0 || got as usize != expected {
+        return Err(format!(
+            "{key}: axis {axis} is {got}, but the config's {field} is {expected} (shape {shape:?})"
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_axis`] for a tensor the config sizes as a flat vector (a norm
+/// weight, a bias), whose rank the checkpoint may write as `[N]` or `[1, N]`.
+fn check_numel(weights: &WeightMap, key: &str, expected: usize, field: &str) -> Result<(), String> {
+    let Some(w) = weights.get(key) else {
+        return Ok(());
+    };
+    let shape = mlxcel_core::array_shape(w);
+    let got: i64 = shape.iter().map(|&d| d as i64).product();
+    if got != expected as i64 {
+        return Err(format!(
+            "{key}: {got} entries, but the config's {field} is {expected} (shape {shape:?})"
+        ));
+    }
+    Ok(())
 }
 
 // KDA: KimiK3DeltaAttention.
@@ -796,6 +895,34 @@ impl KimiK3DeltaAttention {
 
         let qkv_proj =
             UnifiedLinear::from_weights(weights, &format!("{prefix}.qkv_proj"), gs, bits)?;
+
+        check_axis(
+            weights,
+            &format!("{prefix}.qkv_proj.weight"),
+            0,
+            3 * projection_dim,
+            "linear_attn_config num_heads * head_dim * 3",
+        )?;
+        check_axis(
+            weights,
+            &format!("{prefix}.f_b_proj.weight"),
+            0,
+            projection_dim,
+            "linear_attn_config num_heads * head_dim",
+        )?;
+        check_axis(
+            weights,
+            &format!("{prefix}.b_proj.weight"),
+            0,
+            num_heads,
+            "linear_attn_config.num_heads",
+        )?;
+        check_numel(
+            weights,
+            &format!("{prefix}.o_norm.weight"),
+            head_dim,
+            "linear_attn_config.head_dim",
+        )?;
 
         // `[3P, K, 1]` after sanitize. The checkpoint stores it float32; cast to
         // the activation dtype so `conv1d` does not promote the q/k/v stream.
@@ -1023,6 +1150,47 @@ impl KimiK3MLAAttention {
     ) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
+
+        check_axis(
+            weights,
+            &format!("{prefix}.kv_a_proj_with_mqa.weight"),
+            0,
+            config.kv_lora_rank + config.qk_rope_head_dim,
+            "kv_lora_rank + qk_rope_head_dim",
+        )?;
+        check_numel(
+            weights,
+            &format!("{prefix}.kv_a_layernorm.weight"),
+            config.kv_lora_rank,
+            "kv_lora_rank",
+        )?;
+        let q_out_key = if config.q_lora_rank.is_some() {
+            format!("{prefix}.q_b_proj.weight")
+        } else {
+            format!("{prefix}.q_proj.weight")
+        };
+        check_axis(
+            weights,
+            &q_out_key,
+            0,
+            config.num_attention_heads * config.q_head_dim(),
+            "num_attention_heads * (qk_nope_head_dim + qk_rope_head_dim)",
+        )?;
+        if let Some(rank) = config.q_lora_rank {
+            check_axis(
+                weights,
+                &format!("{prefix}.q_a_proj.weight"),
+                0,
+                rank,
+                "q_lora_rank",
+            )?;
+            check_numel(
+                weights,
+                &format!("{prefix}.q_a_layernorm.weight"),
+                rank,
+                "q_lora_rank",
+            )?;
+        }
 
         let q_proj = if config.q_lora_rank.is_some() {
             let q_a_norm = take_weight(weights, &format!("{prefix}.q_a_layernorm.weight"))?;
@@ -1260,6 +1428,30 @@ impl KimiK3SparseMoE {
             .map(|w| mlxcel_core::astype(w, dtype::FLOAT32));
 
         let switch_prefix = format!("{prefix}.switch_mlp");
+        // Sanitize counts the per-expert planes it stacks; a checkpoint that
+        // already ships stacked planes never passes through that count.
+        for leaf in ["gate_proj", "up_proj", "down_proj"] {
+            check_axis(
+                weights,
+                &format!("{switch_prefix}.{leaf}.weight"),
+                0,
+                config.num_experts,
+                "num_experts",
+            )?;
+        }
+        check_axis(
+            weights,
+            &format!("{prefix}.gate.weight"),
+            0,
+            config.num_experts,
+            "num_experts",
+        )?;
+        check_numel(
+            weights,
+            &format!("{prefix}.e_score_correction_bias"),
+            config.num_experts,
+            "num_experts",
+        )?;
         let (expert_gs, expert_bits, expert_mode) =
             expert_quantization(weights, &switch_prefix, config);
         let switch_mlp = SwitchGLU::from_weights_with_mode(
@@ -1273,7 +1465,23 @@ impl KimiK3SparseMoE {
 
         let (routed_expert_down_proj, routed_expert_norm, routed_expert_up_proj) =
             if config.routed_expert_hidden_size.is_some() {
+                let latent = config
+                    .routed_expert_hidden_size
+                    .unwrap_or(config.hidden_size);
+                check_axis(
+                    weights,
+                    &format!("{prefix}.routed_expert_down_proj.weight"),
+                    0,
+                    latent,
+                    "routed_expert_hidden_size",
+                )?;
                 let norm = if config.latent_moe_use_norm {
+                    check_numel(
+                        weights,
+                        &format!("{prefix}.routed_expert_norm.weight"),
+                        latent,
+                        "routed_expert_hidden_size",
+                    )?;
                     let w = take_weight(weights, &format!("{prefix}.routed_expert_norm.weight"))?;
                     Some(RMSNorm::new(w, config.rms_norm_eps))
                 } else {
@@ -1623,6 +1831,19 @@ impl KimiK3Model {
         let gs = config.group_size();
         let bits = config.bits();
 
+        check_axis(
+            weights,
+            "model.embed_tokens.weight",
+            0,
+            config.vocab_size,
+            "vocab_size",
+        )?;
+        check_numel(
+            weights,
+            "model.norm.weight",
+            config.hidden_size,
+            "hidden_size",
+        )?;
         let embed_tokens = UnifiedEmbedding::from_weights(weights, "model.embed_tokens", gs, bits)?;
         let act_dtype = activation_dtype(weights);
 

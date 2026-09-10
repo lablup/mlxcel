@@ -214,6 +214,32 @@ fn sanitize_kda_layer(
     Ok(())
 }
 
+/// Reject a per-expert plane set that `stack` would abort on: empty, or with
+/// any expert's shape differing from expert 0's.
+fn check_uniform_shapes(
+    planes: &[UniquePtr<MlxArray>],
+    src_prefix: &str,
+    src_leaf: &str,
+    plane: &str,
+) -> Result<(), String> {
+    let Some(first) = planes.first() else {
+        return Err(format!(
+            "{src_prefix}.experts.0.{src_leaf}.{plane}: no expert planes to stack"
+        ));
+    };
+    let expected = mlxcel_core::array_shape(first);
+    for (e, w) in planes.iter().enumerate().skip(1) {
+        let shape = mlxcel_core::array_shape(w);
+        if shape != expected {
+            return Err(format!(
+                "{src_prefix}.experts.{e}.{src_leaf}.{plane}: shape {shape:?} differs from \
+                 expert 0's {expected:?}; every expert plane must have the same shape to stack"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Stack one expert plane. Returns `Ok(false)` when expert 0 carries neither
 /// layout (already stacked, or a dense checkpoint under another name).
 fn stack_expert_plane(
@@ -261,6 +287,24 @@ fn stack_expert_plane(
                  gap); refusing to load a truncated MoE layer"
             ));
         }
+        // `stack` and `view` are the two MLX calls in this file that abort the
+        // process on a bad argument instead of returning: `stack` on planes
+        // whose shapes disagree, `view` on a trailing axis that is not a whole
+        // number of uint32 words. Both are reachable from checkpoint data, so
+        // check them here and report the offending expert by index.
+        check_uniform_shapes(&packed, src_prefix, src_leaf, "weight_packed")?;
+        check_uniform_shapes(&scales, src_prefix, src_leaf, "weight_scale")?;
+        let packed_shape = mlxcel_core::array_shape(&packed[0]);
+        let last = *packed_shape.last().ok_or_else(|| {
+            format!("{src_prefix}.experts.0.{src_leaf}.weight_packed: expected a shaped plane, got a scalar")
+        })?;
+        if last <= 0 || last % 4 != 0 {
+            return Err(format!(
+                "{src_prefix}.experts.0.{src_leaf}.weight_packed: trailing axis {last} is not a \
+                 positive multiple of 4, so the uint8 plane is not a whole number of uint32 \
+                 mxfp4 words (shape {packed_shape:?})"
+            ));
+        }
         // [E, out, in / 2] uint8 -> [E, out, in / 8] uint32: the little-endian
         // byte order of the view is the low-nibble-first code order MLX's
         // mxfp4 kernels read, pinned by `mxfp4_repack_matches_scalar_dequant`.
@@ -294,6 +338,7 @@ fn stack_expert_plane(
                      until the first gap); refusing to load a truncated MoE layer"
                 ));
             }
+            check_uniform_shapes(&sources, src_prefix, src_leaf, plane)?;
             let stacked = eval_owned(stack_arrays(&sources, 0));
             drop(sources);
             weights.insert(dst(plane), stacked);

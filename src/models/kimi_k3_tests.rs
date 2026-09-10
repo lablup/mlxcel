@@ -1334,6 +1334,127 @@ fn config_validation_names_the_offending_field() {
     assert!(tiny_text_config().validate().is_ok());
 }
 
+/// The router calls `argpartition(kth = k - 1)` and slices `[0, k)` off the
+/// result, both of which index past the score axis for a `k` of zero or one
+/// above `num_experts`. Config validation is the only place that sees the two
+/// numbers together.
+#[test]
+fn config_validation_bounds_the_router_top_k() {
+    let mut c = tiny_text_config();
+    c.num_experts_per_token = 0;
+    assert!(c.validate().unwrap_err().contains("num_experts_per_token"));
+
+    let mut c = tiny_text_config();
+    c.num_experts_per_token = EXPERTS + 1;
+    let err = c.validate().unwrap_err();
+    assert!(err.contains("num_experts_per_token"), "{err}");
+    assert!(err.contains("exceeds"), "{err}");
+
+    // Selecting every expert is legal, and so is a zero `k` on a config with
+    // no experts at all, where the field never reaches the router.
+    let mut c = tiny_text_config();
+    c.num_experts_per_token = EXPERTS;
+    assert!(c.validate().is_ok());
+
+    let mut c = tiny_text_config();
+    c.num_experts = 0;
+    c.num_experts_per_token = 0;
+    assert!(c.validate().is_ok());
+
+    let mut c = tiny_text_config();
+    c.routed_expert_hidden_size = Some(0);
+    assert!(
+        c.validate()
+            .unwrap_err()
+            .contains("routed_expert_hidden_size")
+    );
+}
+
+/// A config edited away from its checkpoint (a layer-truncated debug copy, a
+/// hand-written `text_config`, the wrong checkpoint entirely) must fail at
+/// load naming the tensor and the field. Without the cross-checks the
+/// disagreement reaches an MLX reshape or slice in the middle of a forward
+/// pass, which aborts the process with no key to name, or broadcasts and
+/// returns fluent nonsense.
+#[test]
+fn from_weights_names_a_config_checkpoint_shape_mismatch() {
+    let config = tiny_text_config();
+    let weights = sanitized(&config);
+    assert!(KimiK3Model::from_weights(&weights, &config).is_ok());
+
+    let mut c = config.clone();
+    c.vocab_size = VOCAB + 1;
+    let err = KimiK3Model::from_weights(&weights, &c)
+        .err()
+        .expect("the mismatch must be refused");
+    assert!(err.contains("embed_tokens"), "{err}");
+    assert!(err.contains("vocab_size"), "{err}");
+
+    let mut c = config.clone();
+    c.hidden_size = HIDDEN + 1;
+    let err = KimiK3Model::from_weights(&weights, &c)
+        .err()
+        .expect("the mismatch must be refused");
+    assert!(err.contains("model.norm.weight"), "{err}");
+    assert!(err.contains("hidden_size"), "{err}");
+
+    let mut c = config.clone();
+    c.linear_attn_config.num_heads = KDA_HEADS + 1;
+    let err = KimiK3Model::from_weights(&weights, &c)
+        .err()
+        .expect("the mismatch must be refused");
+    assert!(err.contains("qkv_proj"), "{err}");
+
+    let mut c = config.clone();
+    c.kv_lora_rank = KV_LORA + 1;
+    let err = KimiK3Model::from_weights(&weights, &c)
+        .err()
+        .expect("the mismatch must be refused");
+    assert!(err.contains("kv_a_proj_with_mqa"), "{err}");
+    assert!(err.contains("kv_lora_rank"), "{err}");
+
+    let mut c = config.clone();
+    c.num_attention_heads = MLA_HEADS + 1;
+    let err = KimiK3Model::from_weights(&weights, &c)
+        .err()
+        .expect("the mismatch must be refused");
+    assert!(err.contains("q_b_proj"), "{err}");
+
+    let mut c = config.clone();
+    c.num_experts = EXPERTS + 1;
+    let err = KimiK3Model::from_weights(&weights, &c)
+        .err()
+        .expect("the mismatch must be refused");
+    assert!(err.contains("num_experts"), "{err}");
+}
+
+/// `stack` aborts the process when the planes it is handed disagree in shape,
+/// so the sanitizer has to reject a mismatched expert set itself rather than
+/// let MLX see it.
+#[test]
+fn sanitize_refuses_mismatched_expert_plane_shapes() {
+    let config = tiny_text_config();
+    let mut raw = raw_checkpoint(
+        &config,
+        RawLayout {
+            legacy_residual_keys: false,
+        },
+    );
+    let key = format!(
+        "language_model.model.layers.1.block_sparse_moe.experts.{}.w1.weight",
+        EXPERTS - 1
+    );
+    raw.insert(
+        key,
+        noise_arr(&[MOE_INTER as i32 + 1, LATENT as i32], 77, 0.5),
+    );
+    let err = KimiK3Model::sanitize_weights(raw, &config)
+        .err()
+        .expect("a mismatched expert plane must be refused");
+    assert!(err.contains(&format!("experts.{}", EXPERTS - 1)), "{err}");
+    assert!(err.contains("differs from"), "{err}");
+}
+
 /// The published `config.json`, trimmed to the fields the loader reads.
 const PUBLISHED_CONFIG: &str = r#"{
     "architectures": ["KimiK3ForConditionalGeneration"],
