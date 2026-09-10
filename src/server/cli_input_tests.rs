@@ -169,6 +169,8 @@ fn sample_input() -> ServerStartupInput {
         tp_embedding_mode: "replicated".to_string(),
         tp_lm_head_mode: "replicated".to_string(),
         vision_cache_size: 20,
+        video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+        video_fps: crate::multimodal::video::DEFAULT_FPS,
         max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
         max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
         max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,

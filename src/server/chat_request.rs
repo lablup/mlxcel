@@ -331,6 +331,231 @@ fn map_reasoning_control_kwargs(
     per_request_kwargs.set(target, serde_json::Value::String(effort));
 }
 
+/// Operator-tunable knobs for the video-to-frames fallback (issue #1322).
+///
+/// Carried explicitly rather than read from a process global so a test can pin
+/// them without mutating the environment, and so the router's per-model
+/// `AppState`s each answer with the config they were built from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VideoFramesFallback {
+    /// Cap on frames kept per clip. Values below
+    /// [`MIN_FALLBACK_MAX_FRAMES`](crate::multimodal::video::MIN_FALLBACK_MAX_FRAMES)
+    /// are raised to it here, so a caller cannot ask for a single frame.
+    pub(crate) max_frames: usize,
+    /// Decode rate used when the `video_url` part carries no `fps` of its own.
+    pub(crate) default_fps: f64,
+}
+
+impl VideoFramesFallback {
+    /// Read the operator settings off a live [`ServerConfig`].
+    pub(crate) fn from_config(config: &super::config::ServerConfig) -> Self {
+        Self {
+            max_frames: config.video_max_frames,
+            default_fps: config.video_fps,
+        }
+    }
+
+    fn effective_max_frames(self) -> usize {
+        self.max_frames
+            .max(crate::multimodal::video::MIN_FALLBACK_MAX_FRAMES)
+    }
+}
+
+/// The sentence inserted ahead of a clip's frames so the model reads them as
+/// one video rather than as unrelated pictures.
+fn video_frames_lead_text(frames: usize) -> String {
+    format!("Here is a video as a sequence of {frames} frames in chronological order.")
+}
+
+/// Rewrite every `video_url` content part into the sampled frames of that clip,
+/// as ordered `image_url` parts (issue #1322).
+///
+/// Runs after the HTTP boundary's [`media_capability_rejection`] and before
+/// [`prepare_chat_request_with_cache`], so the template sees one image
+/// placeholder per frame and the unchanged image pipeline carries the bytes to
+/// the vision tower. The request is left untouched, and `Ok(0)` returned, for a
+/// checkpoint with a native video path: those keep their own temporal
+/// processor and `prepared.videos`.
+///
+/// [`media_capability_rejection`]: crate::server::media_capability_rejection
+///
+/// # Errors
+/// Returns a client-facing message when `ffmpeg` is missing, a referenced clip
+/// cannot be resolved or decoded, or the substituted frames would push the
+/// request past the per-request image limit.
+pub(crate) async fn expand_video_parts_to_frames(
+    request: &mut ChatCompletionRequest,
+    support: super::state::ModelMediaSupport,
+    settings: VideoFramesFallback,
+    model_id: &str,
+) -> std::result::Result<usize, String> {
+    let allowlist = super::media::video_dir_allowlist_from_env();
+    expand_video_parts_to_frames_with_allowlist(request, support, settings, model_id, &allowlist)
+        .await
+}
+
+/// Test-friendly variant of [`expand_video_parts_to_frames`] that takes the
+/// directory allowlist directly.
+///
+/// Same split `extract_chat_video_paths_with_allowlist` uses, and for the same
+/// reason: `MLXCEL_VIDEO_DIR_ALLOWLIST` is process-global state, so a test that
+/// set it would have to hold the crate env lock across this function's awaits.
+pub(crate) async fn expand_video_parts_to_frames_with_allowlist(
+    request: &mut ChatCompletionRequest,
+    support: super::state::ModelMediaSupport,
+    settings: VideoFramesFallback,
+    model_id: &str,
+    allowlist: &[std::path::PathBuf],
+) -> std::result::Result<usize, String> {
+    if !support.video_frames_fallback {
+        return Ok(0);
+    }
+    // Collect the positions first: the decode is async and the rewrite shifts
+    // every index after it, so doing both in one pass would walk a moving list.
+    let targets: Vec<(usize, usize, crate::server::types::request::VideoUrl)> = request
+        .messages
+        .iter()
+        .enumerate()
+        .flat_map(|(message_index, message)| match &message.content {
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .enumerate()
+                .filter_map(move |(part_index, part)| match part {
+                    ContentPart::VideoUrl { video_url } => {
+                        Some((message_index, part_index, video_url.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            MessageContent::Text(_) => Vec::new(),
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    if !crate::multimodal::video::ffmpeg_available() {
+        return Err(
+            "Video input requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` \
+             on macOS or `apt install ffmpeg` on Linux) and retry."
+                .to_string(),
+        );
+    }
+
+    let max_frames = settings.effective_max_frames();
+    let mut expansions: Vec<(usize, usize, Vec<Vec<u8>>)> = Vec::with_capacity(targets.len());
+    for (message_index, part_index, video_url) in targets {
+        let resolved = super::media::resolve_video_url(&video_url, allowlist)
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "Could not read the video referenced by {:?}. Local paths must sit inside a \
+                     directory listed in {}.",
+                    video_url.url,
+                    super::media::VIDEO_DIR_ALLOWLIST_ENV
+                )
+            })?;
+        let fps = video_url.fps.unwrap_or(settings.default_fps);
+        let label = resolved.canonical_path().display().to_string();
+        // ffmpeg decode plus PNG encode is seconds of CPU on a long clip, so it
+        // runs on the blocking pool like the image decode path does rather than
+        // parking a Tokio worker.
+        let (kept, sampled) = tokio::task::spawn_blocking(move || {
+            let frames =
+                crate::multimodal::video::load_video_source(&resolved.source, Some(fps), None)?;
+            let sampled = frames.len();
+            let kept = crate::multimodal::video::subsample_evenly(frames, max_frames);
+            crate::multimodal::video::frames_to_png(&kept).map(|png| (png, sampled))
+        })
+        .await
+        .map_err(|err| format!("Video frame extraction task failed: {err}"))?
+        .map_err(|err| format!("Failed to load video {label:?}: {err}"))?;
+
+        tracing::info!(
+            "model {model_id} has no native video path; sending {} of {sampled} sampled frames \
+             from {label} as ordered images",
+            kept.len()
+        );
+        expansions.push((message_index, part_index, kept));
+    }
+
+    // The frames become ordinary image parts, so they spend the same per-request
+    // image budget. Refuse here, naming the frames, rather than letting
+    // `validate_image_count` report a count the caller never sent.
+    let injected: usize = expansions.iter().map(|(_, _, frames)| frames.len()).sum();
+    if let Some(message) = video_frame_budget_rejection(
+        request.image_urls().len(),
+        injected,
+        super::media::current_image_input_limits().max_images_per_request,
+    ) {
+        return Err(message);
+    }
+
+    apply_video_frame_expansion(request, expansions);
+    Ok(injected)
+}
+
+/// Refuse a request whose substituted frames would not fit the per-request
+/// image budget, naming the frames.
+///
+/// `validate_image_count` would refuse it a moment later, but its message
+/// reports an image count the caller never sent, which reads as a server bug
+/// rather than as a `--video-max-frames` that is too high for this deployment.
+fn video_frame_budget_rejection(
+    existing_images: usize,
+    injected: usize,
+    limit: usize,
+) -> Option<String> {
+    (existing_images + injected > limit).then(|| {
+        format!(
+            "The video expanded to {injected} frame image(s) alongside {existing_images} image \
+             input(s), over the per-request limit of {limit}. Lower --video-max-frames or raise \
+             --max-images."
+        )
+    })
+}
+
+/// Splice each clip's frames into the request in place of its `video_url` part.
+///
+/// Split out from [`expand_video_parts_to_frames`] because everything above it
+/// is I/O (allowlist resolution, ffmpeg, PNG encoding) and everything here is
+/// the ordering contract: the lead sentence first, then the frames in
+/// chronological order, with the parts that surrounded the clip keeping their
+/// positions relative to it. Tests drive this half directly with synthetic
+/// bytes so the contract is covered on a host with no ffmpeg.
+///
+/// `expansions` is `(message index, part index, frame PNG bytes)`. Applied back
+/// to front so an earlier splice cannot move a later part's index.
+fn apply_video_frame_expansion(
+    request: &mut ChatCompletionRequest,
+    expansions: Vec<(usize, usize, Vec<Vec<u8>>)>,
+) {
+    use base64::Engine as _;
+
+    for (message_index, part_index, frames) in expansions.into_iter().rev() {
+        let Some(message) = request.messages.get_mut(message_index) else {
+            continue;
+        };
+        let MessageContent::Parts(parts) = &mut message.content else {
+            continue;
+        };
+        if part_index >= parts.len() {
+            continue;
+        }
+        let mut replacement: Vec<ContentPart> = Vec::with_capacity(frames.len() + 1);
+        replacement.push(ContentPart::Text {
+            text: video_frames_lead_text(frames.len()),
+        });
+        replacement.extend(frames.into_iter().map(|png| ContentPart::ImageUrl {
+            image_url: crate::server::types::request::ImageUrl::new(format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png)
+            )),
+        }));
+        parts.splice(part_index..=part_index, replacement);
+    }
+}
+
 /// Legacy wrapper preserved for tests and any callers outside the hot
 /// route path. Delegates to [`prepare_chat_request_with_cache`] with
 /// the cache-enabled flag set to `false`, matching earlier behavior.

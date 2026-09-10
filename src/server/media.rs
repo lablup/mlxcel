@@ -392,7 +392,7 @@ pub(crate) fn media_capability_rejection(
     if !support.audio && !request.audio_inputs().is_empty() {
         return refuse("audio");
     }
-    if !support.video && !request.video_urls().is_empty() {
+    if !support.video() && !request.video_urls().is_empty() {
         return refuse("video");
     }
     if !support.video_with_audio
@@ -664,7 +664,10 @@ pub(crate) fn scan_insecure_allowlist_dirs(allowlist: &[PathBuf]) -> Vec<PathBuf
 /// allowlist guard rejects it, or the open(2) syscall fails. The caller
 /// drops the failure silently — the chat handler short-circuits with a
 /// 400 when `videos` is empty.
-async fn resolve_video_url(video: &VideoUrl, allowlist: &[PathBuf]) -> Option<ResolvedVideo> {
+pub(crate) async fn resolve_video_url(
+    video: &VideoUrl,
+    allowlist: &[PathBuf],
+) -> Option<ResolvedVideo> {
     let url = &video.url;
     let fps = video.fps;
 

@@ -83,7 +83,7 @@ pub async fn create_response(
     }
 
     // -- Translate Responses request → ChatCompletionRequest ---------------
-    let translated = match responses_request_to_chat(
+    let mut translated = match responses_request_to_chat(
         &request,
         state.responses_store.as_ref(),
         state.conversation_store.as_ref(),
@@ -101,6 +101,22 @@ pub async fn create_response(
         state.display_model_id(),
     ) {
         return rejection.into_response();
+    }
+
+    // Substitute a clip with its sampled frames when the checkpoint has no
+    // native video path (issue #1322), on the same seam the chat route uses:
+    // after the capability gate, before any render. Both `create_response`
+    // handlers below read `translated`, so rewriting once here covers the
+    // streaming and non-streaming paths alike.
+    if let Err(message) = crate::server::chat_request::expand_video_parts_to_frames(
+        &mut translated.chat_request,
+        state.media_support,
+        crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
+        state.display_model_id(),
+    )
+    .await
+    {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
     // Reject requests with no effective input before any model dispatch

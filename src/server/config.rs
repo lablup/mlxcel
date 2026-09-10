@@ -836,6 +836,21 @@ pub struct ServerConfig {
     /// multimodal embedder on subsequent turns. Default is
     /// [`DEFAULT_VISION_CACHE_SIZE`](crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE).
     pub vision_cache_size: usize,
+    /// Cap on the frames kept when a `video_url` block is served by the
+    /// frame fallback, because the loaded checkpoint has no native video path
+    /// (issue #1322). Minimum 2, default
+    /// [`DEFAULT_FALLBACK_MAX_FRAMES`](crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES).
+    ///
+    /// Read only on the fallback path. A native video family samples frames
+    /// through its own processor and never consults this.
+    pub video_max_frames: usize,
+    /// Sampling rate the frame fallback decodes a clip at, in frames per
+    /// second, when the request's own `video_url.fps` is absent. Default
+    /// [`DEFAULT_FPS`](crate::multimodal::video::DEFAULT_FPS).
+    ///
+    /// Read only on the fallback path, for the same reason as
+    /// [`Self::video_max_frames`].
+    pub video_fps: f64,
     /// Axis B (B8): server-wide language bias configuration, if
     /// resolved at startup from CLI flags or the `LLAMA_ARG_LANG_BIAS` env
     /// var. Every batch sequence inherits this same policy (Phase 1 single
@@ -1115,6 +1130,8 @@ impl Default for ServerConfig {
             remote_pipeline_stage: None,
             tensor_parallel: ShardConfig::default(),
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
+            video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+            video_fps: crate::multimodal::video::DEFAULT_FPS,
             lang_bias_config: None,
             reasoning_budget: None,
             chat_template_kwargs: None,

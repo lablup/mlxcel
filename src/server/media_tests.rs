@@ -1367,7 +1367,8 @@ fn media_capability_rejection_admits_what_the_checkpoint_supports() {
     let vlm = ModelMediaSupport {
         image: true,
         audio: true,
-        video: false,
+        video_native: false,
+        video_frames_fallback: false,
         video_with_audio: false,
     };
     let image_request = build_chat_request(vec![ContentPart::ImageUrl {
@@ -1375,7 +1376,11 @@ fn media_capability_rejection_admits_what_the_checkpoint_supports() {
     }]);
     assert!(super::media_capability_rejection(&image_request, vlm, "qwen2.5-vl-7b-4bit").is_none());
 
-    // Video stays gated per family, as it was before the modality gate existed.
+    // Neither a native video path nor the frame fallback: the gate still
+    // refuses. `detect_model_media_support` gives an image-capable checkpoint
+    // the fallback (issue #1322), so this combination now comes from
+    // `--no-mmproj` or from a family whose fallback an operator disabled, but
+    // the gate reads the flags rather than the family and must keep refusing.
     let video_request = build_chat_request(vec![ContentPart::VideoUrl {
         video_url: VideoUrl {
             url: "file://clip.mp4".to_string(),
@@ -1383,6 +1388,15 @@ fn media_capability_rejection_admits_what_the_checkpoint_supports() {
         },
     }]);
     assert!(super::media_capability_rejection(&video_request, vlm, "qwen2.5-vl-7b-4bit").is_some());
+
+    // The same checkpoint with the frame fallback on admits the same request.
+    let fallback = ModelMediaSupport {
+        video_frames_fallback: true,
+        ..vlm
+    };
+    assert!(
+        super::media_capability_rejection(&video_request, fallback, "gemma-3-4b-it-4bit").is_none()
+    );
 
     // A text-only request is never refused, whatever the checkpoint is.
     let text = build_chat_request(vec![ContentPart::Text {
@@ -1419,7 +1433,8 @@ fn media_capability_rejection_refuses_video_plus_audio_unless_the_model_merges_b
     let each_alone = ModelMediaSupport {
         image: true,
         audio: true,
-        video: true,
+        video_native: true,
+        video_frames_fallback: false,
         video_with_audio: false,
     };
     let rejection =
@@ -1456,7 +1471,8 @@ fn media_capability_rejection_leaves_single_modality_requests_alone() {
     let each_alone = ModelMediaSupport {
         image: true,
         audio: true,
-        video: true,
+        video_native: true,
+        video_frames_fallback: false,
         video_with_audio: false,
     };
     let audio_only = build_chat_request(vec![ContentPart::InputAudio {

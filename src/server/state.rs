@@ -374,10 +374,22 @@ pub struct ModelMediaSupport {
     /// a multimodal checkpoint without an audio tower still refuses later, on
     /// the worker, where the loaded family is known.
     pub audio: bool,
-    /// `true` when the loaded model supports `video_url` content blocks.
-    /// Currently this is exactly the Gemma 4 VLM family; expand the
-    /// detection logic alongside any new video-capable model.
-    pub video: bool,
+    /// `true` when the loaded model has a native video path: a temporal
+    /// encoder (or a per-frame scatter) that consumes `video_url` content
+    /// blocks as a clip. Gemma 4 VLM / Unified, Inkling, Kimi-VL and Qwen-VL
+    /// qualify; expand the detection logic alongside any new one.
+    pub video_native: bool,
+    /// `true` when the loaded model has no native video path but does have a
+    /// vision tower, so a `video_url` block is served by decoding the clip and
+    /// sending the sampled frames as ordered images (issue #1322).
+    ///
+    /// Separate from [`Self::video_native`] because the two differ in what
+    /// reaches the model, not only in whether the request is admitted: the
+    /// fallback rewrites the request into `image_url` parts before rendering,
+    /// so the worker sees images and `prepared.videos` is empty. Anything that
+    /// only needs to know whether a `video_url` part is admitted at all should
+    /// read [`Self::video`].
+    pub video_frames_fallback: bool,
     /// `true` when the loaded model accepts `video_url` and `input_audio`
     /// content blocks in the *same* request (issue #1349).
     ///
@@ -405,9 +417,21 @@ impl ModelMediaSupport {
         Self {
             image: false,
             audio: false,
-            video: false,
+            video_native: false,
+            video_frames_fallback: false,
             video_with_audio: false,
         }
+    }
+
+    /// `true` when a `video_url` content block is admitted at all, natively or
+    /// through the frame fallback.
+    ///
+    /// This is what the HTTP boundary gate keys on, and it keeps the meaning
+    /// the single `video` field carried before issue #1322 split it: "this
+    /// checkpoint can answer a question about a clip".
+    #[must_use]
+    pub const fn video(&self) -> bool {
+        self.video_native || self.video_frames_fallback
     }
 }
 

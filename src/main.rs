@@ -451,11 +451,14 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,
 
-    /// Video file paths for VLMs that support video inputs (e.g. Gemma4,
-    /// Kimi-VL, and Qwen-VL). Pass the flag multiple times for multiple
-    /// videos: `--video clip1.mp4 --video clip2.mp4`. Frame extraction
-    /// requires `ffmpeg` on PATH. `gemma4_unified` also accepts `--video`
-    /// together with `--audio` in the same prompt.
+    /// Video file paths. Families with a native video path (Gemma 4, Inkling,
+    /// Kimi-VL, Qwen-VL) consume the clip through their own temporal
+    /// processor; every other VLM with a vision tower decodes the clip and
+    /// sends the sampled frames as ordered images (see `--video-max-frames`).
+    /// Pass the flag multiple times for multiple videos: `--video clip1.mp4
+    /// --video clip2.mp4`. Frame extraction requires `ffmpeg` on PATH.
+    /// `gemma4_unified` also accepts `--video` together with `--audio` in the
+    /// same prompt.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub(crate) video: Vec<PathBuf>,
 
@@ -464,6 +467,20 @@ pub(crate) struct GenerationOptions {
     /// vision tower. Defaults to 2.0.
     #[arg(long, value_name = "FLOAT", default_value_t = 2.0)]
     pub(crate) fps: f64,
+
+    /// Maximum frames kept when `--video` is served as ordered still images,
+    /// because the loaded checkpoint has no native video path.
+    ///
+    /// The clip is decoded at `--fps`, then evenly subsampled to this many
+    /// frames, always keeping the first and the last. Ignored by families with
+    /// a native video path. Values below 2 are raised to 2.
+    #[arg(
+        long = "video-max-frames",
+        env = "MLXCEL_VIDEO_MAX_FRAMES",
+        value_name = "N",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES
+    )]
+    pub(crate) video_max_frames: usize,
 
     /// Write synthesized speech for the generated answer to this WAV path
     /// (24 kHz mono PCM16). Qwen3-Omni models only; the talker + code2wav
@@ -2208,6 +2225,34 @@ pub(crate) struct ServeArgs {
     /// subsequent turns. `0` disables caching. Default: 20.
     #[arg(long = "vision-cache-size", default_value_t = 20, value_name = "N")]
     vision_cache_size: usize,
+
+    /// Maximum sampled frames kept when a `video_url` block is served as
+    /// ordered still images.
+    ///
+    /// Applies only when the loaded checkpoint has no native video path; a
+    /// native video family samples through its own processor and ignores this.
+    /// Values below 2 are raised to 2, so the first and last sampled frame are
+    /// always kept. Also reads `MLXCEL_VIDEO_MAX_FRAMES`.
+    #[arg(
+        long = "video-max-frames",
+        env = "MLXCEL_VIDEO_MAX_FRAMES",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
+        value_name = "N"
+    )]
+    video_max_frames: usize,
+
+    /// Frames-per-second the video-to-images fallback decodes a clip at when
+    /// the request carries no per-`video_url` `fps` of its own.
+    ///
+    /// Applies only when the loaded checkpoint has no native video path. Also
+    /// reads `MLXCEL_VIDEO_FPS`.
+    #[arg(
+        long = "video-fps",
+        env = "MLXCEL_VIDEO_FPS",
+        default_value_t = mlxcel::multimodal::video::DEFAULT_FPS,
+        value_name = "FLOAT"
+    )]
+    video_fps: f64,
 
     /// Maximum encoded bytes accepted for each image input.
     ///

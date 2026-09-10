@@ -3541,3 +3541,355 @@ async fn app_state_renders_the_kimi_k3_native_chat_format_when_control_ids_are_c
         .await
         .expect("a complete K3 vocabulary must render through the native path, not refuse");
 }
+
+// ─── Video-to-frames fallback (issue #1322) ──────────────────────────────────
+
+use super::{
+    VideoFramesFallback, apply_video_frame_expansion, expand_video_parts_to_frames,
+    expand_video_parts_to_frames_with_allowlist, video_frames_lead_text,
+};
+use crate::server::state::ModelMediaSupport;
+
+/// The flags a checkpoint with a vision tower and no temporal path resolves to.
+fn frames_fallback_support() -> ModelMediaSupport {
+    ModelMediaSupport {
+        image: true,
+        audio: true,
+        video_native: false,
+        video_frames_fallback: true,
+        video_with_audio: false,
+    }
+}
+
+/// The flags a native video family resolves to.
+fn native_video_support() -> ModelMediaSupport {
+    ModelMediaSupport {
+        image: true,
+        audio: true,
+        video_native: true,
+        video_frames_fallback: false,
+        video_with_audio: false,
+    }
+}
+
+/// One 1x1 PNG whose only pixel is `value`, so a test can tell frames apart by
+/// their bytes and by the base64 in the rewritten data URI.
+fn frame_png(value: u8) -> Vec<u8> {
+    let mut buffer = image::RgbImage::new(1, 1);
+    buffer.put_pixel(0, 0, image::Rgb([value, 0, 0]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(buffer)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("1x1 PNG encodes");
+    bytes
+}
+
+fn video_part(url: &str) -> ContentPart {
+    ContentPart::VideoUrl {
+        video_url: VideoUrl {
+            url: url.to_string(),
+            fps: None,
+        },
+    }
+}
+
+fn user_parts(parts: Vec<ContentPart>) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Parts(parts),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }
+}
+
+fn part_kinds(request: &ChatCompletionRequest, message_index: usize) -> Vec<String> {
+    match &request.messages[message_index].content {
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => format!("text:{text}"),
+                ContentPart::ImageUrl { image_url } => format!("image:{}", image_url.url),
+                ContentPart::VideoUrl { video_url } => format!("video:{}", video_url.url),
+                ContentPart::InputAudio { .. } => "audio".to_string(),
+            })
+            .collect(),
+        MessageContent::Text(text) => vec![format!("text:{text}")],
+    }
+}
+
+#[test]
+fn video_part_expands_to_ordered_image_parts_with_lead_text() {
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///clip.mp4"),
+        ContentPart::Text {
+            text: "Describe what changes.".to_string(),
+        },
+    ])]);
+    let frames: Vec<Vec<u8>> = (0..4).map(frame_png).collect();
+
+    apply_video_frame_expansion(&mut request, vec![(0, 0, frames.clone())]);
+
+    let kinds = part_kinds(&request, 0);
+    assert_eq!(kinds.len(), 6, "lead sentence + 4 frames + the question");
+    assert_eq!(kinds[0], format!("text:{}", video_frames_lead_text(4)));
+    assert_eq!(kinds[5], "text:Describe what changes.");
+    // Chronological order is the whole contract: the frames must appear in the
+    // order they were sampled, not sorted or reversed by the splice.
+    let urls = request.image_urls();
+    assert_eq!(urls.len(), 4);
+    for (index, (url, frame)) in urls.iter().zip(frames.iter()).enumerate() {
+        use base64::Engine as _;
+        let expected = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(frame)
+        );
+        assert_eq!(url, &expected, "frame {index} landed out of order");
+    }
+    assert!(
+        request.video_urls().is_empty(),
+        "the video part must be gone once its frames replaced it"
+    );
+}
+
+#[test]
+fn video_expansion_preserves_surrounding_images() {
+    // Two clips and two of the caller's own images in one message. Each clip's
+    // frames land where that clip was, and the caller's images keep their
+    // positions relative to them.
+    let mut request = request_with_messages(vec![user_parts(vec![
+        ContentPart::ImageUrl {
+            image_url: ImageUrl::new("data:image/png;base64,Zmlyc3Q=".to_string()),
+        },
+        video_part("file:///a.mp4"),
+        ContentPart::ImageUrl {
+            image_url: ImageUrl::new("data:image/png;base64,bWlkZGxl".to_string()),
+        },
+        video_part("file:///b.mp4"),
+        ContentPart::Text {
+            text: "compare".to_string(),
+        },
+    ])]);
+
+    apply_video_frame_expansion(
+        &mut request,
+        vec![
+            (0, 1, vec![frame_png(10), frame_png(11)]),
+            (0, 3, vec![frame_png(20)]),
+        ],
+    );
+
+    let kinds = part_kinds(&request, 0);
+    assert_eq!(kinds[0], "image:data:image/png;base64,Zmlyc3Q=");
+    assert_eq!(kinds[1], format!("text:{}", video_frames_lead_text(2)));
+    assert!(kinds[2].starts_with("image:data:image/png;base64,"));
+    assert!(kinds[3].starts_with("image:data:image/png;base64,"));
+    assert_eq!(kinds[4], "image:data:image/png;base64,bWlkZGxl");
+    assert_eq!(kinds[5], format!("text:{}", video_frames_lead_text(1)));
+    assert!(kinds[6].starts_with("image:data:image/png;base64,"));
+    assert_eq!(kinds[7], "text:compare");
+    assert_eq!(request.image_urls().len(), 5);
+}
+
+#[tokio::test]
+async fn video_expansion_skipped_for_native_video_model() {
+    // A native family keeps its `video_url` part so `prepared.videos` reaches
+    // its own temporal processor. This must not even look at the filesystem,
+    // which is why the fixture URL points at nothing.
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///no/such/clip.mp4"),
+        ContentPart::Text {
+            text: "describe".to_string(),
+        },
+    ])]);
+    let before = part_kinds(&request, 0);
+
+    let injected = expand_video_parts_to_frames(
+        &mut request,
+        native_video_support(),
+        VideoFramesFallback {
+            max_frames: 8,
+            default_fps: 2.0,
+        },
+        "gemma-4-e4b-it-4bit",
+    )
+    .await
+    .expect("a native video model is a no-op, not an error");
+
+    assert_eq!(injected, 0);
+    assert_eq!(part_kinds(&request, 0), before);
+    assert_eq!(request.video_urls().len(), 1);
+}
+
+#[tokio::test]
+async fn video_expansion_is_a_no_op_without_video_parts() {
+    let mut request = request_with_messages(vec![user_parts(vec![ContentPart::Text {
+        text: "no media here".to_string(),
+    }])]);
+
+    let injected = expand_video_parts_to_frames(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 8,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+    )
+    .await
+    .expect("a request with no clip is a no-op");
+    assert_eq!(injected, 0);
+}
+
+#[tokio::test]
+async fn video_expansion_changes_mm_digest_when_frames_change() {
+    // The prompt-cache key digests the resolved image bytes, so two requests
+    // for the same clip at the same settings must share a bucket and a changed
+    // clip must not. The frames become ordinary image parts, so this follows
+    // from the rewrite alone: what the digest sees is what
+    // `try_extract_chat_image_data` decodes back out of the data URIs.
+    let digest_of = |frames: Vec<Vec<u8>>| async move {
+        let mut request = request_with_messages(vec![user_parts(vec![
+            video_part("file:///clip.mp4"),
+            ContentPart::Text {
+                text: "describe".to_string(),
+            },
+        ])]);
+        apply_video_frame_expansion(&mut request, vec![(0, 0, frames)]);
+        let images = crate::server::media::try_extract_chat_image_data(&request)
+            .await
+            .expect("the rewritten data URIs decode");
+        crate::server::multimodal_digest_from_vecs(&images, &[])
+    };
+
+    let first = digest_of((0..3).map(frame_png).collect()).await;
+    let again = digest_of((0..3).map(frame_png).collect()).await;
+    let changed = digest_of((0..3).map(|index| frame_png(index + 100)).collect()).await;
+
+    assert_eq!(
+        first, again,
+        "the same clip at the same settings must reuse the same prefix"
+    );
+    assert_ne!(
+        first, changed,
+        "a different clip must not adopt the first clip's KV"
+    );
+}
+
+#[test]
+fn video_frame_budget_refusal_names_the_frames() {
+    use super::video_frame_budget_rejection;
+
+    // Exactly at the limit is admitted: the default 16-frame cap is also the
+    // default per-request image limit, so a video-only request must fit
+    // without an operator raising anything.
+    assert!(video_frame_budget_rejection(0, 16, 16).is_none());
+    assert!(video_frame_budget_rejection(2, 14, 16).is_none());
+
+    let message = video_frame_budget_rejection(2, 16, 16)
+        .expect("18 images against a limit of 16 is refused");
+    assert!(
+        message.contains("16 frame image(s)")
+            && message.contains("2 image input(s)")
+            && message.contains("limit of 16"),
+        "the refusal must name the frames, the caller's own images and the limit: {message}"
+    );
+    assert!(
+        message.contains("--video-max-frames"),
+        "the refusal must name the dial that fixes it: {message}"
+    );
+}
+
+#[test]
+fn video_frames_lead_text_names_the_frame_count() {
+    assert_eq!(
+        video_frames_lead_text(8),
+        "Here is a video as a sequence of 8 frames in chronological order."
+    );
+}
+
+/// End-to-end fallback: resolve a real clip through the allowlist, decode it,
+/// subsample, and splice the frames back in.
+///
+/// `#[ignore]` for the reason `multimodal::video_tests` documents at the top of
+/// that file: an early return on a host without ffmpeg counts as a pass, so the
+/// skip has to be the kind that reaches the summary line. Run with
+/// `cargo test --features metal,accelerate --lib server::chat_request -- --ignored`.
+#[tokio::test]
+#[ignore = "needs ffmpeg 5.0+ on PATH"]
+async fn video_part_expands_through_a_real_clip() {
+    assert!(
+        crate::multimodal::video::ffmpeg_available(),
+        "this test was run explicitly, so a missing ffmpeg is a failure and not a skip"
+    );
+    let dir = std::env::temp_dir().join(format!("mlxcel-video-fallback-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("clip.mp4");
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=10",
+            "-t",
+            "4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&clip)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "ffmpeg could not build the fixture clip");
+
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part(&format!("file://{}", clip.display())),
+        ContentPart::Text {
+            text: "Describe what changes.".to_string(),
+        },
+    ])]);
+    // 4 s at 2 fps samples to 8 frames, so a cap of 4 exercises the subsample.
+    // The allowlist is injected rather than set in the environment: the env
+    // form is process-global, so a test would have to hold the crate env lock
+    // across these awaits.
+    let injected = expand_video_parts_to_frames_with_allowlist(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 4,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+        &[dir.canonicalize().unwrap()],
+    )
+    .await;
+
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert_eq!(injected.expect("the clip decodes"), 4);
+    assert!(request.video_urls().is_empty());
+    let kinds = part_kinds(&request, 0);
+    assert_eq!(kinds[0], format!("text:{}", video_frames_lead_text(4)));
+    assert_eq!(kinds.len(), 6);
+    let urls = request.image_urls();
+    assert_eq!(urls.len(), 4);
+    // Distinct frames: `testsrc2` animates, so four identical data URIs would
+    // mean the subsample kept one frame four times.
+    let unique: std::collections::HashSet<&String> = urls.iter().collect();
+    assert_eq!(
+        unique.len(),
+        4,
+        "the kept frames must differ from each other"
+    );
+    for url in &urls {
+        assert!(url.starts_with("data:image/png;base64,"));
+    }
+}

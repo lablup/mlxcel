@@ -177,6 +177,8 @@ fn sample_args() -> crate::ServeArgs {
         rope: mlxcel::cli::rope_args::RopeOverrideArgs::default(),
         decode_storage_backend: None,
         vision_cache_size: 20,
+        video_max_frames: mlxcel::video::DEFAULT_FALLBACK_MAX_FRAMES,
+        video_fps: mlxcel::video::DEFAULT_FPS,
         max_image_payload_size: mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
         max_images_per_request: mlxcel::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
         max_image_width: mlxcel::server::DEFAULT_MAX_IMAGE_WIDTH,

@@ -415,6 +415,8 @@ both be on `PATH` and must be **ffmpeg 5.0 (2022) or newer**. See
 | `MLXCEL_VIDEO_MAX_PIXELS` | unsigned integer | `16777216` | Rejects source videos whose `width × height` exceeds the cap. |
 | `MLXCEL_VIDEO_MAX_DURATION_SEC` | float seconds | `600` | Rejects source videos longer than the cap. |
 | `MLXCEL_VIDEO_MAX_PNG_FRAME_BYTES` | unsigned integer bytes | `268435456` | Per-frame cap for the ffmpeg PNG stream splitter. |
+| `MLXCEL_VIDEO_MAX_FRAMES` | unsigned integer (minimum 2) | `16` | Frames kept when a clip is served as ordered still images, because the loaded checkpoint has no native video path. Values below 2 are raised to 2, so the first and the last sampled frame always survive. The flag spelling is `--video-max-frames` on `mlxcel serve`, `mlxcel-server` and `mlxcel generate`. Frames spend the per-request image budget (`--max-images`), so raising this past that limit is refused. A family with a native video path (Gemma 4, Inkling, Kimi-VL, Qwen-VL) samples through its own processor and ignores this. |
+| `MLXCEL_VIDEO_FPS` | float > 0 | `2.0` | Sampling rate the video-to-images fallback decodes a clip at when the request's own `video_url.fps` is absent. Server-side only (`--video-fps`); the CLI keeps `--fps` for the same dial. Read only on the fallback path, for the same reason as the row above. |
 
 ## Hardware and kernel diagnostic variables
 

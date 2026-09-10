@@ -1030,7 +1030,8 @@ mod tests {
         let each_alone = crate::server::state::ModelMediaSupport {
             image: true,
             audio: true,
-            video: true,
+            video_native: true,
+            video_frames_fallback: false,
             video_with_audio: false,
         };
         let request = chat_request_with_media_parts(serde_json::json!([
@@ -1058,7 +1059,8 @@ mod tests {
         let no_audio = crate::server::state::ModelMediaSupport {
             image: true,
             audio: false,
-            video: true,
+            video_native: true,
+            video_frames_fallback: false,
             video_with_audio: false,
         };
         let request = chat_request_with_media_parts(serde_json::json!([

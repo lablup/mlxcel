@@ -576,6 +576,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             audio: None,
             video: Vec::new(),
             fps: 2.0,
+            video_max_frames: mlxcel::video::DEFAULT_FALLBACK_MAX_FRAMES,
             output_audio: None,
             speaker: "ethan".to_string(),
             max_tokens: 16,
@@ -1020,4 +1021,141 @@ fn resolve_cli_pipeline_assignments_auto_splits_layers_across_stages() {
             .all(|stage| !stage.layer_range.is_empty())
     );
     fs::remove_dir_all(args.model.model).unwrap();
+}
+
+// ─── Video-to-frames fallback (issue #1322) ──────────────────────────────────
+
+fn model_dir_with_config(config: serde_json::Value) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+    dir
+}
+
+fn gemma3_vlm_config() -> serde_json::Value {
+    serde_json::json!({
+        "model_type": "gemma3",
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "text_config": {"model_type": "gemma3_text"},
+        "vision_config": {"model_type": "siglip_vision_model", "image_size": 896}
+    })
+}
+
+#[test]
+fn cli_video_fallback_declines_native_and_text_only_checkpoints() {
+    // A native video family keeps its clip so `compute_vlm_embeddings` routes
+    // it to the family's own temporal path, and a checkpoint with no vision
+    // tower has nowhere to send frames. Neither reaches ffmpeg, which is why
+    // this test needs none.
+    let native = model_dir_with_config(serde_json::json!({
+        "model_type": "qwen2_5_vl",
+        "architectures": ["Qwen2_5_VLForConditionalGeneration"]
+    }));
+    assert!(
+        super::expand_cli_videos_to_frames(
+            native.path(),
+            &[PathBuf::from("/no/such/clip.mp4")],
+            2.0,
+            8,
+        )
+        .unwrap()
+        .is_none(),
+        "Qwen2.5-VL has had a native video path since issue #1166"
+    );
+
+    let text_only = model_dir_with_config(serde_json::json!({"model_type": "llama"}));
+    assert!(
+        super::expand_cli_videos_to_frames(
+            text_only.path(),
+            &[PathBuf::from("/no/such/clip.mp4")],
+            2.0,
+            8,
+        )
+        .unwrap()
+        .is_none(),
+        "a text-only checkpoint must fall through to the existing --video refusal"
+    );
+
+    // No `--video` at all is a no-op for every family.
+    let fallback = model_dir_with_config(gemma3_vlm_config());
+    assert!(
+        super::expand_cli_videos_to_frames(fallback.path(), &[], 2.0, 8)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// `#[ignore]` for the reason `multimodal::video_tests` documents: an early
+/// return on a host without ffmpeg counts as a pass, so the skip has to be the
+/// kind that reaches the summary line. Run with
+/// `cargo test --features metal,accelerate --lib commands::generate -- --ignored`.
+#[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH"]
+fn cli_video_fallback_appends_frame_images_and_clears_video() {
+    assert!(
+        mlxcel::video::ffmpeg_available(),
+        "this test was run explicitly, so a missing ffmpeg is a failure and not a skip"
+    );
+    let clip =
+        std::env::temp_dir().join(format!("mlxcel-cli-fallback-{}.mp4", uuid::Uuid::new_v4()));
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=10",
+            "-t",
+            "4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&clip)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "ffmpeg could not build the fixture clip");
+    let _clip_guard = mlxcel::video::TempFile::new(clip.clone());
+
+    let model = model_dir_with_config(gemma3_vlm_config());
+    // 4 s at --fps 2.0 samples to 8 frames, so a cap of 4 exercises the
+    // subsample rather than the identity path.
+    let expansion =
+        super::expand_cli_videos_to_frames(model.path(), std::slice::from_ref(&clip), 2.0, 4)
+            .expect("the fallback decodes the clip")
+            .expect("an image-only VLM must take the fallback");
+
+    assert_eq!(expansion.frame_paths.len(), 4);
+    assert_eq!(
+        expansion.lead_text,
+        "Here is a video as a sequence of 4 frames in chronological order."
+    );
+    for path in &expansion.frame_paths {
+        let bytes = fs::read(path).expect("each frame was written to disk");
+        assert_eq!(
+            &bytes[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "{} is not a PNG",
+            path.display()
+        );
+    }
+
+    // What `run_generate_once` then does with it: the frames join `--image` and
+    // the video list empties, so `compute_vlm_embeddings` never sees a video.
+    let mut images: Vec<PathBuf> = vec![PathBuf::from("user-own.png")];
+    let mut videos: Vec<PathBuf> = vec![clip.clone()];
+    images.extend(expansion.frame_paths.iter().cloned());
+    videos.clear();
+    assert_eq!(images.len(), 5);
+    assert!(videos.is_empty());
+
+    // The guards unlink the PNGs when the run ends.
+    let first = expansion.frame_paths[0].clone();
+    drop(expansion);
+    assert!(
+        !first.exists(),
+        "the frame temp files must not outlive the run"
+    );
 }

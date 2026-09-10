@@ -864,6 +864,99 @@ fn cli_video_content_part_count(model_path: &Path, num_videos: usize) -> usize {
     }
 }
 
+/// Frames a `--video` clip was replaced with, plus the guards that delete the
+/// temporary PNGs when the run ends (issue #1322).
+pub(crate) struct CliVideoFrames {
+    /// Temporary PNG paths, in chronological order, to append to `--image`.
+    pub(crate) frame_paths: Vec<std::path::PathBuf>,
+    /// Sentence telling the model the images are one clip.
+    pub(crate) lead_text: String,
+    /// RAII guards. Held for the life of the run; dropping them unlinks the
+    /// PNGs, so they must outlive the vision-tower read.
+    pub(crate) _guards: Vec<mlxcel::video::TempFile>,
+}
+
+/// Decode `--video` into ordered still images when the checkpoint has no
+/// native video path (issue #1322).
+///
+/// `Ok(None)` for a family that consumes the clip itself, and for a request
+/// with no `--video` at all, so the native paths in
+/// `generate_vlm::compute_vlm_embeddings` keep seeing their video list. A
+/// checkpoint with no vision tower also returns `Ok(None)`: there is nowhere to
+/// send frames, and the refusal it already produces names that.
+///
+/// The clip is decoded at `target_fps`, evenly subsampled to `max_frames`
+/// (first and last always kept), PNG-encoded, and written to the system temp
+/// directory. Server-side the equivalent rewrite happens in
+/// `server::chat_request::expand_video_parts_to_frames`.
+pub(crate) fn expand_cli_videos_to_frames(
+    model_path: &Path,
+    video_paths: &[std::path::PathBuf],
+    target_fps: f64,
+    max_frames: usize,
+) -> Result<Option<CliVideoFrames>> {
+    if video_paths.is_empty() {
+        return Ok(None);
+    }
+    let Ok(model_type) = mlxcel::models::get_model_type(model_path) else {
+        return Ok(None);
+    };
+    if mlxcel::models::model_type_has_native_video(model_type)
+        || !mlxcel::models::model_type_is_vision_capable(model_type)
+        || matches!(model_type, mlxcel::models::ModelType::MuseGlimmerVLM)
+    {
+        return Ok(None);
+    }
+    ensure!(
+        mlxcel::video::ffmpeg_available(),
+        "--video requires `ffmpeg` on PATH. Install ffmpeg (e.g. `brew install ffmpeg` on macOS \
+         or `apt install ffmpeg` on Linux) and retry."
+    );
+
+    let max_frames = max_frames.max(mlxcel::video::MIN_FALLBACK_MAX_FRAMES);
+    let temp_dir = std::env::temp_dir();
+    let mut frame_paths = Vec::new();
+    let mut guards = Vec::new();
+    let mut total_frames = 0usize;
+    for path in video_paths {
+        let frames = mlxcel::video::load_video(path, Some(target_fps), None)
+            .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
+        let sampled = frames.len();
+        let kept = mlxcel::video::subsample_evenly(frames, max_frames);
+        let encoded = mlxcel::video::frames_to_png(&kept)
+            .map_err(|err| anyhow!("Failed to encode frames of {}: {err}", path.display()))?;
+        println!(
+            "model_type={:?} has no native video path; sending {} of {} sampled frames from {} \
+             as ordered images",
+            model_type,
+            encoded.len(),
+            sampled,
+            path.display()
+        );
+        total_frames += encoded.len();
+        for png in encoded {
+            let frame_path =
+                temp_dir.join(format!("mlxcel-video-frame-{}.png", uuid::Uuid::new_v4()));
+            std::fs::write(&frame_path, png).map_err(|err| {
+                anyhow!(
+                    "Failed to write video frame {}: {err}",
+                    frame_path.display()
+                )
+            })?;
+            guards.push(mlxcel::video::TempFile::new(frame_path.clone()));
+            frame_paths.push(frame_path);
+        }
+    }
+
+    Ok(Some(CliVideoFrames {
+        frame_paths,
+        lead_text: format!(
+            "Here is a video as a sequence of {total_frames} frames in chronological order."
+        ),
+        _guards: guards,
+    }))
+}
+
 fn tokenize_prompt(
     tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
     prompt: &str,
@@ -2188,7 +2281,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
 /// One-shot (`-p`-supplied) text generation: the historical `generate` flow.
 fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Safe: the only caller (`run_generate`) guarantees `prompt` is `Some`.
-    let user_prompt = args
+    let mut user_prompt = args
         .generation
         .prompt
         .clone()
@@ -2329,6 +2422,29 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 );
             }
             Some(super::generate_falcon_ocr::load_layout_detections(path)?)
+        }
+        None => None,
+    };
+
+    // Video-to-frames fallback (issue #1322). Runs after every validator that
+    // reads `--video` (pipeline parallelism, `--output-audio`,
+    // `--layout-detections`, the Muse Glimmer guard) so none of them changes
+    // meaning, and before the prompt is rendered so the template emits one
+    // image placeholder per frame. On the fallback path
+    // `compute_vlm_embeddings` never sees a video: the clip is already an
+    // ordered run of `--image` inputs by then. The guards live until this
+    // function returns, which is after the vision tower has read the PNGs.
+    let _video_frame_guards = match expand_cli_videos_to_frames(
+        &args.model.model,
+        &args.generation.video,
+        args.generation.fps,
+        args.generation.video_max_frames,
+    )? {
+        Some(expansion) => {
+            args.generation.image.extend(expansion.frame_paths);
+            user_prompt = format!("{}\n\n{}", expansion.lead_text, user_prompt);
+            args.generation.video.clear();
+            Some(expansion._guards)
         }
         None => None,
     };

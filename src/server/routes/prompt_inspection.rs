@@ -107,6 +107,28 @@ async fn render_chat_prompt(
     if let Err(message) = super::chat::validate_chat_tool_inputs(request) {
         return Err(ErrorResponse::new(message, "invalid_request_error"));
     }
+    // These routes exist to answer "what prompt would the generating route
+    // build for this body?", so they have to run the same video-to-frames
+    // substitution the generating route does (issue #1322); otherwise the
+    // reported prompt would carry no image placeholders for a clip that
+    // /v1/chat/completions expands into as many as sixteen. Rewritten on a
+    // local copy because the caller's request is borrowed and these handlers
+    // never generate.
+    let mut expanded;
+    let request = if state.media_support.video_frames_fallback && !request.video_urls().is_empty() {
+        expanded = request.clone();
+        crate::server::chat_request::expand_video_parts_to_frames(
+            &mut expanded,
+            state.media_support,
+            crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
+            state.display_model_id(),
+        )
+        .await
+        .map_err(|message| ErrorResponse::new(message, "invalid_request_error"))?;
+        &expanded
+    } else {
+        request
+    };
     let prompt_cache_enabled = state.prompt_cache.is_some();
     prepare_chat_request_with_cache(
         &state.chat_template,

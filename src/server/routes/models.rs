@@ -84,7 +84,7 @@ fn b10621_model_info(state: &AppState, created: i64) -> serde_json::Value {
 /// The b10621 Ollama-compat block (`get_res_models`'s `models` array entry).
 fn b10621_ollama_entry(state: &AppState) -> serde_json::Value {
     let multimodal =
-        state.media_support.image || state.media_support.video || state.media_support.audio;
+        state.media_support.image || state.media_support.video() || state.media_support.audio;
     let capabilities = if multimodal {
         serde_json::json!(["completion", "multimodal"])
     } else {
