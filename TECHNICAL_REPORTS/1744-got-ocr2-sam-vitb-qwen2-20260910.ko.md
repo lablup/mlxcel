@@ -194,6 +194,7 @@ bf16 변환본으로 `mlxcel-server`, 페이지를 `data:image/png;base64` conte
 ## 5. 검증하지 못한 것
 
 - **`cargo test --workspace --profile test-fast --features metal,accelerate`는 실행하지 못했다.** 이슈가 인수 조건으로 적었지만 이 호스트는 CUDA를 쓰는 Linux aarch64다. 여기에는 Metal도 Accelerate도 없다. 위의 CUDA 등가물이 실제로 실행한 것이고 이 변경이 건드리는 모듈로 범위를 좁혔다. 전체 워크스페이스 스위트는 머지 게이트에 맡긴다.
+- **범위를 지정하지 않은 `cargo test --lib --features cuda`는 이 호스트에서 게이트로 쓸 수 없고, 게이트로 삼지도 않았다.** `terminate called ... cudaStreamEndCapture(stream, &handle_) failed`로 테스트 프로세스 전체가 죽는다. 테스트 실패가 아니라 C++ abort다. 이 브랜치에서 연속 두 번 돌렸을 때 서로 무관한 지점에서 죽었다. 한 번은 `loading::vlm`에서 2184개 통과 후, 한 번은 `audio::phi4mm`에서 1366개 통과 후다. 그래프 캡처와 아무 상관 없는 브랜치들에서도 이 호스트가 보여 온 병렬 CUDA 그래프 캡처 시그니처다. 실제로 게이트로 삼은 것은 4.6의 범위 지정 스위트다. 나중에 전체 스위트를 돌리는 오케스트레이터는 같은 abort를 예상하고, 여기에 귀속하기 전에 베이스 브랜치를 대조 실행해야 한다.
 - **4비트 변환본은 greedy 일치 게이트에 넣지 않았다.** CLI와 서버 양쪽에서 페이지를 정확히 옮겨 적고 양자화 블록도 `got_text_config`로 단위 테스트되지만, 레퍼런스 오라클은 원본 fp32 가중치로 돌므로 양자화된 greedy 일치는 의미 있는 비교가 아니고 주장하지 않았다. 고정 페이지에서 bf16과 한 토큰 다른 것은 게이트가 아니라 위에 기록해 뒀다. 8비트 변환본은 내려받지 않았고 전혀 돌리지 않았다.
 - **사진 이미지는 오라클과 비교하지 않았다.** mlxcel의 bicubic 리사이즈는 `image`의 Catmull-Rom이고 업스트림은 PIL의 것이라, 사진은 리샘플된 픽셀이 조금 달라 greedy 토큰 일치를 기대할 수 없다. 위에서 쓴 고대비 렌더링 페이지는 필터에 거의 무관하고, 그래서 토큰 단위 비교의 대상이다.
 - **세밀 영역 모드는 레퍼런스와 비교하지 않았다.** `[x1,y1,x2,y2] OCR with format: `과 `[red] OCR with format: `는 지시문으로 그대로 전달되며, 정답을 아는 영역이 있는 페이지로 태우지 않았다.
