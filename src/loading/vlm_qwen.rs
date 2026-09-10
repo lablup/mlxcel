@@ -415,7 +415,21 @@ fn load_qwen3_5_vlm_with_variant(
         parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3.5 vision config")?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
+    // Vendor fine-grained FP8 releases (`quant_method: "fp8"`, one bf16
+    // inverse scale per 128x128 block) declare no `quantization` block and
+    // ship raw E4M3 bytes. Reconstruct and requantize them to MLX-native
+    // mxfp8 before the weight map is split, so the sidecars are still paired
+    // with their tensors and the vision tower (which the released
+    // checkpoints leave unconverted) simply has none to consume.
+    let fp8_block = models::qwen_fp8_block_quantization(&full_config)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
     let raw_weights = load_vlm_weights_common(model_path, None)?;
+    let raw_weights = match fp8_block {
+        Some(detected) => models::requantize_block_fp8_weights(raw_weights, detected.block_rows)
+            .map_err(|error| anyhow::anyhow!("{error}"))?,
+        None => raw_weights,
+    };
     let mut text_weights = mlxcel_core::weights::WeightMap::new();
     let mut vision_weights = mlxcel_core::weights::WeightMap::new();
 
@@ -448,6 +462,11 @@ fn load_qwen3_5_vlm_with_variant(
             "quantization".to_string(),
             full_config["quantization"].clone(),
         );
+    }
+
+    if let Some(detected) = fp8_block {
+        models::merge_fp8_block_quantization(&mut text_config_val, detected)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
 
     let text_config: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config_val)

@@ -1847,6 +1847,16 @@ impl Qwen35Model {
                 .insert("quantization".to_string(), v["quantization"].clone());
         }
 
+        // Vendor fine-grained FP8 releases carry no `quantization` block at
+        // all: they declare `quantization_config: {quant_method: "fp8", ...}`
+        // and ship raw E4M3 bytes with a per-128x128-block inverse scale. The
+        // weights are converted to MLX-native mxfp8 below, so the config has
+        // to declare that layout before the model constructor reads it.
+        let fp8_block = crate::models::qwen_fp8_block_quantization(&v)?;
+        if let Some(detected) = fp8_block {
+            crate::models::merge_fp8_block_quantization(&mut text_config_val, detected)?;
+        }
+
         let config: Qwen35Config = serde_json::from_value(text_config_val)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
         config.validate_supported().map_err(|e| e.to_string())?;
@@ -1864,6 +1874,17 @@ impl Qwen35Model {
 
         println!("[Qwen3.5] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
+
+        // Reconstruct block-scaled FP8 tensors before any other sanitization:
+        // the sidecars are keyed off the original tensor names, and the pass
+        // replaces `<name>.weight` with a packed plane plus `<name>.scales`.
+        let weights = match fp8_block {
+            Some(detected) => {
+                println!("[Qwen3.5] Requantizing fine-grained FP8 weights to mxfp8...");
+                crate::models::requantize_block_fp8_weights(weights, detected.block_rows)?
+            }
+            None => weights,
+        };
 
         // Strip language_model. prefix and sanitize
         let weights = sanitize_moe_weights(weights, &config);
