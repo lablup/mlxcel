@@ -265,7 +265,13 @@ impl DynamicNtkRope {
     // Used by: InternLM3, InternLM2
     pub fn apply(&self, x: &MlxArray, offset: i32, seq_len: i32) -> UniquePtr<MlxArray> {
         let base_eff = self.base_for(seq_len);
-        let _ = self.log_dynamic_rescale_once(seq_len, base_eff);
+        // Ask the subscriber before the dedup set's lock, so a run without
+        // `RUST_LOG` never takes it. The gate sits here rather than inside
+        // `log_dynamic_rescale_once` because the tests call that directly and
+        // assert on its return value.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let _ = self.log_dynamic_rescale_once(seq_len, base_eff);
+        }
         mlxcel_core::fast_rope(
             x,
             self.dims,
@@ -278,6 +284,11 @@ impl DynamicNtkRope {
 
     /// Log the rescaled base the first time this schedule crosses
     /// `max_position_embeddings`, and return whether this call was that time.
+    ///
+    /// The value reported is a snapshot taken at that first crossing, not the
+    /// base in force for the rest of the run: the key below deliberately omits
+    /// `seq_len`, so a request that goes on to a longer context rescales
+    /// further without logging again.
     ///
     /// This is a validation aid for the case a short prompt cannot exercise
     /// (`base_for` is a no-op below the boundary), not telemetry, so it is

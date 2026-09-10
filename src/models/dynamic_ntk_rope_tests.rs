@@ -35,6 +35,13 @@ const DIMS: i32 = 128;
 const BASE: f32 = 50_000_000.0;
 const MAX_POS: usize = 32768;
 
+// `the_rescale_log_fires_once_per_schedule_not_once_per_process` asserts on the
+// process-global dedup set inside `log_dynamic_rescale_once`, so it reserves
+// the geometries `(64, {111_111.0, 222_222.0, 333_333.0}, 1024, {2.0, 4.0})`.
+// A new test that crosses `max_position_embeddings` on one of those would make
+// that test's first assertion depend on execution order. Use the constants
+// above, or a geometry no other test names.
+
 /// Parse a `rope_scaling` block the way a `config.json` delivers it.
 fn spec(json: &str) -> RopeScalingSpec {
     serde_json::from_str(json).unwrap_or_else(|err| panic!("block must parse: {err}\n{json}"))
