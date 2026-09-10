@@ -66,18 +66,6 @@
 
 use crate::models::rope_utils::{RopeScalingSpec, is_usable_scalar, printable_label};
 use mlxcel_core::{MlxArray, UniquePtr};
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Guards the one-time `base_eff` debug log in [`DynamicNtkRope::apply`].
-///
-/// `DynamicNtkRope` is `Copy` and rebuilt once per attention block (32 layers
-/// for the checkpoint this schedule was validated against), and `apply` runs
-/// once per layer on every forward past `max_position_embeddings`. None of
-/// that identifies the struct across calls, so a per-instance guard cannot
-/// dedupe it; a single process-wide flag is what turns "log every layer at
-/// every decode step past the boundary" into "log the rescale once, as a
-/// validation aid, not as telemetry."
-static DYNAMIC_BASE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The three `rope_scaling` schemes the InternLM families accept.
 ///
@@ -223,15 +211,9 @@ impl DynamicNtkRope {
 
     /// Whether `apply` rotates adjacent pairs (`true`) or the two halves of
     /// the head (`false`).
-    // Used by: InternLM3, InternLM2 (tests)
+    // Used by: InternLM2 (tests)
     pub fn traditional(&self) -> bool {
         self.traditional
-    }
-
-    /// The rotary dimension the schedule was built with.
-    // Used by: InternLM3, InternLM2 (tests)
-    pub fn dims(&self) -> i32 {
-        self.dims
     }
 
     /// The position scale to hand `fast_rope`.
@@ -283,7 +265,7 @@ impl DynamicNtkRope {
     // Used by: InternLM3, InternLM2
     pub fn apply(&self, x: &MlxArray, offset: i32, seq_len: i32) -> UniquePtr<MlxArray> {
         let base_eff = self.base_for(seq_len);
-        self.log_dynamic_rescale_once(seq_len, base_eff);
+        let _ = self.log_dynamic_rescale_once(seq_len, base_eff);
         mlxcel_core::fast_rope(
             x,
             self.dims,
@@ -294,26 +276,63 @@ impl DynamicNtkRope {
         )
     }
 
-    /// Log the rescaled base the first time any dynamic schedule crosses
-    /// `max_position_embeddings` in this process.
+    /// Log the rescaled base the first time this schedule crosses
+    /// `max_position_embeddings`, and return whether this call was that time.
     ///
     /// This is a validation aid for the case a short prompt cannot exercise
     /// (`base_for` is a no-op below the boundary), not telemetry, so it is
-    /// gated at debug level, fires only in [`DynamicNtkRopeMode::Dynamic`],
-    /// and fires once total rather than once per layer or per decode step;
-    /// see [`DYNAMIC_BASE_LOGGED`]. It never touches `base_eff`, so `apply`'s
-    /// arithmetic is unaffected whether or not `RUST_LOG` is set.
-    fn log_dynamic_rescale_once(&self, seq_len: i32, base_eff: f32) {
+    /// gated at debug level and fires only in [`DynamicNtkRopeMode::Dynamic`].
+    /// It never touches `base_eff`, so `apply`'s arithmetic is unaffected
+    /// whether or not `RUST_LOG` is set.
+    ///
+    /// Deduplicated on the schedule's own parameters rather than through a
+    /// process-wide flag, for the reason
+    /// `rope_utils::report_unusable_rope_scaling_once` already records: a
+    /// process can hold more than one model (the server's `--models-dir`
+    /// routing, the pipeline stage executors, the tensor-parallel ranks), and
+    /// a single flag would let the first checkpoint past the boundary silence
+    /// every later one. `DynamicNtkRope` is `Copy` and carries no label, so
+    /// those parameters are also what identifies the emitted line: two
+    /// checkpoints that agree on all four are the same schedule and have
+    /// nothing to distinguish in the log anyway.
+    ///
+    /// The lock is taken only past the boundary, where a decode step already
+    /// costs on the order of a second at the context lengths that reach it.
+    fn log_dynamic_rescale_once(&self, seq_len: i32, base_eff: f32) -> bool {
+        use std::collections::BTreeSet;
+        use std::sync::{Mutex, OnceLock};
+
+        /// `(dims, base bits, max_position_embeddings, factor bits)`. Raw bits
+        /// rather than the `f32`s so the key is `Ord` without a total-order
+        /// wrapper; `from_scaling` has already rejected NaN through
+        /// `is_usable_scalar`, so the bit pattern is a faithful identity here.
+        type ScheduleKey = (i32, u32, usize, u32);
+
+        static LOGGED: OnceLock<Mutex<BTreeSet<ScheduleKey>>> = OnceLock::new();
+
         let DynamicNtkRopeMode::Dynamic { factor } = self.mode else {
-            return;
+            return false;
         };
         let max_pos = i64::try_from(self.max_position_embeddings).unwrap_or(i64::MAX);
         if (seq_len as i64) <= max_pos {
-            return;
+            return false;
         }
-        if DYNAMIC_BASE_LOGGED.swap(true, Ordering::Relaxed) {
-            return;
+
+        let key: ScheduleKey = (
+            self.dims,
+            self.base.to_bits(),
+            self.max_position_embeddings,
+            factor.to_bits(),
+        );
+        let logged = LOGGED.get_or_init(|| Mutex::new(BTreeSet::new()));
+        // A poisoned lock means another thread panicked while logging; the set
+        // is still a valid set, and losing the line is worse than reusing it.
+        let mut logged = logged.lock().unwrap_or_else(|err| err.into_inner());
+        if !logged.insert(key) {
+            return false;
         }
+        drop(logged);
+
         tracing::debug!(
             seq_len,
             max_position_embeddings = self.max_position_embeddings,
@@ -323,6 +342,7 @@ impl DynamicNtkRope {
             base_eff,
             "dynamic NTK rope base rescaled past max_position_embeddings"
         );
+        true
     }
 }
 
