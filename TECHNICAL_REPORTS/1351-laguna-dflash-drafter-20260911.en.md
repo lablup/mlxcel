@@ -3,7 +3,7 @@
 **Date**: 2026-09-11
 **Author**: mlxcel maintainers
 **Reviewer**: -
-**Status**: Completed (Linux/CUDA host; the `metal,accelerate` workspace gate was not runnable here and the throughput criterion is met only at `--draft-block-size 8` on code text)
+**Status**: Completed (Linux/CUDA host; the `metal,accelerate` workspace gate was not runnable here, the block-versus-chain exactness probe declines this host by default, and the throughput criterion is met only at `--draft-block-size 8` on code text with the override)
 **Languages**: Rust, Markdown
 **Risk Level**: Medium (a new drafter family in `mlxcel-core`, a `SpeculativeTarget` impl on the Laguna target, a generalized server DFlash burst target trait that the Qwen 3.5 path now also goes through, and a new offline `mlxcel generate --draft-kind dflash` arm)
 
@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-Poolside ships a DFlash speculator for every Laguna release, but mlxcel's DFlash machinery was hard-wired to the Qwen 3.5 drafter shape. This PR adds `mlxcel_core::drafter::laguna_dflash` (fused QKV, per-head softplus gate, `aux_hidden_norms`, sliding-window context attention), implements `SpeculativeTarget` on the Laguna target with rollback across dense and rotating caches, routes `model_type: laguna` drafters through `load_drafter`, and wires the pairing into both `mlxcel-server` and offline `mlxcel generate`. On Laguna XS 2.1 NVFP4 with the published drafter on a GB10, greedy output equals classic decode except at bf16 logit ties, code completions accept 2.6 to 3.9 proposals per round, and throughput beats classic decode only at `--draft-block-size 8` (1.14x); the default block of 16 is slower on this host.
+Poolside ships a DFlash speculator for every Laguna release, but mlxcel's DFlash machinery was hard-wired to the Qwen 3.5 drafter shape. This PR adds `mlxcel_core::drafter::laguna_dflash` (fused QKV, per-head softplus gate, `aux_hidden_norms`, sliding-window context attention), implements `SpeculativeTarget` on the Laguna target with rollback across dense and rotating caches, routes `model_type: laguna` drafters through `load_drafter`, and wires the pairing into both `mlxcel-server` and offline `mlxcel generate`. The pairing runs behind the same measured block-versus-chain exactness gate as the LFM2 and Muse Glimmer arms. On Laguna XS 2.1 NVFP4 with the published drafter on a GB10 the probe declines (107246 of 200704 logit bytes differ at the first verify position), so DFlash is off by default there; with `MLXCEL_MTP_ALLOW_INEXACT=1` greedy output equals classic decode except at bf16 logit ties, code completions accept 2.6 to 3.9 proposals per round, and throughput beat classic decode only once, at `--draft-block-size 8` on an idle host (1.14x); a rerun under concurrent load measured 0.82x, and the default block of 16 is slower on this host.
 
 ---
 
@@ -45,7 +45,7 @@ Config values from the drafter's `config.json` are validated before any weight i
 
 ### 2.2 Performance
 
-Measured on a GB10 (sm_121), NVFP4 target, bf16 drafter, greedy, 128 tokens, `mlxcel generate`:
+Measured on a GB10 (sm_121), NVFP4 target, bf16 drafter, greedy, 128 tokens, `mlxcel generate` with `MLXCEL_MTP_ALLOW_INEXACT=1` (the exactness probe declines this host):
 
 | Prompt | Classic tok/s | DFlash block 16 tok/s | Mean accepted length | Greedy ids |
 |-------|------|------|------|------|
@@ -56,7 +56,7 @@ Measured on a GB10 (sm_121), NVFP4 target, bf16 drafter, greedy, 128 tokens, `ml
 | code 1 (`lru_get` body) | 30.81 | 27.13 | 3.88 | differ at 69 (one-ulp tie) |
 | code 2 (`debounce` body) | 32.35 | 21.87 | 2.63 | differ at 103 (one-ulp tie) |
 
-Block-size sweep on code 0 (classic 28.70 tok/s): block 4 gives 25.84 tok/s at 2.20 accepted, block 6 gives 30.45 at 3.00, block 8 gives 32.61 at 3.57, block 12 gives 29.87 at 3.74, block 16 gives 24.81 at 3.27. A 16-row verify forward costs about four single-token decodes on this host (verify 130 ms per round against 35 ms per classic token), so the default block only pays off above roughly five accepted tokens per round.
+Block-size sweep on code 0 (classic 28.70 tok/s): block 4 gives 25.84 tok/s at 2.20 accepted, block 6 gives 30.45 at 3.00, block 8 gives 32.61 at 3.57, block 12 gives 29.87 at 3.74, block 16 gives 24.81 at 3.27. A post-merge rerun of code 0 reproduced the acceptance counters and the tie positions exactly (3.27 at block 16, 3.57 at block 8) but not the block-8 speed-up: 24.54 tok/s against a 30.00 tok/s classic run, with another agent's cargo builds running on the host at the time. The block-8 advantage is therefore a single quiet-host measurement, not a reliable property of this pairing on the GB10. A 16-row verify forward costs about four single-token decodes on this host (verify 130 ms per round against 35 ms per classic token), so the default block only pays off above roughly five accepted tokens per round.
 
 The drafter's per-position accuracy along the reference path (probe b, shadow drafter): code 0 gives 0.88, 1.00, 0.75, 0.62, 0.38, 0.25 for d_0 to d_5 (mean accepted prefix 4.25 over 8 rounds); chat 0 gives 0.88, 0.50, 0.25, 0.12 (mean 1.38). Poolside's own numbers with a bf16 target are 3.55 to 4.57 on GSM8K, HumanEval, EvalPlus and Math.
 
@@ -72,7 +72,7 @@ Server path: the same request through `mlxcel-server --draft-model ... --draft-k
 
 - **Test Coverage**: 7 core unit tests (config contract, sanitizer, context window, in-block causality, window visibility, RoPE sensitivity), 2 binary greedy-invariant tests (oracle drafter with forced accept lengths 0, 1, 2 and full across the window wrap; the real drafter with random weights), 1 detection test, and an ignored real-checkpoint probe.
 - **Code Complexity**: the drafter is a sibling module of `dflash`, sharing `DFlashMlp` and the sampling helpers; no changes to the round loop.
-- **Technical Debt**: no DFlash exactness gate exists (see follow-ups).
+- **Technical Debt**: the gate is the shared MTP one, so its decline log line still says "MTP declined"; the burst and the offline arm add a DFlash-named line after it.
 
 ---
 
@@ -142,7 +142,7 @@ None.
 
 **Concept:** a `T = K` verify block and `K` single-token decodes reduce the same dot products in different orders on the `M >= 2` and `M = 1` quantized matmul kernels. Where the target's top-2 logits are equal in bf16, the argmax can differ.
 
-**Application in this PR:** the ignored `laguna_real_checkpoint_probe` compares both arms on the real checkpoint and prints the top-2 margins at every disagreement: every one of the seven observed disagreements across five prompts sat at a chain-arm margin of 0.0 or 0.125 (one bf16 ulp at logits of 21 to 34).
+**Application in this PR:** the ignored `laguna_real_checkpoint_probe` compares both arms on the real checkpoint and prints the top-2 margins at every disagreement: every one of the seven observed disagreements across five prompts sat at a chain-arm margin of 0.0 or 0.125 (one bf16 ulp at logits of 21 to 34). The production gate (`dflash_exactness_allows`) compares the two arms byte for byte on synthetic inputs and declines the host when they differ, which on this GB10 they do.
 
 ### 5.2 Measuring a drafter without rejection feedback
 
@@ -193,6 +193,7 @@ None.
 | Hash | Type | Message |
 |------|------|---------|
 | `154aafa1` | feat | add the Laguna DFlash drafter and target |
+| `d64c73af` | merge | integrate Laguna into main's `DFlashTargetModel` design with the exactness gate |
 | `76f16daf` | test | track the oracle drafter's reference position |
 | `fa8f1919` | test | add a real-checkpoint DFlash probe and a RoPE sensitivity test |
 
@@ -202,7 +203,7 @@ None.
 
 ### Required
 
-- [ ] Decide whether DFlash should fail closed on block-versus-chain ties the way the MTP exactness gate does (`MLXCEL_MTP_ALLOW_INEXACT`), for Laguna and for Qwen 3.5 alike.
+- [ ] Decide whether the Qwen 3.5 DFlash arm should run the same measured gate Laguna, LFM2 and Muse Glimmer now run (it keeps the permissive default).
 - [ ] Run the `metal,accelerate` workspace gate and the block-size sweep on an Apple Silicon host; the block 8 recommendation is GB10-specific.
 
 ### Monitoring Required
