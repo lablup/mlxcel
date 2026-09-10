@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Config-level tests for InternLM2's rotary schedule (#1324).
+//! Config-level tests for InternLM2's rotary schedule (#1324, then #1320).
 //!
 //! The defect here was one stage earlier than `internlm3`'s: `ModelArgs` did
 //! not declare `rope_scaling`, so the block never became a value at all. A
 //! parse test is the only thing that catches that, because a dropped block
 //! produces the correct schedule for every sequence inside
 //! `max_position_embeddings` and is invisible below it.
+//!
+//! The first three tests came with #1324's shared helper. The rest came with
+//! #1320, which asked for this family's own `ModelArgs::rope()` plumbing to be
+//! covered rather than only the helper's arithmetic.
 
 use super::ModelArgs;
 use crate::models::dynamic_ntk_rope::DynamicNtkRopeMode;
