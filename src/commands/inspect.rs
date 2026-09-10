@@ -153,19 +153,29 @@ fn run_tokenize(model_path: &Path, corpus: &Path, whole: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Split on `\n` and drop the empty tail a newline-terminated file leaves,
-    // so a 1000-line file yields exactly 1000 arrays. A `\r` before the
-    // newline stays part of the line.
-    let mut lines: Vec<&str> = content.split('\n').collect();
-    if content.ends_with('\n') {
-        lines.pop();
-    }
-    for line in lines {
+    for line in corpus_lines(&content) {
         let ids = tokenizer.encode_with_special(line, false, false)?;
         writeln!(out, "{}", serde_json::to_string(&ids)?)?;
     }
     out.flush()?;
     Ok(())
+}
+
+/// Split file content into the lines `run_tokenize` encodes one at a time.
+///
+/// Splits on `\n` and drops the empty tail a newline-terminated file leaves,
+/// so a 1000-line file yields exactly 1000 arrays. A `\r` before the newline
+/// stays part of the line, matching a reference tokenizer reading the file in
+/// text mode without universal-newline translation. Content with no trailing
+/// `\n` (including empty content) is not adjusted, so `""` yields one empty
+/// line the way `"".split('\n')` does, and a file missing its final newline
+/// still gets that last partial line encoded rather than silently dropped.
+fn corpus_lines(content: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    if content.ends_with('\n') {
+        lines.pop();
+    }
+    lines
 }
 
 /// Parse the user-facing `--quant` label into a typed [`QuantHint`].
@@ -212,5 +222,40 @@ mod tests {
             msg.contains("turbo3"),
             "expected label echoed back in: {msg}"
         );
+    }
+
+    #[test]
+    fn corpus_lines_drops_the_trailing_empty_tail() {
+        // A trailing newline must not produce a spurious 4th (empty) line.
+        assert_eq!(corpus_lines("a\nb\nc\n"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn corpus_lines_keeps_a_final_line_with_no_trailing_newline() {
+        // No trailing `\n`: the last partial line is still encoded, not
+        // dropped as if it were the newline-terminated empty tail.
+        assert_eq!(corpus_lines("a\nb\nc"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn corpus_lines_keeps_a_trailing_cr_as_part_of_the_line() {
+        assert_eq!(corpus_lines("a\r\nb\r\n"), vec!["a\r", "b\r"]);
+    }
+
+    #[test]
+    fn corpus_lines_on_empty_content_yields_one_empty_line() {
+        // Matches `"".split('\n')`, which yields `[""]`, not `[]`: empty
+        // content is not "ends with \n" so the empty-tail pop never fires.
+        assert_eq!(corpus_lines(""), vec![""]);
+    }
+
+    #[test]
+    fn corpus_lines_on_a_lone_newline_yields_one_empty_line() {
+        assert_eq!(corpus_lines("\n"), vec![""]);
+    }
+
+    #[test]
+    fn corpus_lines_preserves_blank_lines_in_the_middle() {
+        assert_eq!(corpus_lines("a\n\nb\n"), vec!["a", "", "b"]);
     }
 }

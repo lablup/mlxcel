@@ -224,3 +224,128 @@ fn chat_options_new_sets_conventional_defaults() {
     assert!(matches!(opts.kv_cache_mode, KVCacheMode::Fp16));
     assert!(opts.sampling.stop_token_ids.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Kimi K3 native rendering (#1338)
+// ---------------------------------------------------------------------------
+
+/// Number of BPE ranks the synthetic vocabulary holds: one per byte.
+const K3_SYNTHETIC_BASE: u32 = 256;
+
+/// The six control tokens `KimiK3Renderer::new` requires, in the order the
+/// real `tokenizer_config.json` names them.
+const K3_SYNTHETIC_CONTROL_NAMES: [&str; 6] = [
+    "[BOS]",
+    "[EOS]",
+    "<|end_of_msg|>",
+    "<|open|>",
+    "<|close|>",
+    "<|sep|>",
+];
+
+/// Build a throwaway Kimi K3 renderer over a single-byte vocabulary, mirroring
+/// `server::kimi_k3_chat_tests::synthetic_renderer`. The ids are meaningless,
+/// but the rendered text and control-token placement are vocabulary
+/// independent, so `render_k3_prompt`'s role mapping and reasoning threading
+/// are testable without the checkpoint's 2.8 MB `tiktoken.model`.
+fn k3_synthetic_renderer() -> (tempfile::TempDir, KimiK3Renderer) {
+    use base64::Engine;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut lines = String::new();
+    for (rank, byte) in (0u8..=255).enumerate() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode([byte]);
+        lines.push_str(&format!("{encoded} {rank}\n"));
+    }
+    std::fs::write(dir.path().join("tiktoken.model"), lines).expect("write synthetic tiktoken");
+
+    let decoder: serde_json::Map<String, serde_json::Value> = K3_SYNTHETIC_CONTROL_NAMES
+        .iter()
+        .enumerate()
+        .map(|(offset, name)| {
+            (
+                (K3_SYNTHETIC_BASE + offset as u32).to_string(),
+                serde_json::json!({"content": name, "special": true}),
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.path().join("tokenizer_config.json"),
+        serde_json::to_vec(&serde_json::json!({ "added_tokens_decoder": decoder }))
+            .expect("serialize config"),
+    )
+    .expect("write tokenizer_config.json");
+
+    let tiktoken = mlxcel::tokenizer::TiktokenTokenizer::from_file_with_family(
+        &dir.path().join("tiktoken.model"),
+        dir.path(),
+        mlxcel::tokenizer::TiktokenFamily::KimiK3,
+    )
+    .expect("load the synthetic K3 vocabulary");
+    let tokenizer = Arc::new(MlxcelTokenizer::Tiktoken(tiktoken));
+    let renderer = KimiK3Renderer::new(tokenizer).expect("synthetic renderer");
+    (dir, renderer)
+}
+
+fn system(content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "system".to_string(),
+        content: content.to_string(),
+    }
+}
+
+#[test]
+fn render_k3_prompt_maps_known_chat_roles() {
+    let (_dir, renderer) = k3_synthetic_renderer();
+    let convo = vec![system("be nice"), user("hi"), assistant("hello")];
+    let reasonings = vec![None, None, None];
+
+    let prompt = render_k3_prompt(&renderer, &convo, &reasonings).expect("render");
+    let text = prompt.text();
+    assert!(text.contains(r#"role="system""#), "text: {text}");
+    assert!(text.contains(r#"role="user""#), "text: {text}");
+    assert!(text.contains(r#"role="assistant""#), "text: {text}");
+}
+
+#[test]
+fn render_k3_prompt_defaults_an_unrecognized_role_to_user() {
+    // `ChatMessage::role` is a free-form string on the CLI transcript type;
+    // anything other than "assistant"/"system"/"tool" must fall back to
+    // `Role::User` rather than panicking on the match.
+    let (_dir, renderer) = k3_synthetic_renderer();
+    let convo = vec![ChatMessage {
+        role: "narrator".to_string(),
+        content: "once upon a time".to_string(),
+    }];
+
+    let prompt = render_k3_prompt(&renderer, &convo, &[None]).expect("render");
+    assert!(prompt.text().contains(r#"role="user""#));
+}
+
+#[test]
+fn render_k3_prompt_returns_the_native_form_with_ids() {
+    let (_dir, renderer) = k3_synthetic_renderer();
+    let convo = vec![user("hi")];
+
+    let prompt = render_k3_prompt(&renderer, &convo, &[None]).expect("render");
+    match prompt {
+        TurnPrompt::Native { text, ids } => {
+            assert!(!text.is_empty());
+            assert!(!ids.is_empty());
+        }
+        TurnPrompt::Text(_) => panic!("K3 rendering must produce the native ids form"),
+    }
+}
+
+#[test]
+fn render_k3_prompt_threads_a_prior_assistant_turns_reasoning_into_its_own_channel() {
+    // `reasonings` is index-aligned with `conversation` (see `run_chat`); a
+    // prior assistant turn's reasoning must reach that turn's `think` channel
+    // in the re-rendered history, not just the live generation prompt.
+    let (_dir, renderer) = k3_synthetic_renderer();
+    let convo = vec![user("hi"), assistant("hello"), user("and then?")];
+    let reasonings = vec![None, Some("mulling it over".to_string()), None];
+
+    let prompt = render_k3_prompt(&renderer, &convo, &reasonings).expect("render");
+    assert!(prompt.text().contains("mulling it over"));
+}
