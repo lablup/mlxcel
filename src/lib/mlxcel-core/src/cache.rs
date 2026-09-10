@@ -5383,17 +5383,21 @@ impl RotatingKVCache {
                 ));
             }
             let physical_len = k_shape[2];
-            if state.buffer_size > 0 {
-                if state.idx > physical_len {
-                    return Err(format!(
-                        "RotatingKVCache::restore_fp16_snapshot_state buffered idx {} exceeds physical length {}",
-                        state.idx, physical_len
-                    ));
-                }
-            } else if state.idx > state.max_size {
+            // The write position has to land inside the buffer it is being
+            // restored against, and that is the whole of the constraint. It is
+            // deliberately not `idx <= max_size`: `update_concat` stores more
+            // than the window after a prefill longer than it and pins `idx` to
+            // the stored length, so a snapshot captured between that prefill
+            // and the next single-token step legitimately carries
+            // `idx == physical_len > max_size` (#1335). Rejecting that shape
+            // sent every over-window first turn down a cold prefill. The
+            // physical bound still catches a genuinely corrupt idx, and it is
+            // the tighter check while the buffer is still growing towards
+            // `max_size`.
+            if state.idx > physical_len {
                 return Err(format!(
-                    "RotatingKVCache::restore_fp16_snapshot_state ring idx {} exceeds max_size {}",
-                    state.idx, state.max_size
+                    "RotatingKVCache::restore_fp16_snapshot_state idx {} exceeds physical length {}",
+                    state.idx, physical_len
                 ));
             }
         }
