@@ -378,6 +378,18 @@ pub struct ModelMediaSupport {
     /// Currently this is exactly the Gemma 4 VLM family; expand the
     /// detection logic alongside any new video-capable model.
     pub video: bool,
+    /// `true` when the loaded model accepts `video_url` and `input_audio`
+    /// content blocks in the *same* request (issue #1349).
+    ///
+    /// Strictly narrower than `audio && video`: a family can consume each
+    /// modality alone and still have no merge path that scatters both into one
+    /// token stream, which is why this is its own flag rather than a
+    /// conjunction. Only the encoder-free Gemma 4 Unified model qualifies
+    /// today. The check lives at the HTTP boundary because request preparation
+    /// never sees the loaded model; `LoadedModel::supports_video_with_audio`
+    /// is the worker-side sibling and the backstop for routes that skip the
+    /// boundary.
+    pub video_with_audio: bool,
 }
 
 impl ModelMediaSupport {
@@ -394,6 +406,7 @@ impl ModelMediaSupport {
             image: false,
             audio: false,
             video: false,
+            video_with_audio: false,
         }
     }
 }

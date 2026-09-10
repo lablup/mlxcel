@@ -1173,10 +1173,17 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
     // "text-only".
     let multimodal = crate::model_metadata::is_vlm_model_type(model_type);
 
+    // Video *and* audio in one request needs a merge path that scatters both
+    // into a single token stream, which today is only the encoder-free Gemma 4
+    // Unified model (issue #1349). Mirror `LoadedModel::supports_video_with_audio`
+    // when another family gains it.
+    let video_with_audio = matches!(model_type, ModelType::Gemma4Unified);
+
     ModelMediaSupport {
         image: multimodal,
         audio: multimodal,
         video,
+        video_with_audio,
     }
 }
 

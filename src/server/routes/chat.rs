@@ -1942,7 +1942,8 @@ async fn stream_chat_completion(
 /// can refuse the request without paying canonicalisation / disk-I/O cost.
 /// Retained as the narrow `video_url`-only predicate the modality gate
 /// subsumes; the shared `media_capability_rejection` covers image, audio and
-/// video together (issue #1451).
+/// video together (issue #1451), plus the video+audio combination for a
+/// checkpoint that takes each alone but cannot merge both (issue #1349).
 #[cfg_attr(not(test), allow(dead_code))]
 fn request_has_video_blocks(request: &ChatCompletionRequest) -> bool {
     !request.video_urls().is_empty()

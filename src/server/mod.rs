@@ -120,7 +120,9 @@ pub use media::{
     DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,
     configure_media_admission, media_admission_disabled,
 };
-pub(crate) use media::{current_image_input_limits, media_capability_rejection};
+pub(crate) use media::{
+    current_image_input_limits, is_combined_video_audio_rejection, media_capability_rejection,
+};
 pub use media_net::{configure_private_media_urls, private_media_urls_allowed_from_env};
 pub use model_provider::{GenerationResult, ModelProvider};
 pub use model_source::{

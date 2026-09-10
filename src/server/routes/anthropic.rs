@@ -64,6 +64,41 @@ use super::chat::{
     build_prompt_cache_request_context, parse_priority_header, validate_chat_tool_inputs,
 };
 
+/// Render a media-capability rejection from the HTTP boundary in this route's
+/// Anthropic error envelope.
+///
+/// A per-modality refusal ("this checkpoint has no audio tower at all") is a
+/// capability gap the client cannot act on, and keeps the
+/// `501 not_supported_error` shape issue #1451 gave it. The video+audio
+/// *combination* refusal is not a capability gap: each modality is accepted on
+/// its own and only the pair has no merge path, so the client fixes it by
+/// dropping one of the two parts. That is a request error, and it keeps the
+/// boundary's own `400 invalid_request_error`.
+///
+/// The combination arm is unreachable through this route today, and is written
+/// anyway rather than left for later. `AnthropicContentBlock` has no video or
+/// audio variant, so an inbound `/v1/messages` request carries neither and
+/// `media_capability_rejection` can only ever hand this function the image
+/// refusal. What the arm buys is that the day that schema gains a video block,
+/// a client-fixable request error does not arrive as a `501` saying the
+/// checkpoint cannot do it. The cost is one status comparison.
+fn media_rejection_response(
+    rejection: crate::server::types::ErrorResponse,
+) -> AnthropicErrorResponse {
+    if crate::server::is_combined_video_audio_rejection(&rejection) {
+        return AnthropicErrorResponse::new(
+            rejection.status,
+            rejection.error.message,
+            "invalid_request_error",
+        );
+    }
+    AnthropicErrorResponse::new(
+        StatusCode::NOT_IMPLEMENTED,
+        rejection.error.message,
+        "not_supported_error",
+    )
+}
+
 fn generation_error_to_response(err: anyhow::Error) -> Response {
     if err.downcast_ref::<QueueFullError>().is_some() {
         AnthropicErrorResponse::overloaded("All slots are busy. Please try again later.")
@@ -110,12 +145,7 @@ pub async fn anthropic_messages(
         state.media_support,
         state.display_model_id(),
     ) {
-        return AnthropicErrorResponse::new(
-            StatusCode::NOT_IMPLEMENTED,
-            rejection.error.message,
-            "not_supported_error",
-        )
-        .into_response();
+        return media_rejection_response(rejection).into_response();
     }
 
     // Reject requests with no effective input before any model dispatch
@@ -949,5 +979,81 @@ mod tests {
             r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"Hello there"}]}"#,
         );
         assert!(request_has_effective_input(&chat_request));
+    }
+
+    // -- media capability rejections in the Anthropic envelope (issue #1349).
+
+    fn chat_request_with_media_parts(
+        parts: serde_json::Value,
+    ) -> crate::server::types::request::ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "gemma-4-12b-it-4bit",
+            "messages": [{"role": "user", "content": parts}],
+        }))
+        .expect("the media-part fixture parses as a chat request")
+    }
+
+    #[test]
+    fn combined_video_audio_refusal_renders_as_a_client_error_in_the_anthropic_envelope() {
+        // A checkpoint that takes each modality alone but has no merge path for
+        // the pair. `media_rejection_response` is exercised directly because
+        // `AnthropicContentBlock` has no video or audio variant, so no
+        // `/v1/messages` body can drive this arm end to end; the fixture is an
+        // OpenAI-shaped request because that is the type the shared boundary
+        // takes. What the test pins is the switch itself: a combination refusal
+        // is a client error and must not be flattened into the per-modality
+        // 501 the arm below returns.
+        let each_alone = crate::server::state::ModelMediaSupport {
+            image: true,
+            audio: true,
+            video: true,
+            video_with_audio: false,
+        };
+        let request = chat_request_with_media_parts(serde_json::json!([
+            {"type": "video_url", "video_url": {"url": "file:///clip.mp4"}},
+            {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "wav"}},
+        ]));
+        let rejection =
+            crate::server::media_capability_rejection(&request, each_alone, "gemma-4-12b-it-4bit")
+                .expect("video plus audio is refused without a merge path");
+        let rendered = media_rejection_response(rejection);
+
+        assert_eq!(rendered.status, StatusCode::BAD_REQUEST);
+        assert_eq!(rendered.error.error_type, "invalid_request_error");
+        assert_eq!(
+            rendered.error.message,
+            "Combined video and audio inputs are not supported"
+        );
+    }
+
+    #[test]
+    fn per_modality_refusal_renders_as_a_capability_gap_in_the_anthropic_envelope() {
+        // The other half of the same switch: a checkpoint with no audio tower
+        // at all cannot be talked into serving audio by editing the request, so
+        // it keeps the 501 `not_supported_error` shape issue #1451 gave it.
+        let no_audio = crate::server::state::ModelMediaSupport {
+            image: true,
+            audio: false,
+            video: true,
+            video_with_audio: false,
+        };
+        let request = chat_request_with_media_parts(serde_json::json!([
+            {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "wav"}},
+        ]));
+        let rejection =
+            crate::server::media_capability_rejection(&request, no_audio, "gemma-4-12b-it-4bit")
+                .expect("audio is refused by a checkpoint with no audio tower");
+        let rendered = media_rejection_response(rejection);
+
+        assert_eq!(rendered.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(rendered.error.error_type, "not_supported_error");
+        assert!(
+            rendered
+                .error
+                .message
+                .starts_with("audio input is not supported"),
+            "{}",
+            rendered.error.message
+        );
     }
 }

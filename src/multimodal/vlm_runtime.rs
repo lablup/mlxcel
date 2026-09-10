@@ -219,6 +219,15 @@ pub enum VlmPreparationSummary {
         frame_slots: usize,
         total_tokens: usize,
     },
+    /// Gemma 4 Unified expanded video frame runs and an audio run in the same
+    /// prompt (issue #1349). Reports both counts because a caller reading only
+    /// the frame slots could not tell whether the audio clip was consumed.
+    Gemma4VideoAudio {
+        video_count: usize,
+        frame_slots: usize,
+        audio_tokens: usize,
+        total_tokens: usize,
+    },
     /// Muse Glimmer expanded each `<|image|>` marker into
     /// `<|image_start|> <|patch|>*N <|image_end|>` and scattered the
     /// projected feature rows into the patch-token positions.

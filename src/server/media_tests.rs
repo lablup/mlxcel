@@ -1368,6 +1368,7 @@ fn media_capability_rejection_admits_what_the_checkpoint_supports() {
         image: true,
         audio: true,
         video: false,
+        video_with_audio: false,
     };
     let image_request = build_chat_request(vec![ContentPart::ImageUrl {
         image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
@@ -1388,6 +1389,124 @@ fn media_capability_rejection_admits_what_the_checkpoint_supports() {
         text: "hello".to_string(),
     }]);
     assert!(super::media_capability_rejection(&text, ModelMediaSupport::none(), "m").is_none());
+}
+
+#[test]
+fn media_capability_rejection_refuses_video_plus_audio_unless_the_model_merges_both() {
+    use crate::server::state::ModelMediaSupport;
+
+    let combined = vec![
+        ContentPart::Text {
+            text: "describe and transcribe".to_string(),
+        },
+        ContentPart::VideoUrl {
+            video_url: VideoUrl {
+                url: "file://clip.mp4".to_string(),
+                fps: None,
+            },
+        },
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "aGVsbG8=".to_string(),
+                format: "wav".to_string(),
+            },
+        },
+    ];
+
+    // A family that takes video alone and audio alone but has no merge path for
+    // both still refuses the combination, with the exact wording the
+    // preparation-level bail used before issue #1349 moved the check here.
+    let each_alone = ModelMediaSupport {
+        image: true,
+        audio: true,
+        video: true,
+        video_with_audio: false,
+    };
+    let rejection =
+        super::media_capability_rejection(&build_chat_request(combined.clone()), each_alone, "m")
+            .expect("video+audio is refused when the model cannot merge both");
+    assert_eq!(rejection.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(rejection.error.error_type, "invalid_request_error");
+    assert_eq!(
+        rejection.error.message,
+        "Combined video and audio inputs are not supported"
+    );
+
+    // Gemma 4 Unified merges both, so the same request is admitted.
+    let unified = ModelMediaSupport {
+        video_with_audio: true,
+        ..each_alone
+    };
+    assert!(
+        super::media_capability_rejection(
+            &build_chat_request(combined),
+            unified,
+            "gemma-4-12b-it-4bit"
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn media_capability_rejection_leaves_single_modality_requests_alone() {
+    use crate::server::state::ModelMediaSupport;
+
+    // `video_with_audio: false` must not leak into the audio-only or video-only
+    // paths: each modality on its own is still admitted.
+    let each_alone = ModelMediaSupport {
+        image: true,
+        audio: true,
+        video: true,
+        video_with_audio: false,
+    };
+    let audio_only = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: "aGVsbG8=".to_string(),
+            format: "wav".to_string(),
+        },
+    }]);
+    assert!(super::media_capability_rejection(&audio_only, each_alone, "m").is_none());
+
+    let video_only = build_chat_request(vec![ContentPart::VideoUrl {
+        video_url: VideoUrl {
+            url: "file://clip.mp4".to_string(),
+            fps: None,
+        },
+    }]);
+    assert!(super::media_capability_rejection(&video_only, each_alone, "m").is_none());
+}
+
+#[test]
+fn media_capability_rejection_reports_the_missing_modality_before_the_combination() {
+    use crate::server::state::ModelMediaSupport;
+
+    // A text-only checkpoint sent video + audio has to hear which modality it
+    // cannot serve, not a combination refusal it could not act on either.
+    let combined = build_chat_request(vec![
+        ContentPart::VideoUrl {
+            video_url: VideoUrl {
+                url: "file://clip.mp4".to_string(),
+                fps: None,
+            },
+        },
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "aGVsbG8=".to_string(),
+                format: "wav".to_string(),
+            },
+        },
+    ]);
+    let rejection =
+        super::media_capability_rejection(&combined, ModelMediaSupport::none(), "qwen3-0.6b-4bit")
+            .expect("a text-only checkpoint refuses the request");
+    assert!(
+        rejection
+            .error
+            .message
+            .starts_with("audio input is not supported"),
+        "{}",
+        rejection.error.message
+    );
 }
 
 #[test]

@@ -176,3 +176,76 @@ fn merge_llava_flattens_projected_features_in_image_token_order() {
     assert_arrays_equal(&merged.inputs_embeds, &expected);
     assert!(merged.attention_mask_4d.is_none());
 }
+
+/// Pin the two-op composition `Gemma4UnifiedModel::merge_multimodal` runs when
+/// a prompt carries video frames and audio at once (issue #1349): `merge_llava`
+/// on `video_token_id`, then `masked_scatter` on `audio_token_id`.
+///
+/// This is the primitive-level stand-in for a synthetic-model scatter test. A
+/// `Gemma4UnifiedModel` cannot be built without a full Gemma 4 backbone weight
+/// map plus vision and multimodal projector weights, and instantiating one
+/// would run a real forward on the GPU inside the unit-test gate. The two ops
+/// below are literally the ones `merge_multimodal` calls, in the same order and
+/// against the same running embeddings, so the property that matters is
+/// testable here: the two runs address disjoint placeholder ids, each run
+/// receives its own features, and neither clobbers the other or the text.
+#[test]
+fn video_then_audio_scatter_fills_each_run_without_clobbering_the_other() {
+    let _cpu = cpu_device();
+
+    const VIDEO_TOKEN: i32 = 42;
+    const AUDIO_TOKEN: i32 = 77;
+
+    // text, 4 video tokens, text, 3 audio tokens, text — the shape an expanded
+    // Gemma 4 Unified prompt has once the frame runs and the audio run are in.
+    let input_ids = mlxcel_core::from_slice_i32(
+        &[
+            5,
+            VIDEO_TOKEN,
+            VIDEO_TOKEN,
+            VIDEO_TOKEN,
+            VIDEO_TOKEN,
+            6,
+            AUDIO_TOKEN,
+            AUDIO_TOKEN,
+            AUDIO_TOKEN,
+            7,
+        ],
+        &[1, 10],
+    );
+    // One text value per position, hidden = 2, so a clobbered text row is
+    // visible in the assertion rather than hidden behind a broadcast.
+    let text: Vec<f32> = (0..10).flat_map(|i| [i as f32, i as f32]).collect();
+    let inputs_embeds = mlxcel_core::from_slice_f32(&text, &[1, 10, 2]);
+
+    // Distinct constants per modality: every video row is -1.0, every audio row
+    // is -2.0, so a run that received the other modality's features fails.
+    let video_features = mlxcel_core::from_slice_f32(&[-1.0; 8], &[1, 4, 2]);
+    let audio_features = mlxcel_core::from_slice_f32(&[-2.0; 6], &[1, 3, 2]);
+
+    let after_video = merge_llava(VIDEO_TOKEN, &video_features, &inputs_embeds, &input_ids);
+
+    // The audio half is the `masked_scatter` branch of `merge_multimodal`:
+    // build the `input_ids == audio_token_id` mask, broadcast it over the
+    // hidden axis, and scatter the projected audio rows into it.
+    let audio_token_arr = mlxcel_core::from_slice_i32(&[AUDIO_TOKEN], &[1]);
+    let is_audio = mlxcel_core::equal(&input_ids, &audio_token_arr);
+    let audio_mask = mlxcel_core::expand_dims(&is_audio, -1);
+    let audio_mask = mlxcel_core::broadcast_to(
+        &audio_mask,
+        &mlxcel_core::array_shape(&after_video.inputs_embeds),
+    );
+    let merged = masked_scatter(&after_video.inputs_embeds, &audio_mask, &audio_features);
+
+    let expected = mlxcel_core::from_slice_f32(
+        &[
+            0.0, 0.0, // text
+            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, // 4 video rows
+            5.0, 5.0, // text
+            -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, // 3 audio rows
+            9.0, 9.0, // text
+        ],
+        &[1, 10, 2],
+    );
+    assert_arrays_equal(&merged, &expected);
+}

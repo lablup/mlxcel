@@ -369,3 +369,115 @@ async fn a_malformed_body_is_a_400_not_a_422() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["type"], "invalid_request_error");
 }
+
+// -- media parts are refused before the render fetches them --------------
+//
+// `render_chat_prompt` runs `media_capability_rejection` first, so these
+// routes answer the way `/v1/chat/completions` answers instead of downloading
+// a URL for a checkpoint that has no tower to spend it on. The stub state
+// carries `ModelMediaSupport::default()`, i.e. a text-only checkpoint.
+
+#[tokio::test]
+async fn a_media_part_is_refused_rather_than_fetched_and_counted() {
+    for path in [
+        "/apply-template",
+        "/chat/completions/input_tokens",
+        "/v1/chat/completions/input_tokens",
+    ] {
+        let (status, body) = post(
+            path,
+            serde_json::json!({
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "what is this"},
+                    {"type": "image_url", "image_url": {"url": "http://169.254.169.254/latest/meta-data/"}}
+                ]}]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
+        assert_eq!(
+            body["error"]["type"], "not_supported_error",
+            "{path}: {body}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message string")
+                .starts_with("image input is not supported"),
+            "{path}: {body}"
+        );
+        assert!(body.get("prompt").is_none(), "{path}: {body}");
+        assert!(body.get("input_tokens").is_none(), "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn the_video_plus_audio_combination_is_still_refused_here() {
+    // Issue #1349 moved this refusal out of `prepare_chat_request_with_cache`,
+    // which is the function these routes call. The boundary check has to carry
+    // it, or a body the generating routes reject would be rendered and counted
+    // here after its parts were resolved.
+    let (status, body) = post(
+        "/apply-template",
+        serde_json::json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "video_url", "video_url": {"url": "file:///clip.mp4"}},
+                {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "wav"}}
+            ]}]
+        }),
+    )
+    .await;
+    assert!(
+        status == StatusCode::NOT_IMPLEMENTED || status == StatusCode::BAD_REQUEST,
+        "{status}: {body}"
+    );
+    assert!(body.get("prompt").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn a_text_only_body_is_unaffected_by_the_media_gate() {
+    let (status, body) = post("/apply-template", chat_body()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["prompt"],
+        "<|system|>be brief<|user|>Hello<|assistant|>"
+    );
+}
+
+#[tokio::test]
+async fn a_responses_native_image_part_is_refused_on_the_count_routes_too() {
+    // The two Responses count routes reach the gate through the translator
+    // rather than with the body the client sent, so the chat-shaped cases
+    // above do not cover them: a translation that dropped or renamed a media
+    // part would leave this pair counting a prompt `/v1/responses` refuses.
+    // `input_image` is the Responses-native spelling of `image_url`.
+    for path in ["/responses/input_tokens", "/v1/responses/input_tokens"] {
+        let (status, body) = post(
+            path,
+            serde_json::json!({
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "what is this"},
+                        {"type": "input_image", "image_url": "http://169.254.169.254/latest/meta-data/"}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
+        assert_eq!(
+            body["error"]["type"], "not_supported_error",
+            "{path}: {body}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message string")
+                .starts_with("image input is not supported"),
+            "{path}: {body}"
+        );
+        assert!(body.get("input_tokens").is_none(), "{path}: {body}");
+    }
+}

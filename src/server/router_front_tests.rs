@@ -360,6 +360,55 @@ async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
     }
 }
 
+/// The router refuses media from the request, before `prepare_chat_request_with_cache`
+/// downloads it. `has_declared_media` below covers the same request shape after
+/// resolution; this covers the point that matters for a text-only front, which
+/// is that nothing is fetched on its behalf.
+#[test]
+fn text_only_router_rejects_declared_media_from_the_request_itself() {
+    use crate::server::types::request::{ContentPart, ImageUrl, InputAudio, VideoUrl};
+
+    let with_parts = |parts: Vec<ContentPart>| -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": []}],
+        }))
+        .map(|mut request: ChatCompletionRequest| {
+            request.messages[0].content =
+                crate::server::types::request::MessageContent::Parts(parts);
+            request
+        })
+        .expect("the fixture parses as a chat request")
+    };
+
+    assert!(request_declares_media(&with_parts(vec![
+        ContentPart::ImageUrl {
+            image_url: ImageUrl::new("http://169.254.169.254/".to_string()),
+        }
+    ])));
+    assert!(request_declares_media(&with_parts(vec![
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "aGVsbG8=".to_string(),
+                format: "wav".to_string(),
+            },
+        }
+    ])));
+    assert!(request_declares_media(&with_parts(vec![
+        ContentPart::VideoUrl {
+            video_url: VideoUrl {
+                url: "http://169.254.169.254/clip.mp4".to_string(),
+                fps: None,
+            },
+        }
+    ])));
+    assert!(!request_declares_media(&with_parts(vec![
+        ContentPart::Text {
+            text: "hello".to_string(),
+        }
+    ])));
+}
+
 #[test]
 fn text_only_router_rejects_declared_media_even_when_resolution_drops_it() {
     let invalid_image = super::super::media::MediaRequestMetadata::new(1, 0, 0, 0, 0, 0);
