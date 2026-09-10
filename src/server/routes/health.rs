@@ -60,6 +60,8 @@ fn side_model_ready(state: &AppState) -> bool {
 ///
 /// `200 {"status": "ok"}` once the serving worker is up; the b10621 loading
 /// envelope before that. Never reports saturation (see module docs).
+///
+/// Used by: `mlxcel-server` and `mlxcel serve`.
 pub async fn health_check(State(state): State<AppState>) -> Response {
     // A server started with b10621's `--embeddings` or `--reranking` has no
     // chat worker to be "loaded", and reporting it unhealthy forever would
@@ -67,6 +69,13 @@ pub async fn health_check(State(state): State<AppState>) -> Response {
     // there is whether the worker the mode selected came up.
     let ready = if state.config.embedding_serving_mode.blocks_generation() {
         side_model_ready(&state)
+    } else if state.model_provider.is_chat_unavailable() && state.audio_model.is_some() {
+        // Whisper and Kokoro checkpoints are primary audio-only models: their
+        // dedicated worker has already loaded before the provider is installed,
+        // while the deliberately unused chat worker records a terminal state.
+        // Treat that combination as ready so the documented `-m <checkpoint>`
+        // audio server can pass container health checks.
+        true
     } else {
         state.model_provider.is_loaded()
     };

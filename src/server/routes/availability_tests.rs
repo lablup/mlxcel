@@ -159,6 +159,25 @@ async fn post(app: axum::Router, path: &str, body: Value) -> (StatusCode, Value)
     (status, body)
 }
 
+async fn get(app: axum::Router, path: &str) -> (StatusCode, Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("route responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let body = serde_json::from_slice(&bytes).expect("health body is JSON");
+    (status, body)
+}
+
 #[tokio::test]
 async fn embedding_only_server_returns_501_on_all_generation_routes() {
     let cases = [
@@ -229,6 +248,16 @@ async fn audio_only_server_names_the_served_routes() {
     let message = body["error"]["message"].as_str().expect("message");
     assert!(message.contains("/v1/audio/transcriptions"), "{body}");
     assert!(message.contains("/v1/audio/translations"), "{body}");
+}
+
+#[tokio::test]
+async fn audio_only_server_reports_healthy_after_its_worker_is_ready() {
+    let state = state_with(ModelProvider::chat_unavailable_for_route_tests())
+        .with_audio_model(Some(Arc::new(SideAudioProvider)));
+    let (status, body) = get(create_app(state), "/health").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "status": "ok" }));
 }
 
 #[tokio::test]
