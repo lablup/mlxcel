@@ -3076,7 +3076,7 @@ async fn two_trailing_assistant_messages_are_refused_with_upstreams_wording() {
 // ---------------------------------------------------------------------------
 
 use super::{
-    effective_tools, inject_tool_choice_instruction, resolve_effective_kwargs,
+    effective_tools, inject_tool_choice_instruction, kimi_k3_tools, resolve_effective_kwargs,
     tool_choice_instruction, with_tool_choice_instruction,
 };
 use crate::server::prompt_cache::key::template_sig;
@@ -3141,6 +3141,40 @@ fn effective_tools_narrows_to_named_function() {
     // Undeclared names render nothing; the routes reject them before this.
     let missing = tool_request(user(), Some(named_choice("get_stock")));
     assert!(effective_tools(&missing).is_none());
+}
+
+#[test]
+fn kimi_k3_declares_tools_under_tool_choice_none() {
+    let user = || vec![text_message(Role::User, "What time is it in Seoul?")];
+
+    // The one case K3 differs on: the reference renders the declaration and
+    // then the "you MUST NOT call any tools" message, so the model knows what
+    // it is being told to leave alone.
+    let none = tool_request(user(), Some(ToolChoice::Mode("none".to_string())));
+    assert!(effective_tools(&none).is_none());
+    let declared = kimi_k3_tools(&none, effective_tools(&none)).expect("K3 keeps the declaration");
+    assert_eq!(declared.len(), 2);
+
+    // Every other mode is the shared answer, narrowing included.
+    for choice in [
+        None,
+        Some(ToolChoice::Mode("auto".to_string())),
+        Some(ToolChoice::Mode("required".to_string())),
+        Some(named_choice("get_weather")),
+    ] {
+        let request = tool_request(user(), choice);
+        let shared = effective_tools(&request);
+        assert_eq!(
+            kimi_k3_tools(&request, shared).map(<[Tool]>::len),
+            shared.map(<[Tool]>::len)
+        );
+    }
+
+    // With no tools declared at all, `none` stays empty rather than becoming
+    // an empty declaration block.
+    let mut toolless = request_with_messages(user());
+    toolless.tool_choice = Some(ToolChoice::Mode("none".to_string()));
+    assert!(kimi_k3_tools(&toolless, effective_tools(&toolless)).is_none());
 }
 
 #[test]

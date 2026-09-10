@@ -2894,6 +2894,11 @@ const K3_ARGUMENT_CLOSE: &str = "<|close|>argument<|sep|>";
 const K3_JSON_OPEN: &str = "<|open|>json";
 const K3_JSON_CLOSE: &str = "<|close|>json<|sep|>";
 const K3_SEP: &str = "<|sep|>";
+/// The three bare structural markers, used only to sweep up a stray one that
+/// survived [`strip_kimi_k3_markers`]'s tag-shaped passes.
+const K3_OPEN: &str = "<|open|>";
+const K3_CLOSE: &str = "<|close|>";
+const K3_END_OF_MSG: &str = "<|end_of_msg|>";
 
 /// Try parsing Kimi K3's XTML generation.
 ///
@@ -3111,6 +3116,36 @@ fn strip_kimi_k3_markers(text: &str) -> String {
     ] {
         out = out.replace(marker, "");
     }
+    // The openers that carry attributes have no fixed length, so a `replace`
+    // table cannot reach them: `<|open|>call tool="x" index="1"<|sep|>` and the
+    // `argument` / `json` forms end wherever the model closed the tag header.
+    out = strip_kimi_k3_open_tag_headers(&out);
+    // Whatever is left is a bare marker with no partner. Sweeping it here is
+    // what lets the doc comment above say "never" rather than "usually".
+    for marker in [K3_OPEN, K3_CLOSE, K3_SEP, K3_END_OF_MSG] {
+        out = out.replace(marker, "");
+    }
+    out
+}
+
+/// Remove every `<|open|>…<|sep|>` tag header, attributes and all.
+///
+/// An unterminated trailing `<|open|>` is left for the bare-marker sweep in
+/// [`strip_kimi_k3_markers`] rather than swallowing the rest of the text: a
+/// generation truncated mid-header would otherwise lose its whole tail, and
+/// the tail is the part a user would want to see.
+fn strip_kimi_k3_open_tag_headers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(K3_OPEN) {
+        let after_open = &rest[start + K3_OPEN.len()..];
+        let Some(sep) = after_open.find(K3_SEP) else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        rest = &after_open[sep + K3_SEP.len()..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -5750,6 +5785,30 @@ mod tests {
         let result = try_kimi_k3(no_response).expect("K3");
         assert_eq!(result.reasoning_content.as_deref(), Some("reasoning"));
         assert_eq!(result.content, "bare answer");
+    }
+
+    #[test]
+    fn kimi_k3_content_strips_attribute_bearing_openers_and_stray_markers() {
+        // A `call` header stranded in the content span has no fixed length, so
+        // the marker table alone cannot reach it.
+        let stray_header = concat!(
+            "<|open|>response<|sep|>answer ",
+            r#"<|open|>call tool="t" index="1"<|sep|>tail"#,
+            "<|close|>response<|sep|>",
+        );
+        let result = try_kimi_k3(stray_header).expect("K3");
+        assert_eq!(result.content, "answer tail");
+
+        // A bare marker with no partner is swept too.
+        let bare = "<|open|>response<|sep|>a<|sep|>b<|end_of_msg|>c<|close|>response<|sep|>";
+        assert_eq!(try_kimi_k3(bare).expect("K3").content, "abc");
+
+        // A generation truncated mid-header keeps its tail rather than losing
+        // everything after the unterminated `<|open|>`.
+        let truncated = "<|open|>response<|sep|>answer<|open|>call tool=\"t\"";
+        let result = try_kimi_k3(truncated).expect("K3");
+        assert_eq!(result.content, "answercall tool=\"t\"");
+        assert!(!result.content.contains("<|"));
     }
 
     #[test]

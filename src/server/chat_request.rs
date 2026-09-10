@@ -467,7 +467,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
             processor,
             renderer,
             request,
-            effective_tools,
+            kimi_k3_tools(request, effective_tools),
             &merged_kwargs,
             prefill.is_some(),
             declared_images,
@@ -728,7 +728,16 @@ fn prepare_kimi_k3_chat_request(
     let thinking_effort = match kwarg_effort(merged_kwargs, "thinking_effort")? {
         Some(effort) => effort,
         None => match kwarg_effort(merged_kwargs, "reasoning_effort")? {
-            Some(effort) => effort,
+            // The portable name is clamped onto K3's three levels rather than
+            // passed through, so an OpenAI-shaped request asking for the
+            // portable default `medium` renders instead of failing. An
+            // unrecognized level still reaches the renderer and still errors.
+            Some(Some(effort)) => Some(
+                super::kimi_k3_chat::clamp_portable_reasoning_effort(&effort)
+                    .map(str::to_string)
+                    .unwrap_or(effort),
+            ),
+            Some(None) => None,
             None => Some(super::kimi_k3_chat::DEFAULT_THINKING_EFFORT.to_string()),
         },
     };
@@ -1069,6 +1078,31 @@ pub(crate) fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]
             })
             .map(std::slice::from_ref),
         _ => tools,
+    }
+}
+
+/// The tools Kimi K3 declares, which differ from [`effective_tools`] in the
+/// `tool_choice: "none"` case alone (#1338).
+///
+/// `effective_tools` hides the tools from a Jinja template under `none`,
+/// because for a template the tools block *is* the offer: showing it and then
+/// saying "do not call these" is a contradiction the template cannot express.
+/// K3 can. It renders the refusal as its own system message, and the reference
+/// emits that message after the declaration, so the model is told exactly
+/// which tools it must not call. The `xtml/tool_choice_none.json` fixture
+/// carries both blocks in that order.
+///
+/// Every other mode keeps the shared narrowing, the named-function case
+/// included, so this only ever widens `none` back to the declared list.
+///
+/// Used by: prepare_chat_request_with_cache
+fn kimi_k3_tools<'a>(
+    request: &'a ChatCompletionRequest,
+    effective: Option<&'a [Tool]>,
+) -> Option<&'a [Tool]> {
+    match request.tool_choice.as_ref() {
+        Some(choice) if choice.is_none() => request.tools.as_deref(),
+        _ => effective,
     }
 }
 

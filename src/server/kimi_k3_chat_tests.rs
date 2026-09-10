@@ -676,6 +676,34 @@ fn thinking_effort_medium_is_rejected() {
 }
 
 #[test]
+fn portable_reasoning_effort_clamps_onto_the_three_rendered_levels() {
+    // The two names both ladders share keep their meaning.
+    assert_eq!(clamp_portable_reasoning_effort("low"), Some("low"));
+    assert_eq!(clamp_portable_reasoning_effort("high"), Some("high"));
+    assert_eq!(clamp_portable_reasoning_effort("max"), Some("max"));
+
+    // OpenAI's default effort is the one `VALID_THINKING_EFFORTS` omits, so
+    // without the clamp a plain `reasoning_effort` request would 400. It
+    // rounds up, toward K3's own `max` default, rather than down.
+    assert_eq!(clamp_portable_reasoning_effort("medium"), Some("high"));
+    assert_eq!(clamp_portable_reasoning_effort("minimal"), Some("low"));
+
+    // An unrecognized level is not invented into a valid one; it falls
+    // through to the renderer, which still rejects it.
+    assert_eq!(clamp_portable_reasoning_effort("turbo"), None);
+    assert_eq!(clamp_portable_reasoning_effort(""), None);
+
+    // Every level the clamp produces is one the renderer accepts.
+    for portable in ["minimal", "low", "medium", "high", "max"] {
+        let clamped = clamp_portable_reasoning_effort(portable).expect("clamped");
+        assert!(
+            VALID_THINKING_EFFORTS.contains(&clamped),
+            "{portable} clamped to {clamped}, which the renderer rejects"
+        );
+    }
+}
+
+#[test]
 fn unresolvable_tool_name_is_an_error() {
     let (_dir, renderer) = synthetic_renderer();
     let err = renderer

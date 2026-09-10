@@ -993,6 +993,17 @@ fn submit_next_turn_warmup(
     {
         return;
     }
+    // Kimi K3 opts out for the same reason it opts out of the #1143 boundary
+    // snapshot: it has no Jinja template, so `render_next_turn_history` would
+    // fall through to the generic `User:/Assistant:` form and tokenize that
+    // text, producing a warm-up prefix no XTML request can ever match. The
+    // entry is unreachable rather than wrong (`PromptCacheKey` carries
+    // `token_prefix_hash`), but it costs a background prefill per completion,
+    // and it is the one path that would put user-derived text back through the
+    // special-matching `encode` this family renders ids to avoid.
+    if state.chat_template.kimi_k3().is_some() {
+        return;
+    }
     let Some(history) = crate::server::chat_request::render_next_turn_history(
         &state.chat_template,
         request,

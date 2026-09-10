@@ -645,7 +645,11 @@ pub(crate) struct InspectArgs {
     ///
     /// Exercises the pattern's newline alternatives, which per-line encoding
     /// never reaches.
-    #[arg(long)]
+    ///
+    /// `requires` rather than a silent no-op: on its own this flag reads like
+    /// a request to tokenize something, and answering it with the ordinary
+    /// memory estimate would look like the tokenizer disagreeing.
+    #[arg(long, requires = "tokenize")]
     pub(crate) tokenize_whole: bool,
 
     // Shared TurboQuant KV-cache flag group, gives `inspect` the same

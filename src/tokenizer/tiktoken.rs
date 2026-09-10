@@ -462,6 +462,19 @@ impl TiktokenTokenizer {
 
     /// Append the ids of one text run to `out`, applying the family's
     /// bounded-chunk guard first.
+    ///
+    /// The guard reproduces the reference's own chunking, so it bounds what
+    /// one regex sweep sees: at most `TIKTOKEN_MAX_ENCODE_CHARS` characters,
+    /// split again at runs of `MAX_NO_WHITESPACE_CHARS`. Both widths are the
+    /// reference's, and narrowing them would change the pre-tokenization and
+    /// with it the ids, so they are not tuning knobs.
+    ///
+    /// It does not bound [`Self::bpe_encode`], which is quadratic in the length
+    /// of a single piece. A 25 000-character run of punctuation matches the
+    /// ` ?[^\s\p{L}\p{N}]+[\r\n]*` alternative as one piece and stays slow. That
+    /// is the pre-existing shape of `bpe_encode` (HunYuan reaches it with no
+    /// guard at all), not something this family introduces, and fixing it means
+    /// replacing the merge loop for every tiktoken checkpoint at once.
     fn encode_text_into(&self, text: &str, out: &mut Vec<u32>) -> Result<()> {
         match self.family {
             // Byte-identical to the pre-K3 path: one regex sweep, no chunking.

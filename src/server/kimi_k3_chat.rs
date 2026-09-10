@@ -62,6 +62,32 @@ pub const VALID_THINKING_EFFORTS: [&str; 3] = ["low", "high", "max"];
 /// `apply_chat_template` via `kwargs.setdefault("thinking_effort", "max")`.
 pub const DEFAULT_THINKING_EFFORT: &str = "max";
 
+/// Map a portable OpenAI-style `reasoning_effort` onto the three levels this
+/// family renders, or `None` when the name is not one mlxcel forwards.
+///
+/// Only the portable field goes through here. A `thinking_effort` kwarg is
+/// K3's own name, so an unsupported value there stays a hard error: the caller
+/// asked for this family by name and named a level it does not have. The
+/// portable field is different, because a client that never heard of K3 sends
+/// OpenAI's ladder, whose default level `medium` is exactly the one
+/// `VALID_THINKING_EFFORTS` omits. Erroring on the default effort of the
+/// portable API would make plain `reasoning_effort` unusable on this family.
+///
+/// The map is monotone and keeps the two names both ladders share, so `low`
+/// and `high` mean what they say. `minimal` rounds down to `low`; `medium`
+/// rounds up to `high` rather than down, because K3's own default is `max` and
+/// rounding toward it is the smaller departure.
+///
+/// Used by: chat_request
+pub fn clamp_portable_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort {
+        "minimal" | "low" => Some("low"),
+        "medium" | "high" => Some("high"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
 /// One pre-encoded image prompt: the ids to splice in, plus the text form for
 /// the diagnostic rendering.
 ///
@@ -648,10 +674,14 @@ impl<'a> ImagePromptState<'a> {
 ///
 /// Port of `encoding_k3.normalize_xtml_tool_result_messages`. A run in which
 /// any message's `tool_call_id` fails to match is left exactly as it came in.
-/// Side-effect free: only matched messages are cloned and rewritten.
+/// Side-effect free with respect to the caller's slice: the input is borrowed
+/// and every message in the returned vector is a clone, so a rewritten `name`
+/// never reaches the request the route still holds.
 ///
-/// Serving frameworks normally deliver tool results already in call order, so
-/// the common path allocates nothing beyond the output vector.
+/// The clone is of the whole message list, content strings included, which is
+/// one copy of the conversation per render. That is well under the cost of
+/// tokenizing it, and it buys the reordering a single straightforward pass;
+/// revisit it only if a profile puts this path on top.
 pub fn normalize_xtml_tool_result_messages(messages: &[Message]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     // `tool_call_id` -> (1-based position, function name). Every entry advances
