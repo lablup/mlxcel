@@ -192,8 +192,13 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+// `load_drafter` is the binary-crate wrapper (issue #1326): the
+// `glm4_moe_lite_mtp` drafter reuses the target family's decoder block, which
+// `mlxcel-core` cannot name, so core refuses that `model_type` and this
+// wrapper builds it and delegates every other kind back to core.
+use crate::models::drafter_loader::load_drafter;
 use mlxcel_core::drafter::dflash::drafter::sampler_is_greedy;
-use mlxcel_core::drafter::{Drafter, DrafterKind, load_drafter};
+use mlxcel_core::drafter::{Drafter, DrafterKind};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
 use mlxcel_core::generation_policy::{initial_token_history, merged_eos_token_ids};
 use mlxcel_core::sampling::TokenLogprobData;
@@ -722,8 +727,31 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
             vlm.text_model.mtp_exactness_allows(block_size)
         }
         LoadedModel::Inkling(_) | LoadedModel::InklingVLM(_) => true,
+        // GLM-4.7-Flash (`glm4_moe_lite`, issue #1326) paired with the
+        // `glm4_moe_lite_mtp` drafter `mlxcel split-mtp` produces. Plain MLA
+        // over `KVCache`, no Metal-only kernel prerequisite: the whole
+        // condition is the measured block-vs-chain probe.
+        LoadedModel::Glm4MoeLite(m) => m.mtp_exactness_allows(block_size),
         _ => false,
     }
+}
+
+/// Whether an adopted prompt-cache prefix (`prefill_start_offset > 0`) can
+/// be reused by this family's MTP target adapter.
+///
+/// The Gemma 4, Qwen 3.5 and Inkling adapters run on model-owned sequence
+/// state, which is where the adoption restored the prefix, so they forward
+/// only the suffix (issue #518). `glm4_moe_lite` keeps its classic caches in
+/// the scheduler's `CachePool` (a `DenseKvCache` family) and its MTP adapter
+/// runs on a separate model-owned slot (issue #1326): the adopted prefix is
+/// not reachable from that slot, and finishing such a request through MTP
+/// would leave the pool cache holding only the prefix while the finalizer
+/// donates it under the full `prompt ++ generated` key. Declining to classic
+/// decode keeps both the reuse and the donation correct.
+///
+/// Used by: [`run_mtp_burst`], `BatchScheduler::start_mtp_slice_b1`.
+pub(crate) fn mtp_adopted_prefix_reusable(model: &LoadedModel) -> bool {
+    !matches!(model, LoadedModel::Glm4MoeLite(_))
 }
 
 /// Successful burst outcome returned to the scheduler.
@@ -1126,11 +1154,14 @@ fn run_mtp_burst(
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
+        // GLM-4.7-Flash (#1326): the drafter borrows nothing; bind only
+        // re-checks the hidden width and vocabulary against the target.
+        LoadedModel::Glm4MoeLite(glm) => glm as &dyn LanguageModel,
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), or Inkling \
-                 (text or VLM); \
+                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), Inkling \
+                 (text or VLM), or GLM-4.7-Flash (glm4_moe_lite); \
                  falling back to classic decode",
                 model_variant_label(ctx.model),
             );
@@ -1159,6 +1190,17 @@ fn run_mtp_burst(
                 return Err(BurstOutcome::DeclineToClassic);
             }
         };
+    if prefill_start_offset > 0 && !mtp_adopted_prefix_reusable(ctx.model) {
+        tracing::debug!(
+            "MTP speculative burst declined for seq {}: prefill_start_offset={} but the {:?} \
+             MTP adapter cannot reuse an adopted prompt-cache prefix; falling back to classic \
+             decode",
+            seq.seq_id,
+            seq.prefill_start_offset,
+            model_variant_label(ctx.model),
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
 
     // The MTP generator owns the drafter by value; take it from the
     // slot for the burst's lifetime. On success we return it via
@@ -1327,6 +1369,29 @@ fn run_mtp_burst(
                 Some(seq.seq_id),
             )
             .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
+        // GLM-4.7-Flash (#1326): the adapter routes through the model's
+        // MTP-only per-sequence cache slot; the adopted-prefix decline above
+        // guarantees `prefill_start_offset == 0` here.
+        LoadedModel::Glm4MoeLite(glm) => {
+            let adapter =
+                crate::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter::new(
+                    glm,
+                    Some(seq.seq_id),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -2716,6 +2781,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Lfm2(_) => "Lfm2",
         LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
         LoadedModel::Lfm2VL(_) => "Lfm2VL",
+        LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         _ => "other",
     }
 }

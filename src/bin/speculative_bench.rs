@@ -429,8 +429,8 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
 /// the same table the burst path uses. It covers the speculative-capable
 /// variants and reports every other one as `other`, so the message also names
 /// the target directory to identify the checkpoint.
-const MTP_SUPPORTED_FAMILIES: &str = "Gemma 4 (Gemma4, Gemma4VLM, Gemma4Unified) \
-     and Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM)";
+const MTP_SUPPORTED_FAMILIES: &str = "Gemma 4 (Gemma4, Gemma4VLM, Gemma4Unified), \
+     Qwen 3.5 (Qwen35, Qwen35Moe, Qwen35VLM, Qwen35MoeVLM) and GLM-4.7-Flash (Glm4MoeLite)";
 
 /// Whether [`run_mtp`] can build an `MtpTarget` adapter for this variant.
 ///
@@ -451,6 +451,7 @@ fn mtp_target_supported(model: &LoadedModel) -> bool {
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Glm4MoeLite(_)
     )
 }
 
@@ -480,11 +481,13 @@ fn run_mtp(
     max_tokens: usize,
     block_size: Option<u32>,
 ) -> Result<(f64, usize, Option<MtpAcceptanceSummary>)> {
+    use mlxcel::models::drafter_loader::load_drafter;
     use mlxcel::models::gemma4_mtp_target::{
         Gemma4MtpTargetAdapter, Gemma4UnifiedMtpTargetAdapter, Gemma4VLMtpTargetAdapter,
     };
+    use mlxcel::models::glm4_moe_lite_mtp_target::Glm4MoeLiteMtpTargetAdapter;
     use mlxcel::models::qwen3_5_mtp_target::{Qwen35MtpTargetAdapter, Qwen35VLMtpTargetAdapter};
-    use mlxcel_core::drafter::{DrafterKind, load_drafter};
+    use mlxcel_core::drafter::DrafterKind;
 
     let block_size = block_size.unwrap_or(4) as usize;
     if block_size < 2 {
@@ -611,6 +614,16 @@ fn run_mtp(
             max_tokens,
             block_size,
         ),
+        // GLM-4.7-Flash (#1326) paired with the `glm4_moe_lite_mtp` drafter.
+        LoadedModel::Glm4MoeLite(glm) => run_mtp_timed(
+            |seq| Glm4MoeLiteMtpTargetAdapter::new(glm, Some(seq)),
+            drafter,
+            target_lm,
+            draft_dir,
+            &prompt_tokens,
+            max_tokens,
+            block_size,
+        ),
         // Unreachable while `mtp_target_supported` above covers the same
         // list; kept so a variant added to one place and not the other fails
         // with the same operator-facing message rather than a panic.
@@ -648,7 +661,8 @@ where
 {
     use std::sync::atomic::AtomicBool;
 
-    use mlxcel_core::drafter::{DrafterKind, load_drafter};
+    use mlxcel::models::drafter_loader::load_drafter;
+    use mlxcel_core::drafter::DrafterKind;
     use mlxcel_core::sampling::LogprobsConfig;
     use mlxcel_core::speculative::mtp::MtpGenerator;
 

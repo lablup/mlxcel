@@ -112,6 +112,9 @@ pub mod deepseek_v32;
 pub mod deepseek_v4;
 pub mod diffusion_gemma;
 pub mod dots1;
+/// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` drafter and
+/// delegates every other kind to `mlxcel_core::drafter::load_drafter`.
+pub mod drafter_loader;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
 pub mod ernie4_5_moe_vl;
@@ -132,6 +135,9 @@ pub mod gemma4_mtp_target;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;
+pub mod glm4_moe_lite_mtp_config;
+pub mod glm4_moe_lite_mtp_drafter;
+pub mod glm4_moe_lite_mtp_target;
 pub mod glm4v;
 pub mod glm4v_moe;
 pub mod glm_moe_dsa;

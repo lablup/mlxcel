@@ -22,7 +22,9 @@
 //! - Sparse MoE with grouped expert selection
 //! - Sigmoid routing with e_score_correction_bias
 
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
+use mlxcel_core::cache::{KVCacheMode, SequenceId};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
@@ -34,7 +36,12 @@ use std::path::Path;
 #[path = "glm4_moe_lite_sanitize.rs"]
 mod glm4_moe_lite_sanitize;
 
-pub use glm4_moe_lite_sanitize::sanitize_weights;
+/// MTP target hooks (verify forward, model-owned speculative cache slot,
+/// exactness probe), split out the same way the sanitizer is (issue #1326).
+#[path = "glm4_moe_lite_mtp_hooks.rs"]
+mod glm4_moe_lite_mtp_hooks;
+
+pub use glm4_moe_lite_sanitize::{kv_b_proj_geometry, sanitize_weights};
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +97,17 @@ pub struct ModelArgs {
     pub group_size: Option<i32>,
     #[serde(default)]
     pub bits: Option<i32>,
+
+    /// Number of next-token-prediction (MTP) layers the raw checkpoint
+    /// stores beyond `num_hidden_layers` (`model.layers.{num_hidden_layers}.*`
+    /// on GLM-4.7-Flash, which declares 1). The target loader never reads
+    /// them: the decoder is still built from `0..num_hidden_layers`, and the
+    /// nextn tensors are extracted into a standalone `glm4_moe_lite_mtp`
+    /// drafter by `mlxcel split-mtp` (issue #1326). The field is carried so
+    /// the drafter config (a copy of this one) can derive its default block
+    /// size from it.
+    #[serde(default)]
+    pub num_nextn_predict_layers: usize,
 }
 
 fn default_routed_scaling() -> f32 {
@@ -774,19 +792,46 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    /// Load decoder layer `layer_idx` from its `model.layers.{layer_idx}`
+    /// prefix, MoE or dense per `ModelArgs::is_moe_layer`.
+    ///
+    /// Used by: `Glm4MoeLiteModel::from_weights`, the `glm4_moe_lite`
+    /// pipeline stage executor.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
         layer_idx: usize,
     ) -> Result<Self, String> {
-        let prefix = format!("model.layers.{}", layer_idx);
+        Self::from_weights_with_prefix(
+            weights,
+            args,
+            &format!("model.layers.{layer_idx}"),
+            args.is_moe_layer(layer_idx),
+        )
+    }
+
+    /// Load one decoder block from an arbitrary key prefix.
+    ///
+    /// The `glm4_moe_lite_mtp` drafter loads its single block from
+    /// `model.mtp_block` with this, so the drafter's attention, routing and
+    /// expert code are the decoder's own rather than a copy (issue #1326).
+    /// `is_moe` selects the routed FFN; the drafter passes what the weight
+    /// map says (`{prefix}.mlp.switch_mlp.*` present).
+    ///
+    /// Used by: [`Self::from_weights`], `glm4_moe_lite_mtp_drafter`.
+    pub fn from_weights_with_prefix(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+        is_moe: bool,
+    ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
 
         let self_attn =
             MlaAttention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
 
-        let mlp = if args.is_moe_layer(layer_idx) {
+        let mlp = if is_moe {
             FFN::MoE(MoELayer::from_weights(
                 weights,
                 args,
@@ -823,6 +868,25 @@ pub struct Glm4MoeLiteModel {
     pub layers: Vec<TransformerBlock>,
     pub norm: RMSNorm,
     pub lm_head: UnifiedLinear,
+    /// Per-sequence KV caches used ONLY by the MTP target hooks
+    /// (`glm4_moe_lite_mtp_hooks`). Classic serving keeps its caches in the
+    /// scheduler's `CachePool` (`sequence_state_layout` stays at its
+    /// `DenseKvCache` default), so batching, paged storage and prompt-cache
+    /// donation are untouched by this slot. `seq_id = None` selects the
+    /// internal fallback slot the offline CLI uses; the scheduler's
+    /// `release_sequence_state_by_id` drops a sequence's slot when it
+    /// finishes (issue #1326).
+    pub(crate) mtp_sequence_state: ModelOwnedSequenceState<KVCache>,
+    /// Per-layer KV cache mode table the CLI generator or the server
+    /// scheduler injects through [`LanguageModel::set_kv_cache_layer_modes`].
+    ///
+    /// The scheduler upgrades the *pool* caches of a `DenseKvCache` family
+    /// after allocation (`apply_kv_cache_mode_to`), which is why this family
+    /// needed no table before the MTP slot existed. The slot is built by the
+    /// model, not the pool, so without this table every MTP sequence would
+    /// silently run on FP16 caches while the server logged the operator's
+    /// requested mode as applied (issue #1326).
+    pub(crate) kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Glm4MoeLiteModel {
@@ -832,6 +896,20 @@ impl Glm4MoeLiteModel {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_with_hidden(input_ids, caches).0
+    }
+
+    /// The classic forward, also returning the pre-final-norm hidden of every
+    /// position (`[B, L, hidden]`). Same arithmetic as [`Self::forward`]:
+    /// the residual stream is already computed, so handing it back costs
+    /// nothing and keeps the MTP prefill byte-identical to classic prefill.
+    ///
+    /// Used by: [`Self::forward`], the MTP hooks' prefill.
+    pub(crate) fn forward_with_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let mut h = self.embed_tokens.forward(input_ids);
 
         let shape = mlxcel_core::array_shape(&h);
@@ -848,12 +926,26 @@ impl Glm4MoeLiteModel {
             h = layer.forward(&h, &mut caches[i], mask.as_deref());
         }
 
-        let h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        let normed = self.norm.forward(&h);
+        (self.lm_head.forward(&normed), h)
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    /// The MTP slot's cache set, honouring the injected per-layer mode table.
+    ///
+    /// [`Self::make_caches`] stays unconditionally FP16 because it feeds the
+    /// scheduler's `CachePool`, which applies the resolved modes itself right
+    /// after allocation. Nothing does that for the model-owned MTP slot, so
+    /// every site that installs one goes through here instead (issue #1326).
+    ///
+    /// Used by: the MTP hooks' slot installs and the block-vs-chain probe.
+    pub(crate) fn make_configured_caches(&self) -> Vec<KVCache> {
+        (0..self.layers.len())
+            .map(|i| KVCache::new_with_mode(self.kv_cache_layer_modes.mode_for_layer(i)))
+            .collect()
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
@@ -893,11 +985,20 @@ impl Glm4MoeLiteModel {
 
         let lm_head = UnifiedLinear::from_weights(weights, "lm_head", group_size, bits)?;
 
+        let mtp_sequence_state =
+            ModelOwnedSequenceState::new((0..layers.len()).map(|_| KVCache::new()).collect());
+
         Ok(Self {
             embed_tokens,
             layers,
             norm,
             lm_head,
+            mtp_sequence_state,
+            // No mode table is known at load time; the CLI generator and the
+            // server scheduler inject one before the first forward, and every
+            // slot install after that rebuilds through
+            // `make_configured_caches`.
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -932,6 +1033,53 @@ impl LanguageModel for Glm4MoeLiteModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // GLM4 MoE Lite EOS tokens from config.json
         vec![154820, 154827, 154829]
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.embed_tokens.forward(input_ids))
+    }
+
+    /// Shared-buffer handle to the token table, for the MTP drafter's
+    /// target-compat check (hidden width) and `MtpTarget::embed_token`.
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
+    }
+
+    /// The untied output head, for the MTP drafter's vocabulary check.
+    fn lm_head_module(&self) -> Option<UnifiedLinear> {
+        Some(self.lm_head.clone_shared())
+    }
+
+    /// Record the resolved per-layer KV cache mode table and rebuild the
+    /// fallback slot so it is not left holding caches in the previous mode.
+    ///
+    /// Both injection sites (`GenerationConfig`'s
+    /// `apply_kv_cache_mode_with_boundary_policy_for_model` and the
+    /// scheduler's `inject_model_owned_kv_cache_modes`) run before any
+    /// sequence exists, so no per-sequence slot can be stranded here.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.mtp_sequence_state
+            .replace_internal(self.make_configured_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Reset the MTP fallback slot before a fresh single-row generation.
+    /// Classic CLI generation never touches the slot, so this only matters
+    /// for a process that ran an MTP session and then a classic one.
+    fn reset_runtime_state(&self) {
+        self.mtp_sequence_state
+            .replace_internal(self.make_configured_caches());
+    }
+
+    /// Drop the sequence's MTP cache slot. The scheduler calls this for
+    /// every finished sequence whether or not it ran MTP; a sequence that
+    /// never did has no slot and the release is a no-op.
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.mtp_sequence_state.release_sequence_state(seq_id);
     }
 }
 

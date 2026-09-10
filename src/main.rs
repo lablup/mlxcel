@@ -215,6 +215,20 @@ enum Commands {
     /// `MLXCEL_AUTOTUNE=1` to additionally tune unseen shapes on first use.
     #[command(verbatim_doc_comment)]
     Tune(commands::TuneArgs),
+
+    /// Split the GLM-4.7-Flash MTP block into a standalone drafter directory.
+    ///
+    /// Reads the raw `zai-org/GLM-4.7-Flash` checkpoint (the community 4-bit
+    /// conversions drop the `model.layers.47.*` next-token-prediction
+    /// tensors) and writes a `glm4_moe_lite_mtp` directory that
+    /// `mlxcel generate --draft-model` and `mlxcel-server --model-draft`
+    /// pair with any `glm4_moe_lite` target of the same geometry:
+    ///
+    ///     mlxcel split-mtp -m models/glm-4.7-flash-bf16 -o models/glm-4.7-flash-mtp-4bit --q-bits 4
+    ///     mlxcel generate -m models/glm-4.7-flash-4bit --draft-model models/glm-4.7-flash-mtp-4bit -p "Hi"
+    #[cfg(feature = "surgery")]
+    #[command(name = "split-mtp", verbatim_doc_comment)]
+    SplitMtp(commands::SplitMtpArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -2917,6 +2931,8 @@ fn main() -> anyhow::Result<()> {
             args.models_dir.as_deref(),
         ),
         Commands::Tune(args) => commands::run_tune(args),
+        #[cfg(feature = "surgery")]
+        Commands::SplitMtp(args) => commands::run_split_mtp(args),
     }
 }
 

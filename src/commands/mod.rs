@@ -33,6 +33,8 @@ pub(crate) mod models;
 pub(crate) mod rerank;
 pub(crate) mod run;
 mod serve;
+#[cfg(feature = "surgery")]
+pub(crate) mod split_mtp;
 pub(crate) mod tune;
 
 pub(crate) use chat::{ChatOptions, run_chat};
@@ -45,4 +47,6 @@ pub(crate) use models::{run_list_local, run_remove};
 pub(crate) use rerank::{RerankArgs, run_rerank};
 pub(crate) use run::{RunArgs, run_run};
 pub(crate) use serve::run_serve;
+#[cfg(feature = "surgery")]
+pub(crate) use split_mtp::{SplitMtpArgs, run_split_mtp};
 pub(crate) use tune::{TuneArgs, run_tune};

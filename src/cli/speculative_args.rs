@@ -241,6 +241,13 @@ pub fn resolve_draft_block_size(
     {
         return n;
     }
+    if kind == DrafterKind::Mtp
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_glm4_moe_lite_mtp_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
     // An LFM2 DSpark drafter (issue #1339) counts proposals in `block_size`
     // and runs at `min(block_size + 1, runtime_block_size)` rows by default
     // (8 on the published checkpoints); the flat DFlash default of 16 would
