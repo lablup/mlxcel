@@ -121,6 +121,10 @@ Linux aarch64, NVIDIA GB10, CUDA sm_121, `--profile test-fast --features cuda`. 
 
 Re-derived from `qwen.tiktoken` (151643 ranks, max rank 151642) and `tokenization_qwen.py`'s ordering: `<|endoftext|>` 151643, `<|im_start|>` 151644, `<|im_end|>` 151645, `<|extra_0..204|>` 151646..151850, `<ref>` 151851 through `<imgpad>` 151859, totalling 151860 which is the declared `vocab_size`. `tokenizer_config.json` declares `tokenizer_class: "QWenTokenizer"` and an empty `added_tokens_decoder` on all three checkpoints. `tests/got_ocr_prompt_parity.rs` asserts mlxcel's loaded tokenizer resolves all six framing spellings to those ids on the real checkpoint.
 
+### 4.1b The other family on the tiktoken path
+
+Only three checkpoint directories on this host reach the tiktoken loader at all besides GOT's: `hunyuan-13b` and `hunyuan-a13b-instruct-4bit` declare `HYTokenizer`, and `phi-3-small-8k-instruct-aq4_64` declares `Phi3SmallTokenizer`. None of them can enter the new branch. `hunyuan-13b` was run end to end after the change and answers `The capital of France is Paris.` as before, which is the shared-file regression check that the unit gate on the HunYuan table cannot make.
+
 ### 4.2 Greedy parity, both key layouts
 
 `tests/got_ocr_real_model.rs` on the committed fixture page:

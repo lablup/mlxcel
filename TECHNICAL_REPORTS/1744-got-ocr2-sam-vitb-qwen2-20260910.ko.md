@@ -121,6 +121,10 @@ Linux aarch64, NVIDIA GB10, CUDA sm_121, `--profile test-fast --features cuda`. 
 
 `qwen.tiktoken`(151643 랭크, 최대 랭크 151642)과 `tokenization_qwen.py`의 순서에서 다시 유도: `<|endoftext|>` 151643, `<|im_start|>` 151644, `<|im_end|>` 151645, `<|extra_0..204|>` 151646..151850, `<ref>` 151851부터 `<imgpad>` 151859까지, 합계 151860으로 선언된 `vocab_size`와 같다. 세 체크포인트 모두 `tokenizer_config.json`에 `tokenizer_class: "QWenTokenizer"`와 빈 `added_tokens_decoder`를 적는다. `tests/got_ocr_prompt_parity.rs`는 mlxcel이 로드한 토크나이저가 실제 체크포인트에서 감싸기 표기 여섯 개를 그 id로 푸는지 단언한다.
 
+### 4.1b tiktoken 경로 위의 다른 계열
+
+이 호스트에서 GOT 외에 tiktoken 로더에 닿는 체크포인트 디렉터리는 셋뿐이다. `hunyuan-13b`와 `hunyuan-a13b-instruct-4bit`는 `HYTokenizer`를, `phi-3-small-8k-instruct-aq4_64`는 `Phi3SmallTokenizer`를 적는다. 어느 것도 새 분기에 들어갈 수 없다. 변경 후 `hunyuan-13b`를 끝까지 돌려 이전과 같이 `The capital of France is Paris.`를 답하는 것을 확인했다. HunYuan 표에 건 단위 게이트가 할 수 없는 공유 파일 회귀 확인이다.
+
 ### 4.2 greedy 일치, 두 키 레이아웃
 
 커밋된 고정 페이지에서 `tests/got_ocr_real_model.rs`:
