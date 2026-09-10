@@ -572,6 +572,11 @@ fn split_refuses_an_oversized_block_size() {
     let msg = err.to_string();
     assert!(msg.contains("20000"), "{msg}");
     assert!(msg.contains("maximum"), "{msg}");
+    // The message is a single sentence with no intentional alignment: a run
+    // of two or more spaces means the `\` line continuations were dropped
+    // and rustfmt joined the wrapped literal, leaving the wrap indentation
+    // inside the rendered text (issue #1763).
+    assert!(!msg.contains("  "), "{msg}");
 }
 
 /// The ceiling must not move the widths a caller can legitimately ask for.
@@ -585,5 +590,40 @@ fn split_accepts_block_sizes_up_to_the_ceiling() {
         let result =
             split_mtp(synthetic_weights(), &source_config(), &opts).expect("must be accepted");
         assert_eq!(result.config["block_size"], requested);
+    }
+}
+
+/// MLX's affine packing only has an integer solution for
+/// `{2, 3, 4, 5, 6, 8}`; a width outside that set must be refused before any
+/// tensor work, naming the width and the accepted set, rather than
+/// quantizing and failing later at load (issue #1763).
+#[test]
+fn split_refuses_an_unsupported_q_bits() {
+    for bits in [1, 7, 9, 16, 32] {
+        let opts = SplitMtpOptions {
+            q_bits: Some(bits),
+            ..SplitMtpOptions::default()
+        };
+        let err = split_mtp(synthetic_weights(), &source_config(), &opts)
+            .err()
+            .unwrap_or_else(|| panic!("--q-bits {bits} must be refused"));
+        let msg = err.to_string();
+        assert!(msg.contains(&bits.to_string()), "{msg}");
+        assert!(msg.contains("2, 3, 4, 5, 6, 8"), "{msg}");
+    }
+}
+
+/// Every width the `--q-bits` help text advertises must actually be accepted.
+#[test]
+fn split_accepts_every_supported_affine_bit_width() {
+    for bits in [2, 3, 4, 5, 6, 8] {
+        let opts = SplitMtpOptions {
+            q_bits: Some(bits),
+            q_group_size: 64,
+            ..SplitMtpOptions::default()
+        };
+        let result = split_mtp(synthetic_weights(), &source_config(), &opts)
+            .unwrap_or_else(|e| panic!("--q-bits {bits} must be accepted: {e}"));
+        assert_eq!(result.config["quantization"]["bits"], bits);
     }
 }

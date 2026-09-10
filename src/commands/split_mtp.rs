@@ -73,27 +73,7 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
             args.model.display()
         ));
     }
-    // A sharded checkpoint carries no `model.safetensors`, so probing for
-    // that one filename let `--output` point at one and silently replace its
-    // `config.json` and tokenizer files while orphaning the shards. Screen on
-    // whatever makes the directory a checkpoint instead (issue #1326).
-    if let Some(existing) = existing_checkpoint_marker(&args.output) {
-        if !args.force {
-            return Err(anyhow!(
-                "split-mtp: {} already holds a checkpoint ({existing}); pass --force to overwrite",
-                args.output.display()
-            ));
-        }
-        // `collect_shard_paths` prefers an index over a bare
-        // `model.safetensors`, so a stale index left beside the drafter's
-        // single-file output would send the loader to the victim's shards.
-        let index = args.output.join("model.safetensors.index.json");
-        if index.exists() {
-            std::fs::remove_file(&index).with_context(|| {
-                format!("split-mtp: failed to remove stale {}", index.display())
-            })?;
-        }
-    }
+    prepare_output_dir(&args.output, args.force)?;
     if args.q_bits.is_none() && args.q_group_size != 64 {
         eprintln!("split-mtp: --q-group-size has no effect without --q-bits");
     }
@@ -141,6 +121,73 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
     Ok(())
 }
 
+/// Whether `name` is a shard of a sharded safetensors checkpoint
+/// (`model-00001-of-00003.safetensors` and siblings).
+///
+/// Used by: [`existing_checkpoint_marker`], [`find_shard`].
+fn is_shard_filename(name: &str) -> bool {
+    name.starts_with("model-") && name.ends_with(".safetensors")
+}
+
+/// The first `model-*.safetensors` shard in `dir`, by filename order, or
+/// `None` when the directory holds none or cannot be read.
+///
+/// Used by: [`prepare_output_dir`].
+fn find_shard(dir: &std::path::Path) -> Option<String> {
+    let mut shards: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            is_shard_filename(&name).then_some(name)
+        })
+        .collect();
+    shards.sort();
+    shards.into_iter().next()
+}
+
+/// Guard `args.output` before [`split_mtp_dir`] writes into it.
+///
+/// No existing marker: `Ok(())`, nothing to guard. A marker with `force`
+/// unset: today's `already holds a checkpoint (...); pass --force to
+/// overwrite` refusal, unchanged. A marker with `force` set and at least one
+/// `model-*.safetensors` shard present: a new refusal naming one shard,
+/// because `--force` overwrites the drafter's own `model.safetensors` and
+/// `config.json` but does not promise to delete weight files, and the shards
+/// it would otherwise leave orphaned may be the only surviving copy (issue
+/// #1763). A marker with `force` set and no shards: remove a stale
+/// `model.safetensors.index.json` as before and return `Ok(())`, since
+/// `collect_shard_paths` prefers an index over a bare `model.safetensors` and
+/// a stale one left beside the drafter's single-file output would send the
+/// loader to the victim's shards.
+///
+/// Used by: [`run_split_mtp`].
+fn prepare_output_dir(dir: &std::path::Path, force: bool) -> Result<()> {
+    let Some(existing) = existing_checkpoint_marker(dir) else {
+        return Ok(());
+    };
+    if !force {
+        return Err(anyhow!(
+            "split-mtp: {} already holds a checkpoint ({existing}); pass --force to overwrite",
+            dir.display()
+        ));
+    }
+    if let Some(shard) = find_shard(dir) {
+        return Err(anyhow!(
+            "split-mtp: {} holds shard {shard}; --force overwrites the drafter's own \
+             model.safetensors and config.json but does not delete weight shards, remove the \
+             directory by hand and retry",
+            dir.display()
+        ));
+    }
+    let index = dir.join("model.safetensors.index.json");
+    if index.exists() {
+        std::fs::remove_file(&index)
+            .with_context(|| format!("split-mtp: failed to remove stale {}", index.display()))?;
+    }
+    Ok(())
+}
+
 /// Name of the first artifact that makes `dir` look like an existing
 /// checkpoint, or `None` when writing there would clobber nothing.
 ///
@@ -150,7 +197,7 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
 /// index and shards instead, and would lose its config and tokenizer while
 /// keeping shards nothing can load.
 ///
-/// Used by: [`run_split_mtp`].
+/// Used by: [`run_split_mtp`] (through [`prepare_output_dir`]).
 fn existing_checkpoint_marker(dir: &std::path::Path) -> Option<String> {
     for name in [
         "model.safetensors",
@@ -161,18 +208,16 @@ fn existing_checkpoint_marker(dir: &std::path::Path) -> Option<String> {
             return Some(name.to_string());
         }
     }
-    let shard = std::fs::read_dir(dir).ok()?.flatten().find(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with("model-") && n.ends_with(".safetensors"))
-    })?;
+    let shard = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .find(|entry| entry.file_name().to_str().is_some_and(is_shard_filename))?;
     Some(shard.file_name().to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::existing_checkpoint_marker;
+    use super::{existing_checkpoint_marker, prepare_output_dir};
 
     /// The guard this replaces probed only `model.safetensors`, so a sharded
     /// checkpoint passed it and lost its `config.json` and tokenizer files to
@@ -206,5 +251,47 @@ mod tests {
             None,
             "a directory that does not exist clobbers nothing"
         );
+    }
+
+    /// `--force` must refuse rather than delete when the output directory
+    /// still holds a previously sharded checkpoint's weight shards: nothing
+    /// promised by a flag named `--force` covers deleting weight files, and
+    /// those shards may be the only surviving copy (issue #1763).
+    #[test]
+    fn force_refuses_a_previously_sharded_output_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shard = dir.path().join("model-00001-of-00003.safetensors");
+        let index = dir.path().join("model.safetensors.index.json");
+        let config = dir.path().join("config.json");
+        std::fs::write(&shard, b"shard").expect("write shard");
+        std::fs::write(&index, b"index").expect("write index");
+        std::fs::write(&config, b"config").expect("write config");
+
+        let err = prepare_output_dir(dir.path(), true).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("model-00001-of-00003.safetensors"),
+            "must name the shard: {msg}"
+        );
+
+        assert!(shard.exists(), "the shard must not be deleted");
+        assert!(index.exists(), "the index must not be deleted");
+    }
+
+    /// A stale index with no surviving shards is still cleared under
+    /// `--force`, as before: there is nothing left for it to misdirect the
+    /// loader toward.
+    #[test]
+    fn force_clears_a_stale_index_when_no_shards_remain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let weights = dir.path().join("model.safetensors");
+        let index = dir.path().join("model.safetensors.index.json");
+        std::fs::write(&weights, b"weights").expect("write weights");
+        std::fs::write(&index, b"index").expect("write index");
+
+        prepare_output_dir(dir.path(), true).expect("must be accepted");
+
+        assert!(!index.exists(), "the stale index must be removed");
+        assert!(weights.exists(), "model.safetensors must be left alone");
     }
 }

@@ -194,7 +194,9 @@ fn resolve_block_size(text: &Value, opts: &SplitMtpOptions) -> Result<usize, Sur
     let requested = opts.block_size.unwrap_or_else(|| nextn.saturating_add(1));
     if requested > MAX_BLOCK_SIZE {
         return Err(anyhow!(
-            "split-mtp: --block-size {requested} exceeds the maximum of {MAX_BLOCK_SIZE}; the              value becomes the served verify width, and this family verifies one query row at a              time"
+            "split-mtp: --block-size {requested} exceeds the maximum of {MAX_BLOCK_SIZE}; the \
+             value becomes the served verify width, and this family verifies one query row at a \
+             time"
         )
         .into());
     }
@@ -306,8 +308,17 @@ pub fn split_mtp(
     let text = text_config(config);
     let source_layer = nextn_layer_index(config)?;
     // Resolved up front: a rejected `--block-size` should fail before the
-    // tensor work, not after it.
+    // tensor work, not after it. `--q-bits` gets the same treatment: MLX's
+    // affine packing only has an integer solution for
+    // `SUPPORTED_AFFINE_BITS`, and a wider bounds check
+    // (`validate_quantization_params`) still runs later at the quantize call
+    // site because it is the shared load-time guard, not a producer-specific
+    // one.
     let block_size = resolve_block_size(text, opts)?;
+    if let Some(bits) = opts.q_bits {
+        mlxcel_core::layers::validate_affine_quantization_bits(bits)
+            .map_err(|e| anyhow!("split-mtp: {e}"))?;
+    }
     let geometry = KvBProjGeometry {
         num_heads: cfg_usize(text, "num_attention_heads")?,
         qk_nope_head_dim: cfg_usize(text, "qk_nope_head_dim")?,

@@ -1184,8 +1184,9 @@ impl Linear {
 /// by mlx-lm/mlx-vlm, which emits per-path bit overrides in `config.quantization`
 /// (e.g. Qwen3.5/3.6 MoE router gates).
 ///
-/// Returns an error only when the inferred bits are not a valid MLX bit width
-/// `{2, 3, 4, 5, 6, 8}` — in that case `group_size` itself is likely wrong.
+/// Returns an error only when the inferred bits are not in
+/// [`SUPPORTED_AFFINE_BITS`] — in that case `group_size` itself is likely
+/// wrong.
 fn infer_quantization_bits(
     weight_shape: &[i32],
     scales_shape: &[i32],
@@ -1224,7 +1225,7 @@ fn infer_quantization_bits(
     if inferred_bits == caller_bits {
         return Ok(caller_bits);
     }
-    if ![2, 3, 4, 5, 6, 8].contains(&inferred_bits) {
+    if !SUPPORTED_AFFINE_BITS.contains(&inferred_bits) {
         return Err(format!(
             "Quantized weight shape inconsistency: inferred bits={} not in {{2,3,4,5,6,8}}; \
              weight.shape={:?}, scales.shape={:?}, group_size={}, caller_bits={}",
@@ -1347,6 +1348,33 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
     Ok(())
 }
 
+/// Reject a bit width outside [`SUPPORTED_AFFINE_BITS`], before any tensor work.
+///
+/// [`validate_quantization_params`] above stays a bounds check (`1..=32`)
+/// because it guards the load path, where an allowlist would refuse a
+/// checkpoint whose declared width diverges from a shape-derived one that
+/// [`infer_quantization_bits`] can still reconcile. A producer that picks the
+/// width itself rather than loading it, such as `split-mtp`, has no tensor to
+/// reconcile against and no reason to accept a width MLX's affine packing
+/// cannot represent, so it calls this in addition to, not instead of, the
+/// bounds check.
+///
+/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` in the consuming crate
+pub fn validate_affine_quantization_bits(bits: i32) -> Result<(), String> {
+    if SUPPORTED_AFFINE_BITS.contains(&bits) {
+        return Ok(());
+    }
+    let accepted = SUPPORTED_AFFINE_BITS
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "--q-bits ({bits}) must be one of {accepted}: MLX's affine packing only has an integer \
+         solution for these widths"
+    ))
+}
+
 /// Every quantization mode MLX accepts, in the order its own parser tests them.
 ///
 /// This mirrors `string_to_quantization_mode` in
@@ -1360,6 +1388,25 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
 ///          `crate::models::gemma4::validate_quantization_scheme` in the
 ///          consuming crate
 pub const SUPPORTED_QUANTIZATION_MODES: [&str; 4] = ["affine", "mxfp4", "mxfp8", "nvfp4"];
+
+/// Bit widths a real affine-quantized tensor can pack: the invariant
+/// `packed_in_features * 32 == bits * num_groups * group_size` only has an
+/// integer solution at these six values.
+///
+/// This is the single definition of the affine set. [`infer_quantization_bits`]
+/// reads it when re-deriving a bit width from a loaded tensor's shape, and a
+/// producer that picks the width up front rather than inferring it from a
+/// tensor (`mlxcel_surgery::ops::split_mtp::split_mtp`) validates against it
+/// directly through [`validate_affine_quantization_bits`]. Unlike
+/// [`validate_quantization_params`], which stays a bounds check so a loader
+/// does not refuse a checkpoint whose declared width disagrees with its
+/// tensor shapes, this is the allowlist a producer needs before it spends any
+/// tensor work on a width nothing can load.
+///
+/// Used by: [`infer_quantization_bits`], [`validate_affine_quantization_bits`],
+///          and `mlxcel_surgery::ops::split_mtp::split_mtp` in the consuming
+///          crate
+pub const SUPPORTED_AFFINE_BITS: [i32; 6] = [2, 3, 4, 5, 6, 8];
 
 /// Reject a declared quantization mode MLX cannot parse.
 ///
