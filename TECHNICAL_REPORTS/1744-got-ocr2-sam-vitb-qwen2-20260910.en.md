@@ -172,6 +172,8 @@ The model emits `<|im_end|>` at exactly the position where the shipped build sto
 
 Identical to the CLI on every field. Two concurrent requests on the three-line page, one `OCR: ` and one `OCR with format: `, both returned the full transcription (287 and 289 prompt tokens, 15 and 14 completion tokens), which exercises the batched decode path.
 
+The 4-bit conversion was served the same way and returned 287 prompt tokens, 11 completion tokens, `finish_reason: "stop"` and `GOT OCR two point zero\nrenders this page` on the fixture page. That is the same token count as bf16 and one token of content different (bf16 keeps a space before the newline), which is the quantization drift this repository records rather than gates.
+
 That the two front ends render the same prompt is pinned rather than argued. `server_render_and_cli_instruction_tokenize_identically` renders through the real `ChatTemplateProcessor` and asserts byte equality of the assembled prompt and equality of every id, because a matching `prompt_tokens` count survives a wrong render.
 
 ### 4.6 Gates
@@ -188,7 +190,7 @@ That the two front ends render the same prompt is pinned rather than argued. `se
 ## 5. What Was Not Verified
 
 - **`cargo test --workspace --profile test-fast --features metal,accelerate` was not run.** The issue lists it as an acceptance criterion, but this host is Linux aarch64 with CUDA: there is no Metal and no Accelerate here. The CUDA equivalents above are what was actually run, scoped to the modules this change touches; the full workspace suite is left to the merge gate.
-- **The 4-bit conversion was not part of the greedy-parity gate.** It transcribes the page correctly from the CLI and its quantization block is unit-tested through `got_text_config`, but the reference oracle runs the original fp32 weights, so quantized greedy agreement is not a meaningful comparison and was not claimed. The 8-bit conversion was not downloaded and was not run at all.
+- **The 4-bit conversion was not part of the greedy-parity gate.** It transcribes the page correctly from both the CLI and the server and its quantization block is unit-tested through `got_text_config`, but the reference oracle runs the original fp32 weights, so quantized greedy agreement is not a meaningful comparison and was not claimed; its one-token difference from bf16 on the fixture is recorded above rather than gated. The 8-bit conversion was not downloaded and was not run at all.
 - **Photographic images were not compared against the oracle.** mlxcel's bicubic resize is `image`'s Catmull-Rom and upstream's is PIL's, so a photo's resampled pixels differ slightly and greedy token-exactness is not expected there. The rendered high-contrast page used above is close to filter-independent, which is why it is the token-exact comparison.
 - **The fine-grained region modes were not compared against the reference.** `[x1,y1,x2,y2] OCR with format: ` and `[red] OCR with format: ` are passed through verbatim as instructions and were not exercised on a page with a known region answer.
 - **Text-only requests are not a supported mode and were not made to work.** With no image the runtime arm never runs, and the model produces junk, which is inherent to an OCR-only checkpoint whose reference `chat()` always passes an image. Behaviour was left alone rather than papered over.
