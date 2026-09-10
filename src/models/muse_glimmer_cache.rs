@@ -50,6 +50,28 @@ impl MuseCache {
         matches!(self, Self::Rotating(_))
     }
 
+    /// Rewind `n` positions after a partial speculative accept (issue
+    /// #1343). No data moves on either variant: `offset` (and the rotating
+    /// write index) step back and the next append overwrites the rejected
+    /// rows. Returns the positions actually rewound.
+    pub(crate) fn trim(&mut self, n: i32) -> i32 {
+        match self {
+            Self::Standard(cache) => cache.trim(n),
+            Self::Rotating(cache) => cache.trim(n),
+        }
+    }
+
+    /// Arm a sliding cache with `buffer_size` rows of speculative slack so
+    /// a verify block appended past the ring boundary can be trimmed back
+    /// without overwriting still-visible window entries. A no-op on a full
+    /// layer's growing cache, which can always be trimmed.
+    pub(crate) fn enable_speculative_buffer(&mut self, buffer_size: i32) -> Result<(), String> {
+        match self {
+            Self::Standard(_) => Ok(()),
+            Self::Rotating(cache) => cache.enable_speculative_buffer(buffer_size),
+        }
+    }
+
     pub(crate) fn update_and_fetch(
         &mut self,
         k: UniquePtr<MlxArray>,

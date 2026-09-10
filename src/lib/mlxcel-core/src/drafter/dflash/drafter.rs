@@ -500,17 +500,16 @@ impl Drafter for DFlashDrafter {
     /// default, `min(block_size + 1, runtime_block_size)`. A plain DFlash
     /// drafter keeps the trait default (`None`).
     ///
-    /// Declarative on this drafter, not load-bearing. The only readers of
-    /// this hook and of [`Self::prefer_requested_block_size`] are the MTP
-    /// generator and its batched round loop; the DFlash round loop uses the
-    /// `block_size` it was constructed with and never adapts it, so the
-    /// no-backoff property below holds for DSpark whatever this returns.
-    /// The width a DSpark run actually gets is decided one layer up, before
-    /// the drafter is loaded: `resolve_draft_block_size` peeks the drafter
-    /// config through `peek_dspark_configured_block_size` and passes the
-    /// same `runtime_verify_width()` in as `block_size`, unless
-    /// `--draft-block-size` overrides it. Kept implemented so the two agree
-    /// if the DFlash loop ever grows an adaptive width.
+    /// Declarative on this drafter. The DFlash round loop reads this hook
+    /// and [`Self::prefer_requested_block_size`] since issue #1343, but only
+    /// widens between a configured depth and the requested ceiling when the
+    /// drafter does NOT prefer the requested width; DSpark does, so the
+    /// no-backoff property below holds whatever this returns. The width a
+    /// DSpark run actually gets is decided one layer up, before the drafter
+    /// is loaded: `resolve_draft_block_size` peeks the drafter config
+    /// through `peek_dspark_configured_block_size` and passes the same
+    /// `runtime_verify_width()` in as `block_size`, unless
+    /// `--draft-block-size` overrides it.
     fn configured_block_size(&self) -> Option<usize> {
         self.is_dspark()
             .then(|| self.model.config.runtime_verify_width())
@@ -848,7 +847,10 @@ fn sample_block_per_position(
 /// mx.concatenate([bonus, draft_tokens], axis=1)` pipeline. Stochastic
 /// sampling falls back to the scalar helper because stochastic DFlash parity
 /// is outside the hot path optimized.
-fn sample_block_per_position_array(
+///
+/// Used by: `DFlashDrafter::draft_block_array`,
+/// `MuseAssistantDrafter::draft_block` / `draft_block_array` (issue #1343).
+pub(crate) fn sample_block_per_position_array(
     logits: &MlxArray,
     block_size: usize,
     sampler: &SamplingConfig,

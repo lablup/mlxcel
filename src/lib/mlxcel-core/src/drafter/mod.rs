@@ -69,7 +69,7 @@
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
 //! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type); the `glm4_moe_lite_mtp` drafter resolves to this kind here but is built by the binary crate's `mlxcel::models::drafter_loader` (issue #1326) | |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type) | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
@@ -235,6 +235,12 @@ pub fn drafter_kind_by_model_type() -> &'static HashMap<&'static str, DrafterKin
         // builds it. The kind still has to resolve here so `--draft-model`
         // auto-detects MTP without a `--draft-kind` flag.
         m.insert(GLM4_MOE_LITE_MTP_MODEL_TYPE, DrafterKind::Mtp);
+        // The Muse Glimmer assistant (issue #1343) is a DFlash-family block
+        // drafter with its own `model_type`. It would resolve to the DFlash
+        // default anyway; the explicit entry is what lets an explicit
+        // `--draft-kind mtp` be warned about as a mismatch, and what
+        // documents the pairing in the table above.
+        m.insert(dflash::MUSE_ASSISTANT_MODEL_TYPE, DrafterKind::Dflash);
         m
     })
 }
@@ -1067,6 +1073,17 @@ pub trait Drafter {
         false
     }
 
+    /// Whether this drafter is the Muse Glimmer assistant (issue #1343).
+    ///
+    /// Same role as [`Self::is_dspark`] for the third DFlash-family drafter:
+    /// its `encoder.fc` reads the Muse Glimmer residual streams at a width
+    /// no other target produces, and a Muse target can run no other
+    /// drafter, so the server's DFlash target gate reads this to refuse a
+    /// mismatched pairing by name before any forward runs.
+    fn is_muse_assistant(&self) -> bool {
+        false
+    }
+
     /// Produce a draft block of proposal tokens.
     ///
     /// Semantics are kind-specific:
@@ -1240,8 +1257,15 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
     let resolved = resolve_drafter_kind(path, kind)?;
     match resolved {
         DrafterKind::Dflash => {
-            // Wired in by load weights, sanitize, build the model,
-            // hand back the boxed trait object.
+            // Two concrete families share the kind and the round loop. The
+            // Muse Glimmer assistant (issue #1343) declares its own
+            // `model_type`; everything else (Qwen 3.5 DFlash, LFM2 DSpark)
+            // loads through `DFlashDrafter`.
+            let model_type = peek_drafter_model_type(path)?;
+            if model_type.as_deref() == Some(dflash::MUSE_ASSISTANT_MODEL_TYPE) {
+                let drafter = dflash::MuseAssistantDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
             let drafter = dflash::drafter::DFlashDrafter::load(path)?;
             Ok((Box::new(drafter), resolved))
         }
@@ -1394,9 +1418,14 @@ mod tests {
         assert_eq!(map.get("qwen3_5_mtp"), Some(&DrafterKind::Mtp));
         // The GLM-4.7-Flash split-out MTP block (issue #1326).
         assert_eq!(map.get("glm4_moe_lite_mtp"), Some(&DrafterKind::Mtp));
-        // The four MTP spellings, nothing else: upstream's three plus the
-        // GLM-4.7-Flash drafter this tree produces itself.
-        assert_eq!(map.len(), 4);
+        // The Muse Glimmer assistant (issue #1343) is the one DFlash-family
+        // drafter with a dedicated model_type.
+        assert_eq!(
+            map.get("muse_glimmer_assistant"),
+            Some(&DrafterKind::Dflash)
+        );
+        // The four MTP spellings plus the Muse assistant, nothing else.
+        assert_eq!(map.len(), 5);
     }
 
     #[test]

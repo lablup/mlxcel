@@ -399,11 +399,19 @@ pub const DSPARK_DRAFT_ARCHITECTURE: &str = "Lfm2DSparkDraftModel";
 /// sufficient: `dflash_config` is what [`DFlashConfig::from_json`] itself
 /// keys on, and `architectures` is what HuggingFace `AutoModel` dispatch keys
 /// on. A checkpoint carrying neither is not a DFlash drafter.
+///
+/// The Muse Glimmer assistant (issue #1343) is the one DFlash-family drafter
+/// with a dedicated `model_type`; its markers are read through
+/// [`super::muse::is_muse_assistant_config`] so the standalone-model
+/// rejection covers it too.
 pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
     if config
         .get("dflash_config")
         .is_some_and(serde_json::Value::is_object)
     {
+        return true;
+    }
+    if super::muse::is_muse_assistant_config(config) {
         return true;
     }
 
@@ -635,6 +643,26 @@ mod tests {
         assert!(is_dflash_drafter_config(&json!({
             "model_type": "qwen3",
             "dflash_config": {"mask_token_id": 248070},
+        })));
+    }
+
+    /// The Muse Glimmer assistant carries neither of the two markers above
+    /// and is still a DFlash-family drafter (issue #1343): passing it to `-m`
+    /// must get the same "not a standalone model" refusal.
+    #[test]
+    fn probe_accepts_the_muse_glimmer_assistant_markers() {
+        assert!(is_dflash_drafter_config(&json!({
+            "architectures": ["MuseGlimmerAssistantModel"],
+            "model_type": "muse_glimmer_assistant",
+            "mask_token_id": 201818,
+        })));
+        assert!(is_dflash_drafter_config(&json!({
+            "model_type": "muse_glimmer_assistant",
+        })));
+        // The Muse Glimmer TARGET is a full model.
+        assert!(!is_dflash_drafter_config(&json!({
+            "architectures": ["MuseGlimmerForConditionalGeneration"],
+            "model_type": "muse_glimmer",
         })));
     }
 

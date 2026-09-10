@@ -91,6 +91,12 @@
 //!   one warning), B = 1 only, and gated on the block-versus-chain
 //!   exactness probe (`Lfm2Model::dflash_exactness_allows`) like the MTP
 //!   arms. The per-target plumbing lives in [`super::dflash_target`].
+//! - **DFlash / Muse Glimmer** (issue #1343): text-only requests on
+//!   [`crate::LoadedModel::MuseGlimmerVLM`], paired with the Muse Glimmer
+//!   assistant drafter (`muse_glimmer_assistant`) through the same
+//!   `SpeculativeDispatch::DFlash` variant. B = 1 only, the sliding caches
+//!   armed with a speculative buffer before the prefill, and gated on the
+//!   exactness probe (`MuseGlimmerTextModel::dflash_exactness_allows`).
 //!
 //! B > 1 batched bursts are deferred to a peer follow-up — they require
 //! the batched `MtpTarget` / `SpeculativeTarget` methods on the adapter
@@ -398,9 +404,9 @@ pub(crate) fn should_burst_for_sequence(
         if matches!(dispatch, crate::server::SpeculativeDispatch::DFlash { .. }) {
             tracing::warn!(
                 "DFlash speculative dispatch declined for seq {}: multimodal VLM request \
-                 detected; VLM-wrapped text-only Qwen 3.5 and LFM2 targets are supported, \
-                 but multimodal speculative tail is not yet enabled; falling back to classic \
-                 decode",
+                 detected; VLM-wrapped text-only Qwen 3.5, LFM2 and Muse Glimmer targets are \
+                 supported, but multimodal speculative tail is not yet enabled; falling back \
+                 to classic decode",
                 seq.seq_id,
             );
         } else {
@@ -1592,8 +1598,10 @@ where
 }
 
 /// DFlash B=1 burst: a Qwen 3.5 text target (or VLM wrapper serving a
-/// text-only request) with a DFlash drafter, or an LFM2 / LFM2.5 text target
-/// (or LFM2-VL wrapper) with a DSpark drafter (issue #1339).
+/// text-only request) with a DFlash drafter, an LFM2 / LFM2.5 text target
+/// (or LFM2-VL wrapper) with a DSpark drafter (issue #1339), or a Muse
+/// Glimmer VLM checkpoint serving a text-only request with the Muse Glimmer
+/// assistant drafter (issue #1343).
 ///
 /// **Variant gate runs before drafter load.** Same rationale as
 /// [`run_mtp_burst`]: surfacing "unsupported target" decline-to-classic
@@ -1624,8 +1632,9 @@ fn run_dflash_burst(
     if seq.vlm_embeddings.is_some() || !seq.images.is_empty() || !seq.audio.is_empty() {
         tracing::warn!(
             "DFlash speculative dispatch declined for seq {}: multimodal VLM request \
-             detected; VLM-wrapped text-only Qwen 3.5 and LFM2 targets are supported, but \
-             multimodal speculative tail is not yet enabled; falling back to classic decode",
+             detected; VLM-wrapped text-only Qwen 3.5, LFM2 and Muse Glimmer targets are \
+             supported, but multimodal speculative tail is not yet enabled; falling back to \
+             classic decode",
             seq.seq_id,
         );
         return Err(BurstOutcome::DeclineToClassic);
@@ -1662,11 +1671,13 @@ fn run_dflash_burst(
         LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => m.exactness_allows(bs),
         LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => m.exactness_allows(bs),
         LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
+        LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         _ => {
             tracing::warn!(
                 "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
-                 text or VLM-wrapped text-only (DFlash drafter) or LFM2 / LFM2.5 text or \
-                 LFM2-VL text-only (DSpark drafter); falling back to classic decode",
+                 text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
+                 LFM2-VL text-only (DSpark drafter), or Muse Glimmer text-only (Muse Glimmer \
+                 assistant drafter); falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1781,6 +1792,7 @@ fn run_dflash_burst(
         LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => drive!(m),
         LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => drive!(m),
         LoadedModel::Lfm2VL(m) => drive!(m),
+        LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -2589,9 +2601,10 @@ where
 /// IO; the drafter bind happens **inside** `DFlashBatchedGenerator::run_batched`
 /// (same asymmetry as the B = 1 path — do NOT add a manual bind here).
 ///
-/// LFM2 DSpark is B = 1 only (issue #1339): its drafter has no batched draft
-/// and the family's short-conv state has no per-row rollback, so an LFM2
-/// window declines here and its rows are served classically.
+/// Whether a family runs batched is the target's own policy
+/// ([`DFlashTargetModel::supports_batched`]): LFM2 DSpark (issue #1339) and
+/// Muse Glimmer (issue #1343) are B = 1 only, so their windows decline here
+/// and their rows are served classically.
 fn run_dflash_burst_batched(
     ctx: BurstContext<'_>,
     seqs: &mut [SequenceInfo],
@@ -2610,18 +2623,24 @@ fn run_dflash_burst_batched(
         return Err(BurstOutcome::DeclineToClassic);
     }
 
-    // HOIST: variant gate before drafter IO.
-    match ctx.model {
-        LoadedModel::Qwen35(_)
-        | LoadedModel::Qwen35Moe(_)
-        | LoadedModel::Qwen35VLM(_)
-        | LoadedModel::Qwen35MoeVLM(_) => {}
-        LoadedModel::Lfm2(_) | LoadedModel::Lfm2Moe(_) | LoadedModel::Lfm2VL(_) => {
-            tracing::warn!(
-                "DFlash batched speculative dispatch declined: LFM2 DSpark is B = 1 only; \
-                 falling back to classic decode for this window"
-            );
-            return Err(BurstOutcome::DeclineToClassic);
+    // HOIST: variant gate before drafter IO. The batched policy is the
+    // target's own (`DFlashTargetModel::supports_batched`); the match only
+    // recovers the concrete type the trait is implemented on.
+    let batched_supported = match ctx.model {
+        LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => {
+            <crate::models::Qwen35Model as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Qwen35VLM(_) | LoadedModel::Qwen35MoeVLM(_) => {
+            <crate::vision::Qwen35VLModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Lfm2(_) | LoadedModel::Lfm2Moe(_) => {
+            <crate::models::Lfm2Model as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Lfm2VL(_) => {
+            <crate::vision::Lfm2VlModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::MuseGlimmerVLM(_) => {
+            <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::supports_batched()
         }
         _ => {
             tracing::warn!(
@@ -2631,6 +2650,14 @@ fn run_dflash_burst_batched(
             );
             return Err(BurstOutcome::DeclineToClassic);
         }
+    };
+    if !batched_supported {
+        tracing::warn!(
+            "DFlash batched speculative dispatch declined: {:?} runs the DFlash round loop \
+             at B = 1 only; falling back to classic decode for this window",
+            model_variant_label(ctx.model),
+        );
+        return Err(BurstOutcome::DeclineToClassic);
     }
 
     if let Some(load) = ctx
@@ -2782,6 +2809,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
         LoadedModel::Lfm2VL(_) => "Lfm2VL",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
+        LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
         _ => "other",
     }
 }

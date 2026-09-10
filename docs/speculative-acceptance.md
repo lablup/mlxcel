@@ -33,12 +33,20 @@ only when `temperature == 0`.
 Sampler-match where the sampler happens to be `argmax`. Lossless by the same
 argument; it is exactly greedy target decoding.
 
-### Argmax-against-argmax (MTP, DFlash and DSpark)
+### Argmax-against-argmax (MTP, DFlash, DSpark and the Muse Glimmer assistant)
 
 Accept iff the drafted token equals `argmax(target_logits)`, regardless of
 temperature; emit the argmax on mismatch. **Not lossless** at `temperature > 0`:
 the served stream is the target's greedy stream, not a sample from `p`. Its
 acceptance probability is `q(argmax p)`.
+
+The Muse Glimmer assistant drafter (#1343) runs on the same DFlash round loop
+under this rule, with no dispatch difference from the Qwen 3.5 DFlash drafter:
+its proposals are sampled per masked slot under the request's sampler and
+accepted against the target's argmax. At `temperature == 0` it is exactly
+greedy target decoding, subject to the block-versus-chain exactness probe
+below, including past the 2048-token sliding window of the target's rotating
+caches.
 
 The LFM2 DSpark drafter runs on the DFlash round loop and therefore this rule,
 with one difference in dispatch: it is greedy-only. The drafter's Markov head
@@ -97,6 +105,7 @@ real and provable.
 | Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) | not wired |
 | DFlash round loop (Qwen 3.5 DFlash drafter) | argmax (lossless here) | argmax-against-argmax (**biased**) | not wired |
 | DFlash round loop (LFM2 DSpark drafter) | argmax (lossless here, probe-gated) | declines to classic decode | not wired |
+| DFlash round loop (Muse Glimmer assistant drafter) | argmax (lossless here, probe-gated) | argmax-against-argmax (**biased**) | not wired |
 
 The MTP and DFlash verify paths select the target token with
 `argmax_per_position` / `argmax_logits_to_array` regardless of the sampler, and
@@ -366,14 +375,16 @@ drafter checkpoint is a different object: it ships no `embed_tokens` and no
 `lm_head` because it borrows both from the target when it binds, so the classic
 path cannot load it as a `LoadedModel` at all. The CLI refuses it up front, with
 or without `--draft-kind`, and names `mlxcel-server` as the path that does drive
-the DFlash round loop (#1168). The LFM2 DSpark drafters (#1339) are the same
-shape and get the same refusal. Before that check existed, the drafter's
+the DFlash round loop (#1168). The LFM2 DSpark drafters (#1339) and the Muse
+Glimmer assistant (#1343) are the same shape and get the same refusal. Before that check existed, the drafter's
 ordinary `"model_type": "qwen3"` sent it to the Qwen 3 loader, which failed with
 `Weight not found: model.embed_tokens.weight`.
 
 The discriminator is structural (a `dflash_config` block and/or
 `architectures: ["DFlashDraftModel"]` or `["Lfm2DSparkDraftModel"]` in the
-drafter's `config.json`), not the resolved `DrafterKind`. Keying on the resolved kind would reject every ordinary
+drafter's `config.json`, or the Muse assistant's own
+`model_type: muse_glimmer_assistant` / `["MuseGlimmerAssistantModel"]`), not
+the resolved `DrafterKind`. Keying on the resolved kind would reject every ordinary
 classic drafter along with it, since they all auto-resolve to `dflash`. The same
 structural check runs inside `get_model_type`, so `mlxcel generate -m
 <dflash-dir>` is rejected as "not a standalone model" too.

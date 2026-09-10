@@ -71,6 +71,7 @@
 use crate::drafter::{Drafter, DrafterError};
 use crate::ffi::{self, MlxArray};
 use crate::generate::{GenerationStats, SamplingConfig};
+use crate::speculative::mtp::adaptive::BlockThroughputController;
 use cxx::UniquePtr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -682,6 +683,36 @@ impl DFlashGenerator {
         let decode_start = Instant::now();
 
         let block_size_cfg = self.block_size as usize;
+        // Verify-width policy (issue #1343). A drafter that declares a
+        // configured depth below the requested width, and does not insist
+        // on the requested width, runs the same throughput comparator the
+        // MTP loop runs: warm up at the configured depth, then alternate
+        // measurement windows between the depth and the requested ceiling
+        // and hold whichever emits more tokens per millisecond. The Muse
+        // Glimmer assistant is the case: on an M5 Max its published 16-row
+        // block measures below classic decode on natural text (1.9 accepted
+        // per round, 13 to 18 tok/s against 18) and 2x above it at 4 rows
+        // (34 to 41 tok/s), while repetitive text accepts 14 of 15 at 16 rows
+        // (94 tok/s), so neither fixed width is right. The Qwen 3.5 DFlash
+        // drafter declares no depth and the DSpark drafter prefers its
+        // requested width, so both keep running at `block_size` unchanged.
+        let mut width_controller = if self.drafter.prefer_requested_block_size() {
+            None
+        } else {
+            self.drafter
+                .configured_block_size()
+                .filter(|&depth| depth > 1 && depth < block_size_cfg)
+                .map(|depth| {
+                    tracing::debug!(
+                        requested = block_size_cfg,
+                        configured = depth,
+                        "DFlash verify width starts at the drafter's configured depth and \
+                         widens to the requested ceiling only when a measurement window \
+                         emits more tokens per millisecond there"
+                    );
+                    BlockThroughputController::new(block_size_cfg, depth)
+                })
+        };
         let mut bonus = first_bonus;
         let mut hidden: UniquePtr<MlxArray> = first_hidden;
         // `emitted` counts ALL tokens the caller will see, including
@@ -710,10 +741,14 @@ impl DFlashGenerator {
             }
             // Upstream: bs = min(block_total, max_tokens - emitted + 1)
             let remaining_plus_one = max_tokens - emitted + 1;
-            let bs = block_size_cfg.min(remaining_plus_one);
+            let bs = match &width_controller {
+                Some(controller) => controller.decide(remaining_plus_one),
+                None => block_size_cfg.min(remaining_plus_one),
+            };
             if bs <= 1 {
                 break;
             }
+            let round_started = Instant::now();
 
             // ---- Draft ----
             let phase_start = Instant::now();
@@ -839,6 +874,15 @@ impl DFlashGenerator {
                 if emitted >= max_tokens {
                     break;
                 }
+            }
+            // Feed the width comparator what this round delivered against
+            // what it cost, the same window sums the MTP loop reads.
+            if let Some(controller) = &mut width_controller {
+                controller.record_round(
+                    bs,
+                    new_tokens.len(),
+                    round_started.elapsed().as_secs_f64() * 1000.0,
+                );
             }
             if hit_eos {
                 break;
@@ -1392,6 +1436,10 @@ mod tests {
         bind_calls: u32,
         reset_calls: u32,
         target_layer_ids: Option<Vec<usize>>,
+        /// `configured_block_size()` answer; `None` keeps the trait default.
+        configured_depth: Option<usize>,
+        /// `prefer_requested_block_size()` answer.
+        prefer_requested: bool,
         /// Row count (`shape[1]`) of the `hidden` tensor each `draft_block`
         /// call received, in call order. A DSpark drafter appends every
         /// row to its own context cache, so the DSpark parity test pins
@@ -1407,12 +1455,20 @@ mod tests {
                 bind_calls: 0,
                 reset_calls: 0,
                 target_layer_ids: None,
+                configured_depth: None,
+                prefer_requested: false,
                 seen_hidden_rows: Rc::new(Cell::new(Vec::new())),
             }
         }
 
         fn with_target_layer_ids(mut self, target_layer_ids: Vec<usize>) -> Self {
             self.target_layer_ids = Some(target_layer_ids);
+            self
+        }
+
+        fn with_configured_depth(mut self, depth: usize, prefer_requested: bool) -> Self {
+            self.configured_depth = Some(depth);
+            self.prefer_requested = prefer_requested;
             self
         }
 
@@ -1444,6 +1500,14 @@ mod tests {
 
         fn dflash_target_layer_ids(&self) -> Option<&[usize]> {
             self.target_layer_ids.as_deref()
+        }
+
+        fn configured_block_size(&self) -> Option<usize> {
+            self.configured_depth
+        }
+
+        fn prefer_requested_block_size(&self) -> bool {
+            self.prefer_requested
         }
 
         fn set_shared_kv(
@@ -1536,6 +1600,72 @@ mod tests {
     // --------------------------------------------------------------
     // Round-loop control-flow tests
     // --------------------------------------------------------------
+
+    /// A drafter that declares a configured depth below the requested width
+    /// (the Muse Glimmer assistant, issue #1343) is drafted at that depth
+    /// through the warm-up and the first measurement window, never at the
+    /// ceiling; a drafter that prefers the requested width (DSpark) and one
+    /// that declares no depth (Qwen 3.5 DFlash) draft at the requested width
+    /// from the first round.
+    #[test]
+    fn dflash_round_loop_starts_at_the_configured_depth() {
+        let widths_for = |configured: Option<(usize, bool)>| -> Vec<usize> {
+            let seen: Rc<Cell<Vec<usize>>> = Rc::new(Cell::new(Vec::new()));
+            let recorder = seen.clone();
+            let target = SyntheticTarget::new(vec![1, 8, 15, 22, 29], 5 * 8, |_s, prev| prev + 1);
+            let mut caches: Vec<SyntheticCache> =
+                (0..3).map(|_| SyntheticCache::default()).collect();
+            let mut drafter = SyntheticDrafter::new(move |bonus, bs| {
+                let mut widths = recorder.take();
+                widths.push(bs);
+                recorder.set(widths);
+                (1..bs as i32).map(|s| bonus + s).collect()
+            });
+            if let Some((depth, prefer)) = configured {
+                drafter = drafter.with_configured_depth(depth, prefer);
+            }
+            let mut r#gen =
+                DFlashGenerator::with_drafter(Box::new(drafter), SamplingConfig::greedy());
+            r#gen.block_size = 6;
+            let first_hidden = ffi::zeros(&[1, 1, 5 * 8], crate::dtype::FLOAT32);
+            r#gen
+                .run(
+                    &target,
+                    &EmbedOnlyLm,
+                    &mut caches,
+                    0,
+                    first_hidden,
+                    &[],
+                    60,
+                    &AtomicBool::new(false),
+                    &crate::sampling::LogprobsConfig::default(),
+                )
+                .expect("synthetic round loop must not fail");
+            seen.take()
+        };
+
+        let configured = widths_for(Some((3, false)));
+        assert!(configured.len() >= 8, "sixty tokens need several rounds");
+        assert!(
+            configured.iter().all(|&w| w == 3),
+            "every round of a 60-token run stays inside the warm-up and first window at the \
+             configured depth 3, never the requested 6: {configured:?}"
+        );
+
+        let dspark_like = widths_for(Some((3, true)));
+        assert!(
+            dspark_like.iter().all(|&w| w == 6 || w < 6 && w > 1),
+            "a drafter that prefers the requested width drafts at 6 (narrower only at the \
+             budget's end): {dspark_like:?}"
+        );
+        assert_eq!(dspark_like[0], 6);
+
+        let plain = widths_for(None);
+        assert_eq!(
+            plain[0], 6,
+            "no configured depth: the requested width from round one"
+        );
+    }
 
     /// The round loop must prefer the drafter checkpoint's
     /// `target_layer_ids` over the target-side fallback. This is

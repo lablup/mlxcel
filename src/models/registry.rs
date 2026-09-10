@@ -124,6 +124,8 @@ const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
 const MTP: &[Drafter] = &[Drafter::Mtp];
 const MTP_DFLASH: &[Drafter] = &[Drafter::Mtp, Drafter::Dflash];
+/// DFlash round loop only: the Muse Glimmer assistant drafter (issue #1343).
+const DFLASH: &[Drafter] = &[Drafter::Dflash];
 
 const EMPTY_KEYS: &[&str] = &[];
 const QWEN35_ALIASES: &[&str] = &["Qwen 3.8"];
@@ -442,6 +444,7 @@ impl ModelType {
             | ModelType::Qwen35VLM
             | ModelType::Qwen35Moe
             | ModelType::Qwen35MoeVLM => MTP_DFLASH,
+            ModelType::MuseGlimmerVLM => DFLASH,
             _ => NO_DRAFTERS,
         };
         let cuda = match self {
