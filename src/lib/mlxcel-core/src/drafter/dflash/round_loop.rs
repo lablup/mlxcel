@@ -1366,6 +1366,12 @@ mod tests {
         bind_calls: u32,
         reset_calls: u32,
         target_layer_ids: Option<Vec<usize>>,
+        /// Row count (`shape[1]`) of the `hidden` tensor each `draft_block`
+        /// call received, in call order. A DSpark drafter appends every
+        /// row to its own context cache, so the DSpark parity test pins
+        /// that the first round sees the whole prompt and every later
+        /// round sees exactly the rows committed since.
+        seen_hidden_rows: Rc<Cell<Vec<i32>>>,
     }
 
     impl SyntheticDrafter {
@@ -1375,12 +1381,17 @@ mod tests {
                 bind_calls: 0,
                 reset_calls: 0,
                 target_layer_ids: None,
+                seen_hidden_rows: Rc::new(Cell::new(Vec::new())),
             }
         }
 
         fn with_target_layer_ids(mut self, target_layer_ids: Vec<usize>) -> Self {
             self.target_layer_ids = Some(target_layer_ids);
             self
+        }
+
+        fn hidden_rows_recorder(&self) -> Rc<Cell<Vec<i32>>> {
+            self.seen_hidden_rows.clone()
         }
     }
 
@@ -1423,10 +1434,15 @@ mod tests {
         fn draft_block(
             &mut self,
             last_bonus: i32,
-            _hidden: Option<&MlxArray>,
+            hidden: Option<&MlxArray>,
             block_size: usize,
             _sampler: &SamplingConfig,
         ) -> Result<Vec<i32>, DrafterError> {
+            if let Some(h) = hidden {
+                let mut rows = self.seen_hidden_rows.take();
+                rows.push(ffi::array_shape(h)[1]);
+                self.seen_hidden_rows.set(rows);
+            }
             // DFlash drafter returns `block_size - 1` proposals.
             let proposals = (self.propose)(last_bonus, block_size);
             debug_assert_eq!(
@@ -1835,6 +1851,130 @@ mod tests {
             out3.tokens, out.tokens,
             "byte-identical output with an oracle drafter (full-accept hot path)"
         );
+    }
+
+    /// DSpark greedy parity (issue #1339) over 64 tokens.
+    ///
+    /// Two things differ from the Qwen 3.5 DFlash round above and both are
+    /// pinned here. First, the caller feeds the drafter EVERY prompt row on
+    /// the first round (`first_hidden` is `[1, S, dim]`, not `[1, 1, dim]`)
+    /// so the drafter's own context cache holds the whole prompt; the loop
+    /// must pass that tensor through untouched and then hand the drafter
+    /// exactly the rows committed by each verify (`accepted + 1` after a
+    /// partial accept, the full block after a full accept). Second, a DSpark
+    /// drafter proposes a Markov chain seeded from the anchor; a chain that
+    /// is right for a prefix and wrong after it is the common case, and the
+    /// exact-match walk must still emit the target's own greedy stream.
+    #[test]
+    fn dspark_round_loop_greedy_parity_for_sixty_four_tokens() {
+        fn chain_next(prev: i32) -> i32 {
+            (prev.rem_euclid(103) * 11 + 17).rem_euclid(200) + 30
+        }
+        let argmax_fn = |_s: i32, prev_token: i32| chain_next(prev_token);
+
+        let first_bonus = 77i32;
+        let max_tokens = 65; // first bonus + 64 round-loop emissions
+        let mut reference: Vec<i32> = Vec::with_capacity(max_tokens);
+        reference.push(first_bonus);
+        for _ in 1..max_tokens {
+            let prev = *reference.last().unwrap();
+            reference.push(chain_next(prev));
+        }
+
+        // A DSpark-shaped drafter: a chain from the anchor that is exact for
+        // a round-dependent prefix and then wanders (the sentinel 1 is
+        // outside the chain's image [30, 230)).
+        let round = Rc::new(Cell::new(0usize));
+        let round_for_drafter = round.clone();
+        let propose = move |anchor: i32, bs: usize| -> Vec<i32> {
+            let r = round_for_drafter.get();
+            round_for_drafter.set(r + 1);
+            let correct_prefix = match r % 4 {
+                0 => bs - 1, // full accept
+                1 => 0,      // zero accept
+                2 => 2,
+                _ => (bs - 1) / 2,
+            };
+            let mut out = Vec::with_capacity(bs - 1);
+            let mut prev = anchor;
+            for i in 0..bs - 1 {
+                let next = chain_next(prev);
+                out.push(if i < correct_prefix { next } else { 1 });
+                prev = next;
+            }
+            out
+        };
+
+        const PROMPT_ROWS: i32 = 5;
+        const HIDDEN_DIM: i32 = 5 * 8;
+        let target = SyntheticTarget::new(vec![2, 9, 17, 21, 27], HIDDEN_DIM, argmax_fn);
+        let mut caches: Vec<SyntheticCache> = (0..3).map(|_| SyntheticCache::default()).collect();
+        let drafter = SyntheticDrafter::new(propose);
+        let seen_rows = drafter.hidden_rows_recorder();
+        let lm = EmbedOnlyLm;
+        let block_size = 8u32;
+        let mut r#gen = DFlashGenerator::new(
+            Box::new(drafter),
+            SamplingConfig::greedy(),
+            block_size,
+            125_017,
+        );
+        // Whole-prompt first hidden: one row per prompt token.
+        let first_hidden = ffi::zeros(&[1, PROMPT_ROWS, HIDDEN_DIM], crate::dtype::FLOAT32);
+
+        let out = r#gen
+            .run(
+                &target,
+                &lm,
+                &mut caches,
+                first_bonus,
+                first_hidden,
+                &[],
+                max_tokens,
+                &AtomicBool::new(false),
+                &crate::sampling::LogprobsConfig::default(),
+            )
+            .expect("DSpark synthetic round loop must not fail");
+
+        let reference_tail = &reference[1..];
+        assert_eq!(out.tokens.len(), reference_tail.len());
+        for (i, (got, want)) in out.tokens.iter().zip(reference_tail.iter()).enumerate() {
+            assert_eq!(
+                got, want,
+                "token {i} diverged from the greedy reference: got {got}, want {want}"
+            );
+        }
+
+        // The accept pattern followed the drafter's round schedule, so the
+        // loop really exercised full, zero and partial accepts.
+        assert!(out.accept_lens.len() >= 4, "{:?}", out.accept_lens);
+        assert_eq!(out.accept_lens[0], block_size - 1, "round 0 full accept");
+        assert_eq!(out.accept_lens[1], 0, "round 1 zero accept");
+        assert_eq!(out.accept_lens[2], 2, "round 2 partial accept");
+
+        // Hidden rows handed to the drafter: the whole prompt first, then
+        // exactly the committed rows of each verify.
+        let rows = seen_rows.take();
+        assert_eq!(rows.len(), out.accept_lens.len());
+        assert_eq!(
+            rows[0], PROMPT_ROWS,
+            "first draft must see every prompt row"
+        );
+        let verify_lens = target.verify_call_lens();
+        for (i, accepted) in out.accept_lens.iter().enumerate().take(rows.len() - 1) {
+            let bs = verify_lens[i];
+            let expected = if (*accepted as i32) < bs - 1 {
+                *accepted as i32 + 1
+            } else {
+                bs
+            };
+            assert_eq!(
+                rows[i + 1],
+                expected,
+                "round {} draft must see the rows committed by round {i} (accepted {accepted}, bs {bs})",
+                i + 1
+            );
+        }
     }
 
     /// EOS handling: when an emitted token equals an EOS id, the round

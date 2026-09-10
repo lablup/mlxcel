@@ -177,6 +177,10 @@ impl LanguageModel for Lfm2VlModel {
         self.text_model.embed_tokens(input_ids)
     }
 
+    fn embed_tokens_module(&self) -> Option<mlxcel_core::layers::UnifiedEmbedding> {
+        self.text_model.embed_tokens_module()
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         LanguageModel::make_caches(&self.text_model)
     }
@@ -235,5 +239,64 @@ impl LanguageModel for Lfm2VlModel {
 
     fn trim_internal_caches(&self, excess: i32) {
         self.text_model.trim_internal_caches(excess);
+    }
+}
+
+/// DFlash target adapter for text-only requests against an LFM2-VL
+/// checkpoint (issue #1339): every hook delegates to the LFM2 text
+/// backbone, which owns the caches the burst allocates through
+/// `Lfm2Model::make_speculative_caches`. Image-bearing requests never reach
+/// the speculative path (the burst gate declines them to classic decode).
+impl mlxcel_core::drafter::dflash::SpeculativeTarget for Lfm2VlModel {
+    type Cache = crate::models::lfm2::Lfm2LayerCache;
+    type VerifyOut = crate::models::lfm2::VerifyOutput;
+
+    fn capture_layer_ids(&self) -> &[usize] {
+        mlxcel_core::drafter::dflash::SpeculativeTarget::capture_layer_ids(&self.text_model)
+    }
+
+    fn verify_forward(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+    ) -> Self::VerifyOut {
+        self.text_model
+            .forward_speculative(verify_input, caches, &[])
+    }
+
+    fn verify_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        self.text_model
+            .forward_speculative(verify_input, caches, capture_layer_ids)
+    }
+
+    fn rollback_partial(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: i32,
+        block_size: i32,
+    ) {
+        self.text_model.rollback_speculative_cache(
+            caches,
+            &verify_out.conv_states,
+            accepted,
+            block_size,
+        );
+    }
+
+    fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
+        mlxcel_core::drafter::dflash::SpeculativeTarget::concat_hidden_for_drafter(
+            &self.text_model,
+            verify_out,
+        )
+    }
+
+    fn verify_logits<'a>(&self, verify_out: &'a Self::VerifyOut) -> &'a MlxArray {
+        mlxcel_core::drafter::dflash::SpeculativeTarget::verify_logits(&self.text_model, verify_out)
     }
 }

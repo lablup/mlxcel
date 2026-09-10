@@ -124,6 +124,33 @@ pub struct DFlashConfig {
     /// Total layer count of the target's transformer stack (32 for Qwen 3.5).
     #[serde(default = "default_num_target_layers")]
     pub num_target_layers: usize,
+
+    /// Rank of the DSpark low-rank Markov token-transition head
+    /// (`markov_head.markov_w1` / `markov_w2`, issue #1339). `0`, the
+    /// DFlash default, means the checkpoint carries no such head and the
+    /// drafter samples every masked position independently.
+    #[serde(default)]
+    pub markov_rank: usize,
+
+    /// RoPE pairing. `true` (the DFlash default) rotates dimension `i`
+    /// with `i + head_dim / 2` (NeoX style); `false` rotates `i` with
+    /// `i + 1` (GPT-J style, MLX's `traditional = true`). The published
+    /// DSpark drafters set `false`.
+    #[serde(default = "default_rope_is_neox_style")]
+    pub rope_is_neox_style: bool,
+
+    /// Verify width the checkpoint recommends at runtime, counted in rows
+    /// including the anchor. Absent on the published DSpark checkpoints,
+    /// where [`Self::runtime_verify_width`] falls back to
+    /// [`DSPARK_DEFAULT_VERIFY_WIDTH`].
+    #[serde(default)]
+    pub runtime_block_size: Option<usize>,
+
+    /// Whether the checkpoint ships a `confidence_head.*` projection. The
+    /// runtime loads it and never calls it (no early-exit policy is built
+    /// on it).
+    #[serde(default)]
+    pub enable_confidence_head: bool,
 }
 
 fn default_hidden_size() -> usize {
@@ -174,6 +201,15 @@ fn default_target_layer_ids() -> Vec<usize> {
 fn default_num_target_layers() -> usize {
     32
 }
+fn default_rope_is_neox_style() -> bool {
+    true
+}
+
+/// Verify width (anchor plus proposals) a DSpark drafter runs at when its
+/// config declares no `runtime_block_size`: seven proposals plus the
+/// anchor. `--draft-block-size 10` restores the trained width
+/// (`block_size + 1`) of the published checkpoints.
+pub const DSPARK_DEFAULT_VERIFY_WIDTH: usize = 8;
 
 impl Default for DFlashConfig {
     fn default() -> Self {
@@ -194,6 +230,10 @@ impl Default for DFlashConfig {
             mask_token_id: default_mask_token_id(),
             target_layer_ids: default_target_layer_ids(),
             num_target_layers: default_num_target_layers(),
+            markov_rank: 0,
+            rope_is_neox_style: default_rope_is_neox_style(),
+            runtime_block_size: None,
+            enable_confidence_head: false,
         }
     }
 }
@@ -236,10 +276,57 @@ impl DFlashConfig {
             if let Some(v) = dflash_cfg.get("target_layer_ids") {
                 flat.insert("target_layer_ids".to_string(), v.clone());
             }
+            // The DSpark drafters nest `num_target_layers` under
+            // `dflash_config` (the Qwen 3.5 DFlash checkpoints keep it at the
+            // top level). Without this lift a 30-layer LFM2.5-2.6B pairing
+            // would silently read the Qwen default of 32.
+            if let Some(v) = dflash_cfg.get("num_target_layers") {
+                flat.insert("num_target_layers".to_string(), v.clone());
+            }
         }
 
         serde_json::from_value(serde_json::Value::Object(flat))
             .map_err(|e| format!("Failed to parse DFlashConfig: {e}"))
+    }
+
+    /// Whether this checkpoint is an LFM2 / LFM2.5 DSpark drafter: a DFlash
+    /// backbone plus a low-rank Markov token-transition head (issue #1339).
+    ///
+    /// Keyed on `markov_rank > 0` rather than on `architectures`, because the
+    /// head's presence is what changes the draft step (all-position logits
+    /// chained through the head, `[anchor, mask, ...]` inputs, traditional
+    /// RoPE) and the rank is what sizes it.
+    pub fn is_dspark(&self) -> bool {
+        self.markov_rank > 0
+    }
+
+    /// Verify width in rows, anchor included, at the trained block size.
+    ///
+    /// A DSpark `block_size` is the proposal count gamma (9 on the published
+    /// checkpoints), so the verify width is `gamma + 1`. A DFlash
+    /// `block_size` already counts the bonus row, so it is the width itself.
+    pub fn verify_width(&self) -> usize {
+        if self.is_dspark() {
+            self.block_size + 1
+        } else {
+            self.block_size
+        }
+    }
+
+    /// Verify width a DSpark drafter runs at when the operator passes no
+    /// `--draft-block-size`: `min(verify_width, runtime_block_size)`, where a
+    /// missing `runtime_block_size` reads as
+    /// [`DSPARK_DEFAULT_VERIFY_WIDTH`]. For a DFlash checkpoint this is
+    /// simply [`Self::verify_width`].
+    pub fn runtime_verify_width(&self) -> usize {
+        let width = self.verify_width();
+        if !self.is_dspark() {
+            return width;
+        }
+        width.min(
+            self.runtime_block_size
+                .unwrap_or(DSPARK_DEFAULT_VERIFY_WIDTH),
+        )
     }
 }
 
@@ -247,6 +334,11 @@ impl DFlashConfig {
 /// `architectures` array of its `config.json`, and the class the checkpoint's
 /// `auto_map` points `AutoModel` at (`dflash.DFlashDraftModel`).
 pub const DFLASH_DRAFT_ARCHITECTURE: &str = "DFlashDraftModel";
+
+/// Architecture name the LiquidAI LFM2.5 DSpark drafters declare
+/// (`LiquidAI/LFM2.5-2.6B-DSpark` and siblings, issue #1339). They also
+/// carry a `dflash_config` block, so either marker identifies them.
+pub const DSPARK_DRAFT_ARCHITECTURE: &str = "Lfm2DSparkDraftModel";
 
 /// Whether a parsed `config.json` describes a DFlash speculative drafter
 /// rather than a standalone model.
@@ -283,9 +375,12 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
         .get("architectures")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|architectures| {
-            architectures
-                .iter()
-                .any(|arch| arch.as_str() == Some(DFLASH_DRAFT_ARCHITECTURE))
+            architectures.iter().any(|arch| {
+                matches!(
+                    arch.as_str(),
+                    Some(DFLASH_DRAFT_ARCHITECTURE) | Some(DSPARK_DRAFT_ARCHITECTURE)
+                )
+            })
         })
 }
 
@@ -305,6 +400,12 @@ pub fn is_dflash_drafter_dir(path: &Path) -> bool {
     };
     is_dflash_drafter_config(&config)
 }
+
+/// DSpark-specific config tests (issue #1339), kept in their own file so this
+/// module stays readable.
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod dspark_tests;
 
 #[cfg(test)]
 mod tests {

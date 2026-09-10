@@ -62,6 +62,8 @@ pub mod cache;
 pub mod config;
 pub mod drafter;
 pub mod layer;
+/// DSpark low-rank Markov token-transition head (issue #1339).
+pub mod markov;
 pub mod mlp;
 pub mod model;
 /// DFlash speculative-decoding round-loop driver (sub-12). B=1 only; batched DFlash lives in [`round_loop_batched`].
@@ -73,10 +75,12 @@ pub mod round_loop_batched;
 pub use attention::DFlashAttention;
 pub use cache::DFlashKVCache;
 pub use config::{
-    DFLASH_DRAFT_ARCHITECTURE, DFlashConfig, is_dflash_drafter_config, is_dflash_drafter_dir,
+    DFLASH_DRAFT_ARCHITECTURE, DFlashConfig, DSPARK_DEFAULT_VERIFY_WIDTH,
+    DSPARK_DRAFT_ARCHITECTURE, is_dflash_drafter_config, is_dflash_drafter_dir,
 };
 pub use drafter::DFlashDrafter;
 pub use layer::DFlashDecoderLayer;
+pub use markov::VanillaMarkovHead;
 pub use mlp::DFlashMlp;
 pub use model::DFlashDraftModel;
 pub use round_loop::{

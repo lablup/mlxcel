@@ -62,6 +62,15 @@ use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 // resolve `super::lfm2::{build_conv_decode_weight, short_conv_decode_step}`.
 pub(crate) use super::conv_decode::{build_conv_decode_weight, short_conv_decode_step};
 
+/// DSpark speculative-decoding target hooks (issue #1339): the verify
+/// forward with residual-stream capture, the attention-trim plus short-conv
+/// recompute rollback, the block-versus-chain exactness probe and the
+/// `SpeculativeTarget` impl. A child module so it can reach the private
+/// layer internals without widening their visibility.
+#[path = "lfm2_speculative.rs"]
+mod speculative;
+pub use speculative::{ConvRollbackSnapshot, VerifyOutput};
+
 // Configuration.
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,15 +87,27 @@ pub struct ModelArgs {
     #[serde(rename = "conv_L_cache")]
     pub conv_l_cache: usize,
 
-    #[serde(default = "default_rope_theta")]
-    pub rope_theta: f32,
+    /// Top-level `rope_theta`, the layout of the mlx-community conversions.
+    /// Read through [`Self::rope_theta`], which also covers the nested
+    /// transformers 5.x layout.
+    #[serde(default, rename = "rope_theta")]
+    pub rope_theta_top_level: Option<f32>,
+
+    /// `rope_parameters.rope_theta`, the transformers 5.x layout of the
+    /// LiquidAI originals (`LiquidAI/LFM2.5-2.6B` at 1e7,
+    /// `LiquidAI/LFM2.5-8B-A1B` at 5e6), which carry no top-level
+    /// `rope_theta`. Without this the attention layers of those checkpoints
+    /// ran at the 1e6 default, which is the wrong base for both the target
+    /// and its DSpark drafter pairing (issue #1339).
+    #[serde(default)]
+    pub rope_parameters: Option<Lfm2RopeParameters>,
 
     /// Whether the short-convolution mixer stays causal.
     ///
     /// Not a `config.json` key on any published checkpoint; it defaults to
     /// `true`, which is the generator behaviour, and is set to `false` by
     /// [`crate::models::lfm2_embedding`] for the bidirectional
-    /// `Lfm2BidirectionalModel` export. See [`ShortConv::forward`] for what the
+    /// `Lfm2BidirectionalModel` export. See [`ShortConv::forward_with_capture`] for what the
     /// two modes pad.
     #[serde(default = "default_conv_causal")]
     pub conv_causal: bool,
@@ -123,6 +144,15 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
+}
+
+/// The `rope_parameters` block of a transformers 5.x LFM2 config. Only
+/// `rope_theta` is read; every published LFM2 checkpoint declares
+/// `rope_type: "default"`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Lfm2RopeParameters {
+    #[serde(default)]
+    pub rope_theta: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -164,6 +194,15 @@ fn padding_multiplier(attention_mask: &MlxArray, dtype: i32) -> UniquePtr<MlxArr
 impl ModelArgs {
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
+    }
+
+    /// RoPE base of the attention layers: the top-level `rope_theta` when
+    /// present, else `rope_parameters.rope_theta`, else the 1e6 default of
+    /// the first LFM2 release.
+    pub fn rope_theta(&self) -> f32 {
+        self.rope_theta_top_level
+            .or_else(|| self.rope_parameters.as_ref().and_then(|p| p.rope_theta))
+            .unwrap_or_else(default_rope_theta)
     }
 
     pub fn group_size(&self) -> i32 {
@@ -287,7 +326,7 @@ impl Attention {
             num_kv_heads: args.num_key_value_heads as i32,
             head_dim,
             scale: (head_dim as f32).powf(-0.5),
-            rope_base: args.rope_theta,
+            rope_base: args.rope_theta(),
         })
     }
 
@@ -441,11 +480,17 @@ impl ShortConv {
     /// (`apply_mask_to_padding_states` at the top of the mixer). Generation
     /// passes `None`: it runs one unpadded sequence and never has padding to
     /// mask.
-    pub(crate) fn forward(
+    /// The mixer forward, which can also record what a speculative rollback
+    /// needs (issue #1339): the conv state as it was before this call and
+    /// this call's gated input `Bx`, as a [`ConvRollbackSnapshot`] pushed
+    /// onto `capture` under `layer_idx`. The state is replaced, never
+    /// mutated in place, so holding the previous handle costs no copy.
+    pub(crate) fn forward_with_capture(
         &self,
         x: &MlxArray,
         conv_state: &mut Option<UniquePtr<MlxArray>>,
         pad_multiplier: Option<&MlxArray>,
+        capture: Option<(usize, &mut Vec<ConvRollbackSnapshot>)>,
     ) -> UniquePtr<MlxArray> {
         let h = self.hidden_size;
         let masked;
@@ -464,6 +509,14 @@ impl ShortConv {
         let x_part = slice_axis(&bcx, -1, 2 * h, 3 * h);
 
         let bx = mlxcel_core::multiply(&b_part, &x_part);
+
+        if let Some((layer_idx, snapshots)) = capture {
+            snapshots.push(ConvRollbackSnapshot {
+                layer_idx,
+                prev_state: conv_state.as_ref().map(|s| mlxcel_core::copy(s)),
+                bx_block: mlxcel_core::contiguous(&bx, false),
+            });
+        }
 
         // Prepend the cached tail (decode) or zero-pad by L_cache - 1 (prefill),
         // so the kernel-size-`L_cache` depthwise conv stays causal.
@@ -741,7 +794,7 @@ impl Lfm2DecoderLayer {
     }
 
     /// `pad_multiplier` is the `[B, L, 1]` padding multiplier the short-conv
-    /// mixer needs (see [`ShortConv::forward`]); attention masks padding
+    /// mixer needs (see [`ShortConv::forward_with_capture`]); attention masks padding
     /// through `mask` instead and ignores it. `None` on the generation path.
     fn forward(
         &self,
@@ -749,6 +802,20 @@ impl Lfm2DecoderLayer {
         cache: &mut Lfm2LayerCache,
         mask: Option<&MlxArray>,
         pad_multiplier: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_capture(x, cache, mask, pad_multiplier, None)
+    }
+
+    /// [`Self::forward`] that hands a short-conv mixer the rollback capture
+    /// sink (see [`ShortConv::forward_with_capture`]); attention layers
+    /// ignore it because their KV cache is trimmed, not recomputed.
+    fn forward_with_capture(
+        &self,
+        x: &MlxArray,
+        cache: &mut Lfm2LayerCache,
+        mask: Option<&MlxArray>,
+        pad_multiplier: Option<&MlxArray>,
+        conv_capture: Option<(usize, &mut Vec<ConvRollbackSnapshot>)>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.operator_norm.forward(x);
         // `make_caches` builds the per-layer cache in lockstep with the mixer
@@ -758,7 +825,7 @@ impl Lfm2DecoderLayer {
                 attn.forward(&normed, kv, mask)
             }
             (Mixer::Conv(conv), Lfm2LayerCache::Conv(state)) => {
-                conv.forward(&normed, state, pad_multiplier)
+                conv.forward_with_capture(&normed, state, pad_multiplier, conv_capture)
             }
             _ => unreachable!("LFM2 layer cache kind does not match its mixer"),
         };
@@ -1084,7 +1151,7 @@ impl Lfm2Model {
 // 3. MoE expert stacking `feed_forward.experts.{e}.{proj} → feed_forward.switch_mlp.{proj}`.
 //    The 4-bit mlx-community MoE checkpoint already ships the stacked
 //    `switch_mlp` tensors, so this only fires for non-pre-stacked exports.
-fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
+pub(crate) fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
     // 1. Conv weight orientation.
     let conv_keys: Vec<String> = weights
         .keys()
@@ -1101,16 +1168,25 @@ fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
         }
     }
 
-    // 2. Dense MLP w1/w2/w3 → gate/down/up rename (covers weight + quantized
-    //    scales/biases by matching the `.feed_forward.wN.` key segment).
+    // 2. MLP w1/w2/w3 → gate/down/up rename (covers weight + quantized
+    //    scales/biases by matching the `.wN.` key segment).
+    //
+    //    Both the dense `.feed_forward.wN.` form and the per-expert
+    //    `.feed_forward.experts.{e}.wN.` form are renamed. The MoE originals
+    //    (`LiquidAI/LFM2.5-8B-A1B`) ship unstacked per-expert `wN` tensors,
+    //    and step 3 below stacks `experts.{e}.gate_proj` and siblings, so
+    //    without the expert arm the stacking probe never fires and the load
+    //    fails on `switch_mlp.gate_proj`. The mlx-community 4-bit conversions
+    //    ship the stacked `switch_mlp.*` tensors and match neither form.
     let rename = |key: &str| -> Option<String> {
-        for (old, new) in [
-            (".feed_forward.w1.", ".feed_forward.gate_proj."),
-            (".feed_forward.w2.", ".feed_forward.down_proj."),
-            (".feed_forward.w3.", ".feed_forward.up_proj."),
-        ] {
-            if key.contains(old) {
-                return Some(key.replace(old, new));
+        for (old, new) in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")] {
+            let dense = format!(".feed_forward.{old}.");
+            if key.contains(&dense) {
+                return Some(key.replace(&dense, &format!(".feed_forward.{new}.")));
+            }
+            let expert = format!(".{old}.");
+            if key.contains(".feed_forward.experts.") && key.contains(&expert) {
+                return Some(key.replace(&expert, &format!(".{new}.")));
             }
         }
         None
@@ -1208,6 +1284,17 @@ impl LanguageModel for Lfm2Model {
 
     fn supports_batching(&self) -> bool {
         false // Hybrid short-conv state is not compatible with per-sequence KV isolation.
+    }
+
+    fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        Some(self.embed_tokens.forward(input_ids))
+    }
+
+    /// Shared-buffer handle to the tied embedding table, which the LFM2
+    /// DSpark drafter (issue #1339) borrows as both its input embedding and
+    /// its LM head; the published drafters ship neither.
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
     }
 
     fn supports_padded_prefill(&self) -> bool {

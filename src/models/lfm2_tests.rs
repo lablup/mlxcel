@@ -93,6 +93,32 @@ const LFM2_8B_MOE_CONFIG: &str = r#"{
     "quantization": { "group_size": 64, "bits": 4 }
 }"#;
 
+/// The LiquidAI originals (`LiquidAI/LFM2.5-2.6B`, `LiquidAI/LFM2.5-8B-A1B`)
+/// are transformers 5.x exports: `rope_theta` lives under `rope_parameters`
+/// and the top level carries none. The mlx-community conversions keep the
+/// top-level key, and it wins when both are present.
+#[test]
+fn lfm2_rope_theta_reads_the_nested_rope_parameters_layout() {
+    let nested = LFM2_350M_CONFIG.replace(
+        r#""rope_theta": 1000000.0,"#,
+        r#""rope_parameters": {"rope_theta": 10000000.0, "rope_type": "default"},"#,
+    );
+    let args: ModelArgs = serde_json::from_str(&nested).expect("parse nested rope config");
+    assert_eq!(args.rope_theta_top_level, None);
+    assert_eq!(args.rope_theta(), 10_000_000.0);
+
+    let both = LFM2_350M_CONFIG.replace(
+        r#""rope_theta": 1000000.0,"#,
+        r#""rope_theta": 1000000.0, "rope_parameters": {"rope_theta": 10000000.0},"#,
+    );
+    let args: ModelArgs = serde_json::from_str(&both).expect("parse config with both keys");
+    assert_eq!(args.rope_theta(), 1_000_000.0, "the top-level key wins");
+
+    let neither = LFM2_350M_CONFIG.replace(r#""rope_theta": 1000000.0,"#, "");
+    let args: ModelArgs = serde_json::from_str(&neither).expect("parse config without rope keys");
+    assert_eq!(args.rope_theta(), 1_000_000.0, "the first-release default");
+}
+
 #[test]
 fn lfm2_dense_config_parses() {
     let args: ModelArgs = serde_json::from_str(LFM2_350M_CONFIG).expect("parse dense config");
@@ -103,7 +129,7 @@ fn lfm2_dense_config_parses() {
     assert_eq!(args.num_hidden_layers, 16);
     assert_eq!(args.conv_l_cache, 3);
     assert!(!args.conv_bias);
-    assert_eq!(args.rope_theta, 1_000_000.0);
+    assert_eq!(args.rope_theta(), 1_000_000.0);
     // head_dim derives from hidden/heads; the q/k layernorm weights are [64].
     assert_eq!(args.head_dim(), 64);
     assert_eq!(args.group_size(), 64);
@@ -411,7 +437,7 @@ fn impulse_response(conv_causal: bool) -> (Vec<f32>, bool) {
     let args = impulse_args(conv_causal);
     let conv = ShortConv::from_weights(&impulse_weights(), &args, "conv").expect("short conv");
     let mut state: Option<UniquePtr<MlxArray>> = None;
-    let out = conv.forward(&impulse_input(), &mut state, None);
+    let out = conv.forward_with_capture(&impulse_input(), &mut state, None, None);
     assert_eq!(
         mlxcel_core::array_shape(&out),
         vec![1, IMPULSE_LEN, IMPULSE_HIDDEN],
@@ -490,5 +516,362 @@ fn noncausal_short_conv_symmetric_pad_keeps_length() {
     assert!(
         causal[IMPULSE_AT - 1] == 0.0 && response[IMPULSE_AT - 1] != 0.0,
         "only the bidirectional mixer may write behind the impulse"
+    );
+}
+
+// DSpark speculative target hooks (#1339).
+//
+// A two-layer synthetic LFM2 (layer 0 short-conv, layer 1 attention, dense
+// SwiGLU, `L_cache = 3`) with deterministic pseudo-random weights, driven
+// through `forward_speculative` / `rollback_speculative_cache` and compared
+// against a reference that consumed the committed tokens in one pass.
+
+/// Deterministic pseudo-random values in `[-scale, scale]` (a 32-bit LCG;
+/// no crate dependency, same sequence on every host).
+fn lcg_values(seed: u32, count: usize, scale: f32) -> Vec<f32> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12345);
+    (0..count)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            (unit * 2.0 - 1.0) * scale
+        })
+        .collect()
+}
+
+const SPEC_HIDDEN: usize = 8;
+const SPEC_VOCAB: usize = 16;
+const SPEC_FF: i32 = 16;
+const SPEC_L_CACHE: usize = 3;
+
+fn speculative_args() -> ModelArgs {
+    serde_json::from_str(&format!(
+        r#"{{
+            "model_type": "lfm2",
+            "vocab_size": {SPEC_VOCAB},
+            "hidden_size": {SPEC_HIDDEN},
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "norm_eps": 1e-05,
+            "conv_bias": false,
+            "conv_L_cache": {SPEC_L_CACHE},
+            "rope_theta": 10000.0,
+            "full_attn_idxs": [1],
+            "eos_token_id": 7
+        }}"#
+    ))
+    .expect("parse synthetic speculative config")
+}
+
+/// Every tensor `Lfm2Model::from_weights` reads for [`speculative_args`],
+/// filled from `seed`.
+fn speculative_weights(seed: u32) -> WeightMap {
+    let h = SPEC_HIDDEN as i32;
+    let mut weights = WeightMap::new();
+    let mut next = 0u32;
+    let mut tensor = |name: &str, shape: &[i32], scale: f32| {
+        next += 1;
+        let count: i32 = shape.iter().product();
+        weights.insert(
+            name.to_string(),
+            mlxcel_core::from_slice_f32(&lcg_values(seed + next, count as usize, scale), shape),
+        );
+    };
+    tensor("model.embed_tokens.weight", &[SPEC_VOCAB as i32, h], 1.0);
+    for layer in 0..2 {
+        let p = format!("model.layers.{layer}");
+        // Norm weights near 1 so the residual stream keeps a sane scale.
+        tensor(&format!("{p}.operator_norm.weight"), &[h], 0.2);
+        tensor(&format!("{p}.ffn_norm.weight"), &[h], 0.2);
+        tensor(&format!("{p}.feed_forward.w1.weight"), &[SPEC_FF, h], 0.5);
+        tensor(&format!("{p}.feed_forward.w2.weight"), &[h, SPEC_FF], 0.5);
+        tensor(&format!("{p}.feed_forward.w3.weight"), &[SPEC_FF, h], 0.5);
+    }
+    // Layer 0: short conv.
+    tensor("model.layers.0.conv.in_proj.weight", &[3 * h, h], 0.5);
+    tensor("model.layers.0.conv.out_proj.weight", &[h, h], 0.5);
+    tensor(
+        "model.layers.0.conv.conv.weight",
+        &[h, SPEC_L_CACHE as i32, 1],
+        0.8,
+    );
+    // Layer 1: attention (2 heads of 4, 1 KV head).
+    tensor("model.layers.1.self_attn.q_proj.weight", &[h, h], 0.5);
+    tensor("model.layers.1.self_attn.k_proj.weight", &[4, h], 0.5);
+    tensor("model.layers.1.self_attn.v_proj.weight", &[4, h], 0.5);
+    tensor("model.layers.1.self_attn.out_proj.weight", &[h, h], 0.5);
+    tensor("model.layers.1.self_attn.q_layernorm.weight", &[4], 0.2);
+    tensor("model.layers.1.self_attn.k_layernorm.weight", &[4], 0.2);
+    tensor("model.embedding_norm.weight", &[h], 0.2);
+    // Shift the norm weights to be centred on 1.
+    let ones_named: Vec<String> = weights
+        .keys()
+        .filter(|k| k.contains("norm"))
+        .cloned()
+        .collect();
+    for name in ones_named {
+        let w = weights.remove(&name).expect("norm weight");
+        let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
+        weights.insert(name, mlxcel_core::add(&w, &one));
+    }
+    weights
+}
+
+fn speculative_model() -> super::lfm2::Lfm2Model {
+    super::lfm2::Lfm2Model::from_weights(speculative_args(), speculative_weights(7))
+        .expect("synthetic LFM2 must construct")
+}
+
+fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
+    mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32])
+}
+
+fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
+    let diff = mlxcel_core::subtract(a, b);
+    mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(&diff)))
+}
+
+fn attention_offset(caches: &[super::lfm2::Lfm2LayerCache]) -> i32 {
+    caches
+        .iter()
+        .find_map(|c| match c {
+            super::lfm2::Lfm2LayerCache::Attention(kv) => Some(kv.offset),
+            _ => None,
+        })
+        .expect("synthetic model has an attention layer")
+}
+
+fn conv_state(caches: &[super::lfm2::Lfm2LayerCache]) -> &MlxArray {
+    caches
+        .iter()
+        .find_map(|c| match c {
+            super::lfm2::Lfm2LayerCache::Conv(Some(state)) => Some(&**state),
+            _ => None,
+        })
+        .expect("synthetic model has a written conv state")
+}
+
+#[test]
+fn verify_forward_captures_requested_layers() {
+    let _guard = mlx_test_guard();
+    let model = speculative_model();
+    let mut caches = model.make_speculative_caches();
+    let bs = 4;
+    let out = model.forward_speculative(&ids(&[1, 2, 3, 4]), &mut caches, &[0, 1]);
+
+    assert_eq!(
+        mlxcel_core::array_shape(&out.logits),
+        vec![1, bs, SPEC_VOCAB as i32],
+        "full-block logits"
+    );
+    assert_eq!(out.hidden_states.len(), 2);
+    for slab in &out.hidden_states {
+        assert_eq!(
+            mlxcel_core::array_shape(slab),
+            vec![1, bs, SPEC_HIDDEN as i32]
+        );
+    }
+    // Captured before `embedding_norm`: the layer-1 slab normed then projected
+    // through the tied embedding reproduces the logits, so the slab itself is
+    // the pre-norm residual stream.
+    let normed = model.embedding_norm_for_test(&out.hidden_states[1]);
+    let reprojected = model.tied_projection_for_test(&normed);
+    assert!(
+        max_abs_diff(&reprojected, &out.logits) < 1e-5,
+        "the last captured slab must be the pre-embedding_norm residual stream"
+    );
+    // One conv snapshot per short-conv layer, holding the block's Bx and no
+    // previous state (fresh caches).
+    assert_eq!(out.conv_states.len(), 1);
+    assert_eq!(out.conv_states[0].layer_idx, 0);
+    assert!(out.conv_states[0].prev_state.is_none());
+    assert_eq!(
+        mlxcel_core::array_shape(&out.conv_states[0].bx_block),
+        vec![1, bs, SPEC_HIDDEN as i32]
+    );
+    // Caches advanced over the whole block.
+    assert_eq!(attention_offset(&caches), bs);
+}
+
+#[test]
+fn conv_rollback_matches_committed_prefix() {
+    let _guard = mlx_test_guard();
+    let model = speculative_model();
+    let prompt = [1, 2, 3, 4, 5];
+    let verify = [6, 7, 8, 9];
+    let accepted = 1; // commit verify[..2]
+    let bs = verify.len() as i32;
+
+    // Speculative path: prefill, verify the block, roll back to two rows.
+    let mut caches = model.make_speculative_caches();
+    let _ = model.forward_speculative(&ids(&prompt), &mut caches, &[]);
+    let out = model.forward_speculative(&ids(&verify), &mut caches, &[]);
+    assert!(
+        out.conv_states[0].prev_state.is_some(),
+        "the verify block starts from the prefilled conv state"
+    );
+    model.rollback_speculative_cache(&mut caches, &out.conv_states, accepted, bs);
+    assert_eq!(attention_offset(&caches), 7, "5 prompt + 2 committed rows");
+
+    // Reference: the committed sequence consumed in one pass.
+    let mut reference_caches = model.make_speculative_caches();
+    let _ = model.forward_speculative(&ids(&[1, 2, 3, 4, 5, 6, 7]), &mut reference_caches, &[]);
+    assert_eq!(attention_offset(&reference_caches), 7);
+    let state_diff = max_abs_diff(conv_state(&caches), conv_state(&reference_caches));
+    assert!(
+        state_diff < 1e-5,
+        "rolled-back conv state must equal the one-pass state; max|diff| = {state_diff}"
+    );
+
+    // And the next decode step agrees on both.
+    let next = model.forward_speculative(&ids(&[10]), &mut caches, &[]);
+    let next_ref = model.forward_speculative(&ids(&[10]), &mut reference_caches, &[]);
+    let logit_diff = max_abs_diff(&next.logits, &next_ref.logits);
+    assert!(
+        logit_diff < 1e-4,
+        "next-token logits after rollback must match the one-pass reference; max|diff| = {logit_diff}"
+    );
+    assert_eq!(attention_offset(&caches), 8);
+}
+
+#[test]
+fn conv_rollback_from_fresh_caches_pads_with_zeros() {
+    let _guard = mlx_test_guard();
+    // A verify block as the very first forward (no prefill, `prev_state`
+    // None) rolls back to `concat(zeros, bx[:, :n])`, which for n = 1 is
+    // `[0, bx0]`: the state a one-token prefill leaves.
+    let model = speculative_model();
+    let mut caches = model.make_speculative_caches();
+    let out = model.forward_speculative(&ids(&[3, 4, 5, 6]), &mut caches, &[]);
+    model.rollback_speculative_cache(&mut caches, &out.conv_states, 0, 4);
+    assert_eq!(attention_offset(&caches), 1);
+
+    let mut reference_caches = model.make_speculative_caches();
+    let _ = model.forward_speculative(&ids(&[3]), &mut reference_caches, &[]);
+    let state_diff = max_abs_diff(conv_state(&caches), conv_state(&reference_caches));
+    assert!(state_diff < 1e-5, "max|diff| = {state_diff}");
+}
+
+#[test]
+fn speculative_block_logits_match_single_token_decode() {
+    let _guard = mlx_test_guard();
+    // The exactness premise on the synthetic model: a four-row verify block
+    // and four single-token decode steps from the same prefilled state. The
+    // synthetic model is f32 and tiny, so this pins the arithmetic path
+    // (mask anchoring, conv padding, tied head), not any kernel-selection
+    // effect; the real-checkpoint probe measures those.
+    let model = speculative_model();
+    let prompt = [1, 2, 3, 4, 5];
+    let block = [6, 7, 8, 9];
+
+    let mut chain_caches = model.make_speculative_caches();
+    let _ = model.forward_speculative(&ids(&prompt), &mut chain_caches, &[]);
+    let mut chain_rows: Vec<UniquePtr<MlxArray>> = Vec::new();
+    for tok in block {
+        let out = model.forward_speculative(&ids(&[tok]), &mut chain_caches, &[]);
+        chain_rows.push(out.logits);
+    }
+
+    let mut block_caches = model.make_speculative_caches();
+    let _ = model.forward_speculative(&ids(&prompt), &mut block_caches, &[]);
+    let out = model.forward_speculative(&ids(&block), &mut block_caches, &[]);
+    for (i, chain) in chain_rows.iter().enumerate() {
+        let i = i as i32;
+        let row = mlxcel_core::slice(&out.logits, &[0, i, 0], &[1, i + 1, SPEC_VOCAB as i32]);
+        let diff = max_abs_diff(&row, chain);
+        assert!(
+            diff < 1e-4,
+            "verify row {i} diverged from the single-token step: max|diff| = {diff}"
+        );
+    }
+    assert_eq!(
+        attention_offset(&chain_caches),
+        attention_offset(&block_caches)
+    );
+}
+
+#[test]
+fn exactness_probe_runs_on_the_synthetic_model() {
+    let _guard = mlx_test_guard();
+    // The probe must be runnable on a checkpoint-free model and report a
+    // verdict rather than `NotRun`; whether it is `Equal` on this host is
+    // the measurement, not a fixed expectation.
+    let model = speculative_model();
+    let verdict = model.probe_block_chain_exactness(4);
+    assert!(
+        !matches!(
+            verdict,
+            crate::models::speculative_exactness::BlockChainExactness::NotRun(_)
+        ),
+        "probe must run: {verdict:?}"
+    );
+    assert!(matches!(
+        model.probe_block_chain_exactness(1),
+        crate::models::speculative_exactness::BlockChainExactness::NotRun(_)
+    ));
+}
+
+/// The MoE originals (`LiquidAI/LFM2.5-8B-A1B`) ship unstacked per-expert
+/// `feed_forward.experts.{e}.w1/w2/w3` tensors. The sanitizer must rename
+/// those to `gate_proj` / `down_proj` / `up_proj` before the expert-stacking
+/// pass looks for them, or the stacking never fires and the load dies on
+/// `Missing weight: model.layers.N.feed_forward.switch_mlp.gate_proj`.
+#[test]
+fn sanitize_stacks_unstacked_per_expert_moe_weights() {
+    let _guard = mlx_test_guard();
+    let args: ModelArgs = serde_json::from_str(
+        r#"{
+            "model_type": "lfm2_moe",
+            "vocab_size": 8,
+            "hidden_size": 4,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "norm_eps": 1e-05,
+            "conv_bias": false,
+            "conv_L_cache": 3,
+            "rope_theta": 10000.0,
+            "full_attn_idxs": [0],
+            "num_experts": 3,
+            "num_experts_per_tok": 1
+        }"#,
+    )
+    .expect("parse MoE config");
+
+    let mut weights = WeightMap::new();
+    for e in 0..3 {
+        // `w1` and `w3` are [ff, hidden]; `w2` is [hidden, ff].
+        weights.insert(
+            format!("model.layers.0.feed_forward.experts.{e}.w1.weight"),
+            mlxcel_core::zeros(&[6, 4], mlxcel_core::dtype::FLOAT32),
+        );
+        weights.insert(
+            format!("model.layers.0.feed_forward.experts.{e}.w3.weight"),
+            mlxcel_core::zeros(&[6, 4], mlxcel_core::dtype::FLOAT32),
+        );
+        weights.insert(
+            format!("model.layers.0.feed_forward.experts.{e}.w2.weight"),
+            mlxcel_core::zeros(&[4, 6], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+    let sanitized = super::lfm2::sanitize_weights(weights, &args);
+
+    for (proj, shape) in [
+        ("gate_proj", vec![3, 6, 4]),
+        ("up_proj", vec![3, 6, 4]),
+        ("down_proj", vec![3, 4, 6]),
+    ] {
+        let key = format!("model.layers.0.feed_forward.switch_mlp.{proj}.weight");
+        let stacked = sanitized
+            .get(&key)
+            .unwrap_or_else(|| panic!("{key} must be stacked from the per-expert tensors"));
+        assert_eq!(mlxcel_core::array_shape(stacked), shape, "{key}");
+    }
+    assert!(
+        !sanitized
+            .keys()
+            .any(|k| k.contains(".experts.") && k.contains(".w1.")),
+        "the per-expert w1 tensors must be consumed, not left behind"
     );
 }

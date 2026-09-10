@@ -1022,7 +1022,7 @@ fn dflash_drafter_is_rejected_as_a_standalone_model() {
         .to_string();
 
     assert!(
-        error.contains("DFlash speculative drafter"),
+        error.contains("DFlash-family speculative drafter"),
         "the error must name the real problem, got: {error}",
     );
     assert!(
@@ -1048,6 +1048,13 @@ fn dflash_drafter_is_rejected_on_either_marker_alone() {
             "dflash_config_only",
             r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 248070}}"#,
         ),
+        // The LFM2 DSpark drafters (issue #1339) declare their own
+        // architecture name and are the same kind of object: a backbone with
+        // no embed_tokens and no lm_head, bound to a target at load.
+        (
+            "dspark_architecture_only",
+            r#"{"architectures": ["Lfm2DSparkDraftModel"], "model_type": "qwen3"}"#,
+        ),
     ] {
         let model_dir = temp_path(name);
         fs::create_dir_all(&model_dir).unwrap();
@@ -1057,7 +1064,7 @@ fn dflash_drafter_is_rejected_on_either_marker_alone() {
             .expect_err("marker alone is sufficient")
             .to_string();
         assert!(
-            error.contains("DFlash speculative drafter"),
+            error.contains("DFlash-family speculative drafter"),
             "{name}: {error}"
         );
 

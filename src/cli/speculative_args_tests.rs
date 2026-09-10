@@ -192,6 +192,68 @@ fn resolve_draft_block_size_derives_inkling_default_from_the_mtp_layer_count() {
     );
 }
 
+/// The published `LiquidAI/LFM2.5-2.6B-DSpark` config, trimmed to the
+/// fields the block-size peek reads (issue #1339).
+const DSPARK_CONFIG: &str = r#"{
+    "architectures": ["Lfm2DSparkDraftModel"],
+    "model_type": "qwen3",
+    "hidden_size": 2048,
+    "block_size": 9,
+    "dflash_config": {"mask_token_id": 125017, "target_layer_ids": [2, 9, 17, 21, 27], "num_target_layers": 30},
+    "markov_rank": 256,
+    "rope_is_neox_style": false
+}"#;
+
+#[test]
+fn resolve_draft_block_size_defaults_a_dspark_drafter_to_its_runtime_verify_width() {
+    // A DSpark `block_size` counts proposals (9); the verify width is one
+    // more, and the runtime default is the eight-row width, so neither the
+    // flat DFlash 16 nor the raw 9 may be used.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("config.json"), DSPARK_CONFIG).expect("write config.json");
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Dflash, dir.path()),
+        8
+    );
+    assert_eq!(
+        resolve_draft_block_size(Some(10), DrafterKind::Dflash, dir.path()),
+        10,
+        "an explicit --draft-block-size restores the trained width"
+    );
+}
+
+#[test]
+fn resolve_draft_block_size_honors_a_dspark_runtime_block_size_up_to_the_trained_width() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let with_runtime = DSPARK_CONFIG.replace(
+        "\"markov_rank\": 256,",
+        "\"markov_rank\": 256, \"runtime_block_size\": 12,",
+    );
+    std::fs::write(dir.path().join("config.json"), with_runtime).expect("write config.json");
+    // 12 requested rows exceed the trained 10, so the width caps at 10.
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Dflash, dir.path()),
+        10
+    );
+}
+
+#[test]
+fn resolve_draft_block_size_keeps_the_flat_default_for_a_plain_dflash_drafter() {
+    // A Qwen 3.5 DFlash checkpoint (no `markov_rank`) keeps the flat 16: its
+    // `block_size` already counts the bonus row and the round loop reads it
+    // from the loaded config, not from this peek.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"architectures": ["DFlashDraftModel"], "block_size": 16, "dflash_config": {"mask_token_id": 248070}}"#,
+    )
+    .expect("write config.json");
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Dflash, dir.path()),
+        DEFAULT_DFLASH_BLOCK_SIZE
+    );
+}
+
 #[test]
 fn resolve_draft_block_size_ignores_block_size_from_a_non_qwen35_mtp_drafter() {
     // A Gemma 4 assistant drafter (or any non-`qwen3_5_mtp` model_type)

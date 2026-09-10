@@ -1737,17 +1737,16 @@ fn reject_dflash_drafter_offline(draft_model_path: &Path) -> Result<()> {
     }
 
     Err(anyhow!(
-        "--draft-model {path} is a DFlash speculative drafter, not a standalone \
-         model, and the offline `mlxcel generate` path does not construct the \
-         `DFlashGenerator` round loop. Loading it here would route it through the \
-         standalone model loader, which fails on the drafter's missing \
-         embed_tokens (a DFlash drafter borrows embed_tokens and lm_head from the \
-         target when it binds). The offline runtime wiring lands with the \
-         DFlashGenerator round loop and the per-target SpeculativeTarget impls. \
-         To use this drafter today, run `mlxcel-server` with the same -m target \
-         and `--draft-model {path} --draft-kind dflash`. For an offline \
-         speculative run, pass a small full model as --draft-model instead, which \
-         keeps the classic SpeculativeGenerator path.",
+        "--draft-model {path} is a DFlash-family speculative drafter (Qwen 3.5 \
+         DFlash or LFM2 DSpark), not a standalone model, and the offline `mlxcel \
+         generate` path does not construct the `DFlashGenerator` round loop. \
+         Loading it here would route it through the standalone model loader, \
+         which fails on the drafter's missing embed_tokens (these drafters borrow \
+         embed_tokens and lm_head from the target when they bind). To use this \
+         drafter, run `mlxcel-server` with the same -m target and `--draft-model \
+         {path}` (`--draft-kind dflash` is optional; the kind is auto-detected). \
+         For an offline speculative run, pass a small full model as --draft-model \
+         instead, which keeps the classic SpeculativeGenerator path.",
         path = draft_model_path.display(),
     ))
 }
