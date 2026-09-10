@@ -168,21 +168,29 @@ Greedy 전용 강제는 별개의 게이트이고 이 호스트에서 작동한�
 
 ---
 
-## 8. 리뷰 발견 사항
+## 8. 리뷰 발견 사항과 그에 대한 조치
 
-리뷰는 CRITICAL이나 HIGH를 찾지 못했다. 이 보고서 외에 브랜치에서 바뀐 것은 없다. 아래는 다시 발견되지 않도록 기록해 둔다.
+리뷰는 CRITICAL도 HIGH도 찾지 못했다. 찾아낸 것 중 이 브랜치가 만들어 낸 회귀에 해당하는 MEDIUM 하나는 브랜치에서 고쳤고, 리뷰가 거짓임을 보인 문서 서술 셋과 그것을 고치다 발견한 체크포인트 유래 수치 둘도 함께 고쳤다. 나머지는 다시 발견되지 않도록 기록해 둔다.
 
-**LFM2 타깃 위의 DSpark 아닌 잘못된 페어링에는 게이트가 없다.** `validate_target_compat`는 drafter가 DSpark가 아니면 즉시 `Ok`를 돌려주고, `DFlashDraftModel::forward`는 자기 `fc` 입력 폭을 검사하지 않는다. 그래서 진짜 Qwen 3.5 DFlash drafter와 짝지어진 LFM2 타깃은 `Result`가 아닌 cxx 심을 통과하는 MLX shape 예외에 도달한다. 이 위험은 종류로는 기존에도 있었지만(4B Qwen 타깃과 27B DFlash drafter가 같은 방식으로 실패한다), LFM2 타깃은 예전에 variant 게이트에서 decline되었고 이제는 그렇지 않다. 좁은 수정은 타깃이 LFM2이고 drafter가 DSpark가 아닐 때 버스트 게이트에서 decline하는 것이고, 넓은 수정은 모든 DFlash drafter에 `fc` 폭 검사를 거는 것인데 후자는 어떤 Qwen 페어링이 받아들여지는지를 바꾸므로 리뷰 편집이 아니라 메인테이너의 판단 사항이다.
+### 8.1 고친 것
 
-**세 번째 계열은 match 팔 하나보다 많이 건드린다.** 모듈 문서는 "`impl` 블록 하나 더하기 버스트 게이트의 match 팔 하나"라고 말한다. 실제 개수는 넷이다. 정확성 게이트, `drive!` 디스패치, LFM2의 B = 1 decline을 하드코딩한 배치 게이트, 그리고 `model_variant_label`이다. 트레이트에 `supports_batched()` 메서드를 두면 셋째를 제자리로 옮길 수 있고, 다음 계열이 들어올 때 함께 하면 좋다.
+**LFM2 타깃 위의 DSpark 아닌 잘못된 페어링에 게이트가 없었다.** `validate_target_compat`는 drafter가 DSpark가 아니면 즉시 `Ok`를 돌려주고, `DFlashDraftModel::forward`는 자기 `fc` 입력 폭을 검사하지 않는다. 그래서 진짜 Qwen 3.5 DFlash drafter와 짝지어진 LFM2 타깃은 `Result`가 아닌 cxx 심을 통과하는 MLX shape 예외에 도달했고, 이는 요청을 실패시키는 대신 프로세스를 abort시킨다. 이 위험은 종류로는 기존에도 있었지만(4B Qwen 타깃과 27B DFlash drafter가 같은 방식으로 실패한다), LFM2 타깃은 예전에 variant 게이트에서 decline되었고 이 브랜치 이후로는 그렇지 않으므로, 물려받은 구멍이 아니라 회귀다.
+
+이 판단은 drafter가 내릴 수 없다. drafter는 타깃을 `LanguageModel`로 보고, 거기에는 아키텍처 문자열이 없어서 DFlash drafter는 LFM2 타깃과 자기가 발표된 Qwen 3.5 타깃을 구별할 방법이 없다. 자기 계열을 아는 쪽은 타깃이므로, 정책은 트레이트에 `DFlashTargetModel::requires_dspark_drafter()`로 올렸다. `first_hidden_rows`와 같은 이유로 연관 함수다. 로드된 인스턴스가 아니라 계열의 속성이므로 테스트가 체크포인트 없이 고정할 수 있다. `Lfm2Model`과 `Lfm2VlModel`에서 `true`이고 나머지는 관대한 기본값을 유지한다. 두 실행 갈래 모두 어떤 forward보다 먼저 이 값을 읽고, `--model-draft`와 발표된 페어링을 지목하는 운영자용 메시지 하나로 답한다. 넓은 대안인 모든 DFlash drafter에 대한 `fc` 폭 검사는 어떤 Qwen 페어링이 받아들여지는지를 바꾸므로 메인테이너 판단 사항으로 남는다.
+
+**체크포인트가 준 수치 둘이 버퍼 인덱스와 라운드 크기에 무경계로 도달했다.** 둘 다 이제 DSpark 페어링 게이트에, 이미 있던 `fc` 폭 검사와 `target_layer_ids` 검사 옆에 들어갔다. DSpark drafter는 자기 임베딩 테이블을 싣지 않으므로 `mask_token_id`는 타깃의 임베딩 테이블을 인덱싱하는데, MLX는 양수 gather 인덱스를 범위 검사하지 않는다. 마지막 행을 넘어가는 id는 버퍼에서 테이블 뒤에 오는 것을 읽어 로짓에 먹였다. 같은 게이트의 타깃 쪽 절반이 이미 타깃 어휘를 `vocab_size`에 고정하므로, id를 `vocab_size`로 묶으면 gather가 묶인다. 별개로 `runtime_verify_width()`가 두 행 미만이면 아무것도 제안하지 못하고 버스트당 토큰 하나를 내보내게 된다. `verify_width()`는 이제 랩 대신 포화 연산을 쓴다. `usize::MAX`는 디버그 빌드에서 패닉이고 릴리스 빌드에서는 0행 폭으로 랩되기 때문이다.
+
+**Markov 헤드의 두 인자는 그 크기를 정하는 config와 대조된 적이 없었다.** `markov_w1`은 체인 스텝마다 토큰 id로 gather되므로, 체인이 뽑는 어휘보다 행이 적은 테이블은 마스크 id와 같은 이유로 자기 버퍼 밖을 읽었다. 폭이 틀린 `markov_w2`는 대신 MLX 안에서 throw했고, 이는 로드 오류가 아니라 프로세스 abort로 브리지를 건넌다. `VanillaMarkovHead::from_weights`는 이제 rank와 함께 어휘 크기도 받아 두 인자를 레이어가 되기 전에 검사한다. 양자화된 인자는 마지막 축으로만 `rank`를 비트팩하므로 행 수는 어느 쪽이든 같게 읽히고 저장된 폭은 비트 깊이의 함수다. 그래서 packed 테이블에서는 rank 검사를 건너뛰고 행 검사는 건너뛰지 않는다.
+
+**리뷰가 거짓임을 보인 문서 서술 셋.** 셋 다 동작 변화는 없다. `ShortConv::forward_with_capture`는 스냅샷에 복사 비용이 없다고 적어 두었지만 코드는 명시적 복사를 뜬다. 떠야 한다. `conv_state`는 호출 끝에서 재할당되므로 별칭은 블록 이후 상태로 읽히기 때문이다. `configured_block_size`는 존재하지 않는 DFlash 라운드 루프 블록 크기 정책을 암시했다. 그리고 `dflash_target` 모듈 문서는 새 계열의 비용을 `impl` 블록 하나 더하기 match 팔 하나라고 적었다.
+
+### 8.2 열어 둔 것
+
+**세 번째 계열은 match 팔 하나가 아니라 셋을 건드린다.** 모듈 문서가 이제 그렇게 적는다. 팔은 정확성 게이트, `drive!` 디스패치, 배치 게이트다. 리뷰가 센 넷째인 `model_variant_label`은 프로젝트 전역 라벨 표(#1613)로 DFlash 전용이 아니다. 버스트가 타깃을 `LoadedModel` enum으로 받고 트레이트가 구현된 구체 타입은 match만이 되찾을 수 있어서 이 팔들은 없앨 수 없고 균일하게 만들 수만 있다. 셋 중 둘은 이미 균일하다. 배치 게이트는 아니다. LFM2의 B = 1 decline을 하드코딩된 팔로 여전히 들고 있고, 이것이 트레이트 밖에 사는 유일한 계열별 정책이다. `supports_batched()` 훅이 답이고, 이 브랜치가 아니라 그것이 필요한 다음 계열의 몫이다.
 
 **프로브는 폭 하나만 측정한다.** `dflash_exactness_allows(block_size)`는 설정된 verify 폭에서 프로브하지만, 라운드 루프는 토큰 예산 끝에서 `bs`를 좁힌다(`bs = block_size_cfg.min(remaining_plus_one)`). 그리고 이 프로젝트의 벤치마크 지침 자체가 블록 대 체인 불일치가 폭에 따라 크게 달라진다고 적고 있다. MTP 갈래도 같은 모양이므로 회귀는 아니지만, 계약은 엄밀히 말해 넓은 폭에서만 측정되어 있다.
 
 **`ProbeKey`에 계열 구분자가 없다.** 키는 `{block_size, hidden_size, num_hidden_layers}`이고, 문서 주석은 한 프로세스가 타깃 모델 하나를 서빙한다고 가정한다. 라우터 모드는 그렇지 않다. 기존 사안이며, 세 번째 계열이 같은 메모에 도달하면서 넓어졌다.
-
-**작동하지 않는 블록 크기 훅.** `configured_block_size()`와 `prefer_requested_block_size()`는 이슈가 요구한 대로 `DFlashDrafter`에 구현되었지만, 읽는 쪽은 MTP 생성기뿐이다. DFlash 라운드 루프는 생성 시 받은 `block_size`를 그대로 쓴다. DSpark의 실효 폭은 `resolve_draft_block_size`에서 온다. drafter가 낮은 수락률에서 물러서지 않는다는 요구는 성립하지만, 공허하게 성립한다.
-
-**벤치마크 수치는 PR 본문에 남았다.** 이슈는 두 폭의 tok/s를 `docs/benchmark_results/`에 기록하라고 했다. PR은 대신 본문에 기록했고, 호스트가 다른 작업을 함께 돌았으며 각 처리량이 표본 하나임을 감안하면 단일 표본 수치를 벤치마크 코퍼스 밖에 두는 것이 이 프로젝트의 벤치마크 규율상 옳은 판단이다. 그 이탈을 여기 적어 두는 것이 요점이다.
 
 ---
 
@@ -190,20 +198,20 @@ Greedy 전용 강제는 별개의 게이트이고 이 호스트에서 작동한�
 
 | 항목 | 값 |
 |-----|---|
-| 변경된 파일 수 | 27 |
-| 추가된 라인 | +3080 |
+| 변경된 파일 수 | 29 |
+| 추가된 라인 | +3788 |
 | 삭제된 라인 | -577 |
-| 추가된 테스트 | 25 |
+| 추가된 테스트 | 27 |
 
 | 영역 | 주요 내용 |
 |-----|----------|
-| Drafter 코어 | `markov.rs`(신규), DSpark config 필드와 `verify_width` / `runtime_verify_width`, `DFlashAttention`에 꿴 RoPE 짝짓기, DSpark draft 스텝과 페어링 게이트, `DrafterError::GreedyOnly`, `Drafter::greedy_only` |
+| Drafter 코어 | `markov.rs`(신규), DSpark config 필드와 `verify_width` / `runtime_verify_width`, `DFlashAttention`에 꿴 RoPE 짝짓기, DSpark draft 스텝과 페어링 게이트, `DrafterError::GreedyOnly`, `Drafter::greedy_only`, `Drafter::is_dspark`. 페어링 게이트가 `mask_token_id`를 어휘 크기로, verify 폭을 두 행 아래로 묶고, `VanillaMarkovHead::from_weights`가 두 인자를 레이어가 되기 전에 config와 대조 |
 | LFM2 타깃 | `lfm2_speculative.rs`(신규): 캡처를 동반한 verify forward, 컨볼루션 롤백, 정확성 프로브, `SpeculativeTarget`. `rope_parameters`와 전문가별 MoE 이름 변경 수정 |
-| 서버 | `dflash_target.rs`(신규): `DFlashTargetModel`, `DFlashVerifyOutput`, `FirstHiddenRows`, 제네릭 드라이버 둘. 버스트 게이트를 LFM2 세 변종으로 확장하되 B = 1로 제한 |
+| 서버 | `dflash_target.rs`(신규): `DFlashTargetModel`, `DFlashVerifyOutput`, `FirstHiddenRows`, 제네릭 드라이버 둘. 버스트 게이트를 LFM2 세 변종으로 확장하되 B = 1로 제한. `requires_dspark_drafter()`가 DSpark 아닌 DFlash drafter와 짝지어진 LFM2 타깃을 두 실행 갈래 모두에서 어떤 forward보다 먼저 decline |
 | CLI | `resolve_draft_block_size`의 DSpark 블록 크기 peek. 오프라인 거부 메시지가 두 drafter 형태를 모두 지칭 |
 | 문서 | `supported-models.md` DSpark 행, `speculative-acceptance.md`의 greedy 전용 decline, README |
 
-리뷰 시점에 로컬 검증: `cargo check --lib --tests`, `cargo clippy --lib --tests -- -D warnings`, `cargo fmt --all -- --check`, 그리고 좁은 테스트 범위 `-p mlxcel-core drafter::dflash`(69), `--lib models::lfm2`(29), `--lib server::batch::speculative_burst`(67), `--lib server::batch::dflash_target`(2), `--lib cli::speculative_args`(22), `--lib models::detection`(60). 전부 통과.
+리뷰 수정 이후 `origin/main`에 리베이스한 상태로 검증: `cargo check --lib --tests`, `cargo clippy --lib --tests -- -D warnings`, `cargo fmt --all -- --check` 전부 통과. `-p mlxcel-core drafter::dflash` 70개 통과, `--lib`로 `models::lfm2` / `server::batch::speculative_burst` / `server::batch::dflash_target` / `cli::speculative_args` / `models::detection`를 한 번에 돌려 181개 통과. 두 수치가 리뷰 시점보다 각각 하나씩 늘었고, 그것이 이번 수정이 추가한 테스트 둘이다.
 
 ---
 

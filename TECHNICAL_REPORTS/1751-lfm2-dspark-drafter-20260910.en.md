@@ -168,19 +168,31 @@ Both are prerequisites rather than scope creep: the bf16 originals cannot load o
 
 ---
 
-## 8. Review findings
+## 8. Review findings, and what was done about them
 
-The review found no CRITICAL or HIGH issues. Nothing was changed on the branch beyond this report. What follows is recorded so it is not rediscovered.
+The review found no CRITICAL and no HIGH. Of what it did find, the one MEDIUM that was a regression this branch introduced is fixed on the branch, along with three doc statements the review showed to be false and two unbounded checkpoint-supplied numbers found while fixing them. The rest is recorded so it is not rediscovered.
 
-**A mismatched non-DSpark pairing on an LFM2 target has no gate.** `validate_target_compat` returns `Ok` immediately when the drafter is not DSpark, and `DFlashDraftModel::forward` does not check its `fc` input width, so an LFM2 target paired with a genuine Qwen 3.5 DFlash drafter reaches an MLX shape throw through a non-`Result` cxx shim. The hazard is pre-existing in kind (a Qwen 4B target with a 27B DFlash drafter fails the same way), but LFM2 targets used to decline at the variant gate and now do not. The narrow fix is a burst-gate decline when the target is LFM2 and the drafter is not DSpark; the broad fix is an `fc`-width check for every DFlash drafter, which would change which Qwen pairings are accepted and so is a maintainer call rather than a review edit.
+### 8.1 Fixed
 
-**A third family touches more than one match arm.** The module doc says "one `impl` block plus a match arm in the burst gate". The real count is four: the exactness gate, the `drive!` dispatch, the batched gate (which hardcodes the LFM2 B = 1 decline), and `model_variant_label`. A `supports_batched()` method on the trait would move the third of those into the trait where it belongs, which is worth doing when the next family lands.
+**A mismatched non-DSpark pairing on an LFM2 target had no gate.** `validate_target_compat` returns `Ok` immediately when the drafter is not DSpark, and `DFlashDraftModel::forward` does not check its `fc` input width, so an LFM2 target paired with a genuine Qwen 3.5 DFlash drafter reached an MLX shape throw through a non-`Result` cxx shim, which aborts the process rather than failing the request. The hazard is pre-existing in kind (a Qwen 4B target with a 27B DFlash drafter fails the same way), but LFM2 targets used to decline at the variant gate and after this branch they do not, which makes it a regression rather than an inherited gap.
+
+The drafter cannot make this call. It reads the target as a `LanguageModel`, which carries no architecture string, so a DFlash drafter has no way to tell an LFM2 target from the Qwen 3.5 one it was published for. The target is the side that knows its own family, so the policy went on the trait as `DFlashTargetModel::requires_dspark_drafter()`, an associated function for the same reason `first_hidden_rows` is one: it is a property of the family, not of a loaded instance, so the test pins it without a checkpoint. It is `true` for `Lfm2Model` and `Lfm2VlModel` and the permissive default everywhere else. Both run arms read it before any forward and answer with one operator-facing message naming `--model-draft` and the published pairings. The broad alternative, an `fc`-width check for every DFlash drafter, would change which Qwen pairings are accepted and stays a maintainer call.
+
+**Two checkpoint-supplied numbers reached a buffer index or a round size unbounded.** Both are now in the DSpark pairing gate, beside the `fc`-width and `target_layer_ids` checks that were already there. `mask_token_id` indexes the target's embedding table, because a DSpark drafter ships none of its own, and MLX range-checks no positive gather index: an id past the last row read whatever followed the table in the buffer and fed it to the logits. The target half of the same gate already pins the target's vocabulary to `vocab_size`, so bounding the id against `vocab_size` bounds the gather. Separately, a `runtime_verify_width()` below two rows proposes nothing and would emit one token per burst, and `verify_width()` now saturates rather than wrapping, since `usize::MAX` there panics in a debug build and wraps to a zero-row width in a release one.
+
+**The Markov head's factors were never measured against the config that sizes them.** `markov_w1` is gathered at a token id once per chain step, so a table with fewer rows than the vocabulary the chain draws from read past its own buffer for the same reason the mask id did; a `markov_w2` of the wrong width threw inside MLX instead, which crosses the bridge as a process abort rather than a load error. `VanillaMarkovHead::from_weights` now takes the vocabulary as well as the rank and checks both factors before either becomes a layer. A quantized factor bit-packs `rank` along its last axis only, so its row count reads the same either way while its stored width is a function of the bit depth; the rank check is therefore skipped for a packed table and the row check is not.
+
+**Three doc statements the review showed to be false**, no behavior change in any of them. `ShortConv::forward_with_capture` claimed the snapshot costs no copy while the code takes an explicit one; it has to, because `conv_state` is reassigned at the end of the call and an alias would read back as the post-block state. `configured_block_size` implied a DFlash round-loop block-size policy that does not exist. And the `dflash_target` module doc claimed a new family costs one `impl` block plus a match arm.
+
+### 8.2 Left open
+
+**A third family touches three match arms, not one.** The module doc now says so. The arms are the exactness gate, the `drive!` dispatch and the batched gate; the fourth the review counted, `model_variant_label`, is the pre-existing project-wide label table (#1613) and not specific to DFlash. The arms exist because the burst reaches the target as a `LoadedModel` enum and only a match recovers the concrete type the trait is implemented on, so they cannot be removed, only made uniform. Two of the three already are. The batched gate is not: it still carries the LFM2 B = 1 decline as a hardcoded arm, which is the one piece of per-family policy living outside the trait. A `supports_batched()` hook is the fix, and it belongs to the next family that needs it rather than to this branch.
 
 **The probe measures one width.** `dflash_exactness_allows(block_size)` probes at the configured verify width, but the round loop narrows `bs` near the token budget (`bs = block_size_cfg.min(remaining_plus_one)`), and this project's own benchmark guidance records that block-versus-chain disagreement varies strongly with width. The MTP arms have the same shape, so this is not a regression, but the contract is strictly only measured at the wide width.
 
 **`ProbeKey` has no family discriminator.** It is `{block_size, hidden_size, num_hidden_layers}`, and its docstring assumes a process serves one target model. Router mode does not. Pre-existing, and widened by a third family reaching the same memo.
 
-**Inert block-size hooks.** `configured_block_size()` and `prefer_requested_block_size()` are implemented on `DFlashDrafter` as the issue asked, but only the MTP generator reads them; the DFlash round loop uses its constructed `block_size` directly. The effective width for DSpark comes from `resolve_draft_block_size`. The requirement that the drafter never backs off on low acceptance holds, just vacuously.
+**Inert block-size hooks.** `configured_block_size()` and `prefer_requested_block_size()` are implemented on `DFlashDrafter` as the issue asked, but only the MTP generator and its batched round loop read them; the DFlash round loop uses its constructed `block_size` directly. The effective width for DSpark comes from `resolve_draft_block_size`, which peeks the drafter config before the drafter is loaded and passes the same number in. The requirement that the drafter never backs off on low acceptance holds, just vacuously. Both are kept implemented, with the situation now stated on them, so the two agree if the DFlash loop ever grows an adaptive width.
 
 **Benchmark numbers stayed in the PR body.** The issue asked for tok/s at both widths in `docs/benchmark_results/`. The PR records them in its body instead, and given that the host served other work and each throughput figure is one sample, keeping single-sample numbers out of the benchmark corpus is the right call under this project's benchmark discipline. Recording the deviation here is the point.
 
@@ -190,20 +202,20 @@ The review found no CRITICAL or HIGH issues. Nothing was changed on the branch b
 
 | Item | Value |
 |------|-------|
-| Files changed | 27 |
-| Lines added | +3080 |
+| Files changed | 29 |
+| Lines added | +3788 |
 | Lines deleted | -577 |
-| New tests | 25 |
+| New tests | 27 |
 
 | Area | Summary |
 |------|---------|
-| Drafter core | `markov.rs` (new), DSpark config fields and `verify_width` / `runtime_verify_width`, RoPE pairing threaded into `DFlashAttention`, DSpark draft step and pairing gate, `DrafterError::GreedyOnly`, `Drafter::greedy_only` |
+| Drafter core | `markov.rs` (new), DSpark config fields and `verify_width` / `runtime_verify_width`, RoPE pairing threaded into `DFlashAttention`, DSpark draft step and pairing gate, `DrafterError::GreedyOnly`, `Drafter::greedy_only`, `Drafter::is_dspark`; the pairing gate also bounds `mask_token_id` against the vocabulary and the verify width below two rows, and `VanillaMarkovHead::from_weights` measures both factors against the config before either becomes a layer |
 | LFM2 target | `lfm2_speculative.rs` (new): verify forward with capture, conv rollback, exactness probe, `SpeculativeTarget`; `rope_parameters` and per-expert MoE rename fixes |
-| Server | `dflash_target.rs` (new): `DFlashTargetModel`, `DFlashVerifyOutput`, `FirstHiddenRows`, both generic drivers; burst gate extended to the three LFM2 variants with a B = 1 restriction |
+| Server | `dflash_target.rs` (new): `DFlashTargetModel`, `DFlashVerifyOutput`, `FirstHiddenRows`, both generic drivers; burst gate extended to the three LFM2 variants with a B = 1 restriction; `requires_dspark_drafter()` declines an LFM2 target paired with a non-DSpark DFlash drafter in both run arms before any forward |
 | CLI | DSpark block-size peek in `resolve_draft_block_size`; offline rejection message names both drafter shapes |
 | Docs | `supported-models.md` DSpark row, `speculative-acceptance.md` greedy-only decline, README |
 
-Verified locally at review time: `cargo check --lib --tests`, `cargo clippy --lib --tests -- -D warnings`, `cargo fmt --all -- --check`, and the narrow test scopes `-p mlxcel-core drafter::dflash` (69), `--lib models::lfm2` (29), `--lib server::batch::speculative_burst` (67), `--lib server::batch::dflash_target` (2), `--lib cli::speculative_args` (22), `--lib models::detection` (60). All clean.
+Verified after the review fixes, rebased on `origin/main`: `cargo check --lib --tests`, `cargo clippy --lib --tests -- -D warnings` and `cargo fmt --all -- --check` clean; `-p mlxcel-core drafter::dflash` 70 passed, and one `--lib` run over `models::lfm2` / `server::batch::speculative_burst` / `server::batch::dflash_target` / `cli::speculative_args` / `models::detection` 181 passed. The two counts each rose by one against the review-time figures, which are the two tests the fixes added.
 
 ---
 
