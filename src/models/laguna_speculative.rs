@@ -62,11 +62,21 @@ impl LagunaModel {
     /// Arm the rotating caches in `caches` with `block_size` rows of
     /// speculative slack. Dense caches are untouched.
     pub fn enable_speculative_buffers(&self, caches: &mut [LagunaCache], block_size: usize) {
-        for cache in caches.iter_mut() {
-            if let LagunaCache::Rotating(rotating) = cache {
-                rotating
-                    .enable_speculative_buffer(block_size as i32)
-                    .expect("fresh FP16 rotating cache accepts a speculative buffer");
+        // The Muse Glimmer slack rule: `block_size` alone makes the buffered
+        // cache compact on every round once the window is full, and eight
+        // blocks of slack amortize that.
+        let slack = crate::models::muse_glimmer::speculative_buffer_size(block_size);
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
+            if let LagunaCache::Rotating(rotating) = cache
+                && let Err(reason) = rotating.enable_speculative_buffer(slack)
+            {
+                tracing::warn!(
+                    layer_idx,
+                    slack,
+                    "Laguna sliding cache could not take a speculative buffer: {reason}; a \
+                     verify block that crosses the window boundary will not be rewindable on \
+                     this layer"
+                );
             }
         }
     }
@@ -190,9 +200,21 @@ impl LagunaModel {
         if trim <= 0 {
             return 0;
         }
-        for cache in caches.iter_mut() {
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
             let trimmed = cache.trim(trim);
             debug_assert_eq!(trimmed, trim, "every Laguna cache must trim the full tail");
+            if trimmed != trim {
+                // A short rewind leaves the layer holding rejected rows, so
+                // the continuation is no longer the committed prefix; name it
+                // rather than let the stream drift silently in release builds.
+                tracing::error!(
+                    layer_idx,
+                    requested = trim,
+                    trimmed,
+                    "Laguna speculative rollback trimmed fewer positions than the rejected \
+                     tail; the sliding cache was armed with too little speculative slack"
+                );
+            }
         }
         trim
     }
@@ -240,11 +262,15 @@ impl SpeculativeTarget for LagunaModel {
             !verify_out.hidden_states.is_empty(),
             "Laguna DFlash verify output must carry at least one captured layer"
         );
-        let mut acc = mlxcel_core::copy(&verify_out.hidden_states[0]);
-        for slab in verify_out.hidden_states.iter().skip(1) {
-            acc = mlxcel_core::concatenate(&acc, slab, -1);
-        }
-        acc
+        let refs: Vec<&MlxArray> = verify_out
+            .hidden_states
+            .iter()
+            .map(|slab| {
+                slab.as_ref()
+                    .expect("captured hidden state must be non-null")
+            })
+            .collect();
+        mlxcel_core::concatenate_many(&refs, -1)
     }
 
     fn verify_logits<'a>(&self, verify_out: &'a Self::VerifyOut) -> &'a MlxArray {

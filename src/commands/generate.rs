@@ -2881,6 +2881,15 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // different id sequences to the same string.
     if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
         eprintln!(
+            "[prompt ids ({}): {}]",
+            prompt_tokens.len(),
+            prompt_tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        eprintln!(
             "[token ids ({}): {}]",
             generated_tokens.len(),
             generated_tokens
@@ -2903,13 +2912,6 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.generation.show_reasoning,
     );
     print_generation_result(&visible, &stats, args.generation.profile, reasoning_only)?;
-    // Raw ids for parity checks between decode paths (speculative versus
-    // classic): decoded text can hide an id-level difference, the ids cannot.
-    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
-        println!("[prompt ids: {prompt_tokens:?}]");
-        println!("[token ids: {generated_tokens:?}]");
-    }
-
     // Cleanup
     mlxcel_core::clear_memory_cache();
 

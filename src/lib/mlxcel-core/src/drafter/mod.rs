@@ -1278,7 +1278,7 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                 let drafter = dflash::MuseAssistantDrafter::load(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
-            if model_type.as_deref() == Some(laguna_dflash::LAGUNA_MODEL_TYPE) {
+            if laguna_dflash::LagunaDFlashConfig::is_laguna_dflash_dir(path) {
                 let drafter = laguna_dflash::LagunaDFlashDrafter::load(path)?;
                 return Ok((Box::new(drafter), resolved));
             }

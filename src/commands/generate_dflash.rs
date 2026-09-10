@@ -97,6 +97,33 @@ pub(super) fn run_offline_dflash(
             "drafter at {draft_model_path:?} did not resolve to a DFlash drafter (got {kind})"
         ));
     }
+    // Family half of the pairing gate the server burst runs
+    // (`required_family_pairing_error`): a plain Qwen 3.5 DFlash drafter
+    // passes `validate_target_compat` on any target, and the mismatch would
+    // surface as an MLX shape throw inside the drafter forward, which crosses
+    // the cxx bridge as a process abort.
+    if !drafter.is_laguna_dflash() {
+        return Err(anyhow!(
+            "the target is a Laguna checkpoint and the drafter at {draft_model_path:?} is not \
+             a Laguna DFlash one. A Laguna target can only be paired with the Poolside DFlash \
+             speculator published for its release (Laguna-XS-2.1 with Laguna-XS-2.1-DFlash, \
+             and so on): another drafter's fc projection reads the residual streams it was \
+             trained on, at a width this target does not produce. Point --draft-model at a \
+             Laguna DFlash drafter, or drop it to run classic decode."
+        ));
+    }
+    // The DFlash round loop verifies with a per-position argmax and has no
+    // stochastic acceptance rule, so a sampling request would silently come
+    // back greedy. Say so instead of drafting.
+    if sampling_config.temperature > 0.0 && sampling_config.top_k != 1 {
+        return Err(anyhow!(
+            "--draft-kind dflash runs a greedy-only round loop; the request samples with \
+             temperature {} / top_k {}. Pass --temp 0 (or --top-k 1), or drop --draft-model \
+             to sample with classic decode.",
+            sampling_config.temperature,
+            sampling_config.top_k
+        ));
+    }
     let target_lm: &dyn LanguageModel = wrapper;
     drafter
         .validate_target_compat(target_lm)

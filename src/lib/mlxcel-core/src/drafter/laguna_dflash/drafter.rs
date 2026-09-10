@@ -186,6 +186,13 @@ impl Drafter for LagunaDFlashDrafter {
         Some(self.model.config.block_size)
     }
 
+    /// The checkpoint has one trained block width; a wider request must not
+    /// engage the adaptive width controller, whose alternate width the
+    /// exactness gate never probed.
+    fn prefer_requested_block_size(&self) -> bool {
+        true
+    }
+
     fn draft_block(
         &mut self,
         last_bonus: i32,

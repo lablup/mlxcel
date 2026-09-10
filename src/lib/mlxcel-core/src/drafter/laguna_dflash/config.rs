@@ -64,8 +64,6 @@ struct RawConfig {
     vocab_size: usize,
     #[serde(default)]
     draft_vocab_size: Option<usize>,
-    #[serde(default = "default_max_position_embeddings")]
-    max_position_embeddings: usize,
     #[serde(default = "default_rope_theta")]
     rope_theta: f64,
     #[serde(default)]
@@ -94,9 +92,6 @@ fn default_true() -> bool {
 fn default_rms_norm_eps() -> f32 {
     1e-6
 }
-fn default_max_position_embeddings() -> usize {
-    262_144
-}
 fn default_rope_theta() -> f64 {
     500_000.0
 }
@@ -109,6 +104,7 @@ fn default_sliding_window() -> usize {
 #[non_exhaustive]
 pub struct LagunaDFlashConfig {
     pub hidden_size: usize,
+    /// SwiGLU inner width; checked against `mlp.gate_proj` at load.
     pub intermediate_size: usize,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
@@ -117,13 +113,11 @@ pub struct LagunaDFlashConfig {
     pub rms_norm_eps: f32,
     /// Target vocabulary the drafter borrows `embed_tokens` and `lm_head` from.
     pub vocab_size: usize,
-    pub max_position_embeddings: usize,
     /// Plain RoPE base applied to all `head_dim` dims (no `rope_parameters`).
     pub rope_theta: f32,
     /// Per-layer sliding window; `[sliding_window; num_hidden_layers]` when the
     /// checkpoint omits `sliding_windows` (XS 2.1 does).
     pub sliding_windows: Vec<usize>,
-    pub attention_bias: bool,
     /// Draft block length: one bonus plus `block_size - 1` masked positions.
     pub block_size: usize,
     /// Token id stamped into the masked positions (`〈|MASK|〉`, id 12).
@@ -191,6 +185,13 @@ impl LagunaDFlashConfig {
             return Err(
                 "Laguna DFlash drafter: rope_parameters is not supported; the published \
                  drafters use plain RoPE over all head dims"
+                    .into(),
+            );
+        }
+        if raw.attention_bias {
+            return Err(
+                "Laguna DFlash drafter: attention_bias must be false; the published drafters \
+                 carry no projection biases and the forward has no bias path"
                     .into(),
             );
         }
@@ -313,10 +314,8 @@ impl LagunaDFlashConfig {
             head_dim,
             rms_norm_eps: raw.rms_norm_eps,
             vocab_size: raw.vocab_size,
-            max_position_embeddings: raw.max_position_embeddings,
             rope_theta: raw.rope_theta as f32,
             sliding_windows,
-            attention_bias: raw.attention_bias,
             block_size: block.block_size,
             mask_token_id: block.mask_token_id,
             num_target_layers: block.num_target_layers,
@@ -346,7 +345,21 @@ impl LagunaDFlashConfig {
         Ok(())
     }
 
-    /// Whether a parsed `config.json` names the Laguna DFlash drafter.
+    /// Whether `path/config.json` names the Laguna DFlash drafter; `false`
+    /// when the file is missing or unparseable (the loader's error to report).
+    pub fn is_laguna_dflash_dir(path: &std::path::Path) -> bool {
+        let Ok(bytes) = std::fs::read(path.join("config.json")) else {
+            return false;
+        };
+        let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return false;
+        };
+        Self::is_laguna_dflash_config(&config)
+    }
+
+    /// Whether a parsed `config.json` names the Laguna DFlash drafter
+    /// (`architectures: ["DFlashLagunaForCausalLM"]`, or `model_type: laguna`
+    /// with a `dflash_config` block).
     pub fn is_laguna_dflash_config(config: &serde_json::Value) -> bool {
         let model_type = config
             .get("model_type")

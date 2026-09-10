@@ -69,6 +69,17 @@ impl LagunaDFlashDecoderLayer {
             group_size,
             bits,
         )?;
+        let gate_key = format!("{prefix}.mlp.gate_proj.weight");
+        let gate_rows = weights
+            .get(&gate_key)
+            .map(|w| ffi::array_shape(w)[0])
+            .ok_or_else(|| format!("Weight not found: {gate_key}"))?;
+        if gate_rows != config.intermediate_size as i32 {
+            return Err(format!(
+                "{gate_key} has {gate_rows} rows but intermediate_size is {}",
+                config.intermediate_size
+            ));
+        }
         let mlp = DFlashMlp::from_weights(weights, &format!("{prefix}.mlp"), group_size, bits)?;
         let norm = |leaf: &str| -> Result<RMSNorm, String> {
             let key = format!("{prefix}.{leaf}.weight");

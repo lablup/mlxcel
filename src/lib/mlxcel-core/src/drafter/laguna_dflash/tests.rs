@@ -494,3 +494,118 @@ fn from_weights_rejects_projection_rows_that_disagree_with_the_config() {
     };
     assert!(msg.contains("fc.weight"), "{msg}");
 }
+
+#[test]
+fn context_appends_continue_the_absolute_positions() {
+    // Two rounds that append context rows [r0, r1] and then [r2] must draft
+    // exactly like one round that appends [r0, r1, r2]: the cached context
+    // keys keep the positions they were rotated at, and the next block sits
+    // after them. A drafter that re-based each round at position 0 would
+    // rotate r2 and the block against stale key positions and differ here.
+    // (A global shift of every position is invisible to RoPE attention, so
+    // this continuity check is the observable form of "positions are
+    // absolute".)
+    let drafter = bound_tiny_drafter(13);
+    let cfg = drafter.model.config.clone();
+    let n = cfg.target_layer_ids.len() as i32;
+    let width = n * cfg.hidden_size as i32;
+    let mut rng = Lcg(29);
+    let all = rand_array(&mut rng, &[1, 3, width], 1.0);
+    ffi::eval(&all);
+    let data = crate::utils::array_to_vec_f32(&all);
+    let rows = |from: usize, to: usize| {
+        ffi::from_slice_f32(
+            &data[from * width as usize..to * width as usize],
+            &[1, (to - from) as i32, width],
+        )
+    };
+    let block: Vec<i32> = vec![5, 31, 31, 31];
+    let inputs = ffi::from_slice_i32(&block, &[1, block.len() as i32]);
+    let to_vec = |logits: cxx::UniquePtr<ffi::MlxArray>| {
+        let logits = ffi::astype(&logits, dtype::FLOAT32);
+        ffi::eval(&logits);
+        crate::utils::array_to_vec_f32(&logits)
+    };
+
+    let mut incremental = drafter.model.make_cache();
+    let _ = drafter
+        .model
+        .forward(&inputs, &rows(0, 2), &mut incremental);
+    let second = to_vec(
+        drafter
+            .model
+            .forward(&inputs, &rows(2, 3), &mut incremental),
+    );
+    assert_eq!(incremental[0].offset(), 3);
+
+    let mut combined = drafter.model.make_cache();
+    let once = to_vec(drafter.model.forward(&inputs, &rows(0, 3), &mut combined));
+    assert_eq!(combined[0].offset(), 3);
+
+    let diff = second
+        .iter()
+        .zip(&once)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        diff < 1e-3,
+        "incremental appends must match one append (diff {diff})"
+    );
+}
+
+#[test]
+fn fused_qkv_rows_are_read_in_q_k_v_order() {
+    // Permuting the fused rows into k, q, v order must change the drafter's
+    // logits: the forward reads q, then k, then v off `qkv_proj`.
+    let cfg = tiny_config();
+    let weights = tiny_weights(&cfg, 31);
+    let d = cfg.head_dim as i32;
+    let nh = cfg.num_attention_heads as i32;
+    let kv = cfg.num_key_value_heads as i32;
+    let h = cfg.hidden_size as i32;
+    let key = "layers.0.self_attn.qkv_proj.weight";
+    let fused = weights.get(key).expect("fused qkv");
+    ffi::eval(fused);
+    let data = crate::utils::array_to_vec_f32(fused);
+    let row = |r: i32| -> &[f32] { &data[(r * h) as usize..((r + 1) * h) as usize] };
+    let mut permuted: Vec<f32> = Vec::with_capacity(data.len());
+    for r in nh * d..(nh + kv) * d {
+        permuted.extend_from_slice(row(r));
+    }
+    for r in 0..nh * d {
+        permuted.extend_from_slice(row(r));
+    }
+    for r in (nh + kv) * d..(nh + 2 * kv) * d {
+        permuted.extend_from_slice(row(r));
+    }
+    let mut swapped = tiny_weights(&cfg, 31);
+    swapped.insert(
+        key.to_string(),
+        ffi::from_slice_f32(&permuted, &[(nh + 2 * kv) * d, h]),
+    );
+    let mut rng = Lcg(37);
+    let n = cfg.target_layer_ids.len() as i32;
+    let hidden = rand_array(&mut rng, &[1, 2, n * cfg.hidden_size as i32], 1.0);
+    let block: Vec<i32> = vec![5, 31, 31, 31];
+    let mut a = bound_drafter_for(cfg.clone(), 31);
+    let mut b = LagunaDFlashDrafter::from_weights(&swapped, cfg.clone()).expect("builds");
+    let mut erng = Lcg(31 ^ 0x9e37);
+    let embed = rand_array(
+        &mut erng,
+        &[cfg.vocab_size as i32, cfg.hidden_size as i32],
+        0.5,
+    );
+    b.model
+        .bind_target_embedding(UnifiedEmbedding::Regular(Embedding::new(embed)));
+    let la = logits_for(&mut a, &block, &hidden);
+    let lb = logits_for(&mut b, &block, &hidden);
+    let diff = la
+        .iter()
+        .zip(&lb)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        diff > 1e-3,
+        "k/q/v row order must change the logits (diff {diff})"
+    );
+}

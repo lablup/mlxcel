@@ -233,6 +233,33 @@ impl LagunaDFlashDraftModel {
         );
         let embed = self.embed();
         let mut x = self.to_compute_dtype(embed.forward(inputs));
+        // Rows older than the widest window can never be attended: drop them
+        // before `aux_hidden_norms` and `fc` run over the whole prompt, and
+        // advance every layer's absolute offset past them. Each layer still
+        // trims to its own window afterwards.
+        let shape = ffi::array_shape(target_hidden);
+        let keep = self
+            .config
+            .sliding_windows
+            .iter()
+            .max()
+            .map(|w| *w as i32 - 1)
+            .unwrap_or(shape[1]);
+        let sliced;
+        let target_hidden = if shape[1] > keep {
+            let dropped = shape[1] - keep;
+            for cache in caches.iter_mut() {
+                cache.advance(dropped);
+            }
+            sliced = ffi::slice(
+                target_hidden,
+                &[0, dropped, 0],
+                &[shape[0], shape[1], shape[2]],
+            );
+            &sliced
+        } else {
+            target_hidden
+        };
         let ctx = self.combine_hidden(target_hidden);
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             x = layer.forward(&x, &ctx, cache);
