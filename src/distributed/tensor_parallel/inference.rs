@@ -157,6 +157,12 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // one its `config.json` carries, so this only decides what a config
         // with no architecture at all reports.
         ModelType::IQuestCoder => "iquestcoder",
+        // Deliberately not "llama", for the reason above and one more: the
+        // Loop decoder runs its stack twice with a per-layer gate, so the TP
+        // Llama runtime could not serve it even if it were validated. The
+        // refusal itself comes from `runtime_kind_for`, which has no arm for
+        // this variant; this arm only keeps the dispatch table total.
+        ModelType::IQuestLoopCoder => "iquestloopcoder",
         ModelType::Llama4 | ModelType::Llama4VLM => "llama4",
         ModelType::Qwen2 | ModelType::Qwen2VL | ModelType::Qwen25VL | ModelType::FastVLM => "qwen2",
         ModelType::Qwen3 | ModelType::Qwen3VL => "qwen3",

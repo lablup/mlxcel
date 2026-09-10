@@ -3382,4 +3382,138 @@ mod tests {
         // The three `eos_token_id` entries generation stops on all resolve.
         assert_eq!(crate::read_eos_token_ids(model_dir), vec![2, 75864, 75869]);
     }
+
+    /// The IQuest-Coder **Loop** checkpoint. Same `IQuestCoderTokenizer` class
+    /// and the same SentencePiece-plus-`added_tokens.json` layout with no
+    /// `tokenizer.json`, so it exercises the same load path as the test above;
+    /// pinned separately because it is a different published checkpoint and the
+    /// two could drift.
+    const IQUEST_LOOP_MODEL_DIR: &str = "models/mlx/iquest-coder-v1-40b-loop-instruct-4bit";
+
+    /// The Loop checkpoint's added tokens, split by what the SentencePiece
+    /// loader actually does with each half.
+    ///
+    /// `added_tokens_decoder` marks 19 of the 27 entries `"special": true`;
+    /// those are the chat scaffold (`<|im_start|>`, `<|im_end|>`, the FIM and
+    /// repo markers, `<|endoftext|>`) and they round-trip in both directions.
+    /// The other 8 are the thinking and tool-call tags, marked
+    /// `"special": false`, and [`parse_special_tokens`] deliberately keeps
+    /// those decode-only: they render correctly from an id but do not fold back
+    /// into one id on encode, splitting into their SentencePiece pieces
+    /// instead. That is a property of the shared SentencePiece loader, not of
+    /// this checkpoint, and it is asserted here rather than glossed over so the
+    /// difference from HuggingFace (which matches every `added_tokens_decoder`
+    /// entry on encode regardless of `special`) is written down where the next
+    /// reader of this family will find it. It is observable only on a
+    /// tool-calling prompt: `chat_template.jinja` emits the six tool tags
+    /// literally and emits neither `<think>` nor `</think>`.
+    #[test]
+    fn the_iquest_loop_coder_tokenizer_round_trips_its_added_tokens() {
+        let model_dir = std::path::Path::new(IQUEST_LOOP_MODEL_DIR);
+        if !model_dir.join("tokenizer.model").exists() {
+            crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint(
+                "the_iquest_loop_coder_tokenizer_round_trips_its_added_tokens",
+                &format!(
+                    "IQuest-Coder Loop checkpoint not present at {}",
+                    model_dir.display()
+                ),
+            );
+            return;
+        }
+
+        let tokenizer = load_tokenizer(model_dir).expect("load IQuest-Coder Loop tokenizer");
+        assert!(
+            matches!(tokenizer, MlxcelTokenizer::SentencePiece(_)),
+            "the checkpoint ships no tokenizer.json, so the SentencePiece fallback is the load path"
+        );
+
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(model_dir.join("tokenizer_config.json")).expect("tok config"),
+        )
+        .expect("parse tokenizer_config.json");
+        let decoder = config["added_tokens_decoder"]
+            .as_object()
+            .expect("added_tokens_decoder");
+
+        // `added_tokens.json` and `added_tokens_decoder` must agree, or the two
+        // halves below would be split on the wrong axis.
+        let added: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(model_dir.join("added_tokens.json")).expect("added_tokens"),
+        )
+        .expect("parse added_tokens.json");
+        assert_eq!(added.len(), 27);
+        for (token, id) in &added {
+            let id = id.as_u64().expect("added token id");
+            assert_eq!(
+                decoder[&id.to_string()]["content"].as_str(),
+                Some(token.as_str()),
+                "added_tokens.json and added_tokens_decoder disagree about id {id}"
+            );
+        }
+
+        let mut specials = 0usize;
+        let mut non_specials = 0usize;
+        for (id_str, entry) in decoder {
+            let id: u32 = id_str.parse().expect("added token id");
+            let content = entry["content"].as_str().expect("content");
+            // `<unk>`, `<s>` and `</s>` are SentencePiece's own control pieces
+            // and are not part of the added-token surface being checked here.
+            if id < 3 {
+                continue;
+            }
+
+            // Every entry decodes back to its own spelling.
+            assert_eq!(
+                tokenizer.decode(&[id], false).unwrap(),
+                content,
+                "{content} must decode back to itself"
+            );
+
+            if entry["special"].as_bool().unwrap_or(false) {
+                specials += 1;
+                assert_eq!(
+                    tokenizer.token_to_id(content),
+                    Some(id),
+                    "{content} must resolve to the id the checkpoint declares"
+                );
+                assert_eq!(
+                    tokenizer.encode(content, true).unwrap(),
+                    vec![id],
+                    "{content} must encode as exactly one id, not as several pieces"
+                );
+            } else {
+                non_specials += 1;
+                assert_eq!(
+                    tokenizer.token_to_id(content),
+                    None,
+                    "non-special added tokens are decode-only on this path; if {content} now \
+                     resolves, the loader changed and this test should assert the round trip \
+                     instead of the gap"
+                );
+                assert!(
+                    tokenizer.encode(content, true).unwrap().len() > 1,
+                    "{content} is expected to split into pieces on encode today"
+                );
+            }
+        }
+        assert_eq!((specials, non_specials), (19, 8));
+
+        // The ChatML scaffold the chat template emits on a plain (non-tool)
+        // turn, which uses only `special: true` tokens and so is exact. The
+        // segment between the markers starts bare rather than with a phantom
+        // space (`add_prefix_space` is false).
+        let chat = tokenizer
+            .encode("<|im_start|>user\nhi<|im_end|>", true)
+            .unwrap();
+        assert_eq!(chat.first(), Some(&75863));
+        assert_eq!(chat.last(), Some(&75864));
+        assert_eq!(chat[1], tokenizer.encode("user", true).unwrap()[0]);
+
+        // `add_bos_token` is false, so no BOS is prepended even with
+        // `add_special_tokens` on.
+        assert_ne!(tokenizer.encode("The", true).unwrap().first(), Some(&1));
+
+        // All three stop ids resolve, not just `eos_token`.
+        assert_eq!(crate::read_eos_token_ids(model_dir), vec![2, 75864, 75869]);
+    }
 }
