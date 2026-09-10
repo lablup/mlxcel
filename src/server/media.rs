@@ -399,15 +399,46 @@ pub(crate) fn media_capability_rejection(
         && !request.video_urls().is_empty()
         && !request.audio_inputs().is_empty()
     {
-        // 400 / `invalid_request_error` reproduces what the preparation-level
-        // bail mapped to on every generation route, so the status, type and
-        // message a client sees are unchanged by the move.
+        // 400 / `invalid_request_error` is what the preparation-level bail
+        // mapped to before the check moved here, so `/v1/chat/completions` and
+        // `/v1/responses`, which return this `ErrorResponse` verbatim, are
+        // byte-identical to the old behaviour. `/v1/messages` cannot reach this
+        // branch at all: `AnthropicContentBlock` has no video or audio variant,
+        // so a request on that route carries neither. It still reads the
+        // combination refusal back out through
+        // `is_combined_video_audio_rejection` rather than rendering every
+        // rejection as its per-modality 501 (see
+        // `routes::anthropic::media_rejection_response`), so the day that
+        // schema gains a video block the status is already right.
         return Some(crate::server::types::ErrorResponse::new(
             COMBINED_VIDEO_AUDIO_REFUSAL,
             "invalid_request_error",
         ));
     }
     None
+}
+
+/// Whether a [`media_capability_rejection`] result is the video+audio
+/// *combination* refusal rather than a per-modality one.
+///
+/// The distinction is what a client can do about it. A per-modality refusal
+/// says the loaded checkpoint has no tower for that modality at all and will
+/// never serve it, which is a capability gap. The combination refusal says
+/// each modality is fine on its own and only the pair has no merge path, which
+/// the client fixes by dropping one of the two parts, so it is a request error.
+/// A route that renders capability gaps as `501 not_supported_error` therefore
+/// still has to render this one as `400 invalid_request_error`.
+///
+/// Keyed on the status this module set plus the shared refusal constant, so a
+/// route does not have to carry a copy of the string.
+///
+/// Used by: `server::routes::anthropic`.
+#[must_use]
+pub(crate) fn is_combined_video_audio_rejection(
+    rejection: &crate::server::types::ErrorResponse,
+) -> bool {
+    rejection.status == axum::http::StatusCode::BAD_REQUEST
+        && rejection.error.message == COMBINED_VIDEO_AUDIO_REFUSAL
 }
 
 static MAX_IMAGE_PAYLOAD_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_IMAGE_PAYLOAD_SIZE);

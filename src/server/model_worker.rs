@@ -1524,7 +1524,9 @@ pub(crate) fn prepare_request_vlm_embeddings(
         if !audio.is_empty() {
             let unified = match model {
                 LoadedModel::Gemma4Unified(unified) if model.supports_video_with_audio() => unified,
-                _ => return Err(anyhow!("Combined video and audio inputs are not supported")),
+                _ => {
+                    return Err(anyhow!(crate::server::media::COMBINED_VIDEO_AUDIO_REFUSAL));
+                }
             };
             // Resolved here rather than inside the audio-only branch below so
             // the combined path can place the audio block inside the last user
@@ -3414,11 +3416,20 @@ fn gemma4_unified_server_video_frames(
 /// Resolve a Gemma 4 Unified request that carries `video_url` and
 /// `input_audio` in the same turn (issue #1349).
 ///
-/// Runs the same per-modality helpers as the single-modality paths, in prompt
-/// order (images, then video frame runs, then the audio run), and scatters all
-/// three through `merge_multimodal`. The video runs splice in after BOS and
-/// the audio run lands before the last `<end_of_turn>`, so the two expansions
-/// address disjoint placeholder ids and neither clobbers the other.
+/// Runs the same per-modality helpers as the single-modality paths and
+/// scatters all three through `merge_multimodal`. The video runs splice in
+/// after BOS and the audio run lands before the last `<end_of_turn>`, so the
+/// two expansions address disjoint placeholder ids and neither clobbers the
+/// other.
+///
+/// **Images must expand before the video frames, and the order is not
+/// cosmetic.** `expand_gemma4_image_tokens` counts a placeholder as
+/// `image_token_id` *or* `boi_token_id`, and
+/// `expand_gemma4_unified_video_tokens` frames every emitted frame with its own
+/// `boi_token_id`. Expanding images second would therefore count each video
+/// frame as an image placeholder, and the prompt would either fail the image
+/// cardinality check with a count the caller cannot explain or, when the counts
+/// happen to line up, be expanded against the wrong runs.
 fn prepare_gemma4_unified_video_and_audio_embeddings(
     unified: &crate::vision::Gemma4UnifiedModel,
     prompt_tokens: &mut Vec<i32>,
@@ -3428,9 +3439,18 @@ fn prepare_gemma4_unified_video_and_audio_embeddings(
     end_of_turn_token_id: Option<i32>,
     image_soft_tokens: Option<usize>,
 ) -> Result<Option<InputEmbeddings>> {
+    // Strict where the audio-only path (`prepare_gemma4_unified_audio_embeddings`)
+    // is lenient: that one warns and drops the audio, this one refuses. The
+    // difference is what a silent drop would leave behind. By the time this
+    // check could fire the prompt's video runs are already the caller's whole
+    // question, so answering it from video alone would answer a question the
+    // caller did not ask, and nothing in a 200 tells them half their input
+    // vanished. `ModelMediaSupport` and `LoadedModel::supports_video_with_audio`
+    // key on the model type rather than on which weights loaded, so the HTTP
+    // boundary admitted this request and here is the first place that knows.
     if unified.embed_audio.is_none() {
         return Err(anyhow!(
-            "This Gemma 4 Unified model has no audio embedder; input_audio is not supported"
+            crate::vision::gemma4_unified::MISSING_AUDIO_EMBEDDER_REFUSAL
         ));
     }
 

@@ -1273,7 +1273,7 @@ fn require_gemma4_unified_audio_embedder(
 ) -> Result<()> {
     if unified.embed_audio.is_none() {
         return Err(anyhow::anyhow!(
-            "This Gemma 4 Unified model has no audio embedder. Audio input is not supported."
+            mlxcel::vision::gemma4_unified::MISSING_AUDIO_EMBEDDER_REFUSAL
         ));
     }
     Ok(())
@@ -1668,11 +1668,19 @@ fn compute_gemma4_unified_video_embeddings(
 /// Compute embeddings for a Gemma 4 Unified prompt that carries `--video` and
 /// `--audio` together, optionally alongside `--image` (issue #1349).
 ///
-/// Runs the same per-modality helpers as the single-modality builders, in
-/// prompt order (images, then video frame runs, then the audio run), and
+/// Runs the same per-modality helpers as the single-modality builders and
 /// scatters all three through `merge_multimodal`. Reusing the helpers rather
 /// than duplicating them is what guarantees a video-only or audio-only prompt
 /// still produces the token stream it produced before this path existed.
+///
+/// **Images must expand before the video frames, and the order is not
+/// cosmetic.** `expand_gemma4_image_tokens` counts a placeholder as
+/// `image_token_id` *or* `boi_token_id`, and
+/// `expand_gemma4_unified_video_tokens` frames every emitted frame with its own
+/// `boi_token_id`. Expanding images second would therefore count each video
+/// frame as an image placeholder, and the prompt would either fail the image
+/// cardinality check with a count the caller cannot explain or, when the counts
+/// happen to line up, be expanded against the wrong runs.
 fn compute_gemma4_unified_video_and_audio_embeddings(
     unified: &mlxcel::vision::Gemma4UnifiedModel,
     prompt_tokens: &mut Vec<i32>,

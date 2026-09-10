@@ -40,6 +40,18 @@ pub use super::gemma4_unified_mask::{
     UnifiedTokenIds, compute_vision_block_ids, derive_mm_token_type_ids, token_type,
 };
 
+/// The refusal an audio-carrying prompt gets from a Gemma 4 Unified checkpoint
+/// that was loaded without the audio embedder (`embed_audio == None`).
+///
+/// Shared by the CLI (`commands::generate_vlm::require_gemma4_unified_audio_embedder`)
+/// and the server's combined video+audio path so the two surfaces answer the
+/// same request with the same sentence. The HTTP media boundary cannot make
+/// this call: both `ModelMediaSupport` and `LoadedModel::supports_video_with_audio`
+/// key on the model *type*, not on which weights actually loaded, so the first
+/// place that knows is the code holding the model (issue #1349).
+pub const MISSING_AUDIO_EMBEDDER_REFUSAL: &str =
+    "This Gemma 4 Unified model has no audio embedder. Audio input is not supported.";
+
 /// Gemma 4 Unified model.
 pub struct Gemma4UnifiedModel {
     pub text_model: crate::models::Gemma4Wrapper,
