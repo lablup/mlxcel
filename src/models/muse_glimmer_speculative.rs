@@ -31,7 +31,9 @@
 //!   ([`MuseGlimmerTextModel::enable_speculative_buffers`]);
 //! - the block-versus-chain exactness probe that decides whether a `bs`-row
 //!   verify block reproduces `bs` single-token decode steps on this host
-//!   ([`MuseGlimmerTextModel::dflash_exactness_allows`]).
+//!   ([`MuseGlimmerTextModel::dflash_exactness_allows`]), run at every width
+//!   the adaptive round loop can settle on
+//!   ([`MuseGlimmerTextModel::dflash_exactness_allows_every_width`]).
 //!
 //! `prefill_forward_with_capture_layers` keeps the trait default on
 //! purpose. LFM2 overrides it to skip prompt-sized short-conv snapshots; a
@@ -44,6 +46,7 @@
 
 use mlxcel_core::concatenate_many;
 use mlxcel_core::drafter::dflash::SpeculativeTarget;
+use mlxcel_core::drafter::dflash::muse::MUSE_ASSISTANT_INITIAL_BLOCK_SIZE;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::{MuseCache, MuseGlimmerTextModel, MuseGlimmerTextWrapper};
@@ -74,13 +77,52 @@ pub struct VerifyOutput {
     pub hidden_states: Vec<UniquePtr<MlxArray>>,
 }
 
+/// The verify widths a run with `block_size` as its ceiling can settle on,
+/// narrowest first, and therefore the widths the exactness gate has to
+/// clear before the burst engages.
+///
+/// Two of them since issue #1343: the drafter's declared depth
+/// ([`MUSE_ASSISTANT_INITIAL_BLOCK_SIZE`]), which the round loop warms up
+/// at, and the requested ceiling the throughput comparator widens to. One
+/// when the ceiling is at or below the depth, which is what
+/// `--draft-block-size 4` (or narrower) asks for. Rounds the emission
+/// budget forces narrower still are not listed: that clamp predates the
+/// adaptive width and applies to every DFlash family.
+///
+/// Used by: [`MuseGlimmerTextModel::dflash_exactness_allows_every_width`].
+pub(crate) fn probed_verify_widths(block_size: usize) -> Vec<usize> {
+    let depth = MUSE_ASSISTANT_INITIAL_BLOCK_SIZE.min(block_size);
+    if depth > 1 && depth != block_size {
+        vec![depth, block_size]
+    } else {
+        vec![block_size]
+    }
+}
+
 /// Speculative buffer the sliding caches are armed with for a `block_size`
-/// verify: `clamp(block_size * 8, 32, 128)` rows, the Gemma 4 MTP rule.
+/// verify: `clamp(block_size * 8, 32, 128)` rows, the Gemma 4 MTP rule,
+/// floored at `block_size` itself.
+///
+/// The floor is the difference from `gemma4_mtp_target::mtp_rotating_buffer_size`,
+/// and it is what makes the rule safe for an operator-chosen width.
+/// `--draft-block-size` is not bounded above anywhere on the way in
+/// (`resolve_draft_block_size` returns the override verbatim), and the
+/// buffer is the slack past `max_size` that lets a verify block be
+/// appended across the ring boundary and then rewound. A block wider than
+/// the buffer overwrites window rows that are still visible, and
+/// `RotatingKVCache::trim` rewinds the offsets without restoring them: the
+/// sequence then continues from a window with holes in it, silently, with
+/// no error anywhere. The Gemma rule's 128-row cap makes that reachable at
+/// `--draft-block-size 129` and above; the floor keeps
+/// `buffer >= block_size` at every width.
 ///
 /// Used by: `DFlashTargetModel::enable_speculative_buffers` on the Muse
 /// targets, the Muse exactness probe.
 pub fn speculative_buffer_size(block_size: usize) -> i32 {
-    ((block_size * 8).clamp(32, 128)) as i32
+    (block_size * 8)
+        .clamp(32, 128)
+        .max(block_size)
+        .min(i32::MAX as usize) as i32
 }
 
 impl MuseGlimmerTextModel {
@@ -146,11 +188,23 @@ impl MuseGlimmerTextModel {
         }
 
         // Keep the vector length-aligned with the request; the drafter's
-        // compatibility gate rejects out-of-range ids before this runs.
+        // compatibility gate rejects out-of-range ids before this runs, so
+        // a miss here means that gate was bypassed. Say so rather than
+        // handing the drafter a zero slab that reads as a residual stream.
         let hidden_states: Vec<UniquePtr<MlxArray>> = hidden_slots
             .into_iter()
-            .map(|slot| {
-                slot.unwrap_or_else(|| {
+            .enumerate()
+            .map(|(slot, captured)| {
+                captured.unwrap_or_else(|| {
+                    tracing::error!(
+                        slot,
+                        requested_layer =
+                            capture_layer_ids.get(slot).copied().unwrap_or(usize::MAX),
+                        num_layers = self.layers.len(),
+                        "Muse Glimmer verify captured no residual stream for this drafter slot; \
+                         the pairing check should have refused this drafter, and the drafter \
+                         will now read zeros for that layer"
+                    );
                     mlxcel_core::zeros(&[shape[0], shape[1], shape[2]], hidden_dtype)
                 })
             })
@@ -187,8 +241,23 @@ impl MuseGlimmerTextModel {
         if trim <= 0 {
             return;
         }
-        for cache in caches.iter_mut() {
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
             let trimmed = cache.trim(trim);
+            if trimmed != trim {
+                // Reachable only if a cache was armed with less speculative
+                // slack than the block it verified, which
+                // `speculative_buffer_size` now prevents. A short rewind
+                // leaves the window holding rejected rows, so the
+                // continuation is not the committed prefix any more: name it
+                // rather than let the stream drift silently.
+                tracing::error!(
+                    layer_idx,
+                    requested = trim,
+                    trimmed,
+                    "Muse Glimmer cache could not rewind the whole rejected tail; this \
+                     sequence's continuation is no longer exact"
+                );
+            }
             debug_assert_eq!(
                 trimmed, trim,
                 "a Muse cache must rewind the whole rejected tail"
@@ -202,7 +271,7 @@ impl MuseGlimmerTextModel {
     /// also owns the decline log line, the `qmv_wide` retry and the
     /// `MLXCEL_MTP_ALLOW_INEXACT` override.
     ///
-    /// Used by: the server DFlash burst gate.
+    /// Used by: [`Self::dflash_exactness_allows_every_width`].
     pub fn dflash_exactness_allows(&self, block_size: usize) -> bool {
         let key = ProbeKey {
             block_size: block_size as u32,
@@ -210,6 +279,30 @@ impl MuseGlimmerTextModel {
             num_hidden_layers: self.layers.len() as u32,
         };
         mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
+    }
+
+    /// Whether the DFlash burst may engage with `block_size` as its verify
+    /// ceiling: the probe has to pass at EVERY width the round loop runs at
+    /// systematically, not only at the ceiling.
+    ///
+    /// Since issue #1343 the loop no longer holds one width. It starts at
+    /// the drafter's declared depth (`MUSE_ASSISTANT_INITIAL_BLOCK_SIZE`,
+    /// four rows) and widens to the requested ceiling only when a
+    /// measurement window emits more tokens per millisecond there, so a
+    /// gate that probed the ceiling alone would admit a width it never
+    /// measured. The forward width selects which quantized-matmul kernel
+    /// MLX dispatches, so a pass at one width is not evidence about
+    /// another: `docs/benchmarks.md` records the same comparison reading
+    /// 20.6 percent disagreement at width 8 and 0.0 percent at width 32.
+    ///
+    /// Both probes are memoised per (model, width) by [`mtp_exactness_gate`],
+    /// so this costs one extra probe per process, not per request.
+    ///
+    /// Used by: the server DFlash burst gate.
+    pub fn dflash_exactness_allows_every_width(&self, block_size: usize) -> bool {
+        probed_verify_widths(block_size)
+            .into_iter()
+            .all(|width| self.dflash_exactness_allows(width))
     }
 
     /// Measure whether a `block_size`-row verify block produces logits
@@ -283,8 +376,8 @@ impl MuseGlimmerTextWrapper {
         self.model.enable_speculative_buffers(caches, buffer_size);
     }
 
-    pub fn dflash_exactness_allows(&self, block_size: usize) -> bool {
-        self.model.dflash_exactness_allows(block_size)
+    pub fn dflash_exactness_allows_every_width(&self, block_size: usize) -> bool {
+        self.model.dflash_exactness_allows_every_width(block_size)
     }
 }
 

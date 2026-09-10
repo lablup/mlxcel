@@ -257,6 +257,34 @@ fn config_flattens_dflash_config_and_validates_layer_types() {
 /// The published checkpoint's layout: flat keys, no `num_target_layers`, no
 /// `vocab_size`, no `dflash_config`. Defaulting the two absent keys to zero
 /// and validating against them would reject this file.
+/// Every dimension the config names is handed to MLX as an `i32`; a value
+/// past the ceiling wraps to a negative extent, which MLX throws on and the
+/// cxx bridge turns into an abort. The config has to refuse it as a message
+/// instead.
+#[test]
+fn config_refuses_dimensions_that_would_wrap_an_i32() {
+    let with = |key: &str, value: serde_json::Value| {
+        let mut json = config_json(2048);
+        json[key] = value;
+        MuseAssistantConfig::from_json(&json)
+    };
+    for key in [
+        "hidden_size",
+        "intermediate_size",
+        "head_dim",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "sliding_window",
+        "block_size",
+    ] {
+        let err = with(key, serde_json::json!(3_000_000_000_u64))
+            .expect_err("a dimension past the ceiling must be refused");
+        assert!(err.contains(key) || err.contains("ceiling"), "{key}: {err}");
+    }
+    // The published shape is still accepted.
+    assert!(MuseAssistantConfig::from_json(&config_json(2048)).is_ok());
+}
+
 #[test]
 fn config_accepts_the_published_flat_layout() {
     let published = serde_json::json!({

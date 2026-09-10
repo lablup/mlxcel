@@ -188,6 +188,45 @@ impl MuseAssistantConfig {
                     .to_string(),
             );
         }
+        // Every dimension below is handed to MLX as an `i32`. A config that
+        // names one past `i32::MAX` wraps to a negative extent, and a
+        // negative extent reaches MLX as a slice or reshape it throws on,
+        // which crosses the cxx bridge as an abort rather than as a load
+        // error. Refuse the config instead. The ceiling is deliberately far
+        // above anything a real checkpoint declares (the published assistant
+        // is 6656 wide over a 2048-row window) and only exists so a
+        // malformed or hostile `config.json` fails as a message.
+        const DIMENSION_CEILING: usize = 1 << 24;
+        for (name, value) in [
+            ("hidden_size", self.hidden_size),
+            ("intermediate_size", self.intermediate_size),
+            ("head_dim", self.head_dim),
+            ("num_attention_heads", self.num_attention_heads),
+            ("num_key_value_heads", self.num_key_value_heads),
+            ("num_hidden_layers", self.num_hidden_layers),
+            ("sliding_window", self.sliding_window),
+            ("block_size", self.block_size),
+        ] {
+            if value > DIMENSION_CEILING {
+                return Err(format!(
+                    "Muse Glimmer assistant {name} = {value} is past the {DIMENSION_CEILING} \
+                     ceiling every dimension is bounded by before it reaches MLX as an i32"
+                ));
+            }
+        }
+        if self
+            .target_layer_ids
+            .len()
+            .checked_mul(self.hidden_size)
+            .is_none_or(|width| width > DIMENSION_CEILING)
+        {
+            return Err(format!(
+                "Muse Glimmer assistant encoder.fc input width (len(target_layer_ids) = {} times \
+                 hidden_size = {}) is past the {DIMENSION_CEILING} ceiling",
+                self.target_layer_ids.len(),
+                self.hidden_size
+            ));
+        }
         if !self
             .num_attention_heads
             .is_multiple_of(self.num_key_value_heads)

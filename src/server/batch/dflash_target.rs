@@ -305,7 +305,7 @@ impl DFlashTargetModel for MuseGlimmerTextWrapper {
         );
     }
     fn exactness_allows(&self, block_size: usize) -> bool {
-        self.dflash_exactness_allows(block_size)
+        self.dflash_exactness_allows_every_width(block_size)
     }
     fn required_drafter_family() -> Option<DFlashDrafterFamily> {
         Some(DFlashDrafterFamily::MuseAssistant)
@@ -333,7 +333,7 @@ impl DFlashTargetModel for crate::vision::MuseGlimmerVlmModel {
         );
     }
     fn exactness_allows(&self, block_size: usize) -> bool {
-        self.text.dflash_exactness_allows(block_size)
+        self.text.dflash_exactness_allows_every_width(block_size)
     }
     fn required_drafter_family() -> Option<DFlashDrafterFamily> {
         Some(DFlashDrafterFamily::MuseAssistant)

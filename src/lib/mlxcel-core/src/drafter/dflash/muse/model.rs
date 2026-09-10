@@ -277,6 +277,29 @@ impl MuseAssistantModel {
             caches.len(),
             self.layers.len()
         );
+        // Drop the rows past the window BEFORE the encoder runs. `fc` and
+        // `output_norm_enc` are both per-row, so this is the same context
+        // the post-projection trim produced, at the cost of the rows that
+        // survive rather than the rows that arrived. It is the whole prompt
+        // that arrives on the first round: at `-c 16384` the incoming
+        // `[1, S, 5 * 6656]` slab alone is 1.1 GB in f16, and projecting all
+        // of it to throw away seven eighths cost that again in the cast and
+        // in `fc`'s output.
+        let window = self.config.sliding_window as i32;
+        let incoming = ffi::array_shape(target_hidden);
+        let target_hidden = if incoming.len() == 3 && incoming[1] > window {
+            for cache in caches.iter_mut() {
+                cache.skip(incoming[1] - window);
+            }
+            ffi::slice(
+                target_hidden,
+                &[0, incoming[1] - window, 0],
+                &[incoming[0], incoming[1], incoming[2]],
+            )
+        } else {
+            ffi::copy(target_hidden)
+        };
+
         // Both inputs come from the target: the residual streams and the
         // embedding lookup. Cast them to the drafter's own dtype so the
         // attention runs uniformly rather than promoting to f32 on a
@@ -284,27 +307,13 @@ impl MuseAssistantModel {
         let (h, target_hidden) = match self.dense_dtype() {
             Some(dtype) => (
                 ffi::astype(&self.embed().forward(block), dtype),
-                ffi::astype(target_hidden, dtype),
+                ffi::astype(&target_hidden, dtype),
             ),
-            None => (self.embed().forward(block), ffi::copy(target_hidden)),
+            None => (self.embed().forward(block), target_hidden),
         };
         let mut h = h;
         let projected = self.fc.forward(&target_hidden);
-        let mut context = self.output_norm_enc.forward(&projected);
-
-        let ctx_shape = ffi::array_shape(&context);
-        let s = ctx_shape[1];
-        let window = self.config.sliding_window as i32;
-        if s > window {
-            context = ffi::slice(
-                &context,
-                &[0, s - window, 0],
-                &[ctx_shape[0], s, ctx_shape[2]],
-            );
-            for cache in caches.iter_mut() {
-                cache.skip(s - window);
-            }
-        }
+        let context = self.output_norm_enc.forward(&projected);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, &context, cache);

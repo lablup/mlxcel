@@ -48,6 +48,15 @@ greedy target decoding, subject to the block-versus-chain exactness probe
 below, including past the 2048-token sliding window of the target's rotating
 caches.
 
+Its verify width is the one adaptive width in the DFlash loop, so the probe
+runs more than once: the round loop warms up at the drafter's declared depth
+of four rows and widens to the requested ceiling only when a measurement
+window pays for it, and the gate clears both widths before the burst engages.
+Probing the ceiling alone would admit the warm-up width unmeasured, which is
+not a formality: the forward width selects which quantized-matmul kernel MLX
+dispatches, and `docs/benchmarks.md` records the same comparison reading
+20.6 percent disagreement at width 8 and 0.0 percent at width 32.
+
 The LFM2 DSpark drafter runs on the DFlash round loop and therefore this rule,
 with one difference in dispatch: it is greedy-only. The drafter's Markov head
 proposes a chain trained against greedy targets, and the server declines any

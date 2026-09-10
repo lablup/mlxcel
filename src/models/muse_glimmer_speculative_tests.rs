@@ -315,6 +315,38 @@ fn speculative_buffer_size_follows_the_gemma_rule() {
     assert_eq!(speculative_buffer_size(32), 128);
 }
 
+/// The buffer is the slack a verify block is appended into past the
+/// window, so it can never be narrower than the block: `--draft-block-size`
+/// is not bounded above on the way in, and the Gemma rule's 128-row cap
+/// alone would hand a 200-row block 128 rows of slack, overwrite 72 rows
+/// the window still shows, and let `trim` rewind the offsets over rows it
+/// cannot restore.
+#[test]
+fn speculative_buffer_never_falls_below_the_block_it_buffers() {
+    for block in [2_usize, 4, 8, 16, 32, 64, 128, 129, 200, 1024, 65536] {
+        let buffer = speculative_buffer_size(block);
+        assert!(
+            buffer >= block as i32,
+            "a {block}-row verify block was armed with only {buffer} rows of slack"
+        );
+    }
+}
+
+/// The exactness gate has to clear every width the adaptive round loop
+/// runs at, not only the requested ceiling: the loop warms up at the
+/// drafter's declared depth of 4 and widens from there, and the forward
+/// width selects which quantized-matmul kernel MLX dispatches.
+#[test]
+fn probed_widths_cover_the_warm_up_depth_and_the_ceiling() {
+    assert_eq!(super::speculative::probed_verify_widths(16), vec![4, 16]);
+    assert_eq!(super::speculative::probed_verify_widths(8), vec![4, 8]);
+    assert_eq!(super::speculative::probed_verify_widths(5), vec![4, 5]);
+    // At or below the depth there is nothing to widen to.
+    assert_eq!(super::speculative::probed_verify_widths(4), vec![4]);
+    assert_eq!(super::speculative::probed_verify_widths(3), vec![3]);
+    assert_eq!(super::speculative::probed_verify_widths(2), vec![2]);
+}
+
 /// The drafter binds the RAW table and the untied head: what the wrapper
 /// hands out through `embed_tokens_module` is not the `embed_norm`-wrapped
 /// lookup `embed_tokens` applies, and the head is the plain projection.
