@@ -240,6 +240,32 @@ fn keeps_float32(key: &str) -> bool {
     key.ends_with("mlp.gate.e_score_correction_bias")
 }
 
+/// Refuse a nextn layer that arrives already quantized.
+///
+/// Everything past this point assumes dense planes: the bf16 pass would
+/// rewrite a packed `uint32` payload as floats, and `--q-bits` would then
+/// quantize that result, both without an error. `decompose_kv_b_proj` and
+/// [`stack_experts`] each handle or refuse their own quantized shape, so a
+/// `.scales` plane still present here belongs to a tensor this tool has no
+/// dequantization path for (a converted checkpoint that kept the nextn layer
+/// with its experts already stacked and packed is the reachable case).
+fn reject_packed_tensors(weights: &WeightMap) -> Result<(), SurgeryError> {
+    let mut packed: Vec<&String> = weights.keys().filter(|k| k.ends_with(".scales")).collect();
+    if packed.is_empty() {
+        return Ok(());
+    }
+    packed.sort();
+    let shown: Vec<&str> = packed.iter().take(5).map(|s| s.as_str()).collect();
+    Err(anyhow!(
+        "split-mtp: {} quantized tensor(s) in the next-token-prediction layer (first: {}); \
+         this tool casts dense planes to bf16 and quantizes the result, so a packed input \
+         would be silently corrupted; use the raw zai-org checkpoint",
+        packed.len(),
+        shown.join(", ")
+    )
+    .into())
+}
+
 /// Whether `key` is a candidate for affine quantization under `group_size`.
 fn quantizable(key: &str, shape: &[i32], group_size: i32) -> bool {
     key.ends_with(".weight")
@@ -306,6 +332,7 @@ pub fn split_mtp(
     if num_experts > 0 {
         stack_experts(&mut out, num_experts)?;
     }
+    reject_packed_tensors(&out)?;
 
     // dtype pass: bf16 everywhere except the router's selection bias.
     let keys: Vec<String> = out.keys().cloned().collect();
@@ -492,6 +519,23 @@ pub fn split_mtp_dir(
     output_dir: &Path,
     opts: &SplitMtpOptions,
 ) -> Result<SplitMtpReport, SurgeryError> {
+    // Refuse an output that resolves to the source before anything is
+    // written. A sharded raw checkpoint carries no `model.safetensors`, so
+    // the CLI's overwrite guard does not fire on it, and the writes below
+    // would replace the source `config.json` with the drafter's and truncate
+    // every companion file: `std::fs::copy` on a path to itself reports
+    // `Ok(0)` after opening the destination with `O_TRUNC`.
+    if output_dir.exists()
+        && std::fs::canonicalize(model_dir)? == std::fs::canonicalize(output_dir)?
+    {
+        return Err(anyhow!(
+            "split-mtp: --output {} is the source checkpoint; write the drafter to a separate \
+             directory, otherwise the source config.json is overwritten and its tokenizer \
+             files are truncated",
+            output_dir.display()
+        )
+        .into());
+    }
     let config_path = model_dir.join("config.json");
     let config: Value = serde_json::from_str(&std::fs::read_to_string(&config_path)?)
         .map_err(|e| anyhow!("split-mtp: parsing {}: {e}", config_path.display()))?;

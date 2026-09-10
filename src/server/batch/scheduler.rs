@@ -642,6 +642,12 @@ impl BatchScheduler {
                 LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
                 LoadedModel::Inkling(inkling) => Some(inkling),
                 LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
+                // GLM-4.7-Flash (#1326): the slice path admits this family,
+                // so the drafter has to come back to the slot here too.
+                // Falling into the `_` arm below would drop the handle and
+                // reload the split-out drafter from disk on every park and
+                // every finished request.
+                LoadedModel::Glm4MoeLite(glm) => Some(glm),
                 _ => None,
             };
             match target_lm {
@@ -690,6 +696,12 @@ impl BatchScheduler {
                 LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
                 LoadedModel::Inkling(inkling) => Some(inkling),
                 LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
+                // GLM-4.7-Flash (#1326): the slice path admits this family,
+                // so the drafter has to come back to the slot here too.
+                // Falling into the `_` arm below would drop the handle and
+                // reload the split-out drafter from disk on every park and
+                // every finished request.
+                LoadedModel::Glm4MoeLite(glm) => Some(glm),
                 _ => None,
             };
             match target_lm {

@@ -295,6 +295,38 @@ fn split_refuses_checkpoint_without_nextn_tensors() {
 }
 
 #[test]
+fn split_refuses_a_quantized_nextn_layer() {
+    // A conversion that kept the nextn layer with its experts already
+    // stacked and packed reaches the bf16 cast, which would rewrite the
+    // packed uint32 payload as floats without an error.
+    let mut weights = synthetic_weights();
+    let l = format!("model.layers.{LAYERS}");
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        for e in 0..EXPERTS {
+            weights.remove(&format!("{l}.mlp.experts.{e}.{proj}.weight"));
+        }
+        weights.insert(
+            format!("{l}.mlp.switch_mlp.{proj}.weight"),
+            mlxcel_core::zeros(
+                &[EXPERTS, MOE_INTER, HIDDEN / 8],
+                mlxcel_core::dtype::UINT32,
+            ),
+        );
+        weights.insert(
+            format!("{l}.mlp.switch_mlp.{proj}.scales"),
+            ramp(&[EXPERTS, MOE_INTER, HIDDEN / 64], 1.0),
+        );
+    }
+    let err = split_mtp(weights, &source_config(), &SplitMtpOptions::default())
+        .err()
+        .expect("must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("quantized tensor(s)"), "{msg}");
+    assert!(msg.contains("switch_mlp"), "{msg}");
+    assert!(msg.contains("raw zai-org checkpoint"), "{msg}");
+}
+
+#[test]
 fn split_refuses_a_foreign_family() {
     let mut config = source_config();
     config["model_type"] = json!("qwen3_moe");
@@ -456,6 +488,38 @@ fn split_dir_writes_a_loadable_drafter_directory() {
     assert_eq!(config["block_size"], 2);
     assert_eq!(config["quantization"]["bits"], 4);
     assert!(out.join("chat_template.jinja").is_file());
+}
+
+#[test]
+fn split_dir_refuses_an_output_that_aliases_the_source() {
+    // `--output <source>` passes the CLI overwrite guard on a sharded
+    // checkpoint (no `model.safetensors`), and the writes would replace the
+    // source config.json and truncate its tokenizer files to zero bytes.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("raw");
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_checkpoint(&src);
+
+    let err = split_mtp_dir(&src, &src, &SplitMtpOptions::default()).expect_err("must refuse");
+    assert!(
+        err.to_string().contains("is the source checkpoint"),
+        "{err}"
+    );
+
+    // Nothing was written and nothing was truncated.
+    assert!(!src.join("model.safetensors").exists());
+    let config: Value =
+        serde_json::from_str(&std::fs::read_to_string(src.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["model_type"], "glm4_moe_lite");
+    assert_eq!(
+        std::fs::read_to_string(src.join("chat_template.jinja")).unwrap(),
+        "{{ messages }}"
+    );
+
+    // A nested path under the source is a different directory and is allowed.
+    let nested = src.join("mtp");
+    split_mtp_dir(&src, &nested, &SplitMtpOptions::default()).expect("nested output");
+    assert!(nested.join("model.safetensors").is_file());
 }
 
 #[test]
