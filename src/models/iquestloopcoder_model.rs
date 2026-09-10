@@ -112,6 +112,10 @@ impl IQuestLoopCoderModel {
         caches: &mut [LayerCaches],
     ) -> UniquePtr<MlxArray> {
         debug_assert_eq!(caches.len(), self.layers.len());
+        // One sequence per call. `supports_batching` is false and
+        // `supports_padded_prefill` is false, so nothing hands this a stacked
+        // batch; a batch would silently share one cache pair across rows.
+        debug_assert_eq!(mlxcel_core::array_shape(input_ids)[0], 1);
         let offset = caches[0].pass1.offset;
 
         let mut h = self.embed_tokens.forward(input_ids);
@@ -422,6 +426,21 @@ impl LanguageModel for IQuestLoopCoderWrapper {
 
     fn reset_runtime_state(&self) {
         self.reset_caches();
+    }
+
+    /// Chunked prefill is safe here, and this states it rather than leaving it
+    /// to the default.
+    ///
+    /// It is not obvious: a continuation chunk finds the pass-1 cache holding
+    /// every prior key while the pass-2 ring holds at most `loop_window_size -
+    /// 1` of them, so the two caches return different key counts for the same
+    /// chunk and the windowed mask has to match the ring's. Verified on the real
+    /// 40B checkpoint at chunk sizes landing on, inside and across the window
+    /// boundary (218 single-pass against 128, 97, 64 and 32): identical top-5
+    /// token ids, logits within one f16 ulp. See
+    /// `check_chunked_prefill` in `tests/iquestloopcoder_parity.rs`.
+    fn supports_chunked_prefill(&self) -> bool {
+        true
     }
 
     /// No batched path: a batched forward would have to interleave two passes
