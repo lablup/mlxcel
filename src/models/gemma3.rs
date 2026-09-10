@@ -1884,9 +1884,11 @@ mod gemma3_mask_tests {
 
     /// The sliding (`Cache::Rotating`) prefill mask must size from the same
     /// `CacheInterface::live_len()` accessor, which for a `RotatingKVCache`
-    /// returns `seq_len()` (its live window). Untrimmed, that equals the keys
-    /// it returns, so `live_len()` is the correct mask width and never exceeds
-    /// the K/V axis.
+    /// returns `visible_len()`, the count of prior keys `update_concat`
+    /// actually concatenates. On a freshly concatenated cache that equals
+    /// `seq_len()`, so this case pins the common value; the decode-grown case
+    /// where the two diverge is covered by
+    /// `rotating_live_len::live_len_matches_the_keys_a_multi_token_append_returns`.
     #[test]
     fn sliding_cache_live_len_matches_returned_keys() {
         const H: i32 = 2;
@@ -1902,7 +1904,7 @@ mod gemma3_mask_tests {
         assert_eq!(
             cache.as_interface().live_len(),
             returned_klen,
-            "RotatingKVCache live_len() (== seq_len) must equal the returned key axis"
+            "RotatingKVCache live_len() (== visible_len) must equal the returned key axis"
         );
     }
 }
