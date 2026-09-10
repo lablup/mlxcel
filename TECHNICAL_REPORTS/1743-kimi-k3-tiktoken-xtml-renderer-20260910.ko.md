@@ -116,10 +116,10 @@ K3 패턴은 `TikTokenTokenizer.pat_str`을 레퍼런스가 나열한 순서 그
 |---|---|---|
 | 라우터가 범용 템플릿으로 렌더링 | `route_chat`이 `prepared.prompt_token_ids`를 봤는데 이 값은 렌더러가 붙은 경우에만 채워진다. 붙이지 않고 만든 라우터는 문자열을 렌더링해 특수 파싱이 켜진 `MlxcelTokenizer::encode`에 넘겼다 | `startup.rs`도 다른 모든 생성 경로가 도는 `attach_native_chat_renderer`를 돌고, 라우터는 렌더링 이전에 어휘 계열을 보고 거부한다 |
 | 렌더러는 없는데 컨트롤 블록은 살아 있음 | `KimiK3Renderer::new`는 철자 여섯을 전부 요구한다. 구조 마커 넷만 이름 붙은 체크포인트는 `None`을 받고 범용 템플릿으로 떨어졌는데, 그 텍스트는 살아 있는 바로 그 컨트롤 id를 인식하는 인코드를 지나간다 | 계열이 K3인데 렌더러가 붙지 않으면 `AppState`가 `kimi_k3_family_unrenderable`을 세우고 `prepare_chat_request_with_cache`가 폴백 대신 거부한다 |
-| 툴콜 파서가 부분 문자열 하나로 클레임 | `try_kimi_k3`는 K3 마커 하나만 있어도 발동했고 스트림 전체를 소유하므로, 다른 모델이 흉내 낸 `<|open|>response<|sep|>` 하나가 그 앞의 모든 것을 조용히 지웠다 | `try_harmony`의 두 마커 규칙을 따라 구조 마커 12개 중 둘을 요구한다. 진짜 K3 턴은 언제나 둘을 채운다 |
-| `argument` 뒤에 온 `<|open|>json` | 전체 객체 블록이 어디에 있든 인정되어서, 모델이 공격자 텍스트를 문자열 인자로 인용하면 이미 파싱한 인자 전부를 갈아 치울 수 있었다 | 첫 `<|open|>argument`보다 앞설 때만 인정한다. 렌더러는 둘 중 한 형태만 내보내므로 뒤에 온 블록은 렌더러의 출력이 아니다 |
+| 툴콜 파서가 부분 문자열 하나로 클레임 | `try_kimi_k3`는 K3 마커 하나만 있어도 발동했고 스트림 전체를 소유하므로, 다른 모델이 흉내 낸 `<\|open\|>response<\|sep\|>` 하나가 그 앞의 모든 것을 조용히 지웠다 | `try_harmony`의 두 마커 규칙을 따라 구조 마커 12개 중 둘을 요구한다. 진짜 K3 턴은 언제나 둘을 채운다 |
+| `argument` 뒤에 온 `<\|open\|>json` | 전체 객체 블록이 어디에 있든 인정되어서, 모델이 공격자 텍스트를 문자열 인자로 인용하면 이미 파싱한 인자 전부를 갈아 치울 수 있었다 | 첫 `<\|open\|>argument`보다 앞설 때만 인정한다. 렌더러는 둘 중 한 형태만 내보내므로 뒤에 온 블록은 렌더러의 출력이 아니다 |
 | tools 없는 요청에 남은 툴콜 블록 | `tools` 필드가 없으면 `should_parse_tool_calls`가 false라 `try_kimi_k3`가 아예 돌지 않았고 호출 문법 원문이 `message.content`에 닿았다. 같은 생성을 스트리밍하면 억제되므로 두 경로가 어긋났다 | `strip_kimi_k3_tools_block`이 `clean_content_markers`에서 내용까지 통째로 떨어뜨린다 |
-| 턴 바깥의 `message` 닫는 태그 | 모델이 매 턴 내보내는 `<|close|>message<|sep|>`가 어느 strip 표에도 없어서 `delta.content`와 `message.content`에 그대로 닿았다 | `CHAT_DELIMITERS`에 `Strip` 동작으로, `clean_content_markers`에는 떠도는 `response` 태그와 함께 추가 |
+| 턴 바깥의 `message` 닫는 태그 | 모델이 매 턴 내보내는 `<\|close\|>message<\|sep\|>`가 어느 strip 표에도 없어서 `delta.content`와 `message.content`에 그대로 닿았다 | `CHAT_DELIMITERS`에 `Strip` 동작으로, `clean_content_markers`에는 떠도는 `response` 태그와 함께 추가 |
 | `canonical_thinking_pair`에 K3 항이 없음 | `--reasoning-format none`에서 여는 마커는 primed close로 따로 풀려 그대로 나갔는데 닫는 마커는 나가지 않았고, 그래서 #1470의 스트리밍-비스트리밍 바이트 일치 불변식이 깨졌다 | K3 항을 넣고 조각 분할 1~8회를 도는 테스트를 붙였다 |
 | 속성 경계를 문자 클래스로 판정 | `kimi_k3_attribute`가 키 앞에 리터럴 공백을 요구해서, 헤더가 줄바꿈으로 갈린 경우 그 인자 하나만 빠지고 나머지 호출은 살아남았다 | ASCII 공백이면 무엇이든 경계로 친다 |
 
