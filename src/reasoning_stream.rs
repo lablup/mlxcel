@@ -311,6 +311,15 @@ pub fn render_full(
 /// fragment printed. True only when decoding produced text, none of it reached
 /// the content channel, and reasoning was suppressed; with `--show-reasoning` the
 /// text is already on screen.
+///
+/// Used by: the CLI `generate` and `chat` REPL paths above (#1721), and
+/// `src/server/routes/chat.rs`'s non-streaming and streaming chat completion
+/// handlers, which pass `show_reasoning: false` unconditionally — the server
+/// never suppresses reasoning into a hidden channel (`reasoning_content` is
+/// always additive alongside `content`), so the check there fires whenever
+/// `content` is empty and generation happened, regardless of priming. That
+/// generalizes past the narrower, primed-only condition the server logged
+/// under issue #467.
 pub fn is_reasoning_only(
     generated_text: &str,
     saw_visible_text: bool,

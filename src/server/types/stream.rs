@@ -40,6 +40,15 @@ pub struct Delta {
     /// Tool call deltas for streaming tool call output
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+    /// Set only when `true`, only on the terminal (finish) chunk: this stream
+    /// produced tokens but `delta.content` never carried anything across the
+    /// whole stream, with everything routed to `delta.reasoning_content`
+    /// instead. See [`super::response::ChatMessage::reasoning_only`] for the
+    /// non-streaming counterpart and the full rationale (#1721, #467). Never
+    /// `Some(false)`; omitted (`None`) otherwise so every existing client's
+    /// wire shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_only: Option<bool>,
 }
 
 /// Incremental tool call data for streaming
@@ -124,6 +133,7 @@ impl ChatCompletionChunk {
                     reasoning_content: None,
                     reasoning: None,
                     tool_calls: None,
+                    reasoning_only: None,
                 },
                 finish_reason: None,
                 logprobs: None,
@@ -159,6 +169,7 @@ impl ChatCompletionChunk {
                     reasoning_content: None,
                     reasoning: None,
                     tool_calls: None,
+                    reasoning_only: None,
                 },
                 finish_reason: None,
                 logprobs,
@@ -202,6 +213,7 @@ impl ChatCompletionChunk {
                     reasoning_content: Some(text),
                     reasoning,
                     tool_calls: None,
+                    reasoning_only: None,
                 },
                 finish_reason: None,
                 logprobs: None,
@@ -228,6 +240,22 @@ impl ChatCompletionChunk {
         self
     }
 
+    /// Flag a stream that produced tokens but whose `delta.content` never
+    /// carried anything, across the whole stream, because everything stayed in
+    /// `delta.reasoning_content`. Attach to the terminal [`Self::finish`] chunk
+    /// only — a mid-stream chunk cannot yet know whether content is still
+    /// coming. `false` leaves the field absent, so the common case keeps the
+    /// existing wire shape. Chaining mirrors `with_timings`.
+    ///
+    /// Used by: chat.rs (streaming path)
+    #[must_use]
+    pub fn with_reasoning_only(mut self, reasoning_only: bool) -> Self {
+        if let Some(choice) = self.choices.first_mut() {
+            choice.delta.reasoning_only = reasoning_only.then_some(true);
+        }
+        self
+    }
+
     /// Create final chunk with finish reason
     pub fn finish(id: String, model: String, finish_reason: String) -> Self {
         Self {
@@ -244,6 +272,7 @@ impl ChatCompletionChunk {
                     reasoning_content: None,
                     reasoning: None,
                     tool_calls: None,
+                    reasoning_only: None,
                 },
                 finish_reason: Some(finish_reason),
                 logprobs: None,
@@ -283,6 +312,7 @@ impl ChatCompletionChunk {
                             arguments: None,
                         }),
                     }]),
+                    reasoning_only: None,
                 },
                 finish_reason: None,
                 logprobs: None,
@@ -321,6 +351,7 @@ impl ChatCompletionChunk {
                             arguments: Some(arguments_chunk),
                         }),
                     }]),
+                    reasoning_only: None,
                 },
                 finish_reason: None,
                 logprobs: None,
@@ -508,5 +539,57 @@ impl CompletionChunk {
                 prompt_tokens_details,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- ChatCompletionChunk::with_reasoning_only --------------------------
+
+    /// `with_reasoning_only(true)` must set the finish chunk's field and
+    /// serialize it.
+    #[test]
+    fn with_reasoning_only_true_sets_and_serializes_field() {
+        let chunk = ChatCompletionChunk::finish(
+            "id".to_string(),
+            "model".to_string(),
+            "length".to_string(),
+        )
+        .with_reasoning_only(true);
+
+        assert_eq!(chunk.choices[0].delta.reasoning_only, Some(true));
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["choices"][0]["delta"]["reasoning_only"], true);
+    }
+
+    /// `with_reasoning_only(false)` must leave the field absent, so the common
+    /// (not-reasoning-only) case keeps the existing wire shape byte for byte.
+    #[test]
+    fn with_reasoning_only_false_omits_field() {
+        let chunk =
+            ChatCompletionChunk::finish("id".to_string(), "model".to_string(), "stop".to_string())
+                .with_reasoning_only(false);
+
+        assert_eq!(chunk.choices[0].delta.reasoning_only, None);
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert!(
+            !json["choices"][0]["delta"]
+                .as_object()
+                .unwrap()
+                .contains_key("reasoning_only"),
+            "reasoning_only must be absent when false"
+        );
+    }
+
+    /// A plain content chunk must never carry `reasoning_only` — the field is
+    /// meaningful only on the terminal chunk, where the whole stream's outcome
+    /// is known.
+    #[test]
+    fn content_chunk_never_carries_reasoning_only() {
+        let chunk =
+            ChatCompletionChunk::content("id".to_string(), "model".to_string(), "hi".to_string());
+        assert_eq!(chunk.choices[0].delta.reasoning_only, None);
     }
 }
