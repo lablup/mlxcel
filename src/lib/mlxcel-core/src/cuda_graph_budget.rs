@@ -56,6 +56,7 @@
 
 use std::env;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -213,6 +214,47 @@ pub fn budget_vars_to_set(
     out
 }
 
+/// What [`apply_cuda_graph_budget_default`] did in this process, so the
+/// startup lines of `mlxcel generate` and `mlxcel-server` can report the
+/// budget the process actually runs with rather than a unit test's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedCudaGraphBudget {
+    /// The budget selected by the policy.
+    pub budget: CudaGraphBudget,
+    /// The `model_type` that selected it.
+    pub model_type: String,
+    /// The variables this process set; a variable the operator had already
+    /// set is absent here and keeps the operator's value.
+    pub set: Vec<(&'static str, u32)>,
+}
+
+static APPLIED: OnceLock<Option<AppliedCudaGraphBudget>> = OnceLock::new();
+
+/// The budget [`apply_cuda_graph_budget_default`] applied in this process,
+/// `None` when it applied nothing or has not run.
+#[must_use]
+pub fn applied_cuda_graph_budget() -> Option<&'static AppliedCudaGraphBudget> {
+    APPLIED.get().and_then(Option::as_ref)
+}
+
+/// One human-readable line for the startup log when a budget was applied,
+/// `None` otherwise (Metal, CPU, an unlisted checkpoint, or a fully
+/// operator-set pair), mirroring [`crate::cuda_arch::cuda_arch_startup_summary`].
+#[must_use]
+pub fn cuda_graph_budget_startup_summary() -> Option<String> {
+    let applied = applied_cuda_graph_budget()?;
+    let set = applied
+        .set
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "CUDA graph budget: {set} applied for model_type {} on sm_121 (#1798); an operator-set value wins per variable",
+        applied.model_type
+    ))
+}
+
 /// Apply the [`cuda_graph_budget_default`] for the running device and the
 /// checkpoint at `model_dir` to the process environment, leaving any variable
 /// the operator already set alone.
@@ -237,13 +279,15 @@ pub fn apply_cuda_graph_budget_default(model_dir: Option<&Path>) {
     let ops_set = env::var_os(MAX_OPS_ENV).is_some();
     let mb_set = env::var_os(MAX_MB_ENV).is_some();
     if ops_set && mb_set {
+        let _ = APPLIED.set(None);
         return;
     }
     let shape = model_dir
         .map(model_graph_shape_from_dir)
         .unwrap_or_default();
     let budget = cuda_graph_budget_default(cuda_compute_capability(), &shape);
-    for (name, value) in budget_vars_to_set(budget, ops_set, mb_set) {
+    let set = budget_vars_to_set(budget, ops_set, mb_set);
+    for &(name, value) in &set {
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only if another thread reads or writes the environment concurrently.
         // Per this function's documented contract, all in-tree callers invoke it
@@ -254,6 +298,13 @@ pub fn apply_cuda_graph_budget_default(model_dir: Option<&Path>) {
         // accessing it here.
         unsafe { env::set_var(name, value.to_string()) };
     }
+    let record = budget.map(|budget| AppliedCudaGraphBudget {
+        budget,
+        model_type: shape.model_type.clone().unwrap_or_default(),
+        set,
+    });
+    // First caller wins; the in-tree contract is one call per process.
+    let _ = APPLIED.set(record);
 }
 
 #[cfg(test)]

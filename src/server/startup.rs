@@ -2661,6 +2661,16 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             compiled_cuda_architectures = mlxcel_core::hardware::compiled_cuda_architectures(),
             "CUDA architecture capabilities detected"
         );
+        // The graph capture budget `main` applied for this checkpoint's
+        // family before any MLX op (#1798). Info, not debug: it changes
+        // decode throughput and peak memory, so an operator reading a log
+        // should see it without raising verbosity.
+        if let Some(summary) = mlxcel_core::hardware::cuda_graph_budget_startup_summary() {
+            tracing::info!(
+                budget = ?mlxcel_core::hardware::applied_cuda_graph_budget(),
+                "{summary}"
+            );
+        }
     }
 
     let runtime = crate::initialize_runtime_checked()?;

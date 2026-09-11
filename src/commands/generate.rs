@@ -140,6 +140,11 @@ fn load_generation_model(
     if let Some(summary) = mlxcel_core::hardware::cuda_arch_startup_summary() {
         println!("{summary}");
     }
+    // And whether this process raised MLX's CUDA graph capture budgets for
+    // this checkpoint's family (#1798); silent when it applied nothing.
+    if let Some(summary) = mlxcel_core::hardware::cuda_graph_budget_startup_summary() {
+        println!("{summary}");
+    }
     let load_start = Instant::now();
     let shard_config = shard_config_from_cli(
         args.tensor_parallel.tp_size,
