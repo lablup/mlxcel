@@ -33,3 +33,59 @@ Three harnesses, all driving the same binary.
 
 Arms are environment variables only: `nograph` is `MLX_USE_CUDA_GRAPHS=0`; `ops100` is `MLX_MAX_OPS_PER_BUFFER=100`; `mb1000` is `MLX_MAX_MB_PER_BUFFER=1000`; `both` is both raised to 100 and 1000, the row MLX gives cc 9.0, 10.0 and 12.0; `both400` is 100 and 400, the A100 byte budget. `default` sets nothing and gets MLX's 20 ops and 25 "MB" for cc 12.1.
 
+## Single-stream decode and short prefill (idle host, n = 3, same binary)
+
+Decode tok/s over 200 tokens after a 101 to 112 token prompt; prefill is that prompt; MLX peak is the allocator high-water mark over load, warm-up, prefill and decode.
+
+### `laguna-xs-2.1-nvfp4`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 112 | 32.02 (31.33 to 32.66) |  | 6247 | 441.6 (428.8 to 453.7) |  | 254 | 21.66 (21.66 to 21.66) | 0.69 to 1.02 | 0 of 3 |
+| nograph | 3 | 112 | 33.79 (33.60 to 33.95) | +5.5% | 5919 | 213.7 (212.5 to 215.1) | -51.6% | 524 | 21.69 (21.69 to 21.70) | 0.72 to 1.05 | 0 of 3 |
+| ops100 | 3 | 112 | 32.48 (32.12 to 32.81) | +1.4% | 6159 | 445.5 (437.1 to 455.5) | +0.9% | 251 | 21.69 (21.69 to 21.69) | 0.72 to 1.13 | 0 of 3 |
+| mb1000 | 3 | 112 | 35.57 (35.29 to 35.79) | +11.1% | 5623 | 421.2 (420.3 to 422.2) | -4.6% | 266 | 21.69 (21.69 to 21.69) | 0.95 to 1.06 | 0 of 3 |
+| both | 3 | 112 | 37.60 (37.14 to 37.94) | +17.4% | 5320 | 414.4 (408.8 to 419.5) | -6.2% | 270 | 22.03 (22.03 to 22.04) | 0.97 to 1.02 | 0 of 3 |
+| both400 | 3 | 112 | 37.95 (37.68 to 38.31) | +18.5% | 5270 | 420.0 (413.8 to 423.8) | -4.9% | 267 | 22.03 (22.03 to 22.03) | 0.97 to 1.02 | 0 of 3 |
+
+### `qwen3.5-4b-4bit`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 111 | 67.38 (66.95 to 67.63) |  | 2968 | 105.0 (104.3 to 106.4) |  | 1057 | 2.83 (2.82 to 2.84) | 1.01 to 1.38 | 0 of 3 |
+| nograph | 3 | 111 | 60.85 (60.64 to 60.96) | -9.7% | 3287 | 89.3 (89.0 to 90.0) | -14.9% | 1242 | 2.83 (2.80 to 2.86) | 0.99 to 1.04 | 0 of 3 |
+| ops100 | 3 | 111 | 70.61 (70.33 to 70.78) | +4.8% | 2833 | 108.9 (108.1 to 109.7) | +3.7% | 1019 | 3.06 (3.04 to 3.08) | 0.99 to 1.32 | 0 of 3 |
+| mb1000 | 3 | 111 | 68.39 (68.06 to 68.57) | +1.5% | 2924 | 105.9 (104.1 to 107.0) | +0.8% | 1049 | 2.85 (2.84 to 2.85) | 1.09 to 1.58 | 0 of 3 |
+| both | 3 | 111 | 70.03 (69.75 to 70.36) | +3.9% | 2856 | 95.3 (94.0 to 96.7) | -9.2% | 1164 | 2.91 (2.90 to 2.93) | 1.08 to 1.45 | 0 of 3 |
+| both400 | 3 | 111 | 70.01 (69.92 to 70.11) | +3.9% | 2857 | 96.8 (94.5 to 99.8) | -7.8% | 1147 | 2.92 (2.90 to 2.97) | 0.99 to 1.42 | 0 of 3 |
+
+### `llama-3.1-8b-4bit`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 101 | 52.98 (52.97 to 52.99) |  | 3775 | 60.2 (59.4 to 60.9) |  | 1678 | 4.68 (4.68 to 4.68) | 0.83 to 0.96 | 0 of 3 |
+| nograph | 3 | 101 | 49.80 (49.75 to 49.84) | -6.0% | 4016 | 52.5 (51.8 to 53.0) | -12.8% | 1925 | 4.75 (4.75 to 4.75) | 0.77 to 1.00 | 0 of 3 |
+| ops100 | 3 | 101 | 52.86 (52.62 to 53.00) | -0.2% | 3784 | 59.9 (58.5 to 60.8) | -0.5% | 1688 | 4.68 (4.68 to 4.68) | 0.82 to 0.97 | 0 of 3 |
+| mb1000 | 3 | 101 | 52.92 (52.86 to 52.98) | -0.1% | 3779 | 64.6 (63.2 to 65.4) | +7.3% | 1565 | 4.75 (4.75 to 4.75) | 0.85 to 0.98 | 0 of 3 |
+| both | 3 | 101 | 47.99 (47.94 to 48.02) | -9.4% | 4168 | 66.6 (66.5 to 66.8) | +10.6% | 1517 | 4.86 (4.86 to 4.86) | 0.78 to 0.90 | 0 of 3 |
+| both400 | 3 | 101 | 48.03 (47.98 to 48.13) | -9.3% | 4164 | 65.8 (64.7 to 67.4) | +9.4% | 1534 | 4.86 (4.86 to 4.86) | 0.72 to 0.91 | 0 of 3 |
+
+## Long prefill: 2048 tokens (one prefill chunk at the default `MLXCEL_PREFILL_CHUNK`), 16 decode tokens (idle host, n = 3)
+
+
+### `laguna-xs-2.1-nvfp4`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 2048 | 33.38 (32.11 to 34.25) |  | 480 | 7536.0 (7414.5 to 7609.7) |  | 272 | 22.74 (22.74 to 22.74) | 0.65 to 0.83 | 0 of 3 |
+| both | 3 | 2048 | 36.16 (35.55 to 36.71) | +8.3% | 442 | 7421.6 (7352.0 to 7487.1) | -1.5% | 276 | 29.79 (29.79 to 29.79) | 0.56 to 0.89 | 0 of 3 |
+| nograph | 3 | 2048 | 35.85 (35.67 to 35.98) | +7.4% | 446 | 3243.9 (3242.2 to 3246.9) | -57.0% | 631 | 23.93 (23.93 to 23.93) | 0.81 to 0.87 | 0 of 3 |
+
+### `qwen3.5-4b-4bit`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 2048 | 67.04 (66.84 to 67.22) |  | 239 | 1539.9 (1530.4 to 1547.8) |  | 1330 | 7.96 (7.94 to 7.97) | 0.55 to 0.70 | 0 of 3 |
+| both | 3 | 2048 | 65.67 (64.82 to 66.93) | -2.0% | 244 | 1716.1 (1708.5 to 1720.4) | +11.4% | 1193 | 13.20 (13.20 to 13.20) | 0.57 to 1.33 | 0 of 3 |
+| nograph | 3 | 2048 | 61.15 (60.90 to 61.43) | -8.8% | 262 | 1335.8 (1331.8 to 1338.5) | -13.3% | 1533 | 8.74 (8.72 to 8.78) | 0.56 to 0.59 | 0 of 3 |
+
