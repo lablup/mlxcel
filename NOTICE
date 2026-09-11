@@ -108,6 +108,20 @@ BSD 2-Clause license, reproduced verbatim as required:
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
+mlx ROCm backend (NripeshN/mlx, rocm-support branch)
+----------------------------------------------------
+
+The AMD GPU (ROCm/HIP) backend under src/lib/mlx-cpp/patches-rocm/, the
+ROCm part of mlxcelverse, is vendored from the rocm-support branch of
+NripeshN/mlx (https://github.com/NripeshN/mlx), a fork of MLX
+(https://github.com/ml-explore/mlx), at the commit recorded in
+src/lib/mlx-cpp/patches-rocm/UPSTREAM, with the local changes listed in
+src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md. It is licensed under the MIT
+License, Copyright © 2023 Apple Inc. and the MLX and NripeshN/mlx
+contributors; the MIT License text in the mlx-lm section above covers it.
+Vendored files keep their original headers.
+
+
 moonshotai/Kimi-K3 (tokenizer pattern and XTML chat grammar)
 -----------------------------------------------------------
 

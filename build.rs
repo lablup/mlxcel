@@ -15,8 +15,10 @@
 // Root build script for the `mlxcel` binary.
 //
 // It does NOTHING for default / `xla-backend` builds, so Apple-Silicon, CUDA, and
-// CI builds are unaffected. Only under the `xla-iree` feature (real OpenXLA
-// execution, issue #449 Phase 3) does it emit the IREE *runtime* link recipe.
+// CI builds are unaffected. Under the `rocm` feature it adds the ROCm library
+// directory as an rpath (see `main`). Only under the `xla-iree` feature (real
+// OpenXLA execution, issue #449 Phase 3) does it emit the IREE *runtime* link
+// recipe.
 //
 // Why here and not in `mlxcel-xla`: the C shim (`mlxcel-xla/csrc/xla_iree.c`) is
 // compiled by that crate's build script and its object links via the normal
@@ -30,6 +32,23 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // ROCm (`rocm` feature, #1802): mlxcel-core links the ROCm shared libraries,
+    // but ROCm installs do not always register their library directory with the
+    // dynamic loader, and mlxcel-core's rpath link arg does not reach this
+    // crate's binaries for the reason given above. Keep the default in step with
+    // `rocm_path` in src/lib/mlxcel-core/build.rs.
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
+    if env::var_os("CARGO_FEATURE_ROCM").is_some() {
+        let rocm = env::var_os("ROCM_PATH")
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/opt/rocm"));
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            rocm.join("lib").display()
+        );
+    }
+
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
     println!("cargo:rerun-if-env-changed=IREE_MACOS_HOME");

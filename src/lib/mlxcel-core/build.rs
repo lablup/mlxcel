@@ -52,8 +52,15 @@ fn main() {
     let cuda_arch = resolve_cuda_architectures();
     println!("cargo:rustc-env=MLXCEL_CUDA_ARCHITECTURES={cuda_arch}");
 
+    // The ROCm counterpart (#1802): the HIP `gfx` targets this build compiles
+    // MLX device code for, recorded the same way so the runtime can name both
+    // the device and this list when they disagree. Empty off ROCm.
+    reject_conflicting_gpu_features();
+    let rocm_arch = resolve_rocm_architectures();
+    println!("cargo:rustc-env=MLXCEL_ROCM_ARCHITECTURES={rocm_arch}");
+
     // Build MLX using cmake
-    let mlx_dst = build_mlx(&mlx_commit, &cuda_arch);
+    let mlx_dst = build_mlx(&mlx_commit, &cuda_arch, &rocm_arch);
     // Verify what actually landed on disk before blessing it. CMake reuses an
     // already-populated _deps/mlx-src rather than re-running FetchContent, so a
     // checkout restored from a CI cache or seeded by hand can disagree with the
@@ -226,6 +233,11 @@ fn main() {
         link_cuda();
     }
 
+    #[cfg(feature = "rocm")]
+    {
+        link_rocm(&out_dir);
+    }
+
     // Rerun if bridge files change
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.h");
@@ -240,6 +252,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches");
     println!("cargo:rerun-if-changed=../mlx-cpp/patches-cuda");
+    println!("cargo:rerun-if-changed=../mlx-cpp/patches-rocm");
     // Sparse-V fused-skip Metal kernel launchers.
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.h");
@@ -267,6 +280,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
+    println!("cargo:rerun-if-env-changed=MLX_ROCM_ARCHITECTURES");
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_METAL");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_ACCELERATE");
     println!("cargo:rerun-if-env-changed=MLXCEL_CXX_MARCH");
@@ -338,9 +353,10 @@ fn mark_mlx_cache_valid(out_dir: &std::path::Path, expected_commit: &str) {
     let _ = std::fs::write(marker, expected_commit);
 }
 
-// `cuda_architectures` is consumed only by the CUDA branch below.
-#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
-fn build_mlx(expected_commit: &str, cuda_architectures: &str) -> PathBuf {
+// Each architecture list is consumed only by its own backend's branch below,
+// and at most one of the two backends is ever enabled.
+#[allow(unused_variables)]
+fn build_mlx(expected_commit: &str, cuda_architectures: &str, rocm_architectures: &str) -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     purge_stale_mlx_cache(&out_dir, expected_commit);
 
@@ -400,7 +416,147 @@ fn build_mlx(expected_commit: &str, cuda_architectures: &str) -> PathBuf {
         config.define("MLX_CUDA_ARCHITECTURES", cuda_architectures);
     }
 
+    #[cfg(feature = "rocm")]
+    {
+        // Turns on the ROCm overlay in ../mlx-cpp/CMakeLists.txt and the
+        // backend's own CMake in mlx/backend/rocm/. The backend passes one
+        // `--offload-arch` per entry of CMAKE_HIP_ARCHITECTURES to hipcc.
+        let rocm = rocm_path();
+        config.define("MLX_BUILD_ROCM", "ON");
+        config.define("CMAKE_HIP_ARCHITECTURES", rocm_architectures);
+        config.define("MLX_ROCM_ARCHITECTURES", rocm_architectures);
+        // find_package(hip|rocblas|rocthrust|rocprim|hiprand|rocwmma CONFIG)
+        // resolves through the prefix path, and the backend's find_library
+        // calls for hiprtc and hipblaslt read ROCM_PATH.
+        config.define("CMAKE_PREFIX_PATH", rocm.display().to_string());
+        config.define("ROCM_PATH", rocm.display().to_string());
+        let hipcc = rocm.join("bin/hipcc");
+        if hipcc.exists() {
+            config.define("CMAKE_HIP_COMPILER", hipcc.display().to_string());
+        }
+    }
+
     config.build()
+}
+
+/// Refuse feature combinations that cannot produce a working binary.
+///
+/// The ROCm overlay replaces MLX core files that the CUDA-only patches also
+/// replace, and the `metal` feature makes the bridge reference symbols that
+/// only the Metal overlay emits. Failing here names the conflict instead of
+/// leaving it to a CMake error or an undefined symbol at link time.
+fn reject_conflicting_gpu_features() {
+    if env::var_os("CARGO_FEATURE_ROCM").is_none() {
+        return;
+    }
+    if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+        panic!("mlxcel-core: the `rocm` and `cuda` features cannot be enabled together");
+    }
+    if env::var_os("CARGO_FEATURE_METAL").is_some() {
+        panic!("mlxcel-core: the `rocm` and `metal` features cannot be enabled together");
+    }
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        panic!("mlxcel-core: the `rocm` feature is supported on Linux only");
+    }
+}
+
+/// The ROCm installation root: `ROCM_PATH` if set, else `/opt/rocm`.
+#[cfg(feature = "rocm")]
+fn rocm_path() -> PathBuf {
+    env::var_os("ROCM_PATH")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/rocm"))
+}
+
+/// The HIP `gfx` target list this build compiles MLX device code for.
+///
+/// An explicitly set `MLX_ROCM_ARCHITECTURES` wins verbatim (`;`-separated,
+/// for example `gfx1151` or `gfx1100;gfx1151`); otherwise the GPU agents that
+/// `rocminfo` reports decide. Unlike CUDA there is no safe default target, so
+/// a host with neither fails the build with a message naming the variable.
+///
+/// Empty string on a non-ROCm build.
+fn resolve_rocm_architectures() -> String {
+    #[cfg(feature = "rocm")]
+    {
+        if let Ok(value) = env::var("MLX_ROCM_ARCHITECTURES") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+        detect_rocm_arch().unwrap_or_else(|| {
+            panic!(
+                "mlxcel-core: the `rocm` feature needs the HIP targets to compile for, and \
+                 rocminfo reported no GPU agent. Set MLX_ROCM_ARCHITECTURES, for example \
+                 MLX_ROCM_ARCHITECTURES=gfx1151."
+            )
+        })
+    }
+    #[cfg(not(feature = "rocm"))]
+    {
+        String::new()
+    }
+}
+
+#[cfg(feature = "rocm")]
+fn detect_rocm_arch() -> Option<String> {
+    use std::process::Command;
+    let bundled = rocm_path().join("bin/rocminfo");
+    let program = if bundled.exists() {
+        bundled
+    } else {
+        PathBuf::from("rocminfo")
+    };
+    let output = Command::new(program).output().ok()?;
+    // GPU agents print `Name:  gfx1151`; the ISA lines print
+    // `Name:  amdgcn-amd-amdhsa--gfx1151` and CPU agents print the CPU model,
+    // so only a bare `gfx...` token after `Name:` is a target.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut archs: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let mut tokens = line.split_whitespace();
+            match (tokens.next(), tokens.next()) {
+                (Some("Name:"), Some(name)) if name.starts_with("gfx") => Some(name.to_string()),
+                _ => None,
+            }
+        })
+        .collect();
+    archs.sort();
+    archs.dedup();
+    if archs.is_empty() {
+        None
+    } else {
+        Some(archs.join(";"))
+    }
+}
+
+#[cfg(feature = "rocm")]
+fn link_rocm(out_dir: &std::path::Path) {
+    let rocm_lib = rocm_path().join("lib");
+
+    // The backend compiles its .hip sources into a separate static archive
+    // that MLX's CMake links PRIVATE into libmlx. Cargo links libmlx.a directly
+    // and never sees that edge, so the archive is named here, after `mlx`,
+    // the same way link_cuda names cuSOLVER.
+    let kernels_dir = out_dir.join("build/_deps/mlx-build/mlx/backend/rocm");
+    println!("cargo:rustc-link-search=native={}", kernels_dir.display());
+    println!("cargo:rustc-link-lib=static=mlx_rocm_kernels");
+
+    // The shared libraries the backend's CMake links (target_link_libraries
+    // in mlx/backend/rocm/CMakeLists.txt).
+    println!("cargo:rustc-link-search=native={}", rocm_lib.display());
+    for lib in ["amdhip64", "rocblas", "hiprand", "hiprtc", "hipblaslt"] {
+        println!("cargo:rustc-link-lib=dylib={lib}");
+    }
+
+    // ROCm installs do not always register their library directory with the
+    // dynamic loader, so embed it. This covers this crate's own test and
+    // example binaries; the root build script adds the same for mlxcel's,
+    // because a dependency's link args do not reach the binary that links it.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", rocm_lib.display());
 }
 
 // Used by the macOS configuration block above; dead on non-macOS targets.

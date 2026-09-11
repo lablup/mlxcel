@@ -14,6 +14,7 @@ static binaries: platform GPU/runtime libraries are still required.
 |----------|--------|-----------------------|-------|
 | macOS on Apple Silicon | primary | `metal,accelerate` | Main development and validation target. |
 | Linux with NVIDIA CUDA | secondary | `cuda` | Release builds currently target CUDA 13-era systems; other versions depend on MLX/CUDA compatibility. |
+| Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows | not documented here | — | The current public installation path is macOS/Linux. |
 
@@ -30,6 +31,7 @@ or test scaffolding.
 | `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
 | `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
 | `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
+| `rocm` | off | AMD GPU backend on Linux (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlx-cpp/patches-rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm). |
 | `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
 | `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
 | `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
@@ -45,6 +47,30 @@ behavior, or constrained embedded targets):
 # Metal + Accelerate, no surgery crate.
 cargo build --release --no-default-features --features metal,accelerate
 ```
+
+### Linux with AMD ROCm
+
+**Experimental.** The `rocm` feature builds MLX with an AMD GPU (ROCm/HIP)
+backend vendored into `src/lib/mlx-cpp/patches-rocm/` (the ROCm part of
+mlxcelverse; provenance in its `UPSTREAM` and `LOCAL_FIXES.md`). On top of the
+Debian/Ubuntu build packages listed under [Linux with CUDA](#linux-with-cuda)
+(the CUDA toolkit itself is not needed) it needs a ROCm installation that
+provides the `hip`, `rocblas`, `rocthrust`, `rocprim`, `hiprand`, `rocwmma`,
+`hipblaslt` and `hiprtc` CMake packages, and `pkg-config` for the Rust
+dependencies.
+
+```bash
+cargo build --release --features rocm
+./target/release/mlxcel generate -m models/mlx/Qwen3-0.6B-4bit -p "Hello" -n 50 --temp 0
+```
+
+The build compiles MLX device code for the `gfx` targets that `rocminfo`
+reports; set `MLX_ROCM_ARCHITECTURES` (for example `gfx1151`, or a `;`-separated
+list) to choose them explicitly, and `ROCM_PATH` if ROCm is not installed under
+`/opt/rocm`. The binaries carry `$ROCM_PATH/lib` as an rpath, so
+`LD_LIBRARY_PATH` is not needed. Known gaps (kernel routing, error propagation,
+memory estimation on UMA hosts, quantization modes other than affine) are
+tracked under lablup/mlxcel#1801.
 
 ### OpenXLA / StableHLO backend (`xla-backend`, `xla-iree`)
 

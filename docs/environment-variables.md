@@ -179,6 +179,9 @@ These are read by the `mlxcel-core` build script.
 
 CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 `MLX_CUDA_ARCHITECTURES`; see [Installation](installation.md#linux-with-cuda).
+ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
+`MLX_ROCM_ARCHITECTURES` (the `gfx` targets, default detected with `rocminfo`); see
+[Installation](installation.md#linux-with-amd-rocm).
 
 ## OpenXLA / StableHLO backend variables
 

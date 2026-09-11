@@ -71,6 +71,9 @@ default = ["surgery"]
 metal = ["mlxcel-core/metal"]
 accelerate = ["mlxcel-core/accelerate"]
 cuda = ["mlxcel-core/cuda"]
+# AMD GPU (ROCm/HIP) backend on Linux, issue #1802. Mutually exclusive with
+# `cuda` and `metal`; see docs/installation.md.
+rocm = ["mlxcel-core/rocm"]
 test-utils = []
 # Seam scaffold for an optional non-MLX forward-execution backend (issue #338).
 #

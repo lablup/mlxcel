@@ -14,6 +14,9 @@ default = []
 metal = []
 accelerate = []
 cuda = []
+# AMD GPU (ROCm/HIP) backend through the ROCm overlay in
+# ../mlx-cpp/patches-rocm, Linux only (issue #1802).
+rocm = []
 
 [dependencies]
 cxx = "1.0"

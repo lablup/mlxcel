@@ -79,7 +79,38 @@ function(mlx_apply_source_overlays mlx_source_dir)
     endforeach()
     message(STATUS "Applied CUDA-only dtype/precision patches")
   endif()
+
+  # ROCm overlay, the ROCm part of mlxcelverse (issue #1802): the AMD GPU
+  # backend vendored from NripeshN/mlx (mlx/backend/rocm/) plus the MLX core
+  # files it hooks, merged at the pinned commit. Copied only for ROCm builds so
+  # Metal and CUDA never compile a ROCm-modified core file. Only CMakeLists.txt
+  # and mlx/ are overlays; README.md, UPSTREAM and LOCAL_FIXES.md next to them
+  # are records. See patches-rocm/README.md for the pin-bump procedure.
+  if(MLX_BUILD_ROCM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches-rocm")
+    set(_rocm_root "${CMAKE_CURRENT_SOURCE_DIR}/patches-rocm")
+    file(GLOB_RECURSE _rocm_patch_files
+         RELATIVE "${_rocm_root}"
+         "${_rocm_root}/mlx/*")
+    list(APPEND _rocm_patch_files "CMakeLists.txt")
+    foreach(_patch_file ${_rocm_patch_files})
+      configure_file(
+        "${_rocm_root}/${_patch_file}"
+        "${mlx_source_dir}/${_patch_file}"
+        COPYONLY)
+    endforeach()
+    list(LENGTH _rocm_patch_files _rocm_patch_count)
+    message(STATUS "Applied ROCm overlay (${_rocm_patch_count} files)")
+  endif()
 endfunction()
+
+# The ROCm overlay replaces MLX core files that the CUDA-only patches above
+# also replace (mlx/fast.cpp, mlx/ops.cpp), and the two backends were never
+# built together upstream either.
+if(MLX_BUILD_ROCM AND MLX_BUILD_CUDA)
+  message(FATAL_ERROR
+    "MLX_BUILD_ROCM and MLX_BUILD_CUDA cannot both be ON: enable at most one "
+    "of the `rocm` and `cuda` cargo features.")
+endif()
 
 set(_mlx_cached_source_dir "${CMAKE_BINARY_DIR}/_deps/mlx-src")
 set(_mlx_cached_binary_dir "${CMAKE_BINARY_DIR}/_deps/mlx-build")
