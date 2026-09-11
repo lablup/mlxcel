@@ -14,7 +14,7 @@ static binaries: platform GPU/runtime libraries are still required.
 |----------|--------|-----------------------|-------|
 | macOS on Apple Silicon | primary | `metal,accelerate` | Main development and validation target. |
 | Linux with NVIDIA CUDA | secondary | `cuda` | Release builds currently target CUDA 13-era systems; other versions depend on MLX/CUDA compatibility. |
-| Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm). |
+| Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows | not documented here | — | The current public installation path is macOS/Linux. |
 
@@ -31,7 +31,7 @@ or test scaffolding.
 | `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
 | `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
 | `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
-| `rocm` | off | AMD GPU backend on Linux (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlx-cpp/patches-rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm). |
+| `rocm` | off | AMD GPU backend on Linux (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlx-cpp/patches-rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
 | `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
 | `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
 | `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
@@ -47,30 +47,6 @@ behavior, or constrained embedded targets):
 # Metal + Accelerate, no surgery crate.
 cargo build --release --no-default-features --features metal,accelerate
 ```
-
-### Linux with AMD ROCm
-
-**Experimental.** The `rocm` feature builds MLX with an AMD GPU (ROCm/HIP)
-backend vendored into `src/lib/mlx-cpp/patches-rocm/` (the ROCm part of
-mlxcelverse; provenance in its `UPSTREAM` and `LOCAL_FIXES.md`). On top of the
-Debian/Ubuntu build packages listed under [Linux with CUDA](#linux-with-cuda)
-(the CUDA toolkit itself is not needed) it needs a ROCm installation that
-provides the `hip`, `rocblas`, `rocthrust`, `rocprim`, `hiprand`, `rocwmma`,
-`hipblaslt` and `hiprtc` CMake packages, and `pkg-config` for the Rust
-dependencies.
-
-```bash
-cargo build --release --features rocm
-./target/release/mlxcel generate -m models/mlx/Qwen3-0.6B-4bit -p "Hello" -n 50 --temp 0
-```
-
-The build compiles MLX device code for the `gfx` targets that `rocminfo`
-reports; set `MLX_ROCM_ARCHITECTURES` (for example `gfx1151`, or a `;`-separated
-list) to choose them explicitly, and `ROCM_PATH` if ROCm is not installed under
-`/opt/rocm`. The binaries carry `$ROCM_PATH/lib` as an rpath, so
-`LD_LIBRARY_PATH` is not needed. Known gaps (kernel routing, error propagation,
-memory estimation on UMA hosts, quantization modes other than affine) are
-tracked under lablup/mlxcel#1801.
 
 ### OpenXLA / StableHLO backend (`xla-backend`, `xla-iree`)
 
@@ -293,6 +269,115 @@ MLXCEL_CXX_MARCH=x86-64-v3 cargo build --release --features cuda
 MLXCEL_CXX_MARCH=none cargo build --release --features cuda
 ```
 
+## Linux with AMD ROCm (experimental)
+
+**Experimental.** AMD GPU support on Linux was added in lablup/mlxcel#1802 and
+is tracked by lablup/mlxcel#1801. It is a source build only: there is no
+release artifact and no ROCm CI job yet, and the gaps listed below are open.
+
+The backend is not part of upstream MLX. mlxcel vendors the ROCm backend from
+the `rocm-support` branch of
+[NripeshN/mlx](https://github.com/NripeshN/mlx/tree/rocm-support) (MIT) into
+`src/lib/mlx-cpp/patches-rocm/` and applies it on top of the same pinned MLX
+commit that the Metal and CUDA builds use. See
+[mlxcelverse](architecture.md#mlxcelverse-the-mlx-side-layer) for how the
+overlay is organized, and `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` for the
+changes mlxcel carries on top of the fork.
+
+Tested configuration: AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`,
+RDNA 3.5) and a 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0 packages
+(HIP 7.15, AMD clang 23). Other RDNA 3, 3.5 and 4 parts are expected to build;
+CDNA parts (for example MI300) compile but carry no tuning.
+
+### Prerequisites
+
+- Rust toolchain compatible with the Rust 2024 edition, CMake and a C++20
+  compiler.
+- `pkg-config` and the OpenSSL headers, which the Rust dependencies need on
+  Linux.
+- BLAS and LAPACK development packages, including `lapacke.h` (see
+  [Linux with CUDA](#linux-with-cuda)).
+- A ROCm installation that provides the `hip`, `rocblas`, `rocthrust`,
+  `rocprim`, `hiprand`, `rocwmma`, `hipblaslt` and `hiprtc` CMake packages
+  (`ls "${ROCM_PATH:-/opt/rocm}"/lib/cmake` lists them), plus `hipcc` and
+  `rocminfo`.
+- Access to the GPU device nodes: the build and run user must be in the `video`
+  and `render` groups.
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y \
+    build-essential cmake git pkg-config libssl-dev \
+    libopenblas-dev liblapack-dev liblapacke-dev
+# ROCm itself comes from AMD's repository (repo.radeon.com).
+rocminfo | grep -E '^\s+Name:\s+gfx'   # should list your GPU target
+```
+
+### Build
+
+```bash
+cargo build --release --features rocm
+# or
+make release-rocm
+```
+
+`rocm` cannot be combined with `cuda` or `metal`; the build fails with a message
+naming the conflict. The first build compiles the MLX device code with `hipcc`,
+which takes a few minutes on top of the Rust build.
+
+### HIP architecture selection
+
+The build compiles MLX device code for the `gfx` targets that `rocminfo`
+reports on the build host. Set `MLX_ROCM_ARCHITECTURES` to choose them
+explicitly, for example to build on a host without a GPU or for several
+targets:
+
+```bash
+MLX_ROCM_ARCHITECTURES=gfx1151 cargo build --release --features rocm
+MLX_ROCM_ARCHITECTURES="gfx1100;gfx1151" cargo build --release --features rocm
+```
+
+If neither the variable nor `rocminfo` yields a target, the build fails and
+names the variable. The chosen list is recorded in the binary as
+`MLXCEL_ROCM_ARCHITECTURES`. Set `ROCM_PATH` when ROCm is not installed under
+`/opt/rocm`; the build reads its CMake packages, `hipcc` and `rocminfo` from
+there.
+
+### Running
+
+The binaries carry `$ROCM_PATH/lib` as an rpath, so `LD_LIBRARY_PATH` is not
+needed even when the ROCm libraries are not registered with the dynamic loader.
+A GPU run prints `Runtime device: GPU` at startup, and the process appears in
+`rocm-smi --showpids`:
+
+```bash
+./target/release/mlxcel generate -m models/mlx/Qwen3-0.6B-4bit -p "Hello" -n 50 --temp 0
+```
+
+On a UMA host the GPU shares memory with the operating system and with any
+other GPU process, so check `rocm-smi --showpids` for other tenants before
+loading a large model.
+
+### Current status
+
+| Area | Status on ROCm |
+|------|----------------|
+| Affine 4-bit / 8-bit checkpoints | Run natively. |
+| mxfp8 and mxfp4 checkpoints | Run natively, including MoE experts through `gather_qmm` (for example gpt-oss-20b-MXFP4-Q4). |
+| NVFP4 checkpoints | No native kernel; load-time conversion is tracked in lablup/mlxcel#1806. |
+| Affine MoE models (for example Qwen3-30B-A3B) | Set `MLXCEL_FUSED_MOE=0`; the fused MoE path aborts on ROCm until lablup/mlxcel#1803. |
+| mlxcel's fused kernels (sampling, fused norm, RoPE + KV append, paged attention) | Run as MLX graph fallbacks on the paths that have one (lablup/mlxcel#1803); ROCm ports are lablup/mlxcel#1814. |
+| GPU faults | May show up as NaN output or a hang instead of an error (lablup/mlxcel#1804). |
+| Memory estimation on UMA hosts | Reads host RAM, not the VRAM carve-out; set `MLXCEL_MEMORY_LIMIT` if a model that fits is refused (lablup/mlxcel#1805). |
+| Diagnostics | Print a CUDA compute capability line for the AMD device (lablup/mlxcel#1805). |
+| Windows, multiple GPUs, distributed inference | Not supported. |
+
+Decode throughput measured on the tested configuration, for orientation only
+(greedy, short prompt): Qwen3-0.6B-4bit about 250 tok/s, Qwen3-30B-A3B-4bit
+about 55 tok/s with `MLXCEL_FUSED_MOE=0`, gpt-oss-20b-MXFP4-Q4 about 3.6 tok/s
+(generic gather kernel). A benchmark page is tracked in lablup/mlxcel#1810.
+
 ## Runtime environment variables
 
 | Variable | Description | Default |
@@ -428,6 +513,9 @@ make test-fast
 
 # Linux / CUDA
 make test-fast-cuda
+
+# Linux / ROCm (experimental): no make target yet
+cargo test --profile test-fast --features rocm -- --test-threads=1
 
 # Narrow to a subset while iterating
 make test-fast-cuda FILTER=server::chat_request
@@ -586,3 +674,19 @@ compiler memory per parallel job, so a default `-j$(nproc)` build needs roughly
 **CMake error: `LAPACK_INCLUDE_DIRS ... NOTFOUND`** — install `liblapacke-dev`
 (MLX needs `lapacke.h`, which `liblapack-dev` alone does not provide) and
 `libopenblas-dev`.
+
+**ROCm: `Could NOT find hip` (or `rocblas`, `rocwmma`, ...) during the MLX
+configure**: install the ROCm development packages that ship those CMake
+configs, or point `ROCM_PATH` at the ROCm root that has them under `lib/cmake`.
+
+**ROCm: `openssl-sys` fails because `pkg-config` could not be found**: install
+`pkg-config` and `libssl-dev`, or set `OPENSSL_LIB_DIR` and
+`OPENSSL_INCLUDE_DIR` for the build.
+
+**ROCm: `rocminfo reported no GPU agent`**: set `MLX_ROCM_ARCHITECTURES`, and
+check that the user is in the `video` and `render` groups so `rocminfo` can open
+`/dev/kfd`.
+
+**ROCm: `[cuda_kernel] No CUDA back-end.` followed by an abort**: a fused path
+without a ROCm fallback was reached. For MoE models set `MLXCEL_FUSED_MOE=0`;
+otherwise report the model in lablup/mlxcel#1803.

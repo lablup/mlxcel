@@ -4,18 +4,19 @@
 [![Latest Release](https://img.shields.io/github/v/release/lablup/mlxcel)](https://github.com/lablup/mlxcel/releases/latest)
 [![CI](https://github.com/lablup/mlxcel/actions/workflows/ci.yml/badge.svg)](https://github.com/lablup/mlxcel/actions/workflows/ci.yml)
 
-High-performance LLM, VLM, embedding, reranking, and audio inference for Apple Silicon and NVIDIA CUDA systems. The CLI and server are implemented in Rust and execute MLX SafeTensors checkpoints through native MLX C++ bindings, without Python in the request path or a checkpoint-conversion step.
+High-performance LLM, VLM, embedding, reranking, and audio inference for Apple Silicon and NVIDIA CUDA systems, with experimental AMD ROCm support on Linux. The CLI and server are implemented in Rust and execute MLX SafeTensors checkpoints through native MLX C++ bindings, without Python in the request path or a checkpoint-conversion step.
 
 ## Overview
 
 `mlxcel` is both a local inference CLI and a production-oriented model server. It runs text generation, multimodal input, embeddings, reranking, speech workloads, continuous batching, prompt caching, speculative decoding, and distributed inference in one native runtime.
 
-Apple Silicon is the primary target. Linux/CUDA is supported as a secondary target, and an opt-in OpenXLA/IREE backend is available as an alpha development path.
+Apple Silicon is the primary target. Linux/CUDA is supported as a secondary target. AMD GPUs on Linux (ROCm) are an experimental, source-build-only target, and an opt-in OpenXLA/IREE backend is available as an alpha development path.
 
 ## Current main highlights
 
 The current `main` branch is v0.7.0 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
 
+- **Experimental AMD GPU (ROCm) support.** `--features rocm` builds mlxcel on Linux against an MLX ROCm backend vendored into the source tree as the ROCm part of mlxcelverse, applied on the same pinned MLX commit as the Metal and CUDA builds. Affine, mxfp8, and mxfp4 checkpoints, including gpt-oss MoE experts, run on RDNA 3.5 (`gfx1151`); fused kernels fall back to MLX graphs and affine MoE models need `MLXCEL_FUSED_MOE=0` for now. See [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the build and the open gaps.
 - **Verified `llama-server` compatibility.** A frozen b10621 manifest classifies all 376 pinned options, routes, and native request fields, with no deferred entries. Native completion, embedding, tokenization, template, infill, props, slots, metrics, resumable-stream, router, and LoRA surfaces are implemented or explicitly classified instead of being silently ignored.
 - **OpenAI, Anthropic, and Vertex-compatible serving.** Chat Completions, Completions, Responses, Embeddings, Reranking, Audio, and Anthropic Messages are available alongside the native `llama-server` routes. Optional Vertex AI custom-container routing is supported through the standard `AIP_*` variables.
 - **Multi-model routing and live adapters.** Router mode discovers checkpoints from the model store, a model directory, or INI presets; loads them on demand; and bounds the resident set with LRU eviction. Multiple LoRA adapters can remain unfused for per-request or live scale changes, or be fused for zero decode overhead.
@@ -210,7 +211,13 @@ Linux/NVIDIA builds require the CUDA toolkit and MLX's CUDA system dependencies:
 cargo build --release --features cuda
 ```
 
-A plain Linux build has no CUDA feature and runs on the CPU, which is not a validated release target and is much slower. See [Installation](docs/installation.md) for the complete prerequisite, CUDA architecture, runtime-header, and packaging matrix.
+Linux/AMD builds are experimental and need a ROCm installation with its HIP, rocBLAS, rocWMMA, hipBLASLt, and hipRTC CMake packages:
+
+```bash
+cargo build --release --features rocm
+```
+
+A plain Linux build has no GPU feature and runs on the CPU, which is not a validated release target and is much slower. See [Installation](docs/installation.md) for the complete prerequisite, CUDA and ROCm architecture, runtime-header, and packaging matrix, and [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the current ROCm status.
 
 ## Performance
 

@@ -14,11 +14,11 @@ MkDocs pages are added later.
 
 Current GitHub-facing docs:
 
-1. `installation.md` - platform prerequisites and build flags.
+1. `installation.md` - platform prerequisites and build flags for macOS, Linux with CUDA, and Linux with AMD ROCm (experimental).
 2. `environment-variables.md` - `MLXCEL_*` runtime, build, downloader, cache, and diagnostic knobs.
 3. `benchmarks.md` - benchmark methodology and the requirements for future raw result tables.
 4. `supported-models.md` - maintained architecture/checkpoint support matrix.
-5. `architecture.md` - runtime architecture and major components.
+5. `architecture.md` - runtime architecture and major components, including mlxcelverse (the per-backend MLX overlays and mlxcel kernels under `src/lib/mlx-cpp/`).
 6. `distributed.md` - tensor/pipeline parallel setup and limitations.
 7. `turbo-kv-cache.md` - TurboQuant modes, the unified paged KV cache, quality/performance trade-offs, and flags.
 8. `CONTINUOUS_BATCHING.md` - continuous-batching scheduler, paged decode, and disaggregated prefill/decode/router serving.
