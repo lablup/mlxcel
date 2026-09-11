@@ -306,7 +306,9 @@ async fn non_stream_completion(
     // Generate (blocking call handled by model provider's worker thread)
     let result = state
         .model_provider
-        .generate_with_live(prompt, options, &live)
+        .generate_with_live_with_prefill(prompt, options, &live, |stats| {
+            slot.on_prefill_progress(stats.prompt_tokens, stats.cached_tokens, stats.processed);
+        })
         .map_err(generation_error_to_response)?;
     slot.finish(
         result.prompt_tokens,
@@ -463,7 +465,7 @@ async fn stream_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live_with_prefill(
                 prompt,
                 options,
                 Vec::new(),
@@ -496,6 +498,13 @@ async fn stream_completion(
                         logprobs,
                     );
                     let _ = token_events.json(&chunk);
+                },
+                |stats| {
+                    slot.on_prefill_progress(
+                        stats.prompt_tokens,
+                        stats.cached_tokens,
+                        stats.processed,
+                    );
                 },
             );
 

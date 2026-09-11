@@ -541,6 +541,22 @@ pub struct AppState {
     pub(crate) gcp_dispatch: Arc<std::sync::OnceLock<axum::Router>>,
 }
 
+impl AppState {
+    /// Effective per-slot context window reported on b10621 metadata surfaces.
+    ///
+    /// An explicit `--ctx-size` is already divided across active slots before
+    /// it reaches `config.context_size`. When it is zero, generation resolves
+    /// the same "model default" window from the checkpoint and falls back to
+    /// 4096 if the checkpoint does not declare one.
+    pub(crate) fn effective_context_size(&self) -> usize {
+        if self.config.context_size > 0 {
+            return self.config.context_size;
+        }
+        crate::read_model_context_window(&self.model_path)
+            .unwrap_or(crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK)
+    }
+}
+
 /// Cumulative counter snapshot taken at the previous `/metrics` scrape.
 ///
 /// b10621 accumulates prompt/predict token counts and processing time into a

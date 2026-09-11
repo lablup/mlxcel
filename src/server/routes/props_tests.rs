@@ -301,6 +301,22 @@ async fn get_props_carries_the_b10621_key_set() {
     assert_eq!(caps.len(), 9, "the nine jinja::caps keys: {caps:?}");
 }
 
+#[tokio::test]
+async fn get_props_resolves_ctx_size_zero_to_effective_context() {
+    let (status, body) = send(
+        app_with(ServerConfig {
+            context_size: 0,
+            ..Default::default()
+        }),
+        Method::GET,
+        "/props",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["default_generation_settings"]["n_ctx"], 4096);
+}
+
 /// GET /props is ungated in b10621; `--props` gates POST only.
 #[tokio::test]
 async fn get_props_is_served_without_the_props_flag() {

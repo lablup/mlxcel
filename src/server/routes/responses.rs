@@ -303,7 +303,7 @@ async fn non_stream_create_response(
     );
     let result = state
         .model_provider
-        .generate_with_media_and_videos_declared_live(
+        .generate_with_media_and_videos_declared_live_with_prefill(
             prepared.prompt,
             options,
             prepared.image_data,
@@ -311,6 +311,9 @@ async fn non_stream_create_response(
             prepared.videos,
             prepared.media,
             &live,
+            |stats| {
+                slot.on_prefill_progress(stats.prompt_tokens, stats.cached_tokens, stats.processed);
+            },
         );
 
     let result = match result {
@@ -538,7 +541,7 @@ async fn stream_create_response(
 
         let result = state_for_task
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live_with_prefill(
                 prepared.prompt,
                 options,
                 prepared.image_data,
@@ -666,6 +669,13 @@ async fn stream_create_response(
                             delta: text,
                         });
                     }
+                },
+                |stats| {
+                    slot.on_prefill_progress(
+                        stats.prompt_tokens,
+                        stats.cached_tokens,
+                        stats.processed,
+                    );
                 },
             );
 

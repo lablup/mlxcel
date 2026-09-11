@@ -311,7 +311,9 @@ async fn non_stream_native_completion(
 
     let result = state
         .model_provider
-        .generate_with_live(request.prompt.clone(), options, &live)
+        .generate_with_live_with_prefill(request.prompt.clone(), options, &live, |stats| {
+            slot.on_prefill_progress(stats.prompt_tokens, stats.cached_tokens, stats.processed);
+        })
         .map_err(generation_error_to_response)?;
     slot.finish(
         result.prompt_tokens,
@@ -964,6 +966,11 @@ async fn stream_native_completion(
                     let _ = token_events.json(&chunk);
                 },
                 |stats| {
+                    slot.on_prefill_progress(
+                        stats.prompt_tokens,
+                        stats.cached_tokens,
+                        stats.processed,
+                    );
                     // b10621 `return_progress` (#1477): every observation
                     // becomes a `prompt_progress` frame with empty content,
                     // ahead of the first content frame. Without the field the
@@ -993,11 +1000,9 @@ async fn stream_native_completion(
                         };
                         let _ = progress_events.json(&frame);
                     }
-                    if !stats.first_token {
-                        return;
-                    }
-                    slot.on_prefill(stats.prompt_tokens, stats.cached_tokens);
-                    if let Ok(mut guard) = prefill_sink.lock() {
+                    if stats.first_token
+                        && let Ok(mut guard) = prefill_sink.lock()
+                    {
                         *guard = StreamPrefill::observed(stats);
                     }
                 },

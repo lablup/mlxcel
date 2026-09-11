@@ -64,6 +64,7 @@ pub struct SlotTask {
     pub id_task: i64,
     /// Resolved request parameters, in the b10621 `params` position.
     pub params: serde_json::Value,
+    prompt_tokens_total: usize,
     pub n_prompt_tokens: usize,
     pub n_prompt_tokens_processed: usize,
     pub n_prompt_tokens_cache: usize,
@@ -357,18 +358,46 @@ impl SlotHandle {
     /// Record the prefill outcome: total prompt tokens and how many came from
     /// the KV prefix cache.
     pub fn on_prefill(&self, prompt_tokens: usize, cached_tokens: usize) {
+        self.on_prefill_progress(prompt_tokens, cached_tokens, prompt_tokens);
+    }
+
+    /// Record one prefill progress observation.
+    ///
+    /// b10621's live slot counters treat `n_prompt_tokens` as the slot's
+    /// current prompt vector length: it climbs during prefill and then grows
+    /// by accepted decoded tokens. `processed` includes cache-supplied tokens,
+    /// so the public processed field subtracts the cached prefix.
+    pub fn on_prefill_progress(
+        &self,
+        prompt_tokens: usize,
+        cached_tokens: usize,
+        processed: usize,
+    ) {
         self.update(|task| {
-            task.n_prompt_tokens = prompt_tokens;
-            task.n_prompt_tokens_cache = cached_tokens;
-            task.n_prompt_tokens_processed = prompt_tokens.saturating_sub(cached_tokens);
+            let processed = processed.min(prompt_tokens);
+            task.prompt_tokens_total = prompt_tokens;
+            if task.n_prompt_tokens_cache == 0 && task.n_prompt_tokens_processed == 0 {
+                task.n_prompt_tokens_cache = cached_tokens.min(prompt_tokens);
+            }
+            task.n_prompt_tokens = processed;
+            task.n_prompt_tokens_processed = processed.saturating_sub(task.n_prompt_tokens_cache);
         });
     }
 
     /// Record one decoded token (and its text when the registry retains text).
     pub fn on_token(&self, piece: &str) {
+        if piece.is_empty() {
+            return;
+        }
         let retain = self.registry.retain_text;
         self.update(|task| {
             task.n_decoded += 1;
+            let prompt_tokens = if task.prompt_tokens_total > 0 {
+                task.prompt_tokens_total
+            } else {
+                task.n_prompt_tokens.saturating_sub(task.n_decoded - 1)
+            };
+            task.n_prompt_tokens = prompt_tokens.saturating_add(task.n_decoded);
             if piece.contains('\n') {
                 task.has_new_line = true;
             }
@@ -393,8 +422,9 @@ impl SlotHandle {
     ) {
         let retain = self.registry.retain_text;
         self.update(|task| {
-            task.n_prompt_tokens = prompt_tokens;
-            task.n_prompt_tokens_cache = cached_tokens;
+            task.prompt_tokens_total = prompt_tokens;
+            task.n_prompt_tokens = prompt_tokens.saturating_add(completion_tokens);
+            task.n_prompt_tokens_cache = cached_tokens.min(prompt_tokens);
             task.n_prompt_tokens_processed = prompt_tokens.saturating_sub(cached_tokens);
             task.n_decoded = completion_tokens;
             task.has_next_token = false;

@@ -112,10 +112,10 @@ fn default_generation_settings_with_live(
 /// mlxcel context/batch geometry, reported as a `/props` extension block.
 ///
 /// An operator passes `--ctx-size` and `--batch-size` and has no other way to
-/// confirm what the server resolved them to (#1450). `n_ctx` is the PER-SLOT
-/// window (`--ctx-size 8192 --parallel 4` gives each slot 2048), matching
-/// llama-server, whose `/props` also reports the per-slot `n_ctx`. `0` means
-/// the checkpoint's own trained context, which mlxcel does not clamp.
+/// confirm what the server resolved them to (#1450). `n_ctx` is the effective
+/// PER-SLOT window (`--ctx-size 8192 --parallel 4` gives each slot 2048),
+/// matching llama-server. When `--ctx-size 0`, it reports the model-derived
+/// window used by generation, falling back to 4096 if the checkpoint omits it.
 pub(crate) fn geometry_block(config: &ServerConfig) -> serde_json::Value {
     serde_json::json!({
         // The logical prefill batch `--batch-size` / `-b` resolves to. mlxcel
@@ -205,7 +205,7 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         // -- b10621 key set --
         "default_generation_settings": {
             "params": default_generation_settings_with_live(&state.config, &live),
-            "n_ctx": state.config.context_size,
+            "n_ctx": state.effective_context_size(),
         },
         "total_slots": state.config.n_parallel,
         "model_alias": state.display_model_id(),
