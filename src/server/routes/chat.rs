@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -364,16 +364,12 @@ pub async fn chat_completions(
     // `prepare_chat_request_with_cache` renders, so the template emits one
     // image placeholder per frame and the request the rest of this handler
     // sees is an ordinary multi-image one. Native video families are left
-    // alone and keep `prepared.videos`.
-    if let Err(message) = crate::server::chat_request::expand_video_parts_to_frames(
-        &mut request,
-        state.media_support,
-        crate::server::chat_request::VideoFramesFallback::from_config(&state.config),
-        state.display_model_id(),
-    )
-    .await
+    // alone and keep `prepared.videos`. A client that disconnects mid-decode
+    // cancels the clips not yet decoded (issue #1766).
+    if let Err(err) =
+        crate::server::chat_request::expand_request_video_parts(&state, &mut request).await
     {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
+        return err.into_error_response().into_response();
     }
 
     // Keep tool validation shared with the disaggregated router front so both
@@ -834,22 +830,6 @@ pub(crate) async fn non_stream_chat_completion(
     // thinking family at once (Qwen `<think>`, Gemma 4 `<|channel>`).
     let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
 
-    // Issue #467: when the prompt primed an open thinking channel and the model
-    // never emitted its close marker, the whole generation routes to
-    // `reasoning_content` and the user-facing `content` is emptied below.
-    // Surface that here so a broken or degenerate decode (e.g. an unsupported
-    // quantization collapsing into repeating tokens) does not masquerade as a
-    // clean, intentionally-empty response.
-    if primed_thinking_unclosed(&result.text, primed_open_thinking) {
-        tracing::warn!(
-            target: "mlxcel::thinking",
-            completion_tokens = result.completion_tokens as u64,
-            finish_reason = %result.finish_reason,
-            "primed thinking channel never closed: `content` is empty and all output \
-             routed to `reasoning_content`; the decode may be truncated or degenerate"
-        );
-    }
-
     // Try to parse tool calls from the output
     if tool_calls::should_parse_tool_calls(&request) {
         let tools = request.tools.as_deref();
@@ -925,6 +905,13 @@ pub(crate) async fn non_stream_chat_completion(
             || tool_calls::content_with_thinking_block(&result.text, &answer, reasoning.as_deref()),
             reasoning.clone(),
         );
+        let reasoning_only = log_if_reasoning_only(
+            &result.text,
+            &shaped.content,
+            shaped.reasoning_content.as_deref(),
+            result.completion_tokens,
+            &result.finish_reason,
+        );
         return Ok(Json(
             ChatCompletionResponse::new_with_logprobs(
                 request_id,
@@ -938,6 +925,7 @@ pub(crate) async fn non_stream_chat_completion(
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
             .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
             .with_florence2_result(florence2_result)
+            .with_reasoning_only(reasoning_only)
             .with_timings(timings.clone()),
         ));
     }
@@ -971,6 +959,14 @@ pub(crate) async fn non_stream_chat_completion(
         submit_next_turn_warmup(&state, &live, &request, ctx, &cleaned_text);
     }
 
+    let reasoning_only = log_if_reasoning_only(
+        &result.text,
+        &shaped.content,
+        shaped.reasoning_content.as_deref(),
+        result.completion_tokens,
+        &result.finish_reason,
+    );
+
     Ok(Json(
         ChatCompletionResponse::new_with_logprobs(
             request_id,
@@ -984,6 +980,7 @@ pub(crate) async fn non_stream_chat_completion(
         .with_cached_tokens(cached_tokens, prompt_cache_enabled)
         .with_reasoning_content_alias_field(shaped.reasoning_content, reasoning_alias_field)
         .with_florence2_result(florence2_result)
+        .with_reasoning_only(reasoning_only)
         .with_timings(timings.clone()),
     ))
 }
@@ -1087,6 +1084,22 @@ struct StreamCallbackState {
     /// Thinking-delimiter echo for `--reasoning-format none` /
     /// `deepseek-legacy` (#1470).
     thinking_echo: ThinkingDelimiterEcho,
+    /// Whether any non-empty text has reached `delta.content` yet, anywhere in
+    /// this stream: the main per-token loop, the thinking-delimiter echo
+    /// branches under `--reasoning-format none` / `deepseek-legacy`, and the
+    /// end-of-stream `remaining` flush. Read at finish time to decide
+    /// [`ChatCompletionChunk::with_reasoning_only`] — a stream that produced
+    /// tokens but never set this leaves the client with an empty `content`
+    /// and no signal that nothing else is coming (see
+    /// [`log_if_reasoning_only`] for the non-streaming counterpart).
+    saw_content: bool,
+    /// Whether any non-empty text has reached `delta.reasoning_content` yet,
+    /// tracked exactly like `saw_content` over the same finalized chunk batch.
+    /// Read at finish time so `reasoning_only` can assert where the output
+    /// went, not merely that `delta.content` stayed empty: a tool-calling
+    /// stream and a structural-marker-only stream both leave `content` empty
+    /// without any reasoning having happened.
+    saw_reasoning_content: bool,
 }
 
 /// Re-emits the literal thinking delimiters into `delta.content` under
@@ -1626,6 +1639,8 @@ async fn stream_chat_completion(
             },
             lp_buffer: std::collections::VecDeque::new(),
             thinking_echo: ThinkingDelimiterEcho::new(primed_close_marker.as_deref()),
+            saw_content: false,
+            saw_reasoning_content: false,
         }));
         let cb_state_for_callback = cb_state.clone();
 
@@ -1813,6 +1828,22 @@ async fn stream_chat_completion(
                                 ));
                             }
                         }
+
+                        // Single check over the finalized batch rather than a
+                        // flag set at each push site above: robust to any
+                        // current or future branch that can push a
+                        // content-carrying chunk (the placeholder push just
+                        // above pushes an explicitly empty one, so it does not
+                        // trip this). Read at finish time via
+                        // `reasoning_stream::is_reasoning_only`.
+                        if !cb.saw_content && pending.iter().any(chunk_carries_content) {
+                            cb.saw_content = true;
+                        }
+                        if !cb.saw_reasoning_content
+                            && pending.iter().any(chunk_carries_reasoning_content)
+                        {
+                            cb.saw_reasoning_content = true;
+                        }
                     }
 
                     for chunk in &pending {
@@ -1827,6 +1858,11 @@ async fn stream_chat_completion(
             .ok()
             .map(|mut cb| cb.stream_filter.flush())
             .unwrap_or_default();
+        // Tracks whether either branch below pushes real `delta.content`, so
+        // `cb.saw_content` (read at finish time, see its doc comment) reflects
+        // this end-of-stream flush too, not just the main per-token loop.
+        let mut remaining_had_content = false;
+        let mut remaining_had_reasoning = false;
         if let Some(text) = remaining.reasoning
             && !text.is_empty()
         {
@@ -1838,6 +1874,7 @@ async fn stream_chat_completion(
                     reasoning_alias_field,
                 );
                 let _ = finish_events.json(&chunk);
+                remaining_had_reasoning = true;
             }
             if reasoning_format.keeps_thoughts_in_content() {
                 let chunk = ChatCompletionChunk::content_with_logprobs(
@@ -1847,6 +1884,7 @@ async fn stream_chat_completion(
                     None,
                 );
                 let _ = finish_events.json(&chunk);
+                remaining_had_content = true;
             }
         }
         if let Some(text) = remaining.content
@@ -1859,6 +1897,13 @@ async fn stream_chat_completion(
                 None,
             );
             let _ = finish_events.json(&chunk);
+            remaining_had_content = true;
+        }
+        if (remaining_had_content || remaining_had_reasoning)
+            && let Ok(mut cb) = cb_state.lock()
+        {
+            cb.saw_content |= remaining_had_content;
+            cb.saw_reasoning_content |= remaining_had_reasoning;
         }
 
         if let Ok(r) = &result {
@@ -1948,6 +1993,26 @@ async fn stream_chat_completion(
             submit_next_turn_warmup(state, &live, request, ctx, &reply);
         }
 
+        // Whether the whole stream produced tokens but `delta.content` never
+        // carried any of them, with the output having gone to
+        // `delta.reasoning_content` instead (see `stream_reasoning_only`, and
+        // `log_if_reasoning_only` for the non-streaming counterpart). An error
+        // result generated no tokens to ask the question about.
+        let reasoning_only = match &result {
+            Ok(r) => cb_state
+                .lock()
+                .map(|cb| {
+                    stream_reasoning_only(
+                        &r.text,
+                        cb.saw_content,
+                        cb.saw_reasoning_content,
+                        &finish_reason,
+                    )
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+
         // Send finish chunk. It is the frame that carries this request's
         // speculative acceptance counters (#1314): the totals are final here,
         // and this is the chunk a client already reads for `finish_reason`.
@@ -1956,6 +2021,7 @@ async fn stream_chat_completion(
             model_id_clone.clone(),
             finish_reason,
         )
+        .with_reasoning_only(reasoning_only)
         .with_timings(
             result
                 .as_ref()
@@ -2189,18 +2255,145 @@ const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>", "<|clos
 /// thinking marker) and `raw_output` contains none of the close markers
 /// (`<channel|>` for Gemma 4, `</think>` for Qwen-style). In that state the
 /// whole generation is reasoning and the non-streaming `content` is emptied by
-/// [`strip_unclosed_primed_thinking`].
+/// [`strip_unclosed_primed_thinking`], the only remaining caller.
 ///
-/// Callers surface this condition (a `tracing::warn!`) instead of returning a
-/// silently-empty `content`, so a broken or degenerate decode that never emits
-/// a close marker (issue #467: an unsupported quantization collapsing into
-/// repeating tokens) does not masquerade as a clean, intentionally-empty
-/// response.
+/// This used to be the condition [`log_if_reasoning_only`] logged directly
+/// (issue #467), scoped to prompts that primed an open thinking block. That
+/// scope missed the far more common shape: a plain, unprimed request that
+/// opens `<think>` on its own and exhausts `max_tokens` (or a reasoning
+/// budget) before closing it, which empties `content` exactly the same way
+/// with `primed` never true. [`log_if_reasoning_only`] now covers both by
+/// checking the actually-shaped `content` instead of re-deriving emptiness
+/// from `primed`, so this predicate's job is purely `content`-emptying.
 fn primed_thinking_unclosed(raw_output: &str, primed: bool) -> bool {
     primed
         && !OPEN_THINKING_CLOSE_MARKERS
             .iter()
             .any(|m| raw_output.contains(m))
+}
+
+/// Whether this response's `content` came back empty despite real generation,
+/// and log a diagnostic when so. `content` is the *already-shaped* text the
+/// client is about to receive (post `shape_response`), not the raw model
+/// output, so this correctly stays silent under `--reasoning-format none` /
+/// `deepseek-legacy`, which deliberately keep the thinking block inside
+/// `content` rather than emptying it.
+///
+/// Reuses [`crate::reasoning_stream::is_reasoning_only`], the same predicate
+/// the CLI's `generate` and `chat` REPL name this condition with (#1721), so
+/// the two surfaces agree on what counts. `show_reasoning` is fixed to
+/// `false`: unlike the CLI, the server never suppresses reasoning into a
+/// hidden channel (`reasoning_content` is always additive alongside
+/// `content`), so the check here fires whenever `content` is empty and
+/// generation happened, regardless of priming — see
+/// [`primed_thinking_unclosed`]'s doc comment for why that generalizes past
+/// the narrower condition this used to log under issue #467.
+///
+/// Callers surface the resulting flag to the client via
+/// `ChatCompletionResponse::with_reasoning_only` /
+/// `ChatCompletionChunk::with_reasoning_only` instead of returning a silently
+/// empty `content` with no signal that nothing else is coming.
+fn log_if_reasoning_only(
+    raw_generated_text: &str,
+    content: &str,
+    reasoning_content: Option<&str>,
+    completion_tokens: usize,
+    finish_reason: &str,
+) -> bool {
+    // `reasoning_content` gates the whole check, because the field asserts
+    // where the output went, not merely that `content` came back empty.
+    // `clean_structural_tokens` empties `content` for outputs that contain no
+    // thinking block at all -- a Gemma 4 generation that is nothing but
+    // `<turn|>` / `<channel|>` / `<|tool_call>` markers is reduced to "" with
+    // `reasoning` left `None` -- and those must not claim the output stayed in
+    // a reasoning channel that was never populated. Under every format that
+    // does produce thoughts this stays true where it matters:
+    // `deepseek` / `auto` put them in `reasoning_content`, and `none` /
+    // `deepseek-legacy` keep them in `content`, which is then non-empty and
+    // short-circuits below anyway. See `ReasoningFormat::emits_reasoning_content`.
+    let reasoning_only = reasoning_content.is_some_and(|text| !text.trim().is_empty())
+        && crate::reasoning_stream::is_reasoning_only(
+            raw_generated_text,
+            !content.trim().is_empty(),
+            false,
+        );
+    if reasoning_only {
+        tracing::warn!(
+            target: "mlxcel::thinking",
+            completion_tokens = completion_tokens as u64,
+            finish_reason = %finish_reason,
+            "generation produced tokens but `content` is empty and all output \
+             routed to `reasoning_content`; the decode may be truncated \
+             (max_tokens or reasoning_budget exhausted before the model closed \
+             its thinking block) or degenerate"
+        );
+    }
+    reasoning_only
+}
+
+/// Whether a finished stream should carry `reasoning_only` on its terminal chunk.
+///
+/// Three conditions, all required:
+///
+/// - `finish_reason` is not `"tool_calls"`. A tool-calling turn legitimately
+///   leaves `delta.content` empty for the whole stream: `FilterState::ToolCall`
+///   suppresses the entire payload from the content channel, and it reaches the
+///   client as `tool_calls` deltas instead. A model that answers with nothing
+///   but a tool call -- the ordinary shape -- therefore ends with
+///   `saw_content` false and a non-empty `result.text`, which
+///   [`crate::reasoning_stream::is_reasoning_only`] alone would report as
+///   reasoning-only on every such request. The non-streaming path excludes its
+///   tool-calls arm for the same reason; this keeps the two surfaces agreeing.
+/// - The stream actually emitted reasoning. The field asserts the output stayed
+///   in the reasoning channel, so a stream whose `content` emptied for some
+///   other reason must not borrow that explanation. See
+///   [`log_if_reasoning_only`], which gates on the shaped `reasoning_content`
+///   for the same reason.
+/// - [`crate::reasoning_stream::is_reasoning_only`] agrees: tokens were
+///   produced and none of them reached `delta.content`.
+///
+/// Used by: the streaming chat completion handler, at finish time.
+fn stream_reasoning_only(
+    generated_text: &str,
+    saw_content: bool,
+    saw_reasoning_content: bool,
+    finish_reason: &str,
+) -> bool {
+    finish_reason != "tool_calls"
+        && saw_reasoning_content
+        && crate::reasoning_stream::is_reasoning_only(generated_text, saw_content, false)
+}
+
+/// Whether a streamed chunk carries non-empty `delta.reasoning_content`.
+///
+/// The `saw_reasoning_content` counterpart to [`chunk_carries_content`], read
+/// from the same finalized `pending` batch so the two flags cannot disagree
+/// about which chunks the client actually received.
+fn chunk_carries_reasoning_content(chunk: &ChatCompletionChunk) -> bool {
+    chunk.choices.first().is_some_and(|choice| {
+        choice
+            .delta
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    })
+}
+
+/// Whether a streamed chunk carries non-empty `delta.content`.
+///
+/// Used to update [`StreamCallbackState::saw_content`] from the finalized
+/// per-token `pending` batch: checking the built chunks rather than setting a
+/// flag at each push site catches every current and future branch that can
+/// put text in `delta.content` (the suppressed-logprob placeholder pushes an
+/// explicitly empty string, so it correctly does not count).
+fn chunk_carries_content(chunk: &ChatCompletionChunk) -> bool {
+    chunk.choices.first().is_some_and(|choice| {
+        choice
+            .delta
+            .content
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    })
 }
 
 /// Strip reasoning content that would otherwise leak when the prompt primed
@@ -2798,8 +2991,8 @@ mod tests {
     #[test]
     fn primed_thinking_unclosed_is_the_content_emptying_predicate() {
         // The predicate is the single source of truth: it is true exactly when
-        // strip_unclosed_primed_thinking empties content, so the warning and the
-        // emptying can never disagree.
+        // strip_unclosed_primed_thinking empties content, so the two can never
+        // disagree about what content ends up empty.
         let unclosed = "all reasoning, never closed";
         assert!(primed_thinking_unclosed(unclosed, true));
         assert_eq!(
@@ -2813,6 +3006,233 @@ mod tests {
             strip_unclosed_primed_thinking("answer".to_string(), closed, true),
             "answer"
         );
+    }
+
+    // -- log_if_reasoning_only --
+
+    #[test]
+    fn log_if_reasoning_only_true_when_content_empty_and_generation_happened() {
+        assert!(log_if_reasoning_only(
+            "<think>reasoning that never closes",
+            "",
+            Some("reasoning that never closes"),
+            128,
+            "length",
+        ));
+    }
+
+    #[test]
+    fn log_if_reasoning_only_false_when_content_present() {
+        assert!(!log_if_reasoning_only(
+            "<think>reasoning</think>the answer",
+            "the answer",
+            Some("reasoning"),
+            64,
+            "stop",
+        ));
+    }
+
+    #[test]
+    fn log_if_reasoning_only_false_when_nothing_was_generated() {
+        // Zero completion tokens is a different fact from a suppressed
+        // channel, and must not borrow this explanation (mirrors
+        // `reasoning_stream::is_reasoning_only`'s own `reasoning_only_is_false_
+        // when_nothing_was_generated` case).
+        assert!(!log_if_reasoning_only("", "", None, 0, "stop"));
+    }
+
+    #[test]
+    fn log_if_reasoning_only_generalizes_primed_thinking_unclosed() {
+        // Whenever the narrower primed-only condition fires, the general
+        // content-emptying check must also fire: `primed_thinking_unclosed`
+        // driving `strip_unclosed_primed_thinking` to empty `content` is
+        // exactly the situation this function names from the shaped result.
+        let raw = "all reasoning, never closed";
+        assert!(primed_thinking_unclosed(raw, true));
+        assert!(log_if_reasoning_only(raw, "", Some(raw), 32, "length"));
+    }
+
+    #[test]
+    fn log_if_reasoning_only_covers_the_unprimed_case_primed_thinking_unclosed_misses() {
+        // The common real-world shape this generalizes to (issue #467 only
+        // covered the primed case): a plain, unprimed request opens its own
+        // `<think>` block and exhausts its token budget before closing it.
+        // `primed` is false here, so `primed_thinking_unclosed` never fires,
+        // but `content` still ends up empty and generation still happened.
+        let raw = "<think>still reasoning when the budget ran out";
+        assert!(!primed_thinking_unclosed(raw, false));
+        assert!(log_if_reasoning_only(raw, "", Some(raw), 512, "length"));
+    }
+
+    #[test]
+    fn log_if_reasoning_only_false_without_reasoning_content() {
+        // `reasoning_only` asserts the output stayed in the reasoning channel.
+        // A generation that emptied `content` with nothing in
+        // `reasoning_content` must not claim it: there was no reasoning.
+        assert!(!log_if_reasoning_only("<turn|>", "", None, 8, "length"));
+        // An empty-but-present reasoning string is the same non-fact.
+        assert!(!log_if_reasoning_only(
+            "<turn|>",
+            "",
+            Some("   "),
+            8,
+            "length"
+        ));
+    }
+
+    #[test]
+    fn log_if_reasoning_only_false_for_structural_marker_only_output() {
+        // The concrete reachable shape, driven through the real shaping helper
+        // rather than a hand-written pair: Gemma 4 emits nothing but structural
+        // markers when no tools are present in the request (see
+        // `clean_structural_tokens`'s doc comment). `content` is emptied, no
+        // thinking block exists, so `reasoning` is `None` -- and the response
+        // must not be reported as reasoning-only.
+        let raw = "<|turn><channel|><|tool_call>";
+        let cleaned = crate::server::tool_calls::clean_structural_tokens(raw);
+        assert_eq!(
+            cleaned, "",
+            "precondition: structural markers reduce to empty content"
+        );
+
+        let shaped = crate::server::shape_response(
+            crate::server::ReasoningFormat::Auto,
+            cleaned,
+            || raw.to_string(),
+            None,
+        );
+        assert_eq!(
+            shaped.reasoning_content, None,
+            "precondition: no thoughts extracted"
+        );
+
+        assert!(!log_if_reasoning_only(
+            raw,
+            &shaped.content,
+            shaped.reasoning_content.as_deref(),
+            12,
+            "length",
+        ));
+    }
+
+    // -- stream_reasoning_only --
+
+    #[test]
+    fn stream_reasoning_only_true_for_a_stream_truncated_mid_thought() {
+        // The target case: tokens were produced, they all went to
+        // `delta.reasoning_content`, and the budget ran out before the model
+        // closed its thinking block.
+        assert!(stream_reasoning_only(
+            "<think>still reasoning when the budget ran out",
+            false,
+            true,
+            "length",
+        ));
+    }
+
+    #[test]
+    fn stream_reasoning_only_false_for_a_tool_calling_stream() {
+        // `FilterState::ToolCall` suppresses the whole tool-call payload from
+        // `delta.content`, so a model that answers with nothing but a tool call
+        // ends the stream with `saw_content` false and a non-empty
+        // `result.text` -- exactly the shape `is_reasoning_only` alone reports
+        // as true. Empty content is normal here and reaches the client as
+        // tool-call deltas, so the terminal chunk must not claim reasoning.
+        // The non-streaming path excludes its tool-calls arm for the same
+        // reason; without this gate the two surfaces disagree.
+        assert!(!stream_reasoning_only(
+            "<tool_call>{\"name\": \"get_weather\", \"arguments\": {}}</tool_call>",
+            false,
+            false,
+            "tool_calls",
+        ));
+        // Still excluded even if the turn also emitted thoughts before the call.
+        assert!(!stream_reasoning_only(
+            "<think>which tool?</think><tool_call>{}</tool_call>",
+            false,
+            true,
+            "tool_calls",
+        ));
+    }
+
+    #[test]
+    fn stream_reasoning_only_false_when_the_stream_emitted_no_reasoning() {
+        // Content emptied for some reason other than reasoning: nothing routed
+        // to `delta.reasoning_content`, so the claim would be false.
+        assert!(!stream_reasoning_only(
+            "<|turn><channel|>",
+            false,
+            false,
+            "length"
+        ));
+    }
+
+    #[test]
+    fn stream_reasoning_only_false_when_content_reached_the_client() {
+        assert!(!stream_reasoning_only(
+            "<think>thought</think>the answer",
+            true,
+            true,
+            "stop",
+        ));
+    }
+
+    #[test]
+    fn stream_reasoning_only_false_when_nothing_was_generated() {
+        assert!(!stream_reasoning_only("", false, false, "stop"));
+    }
+
+    // -- chunk_carries_reasoning_content --
+
+    #[test]
+    fn chunk_carries_reasoning_content_true_for_reasoning_chunk() {
+        let chunk = ChatCompletionChunk::reasoning_content(
+            "id".to_string(),
+            "model".to_string(),
+            "still thinking".to_string(),
+        );
+        assert!(chunk_carries_reasoning_content(&chunk));
+        // The two helpers must classify the same chunk into different channels.
+        assert!(!chunk_carries_content(&chunk));
+    }
+
+    #[test]
+    fn chunk_carries_reasoning_content_false_for_content_chunk() {
+        let chunk =
+            ChatCompletionChunk::content("id".to_string(), "model".to_string(), "hi".to_string());
+        assert!(!chunk_carries_reasoning_content(&chunk));
+    }
+
+    // -- chunk_carries_content --
+
+    #[test]
+    fn chunk_carries_content_true_for_non_empty_delta_content() {
+        let chunk =
+            ChatCompletionChunk::content("id".to_string(), "model".to_string(), "hi".to_string());
+        assert!(chunk_carries_content(&chunk));
+    }
+
+    #[test]
+    fn chunk_carries_content_false_for_empty_placeholder() {
+        // The suppressed-logprob placeholder pushes `Some("")`, not `None`;
+        // must not count as content.
+        let chunk = ChatCompletionChunk::content_with_logprobs(
+            "id".to_string(),
+            "model".to_string(),
+            String::new(),
+            None,
+        );
+        assert!(!chunk_carries_content(&chunk));
+    }
+
+    #[test]
+    fn chunk_carries_content_false_for_reasoning_only_chunk() {
+        let chunk = ChatCompletionChunk::reasoning_content(
+            "id".to_string(),
+            "model".to_string(),
+            "still thinking".to_string(),
+        );
+        assert!(!chunk_carries_content(&chunk));
     }
 
     // -- extract_reasoning_content (non-streaming reasoning surface) --

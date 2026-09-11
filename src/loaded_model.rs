@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -197,6 +197,9 @@ pub enum LoadedModel {
     StarCoder2(models::StarCoder2Model),
     // Mixed full/sliding caches use a wrapper
     Mellum(models::MellumWrapper),
+    // Two cache sets per layer (dense pass 1 + rotating pass 2), owned by
+    // the wrapper's per-sequence model-owned state.
+    IQuestLoopCoder(models::IQuestLoopCoderWrapper),
     Laguna(models::LagunaWrapper),
     MiniCPM(models::MiniCPMModel),
     MiniCPM3(models::MiniCPM3Model),
@@ -352,6 +355,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Afmoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Klear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::IQuestLoopCoder(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SeedOss(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Granite(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BitNet(inner) => LanguageModel::$method(inner, $($arg),*),

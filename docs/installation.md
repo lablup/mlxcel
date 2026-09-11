@@ -236,6 +236,13 @@ available on the deployment host, not only the runtime libraries:
   Install the CUDA toolkit and set `CUDA_HOME` (or `CUDA_PATH`) if it is not at
   `/usr/local/cuda`. Without them the first NVRTC compile fails with
   `cannot open source file` errors.
+- **CUDA shared libraries** come from the host toolkit too. The binary links
+  `cudart`, `cublas`, `cublasLt`, `cufft`, `cusolver`, `nvrtc` and cuDNN
+  dynamically. cuSOLVER joined that list when the MLX pin moved to `81ba1c6a`
+  (MLX's CUDA backend now uses it for Cholesky and initializes it at startup),
+  so a runtime-only install that omits it fails at launch with
+  `libcusolver.so...: cannot open shared object file`. The full CUDA toolkit
+  package ships all of them.
 - An NVIDIA driver matching the CUDA toolkit must be present to run on the GPU.
 
 Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`, default under the

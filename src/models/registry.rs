@@ -1,3 +1,17 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use serde::Serialize;
 
 use super::{ALL_MODEL_TYPES, ModelType};
@@ -209,6 +223,7 @@ impl ModelType {
         match self {
             ModelType::Llama => "llama",
             ModelType::IQuestCoder => "iquest_coder",
+            ModelType::IQuestLoopCoder => "iquest_loop_coder",
             ModelType::Llama4 => "llama4",
             ModelType::Llama4VLM => "llama4_vlm",
             ModelType::MllamaVLM => "mllama_vlm",
@@ -632,6 +647,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
     match model_type {
         ModelType::Llama => &["llama", "mistral"],
         ModelType::IQuestCoder => &["iquestcoder"],
+        ModelType::IQuestLoopCoder => &["iquestloopcoder"],
         ModelType::Llama4 | ModelType::Llama4VLM => &["llama4"],
         ModelType::MllamaVLM => &["mllama"],
         ModelType::Qwen2 => &["qwen2"],

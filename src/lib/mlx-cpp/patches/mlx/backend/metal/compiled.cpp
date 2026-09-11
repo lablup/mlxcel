@@ -1,6 +1,10 @@
 // Copyright © 2023-2024 Apple Inc.
 // mlxcel patch: adds static_cast for mixed-dtype compiled ops.
-// upstream API drift fixed for 6a9a121 (metal::get_command_encoder).
+// Synced to upstream 81ba1c6a. The only delta is that cast, in build_kernel's
+// emission of an op's inputs; everything else is upstream verbatim. Until this
+// sync the file also emitted `elem_to_loc_1<uint>` for 1-D inputs, a leftover
+// from before ml-explore/mlx#3720 that wraps a negative stride in the large
+// kernel negative strides select, so compare against upstream on every bump.
 #include <fmt/format.h>
 #include <sstream>
 
@@ -141,8 +145,8 @@ inline void build_kernel(
     os += fmt::format("  {0} index_{1} = ", idx_type, xname);
     if (ndim == 1) {
       int offset = i * ndim;
-      os +=
-          fmt::format("elem_to_loc_1<uint>(pos.x, in_strides[{0}]);\n", offset);
+      os += fmt::format(
+          "elem_to_loc_1<{0}>(pos.x, in_strides[{1}]);\n", idx_type, offset);
     } else if (ndim == 2) {
       int offset = i * ndim;
       os += fmt::format(
@@ -210,7 +214,7 @@ inline void build_kernel(
         "  {0} tmp_{1} = ", get_type_string(x.dtype()), namer.get_name(x));
     if (is_static_cast(x.primitive())) {
       os += fmt::format(
-          "static_cast<{0}>(tmp_{1});\n",
+          "cast_to<{0}>(tmp_{1});\n",
           get_type_string(x.dtype()),
           namer.get_name(x.inputs()[0]));
     } else {
@@ -336,6 +340,7 @@ void Compiled::eval_gpu(
           /* dynamic_dims = */ false,
           /* use_big_index = */ false,
           /* work_per_thread = */ i > 3 ? 2 : 1);
+      // Generate int64_t index variant for all ndim, including ndim=1.
       // Negative strides force large mode even for small arrays.
       build_kernel(
           kernel,

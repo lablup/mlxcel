@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -464,6 +464,15 @@ pub struct AppState {
     pub model_path: PathBuf,
     /// Static media-input capability flags resolved once at startup.
     pub media_support: ModelMediaSupport,
+    /// `MLXCEL_VIDEO_DIR_ALLOWLIST`, canonicalized once at startup (issue
+    /// #1766).
+    ///
+    /// The video-frames fallback resolves local clips against this rather than
+    /// re-reading the environment and calling `std::fs::canonicalize` on each
+    /// entry per request, which ran on a Tokio worker. Empty by default, which
+    /// is the same fail-closed answer an unset variable gives: no local path
+    /// resolves until the startup pipeline installs the operator's list.
+    pub(crate) video_dir_allowlist: Arc<Vec<PathBuf>>,
     /// Batch-level metrics (active sequences, queue depth) for admission
     /// control and status reporting.
     pub batch_metrics: Arc<BatchMetrics>,
@@ -673,6 +682,7 @@ impl AppState {
             tokenizer,
             model_path,
             media_support: ModelMediaSupport::default(),
+            video_dir_allowlist: Arc::new(Vec::new()),
             batch_metrics,
             batch_observability: Arc::new(BatchObservability::new()),
             metrics: Arc::new(Metrics::new()),
@@ -733,6 +743,7 @@ impl AppState {
             tokenizer,
             model_path,
             media_support: ModelMediaSupport::default(),
+            video_dir_allowlist: Arc::new(Vec::new()),
             batch_metrics,
             batch_observability,
             metrics: Arc::new(Metrics::new()),
@@ -762,6 +773,14 @@ impl AppState {
     #[must_use]
     pub fn with_media_support(mut self, support: ModelMediaSupport) -> Self {
         self.media_support = support;
+        self
+    }
+
+    /// Install the video directory allowlist the startup pipeline resolved
+    /// from `MLXCEL_VIDEO_DIR_ALLOWLIST` (issue #1766).
+    #[must_use]
+    pub(crate) fn with_video_dir_allowlist(mut self, allowlist: Arc<Vec<PathBuf>>) -> Self {
+        self.video_dir_allowlist = allowlist;
         self
     }
 

@@ -2485,12 +2485,14 @@ namespace {
             auto gate = mlx::core::gather_qmm(
                 x, gate_w, gate_s, std::optional<array>(gate_b),
                 std::nullopt, std::optional<array>(rhs_indices),
-                transpose, group_size, bits, "affine", sorted_indices);
+                transpose, group_size, bits, "affine",
+                /* global_scale = */ std::nullopt, sorted_indices);
 
             auto up = mlx::core::gather_qmm(
                 x, up_w, up_s, std::optional<array>(up_b),
                 std::nullopt, std::optional<array>(rhs_indices),
-                transpose, group_size, bits, "affine", sorted_indices);
+                transpose, group_size, bits, "affine",
+                /* global_scale = */ std::nullopt, sorted_indices);
 
             // GeGLU: Python mlx-lm uses nn.gelu_approx(gate) * up.
             auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
@@ -2498,7 +2500,8 @@ namespace {
             auto down = mlx::core::gather_qmm(
                 activated, down_w, down_s, std::optional<array>(down_b),
                 std::nullopt, std::optional<array>(rhs_indices),
-                transpose, group_size, bits, "affine", sorted_indices);
+                transpose, group_size, bits, "affine",
+                /* global_scale = */ std::nullopt, sorted_indices);
 
             return {down};
         };
@@ -2559,12 +2562,12 @@ std::unique_ptr<MlxArray> compiled_switch_qgeglu_forward(
         x.inner, gate_w.inner, gate_s.inner, gb_opt,
         std::nullopt, rhs_opt, true,
         std::optional<int>(group_size), std::optional<int>(bits),
-        mode_str, false);
+        mode_str, /* global_scale = */ std::nullopt, false);
     auto up = mlx::core::gather_qmm(
         x.inner, up_w.inner, up_s.inner, ub_opt,
         std::nullopt, rhs_opt, true,
         std::optional<int>(group_size), std::optional<int>(bits),
-        mode_str, false);
+        mode_str, /* global_scale = */ std::nullopt, false);
 
     auto activated = mlx::core::multiply(gelu_tanh_approx(gate), up);
 
@@ -2572,7 +2575,7 @@ std::unique_ptr<MlxArray> compiled_switch_qgeglu_forward(
         activated, down_w.inner, down_s.inner, db_opt,
         std::nullopt, rhs_opt, true,
         std::optional<int>(group_size), std::optional<int>(bits),
-        mode_str, false);
+        mode_str, /* global_scale = */ std::nullopt, false);
 
     return std::make_unique<MlxArray>(std::move(down));
 }
@@ -3219,13 +3222,13 @@ std::unique_ptr<MlxArray> gather_qmm(
             x.inner, w.inner, scales.inner, biases_opt,
             lhs_opt, rhs_opt, transpose,
             std::optional<int>(group_size), std::optional<int>(bits),
-            "affine", sorted_indices));
+            "affine", /* global_scale = */ std::nullopt, sorted_indices));
     }
     return std::make_unique<MlxArray>(mlx::core::gather_qmm(
         x.inner, w.inner, scales.inner, biases_opt,
         lhs_opt, rhs_opt, transpose,
         std::optional<int>(group_size), std::optional<int>(bits),
-        std::string(mode.data(), mode.size()), sorted_indices));
+        std::string(mode.data(), mode.size()), /* global_scale = */ std::nullopt, sorted_indices));
 }
 
 std::unique_ptr<MlxArray> quantized_matmul(
@@ -5562,17 +5565,55 @@ static bool rejection_path_selected(
         rejection_sample_applies(x, temperature, top_k, top_p, min_p);
 }
 
+// Where a stashed launch stands, read without waiting, throwing, or touching
+// the launch's error.
+//
+// `array::is_available()` is not that query any more. Since MLX 81ba1c6a
+// (ml-explore/mlx#3742) it detaches the array's event through
+// `Event::check_error()`, which throws when the launch failed and clears the
+// error while doing so, and every event a failed command buffer signals points
+// at the same encoder error. Called on a slot that another request stashed, it
+// would throw inside `fused_sample`, which is not a `Result` bridge function,
+// so the process would terminate; and it would consume the error that the
+// owning request's own eval exists to report. Status, the event's signal and
+// its error pointer answer the question without either effect. Metal's
+// completion handler and the CPU scheduler both store an event's error before
+// they signal it (CUDA attaches none), so an error is visible by the time
+// `is_signaled()` is.
+enum class StashedLaunch { InFlight, Landed, Failed };
+
+static StashedLaunch stashed_launch_state(const mlx::core::array& a) {
+    using Status = mlx::core::array::Status;
+    if (a.status() == Status::available) {
+        return StashedLaunch::Landed;
+    }
+    if (a.status() != Status::evaluated) {
+        return StashedLaunch::InFlight;
+    }
+    const auto& event = a.event();
+    if (!event.valid()) {
+        return StashedLaunch::Landed;
+    }
+    if (!event.is_signaled()) {
+        return StashedLaunch::InFlight;
+    }
+    const auto* error = event.load_error();
+    return (error != nullptr && error->valid()) ? StashedLaunch::Failed
+                                                : StashedLaunch::Landed;
+}
+
 // Inspect the previous production launch's converged flags, but ONLY if they
 // have already landed. Never waits, so it is safe to call from inside a decode
 // loop's graph-building phase.
 //
-// `array::is_available()` is MLX's non-blocking status query: it is false while
-// the launch is still unscheduled or in flight, and true once the event is
-// signalled. A decode loop reads each step's token before building the next, so
-// in practice the check lands one step late and costs nothing. If it never
-// lands (a caller that discards its tokens) the stash is simply replaced by the
-// next launch and nothing is reported, which is the correct outcome for a
-// sample that was never used.
+// A launch is in flight while it is unscheduled or its event is unsignalled,
+// and landed once the event is signalled (see `stashed_launch_state`). A decode
+// loop reads each step's token before building the next, so in practice the
+// check lands one step late and costs nothing. If it never lands (a caller that
+// discards its tokens) the stash is simply replaced by the next launch and
+// nothing is reported, which is the correct outcome for a sample that was never
+// used. A launch whose command buffer failed is dropped unread: its flags were
+// never written, and its error belongs to the request that owns it.
 static void drain_pending_verification() {
     auto& pending = pending_verification();
     std::vector<std::tuple<mlx::core::array, mlx::core::array, int>> landed;
@@ -5580,9 +5621,20 @@ static void drain_pending_verification() {
         std::lock_guard<std::mutex> lock(pending.mu);
         for (size_t slot = 0; slot < PendingVerification::SLOTS; ++slot) {
             if (!pending.ok[slot].has_value() ||
-                !pending.rounds[slot].has_value() ||
-                !pending.ok[slot]->is_available() ||
-                !pending.rounds[slot]->is_available()) {
+                !pending.rounds[slot].has_value()) {
+                continue;
+            }
+            const auto ok_state = stashed_launch_state(*pending.ok[slot]);
+            const auto rounds_state = stashed_launch_state(*pending.rounds[slot]);
+            if (ok_state == StashedLaunch::Failed ||
+                rounds_state == StashedLaunch::Failed) {
+                pending.ok[slot].reset();
+                pending.rounds[slot].reset();
+                pending.cap[slot] = 0;
+                continue;
+            }
+            if (ok_state != StashedLaunch::Landed ||
+                rounds_state != StashedLaunch::Landed) {
                 continue;
             }
             landed.emplace_back(
@@ -5599,6 +5651,75 @@ static void drain_pending_verification() {
             std::get<0>(entry), std::get<1>(entry), std::get<2>(entry));
     }
     (void)unconverged;
+}
+
+// -- Test-only fixture for the Failed branch of `drain_pending_verification` --
+//
+// A real Failed launch takes an actual command-buffer error, which nothing in
+// a unit test process triggers on purpose. This hand-builds the same state
+// using only the public `Event`/`Error` API (`mlx/event.h`, `mlx/error.h`): a
+// real event, signalled through a real, successful command, with a synthetic
+// error attached AFTERWARDS so nothing has called `Error::check()` on it
+// (which would consume it) before the test does.
+namespace {
+    // Leaked like `pending_verification()` above: `Event::set_error` stores a
+    // raw pointer, so the error has to outlive every event that points at it,
+    // including one a prior stash left behind.
+    mlx::core::Error& stashed_test_error() {
+        static mlx::core::Error* error = new mlx::core::Error();
+        return *error;
+    }
+}
+
+// Test-only. Stash a launch into slot 0 of the pending-verification ring
+// whose shared event is valid, signalled, and carries an error, mirroring a
+// genuinely failed command buffer at MLX 81ba1c6a (ml-explore/mlx#3742).
+// `array::is_available()` would call `Event::check_error()` on this and
+// throw, consuming the error; `stashed_launch_state` must not.
+void sampling_dispatch_stash_failed_launch_for_test() {
+    auto stream = mlx::core::default_stream(mlx::core::default_device());
+    mlx::core::Event event(stream);
+    event.set_value(1);
+    event.signal(stream);
+    // Land the signal for real before an error is attached: `synchronize`
+    // commits and waits on it, which is safe here because nothing has stored
+    // an error on the event yet for it to `check()` and consume.
+    mlx::core::synchronize(stream);
+
+    auto& error = stashed_test_error();
+    error.set_message(std::make_shared<std::string>(
+        "mlxcel test: synthetic launch failure"));
+    event.set_error(error);
+
+    const uint32_t zero = 0;
+    mlx::core::array ok(&zero, mlx::core::Shape{1}, mlx::core::uint32);
+    mlx::core::array rounds(&zero, mlx::core::Shape{1}, mlx::core::uint32);
+    ok.set_status(mlx::core::array::Status::evaluated);
+    rounds.set_status(mlx::core::array::Status::evaluated);
+    ok.attach_event(event);
+    rounds.attach_event(event);
+
+    auto& pending = pending_verification();
+    std::lock_guard<std::mutex> lock(pending.mu);
+    pending.ok[0] = std::move(ok);
+    pending.rounds[0] = std::move(rounds);
+    pending.cap[0] = 1;
+}
+
+// Test-only. True while the error the stash above attached has not been
+// consumed, i.e. nothing called `Error::check()` on it (which
+// `Event::check_error()`, and so `array::is_available()`, would have done).
+bool sampling_dispatch_stashed_test_error_is_valid() {
+    return stashed_test_error().valid();
+}
+
+// Test-only. True once slot 0 no longer holds a stashed launch, which is what
+// dropping a Failed launch looks like from outside
+// `drain_pending_verification`.
+bool sampling_dispatch_stashed_test_slot_is_empty() {
+    auto& pending = pending_verification();
+    std::lock_guard<std::mutex> lock(pending.mu);
+    return !pending.ok[0].has_value() && !pending.rounds[0].has_value();
 }
 
 // The overflow counting rule and its report, shared by the deferred drain and

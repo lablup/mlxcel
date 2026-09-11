@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -194,7 +194,9 @@ fn resolve_block_size(text: &Value, opts: &SplitMtpOptions) -> Result<usize, Sur
     let requested = opts.block_size.unwrap_or_else(|| nextn.saturating_add(1));
     if requested > MAX_BLOCK_SIZE {
         return Err(anyhow!(
-            "split-mtp: --block-size {requested} exceeds the maximum of {MAX_BLOCK_SIZE}; the              value becomes the served verify width, and this family verifies one query row at a              time"
+            "split-mtp: --block-size {requested} exceeds the maximum of {MAX_BLOCK_SIZE}; the \
+             value becomes the served verify width, and this family verifies one query row at a \
+             time"
         )
         .into());
     }
@@ -306,8 +308,19 @@ pub fn split_mtp(
     let text = text_config(config);
     let source_layer = nextn_layer_index(config)?;
     // Resolved up front: a rejected `--block-size` should fail before the
-    // tensor work, not after it.
+    // tensor work, not after it. `--q-bits` / `--q-group-size` get the same
+    // treatment: MLX's affine quantize kernel only implements
+    // `SUPPORTED_AFFINE_BITS` / `SUPPORTED_AFFINE_GROUP_SIZES`, and a wider
+    // bounds check (`validate_quantization_params`) still runs later at the
+    // quantize call site because it is the shared load-time guard, not a
+    // producer-specific one.
     let block_size = resolve_block_size(text, opts)?;
+    if let Some(bits) = opts.q_bits {
+        mlxcel_core::layers::validate_affine_quantization_bits(bits)
+            .map_err(|e| anyhow!("split-mtp: --q-bits: {e}"))?;
+        mlxcel_core::layers::validate_affine_quantization_group_size(opts.q_group_size)
+            .map_err(|e| anyhow!("split-mtp: --q-group-size: {e}"))?;
+    }
     let geometry = KvBProjGeometry {
         num_heads: cfg_usize(text, "num_attention_heads")?,
         qk_nope_head_dim: cfg_usize(text, "qk_nope_head_dim")?,
@@ -532,23 +545,22 @@ fn index_names_nextn_layer(model_dir: &Path, layer: usize) -> Result<bool, Surge
     Ok(map.keys().any(|k| k.starts_with(&prefix)))
 }
 
-/// Split the nextn block out of `model_dir` into `output_dir`.
+/// Refuse when `output_dir` resolves to the same directory as `model_dir`.
 ///
-/// Reads `config.json`, refuses a checkpoint whose index names no nextn
-/// tensor (the community conversions), loads only the shards that hold the
-/// block, runs [`split_mtp`], writes `model.safetensors` and `config.json`,
-/// and copies the tokenizer files alongside.
-pub fn split_mtp_dir(
-    model_dir: &Path,
-    output_dir: &Path,
-    opts: &SplitMtpOptions,
-) -> Result<SplitMtpReport, SurgeryError> {
-    // Refuse an output that resolves to the source before anything is
-    // written. A sharded raw checkpoint carries no `model.safetensors`, so
-    // the CLI's overwrite guard does not fire on it, and the writes below
-    // would replace the source `config.json` with the drafter's and truncate
-    // every companion file: `std::fs::copy` on a path to itself reports
-    // `Ok(0)` after opening the destination with `O_TRUNC`.
+/// A sharded raw checkpoint carries no `model.safetensors`, so the CLI's
+/// overwrite guard (`prepare_output_dir` in the `mlxcel` binary crate) does
+/// not fire on it, and the writes [`split_mtp_dir`] performs would replace
+/// the source `config.json` with the drafter's and truncate every companion
+/// file: `std::fs::copy` on a path to itself reports `Ok(0)` after opening
+/// the destination with `O_TRUNC`. This has to run before any mutation,
+/// including the CLI's own overwrite guard, which cannot tell "the shard I'm
+/// looking at belongs to the source" from "it belongs to a stray previous
+/// output" (PR #1778 review).
+///
+/// Used by: [`split_mtp_dir`], and
+///          `crate::commands::split_mtp::run_split_mtp` (through its
+///          `preflight_checks`) in the consuming crate
+pub fn refuse_output_is_source(model_dir: &Path, output_dir: &Path) -> Result<(), SurgeryError> {
     if output_dir.exists()
         && std::fs::canonicalize(model_dir)? == std::fs::canonicalize(output_dir)?
     {
@@ -560,6 +572,21 @@ pub fn split_mtp_dir(
         )
         .into());
     }
+    Ok(())
+}
+
+/// Split the nextn block out of `model_dir` into `output_dir`.
+///
+/// Reads `config.json`, refuses a checkpoint whose index names no nextn
+/// tensor (the community conversions), loads only the shards that hold the
+/// block, runs [`split_mtp`], writes `model.safetensors` and `config.json`,
+/// and copies the tokenizer files alongside.
+pub fn split_mtp_dir(
+    model_dir: &Path,
+    output_dir: &Path,
+    opts: &SplitMtpOptions,
+) -> Result<SplitMtpReport, SurgeryError> {
+    refuse_output_is_source(model_dir, output_dir)?;
     let config_path = model_dir.join("config.json");
     let config: Value = serde_json::from_str(&std::fs::read_to_string(&config_path)?)
         .map_err(|e| anyhow!("split-mtp: parsing {}: {e}", config_path.display()))?;

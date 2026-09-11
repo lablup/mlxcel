@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -3545,10 +3545,12 @@ async fn app_state_renders_the_kimi_k3_native_chat_format_when_control_ids_are_c
 // ─── Video-to-frames fallback (issue #1322) ──────────────────────────────────
 
 use super::{
-    VideoFramesFallback, apply_video_frame_expansion, expand_video_parts_to_frames,
-    expand_video_parts_to_frames_with_allowlist, video_frames_lead_text,
+    DecodedVideoPart, VideoFramesError, VideoFramesFallback, apply_video_frame_expansion,
+    decode_video_frames_blocking, expand_video_parts_to_frames, expand_video_parts_with,
+    video_frames_lead_text,
 };
 use crate::server::state::ModelMediaSupport;
+use tokio_util::sync::CancellationToken;
 
 /// The flags a checkpoint with a vision tower and no temporal path resolves to.
 fn frames_fallback_support() -> ModelMediaSupport {
@@ -3716,6 +3718,8 @@ async fn video_expansion_skipped_for_native_video_model() {
             default_fps: 2.0,
         },
         "gemma-4-e4b-it-4bit",
+        &[],
+        &CancellationToken::new(),
     )
     .await
     .expect("a native video model is a no-op, not an error");
@@ -3739,6 +3743,8 @@ async fn video_expansion_is_a_no_op_without_video_parts() {
             default_fps: 2.0,
         },
         "gemma-3-4b-it-4bit",
+        &[],
+        &CancellationToken::new(),
     )
     .await
     .expect("a request with no clip is a no-op");
@@ -3804,6 +3810,71 @@ fn video_frame_budget_refusal_names_the_frames() {
     );
 }
 
+/// A template with no `image` content items, the shape the fallback families
+/// InternVL3, DeepSeek-VL2, FastVLM, Molmo and dots.ocr ship. The same template
+/// string is pinned in
+/// `commands::generate::tests::cli_video_fallback_renders_the_server_prompt_for_an_imageless_template`.
+const IMAGELESS_TEMPLATE: &str = "{% for message in messages %}<|{{ message['role'] }}|>\
+    {{ message['content'] }}<|end|>{% endfor %}\
+    {% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+#[tokio::test]
+async fn video_frames_render_for_an_imageless_template_is_the_flattened_turn() {
+    // Issue #1766 review. A template without image items is rendered from the
+    // typed-message path, which flattens the expanded turn with
+    // `flatten_template_text`: the two lead sentences and the question are
+    // concatenated with no separator. The CLI flattens its turn with the same
+    // helper, and the CLI test named on `IMAGELESS_TEMPLATE` pins its render to
+    // this same string, so the two fronts prefill the same prompt.
+    let processor = ChatTemplateProcessor::with_template(IMAGELESS_TEMPLATE.to_string());
+    assert!(!processor.supports_image_content());
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///clip-a.mp4"),
+        video_part("file:///clip-b.mp4"),
+        ContentPart::Text {
+            text: "What moves?".to_string(),
+        },
+    ])]);
+    apply_video_frame_expansion(
+        &mut request,
+        vec![
+            (0, 0, vec![frame_png(1), frame_png(2)]),
+            (0, 1, vec![frame_png(3), frame_png(4), frame_png(5)]),
+        ],
+    );
+
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .expect("an expanded two-clip body renders");
+
+    let lead_a = video_frames_lead_text(2);
+    let lead_b = video_frames_lead_text(3);
+    assert_eq!(
+        prepared.prompt,
+        format!("<|user|>{lead_a}{lead_b}What moves?<|end|><|assistant|>")
+    );
+}
+
+#[test]
+fn has_video_urls_agrees_with_video_urls() {
+    // `has_video_urls` answers the question `video_urls().is_empty()` asked,
+    // without cloning the parts (issue #1766).
+    let text_only = request_with_messages(vec![user_parts(vec![ContentPart::Text {
+        text: "no clip".to_string(),
+    }])]);
+    assert!(!text_only.has_video_urls());
+    assert!(text_only.video_urls().is_empty());
+
+    let with_clip = request_with_messages(vec![
+        user_parts(vec![ContentPart::Text {
+            text: "first turn".to_string(),
+        }]),
+        user_parts(vec![video_part("data:video/mp4;base64,AAAA")]),
+    ]);
+    assert!(with_clip.has_video_urls());
+    assert_eq!(with_clip.video_urls().len(), 1);
+}
+
 #[test]
 fn video_frames_lead_text_names_the_frame_count() {
     assert_eq!(
@@ -3857,10 +3928,9 @@ async fn video_part_expands_through_a_real_clip() {
         },
     ])]);
     // 4 s at 2 fps samples to 8 frames, so a cap of 4 exercises the subsample.
-    // The allowlist is injected rather than set in the environment: the env
-    // form is process-global, so a test would have to hold the crate env lock
-    // across these awaits.
-    let injected = expand_video_parts_to_frames_with_allowlist(
+    // The allowlist is passed in, exactly as the routes pass the one startup
+    // resolved into `AppState` (issue #1766).
+    let injected = expand_video_parts_to_frames(
         &mut request,
         frames_fallback_support(),
         VideoFramesFallback {
@@ -3869,6 +3939,7 @@ async fn video_part_expands_through_a_real_clip() {
         },
         "gemma-3-4b-it-4bit",
         &[dir.canonicalize().unwrap()],
+        &CancellationToken::new(),
     )
     .await;
 
@@ -3907,7 +3978,7 @@ async fn video_expansion_refuses_more_clips_than_the_image_budget_before_decodin
         .collect::<Vec<_>>();
     let mut request = request_with_messages(vec![user_parts(clips)]);
 
-    let message = expand_video_parts_to_frames_with_allowlist(
+    let refusal = expand_video_parts_to_frames(
         &mut request,
         frames_fallback_support(),
         VideoFramesFallback {
@@ -3916,9 +3987,13 @@ async fn video_expansion_refuses_more_clips_than_the_image_budget_before_decodin
         },
         "gemma-3-4b-it-4bit",
         &[],
+        &CancellationToken::new(),
     )
     .await
     .expect_err("more clips than the image budget is refused");
+    let VideoFramesError::Rejected(message) = refusal else {
+        panic!("an over-budget body is a client error, not a cancellation: {refusal:?}");
+    };
 
     assert!(
         message.contains(&format!("{} video part(s)", limit + 1))
@@ -3930,4 +4005,180 @@ async fn video_expansion_refuses_more_clips_than_the_image_budget_before_decodin
         limit + 1,
         "a refused request must be left untouched"
     );
+}
+
+// ─── Cancellable decode (issue #1766) ────────────────────────────────────────
+
+#[tokio::test]
+async fn video_expansion_cancelled_before_the_call_touches_no_clip() {
+    // A request whose client is already gone returns the cancellation before
+    // the ffmpeg probe, the resolver or the decoder runs. The clip URL points at
+    // nothing and the allowlist is empty, so reaching the resolver would report
+    // an unreadable clip instead, and on a host without ffmpeg reaching the
+    // probe would report that.
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///no/such/clip.mp4"),
+        ContentPart::Text {
+            text: "describe".to_string(),
+        },
+    ])]);
+    let before = part_kinds(&request, 0);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let result = expand_video_parts_to_frames(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 4,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+        &[],
+        &cancel,
+    )
+    .await;
+
+    assert_eq!(result, Err(VideoFramesError::Cancelled));
+    assert_eq!(
+        part_kinds(&request, 0),
+        before,
+        "a cancelled request must be left untouched"
+    );
+
+    // The check comes ahead of the budget check too, so a body that would have
+    // been refused is not answered with a 400 its departed client never reads.
+    let limit = crate::server::media::current_image_input_limits().max_images_per_request;
+    let mut over_budget = request_with_messages(vec![user_parts(
+        (0..=limit)
+            .map(|index| video_part(&format!("file:///no/such/clip-{index}.mp4")))
+            .collect(),
+    )]);
+    let result = expand_video_parts_to_frames(
+        &mut over_budget,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 4,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+        &[],
+        &cancel,
+    )
+    .await;
+    assert_eq!(result, Err(VideoFramesError::Cancelled));
+}
+
+#[tokio::test]
+async fn video_expansion_cancelled_after_the_first_clip_skips_the_second() {
+    // The token fires while the first clip is decoding. That clip's decode is
+    // allowed to finish, but the second clip must never be resolved. Without
+    // the per-clip check the loop runs to the end of the body however early
+    // the token fired.
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///clip-a.mp4"),
+        video_part("file:///clip-b.mp4"),
+        ContentPart::Text {
+            text: "compare".to_string(),
+        },
+    ])]);
+    let before = part_kinds(&request, 0);
+    let cancel = CancellationToken::new();
+    let mut decoded = Vec::new();
+
+    let result = expand_video_parts_with(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 4,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+        &cancel,
+        |video_url, _max_frames| {
+            decoded.push(video_url.url.clone());
+            // The disconnect lands while this clip is being decoded.
+            cancel.cancel();
+            std::future::ready(Ok(DecodedVideoPart {
+                frames: vec![frame_png(1), frame_png(2)],
+                sampled: 2,
+                label: video_url.url,
+            }))
+        },
+    )
+    .await;
+
+    assert_eq!(result, Err(VideoFramesError::Cancelled));
+    assert_eq!(
+        decoded,
+        vec!["file:///clip-a.mp4".to_string()],
+        "the second clip must not be resolved once the token has fired"
+    );
+    assert_eq!(
+        part_kinds(&request, 0),
+        before,
+        "a cancelled request must not be half-expanded"
+    );
+}
+
+#[tokio::test]
+async fn video_expansion_decodes_every_clip_when_not_cancelled() {
+    // Control for the test above: the same driver with a live token visits
+    // both clips and splices both, so the skip above is the token's doing.
+    let mut request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///clip-a.mp4"),
+        video_part("file:///clip-b.mp4"),
+        ContentPart::Text {
+            text: "compare".to_string(),
+        },
+    ])]);
+    let cancel = CancellationToken::new();
+    let mut decoded = Vec::new();
+
+    let injected = expand_video_parts_with(
+        &mut request,
+        frames_fallback_support(),
+        VideoFramesFallback {
+            max_frames: 4,
+            default_fps: 2.0,
+        },
+        "gemma-3-4b-it-4bit",
+        &cancel,
+        |video_url, _max_frames| {
+            decoded.push(video_url.url.clone());
+            std::future::ready(Ok(DecodedVideoPart {
+                frames: vec![frame_png(1), frame_png(2)],
+                sampled: 2,
+                label: video_url.url,
+            }))
+        },
+    )
+    .await
+    .expect("both clips expand");
+
+    assert_eq!(injected, 4);
+    assert_eq!(decoded.len(), 2);
+    let kinds = part_kinds(&request, 0);
+    assert_eq!(kinds[0], format!("text:{}", video_frames_lead_text(2)));
+    assert_eq!(kinds[3], format!("text:{}", video_frames_lead_text(2)));
+    assert_eq!(kinds[6], "text:compare");
+}
+
+#[test]
+fn queued_video_decode_returns_without_decoding_once_cancelled() {
+    // The blocking task is where the cost is, and dropping its `JoinHandle`
+    // does not cancel it: a decode queued behind other blocking work starts
+    // whenever the pool gets to it. It has to check the token itself. The
+    // source is a path that does not exist, so a decode that ran would fail
+    // (on a missing ffmpeg or on the missing file) instead of returning `None`.
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let source = crate::multimodal::video::VideoSource::from_path(std::path::PathBuf::from(
+        "/no/such/clip.mp4",
+    ));
+
+    let decoded = decode_video_frames_blocking(&source, 2.0, 4, &cancel)
+        .expect("a cancelled decode returns before touching ffmpeg");
+
+    assert!(decoded.is_none());
 }

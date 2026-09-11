@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1372,6 +1372,45 @@ fn cap_overflow_is_detected_without_waiting_on_the_production_path() {
             .iter()
             .any(|l| l.contains("exhausted the round cap on an earlier launch")),
         "the deferred overflow was counted but not announced: {lines:?}"
+    );
+}
+
+/// A launch whose command buffer failed must be dropped by the deferred
+/// drain without the drain throwing or consuming the launch's own error.
+///
+/// This does not go through the rejection kernel at all, unlike every other
+/// test in this file: it stashes a launch whose shared event is valid,
+/// signalled, and carries an error, using only core MLX `Event`/`Error`
+/// primitives (see `sampling_dispatch_stash_failed_launch_for_test` in
+/// `mlx_cxx_bridge.cpp`), which needs no GPU JIT support. Since MLX 81ba1c6a
+/// (ml-explore/mlx#3742), `array::is_available()` detaches an evaluated
+/// array's event through `Event::check_error()`, which throws and CLEARS the
+/// error while doing so. Called on a slot the drain does not own, that would
+/// both terminate the process (a throw across a non-`Result` cxx bridge
+/// function) and consume the error the owning request's own eval exists to
+/// report. `drain_pending_verification` reads status, the event's signal and
+/// its error pointer instead, so it must do neither.
+#[test]
+fn a_failed_stashed_launch_is_dropped_without_throwing_or_consuming_its_error() {
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
+
+    sampling_dispatch_stash_failed_launch_for_test();
+    assert!(
+        sampling_dispatch_stashed_test_error_is_valid(),
+        "the fixture's own error was not valid before the drain ran"
+    );
+
+    // Must not throw (which would abort the whole test process rather than
+    // fail this test by name) and must not consume the error.
+    sampling_dispatch_drain_pending();
+
+    assert!(
+        sampling_dispatch_stashed_test_error_is_valid(),
+        "drain_pending_verification consumed the error of a launch it does not own"
+    );
+    assert!(
+        sampling_dispatch_stashed_test_slot_is_empty(),
+        "drain_pending_verification did not drop the Failed slot"
     );
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -506,6 +506,11 @@ fn link_cuda() {
     println!("cargo:rustc-link-lib=dylib=cublas");
     println!("cargo:rustc-link-lib=dylib=cublasLt");
     println!("cargo:rustc-link-lib=dylib=cufft");
+    // cuSOLVER, since MLX 81ba1c6a: ml-explore/mlx#4208 moved Cholesky onto it
+    // and `gpu::init()` now creates its handle cache on every CUDA start, so a
+    // link without it fails on `cusolverDnCreate`. MLX's own CMake links it
+    // PRIVATE, which cargo never sees, so it has to be named here like the rest.
+    println!("cargo:rustc-link-lib=dylib=cusolver");
 
     // CUDA driver API (cuLaunchKernel, cuModuleLoad, etc.)
     println!("cargo:rustc-link-lib=dylib=cuda");

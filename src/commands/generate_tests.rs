@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,15 +15,16 @@
 #[cfg(feature = "xla-backend")]
 use super::decode_xla_cli_images;
 use super::{
-    CliSamplingFlagState, apply_user_chat_template, apply_vlm_chat_template,
-    build_cli_sampling_config_with_flags, cli_pipeline_requested, cli_video_content_part_count,
-    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
-    memory_preflight_ctx_len, reject_dflash_drafter_offline, resolve_cli_pipeline_assignments,
-    resolve_cli_prompt, should_route_offline_mtp, strip_trailing_eos,
-    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
-    validate_tensor_parallel_args, validate_xla_cli_image_cardinality, validate_xla_output_audio,
+    CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames,
+    apply_user_chat_template, apply_vlm_chat_template, build_cli_sampling_config_with_flags,
+    cli_pipeline_requested, cli_video_content_part_count, estimate_delta_label_and_bytes,
+    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
+    reject_dflash_drafter_offline, resolve_cli_pipeline_assignments, resolve_cli_prompt,
+    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
+    validate_pipeline_parallel_args, validate_tensor_parallel_args,
+    validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
-use mlxcel::server::chat_template::ChatTemplateProcessor;
+use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::drafter::DrafterKind;
 use std::fs;
@@ -271,6 +272,17 @@ fn memory_preflight_ctx_len_includes_prompt_and_generation_budget() {
     assert_eq!(memory_preflight_ctx_len(0, 0), 1);
 }
 
+/// A user turn carrying `images` of the caller's own images, `videos` native
+/// `<|video|>` parts and `audios` audio clips, with no fallback frames.
+fn media(images: usize, videos: usize, audios: usize) -> CliPromptMedia {
+    CliPromptMedia {
+        images,
+        videos,
+        audios,
+        ..CliPromptMedia::default()
+    }
+}
+
 #[test]
 fn apply_user_chat_template_wraps_prompt_as_user_message() {
     let processor = ChatTemplateProcessor::with_template(
@@ -286,7 +298,7 @@ fn apply_user_chat_template_wraps_prompt_as_user_message() {
 fn resolve_cli_prompt_skips_template_when_disabled() {
     let processor = ChatTemplateProcessor::with_template("wrapped".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), 0, 0, 0).unwrap();
+    let prompt = resolve_cli_prompt("Hello", true, Some(&processor), &media(0, 0, 0)).unwrap();
 
     assert_eq!(prompt, "Hello");
 }
@@ -295,7 +307,7 @@ fn resolve_cli_prompt_skips_template_when_disabled() {
 fn resolve_cli_prompt_falls_back_on_template_errors() {
     let processor = ChatTemplateProcessor::with_template("{% if %}".to_string());
 
-    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0).unwrap();
+    let prompt = resolve_cli_prompt("Hello", false, Some(&processor), &media(0, 0, 0)).unwrap();
 
     assert_eq!(prompt, "Hello");
 }
@@ -307,7 +319,7 @@ fn resolve_cli_prompt_returns_template_rejections() {
             .to_string(),
     );
 
-    let err = resolve_cli_prompt("bad", false, Some(&processor), 0, 0, 0)
+    let err = resolve_cli_prompt("bad", false, Some(&processor), &media(0, 0, 0))
         .expect_err("template rejection must stop CLI prompt resolution");
 
     assert_eq!(
@@ -331,11 +343,12 @@ fn vlm_chat_template_renders_video_content_part_in_user_turn() {
     let processor = ChatTemplateProcessor::with_template(template);
 
     // One video + the question: marker precedes the text within the turn.
-    let prompt = apply_vlm_chat_template(&processor, "Describe this video.", 0, 1, 0).unwrap();
+    let prompt =
+        apply_vlm_chat_template(&processor, "Describe this video.", &media(0, 1, 0)).unwrap();
     assert_eq!(prompt, "user: <VID>Describe this video.");
 
     // Image + video together render in image-then-video order.
-    let mixed = apply_vlm_chat_template(&processor, "Q", 1, 1, 0).unwrap();
+    let mixed = apply_vlm_chat_template(&processor, "Q", &media(1, 1, 0)).unwrap();
     assert_eq!(mixed, "user: <IMG><VID>Q");
 }
 
@@ -368,7 +381,7 @@ fn vlm_chat_template_omits_video_when_template_lacks_video_support() {
     assert!(!processor.supports_video_content());
 
     // num_videos > 0 but the template has no video branch: no marker emitted.
-    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 1, 0).unwrap();
+    let prompt = apply_vlm_chat_template(&processor, "Q", &media(0, 1, 0)).unwrap();
     assert_eq!(prompt, "user: Q");
 }
 
@@ -393,11 +406,13 @@ fn vlm_chat_template_renders_audio_content_part_in_user_turn() {
     // One audio clip + the question: the audio marker follows the text within
     // the user turn, so `expand_gemma4_audio_tokens` wraps it right after the
     // prompt, matching the server splice and the reference frame.
-    let prompt = apply_vlm_chat_template(&processor, "Transcribe this audio.", 0, 0, 1).unwrap();
+    let prompt =
+        apply_vlm_chat_template(&processor, "Transcribe this audio.", &media(0, 0, 1)).unwrap();
     assert_eq!(prompt, "user: Transcribe this audio.<|audio|>");
 
     // Image + audio together render as image (before text) then text then audio.
-    let mixed = apply_vlm_chat_template(&processor, "Transcribe this audio.", 1, 0, 1).unwrap();
+    let mixed =
+        apply_vlm_chat_template(&processor, "Transcribe this audio.", &media(1, 0, 1)).unwrap();
     assert_eq!(mixed, "user: <IMG>Transcribe this audio.<|audio|>");
 }
 
@@ -414,7 +429,7 @@ fn vlm_chat_template_omits_audio_when_template_lacks_audio_support() {
     assert!(!processor.supports_audio_content());
 
     // num_audios > 0 but the template has no audio branch: no marker emitted.
-    let prompt = apply_vlm_chat_template(&processor, "Q", 0, 0, 1).unwrap();
+    let prompt = apply_vlm_chat_template(&processor, "Q", &media(0, 0, 1)).unwrap();
     assert_eq!(prompt, "user: Q");
 }
 
@@ -435,7 +450,8 @@ fn resolve_cli_prompt_routes_audio_through_vlm_template() {
 
     // Audio follows the text within the user turn (issue #797), matching the
     // reference frame and the server audio-after-text splice.
-    let prompt = resolve_cli_prompt("Transcribe.", false, Some(&processor), 0, 0, 1).unwrap();
+    let prompt =
+        resolve_cli_prompt("Transcribe.", false, Some(&processor), &media(0, 0, 1)).unwrap();
     assert_eq!(prompt, "user: Transcribe.<|audio|>");
 }
 
@@ -450,8 +466,9 @@ fn resolve_cli_prompt_keeps_text_path_for_audio_on_plain_template() {
     );
     assert!(!processor.supports_audio_content());
 
-    let with_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 1).unwrap();
-    let without_audio = resolve_cli_prompt("Hello", false, Some(&processor), 0, 0, 0).unwrap();
+    let with_audio = resolve_cli_prompt("Hello", false, Some(&processor), &media(0, 0, 1)).unwrap();
+    let without_audio =
+        resolve_cli_prompt("Hello", false, Some(&processor), &media(0, 0, 0)).unwrap();
     assert_eq!(with_audio, without_audio);
     assert_eq!(with_audio, "user: Hello");
 }
@@ -497,7 +514,7 @@ fn gemma4_unified_audio_prompt_matches_reference_framing() {
     assert!(processor.supports_audio_content());
 
     const PROMPT: &str = "이 음성을 들리는 그대로 한국어로 받아쓰기 하세요.";
-    let prompt = apply_vlm_chat_template(&processor, PROMPT, 0, 0, 1).unwrap();
+    let prompt = apply_vlm_chat_template(&processor, PROMPT, &media(0, 0, 1)).unwrap();
 
     // The audio marker lands AFTER the prompt text (issue #797).
     let text_pos = prompt.find("받아쓰기").expect("prompt text present");
@@ -1086,8 +1103,9 @@ fn cli_video_fallback_declines_native_and_text_only_checkpoints() {
 
 /// `#[ignore]` for the reason `multimodal::video_tests` documents: an early
 /// return on a host without ffmpeg counts as a pass, so the skip has to be the
-/// kind that reaches the summary line. Run with
-/// `cargo test --features metal,accelerate --lib commands::generate -- --ignored`.
+/// kind that reaches the summary line. These tests live in the binary crate,
+/// so run them with
+/// `cargo test --features metal,accelerate --bin mlxcel commands::generate -- --ignored`.
 #[test]
 #[ignore = "needs ffmpeg 5.0+ on PATH"]
 fn cli_video_fallback_appends_frame_images_and_clears_video() {
@@ -1127,12 +1145,14 @@ fn cli_video_fallback_appends_frame_images_and_clears_video() {
             .expect("the fallback decodes the clip")
             .expect("an image-only VLM must take the fallback");
 
-    assert_eq!(expansion.frame_paths.len(), 4);
+    assert_eq!(expansion.clips.len(), 1);
+    let clip_frames = &expansion.clips[0];
+    assert_eq!(clip_frames.frame_paths.len(), 4);
     assert_eq!(
-        expansion.lead_text,
+        clip_frames.lead_text,
         "Here is a video as a sequence of 4 frames in chronological order."
     );
-    for path in &expansion.frame_paths {
+    for path in &clip_frames.frame_paths {
         let bytes = fs::read(path).expect("each frame was written to disk");
         assert_eq!(
             &bytes[..8],
@@ -1141,21 +1161,255 @@ fn cli_video_fallback_appends_frame_images_and_clears_video() {
             path.display()
         );
     }
+    let first = clip_frames.frame_paths[0].clone();
 
     // What `run_generate_once` then does with it: the frames join `--image` and
     // the video list empties, so `compute_vlm_embeddings` never sees a video.
     let mut images: Vec<PathBuf> = vec![PathBuf::from("user-own.png")];
     let mut videos: Vec<PathBuf> = vec![clip.clone()];
-    images.extend(expansion.frame_paths.iter().cloned());
-    videos.clear();
+    let (groups, frame_dir) = expansion.splice_into(&mut images, &mut videos);
     assert_eq!(images.len(), 5);
     assert!(videos.is_empty());
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].frames, 4);
 
-    // The guards unlink the PNGs when the run ends.
-    let first = expansion.frame_paths[0].clone();
-    drop(expansion);
+    // The directory guard removes the PNGs when the run ends.
+    assert!(first.exists(), "splicing must not release the frames early");
+    drop(frame_dir);
     assert!(
         !first.exists(),
         "the frame temp files must not outlive the run"
     );
+}
+
+/// A PNG-shaped payload. `CliVideoFrames` writes bytes and never decodes
+/// them, so the tests below need no ffmpeg and no image encoder.
+fn fake_png(tag: u8) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.push(tag);
+    bytes
+}
+
+/// A Gemma-3-shaped template reduced to what matters here: image items render
+/// as `<IMG>`, text items render bracketed so each one's extent is visible.
+fn bracketed_text_image_template() -> ChatTemplateProcessor {
+    ChatTemplateProcessor::with_template(
+        "user: {% for item in messages[0]['content'] %}\
+         {% if item['type'] == 'image' %}<IMG>\
+         {% elif item['type'] == 'text' %}[{{ item['text'] }}]\
+         {% endif %}{% endfor %}"
+            .to_string(),
+    )
+}
+
+#[test]
+fn cli_video_fallback_leads_each_clip_with_its_own_frame_count() {
+    // Issue #1766. Two `--video` clips used to reach the model as one undivided
+    // run of frames announced by a single sentence naming their summed count,
+    // rendered after every frame. The server sends the same two clips as two
+    // runs, each preceded by its own sentence. The CLI now does the same.
+    let mut expansion = CliVideoFrames::create().expect("the private frame directory is created");
+    expansion
+        .push_clip(&[fake_png(1), fake_png(2)])
+        .expect("clip A is written");
+    expansion
+        .push_clip(&[fake_png(3), fake_png(4), fake_png(5)])
+        .expect("clip B is written");
+
+    let lead_a = "Here is a video as a sequence of 2 frames in chronological order.";
+    let lead_b = "Here is a video as a sequence of 3 frames in chronological order.";
+    assert_eq!(expansion.clips.len(), 2, "one entry per clip");
+    assert_eq!(expansion.clips[0].lead_text, lead_a);
+    assert_eq!(expansion.clips[1].lead_text, lead_b);
+
+    let clip_a_frames = expansion.clips[0].frame_paths.clone();
+    let clip_b_frames = expansion.clips[1].frame_paths.clone();
+    let mut images: Vec<PathBuf> = vec![PathBuf::from("user-own.png")];
+    let mut videos: Vec<PathBuf> = vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")];
+    let explicit_images = images.len();
+    let (groups, _frame_dir) = expansion.splice_into(&mut images, &mut videos);
+
+    // The vision tower reads the files in this order ...
+    let mut expected_images = vec![PathBuf::from("user-own.png")];
+    expected_images.extend(clip_a_frames);
+    expected_images.extend(clip_b_frames);
+    assert_eq!(images, expected_images);
+    assert!(videos.is_empty());
+    assert_eq!(
+        groups,
+        vec![
+            CliVideoFrameGroup {
+                lead_text: lead_a.to_string(),
+                frames: 2,
+            },
+            CliVideoFrameGroup {
+                lead_text: lead_b.to_string(),
+                frames: 3,
+            },
+        ]
+    );
+
+    // ... and the prompt announces each clip right before its own frames, in
+    // that same order, with the question last.
+    let prompt = resolve_cli_prompt(
+        "What moves?",
+        false,
+        Some(&bracketed_text_image_template()),
+        &CliPromptMedia {
+            images: explicit_images,
+            video_frame_groups: groups,
+            ..CliPromptMedia::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prompt,
+        format!("user: <IMG>[{lead_a}]<IMG><IMG>[{lead_b}]<IMG><IMG><IMG>[What moves?]")
+    );
+}
+
+#[test]
+fn cli_video_fallback_keeps_the_lead_sentences_without_a_content_list() {
+    // With no chat template there is no content list to interleave, so the
+    // sentences go ahead of the text, one per clip, instead of being dropped.
+    // They are flattened the way the server flattens a turn for a template
+    // without image items, with no separator (issue #1766).
+    let groups = vec![
+        CliVideoFrameGroup {
+            lead_text: "A".to_string(),
+            frames: 2,
+        },
+        CliVideoFrameGroup {
+            lead_text: "B".to_string(),
+            frames: 1,
+        },
+    ];
+    let media = CliPromptMedia {
+        video_frame_groups: groups,
+        ..CliPromptMedia::default()
+    };
+    let prompt = resolve_cli_prompt("Q", true, None, &media).unwrap();
+    assert_eq!(prompt, "ABQ");
+}
+
+/// A template with no `image` content items, the shape the fallback families
+/// InternVL3, DeepSeek-VL2, FastVLM, Molmo and dots.ocr ship. The server
+/// renders such a template from its typed-message path, which flattens each
+/// turn with `flatten_template_text`. The same template string is pinned in
+/// `server::chat_request::tests::video_frames_render_for_an_imageless_template_is_the_flattened_turn`.
+const IMAGELESS_TEMPLATE: &str = "{% for message in messages %}<|{{ message['role'] }}|>\
+    {{ message['content'] }}<|end|>{% endfor %}\
+    {% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+#[test]
+fn cli_video_fallback_renders_the_server_prompt_for_an_imageless_template() {
+    // Issue #1766 review: for a template without image items the CLI used to
+    // join two clips' sentences and the question with `\n\n` while the server
+    // concatenates them, so the two fronts prefilled different prompts for the
+    // same two clips.
+    let processor = ChatTemplateProcessor::with_template(IMAGELESS_TEMPLATE.to_string());
+    assert!(!processor.supports_image_content());
+    let lead_a = mlxcel::video::video_frames_lead_text(2);
+    let lead_b = mlxcel::video::video_frames_lead_text(3);
+
+    let cli = resolve_cli_prompt(
+        "What moves?",
+        false,
+        Some(&processor),
+        &CliPromptMedia {
+            video_frame_groups: vec![
+                CliVideoFrameGroup {
+                    lead_text: lead_a.clone(),
+                    frames: 2,
+                },
+                CliVideoFrameGroup {
+                    lead_text: lead_b.clone(),
+                    frames: 3,
+                },
+            ],
+            ..CliPromptMedia::default()
+        },
+    )
+    .unwrap();
+
+    // The server's side: the turn `apply_video_frame_expansion` makes of a
+    // body carrying the two clips ahead of the question, flattened by the
+    // helper the typed-message render uses and rendered as one user message.
+    // The server test named on `IMAGELESS_TEMPLATE` renders the same body
+    // through `prepare_chat_request` and pins the same string.
+    let server_turn = serde_json::json!([
+        {"type": "text", "text": lead_a},
+        {"type": "image"},
+        {"type": "image"},
+        {"type": "text", "text": lead_b},
+        {"type": "image"},
+        {"type": "image"},
+        {"type": "image"},
+        {"type": "text", "text": "What moves?"},
+    ]);
+    let server = processor
+        .apply(
+            &[ChatMessage {
+                role: "user".to_string(),
+                content: flatten_template_text(&server_turn),
+            }],
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(cli, server);
+    assert_eq!(
+        cli,
+        format!("<|user|>{lead_a}{lead_b}What moves?<|end|><|assistant|>")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_video_frames_are_private_and_removed_with_the_run() {
+    // Issue #1766: the frames of a private clip used to land in the shared
+    // temp directory at the default file mode (0644 minus umask), readable by
+    // any local user for the life of the run.
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut expansion = CliVideoFrames::create().expect("the private frame directory is created");
+    expansion
+        .push_clip(&[fake_png(1), fake_png(2)])
+        .expect("clip A is written");
+    expansion
+        .push_clip(&[fake_png(3)])
+        .expect("clip B is written");
+
+    let frames: Vec<PathBuf> = expansion
+        .clips
+        .iter()
+        .flat_map(|clip| clip.frame_paths.iter().cloned())
+        .collect();
+    assert_eq!(frames.len(), 3);
+    let dir = frames[0]
+        .parent()
+        .expect("a frame sits in a directory")
+        .to_path_buf();
+    assert_ne!(
+        dir,
+        std::env::temp_dir(),
+        "frames must go into a per-run directory, not the shared temp directory"
+    );
+    let dir_mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o700, "the frame directory is mode {dir_mode:o}");
+    for frame in &frames {
+        assert_eq!(frame.parent(), Some(dir.as_path()));
+        let mode = fs::metadata(frame).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} is mode {mode:o}", frame.display());
+    }
+
+    // Splicing hands the directory guard to the run, which keeps it until the
+    // vision tower has read the files; dropping it removes both layers.
+    let (_groups, frame_dir) = expansion.splice_into(&mut Vec::new(), &mut Vec::new());
+    assert!(dir.exists(), "splicing must not release the frames early");
+    drop(frame_dir);
+    for frame in &frames {
+        assert!(!frame.exists(), "{} outlived the run", frame.display());
+    }
+    assert!(!dir.exists(), "the frame directory outlived the run");
 }

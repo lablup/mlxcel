@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -167,6 +167,68 @@ fn declares_iquest_coder_architecture(config: &Value) -> bool {
                 .iter()
                 .any(|entry| entry.as_str() == Some(IQUEST_CODER_ARCHITECTURE))
         })
+}
+
+/// `architectures[0]` of the IQuest-Coder Loop causal-LM checkpoints.
+const IQUEST_LOOP_CODER_ARCHITECTURE: &str = "IQuestLoopCoderForCausalLM";
+
+/// Whether a config declares the IQuest-Coder **Loop** architecture regardless
+/// of the `model_type` it carries.
+///
+/// Same relabelling practice as [`declares_iquest_coder_architecture`], but a
+/// worse failure if it goes unnoticed: the Loop decoder runs its layer stack
+/// twice and mixes each pass-2 layer's attention through a per-head gate, so a
+/// Loop checkpoint that reached the plain Llama route would run half the
+/// computation and never read a single `model.gate_projections.*` tensor. The
+/// output would still be fluent, which is exactly why this has to be refused at
+/// detection rather than discovered later.
+fn declares_iquest_loop_coder_architecture(config: &Value) -> bool {
+    config
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.as_str() == Some(IQUEST_LOOP_CODER_ARCHITECTURE))
+        })
+}
+
+/// Classify an `iquestloopcoder` config, refusing a `loop_num` this decoder
+/// does not implement.
+///
+/// `loop_num` decides how many times the layer stack is run and therefore how
+/// many cache sets each layer owns. `crate::models::iquestloopcoder` implements
+/// exactly two, which is what every published checkpoint declares; anything
+/// else would need a third cache set per layer and a second gate application.
+/// Refusing here rather than at `from_weights` keeps a 20+ GB read from
+/// happening first.
+///
+/// Written against JSON *presence* rather than JSON type, for the same reason
+/// [`iquest_coder_model_type`] is: the vendor config compares the value
+/// directly, so a `loop_num` written as `3.0` or `"3"` is just as live as `3`,
+/// and reading it through `as_u64` alone would answer `None` and let it through
+/// as the default 2.
+fn iquest_loop_coder_model_type(config: &Value) -> Result<ModelType> {
+    let loop_num = match config.get("loop_num") {
+        // Absent or explicitly null: the vendor config class defaults to 2.
+        None | Some(Value::Null) => 2,
+        Some(value) => value.as_u64().ok_or_else(|| {
+            anyhow::anyhow!(
+                "IQuest-Coder Loop checkpoint declares loop_num = {value}, which is not a whole \
+                 number. mlxcel implements loop_num 2 only and cannot tell whether this \
+                 checkpoint asks for it, so it refuses rather than guessing."
+            )
+        })?,
+    };
+    if loop_num != 2 {
+        return Err(anyhow::anyhow!(
+            "IQuest-Coder Loop checkpoint declares loop_num = {loop_num}. mlxcel implements the \
+             two-pass loop only: each layer owns one full KV cache for pass 1 and one rotating \
+             cache for pass 2, and a third pass would need a third set. Only loop_num 2 is \
+             supported."
+        ));
+    }
+    Ok(ModelType::IQuestLoopCoder)
 }
 
 fn gemma4_has_vision_weights(model_path: &Path) -> bool {
@@ -605,11 +667,20 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // it loadable by a stack that will not run its `auto_map` code) routes
         // to the same decoder either way, but it has to pass the same config
         // guards; see `declares_iquest_coder_architecture`.
+        // The IQuest-Coder Loop architecture string beats every `model_type`
+        // spelling, not just `llama`. Guarding only the `llama` relabel left the
+        // likelier mistake open: `"model_type": "iquestcoder"` with
+        // `IQuestLoopCoderForCausalLM` fell through to the `iquestcoder` arm
+        // below, which routes to the shared Llama decoder and would run the
+        // stack once instead of twice, never reading a `gate_projections`
+        // tensor. That output is fluent, so it has to be refused here.
+        _ if declares_iquest_loop_coder_architecture(&v) => iquest_loop_coder_model_type(&v),
         "llama" | "mistral" if declares_iquest_coder_architecture(&v) => {
             iquest_coder_model_type(&v)
         }
         "llama" | "mistral" => Ok(ModelType::Llama),
         "iquestcoder" => iquest_coder_model_type(&v),
+        "iquestloopcoder" => iquest_loop_coder_model_type(&v),
         "llama4" => Ok(detect_text_or_vlm(
             &v,
             ModelType::Llama4,

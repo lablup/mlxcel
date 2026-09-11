@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -215,7 +215,7 @@ impl Qwen35MtpDraftModel {
         // the DFlash drafter loader. The published drafter is bf16; the
         // paired 4-bit target's activations are f16, and a dtype-mixed
         // concat/matmul would silently promote to f32.
-        crate::drafter::dflash::drafter::convert_bf16_to_f16_non_quantized(&mut weights);
+        crate::drafter::dflash::drafter::apply_drafter_load_dtype_policy(&mut weights);
         Self::from_weights(&weights, config)
     }
 

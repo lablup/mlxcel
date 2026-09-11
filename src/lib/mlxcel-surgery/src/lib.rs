@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ pub use config::{
 pub use error::SurgeryError;
 pub use ops::{
     AddOp, InterpolateOp, PruneOp, PruneSelector, ReplaceOp, ScaleOp, SplitMtpOptions,
-    SplitMtpReport, SplitMtpResult, split_mtp, split_mtp_dir,
+    SplitMtpReport, SplitMtpResult, refuse_output_is_source, split_mtp, split_mtp_dir,
 };
 pub use pipeline::SurgeryPipeline;
 

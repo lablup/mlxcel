@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -979,6 +979,11 @@ fn build_model_app(
         batch_observability.clone(),
     )?;
     let media_support = super::startup::detect_model_media_support(model_path);
+    // This runs on the blocking pool (see the `spawn_blocking` in the loader),
+    // so the allowlist canonicalization, its writable-directory warning and
+    // the ffmpeg probe happen here once per model load rather than on a
+    // request's Tokio worker (issue #1766).
+    let video_dir_allowlist = super::startup::resolve_video_request_inputs(media_support);
     let state = AppState::with_observability(
         Arc::new(provider),
         config,
@@ -988,7 +993,8 @@ fn build_model_app(
         batch_metrics,
         batch_observability,
     )
-    .with_media_support(media_support);
+    .with_media_support(media_support)
+    .with_video_dir_allowlist(video_dir_allowlist);
     let router = super::app::create_app_without_cors(state.clone());
     Ok((state, router))
 }

@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -922,6 +922,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
     match model_type {
         ModelType::Llama => "llama",
         ModelType::IQuestCoder => "iquest_coder",
+        ModelType::IQuestLoopCoder => "iquest_loop_coder",
         ModelType::Llama4 => "llama4",
         ModelType::Llama4VLM => "llama4_vlm",
         ModelType::MllamaVLM => "mllama_vlm",

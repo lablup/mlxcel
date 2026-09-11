@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1821,4 +1821,158 @@ fn got_model_type_is_detected_for_both_released_layouts() {
 
         fs::remove_dir_all(model_dir).unwrap();
     }
+}
+
+// IQuest-Coder Loop (`iquestloopcoder`).
+
+/// The published IQuest-Coder Loop config, verbatim apart from the keys
+/// detection never reads. `num_hidden_layers` is the real 80.
+fn iquest_loop_coder_config() -> serde_json::Value {
+    json!({
+        "architectures": ["IQuestLoopCoderForCausalLM"],
+        "model_type": "iquestloopcoder",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "eos_token_id": [2, 75864, 75869],
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "intermediate_size": 27648,
+        "loop_num": 2,
+        "loop_window_size": 64,
+        "max_position_embeddings": 131072,
+        "mlp_bias": false,
+        "num_attention_heads": 40,
+        "num_hidden_layers": 80,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-05,
+        "rope_theta": 500000.0,
+        "tie_word_embeddings": false,
+        "vocab_size": 76800
+    })
+}
+
+fn detect_iquest_loop_coder(name: &str, config: serde_json::Value) -> anyhow::Result<ModelType> {
+    let model_dir = temp_path(name);
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), config.to_string()).unwrap();
+    let detected = super::detection::get_model_type(&model_dir);
+    fs::remove_dir_all(model_dir).unwrap();
+    detected
+}
+
+#[test]
+fn iquestloopcoder_model_type_is_detected() {
+    assert_eq!(
+        detect_iquest_loop_coder("iquestloopcoder", iquest_loop_coder_config()).unwrap(),
+        ModelType::IQuestLoopCoder
+    );
+}
+
+#[test]
+fn iquestloopcoder_is_not_confused_with_iquestcoder() {
+    // The two architecture strings differ only by an infix, and the two routes
+    // are entirely different decoders, so an equality test rather than a
+    // substring test is what keeps them apart.
+    assert_eq!(
+        detect_iquest_loop_coder("iquestloopcoder_distinct", iquest_loop_coder_config()).unwrap(),
+        ModelType::IQuestLoopCoder
+    );
+    assert_eq!(
+        detect_iquest_coder("iquestcoder_distinct", iquest_coder_config()).unwrap(),
+        ModelType::IQuestCoder
+    );
+}
+
+#[test]
+fn iquestloopcoder_relabelled_llama_still_routes_to_the_loop_decoder() {
+    // Relabelling to `llama` is how this family is made loadable by stacks that
+    // will not run its `auto_map` code. Falling through to the plain Llama arm
+    // would run the stack once instead of twice and never read a single
+    // `gate_projections` tensor, which still produces fluent output.
+    let mut config = iquest_loop_coder_config();
+    config["model_type"] = json!("llama");
+    assert_eq!(
+        detect_iquest_loop_coder("iquestloopcoder_relabelled", config).unwrap(),
+        ModelType::IQuestLoopCoder
+    );
+}
+
+#[test]
+fn iquestloopcoder_with_an_unsupported_loop_num_is_refused_at_load() {
+    for loop_num in [1, 3, 4] {
+        let mut config = iquest_loop_coder_config();
+        config["loop_num"] = json!(loop_num);
+        let error = detect_iquest_loop_coder("iquestloopcoder_loop_num", config).unwrap_err();
+        assert!(
+            error.to_string().contains("loop_num"),
+            "unexpected error for loop_num {loop_num}: {error}"
+        );
+    }
+}
+
+#[test]
+fn iquestloopcoder_with_an_unreadable_loop_num_is_refused_at_load() {
+    // Fail closed: a `loop_num` this guard cannot read must not be treated as
+    // the default 2. Presence, not JSON type, is what decides.
+    for spelling in [json!("3"), json!(3.5), json!(true)] {
+        let mut config = iquest_loop_coder_config();
+        config["loop_num"] = spelling.clone();
+        let error = detect_iquest_loop_coder("iquestloopcoder_loop_num_type", config).unwrap_err();
+        assert!(
+            error.to_string().contains("loop_num"),
+            "unexpected error for loop_num {spelling}: {error}"
+        );
+    }
+}
+
+#[test]
+fn iquestloopcoder_without_loop_num_takes_the_vendor_default() {
+    // The vendor config class defaults `loop_num` to 2, so an omitted key must
+    // load rather than being refused.
+    let mut config = iquest_loop_coder_config();
+    config.as_object_mut().unwrap().remove("loop_num");
+    assert_eq!(
+        detect_iquest_loop_coder("iquestloopcoder_no_loop_num", config).unwrap(),
+        ModelType::IQuestLoopCoder
+    );
+}
+
+#[test]
+fn iquestloopcoder_architecture_beats_an_iquestcoder_model_type() {
+    // The likelier relabel than `llama`: someone marks the Loop checkpoint as
+    // its non-loop sibling. That arm routes to the shared Llama decoder, which
+    // would run the 80-layer stack once instead of twice and never read a
+    // `gate_projections` tensor, so the architecture string has to win.
+    let mut config = iquest_loop_coder_config();
+    config["model_type"] = json!("iquestcoder");
+    assert_eq!(
+        detect_iquest_loop_coder("iquestloopcoder_as_iquestcoder", config).unwrap(),
+        ModelType::IQuestLoopCoder
+    );
+}
+
+#[test]
+fn iquestloopcoder_architecture_beats_any_model_type_spelling() {
+    for spelling in ["mistral", "qwen2", "iquest_loop_coder", "something-else"] {
+        let mut config = iquest_loop_coder_config();
+        config["model_type"] = json!(spelling);
+        assert_eq!(
+            detect_iquest_loop_coder("iquestloopcoder_spelling", config).unwrap(),
+            ModelType::IQuestLoopCoder,
+            "model_type {spelling:?} must not outrank the Loop architecture string"
+        );
+    }
+}
+
+#[test]
+fn iquestcoder_architecture_is_untouched_by_the_loop_guard() {
+    // The sibling must keep routing to its own decoder; the two architecture
+    // strings differ only by an infix and are compared for exact equality.
+    let mut config = iquest_coder_config();
+    config["model_type"] = json!("llama");
+    assert_eq!(
+        detect_iquest_coder("iquestcoder_as_llama", config).unwrap(),
+        ModelType::IQuestCoder
+    );
 }

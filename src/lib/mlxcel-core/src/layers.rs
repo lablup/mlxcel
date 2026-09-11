@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1184,8 +1184,9 @@ impl Linear {
 /// by mlx-lm/mlx-vlm, which emits per-path bit overrides in `config.quantization`
 /// (e.g. Qwen3.5/3.6 MoE router gates).
 ///
-/// Returns an error only when the inferred bits are not a valid MLX bit width
-/// `{2, 3, 4, 5, 6, 8}` — in that case `group_size` itself is likely wrong.
+/// Returns an error only when the inferred bits are not in
+/// [`SUPPORTED_AFFINE_BITS`] — in that case `group_size` itself is likely
+/// wrong.
 fn infer_quantization_bits(
     weight_shape: &[i32],
     scales_shape: &[i32],
@@ -1224,11 +1225,16 @@ fn infer_quantization_bits(
     if inferred_bits == caller_bits {
         return Ok(caller_bits);
     }
-    if ![2, 3, 4, 5, 6, 8].contains(&inferred_bits) {
+    if !SUPPORTED_AFFINE_BITS.contains(&inferred_bits) {
+        let accepted = SUPPORTED_AFFINE_BITS
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         return Err(format!(
-            "Quantized weight shape inconsistency: inferred bits={} not in {{2,3,4,5,6,8}}; \
+            "Quantized weight shape inconsistency: inferred bits={} not in {{{}}}; \
              weight.shape={:?}, scales.shape={:?}, group_size={}, caller_bits={}",
-            inferred_bits, weight_shape, scales_shape, group_size, caller_bits
+            inferred_bits, accepted, weight_shape, scales_shape, group_size, caller_bits
         ));
     }
     Ok(inferred_bits)
@@ -1347,6 +1353,66 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
     Ok(())
 }
 
+/// Reject a bit width outside [`SUPPORTED_AFFINE_BITS`], before any tensor work.
+///
+/// [`validate_quantization_params`] above stays a bounds check (`1..=32`)
+/// because it guards the load path, where an allowlist would refuse a
+/// checkpoint whose declared width diverges from a shape-derived one that
+/// [`infer_quantization_bits`] can still reconcile. A producer that picks the
+/// width itself rather than loading it, such as `split-mtp`, has no tensor to
+/// reconcile against and no reason to accept a width MLX's affine quantize
+/// kernel does not implement, so it calls this in addition to, not instead
+/// of, the bounds check. The message names "quantization bits" rather than
+/// any particular CLI flag; the caller names its own flag (`split-mtp` says
+/// `--q-bits`) around this error.
+///
+/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` in the consuming crate
+pub fn validate_affine_quantization_bits(bits: i32) -> Result<(), String> {
+    if SUPPORTED_AFFINE_BITS.contains(&bits) {
+        return Ok(());
+    }
+    let accepted = SUPPORTED_AFFINE_BITS
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "quantization bits ({bits}) must be one of {accepted}: MLX's affine quantize kernel \
+         only supports these widths"
+    ))
+}
+
+/// Reject a group size outside [`SUPPORTED_AFFINE_GROUP_SIZES`], before any
+/// tensor work.
+///
+/// Mirrors [`validate_affine_quantization_bits`]: MLX's `affine_quantize`
+/// (see
+/// [ml-explore/mlx `mlx/ops.cpp`](https://github.com/ml-explore/mlx/blob/main/mlx/ops.cpp),
+/// `if (group_size != 32 && group_size != 64 && group_size != 128)`) throws
+/// `std::invalid_argument` on any other value, which crosses the cxx bridge
+/// as an uncatchable `std::terminate` at the first forward pass rather than a
+/// load error. [`validate_quantization_params`] stays a much wider bounds
+/// check (`1..=MAX_QUANT_GROUP_SIZE`) because it guards the shared load path
+/// for every quantization mode, not affine specifically; a producer that
+/// picks the group size itself, such as `split-mtp`, calls this in addition
+/// to, not instead of, that bounds check.
+///
+/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` in the consuming crate
+pub fn validate_affine_quantization_group_size(group_size: i32) -> Result<(), String> {
+    if SUPPORTED_AFFINE_GROUP_SIZES.contains(&group_size) {
+        return Ok(());
+    }
+    let accepted = SUPPORTED_AFFINE_GROUP_SIZES
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "quantization group_size ({group_size}) must be one of {accepted}: MLX's affine \
+         quantize kernel only supports these group sizes"
+    ))
+}
+
 /// Every quantization mode MLX accepts, in the order its own parser tests them.
 ///
 /// This mirrors `string_to_quantization_mode` in
@@ -1360,6 +1426,42 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
 ///          `crate::models::gemma4::validate_quantization_scheme` in the
 ///          consuming crate
 pub const SUPPORTED_QUANTIZATION_MODES: [&str; 4] = ["affine", "mxfp4", "mxfp8", "nvfp4"];
+
+/// Bit widths MLX's affine quantize kernel implements.
+///
+/// This is not a math constraint: the packing invariant
+/// `packed_in_features * 32 == bits * num_groups * group_size` has an
+/// integer solution for `bits == 7` exactly as it does for the others. It is
+/// what the kernel happens to accept — `affine_quantize` in
+/// [ml-explore/mlx `mlx/ops.cpp`](https://github.com/ml-explore/mlx/blob/main/mlx/ops.cpp)
+/// rejects `bits < 2 || bits > 8 || bits == 7` with `std::invalid_argument`
+/// before it inspects any tensor, which crosses the cxx bridge as an
+/// uncatchable `std::terminate` at the first forward pass rather than a load
+/// error.
+///
+/// This is the single definition of the affine set. [`infer_quantization_bits`]
+/// reads it when re-deriving a bit width from a loaded tensor's shape,
+/// [`validate_affine_quantization_bits`] checks a caller-supplied width
+/// against it directly, and gemma4's `validate_override_bits` (in the
+/// consuming crate) reads it for a per-module `quantization` override for
+/// the same reason. Unlike [`validate_quantization_params`], which stays a
+/// bounds check so a loader does not refuse a checkpoint whose declared
+/// width disagrees with its tensor shapes, this is the allowlist a producer
+/// needs before it spends any tensor work on a width nothing can load.
+///
+/// Used by: [`infer_quantization_bits`], [`validate_affine_quantization_bits`],
+///          and `crate::models::gemma4::validate_override_bits` in the
+///          consuming crate
+pub const SUPPORTED_AFFINE_BITS: [i32; 6] = [2, 3, 4, 5, 6, 8];
+
+/// Group sizes MLX's affine quantize kernel implements: `affine_quantize` in
+/// [ml-explore/mlx `mlx/ops.cpp`](https://github.com/ml-explore/mlx/blob/main/mlx/ops.cpp)
+/// rejects anything else with `std::invalid_argument` before it inspects any
+/// tensor, the same uncatchable-abort class as an unsupported
+/// [`SUPPORTED_AFFINE_BITS`] value.
+///
+/// Used by: [`validate_affine_quantization_group_size`]
+pub const SUPPORTED_AFFINE_GROUP_SIZES: [i32; 3] = [32, 64, 128];
 
 /// Reject a declared quantization mode MLX cannot parse.
 ///
@@ -6004,6 +6106,30 @@ mod tests {
                 err.contains("affine") && err.contains("nvfp4"),
                 "the message must name the accepted set: {err}"
             );
+        }
+    }
+
+    /// Mirrors `quantization_mode_allowlist_mirrors_mlx_exactly`, but for the
+    /// group sizes MLX's `affine_quantize` implements rather than the mode
+    /// string: every value in `SUPPORTED_AFFINE_GROUP_SIZES` must be accepted,
+    /// and every value it excludes (PR #1778 review: a group size split-mtp
+    /// could otherwise pass through to a real quantize call and abort the
+    /// process) must be refused naming the offending value and the accepted
+    /// set.
+    #[test]
+    fn affine_group_size_allowlist_matches_mlx_ops_cpp() {
+        for group_size in SUPPORTED_AFFINE_GROUP_SIZES {
+            validate_affine_quantization_group_size(group_size).unwrap_or_else(|e| {
+                panic!(
+                    "MLX's affine_quantize accepts group_size={group_size}, so mlxcel must too: {e}"
+                )
+            });
+        }
+        for group_size in [16, 256, 1] {
+            let err = validate_affine_quantization_group_size(group_size)
+                .expect_err(&format!("group_size {group_size} must be refused"));
+            assert!(err.contains(&group_size.to_string()), "{err}");
+            assert!(err.contains("32, 64, 128"), "{err}");
         }
     }
 

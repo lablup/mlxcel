@@ -56,6 +56,39 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  # One CI run per branch, because four jobs below land on GB10, the single
+  # self-hosted Linux runner that also serves the release build: `clippy`,
+  # `xla-compile`, `xla-link`, and `cuda-sm70-compile`. Without a group, a run
+  # for a commit nobody is waiting on any more does not merely sit idle, it
+  # holds a place in line ahead of the runs that matter. Measured over
+  # 2026-09-10 KST: 113 runs created, 14 open at once, 11 of those stacked on
+  # four branches, and six cancelled by hand purely to free the runner (#1774).
+  #
+  # `main` is deliberately excluded from the cancellation, which is what the
+  # `cancel-in-progress` expression encodes. A push-to-main run is the one that
+  # catches what a stale PR base hid, and it is the last gate before a release
+  # builds from that commit; killing it because the next merge landed 90 seconds
+  # later discards the only signal nothing else produces. The queueing cost of
+  # that choice is bounded rather than unbounded, because cancelling a *pending*
+  # run is inherent to grouping and `cancel-in-progress` governs only the
+  # *running* one: GitHub keeps the in-flight `main` run plus at most one
+  # pending run behind it, so back-to-back merges queue two deep and not N deep.
+  # What that leaves in place, stated plainly rather than discovered later, is
+  # that an intermediate `main` commit can have its run cancelled while still
+  # pending; whatever commit is at the head of `main` is always the newest in
+  # the group and so always gets a run, which is the property that matters
+  # before a release is cut from it. nightly-verify.yml made the same trade for
+  # the same reason (its group is unconditional, having no PR half to key on).
+  #
+  # `github.event.pull_request.number || github.ref` is the shape already used
+  # by pipeline-parallel-ci.yml and by the two per-job groups below, and it
+  # keeps a PR run and a `main` push run in distinct groups. The per-job groups
+  # in `xla-link` and `cuda-sm70-compile` stay as they are: workflow-level and
+  # job-level groups compose, and those two are keyed differently on purpose.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
@@ -104,6 +137,11 @@ jobs:
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
+              # The CUDA half of the same link line: mlxcel-core's build
+              # script names the CUDA libraries, and the MLX pin decides which
+              # of them libmlx.a needs. See the `xla-link` job comment.
+              - 'src/lib/mlxcel-core/build.rs'
+              - 'src/lib/mlx-cpp/CMakeLists.txt'
             # Everything that can compile differently per CUDA architecture: the
             # MLX overlays and turbo kernels, the pinned MLX commit, and the
             # build scripts that hand CMake the architecture list. Rust sources
@@ -256,6 +294,44 @@ jobs:
           persist-credentials: false
       - name: Check every CUDA JIT launch keys its cache on the input dtypes
         run: python3 scripts/ci/check_kernel_dtype_keys.py
+
+  license-headers:
+    name: license headers
+    # Deliberately not behind the `changes` filter, like `crate-versions` and
+    # `kernel-dtype-keys`: it needs no toolchain and runs in seconds.
+    #
+    # This gate exists because coverage without enforcement did nothing. Issue
+    # #1707 found `benches/audio_fft.rs` shipping unlicensed and traced it to
+    # `benches` missing from the script's `TARGET_ROOTS`. That was only the
+    # visible instance: the roots list already named `src`, `examples` and
+    # `tests`, and 95 files under those three roots were unlicensed anyway,
+    # because nothing ever ran the script. Fixing the list would not have
+    # caught a single one of them. Running it in CI does.
+    #
+    # `--check` writes nothing and reports the files the default insert mode
+    # would touch, reusing the same `has_existing_header` predicate the writer
+    # branches on, so the gate can never demand an edit that running
+    # `python3 scripts/insert_apache_header.py` does not produce. Files that
+    # already carry someone else's provenance (the vendored MLX patches under
+    # src/lib/mlx-cpp/patches/ keep Apple's copyright) are skipped by that same
+    # predicate and must stay that way: this gate must never stamp a Lablup
+    # header onto upstream-derived code.
+    #
+    # The second step is the script's own unit suite, which nothing else runs:
+    # tests/test_insert_apache_header.py sits outside python/, and
+    # python.yml's pytest step is scoped to `python/tests` behind a
+    # `python/**` path filter.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Every owned source file carries the license header
+        run: python3 scripts/insert_apache_header.py --check
+      - name: Header script unit tests
+        run: python3 -m unittest discover -s tests -p 'test_insert_apache_header.py' -v
 
   llama-compat-manifest:
     name: llama-compat manifest
@@ -520,6 +596,15 @@ jobs:
   # rejected because the release link is minutes of shared-runner time and the
   # overwhelming majority of Rust PRs cannot affect the link line.
   #
+  # `src/lib/mlxcel-core/build.rs` and `src/lib/mlx-cpp/CMakeLists.txt` are on
+  # the causal path as well. The former lists the CUDA libraries every
+  # `--features cuda` link resolves `libmlx.a` against; the latter holds the MLX
+  # pin, and a pin bump can add one without touching any build script. That is
+  # how ml-explore/mlx#4208's cuSOLVER dependency arrived with the 81ba1c6a bump
+  # (#1769): MLX links it PRIVATE, `cargo check` never links, and no job on the
+  # PR linked CUDA. A pin bump invalidates `mlxcel-core`'s MLX build, so those
+  # runs pay the cold figure below rather than the warm one.
+  #
   # Measured cost of this job's link command on the GB10 runner: 15m40s from a
   # purged `CARGO_TARGET_DIR`, most of which is MLX's CUDA sources compiling
   # from scratch rather than the link itself, and 6m to 7m30s warm. Warm is the
@@ -585,9 +670,15 @@ jobs:
     # group, three pushes to a `build.rs` PR queue three link jobs of up to
     # 120 minutes each on the one runner that also serves clippy for every Rust
     # PR and the release build. Keyed per PR, so PRs never cancel each other.
+    #
+    # `main` is exempt for the same reason the workflow-level group exempts it:
+    # a push to `main` carries no pull request number, so the key falls back to
+    # `refs/heads/main` and every merge shares one group. An unconditional flag
+    # would then let a second merge cancel this job mid-link on the branch a
+    # release builds from, which is the one run that has to finish.
     concurrency:
       group: xla-link-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     timeout-minutes: 120
     env:
       # The value shipped for this runner's architecture. Auto-detection yields
@@ -664,9 +755,14 @@ jobs:
     # Same reasoning as `xla-link`: minutes warm, tens of minutes cold, on the
     # one runner that also serves clippy for every Rust PR and the release
     # build. Keyed per PR, so PRs never cancel each other.
+    #
+    # `main` is exempt, as in `xla-link` and at the workflow level: pushes to
+    # `main` carry no pull request number, so they share the `refs/heads/main`
+    # key, and an unconditional flag would let one merge cancel the previous
+    # merge's compile before it proves the shipped architecture still builds.
     concurrency:
       group: cuda-sm70-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     timeout-minutes: 120
     env:
       # Volta. Plain `70`, not `70a`: architecture-specific suffixes only exist

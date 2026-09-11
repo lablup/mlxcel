@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,14 @@
 //! per 32 values, with no per-token dequantization in the forward pass. The
 //! reconstruction is transient and per tensor, so peak memory stays close to
 //! the checkpoint's own footprint rather than its dequantized size.
+//!
+//! How close the requantized weights stay depends on the MLX pin. MLX rounds
+//! each E8M0 exponent up from `amax / 448`, so no block maximum saturates and
+//! every element lands within half an E4M3 step, but Metal and CPU have done
+//! that only since ml-explore/mlx#4353. Before it they rounded to nearest in
+//! log2 space and clipped the maximum of about half the blocks by up to 29%.
+//! `fp8_block_requantize_round_trip_stays_within_half_an_e4m3_step` holds the
+//! pin to the first behavior.
 //!
 //! This module deliberately lives outside `sanitize.rs`: that file is already
 //! 3k lines, and the FP8 path is a self-contained pre-pass with its own tests.

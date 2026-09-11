@@ -10,14 +10,17 @@
 // qmm_sm80, the naive kernel and qmv is the most architecture-dependent
 // dispatch in decode and MLX exposes no hook for it, so the one-shot trace has
 // to be emitted from the dispatch site itself.
-// Synced to upstream 9a795735. Upstream did not touch
-// mlx/backend/cuda/quantized/ at all between 2c46b953 and 9a795735, so this
-// overlay carries the same delta it did at the previous sync and the call sites
-// below need no adjustment. qmm.h is byte-identical across that range, which
-// means every dispatch entry point consumed here (qmm_naive, qmm_sm90,
-// qmm_sm80, qmv, gather_qmv, fp_qmv) kept its signature, including the
-// `const std::optional<array>& global_scale` parameter #3757 added to qmm_naive
-// at position 5 that both call sites below pass std::nullopt for.
+// Synced to upstream 81ba1c6a. Between 9a795735 and 81ba1c6a upstream touched
+// this file once, ml-explore/mlx#4458, which gives GatherQMM::eval_gpu a
+// guard that refuses a global scale outside Metal and keys `biases` on
+// `mode_ == Affine` instead of `inputs.size() == 6`. Both land ahead of delta
+// (3) and merged without conflict, and the grouped-GEMM gate below already
+// reads `biases` only on the affine path. qmm/qmm.h is byte-identical across
+// that range, which means every dispatch entry point consumed here
+// (qmm_naive, qmm_sm90, qmm_sm80, qmv, gather_qmv, fp_qmv) kept its
+// signature, including the `const std::optional<array>& global_scale`
+// parameter ml-explore/mlx#3757 added to qmm_naive at position 5 that both
+// call sites below pass std::nullopt for.
 //
 // Re-verify these call sites against qmm.h on the next pin bump; an overlay
 // that silently reverts an upstream change is how #830 / #831 happened.
@@ -325,11 +328,16 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& encoder = cu::get_command_encoder(s);
 
+  if (mode_ != QuantizationMode::Affine && inputs.size() == 6) {
+    throw std::runtime_error(
+        "[GatherQMM] Global scale is only supported on the Metal backend.");
+  }
+
   array x = ensure_row_contiguous(inputs[0], encoder, s);
   const array& w = inputs[1];
   const array& scales = inputs[2];
   std::optional<array> biases;
-  if (inputs.size() == 6) {
+  if (mode_ == QuantizationMode::Affine) {
     biases = inputs[3];
   }
   array lhs_indices =

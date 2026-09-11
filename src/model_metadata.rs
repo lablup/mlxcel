@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -102,6 +102,7 @@ macro_rules! for_each_model_registration {
         $macro! {
             Llama => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Llama3Model::load, args: models::llama3::ModelArgs, weight_builder: models::Llama3Model::from_weights, wrap: LoadedModel::Llama } };
             IQuestCoder => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Llama3Model::load, args: models::llama3::ModelArgs, weight_builder: models::Llama3Model::from_weights, wrap: LoadedModel::Llama } };
+            IQuestLoopCoder => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::IQuestLoopCoderModel::load, args: models::iquestloopcoder::ModelArgs, weight_builder: models::IQuestLoopCoderModel::from_weights, wrap: |m| LoadedModel::IQuestLoopCoder(models::IQuestLoopCoderWrapper::new(m)) } };
             Llama4 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Llama4CxxModel::load, args: models::llama4::TextArgs, weight_builder: models::Llama4CxxModel::from_weights, wrap: |m| LoadedModel::Llama4(models::Llama4Wrapper::new(m)) } };
             Llama4VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Llama4 VLM cannot be loaded with LoRA adapters yet") };
             MllamaVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Llama 3.2 Vision (mllama) does not support adapter loading; use load_model() instead") };

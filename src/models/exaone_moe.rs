@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -629,17 +629,28 @@ pub enum AnyKVCache {
 }
 
 impl AnyKVCache {
-    /// Number of live keys the cache will actually return on the next
-    /// `update_and_fetch`. For a `Standard` (`KVCache`) this is
-    /// `offset - live_start` (`live_len()`), which shrinks below the
-    /// monotonic `offset` after a `--max-kv-size` `trim_front`; for a
-    /// `Rotating` cache `seq_len()` already reports the live window. Prefill
+    /// Number of prior keys the next `update_and_fetch` will keep in front
+    /// of the new ones, before the append's own `window - 1` clamp. Prefill
     /// masks size from this so the mask key axis matches the returned K/V,
-    /// while `offset()` stays for RoPE. See issue #430.
+    /// while `offset()` stays for RoPE.
+    ///
+    /// For a `Standard` (`KVCache`) this is `offset - live_start`
+    /// (`live_len()`), which shrinks below the monotonic `offset` after a
+    /// `--max-kv-size` `trim_front` (issue #430).
+    ///
+    /// For a `Rotating` cache it is `visible_len()`, not `seq_len()`.
+    /// `seq_len()` is the physical buffer length: one decode step makes
+    /// `update_in_place` grow the buffer by `step` (256) slots ahead of
+    /// `offset`, while `update_concat` concatenates only the `visible_len()`
+    /// prior keys onto the new ones. A mask sized from `seq_len()` is then
+    /// wider than the returned K/V on the first multi-token append after a
+    /// decode. #430 read `seq_len()` here on the assumption that it reported
+    /// the live window; #1335 showed it does not (Gemma 3), and #1764 applied
+    /// the same correction here.
     fn live_len(&self) -> i32 {
         match self {
             Self::Standard(c) => c.live_len(),
-            Self::Rotating(c) => c.seq_len(),
+            Self::Rotating(c) => c.visible_len(),
         }
     }
 }
@@ -1156,23 +1167,76 @@ mod exaone_moe_mask_tests {
         );
     }
 
-    /// The sliding lookup uses `RotatingKVCache::seq_len()` via
-    /// `AnyKVCache::live_len()`, which equals the keys `update_and_fetch`
-    /// returns.
+    // Physical key-axis length of a rotating cache's buffer, which is what
+    // `RotatingKVCache::seq_len()` reports outside buffered speculative mode.
+    fn physical_len(cache: &AnyKVCache) -> i32 {
+        let AnyKVCache::Rotating(rotating) = cache else {
+            unreachable!("fixture is constructed as Rotating")
+        };
+        rotating
+            .keys
+            .as_ref()
+            .and_then(|k| k.as_ref())
+            .map(|k| mlxcel_core::array_shape(k)[2])
+            .expect("fixture cache must hold keys")
+    }
+
+    /// Regression for #1764: the sliding lookup must size the prefill mask
+    /// to the keys the next multi-token append returns.
+    ///
+    /// A prefill-only fixture cannot tell `seq_len()` from `visible_len()`,
+    /// because `update_concat` stores exactly what it returns and leaves
+    /// `physical == offset`. One decode step makes `update_in_place` grow the
+    /// buffer by `step` slots ahead of `offset`, and only then does a mask
+    /// sized from the physical length come out wider than the returned K/V.
+    /// Mirrors the Gemma 3 guard from #1335
+    /// (`live_len_matches_the_keys_a_multi_token_append_returns`).
     #[test]
     fn sliding_cache_live_len_matches_returned_keys() {
         const H: i32 = 2;
         const D: i32 = 4;
-        let window = 6;
-        let m = 4;
+        const WINDOW: i32 = 512;
+        let (prefill, appended) = (6, 3);
 
-        let mut cache = AnyKVCache::Rotating(RotatingKVCache::new(window));
-        let (k, _) = cache.update_and_fetch(make_kv(H, m, D, 0.0), make_kv(H, m, D, 100.0));
-        let returned_klen = mlxcel_core::array_shape(&k)[2];
+        // Turn one: a prefill, then one decode step.
+        let mut cache = AnyKVCache::Rotating(RotatingKVCache::new(WINDOW));
+        let _ = cache.update_and_fetch(make_kv(H, prefill, D, 0.0), make_kv(H, prefill, D, 100.0));
+        let _ = cache.update_and_fetch(make_kv(H, 1, D, 50.0), make_kv(H, 1, D, 150.0));
+
+        // Fixture guards. The two accessors disagree only while the buffer is
+        // longer than `offset`, and `create_sliding_window_prefill_mask`
+        // clamps the prior keys to `WINDOW - 1`, which would hide the
+        // difference above that. A change to the growth policy should fail
+        // here rather than let this test pass vacuously.
+        let offset = cache.offset();
+        assert!(
+            physical_len(&cache) > offset,
+            "fixture must reach physical > offset; physical {}, offset {offset}",
+            physical_len(&cache)
+        );
+        assert!(
+            offset < WINDOW - 1,
+            "fixture must stay below the window clamp; offset {offset}, window {WINDOW}"
+        );
+
+        // Turn two: the multi-token append. The mask is sized from the cache
+        // before the forward; the keys come out of it.
+        let live_len = cache.live_len();
+        let mask = utils::create_sliding_window_prefill_mask(appended, live_len, WINDOW);
+        let mask_keys = *mlxcel_core::array_shape(&mask)
+            .last()
+            .expect("mask must be rank >= 1");
+
+        let (k, _) = cache.update_and_fetch(
+            make_kv(H, appended, D, 200.0),
+            make_kv(H, appended, D, 300.0),
+        );
+        let returned = mlxcel_core::array_shape(&k)[2];
+
         assert_eq!(
-            cache.live_len(),
-            returned_klen,
-            "AnyKVCache::live_len() for Rotating (== seq_len) must equal the returned key axis"
+            mask_keys, returned,
+            "AnyKVCache::live_len() = {live_len} sized a sliding mask with {mask_keys} key columns, \
+             but the append returned {returned} keys"
         );
     }
 }
