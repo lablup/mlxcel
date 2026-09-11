@@ -59,9 +59,10 @@ impl LagunaDFlashDrafter {
             .map_err(|reason| DrafterError::LoadFailed { reason })?;
         sanitize_weights(&mut weights, &config)
             .map_err(|reason| DrafterError::LoadFailed { reason })?;
-        if drafter_weights_prefer_f16() {
-            crate::drafter::dflash::drafter::convert_bf16_to_f16_non_quantized(&mut weights);
-        }
+        // The shared drafter dtype rule (#1782): f16 where the target loaders
+        // convert, bf16 on Ampere-and-later CUDA, so the drafter lands in the
+        // residual stream's dtype instead of promoting every round to f32.
+        crate::drafter::dflash::drafter::apply_drafter_load_dtype_policy(&mut weights);
         Self::from_weights(&weights, config)
     }
 
@@ -116,31 +117,6 @@ impl LagunaDFlashDrafter {
             });
         }
         Ok(())
-    }
-}
-
-/// Whether the drafter weights should be normalized bf16 -> f16 at load.
-///
-/// Follows the binary crate's `bf16_to_f16_at_load` for a non-quantized text
-/// checkpoint so the drafter runs in the same activation dtype as the target
-/// it is paired with: f16 on Apple Silicon and pre-Ampere CUDA, bf16 on
-/// Ampere-and-later CUDA unless `MLXCEL_CUDA_F16_NORMALIZE` opts in;
-/// `MLXCEL_KEEP_BF16` keeps bf16 everywhere.
-pub(crate) fn drafter_weights_prefer_f16() -> bool {
-    if std::env::var_os("MLXCEL_KEEP_BF16").is_some() {
-        return false;
-    }
-    match crate::hardware::cuda_compute_capability() {
-        Some((major, _)) if major < 8 => true,
-        Some(_) => std::env::var("MLXCEL_CUDA_F16_NORMALIZE")
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-            })
-            .unwrap_or(false),
-        None => {
-            crate::hardware::get_hardware().silicon_gen != crate::hardware::AppleSiliconGen::Unknown
-        }
     }
 }
 
