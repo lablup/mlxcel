@@ -108,3 +108,39 @@ What the table says:
 - **Instantiation is visible and small.** The graph cache hits on Qwen at both budgets (no instantiation in steady state). On Laguna `both` instantiates about one graph every 3.4 tokens (58 over the differenced 200 tokens against 8 at the defaults), 1.15 ms each, 0.34 ms per token, 1.3% of the token; the MoE routing changes the expert-gather node set from token to token and larger graphs have more chances to differ. The gain of 5.6 ms per token is 16x that cost. The graph-exec LRU (`MLX_CUDA_GRAPH_CACHE_SIZE`, 2000 on CUDA builds) is nowhere near its capacity at 24 keys per token.
 - **Summed kernel time is not a clean measure with larger graphs** (33.5 to 38.1 ms per token on Laguna while the wall fell) because independent kernels inside one graph overlap and each stretches; it is reported only to note that it is not the metric. Kernel launch counts and wall time are.
 
+## More MoE shapes: single-stream decode and short prefill (idle host, n = 3, same binary)
+
+Same harness and prompt as the first single-stream table, three arms. Stacked routed-expert projection per checkpoint at its packed width: gpt-oss-20b 33.2M words (32 experts, mxfp4, over the 26.2M budget), qwen3-30b-a3b 25.2M (128 experts, affine 4-bit, under it), qwen3.5-35b-a3b 33.5M (256 experts, affine 4-bit, Laguna's shape), gemma-4-26b-a4b 31.7M (128 experts, affine 4-bit, over it).
+
+### `gpt-oss-20b-mxfp4`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 101 | 75.12 (72.54 to 76.91) |  | 2664 | 790.3 (782.9 to 803.5) |  | 128 | 14.98 (14.98 to 14.98) | 0.80 to 1.10 | 1 of 3 |
+| both | 3 | 101 | 70.08 (61.40 to 75.34) | -6.7% | 2878 | 993.9 (884.1 to 1193.1) | +25.8% | 104 | 22.20 (20.37 to 24.20) | 0.69 to 0.95 | 0 of 3 |
+| nograph | 3 | 101 | 72.66 (72.57 to 72.82) | -3.3% | 2753 | 728.6 (724.8 to 731.4) | -7.8% | 139 | 17.72 (17.72 to 17.72) | 0.87 to 1.00 | 0 of 3 |
+
+### `qwen3-30b-a3b-4bit`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 101 | 78.94 (74.91 to 81.03) |  | 2537 | 654.9 (646.8 to 663.7) |  | 154 | 17.30 (17.30 to 17.30) | 1.03 to 1.36 | 0 of 3 |
+| both | 3 | 101 | 95.19 (94.18 to 95.70) | +20.6% | 2101 | 638.5 (625.5 to 657.6) | -2.5% | 158 | 17.82 (17.82 to 17.82) | 0.96 to 1.54 | 0 of 3 |
+| nograph | 3 | 101 | 75.42 (74.75 to 76.16) | -4.5% | 2652 | 233.0 (232.5 to 233.3) | -64.4% | 433 | 17.35 (17.35 to 17.35) | 1.07 to 1.41 | 0 of 3 |
+
+### `qwen3.5-35b-a3b-4bit`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 111 | 62.28 (58.24 to 66.14) |  | 3220 | 482.3 (474.8 to 487.1) |  | 230 | 20.00 (19.99 to 20.01) | 1.20 to 1.78 | 0 of 3 |
+| both | 3 | 111 | 76.32 (76.16 to 76.49) | +22.5% | 2620 | 464.6 (461.4 to 469.7) | -3.7% | 239 | 20.52 (20.52 to 20.52) | 1.41 to 1.81 | 0 of 3 |
+| nograph | 3 | 111 | 53.14 (51.77 to 54.69) | -14.7% | 3766 | 239.0 (236.2 to 240.9) | -50.5% | 465 | 20.04 (20.00 to 20.06) | 1.53 to 1.69 | 0 of 3 |
+
+### `gemma-4-26b-a4b-it-4bit`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 115 | 61.18 (60.62 to 61.48) |  | 3269 | 702.2 (684.1 to 713.3) |  | 164 | 15.51 (15.51 to 15.51) | 0.72 to 1.45 | 0 of 3 |
+| both | 3 | 115 | 61.12 (60.95 to 61.32) | -0.1% | 3272 | 685.6 (682.6 to 687.4) | -2.4% | 168 | 16.15 (16.15 to 16.15) | 0.72 to 1.17 | 0 of 3 |
+| nograph | 3 | 115 | 54.55 (54.50 to 54.60) | -10.8% | 3666 | 243.2 (242.1 to 244.0) | -65.4% | 473 | 15.59 (15.59 to 15.59) | 0.72 to 0.95 | 0 of 3 |
+
