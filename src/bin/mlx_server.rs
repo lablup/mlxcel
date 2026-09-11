@@ -2041,6 +2041,9 @@ fn main() -> anyhow::Result<()> {
     // off CUDA, a no-op when the variable is already set, and must run before
     // any MLX op.
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
+    // Same class of abort for the cuDNN SDPA plan cache, which prefill shape
+    // diversity alone can cross (#1799). Same contract: CUDA only, env wins.
+    mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
 
     // Publish autotuned CUDA kernel knobs (qmm CTA tile, multirow-qmv row
     // window) into the environment the patched MLX kernels read (#906). Inert

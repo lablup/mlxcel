@@ -64,6 +64,14 @@ Environment Variables:
                            unset, auto-defaults to 2000 on CUDA builds (MLX default 400
                              aborts long-lived shape-diverse decode, #818)
                            explicit value always wins
+  MLX_CUDA_SDPA_CACHE_SIZE CUDA cuDNN SDPA plan-cache LRU capacity (CUDA only)
+                           unset, auto-defaults to 2000 on CUDA builds (MLX default 256
+                             aborts on prompt-length diversity, #1799)
+                           explicit value always wins
+  MLXCEL_SDPA_FALLBACK_MAX_QUERIES  CUDA only: masked SDPA calls with 2..=N query rows over a
+                           longer key sequence (a speculative verify block) bypass cuDNN
+                           and take MLX's ops fallback, so no cuDNN plan is rebuilt per
+                           round (#1799). Default 32; 0 restores upstream dispatch.
 
 Model and Runtime Support:
   `mlxcel arch` lists the supported model-architecture catalog.
@@ -2895,6 +2903,9 @@ fn main() -> anyhow::Result<()> {
     // off CUDA, a no-op when the variable is already set, and must run before
     // any MLX op.
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
+    // Same class of abort for the cuDNN SDPA plan cache, which prefill shape
+    // diversity alone can cross (#1799). Same contract: CUDA only, env wins.
+    mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
 
     // Publish autotuned CUDA kernel knobs (qmm CTA tile, multirow-qmv row
     // window) into the environment the patched MLX kernels read (#906). Inert

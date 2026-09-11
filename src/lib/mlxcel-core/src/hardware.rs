@@ -304,6 +304,52 @@ pub fn apply_cuda_graph_cache_default() {
 
 // ── Detection ─────────────────────────────────────────────────────────────────
 
+/// The `MLX_CUDA_SDPA_CACHE_SIZE` default to apply on a CUDA build, or `None`
+/// off CUDA.
+///
+/// MLX's CUDA backend caches cuDNN SDPA execution plans in an LRU keyed by the
+/// exact query, key, value and mask shapes and strides
+/// (`mlx/backend/cuda/scaled_dot_product_attention.cpp`, capacity 256 by
+/// default), built on the same `lru_cache.h` as the graph cache, so it carries
+/// the same lifetime miss counter and the same fatal `Cache thrashing` throw
+/// once lifetime misses pass `2 * capacity` (512 at MLX's default). Every
+/// distinct prompt length that prefills through cuDNN is one miss per attention
+/// layer class, so a long-lived server crosses 512 on prompt diversity alone;
+/// a multi-row speculative verify used to cross it in a few hundred rounds
+/// before its small-query calls were routed away from cuDNN (issue #1799,
+/// where a 400-token Laguna DFlash run at block 2 aborted on it). Raised to
+/// 2000 for the same reasons and with the same caveats as
+/// [`cuda_graph_cache_default`]: an LRU cap, not a preallocation; a larger
+/// lifetime budget, not a fix; an operator-set value always wins.
+#[must_use]
+pub fn cuda_sdpa_cache_default() -> Option<u32> {
+    #[cfg(feature = "cuda")]
+    {
+        Some(2000)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        None
+    }
+}
+
+/// Apply the [`cuda_sdpa_cache_default`] to the process environment, unless
+/// `MLX_CUDA_SDPA_CACHE_SIZE` is already set. Same contract as
+/// [`apply_cuda_graph_cache_default`]: once, early in `main()`, before any MLX
+/// op and before spawning threads.
+pub fn apply_cuda_sdpa_cache_default() {
+    if std::env::var_os("MLX_CUDA_SDPA_CACHE_SIZE").is_some() {
+        return;
+    }
+    if let Some(value) = cuda_sdpa_cache_default() {
+        // SAFETY: same argument as `apply_cuda_graph_cache_default`: every
+        // in-tree caller invokes this once at the top of `main` right after
+        // CLI parsing, before any model load, MLX op, or worker thread touches
+        // the environment, so no other thread is accessing it here.
+        unsafe { std::env::set_var("MLX_CUDA_SDPA_CACHE_SIZE", value.to_string()) };
+    }
+}
+
 /// Detect hardware capabilities by querying the OS at runtime.
 ///
 /// On non-macOS platforms this always returns [`HardwareCapabilities::default`].
@@ -907,6 +953,14 @@ mod tests {
             metal_ops_per_buffer_default(AppleSiliconGen::Unknown, false),
             None
         );
+    }
+
+    #[test]
+    fn cuda_sdpa_cache_default_matches_build_feature() {
+        #[cfg(feature = "cuda")]
+        assert_eq!(cuda_sdpa_cache_default(), Some(2000));
+        #[cfg(not(feature = "cuda"))]
+        assert_eq!(cuda_sdpa_cache_default(), None);
     }
 
     #[test]
