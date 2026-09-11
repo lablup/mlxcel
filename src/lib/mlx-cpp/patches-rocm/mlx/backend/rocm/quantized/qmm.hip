@@ -6340,6 +6340,64 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
 
 #define has_bias has_bias, use_sorted_rhs_schedule, implicit_x_batch_stride
 
+    // mlxcelverse: mxfp4/mxfp8 store one E8M0 byte per group and no biases,
+    // but every launch below instantiates the kernel with AFFINE=true and a
+    // T-typed scale pointer, which dequantizes fp weights with the affine
+    // formula. Route non-affine modes to the AFFINE=false instantiation with
+    // uint8_t scales instead.
+    if (mode_ != QuantizationMode::Affine) {
+      if (group_size_ != 32 || (bits_ != 4 && bits_ != 8)) {
+        throw std::runtime_error(
+            "[GatherQMM::eval_gpu] ROCm supports mxfp4/mxfp8 only (group_size "
+            "32, bits 4 or 8); got bits=" +
+            std::to_string(bits_) + " group_size=" + std::to_string(group_size_));
+      }
+      auto launch_fp = [&](auto type_tag, auto bits_tag) {
+        using T = typename decltype(type_tag)::type;
+        constexpr int BITS = decltype(bits_tag)::value;
+        enc.add_kernel_node(
+            &rocm::gather_qmv_kernel<T, uint8_t, BITS, 32, false>,
+            grid,
+            dim3(block_size),
+            0u,
+            (const T*)x_ptr,
+            (const uint8_t*)w_ptr,
+            (const uint8_t*)scales_ptr,
+            (const uint8_t*)biases_ptr,
+            li_ptr,
+            ri_ptr,
+            batch_shape_param,
+            lhs_idx_strides_param,
+            rhs_idx_strides_param,
+            batch_ndim,
+            (T*)out_ptr,
+            B,
+            M,
+            N,
+            K,
+            E,
+            has_bias);
+      };
+      auto launch_fp_bits = [&](auto type_tag) {
+        if (bits_ == 8) {
+          launch_fp(type_tag, std::integral_constant<int, 8>{});
+        } else {
+          launch_fp(type_tag, std::integral_constant<int, 4>{});
+        }
+      };
+      if (x.dtype() == float32) {
+        launch_fp_bits(local_type_identity<float>{});
+      } else if (x.dtype() == float16) {
+        launch_fp_bits(local_type_identity<__half>{});
+      } else if (x.dtype() == bfloat16) {
+        launch_fp_bits(local_type_identity<hip_bfloat16>{});
+      } else {
+        throw std::runtime_error(
+            "[GatherQMM::eval_gpu] unsupported activation dtype for mxfp");
+      }
+      return;
+    }
+
     if (x.dtype() == float32) {
       if (bits_ == 8 && group_size_ == 32) {
         enc.add_kernel_node(

@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
+#include <algorithm>
+#include <cstdint>
 #include "mlx/backend/common/utils.h"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/device/config.h"
@@ -287,18 +289,36 @@ void ArgReduce::eval_gpu(const std::vector<array>& inputs, array& out) {
   if (blocks_per_row > 64) blocks_per_row = 64;
 
   if (blocks_per_row <= 1) {
-    constexpr int BLOCK_DIM = 1024;
-    dim3 num_blocks = get_2d_grid_dims(out.shape(), out.strides());
-    dispatch_op([&](auto tt, auto opp) {
-      using T = decltype(tt);
-      using Op = decltype(opp);
-      encoder.add_kernel_node(
-          &rocm::arg_reduce_general<T, Op, BLOCK_DIM, 4>,
-          num_blocks, dim3(BLOCK_DIM), 0,
-          gpu_ptr<T>(in), gpu_ptr<uint32_t>(out), out_size,
-          shape_param, in_strides_param, out_strides_param,
-          ndim, axis_stride, axis_size);
-    });
+    // mlxcelverse: one block per output element. AMD caps every grid
+    // dimension at 2^32 - 1 threads (gridDim * blockDim), so 1024-thread
+    // blocks over a 1-D grid failed to launch past about 4.2M outputs (the
+    // mxfp4 quantize argmin over 16.7M elements hit it). Short axes use a
+    // 64-thread block (whole wavefronts on both wave32 and wave64), and the
+    // grid spills into y so each dimension stays under the cap. The kernel
+    // already indexes blockIdx.x + blockIdx.y * gridDim.x with a bounds check.
+    auto launch_general = [&](auto block_tag) {
+      constexpr int BLOCK_DIM = decltype(block_tag)::value;
+      constexpr size_t kMaxBlocksX = static_cast<size_t>(UINT32_MAX) / BLOCK_DIM;
+      size_t grid_x = std::min(out_size, kMaxBlocksX);
+      size_t grid_y = (out_size + grid_x - 1) / grid_x;
+      dim3 num_blocks(
+          static_cast<uint32_t>(grid_x), static_cast<uint32_t>(grid_y), 1);
+      dispatch_op([&](auto tt, auto opp) {
+        using T = decltype(tt);
+        using Op = decltype(opp);
+        encoder.add_kernel_node(
+            &rocm::arg_reduce_general<T, Op, BLOCK_DIM, 4>,
+            num_blocks, dim3(BLOCK_DIM), 0,
+            gpu_ptr<T>(in), gpu_ptr<uint32_t>(out), out_size,
+            shape_param, in_strides_param, out_strides_param,
+            ndim, axis_stride, axis_size);
+      });
+    };
+    if (axis_size <= 64) {
+      launch_general(std::integral_constant<int, 64>{});
+    } else {
+      launch_general(std::integral_constant<int, 1024>{});
+    }
     return;
   }
 
