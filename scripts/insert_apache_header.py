@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 PROJECT_HEADER = """\
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ PROJECT_HEADER = """\
 // limitations under the License.
 
 """
-PROJECT_COPYRIGHT_LINE = "// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin"
+PROJECT_COPYRIGHT_LINE = "// Copyright 2025-2026 Lablup Inc."
 TARGET_ROOTS = ("src", "examples", "tests", "benches")
 # Repo-relative files that ship with the crate but sit outside every
 # TARGET_ROOTS directory, so the walk above cannot reach them. `build.rs` is
