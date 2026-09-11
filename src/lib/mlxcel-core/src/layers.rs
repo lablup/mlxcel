@@ -4346,7 +4346,7 @@ pub fn attention(
         return metal4_attention(q, k, v, scale, mask, softcap, window_size);
     }
 
-    if let Some(chunk) = materializing_sdpa_query_chunk(q, k, v, softcap) {
+    if let Some(chunk) = materializing_sdpa_query_chunk(q, k, v, softcap, mask.is_some()) {
         return chunked_query_attention(q, k, v, scale, mask, softcap, chunk);
     }
 
@@ -4439,6 +4439,48 @@ fn cuda_sdpa_materializes_scores(q: &MlxArray, v: &MlxArray, softcap: f32) -> bo
     !flash_eligible
 }
 
+/// Upper bound on the query rows the patched `supports_sdpa_cudnn` diverts to
+/// MLX's ops fallback, from `MLXCEL_SDPA_FALLBACK_MAX_QUERIES` (default 32;
+/// `0` restores upstream dispatch).
+///
+/// MLX reads the same variable with `atoi`. The two agree on every integer,
+/// on an empty value (0 on both sides) and on a value with no leading digits
+/// (0 on both sides); they diverge on a value with trailing garbage such as
+/// `32x` (`atoi` reads 32, `parse` fails to 0), on integer overflow and on a
+/// non-UTF-8 value (`std::env::var` errors to the default here, `getenv` sees
+/// the bytes there). Those are misconfigurations, and the divergence only
+/// affects whether an over-budget score matrix is chunked.
+fn sdpa_fallback_max_queries() -> i32 {
+    static MAX_QUERIES: OnceLock<i32> = OnceLock::new();
+    *MAX_QUERIES.get_or_init(|| {
+        std::env::var("MLXCEL_SDPA_FALLBACK_MAX_QUERIES")
+            .ok()
+            .map(|v| v.trim().parse::<i32>().unwrap_or(0))
+            .unwrap_or(32)
+    })
+}
+
+/// True when mlxcel's own small-query gate refuses cuDNN for this call, so MLX
+/// materializes the score matrix even though the dtype and head dims are
+/// flash-eligible and [`cuda_sdpa_materializes_scores`] alone would say no.
+///
+/// Mirrors the gate added to `supports_sdpa_cudnn` in
+/// `src/lib/mlx-cpp/patches/mlx/backend/cuda/scaled_dot_product_attention.cpp`
+/// (issue #1799): a masked or causal call with 2 to
+/// `MLXCEL_SDPA_FALLBACK_MAX_QUERIES` query rows over a longer key sequence,
+/// which is the speculative verify shape and the short trailing chunk of a
+/// chunked prefill. Keep the two in step. A stale mirror here silently drops
+/// the score-matrix chunking from exactly the calls the gate newly sends to the
+/// fallback, and raising the variable above its default would widen that hole
+/// without bound.
+fn cuda_sdpa_small_query_fallback(q_len: i32, k_len: i32, masked: bool) -> bool {
+    cfg!(feature = "cuda")
+        && masked
+        && q_len > 1
+        && q_len <= sdpa_fallback_max_queries()
+        && k_len > q_len
+}
+
 /// Pure chunk-length math for [`materializing_sdpa_query_chunk`].
 ///
 /// Splits `q_len` into the smallest number of near-equal chunks whose
@@ -4471,6 +4513,7 @@ pub(crate) fn materializing_sdpa_query_chunk(
     k: &MlxArray,
     v: &MlxArray,
     softcap: f32,
+    masked: bool,
 ) -> Option<i32> {
     let budget = attention_chunk_budget_bytes();
     if budget == 0 {
@@ -4484,10 +4527,16 @@ pub(crate) fn materializing_sdpa_query_chunk(
     if q_len < 2 {
         return None;
     }
-    if !cuda_sdpa_materializes_scores(q, v, softcap) {
+    let k_shape = ffi::array_shape(k);
+    if k_shape.len() != 4 {
         return None;
     }
-    let k_len = ffi::array_shape(k)[2];
+    let k_len = k_shape[2];
+    if !cuda_sdpa_materializes_scores(q, v, softcap)
+        && !cuda_sdpa_small_query_fallback(q_len, k_len, masked)
+    {
+        return None;
+    }
     let bytes = crate::dtype::size_bytes(ffi::array_dtype(q)).unwrap_or(4);
     let per_row = (q_shape[0].max(1) as usize)
         .saturating_mul(q_shape[1].max(1) as usize)
@@ -7313,6 +7362,23 @@ mod tests {
         // Every chunk's scores stay within budget.
         let chunk = query_chunk_len(1000, 100, 7000).unwrap();
         assert!(chunk as usize * 1000 <= 7000);
+    }
+
+    #[test]
+    fn small_query_fallback_mirrors_the_patched_cudnn_gate() {
+        // The shape the patched `supports_sdpa_cudnn` diverts: masked, 2 to 32
+        // rows, longer key sequence. Off a CUDA build the mirror is inert.
+        let cuda = cfg!(feature = "cuda");
+        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, true), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(2, 4096, true), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(32, 4096, true), cuda);
+        // Unmasked calls keep cuDNN, so they never reach the fallback.
+        assert!(!cuda_sdpa_small_query_fallback(16, 4096, false));
+        // One-row decode, a block wider than the bound, and a prefill whose
+        // key length does not exceed its query length are all outside the gate.
+        assert!(!cuda_sdpa_small_query_fallback(1, 4096, true));
+        assert!(!cuda_sdpa_small_query_fallback(33, 4096, true));
+        assert!(!cuda_sdpa_small_query_fallback(4096, 4096, true));
     }
 
     #[test]

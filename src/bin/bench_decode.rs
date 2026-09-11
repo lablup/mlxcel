@@ -430,6 +430,9 @@ fn main() -> Result<()> {
     // "Cache thrashing" throw. No-op off CUDA; an explicit
     // MLX_CUDA_GRAPH_CACHE_SIZE always wins.
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
+    // Same class of abort for the cuDNN SDPA plan cache, which prefill shape
+    // diversity alone can cross (#1799). Same contract: CUDA only, env wins.
+    mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
 
     let kv_cache_mode = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),

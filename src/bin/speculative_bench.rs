@@ -955,6 +955,9 @@ fn main() -> Result<()> {
     // the canonical workload that surfaced the bug. No-op off CUDA; an
     // explicit MLX_CUDA_GRAPH_CACHE_SIZE always wins.
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
+    // Same class of abort for the cuDNN SDPA plan cache, which prefill shape
+    // diversity alone can cross (#1799). Same contract: CUDA only, env wins.
+    mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
 
     let mut rows: Vec<Row> = Vec::new();
     if args.sweep {

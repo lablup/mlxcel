@@ -3383,7 +3383,7 @@ pub fn causal_attention(
     // `k_len >= q_len` guards the bottom-right causal alignment the chunked
     // path reproduces.
     if k_len >= q_len
-        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0)
+        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, true)
     {
         return layers::chunked_causal_attention(q, k, v, scale, chunk);
     }
