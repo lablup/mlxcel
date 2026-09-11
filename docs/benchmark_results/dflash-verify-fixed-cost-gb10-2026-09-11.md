@@ -67,7 +67,33 @@ Both fixes ship in the same PR, each with a same-binary kill switch used for the
 
 ## After
 
-AFTER_TABLE_PLACEHOLDER
+Same binary (the fix commit), same method, same host state, n = 3 per arm. `old-*` sets both kill switches (`MLXCEL_CUDA_F16_NORMALIZE=1 MLXCEL_GDN_CHAIN_PARITY=0`) and reproduces the before table within 1%; `f16-*` keeps only the GDN fix; `nogdn-*` keeps only the drafter fix.
+
+| Configuration | n | e2e tok/s mean (min to max) | vs off | server decode ms / 200 tok | emitted per verify | round device sync ms (min to max) | round draft host ms | round verify host ms | greedy text == classic |
+|---|---|---|---|---|---|---|---|---|---|
+| off (classic) | 3 | 58.33 (57.27 to 59.38) | | | | | | | yes |
+| block 2 | 3 | 72.57 (72.21 to 72.99) | **1.24x** | 4171 | 1.81 | 18.6 (18.3 to 19.1) | 16.6 | 2.5 | yes |
+| block 3 | 3 | 76.42 (76.36 to 76.51) | **1.31x** | 3264 | 2.37 | 24.4 (24.0 to 24.8) | 11.9 | 2.2 | yes |
+| block 4 | 3 | 76.88 (76.62 to 77.28) | **1.32x** | 3121 | 2.84 | 29.9 (29.4 to 30.6) | 11.9 | 2.3 | yes |
+| block 6 | 3 | 59.06 (58.84 to 59.19) | 1.01x | 3889 | 3.26 | 47.4 (46.6 to 48.0) | 13.0 | 2.6 | yes |
+| block 7 | 3 | 53.45 (53.32 to 53.59) | 0.92x | 4239 | 3.32 | 53.9 (53.3 to 54.5) | 13.0 | 2.7 | yes |
+| block 8 | 3 | 48.84 (48.48 to 49.32) | 0.84x | 4636 | 3.32 | 59.2 (57.7 to 61.5) | 13.1 | 3.9 | yes |
+| block 16 (checkpoint default) | 3 | 48.63 (48.48 to 48.83) | 0.83x | 4628 | 3.62 | 64.1 (62.9 to 66.4) | 13.4 | 5.5 | yes |
+| both switches off (old behavior), block 2 | 3 | 25.98 (25.90 to 26.12) | 0.45x | 7751 | 1.81 | 42.2 (42.0 to 42.4) | 21.4 | 6.7 | yes |
+| both switches off (old behavior), block 8 | 3 | 28.83 (28.33 to 29.23) | 0.49x | 6940 | 3.26 | 79.1 (78.1 to 79.8) | 23.7 | 8.6 | yes |
+| drafter fix only (`MLXCEL_GDN_CHAIN_PARITY=0`), block 2 | 3 | 36.85 (35.97 to 38.13) | 0.63x | 6307 | 1.81 | 40.9 (39.0 to 42.7) | 11.6 | 4.6 | yes |
+| drafter fix only, block 8 | 3 | 36.29 (36.11 to 36.54) | 0.62x | 6034 | 3.32 | 79.2 (77.9 to 80.8) | 13.4 | 5.4 | yes |
+| GDN fix only (`MLXCEL_CUDA_F16_NORMALIZE=1`), block 2 | 3 | 35.87 (35.76 to 36.00) | 0.61x | 5599 | 1.81 | 25.9 (25.8 to 26.0) | 21.8 | 2.9 | yes |
+| GDN fix only, block 8 | 3 | 36.45 (36.19 to 36.64) | 0.62x | 5562 | 3.32 | 62.6 (62.0 to 63.0) | 23.7 | 5.4 | yes |
+
+What moved:
+
+- The 2-row verify round's device work fell from 42.6 ms to 18.6 ms, 1.09x a classic step (17.1 ms) instead of 2.5x. Block 2 and block 4 now beat classic with their whole range above the classic range (72.21 and 76.62 against a classic maximum of 59.38): 1.24x and 1.32x. The classic arm itself is unchanged (58.33 vs 58.42), as nothing on that path moved.
+- The two fixes are not additive, they are serial. A round is host draft build, then host verify build, then the device sync, and each fix shortens a different link: the drafter fix takes the drafter's host build from 21.4 to 11.6 ms per round (the f32 promotions were extra graph nodes) and its device work off the sync, the GDN fix takes the verify's host build from 6.7 to 2.5 ms and the scan's 4400 launches off the sync. Either alone lands near 36 tok/s; both together at 72.6.
+- Greedy text is byte-identical to classic on every after arm, including block 16, which diverged from classic before the change (first difference at character 51 of the completion) and now matches: the sequential chain-parity loop is what buys that.
+- The width curve now has a cliff between 4 and 6 rows rather than a slope: 1.24x, 1.31x, 1.32x at 2, 3, 4 rows, then 1.01x at 6, 0.92x at 7. The multirow `qmv` kernel dispatches accumulator widths of 2, 4 or 8, so 5 to 7 rows take the 8-wide instantiation at its higher register cost (round sync 47.4 ms at 6 rows against 29.9 at 4), and `docs/CONTINUOUS_BATCHING.md` already records a regression past 7 rows on GB10 for that kernel. Block 8 and 16 improve from 0.49x and 0.53x to 0.84x and 0.83x but do not win. Their round device cost (59 and 64 ms) is the `qmm_sm80` term from finding 3, which is not touched here; the win is on the `qmv_multirow` side of the `M * B < 8` switch. With the fixed term gone the width choice is now what decides the outcome on this host, and the checkpoint's own default of 16 is on the losing side. That is a width policy question (the same kernel switch sits at 8 rows for `fp_qmv` on NVFP4 checkpoints, so the crossover is not one number for every family) and is left for a follow-up rather than folded into this fix; `--draft-block-size 4` is the measured setting for this pairing today.
+
+The Laguna pairing from PR #1771 was not re-measured (it needs that PR). Its drafter goes through the same `DFlashDrafter::load` and so had the same f16 conversion on this host; Laguna has no gated-delta layers, so only the first fix applies to it, and its number has to be taken after #1771 merges.
 
 ## Separate finding: `MLX_MAX_OPS_PER_BUFFER=100` on the classic path
 
