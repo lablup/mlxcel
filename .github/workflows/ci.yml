@@ -670,9 +670,15 @@ jobs:
     # group, three pushes to a `build.rs` PR queue three link jobs of up to
     # 120 minutes each on the one runner that also serves clippy for every Rust
     # PR and the release build. Keyed per PR, so PRs never cancel each other.
+    #
+    # `main` is exempt for the same reason the workflow-level group exempts it:
+    # a push to `main` carries no pull request number, so the key falls back to
+    # `refs/heads/main` and every merge shares one group. An unconditional flag
+    # would then let a second merge cancel this job mid-link on the branch a
+    # release builds from, which is the one run that has to finish.
     concurrency:
       group: xla-link-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     timeout-minutes: 120
     env:
       # The value shipped for this runner's architecture. Auto-detection yields
@@ -749,9 +755,14 @@ jobs:
     # Same reasoning as `xla-link`: minutes warm, tens of minutes cold, on the
     # one runner that also serves clippy for every Rust PR and the release
     # build. Keyed per PR, so PRs never cancel each other.
+    #
+    # `main` is exempt, as in `xla-link` and at the workflow level: pushes to
+    # `main` carry no pull request number, so they share the `refs/heads/main`
+    # key, and an unconditional flag would let one merge cancel the previous
+    # merge's compile before it proves the shipped architecture still builds.
     concurrency:
       group: cuda-sm70-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     timeout-minutes: 120
     env:
       # Volta. Plain `70`, not `70a`: architecture-specific suffixes only exist
