@@ -262,6 +262,44 @@ jobs:
       - name: Check every CUDA JIT launch keys its cache on the input dtypes
         run: python3 scripts/ci/check_kernel_dtype_keys.py
 
+  license-headers:
+    name: license headers
+    # Deliberately not behind the `changes` filter, like `crate-versions` and
+    # `kernel-dtype-keys`: it needs no toolchain and runs in seconds.
+    #
+    # This gate exists because coverage without enforcement did nothing. Issue
+    # #1707 found `benches/audio_fft.rs` shipping unlicensed and traced it to
+    # `benches` missing from the script's `TARGET_ROOTS`. That was only the
+    # visible instance: the roots list already named `src`, `examples` and
+    # `tests`, and 95 files under those three roots were unlicensed anyway,
+    # because nothing ever ran the script. Fixing the list would not have
+    # caught a single one of them. Running it in CI does.
+    #
+    # `--check` writes nothing and reports the files the default insert mode
+    # would touch, reusing the same `has_existing_header` predicate the writer
+    # branches on, so the gate can never demand an edit that running
+    # `python3 scripts/insert_apache_header.py` does not produce. Files that
+    # already carry someone else's provenance (the vendored MLX patches under
+    # src/lib/mlx-cpp/patches/ keep Apple's copyright) are skipped by that same
+    # predicate and must stay that way: this gate must never stamp a Lablup
+    # header onto upstream-derived code.
+    #
+    # The second step is the script's own unit suite, which nothing else runs:
+    # tests/test_insert_apache_header.py sits outside python/, and
+    # python.yml's pytest step is scoped to `python/tests` behind a
+    # `python/**` path filter.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Every owned source file carries the license header
+        run: python3 scripts/insert_apache_header.py --check
+      - name: Header script unit tests
+        run: python3 -m unittest discover -s tests -p 'test_insert_apache_header.py' -v
+
   llama-compat-manifest:
     name: llama-compat manifest
     # Deliberately not behind the `changes` filter, like `crate-versions`: it
