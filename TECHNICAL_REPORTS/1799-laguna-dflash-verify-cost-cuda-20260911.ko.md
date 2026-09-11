@@ -25,7 +25,7 @@ PR #1771은 Laguna DFlash 드래프터를 fail-closed 정확성 게이트 뒤에
 두 부분이고 둘 다 환경 변수 킬 스위치가 있으며, 라운드 루프나 Laguna 소스는 건드리지 않는다.
 
 1. 패치된 `mlx/backend/cuda/scaled_dot_product_attention.cpp`(핀된 파일에 게이트 하나를 더한 것으로, 기존 `.cu` 패치와 같은 오버레이 방식): `supports_sdpa_cudnn`이 더 긴 key 시퀀스 위의 2에서 `MLXCEL_SDPA_FALLBACK_MAX_QUERIES`(기본 32)행 마스크 호출을 거부한다. 그런 호출은 MLX 자체의 ops fallback(CPU 백엔드와 Qwen 3.5의 head_dim-256 검증이 이미 쓰는 것과 같은 산술, sink 포함)을 타며 shape별 빌드 비용이 없다. 1행 디코드 스텝(vector 커널)과 프리필(key 길이가 query 길이와 같거나, 경계보다 행이 많다. 청크 프리필의 마지막 짧은 청크만 경로가 바뀐다)은 그대로다. `MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0`이면 재빌드 없이 업스트림 디스패치로 돌아가며, 이것이 A/B의 킬 스위치다.
-2. `MLX_CUDA_SDPA_CACHE_SIZE`가 CUDA 빌드에서 `hardware::apply_cuda_sdpa_cache_default`를 통해 2000으로 기본 설정된다. #818 그래프 캐시 기본값의 자매로, 같은 세 진입점에서 같은 env-wins 계약으로 적용된다. 게이트가 있으면 검증은 더 이상 플랜 캐시를 miss하지 않지만, 장수 서버에서는 프리필 프롬프트 길이의 다양성만으로도 512 miss 중단을 넘고, 그 중단은 요청 오류가 아니라 프로세스 종료다.
+2. `MLX_CUDA_SDPA_CACHE_SIZE`가 CUDA 빌드에서 `hardware::apply_cuda_sdpa_cache_default`를 통해 2000으로 기본 설정된다. #818 그래프 캐시 기본값의 자매로, 같은 네 진입점에서 같은 env-wins 계약으로 적용된다. 게이트가 있으면 검증은 더 이상 플랜 캐시를 miss하지 않지만, 장수 서버에서는 프리필 프롬프트 길이의 다양성만으로도 512 miss 중단을 넘고, 그 중단은 요청 오류가 아니라 프로세스 종료다.
 
 ## 수정 후
 
@@ -57,4 +57,10 @@ PR #1771은 Laguna DFlash 드래프터를 fail-closed 정확성 게이트 뒤에
 
 ## 검증
 
-VERIFICATION_PLACEHOLDER
+패치한 파일은 핀된 업스트림 파일에 게이트 하나를 더한 것이다. `git show 81ba1c6a:mlx/backend/cuda/scaled_dot_product_attention.cpp`와 `src/lib/mlx-cpp/patches/mlx/backend/cuda/scaled_dot_product_attention.cpp`의 차이는 정확히 두 hunk, 헤더 주석과 `supports_sdpa_cudnn` 안의 게이트뿐이다. 빌드 배선은 추가하지 않았다. `src/lib/mlx-cpp/CMakeLists.txt`가 이미 `patches/mlx/backend/cuda/*`를 받아온 MLX 트리에 glob으로 덮어쓰기 때문이다.
+
+게이트가 거부하는 호출은 모두 갈 길이 있고, 그 길들은 cuDNN의 의미와 일치한다. 배열 마스크가 있거나 4에서 32행이면 `supports_sdpa_vector`도 거부하므로(배열 마스크를 받지 않고 `q_len`이 4 이상이어도 받지 않는다) `ScaledDotProductAttention::use_fallback`이 true가 되고 `mlx/fast.cpp`의 ops fallback이 돈다. 이 fallback은 배열 마스크, bool 마스크, GQA 반복, sink, `k_len - q_len` causal offset을 모두 지킨다. 2행이나 3행이고 배열 마스크가 없으면 `sdpa_vector`를 타는데, 그 causal 조건 `i <= kL - qL + q_seq_idx`는 cuDNN의 `set_causal_mask_bottom_right`와 같은 bottom-right 정렬이다. 1행 디코드 스텝은 게이트가 `q_len > 1`을 요구하므로 아예 닿지 않는다. 프런트엔드의 `force_fused=True` 경로는 cuDNN이 처리하던 자리에서 이제 예외를 던지지만, mlxcel은 그 플래그를 설정하지 않는다. backward 프리미티브는 `supports_sdpa_cudnn`을 보지 않고 자체 `use_fallback`이 `q_len % 128 == 0`을 요구하므로, 학습 shape은 게이트와 겹칠 수 없다.
+
+측정: 모든 arm은 유휴 호스트에서 n = 3이고(시작을 load1 0.6 미만으로 게이팅했고, 런마다 load1을 기록했고, `ps`로 다른 소비자가 없는지 확인했다), 기준선과 수정 후가 같은 바이너리이며, `MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0`이 바이너리 안의 킬 스위치다. 킬 스위치 arm이 모든 폭에서 수정 전 기준선을 2% 안에서 재현하므로, A/B가 재빌드가 아니라 게이트를 재는 것이 된다. 클래식 arm은 같은 세션에서 두 설정 모두 다시 측정했다. 전체 표와 nsys 귀속, 무코드 대조는 기록 문서에 있다.
+
+게이트: `cargo fmt --all -- --check` 통과. Rust 쪽은 `hardware.rs`의 #818 테스트 옆에 `cuda_sdpa_cache_default_matches_build_feature`를 추가했고 `cargo test --profile test-fast --features cuda -p mlxcel-core hardware::`와 `cargo clippy --profile test-fast --features cuda --lib --bins --tests -- -D warnings`로 검사한다. 이 호스트에서는 셀렉터 없는 `cargo test --lib`이 이 변경과 무관한 `cudaStreamEndCapture` C++ abort로 죽으므로 셀렉터를 좁힐 수밖에 없다. `metal,accelerate` 게이트는 이 Linux/CUDA 호스트에서 실행할 수 없어 돌리지 않았고, 변경이 거기 닿을 수도 없다. 패치한 파일은 CUDA 백엔드에만 컴파일되고 `cuda_sdpa_cache_default`는 `cuda` 피처가 없으면 `None`을 반환한다.

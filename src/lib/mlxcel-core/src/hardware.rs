@@ -344,8 +344,10 @@ pub fn apply_cuda_sdpa_cache_default() {
     if let Some(value) = cuda_sdpa_cache_default() {
         // SAFETY: same argument as `apply_cuda_graph_cache_default`: every
         // in-tree caller invokes this once at the top of `main` right after
-        // CLI parsing, before any model load, MLX op, or worker thread touches
-        // the environment, so no other thread is accessing it here.
+        // CLI parsing (src/main.rs, src/bin/mlx_server.rs,
+        // src/bin/bench_decode.rs, src/bin/speculative_bench.rs), before any
+        // model load, MLX op, or worker thread touches the environment, so no
+        // other thread is accessing it here.
         unsafe { std::env::set_var("MLX_CUDA_SDPA_CACHE_SIZE", value.to_string()) };
     }
 }
