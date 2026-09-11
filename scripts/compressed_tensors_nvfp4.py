@@ -148,15 +148,37 @@ class PackedPlanes:
         experts, rows, half = self.packed.shape
         return (experts, rows, half * 2)
 
-    def decode(self, decoder: Nvfp4Decoder):
+    def decode(self, decoder: Nvfp4Decoder, experts=None):
+        """Decode to a full `[experts, rows, cols]` float32 tensor.
+
+        With `experts` omitted, every expert is decoded, batched over
+        contiguous ranges so at most `DECODE_BATCH` experts' codes are ever
+        expanded to float32 at once. With `experts` given (the ids a
+        forward actually selected), only those rows are decoded; every
+        other expert's slot in the returned tensor is left uninitialized,
+        which is sound only because the caller never reads it.
+        """
         import torch
 
         out = torch.empty(self.shape, dtype=torch.float32, device=self.packed.device)
-        for lo in range(0, self.shape[0], self.DECODE_BATCH):
-            hi = lo + self.DECODE_BATCH
-            decoder(
-                self.packed[lo:hi], self.scale_bytes[lo:hi], self.row_global[lo:hi], out=out[lo:hi]
-            )
+        if experts is None:
+            for lo in range(0, self.shape[0], self.DECODE_BATCH):
+                hi = lo + self.DECODE_BATCH
+                decoder(
+                    self.packed[lo:hi],
+                    self.scale_bytes[lo:hi],
+                    self.row_global[lo:hi],
+                    out=out[lo:hi],
+                )
+            return out
+        idx = experts.to(device=self.packed.device, dtype=torch.long)
+        for lo in range(0, idx.shape[0], self.DECODE_BATCH):
+            sel = idx[lo : lo + self.DECODE_BATCH]
+            # `sel` is a tensor, so `out[sel]` is advanced indexing and would
+            # hand `decoder(..., out=...)` a copy rather than a view; assign
+            # the decoded batch back with `out[sel] = ...` instead, which
+            # scatters correctly regardless of how `sel` is ordered.
+            out[sel] = decoder(self.packed[sel], self.scale_bytes[sel], self.row_global[sel])
         return out
 
 
@@ -199,8 +221,14 @@ class PackedExperts:
     `LagunaExperts` holds `gate_up_proj` and `down_proj`), a forward pre-hook
     decodes the planes into those attributes as ordinary float32 tensors and a
     forward hook drops them again. The module's own forward runs unmodified on
-    real tensors while only one layer's dense planes exist at once (3 GB on
-    Laguna XS 2.1).
+    real tensors while only one layer's dense planes exist at once, and only
+    the experts that layer's routing actually selected are ever decoded:
+    `LagunaExperts.forward(hidden_states, top_k_index, top_k_weights)` only
+    ever indexes `gate_up_proj[expert_idx]` / `down_proj[expert_idx]` for an
+    `expert_idx` that appears in `top_k_index`, so decoding the rest is a
+    wasted float32 write: an unselected expert's weights are never read
+    (about 124 GB per forward on Laguna XS 2.1 decoding every expert of
+    every layer, versus the handful actually routed to).
     """
 
     def __init__(self, decoder: Nvfp4Decoder, planes: dict[str, PackedPlanes]):
@@ -220,8 +248,14 @@ class PackedExperts:
         module.register_forward_hook(self._release)
 
     def _materialize(self, module, args) -> None:
+        # `args` is `LagunaExperts.forward`'s positional arguments as the
+        # module itself calls it, `(hidden_states, top_k_index,
+        # top_k_weights)`; `top_k_index` names exactly the experts this
+        # forward will read.
+        top_k_index = args[1]
+        selected = top_k_index.unique()
         for leaf, plane in self.planes.items():
-            setattr(module, leaf, plane.decode(self.decoder))
+            setattr(module, leaf, plane.decode(self.decoder, selected))
         self.materialized += 1
 
     def _release(self, module, args, output) -> None:

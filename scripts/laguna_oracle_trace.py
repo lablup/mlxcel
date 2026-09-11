@@ -26,10 +26,18 @@ Usage:
     laguna_oracle_trace.py MODEL_DIR TEXT_FILE [CHUNK_TOKENS=256] [MAX_CHUNKS=4]
         [TOPK=8] [PREFILL=0] [--device DEVICE] [--no-prefix-sharing] > oracle.tsv
 
+MODEL_DIR must hold the checkpoint's own `modeling_laguna.py` and
+`configuration_laguna.py`, which only a directory fetched with `hf download`
+(or an equivalent full-repository clone) has: `mlxcel download`'s allow-list
+(`src/downloader/filters.rs`) does not fetch `*.py` files, so a directory it
+populated is missing both and this script fails with that explanation before
+it imports anything.
+
 Needs torch, transformers 5.x, tokenizers and safetensors, plus
-`compressed_tensors_nvfp4.py` beside this file. It executes the checkpoint's
-Python, exactly as `trust_remote_code=True` would, so only point it at a
-checkpoint you trust.
+`compressed_tensors_nvfp4.py` beside this file. It runs the checkpoint's
+Python from a hashed temporary copy, not in place; see
+`import_checkpoint_code` for exactly what that does and how it differs from
+`trust_remote_code=True`. Only point it at a checkpoint you trust either way.
 
 What is reproduced exactly. The six positional arguments mean what they mean
 to `logit_trace`, including its fallback to the default for a value that does
@@ -46,8 +54,13 @@ the traced forward at CHUNK_TOKENS width because MLX picks a kernel by width.
 This oracle has no width-selected kernels, so it computes each chunk from one
 causal forward over context plus chunk, and chunks whose token sequence is a
 prefix of another chunk's share that forward. The rows are mathematically the
-ones `logit_trace` asks for. `--no-prefix-sharing` runs one forward per chunk,
-which is how to check that claim on a real run.
+ones `logit_trace` asks for, since causal attention makes each row depend
+only on itself and earlier rows of the same forward. A shared forward still
+commits float32 to a different reduction order than a lone forward at the
+chunk's own length, so on a real run `--no-prefix-sharing` (one forward per
+chunk) agrees with sharing to about 5e-5 in logits and NLL rather than bit
+for bit, with no top-1 flip seen in the self-check; that is the comparison
+`--no-prefix-sharing` exists to run.
 
 Precision. Activations are float32 throughout. BF16 tensors are widened to
 float32, which is exact. Every compressed-tensors `nvfp4-pack-quantized` plane
@@ -65,10 +78,12 @@ quantization (`input_activations`, `input_global_scale`) and its FP8 KV cache
 
 Arms this oracle cannot cover. The shipped `modeling_laguna.py` scores the
 router with a sigmoid and nothing else, and it allocates `self_attn.sink`
-without ever reading it in the forward. A config that sets
-`moe_router_score_func` to anything but "sigmoid", `moe_router_use_sigmoid:
-false`, or `swa_attention_sink_enabled: true` is refused rather than traced
-as a different model.
+without ever reading it in the forward. A config whose effective router
+score function, resolved the same way `LagunaConfig::router_score_func` in
+`src/models/laguna.rs` resolves it (`moe_router_score_func` wins when set,
+otherwise `moe_router_use_sigmoid == false` means softmax, otherwise
+sigmoid), is anything but sigmoid is refused, and so is
+`swa_attention_sink_enabled: true`, rather than traced as a different model.
 """
 
 from __future__ import annotations
@@ -79,6 +94,7 @@ import importlib
 import json
 import math
 import sys
+import tempfile
 import time
 import types
 from dataclasses import dataclass
@@ -212,37 +228,83 @@ def plan_forwards(
 
 
 def import_checkpoint_code(model_dir: Path):
-    """Import `configuration_laguna.py` / `modeling_laguna.py` from the
-    checkpoint directory as one package, without writing bytecode into it."""
-    for name in ("configuration_laguna.py", "modeling_laguna.py"):
+    """Copy `configuration_laguna.py` and `modeling_laguna.py` out of the
+    checkpoint directory into a fresh `tempfile.TemporaryDirectory()`, hash
+    the copied bytes, then import the copies as one package.
+
+    Importing straight from `model_dir` (the previous approach) hands the
+    choice of what actually runs to Python's own import machinery: a
+    `modeling_laguna/` package, a compiled `modeling_laguna.*.so`, or a
+    stale `__pycache__/*.pyc` with no hash check all take priority over the
+    `.py` file that sits next to them, and hashing that `.py` file only
+    after importing would not prove it was the code that ran. Copying the
+    two `.py` files into an empty directory first removes every one of
+    those alternatives: the package sees only the files copied here, and
+    both are hashed from the copy before `importlib` touches them.
+    `modeling_laguna.py` has exactly one relative import, `from
+    .configuration_laguna import LagunaConfig` (checked against the shipped
+    XS 2.1 source), so no other file needs to be copied alongside it.
+
+    This does not behave "exactly as `trust_remote_code=True` would": that
+    transformers code path copies the `.py` files into its own per-revision
+    module cache under `~/.cache/huggingface/modules` before importing them,
+    which shares the "import a copy, not the original" shape but not this
+    function's destination, lifetime, or hash-before-import ordering.
+    """
+    names = ("configuration_laguna.py", "modeling_laguna.py")
+    for name in names:
         if not (model_dir / name).is_file():
             raise OracleError(
-                f"{model_dir / name} not found; the oracle runs the checkpoint's own modeling code"
+                f"{model_dir / name} not found; the oracle runs the checkpoint's own modeling "
+                "code, which `mlxcel download`'s allow-list (src/downloader/filters.rs) does not "
+                "fetch, so fetch the checkpoint with `hf download` (or an equivalent full-"
+                "repository clone) instead"
             )
     package = (
         "_laguna_checkpoint_" + hashlib.sha256(str(model_dir.resolve()).encode()).hexdigest()[:12]
     )
-    module = types.ModuleType(package)
-    module.__path__ = [str(model_dir.resolve())]
-    sys.modules[package] = module
-    previous = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
-    try:
-        configuration = importlib.import_module(f"{package}.configuration_laguna")
-        modeling = importlib.import_module(f"{package}.modeling_laguna")
-    finally:
-        sys.dont_write_bytecode = previous
-    digest = hashlib.sha256((model_dir / "modeling_laguna.py").read_bytes()).hexdigest()
-    return configuration, modeling, digest
+    digests: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="mlxcel-laguna-oracle-") as tmp:
+        tmp_dir = Path(tmp)
+        for name in names:
+            data = (model_dir / name).read_bytes()
+            digests[name] = hashlib.sha256(data).hexdigest()
+            (tmp_dir / name).write_bytes(data)
+        module = types.ModuleType(package)
+        module.__path__ = [str(tmp_dir)]
+        sys.modules[package] = module
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            configuration = importlib.import_module(f"{package}.configuration_laguna")
+            modeling = importlib.import_module(f"{package}.modeling_laguna")
+        finally:
+            sys.dont_write_bytecode = previous
+    return configuration, modeling, digests
+
+
+def effective_router_score_func(config: dict) -> str:
+    """The router scoring function this config actually selects, resolved in
+    the same order as `LagunaConfig::router_score_func` in
+    `src/models/laguna.rs`: `moe_router_score_func` wins whenever it is set,
+    regardless of `moe_router_use_sigmoid`; only when it is unset does
+    `moe_router_use_sigmoid == False` select softmax, defaulting to sigmoid
+    otherwise."""
+    score = config.get("moe_router_score_func")
+    if score is not None:
+        return score
+    if config.get("moe_router_use_sigmoid") is False:
+        return "softmax"
+    return "sigmoid"
 
 
 def refuse_unimplemented_arms(config: dict) -> None:
-    score = config.get("moe_router_score_func")
-    if score not in (None, "sigmoid") or config.get("moe_router_use_sigmoid") is False:
-        shown = score if score is not None else "softmax (moe_router_use_sigmoid: false)"
+    effective = effective_router_score_func(config)
+    if effective != "sigmoid":
         raise OracleError(
-            f"the config selects router scoring {shown!r}, but the shipped modeling_laguna.py "
-            "scores with a sigmoid only, so its trace would be a different model"
+            f"the config's effective router scoring is {effective!r}, but the shipped "
+            "modeling_laguna.py scores with a sigmoid only, so its trace would be a different "
+            "model"
         )
     if config.get("swa_attention_sink_enabled"):
         raise OracleError(
@@ -257,7 +319,7 @@ def build_model(model_dir: Path, device, log):
     import torch
     from torch import nn
 
-    configuration, modeling, digest = import_checkpoint_code(model_dir)
+    configuration, modeling, digests = import_checkpoint_code(model_dir)
     raw = json.loads((model_dir / "config.json").read_text())
     refuse_unimplemented_arms(raw)
     raw.pop("quantization_config", None)
@@ -332,7 +394,7 @@ def build_model(model_dir: Path, device, log):
             f"{len(unread)} checkpoint tensors map to no parameter, first {unread[0]}"
         )
     model.to(device)
-    return model, staged, digest
+    return model, staged, digests
 
 
 # --- Trace ---
@@ -399,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--no-prefix-sharing",
         action="store_true",
-        help="one forward per chunk, to check that shared prefixes change nothing",
+        help="one forward per chunk, to check how closely a shared forward agrees with it",
     )
     args = ap.parse_args(argv)
 
@@ -428,7 +490,9 @@ def main(argv: list[str] | None = None) -> int:
             raise OracleError("CHUNK_TOKENS and TOPK must be positive")
         model_dir = Path(args.model_dir)
         device = torch.device(args.device or default_device())
-        text = Path(args.text_file).read_text()
+        # Raw UTF-8, matching `examples/logit_trace.rs`'s `std::fs::read_to_string`
+        # (`read_text()` would use the locale encoding and normalize `\r\n`/`\r`).
+        text = Path(args.text_file).read_bytes().decode("utf-8")
         tokenizer = load_tokenizer(model_dir)
         ids = tokenizer.encode(text, add_special_tokens=False).ids
         bos_prefix = tokenizer.encode("", add_special_tokens=True).ids[:1]
@@ -437,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
 
         log(f"loading {model_dir} on {device} in float32")
         started = time.perf_counter()
-        model, staged, digest = build_model(model_dir, device, log)
+        model, staged, digests = build_model(model_dir, device, log)
         log(
             f"loaded in {time.perf_counter() - started:.0f}s; "
             f"{len(chunks)} chunks in {len(groups)} forward(s)"
@@ -457,8 +521,10 @@ def main(argv: list[str] | None = None) -> int:
     out = sys.stdout
     out.write(f"# model\t{args.model_dir}\n")
     out.write(
-        f"# oracle\tmodeling_laguna.py\tsha256\t{digest}\ttransformers\t{transformers.__version__}"
-        f"\ttorch\t{torch.__version__}\ttokenizers\t{tokenizers.__version__}\n"
+        f"# oracle\tmodeling_laguna.py\tsha256\t{digests['modeling_laguna.py']}"
+        f"\tconfiguration_laguna.py\tsha256\t{digests['configuration_laguna.py']}"
+        f"\ttransformers\t{transformers.__version__}\ttorch\t{torch.__version__}"
+        f"\ttokenizers\t{tokenizers.__version__}\n"
     )
     out.write(f"# dtype\tfloat32\tdevice\t{device}\n")
     out.write(
