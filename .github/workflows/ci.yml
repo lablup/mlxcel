@@ -56,6 +56,39 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  # One CI run per branch, because four jobs below land on GB10, the single
+  # self-hosted Linux runner that also serves the release build: `clippy`,
+  # `xla-compile`, `xla-link`, and `cuda-sm70-compile`. Without a group, a run
+  # for a commit nobody is waiting on any more does not merely sit idle, it
+  # holds a place in line ahead of the runs that matter. Measured over
+  # 2026-09-10 KST: 113 runs created, 14 open at once, 11 of those stacked on
+  # four branches, and six cancelled by hand purely to free the runner (#1774).
+  #
+  # `main` is deliberately excluded from the cancellation, which is what the
+  # `cancel-in-progress` expression encodes. A push-to-main run is the one that
+  # catches what a stale PR base hid, and it is the last gate before a release
+  # builds from that commit; killing it because the next merge landed 90 seconds
+  # later discards the only signal nothing else produces. The queueing cost of
+  # that choice is bounded rather than unbounded, because cancelling a *pending*
+  # run is inherent to grouping and `cancel-in-progress` governs only the
+  # *running* one: GitHub keeps the in-flight `main` run plus at most one
+  # pending run behind it, so back-to-back merges queue two deep and not N deep.
+  # What that leaves in place, stated plainly rather than discovered later, is
+  # that an intermediate `main` commit can have its run cancelled while still
+  # pending; whatever commit is at the head of `main` is always the newest in
+  # the group and so always gets a run, which is the property that matters
+  # before a release is cut from it. nightly-verify.yml made the same trade for
+  # the same reason (its group is unconditional, having no PR half to key on).
+  #
+  # `github.event.pull_request.number || github.ref` is the shape already used
+  # by pipeline-parallel-ci.yml and by the two per-job groups below, and it
+  # keeps a PR run and a `main` push run in distinct groups. The per-job groups
+  # in `xla-link` and `cuda-sm70-compile` stay as they are: workflow-level and
+  # job-level groups compose, and those two are keyed differently on purpose.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
