@@ -89,3 +89,22 @@ Decode tok/s over 200 tokens after a 101 to 112 token prompt; prefill is that pr
 | both | 3 | 2048 | 65.67 (64.82 to 66.93) | -2.0% | 244 | 1716.1 (1708.5 to 1720.4) | +11.4% | 1193 | 13.20 (13.20 to 13.20) | 0.57 to 1.33 | 0 of 3 |
 | nograph | 3 | 2048 | 61.15 (60.90 to 61.43) | -8.8% | 262 | 1335.8 (1331.8 to 1338.5) | -13.3% | 1533 | 8.74 (8.72 to 8.78) | 0.56 to 0.59 | 0 of 3 |
 
+## Graph accounting: instantiation, commits and where the time goes (nsys, single-stream decode)
+
+`nsys profile -t cuda --cuda-graph-trace=node` around `mlxcel-bench-decode` at 400 and 200 generated tokens for the same arm, differenced, so model load, warm-up and prefill cancel and every per-token figure below is the decode work of the extra 200 tokens. Idle host, GPU held, one run per cell; the profiled runs sit within 3% of the unprofiled tables (Laguna default 31.1 to 31.5 tok/s against 32.0, `both` 38.1 to 38.2 against 37.6; Qwen 64.7 against 67.4, 68.2 to 68.5 against 70.0), so nsys inflation is small here. "Host CUDA API" is the summed host time of every CUDA API call per token, minus `cudaMemcpyAsync`, whose call count does not change with tokens (it is the weight upload) and whose time differed between the two runs of a pair by up to 9 ms per token in either direction, a load-time artifact of the differencing, not decode work. Wall per token is `1000 / tok/s` of the profiled 200-token run.
+
+| arm | wall ms/token | kernel launches/token | graphs launched/token (`cudaGraphLaunch`) | `cudaGraphExecUpdate`/token | `cudaGraphInstantiate`/token (host ms/token) | host CUDA API ms/token | of which `ExecUpdate` + `GraphLaunch` |
+|---|---|---|---|---|---|---|---|
+| Laguna default | 31.8 | 2364.9 | 200.0 | 200.0 | 0.04 (0.03) | 17.3 | 6.6 + 4.5 |
+| Laguna `both` | 26.2 | 2364.9 | 24.0 | 23.7 | 0.29 (0.34) | 17.0 | 7.9 + 5.3 |
+| Qwen 3.5 default | 15.5 | 1307.0 | 65.0 | 65.0 | 0.00 (0.01) | 8.9 | 3.8 + 2.7 |
+| Qwen 3.5 `both` | 14.7 | 1307.0 | 14.0 | 14.0 | 0.00 (0.00) | 8.5 | 3.8 + 2.7 |
+
+What the table says:
+
+- **The work is identical.** Kernel launches per token do not change with the budget, on either model. The budget only moves graph boundaries.
+- **Commits per token are the whole story on Laguna.** At the defaults a Laguna token is 200 committed graphs (the 120 or so byte-cap commits from the expert stacks and the lm_head plus the 20-op cap over the rest), and 2,365 nodes over 200 graphs is under 12 nodes per graph. `both` makes it 24 graphs of up to 100 nodes. Qwen goes from 65 to 14.
+- **The saving is not host time.** Host CUDA API time per token is flat (17.3 to 17.0 ms on Laguna, 8.9 to 8.5 on Qwen): fewer `cudaGraphExecUpdate` and `cudaGraphLaunch` calls, but each on a bigger graph, so their sum barely moves. What falls is the wall time, 5.6 ms per token on Laguna for 176 fewer boundaries and 0.9 ms on Qwen for 51 fewer, about 20 to 30 us per boundary either way. That is the device-side cost of a graph boundary: graph launch latency plus the `cudaEventRecord` / `cudaStreamWaitEvent` pair MLX puts between consecutive graphs (201 and 200 per token at the Laguna default, 25 and 24 under `both`), during which the GPU has nothing queued. So this is a reduction in total, not a shift between phases: the host side is unchanged and the device side has fewer idle gaps.
+- **Instantiation is visible and small.** The graph cache hits on Qwen at both budgets (no instantiation in steady state). On Laguna `both` instantiates about one graph every 3.4 tokens (58 over the differenced 200 tokens against 8 at the defaults), 1.15 ms each, 0.34 ms per token, 1.3% of the token; the MoE routing changes the expert-gather node set from token to token and larger graphs have more chances to differ. The gain of 5.6 ms per token is 16x that cost. The graph-exec LRU (`MLX_CUDA_GRAPH_CACHE_SIZE`, 2000 on CUDA builds) is nowhere near its capacity at 24 keys per token.
+- **Summed kernel time is not a clean measure with larger graphs** (33.5 to 38.1 ms per token on Laguna while the wall fell) because independent kernels inside one graph overlap and each stretches; it is reported only to note that it is not the metric. Kernel launch counts and wall time are.
+
