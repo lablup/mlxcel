@@ -1,0 +1,8 @@
+source: https://github.com/NripeshN/mlx
+branch: rocm-support
+commit: 75915908dfe5028335d318b10340313744fd3a8d
+fork_upstream_merge_base: 39886de461d4f014cd60a3a68ad42fd8d776754a
+retargeted_to_mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+license: MIT (see the MLX LICENSE and NOTICE)
+copied_when: MLX_BUILD_ROCM=ON (cargo feature `rocm`)
+local_fixes: LOCAL_FIXES.md
