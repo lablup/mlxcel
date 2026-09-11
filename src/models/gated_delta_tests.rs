@@ -548,8 +548,13 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
     assert!(t <= CHAIN_PARITY_SEQUENTIAL_MAX_T);
     let bf16 = mlxcel_core::dtype::BFLOAT16;
     let f32 = mlxcel_core::dtype::FLOAT32;
-    let q = mlxcel_core::astype(&synth(&[b, t as i32, h, dk], 0.5, 0.0), bf16);
-    let k = mlxcel_core::astype(&synth(&[b, t as i32, h, dk], 0.5, 1.0), bf16);
+    // Model regime: Qwen 3.5 RMS-normalizes q and k to unit norm before the
+    // update, so |k| <= 1 and the delta-rule matrix stays contractive. The
+    // chunked scan's 63-step Neumann series runs in the input dtype and is
+    // only stable there; the bit-exactness asserts below do not depend on
+    // it, but the drift sanity check at the end does.
+    let q = mlxcel_core::astype(&synth(&[b, t as i32, h, dk], 0.2, 0.0), bf16);
+    let k = mlxcel_core::astype(&synth(&[b, t as i32, h, dk], 0.2, 1.0), bf16);
     let v = mlxcel_core::astype(&synth(&[b, t as i32, h, dv], 0.5, 2.0), bf16);
     // Scalar gating in (0, 1) and beta in (0, 1), float32 like `compute_g`.
     let g = mlxcel_core::add(
@@ -580,6 +585,17 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
     }
     let refs: Vec<&mlxcel_core::MlxArray> = ys.iter().map(|y| y.as_ref().unwrap()).collect();
     let y_ref = mlxcel_core::concatenate_many(&refs, 1);
+    // Non-vacuity: a reference near zero would make every comparison below
+    // pass for the wrong reason.
+    let rms = |a: &mlxcel_core::MlxArray| {
+        let f = mlxcel_core::astype(a, f32);
+        mlxcel_core::item_f32(&mlxcel_core::mean_all(&mlxcel_core::square(&f))).sqrt()
+    };
+    let (y_rms, s_rms) = (rms(&y_ref), rms(&s));
+    assert!(
+        y_rms > 1e-3 && s_rms > 1e-3,
+        "reference is degenerate: rms(y_ref)={y_rms}, rms(state)={s_rms}"
+    );
     assert_bit_equal(
         &y_block,
         &y_ref,
@@ -591,8 +607,20 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
     // close but not bit-identical: pin that the flag is what buys exactness.
     let (y_chunk, _) =
         gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, false);
+    // `rms_rel` reduces in the input dtype; compare in f32 so a bf16 reduction
+    // does not decide the verdict. Measured on GB10 (CUDA, 3 runs, identical):
+    // rms_rel = 2.72e-3, so the 1e-2 bound has 3.7x of headroom and still
+    // catches a scan that stops tracking the recurrence.
+    let drift = rms_rel(
+        &mlxcel_core::astype(&y_chunk, f32),
+        &mlxcel_core::astype(&y_ref, f32),
+    );
+    eprintln!("chunked-arm drift vs sequential reference: rms_rel={drift}");
     assert!(
-        rms_rel(&y_chunk, &y_ref) < 1e-2,
-        "chunked scan drifted far from the sequential reference"
+        drift < 1e-2,
+        "chunked scan drifted far from the sequential reference: rms_rel={drift}, rms(y_chunk)={}, rms(y_ref)={y_rms}, dtype(y_chunk)={:?}, dtype(y_ref)={:?}",
+        rms(&y_chunk),
+        mlxcel_core::array_dtype(&y_chunk),
+        mlxcel_core::array_dtype(&y_ref)
     );
 }

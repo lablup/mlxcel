@@ -63,4 +63,4 @@ dtype 정책은 `mlxcel-core`로 로드되는 모든 드래프터 패밀리에 �
 
 ## 검증
 
-`cargo fmt --all -- --check` 통과. 단위 테스트: `drafter.rs`의 정책 및 env 플래그 파싱 테스트, `gated_delta_tests.rs`의 비트 동일성 테스트, 기존 드래프터와 gated-delta 스위트를 이 호스트에서 test-fast 프로파일로 좁은 선택자로 실행했다(범위를 지정하지 않은 `cargo test --lib`는 이 변경과 무관한 `cudaStreamEndCapture` C++ abort로 이 호스트에서 중단되고, `make verify-test-cuda`는 워크스페이스 전체라 watchdog 아래에서 돌릴 수 없었다). `metal,accelerate` 게이트는 이 Linux/CUDA 호스트에서 실행할 수 없어 돌리지 않았다.
+`cargo fmt --all -- --check` 통과. 단위 테스트: `drafter.rs`의 정책 및 env 플래그 파싱 테스트, `gated_delta_tests.rs`의 비트 동일성 테스트(끝의 chunked arm 드리프트 검사는 이 호스트에서 `rms_rel = 2.72e-3`으로 세 번 동일하게 측정됐고 경계는 1e-2다. `rms_rel`이 입력 dtype으로 축약해 bf16을 잘못 읽으므로 비교는 f32로 한다), 기존 드래프터와 gated-delta 스위트를 이 호스트에서 test-fast 프로파일로 좁은 선택자로 실행했다(범위를 지정하지 않은 `cargo test --lib`는 이 변경과 무관한 `cudaStreamEndCapture` C++ abort로 이 호스트에서 중단되고, `make verify-test-cuda`는 워크스페이스 전체라 watchdog 아래에서 돌릴 수 없었다). `metal,accelerate` 게이트는 이 Linux/CUDA 호스트에서 실행할 수 없어 돌리지 않았다.
