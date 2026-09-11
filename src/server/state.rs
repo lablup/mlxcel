@@ -18,7 +18,7 @@
 //! startup/config policy keeps request handling focused on state access rather
 //! than construction details.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -462,6 +462,8 @@ pub struct AppState {
     pub thinking_markers: Arc<crate::tokenizer::ThinkingMarkers>,
     /// Model directory path (for props/info).
     pub model_path: PathBuf,
+    /// Effective per-slot context window reported on b10621 metadata surfaces.
+    effective_context_size: usize,
     /// Static media-input capability flags resolved once at startup.
     pub media_support: ModelMediaSupport,
     /// `MLXCEL_VIDEO_DIR_ALLOWLIST`, canonicalized once at startup (issue
@@ -549,12 +551,16 @@ impl AppState {
     /// the same "model default" window from the checkpoint and falls back to
     /// 4096 if the checkpoint does not declare one.
     pub(crate) fn effective_context_size(&self) -> usize {
-        if self.config.context_size > 0 {
-            return self.config.context_size;
-        }
-        crate::read_model_context_window(&self.model_path)
-            .unwrap_or(crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK)
+        self.effective_context_size
     }
+}
+
+fn resolve_effective_context_size(config: &ServerConfig, model_path: &Path) -> usize {
+    if config.context_size > 0 {
+        return config.context_size;
+    }
+    crate::read_model_context_window(model_path)
+        .unwrap_or(crate::cli::max_tokens::DEFAULT_CONTEXT_WINDOW_FALLBACK)
 }
 
 /// Cumulative counter snapshot taken at the previous `/metrics` scrape.
@@ -676,6 +682,7 @@ impl AppState {
     ) -> Self {
         let slots_debug = slots_debug_from_env();
         let slots = build_slot_registry(&config, slots_debug);
+        let effective_context_size = resolve_effective_context_size(&config, &model_path);
         let mut startup_settings = config.live_settings();
         startup_settings.resolved_token_bias =
             super::model_provider::model_worker::resolve_worker_token_bias(
@@ -697,6 +704,7 @@ impl AppState {
             thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
             tokenizer,
             model_path,
+            effective_context_size,
             media_support: ModelMediaSupport::default(),
             video_dir_allowlist: Arc::new(Vec::new()),
             batch_metrics,
@@ -737,6 +745,7 @@ impl AppState {
     ) -> Self {
         let slots_debug = slots_debug_from_env();
         let slots = build_slot_registry(&config, slots_debug);
+        let effective_context_size = resolve_effective_context_size(&config, &model_path);
         let mut startup_settings = config.live_settings();
         startup_settings.resolved_token_bias =
             super::model_provider::model_worker::resolve_worker_token_bias(
@@ -758,6 +767,7 @@ impl AppState {
             thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
             tokenizer,
             model_path,
+            effective_context_size,
             media_support: ModelMediaSupport::default(),
             video_dir_allowlist: Arc::new(Vec::new()),
             batch_metrics,
