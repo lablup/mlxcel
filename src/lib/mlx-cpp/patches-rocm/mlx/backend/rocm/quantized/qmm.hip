@@ -3835,9 +3835,15 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   // Restrict to 4/8-bit; 2/5/6-bit fall through to the warp-shared QMV kernel.
   bool tiled_bits_supported = (bits_ == 4 || bits_ == 8);
   // tile_n can be 4 on low-CU gfx1152 — still a valid tiled path.
+  // mlxcelverse: the launches below cover only bf16/f16 and group sizes
+  // 32/64/128, but the branch returns unconditionally, so any other input
+  // (f32 activations in particular) left the output unwritten and returned
+  // whatever the allocation held. Only enter when a kernel will launch.
   if (use_tiled && tiled_bits_supported && use_fast_qmv &&
       !can_use_batched_qmv && tile_n >= 4 &&
-      mode_ == QuantizationMode::Affine) {
+      mode_ == QuantizationMode::Affine &&
+      (x.dtype() == bfloat16 || x.dtype() == float16) &&
+      (group_size_ == 32 || group_size_ == 64 || group_size_ == 128)) {
     {
       dim3 tiled_block(host_warp, tile_n);
       const int n_tiles = (N + tile_n - 1) / tile_n;
