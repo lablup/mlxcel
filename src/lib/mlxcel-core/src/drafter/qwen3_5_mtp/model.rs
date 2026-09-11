@@ -215,7 +215,7 @@ impl Qwen35MtpDraftModel {
         // the DFlash drafter loader. The published drafter is bf16; the
         // paired 4-bit target's activations are f16, and a dtype-mixed
         // concat/matmul would silently promote to f32.
-        crate::drafter::dflash::drafter::convert_bf16_to_f16_non_quantized(&mut weights);
+        crate::drafter::dflash::drafter::apply_drafter_load_dtype_policy(&mut weights);
         Self::from_weights(&weights, config)
     }
 

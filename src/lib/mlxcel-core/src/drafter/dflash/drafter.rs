@@ -99,8 +99,9 @@ impl DFlashDrafter {
     ///    [`crate::weights::load_weights_from_dir`].
     /// 3. Sanitize the weight keys (strip `model.` prefix) via
     ///    [`DFlashDraftModel::sanitize`].
-    /// 4. Convert bf16 → f16 on all non-quantized tensors (Apple
-    ///    Silicon precision rules; see `docs/apple-silicon-precision.md`).
+    /// 4. Apply the host's load-time dtype policy to the non-quantized
+    ///    tensors ([`apply_drafter_load_dtype_policy`]): bf16 → f16 on
+    ///    Apple Silicon and pre-Ampere CUDA, bf16 kept elsewhere.
     /// 5. Build the model and allocate its per-layer K/V cache slice.
     pub fn load(path: &Path) -> Result<Self, DrafterError> {
         let config_path = path.join("config.json");
@@ -126,10 +127,11 @@ impl DFlashDrafter {
         // `DFlashDraftModel.sanitize`.
         DFlashDraftModel::sanitize(&mut weights);
 
-        // Apple Silicon precision: convert bf16 → f16 on non-quantized
-        // tensors. Quantized tensors keep their bf16 scales/biases as-is
+        // Load-time dtype: f16 where the target loaders convert to f16 (Apple
+        // Silicon, pre-Ampere CUDA), bf16 where they keep bf16 (Ampere and
+        // later CUDA). Quantized tensors keep their bf16 scales/biases as-is
         // because `quantized_matmul` handles bf16 natively.
-        convert_bf16_to_f16_non_quantized(&mut weights);
+        apply_drafter_load_dtype_policy(&mut weights);
 
         let model = DFlashDraftModel::from_weights(&weights, config)
             .map_err(|msg| DrafterError::LoadFailed { reason: msg })?;
@@ -159,9 +161,118 @@ impl DFlashDrafter {
     }
 }
 
-/// Convert every bf16 tensor in `weights` to f16. Quantized scales and
-/// biases (recognised by living next to a `.scales` or `.biases` key in
-/// the map) are kept as-is.
+/// Rewrite a drafter's bf16 tensors to f16 when, and only when, this host's
+/// target loaders do the same.
+///
+/// The target loaders in the binary crate (`bf16_to_f16_at_load` in
+/// `src/models/sanitize.rs`) convert an unquantized bf16 checkpoint to f16 on
+/// Apple Silicon and on pre-Ampere CUDA, and keep it bf16 on Ampere and later
+/// CUDA unless `MLXCEL_CUDA_F16_NORMALIZE` opts in. A drafter has to land in
+/// the same dtype as the residual stream it reads, because MLX promotes a
+/// bf16 activation times an f16 weight to float32: the whole drafter forward
+/// then runs in f32, and every weight is re-upcast on every round.
+///
+/// Measured on GB10 (sm_121) with `qwen3.5-4b-4bit` and its DFlash drafter
+/// (issue #1782): before this gate the drafter's f16 weights cost about 240
+/// launches and 30 to 38 ms of device time per verify round at every block
+/// width (72 `copy_v<__half, float>` upcasts of the 540M drafter weights plus
+/// f32 cutlass GEMMs), which was the largest fixed term in the round.
+///
+/// `MLXCEL_KEEP_BF16` and `MLXCEL_CUDA_F16_NORMALIZE` are honored the way the
+/// target loaders honor them, so the two sides cannot drift apart under an
+/// operator override.
+///
+/// Used by: DFlash drafter load, Muse Glimmer drafter load, Inkling MTP
+/// drafter load, Qwen 3.5 MTP drafter load.
+pub(crate) fn apply_drafter_load_dtype_policy(weights: &mut WeightMap) {
+    if drafter_bf16_to_f16_at_load() {
+        convert_bf16_to_f16_non_quantized(weights);
+    }
+}
+
+/// Whether this host converts an unquantized bf16 drafter to f16 at load.
+///
+/// Used by: [`apply_drafter_load_dtype_policy`].
+pub fn drafter_bf16_to_f16_at_load() -> bool {
+    let apple_silicon =
+        crate::hardware::get_hardware().silicon_gen != crate::hardware::AppleSiliconGen::Unknown;
+    drafter_bf16_to_f16_policy(
+        std::env::var_os("MLXCEL_KEEP_BF16").is_some(),
+        apple_silicon,
+        crate::cuda_arch::cuda_compute_capability(),
+        EnvFlag::read("MLXCEL_CUDA_F16_NORMALIZE"),
+    )
+}
+
+/// Tri-state reading of a boolean environment flag, with the same spelling
+/// rules as the binary crate's `env_flag_enabled` / `env_flag_disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvFlag {
+    Unset,
+    Enabled,
+    Disabled,
+}
+
+impl EnvFlag {
+    fn read(name: &str) -> Self {
+        match std::env::var(name) {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Self::Unset,
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        let v = raw.trim();
+        if v.is_empty() {
+            return Self::Unset;
+        }
+        if v == "0"
+            || v.eq_ignore_ascii_case("false")
+            || v.eq_ignore_ascii_case("off")
+            || v.eq_ignore_ascii_case("no")
+        {
+            return Self::Disabled;
+        }
+        Self::Enabled
+    }
+}
+
+/// Pure form of [`drafter_bf16_to_f16_at_load`], mirroring the arms of the
+/// binary crate's `bf16_to_f16_at_load` for an unquantized checkpoint:
+///
+/// - `MLXCEL_KEEP_BF16` set: keep bf16 everywhere (the dtype-policy A/B
+///   instrument).
+/// - pre-Ampere CUDA (compute capability below 8): convert, unless
+///   `MLXCEL_CUDA_F16_NORMALIZE` is explicitly disabled. Those parts have no
+///   native bf16, so the target converts too.
+/// - Apple Silicon: convert (Metal's bfloat is storage-only).
+/// - Ampere and later CUDA: keep bf16 unless `MLXCEL_CUDA_F16_NORMALIZE` is
+///   explicitly enabled.
+/// - anything else (CPU-only builds): keep bf16.
+pub(crate) fn drafter_bf16_to_f16_policy(
+    keep_bf16: bool,
+    apple_silicon: bool,
+    cuda_compute_capability: Option<(u32, u32)>,
+    cuda_f16_normalize: EnvFlag,
+) -> bool {
+    if keep_bf16 {
+        return false;
+    }
+    if let Some((major, _)) = cuda_compute_capability
+        && major < 8
+    {
+        return cuda_f16_normalize != EnvFlag::Disabled;
+    }
+    if apple_silicon {
+        return true;
+    }
+    cuda_compute_capability.is_some() && cuda_f16_normalize == EnvFlag::Enabled
+}
+
+/// Convert every bf16 tensor in `weights` to f16, unconditionally. Quantized
+/// scales and biases (recognised by living next to a `.scales` or `.biases`
+/// key in the map) are kept as-is. Callers that load a checkpoint go through
+/// [`apply_drafter_load_dtype_policy`] instead, which decides per host.
 ///
 /// This mirrors the binary crate's `convert_bf16_weights` (in
 /// `src/models/sanitize.rs`) but is duplicated here because the factory
@@ -173,8 +284,7 @@ impl DFlashDrafter {
 /// `weights` is mutated in place; non-bf16 tensors and quantization
 /// auxiliaries (scales, biases) are untouched.
 ///
-/// Used by: DFlash drafter load, Qwen 3.5 MTP drafter load
-/// (`crate::drafter::qwen3_5_mtp::model::Qwen35MtpDraftModel::from_path`).
+/// Used by: [`apply_drafter_load_dtype_policy`], and the loader tests below.
 pub(crate) fn convert_bf16_to_f16_non_quantized(weights: &mut WeightMap) {
     let bf16_keys: Vec<String> = weights
         .iter()
@@ -929,6 +1039,41 @@ mod tests {
             dtype::FLOAT16,
             "non-bf16 tensor must pass through unchanged"
         );
+    }
+
+    #[test]
+    fn drafter_dtype_policy_mirrors_target_loaders() {
+        use super::{EnvFlag, drafter_bf16_to_f16_policy as policy};
+        // Ampere and later CUDA keeps bf16 (the target does too), unless the
+        // operator opts into f16 normalization.
+        assert!(!policy(false, false, Some((12, 1)), EnvFlag::Unset));
+        assert!(!policy(false, false, Some((8, 0)), EnvFlag::Unset));
+        assert!(policy(false, false, Some((12, 1)), EnvFlag::Enabled));
+        assert!(!policy(false, false, Some((12, 1)), EnvFlag::Disabled));
+        // Pre-Ampere CUDA converts unless normalization is disabled.
+        assert!(policy(false, false, Some((7, 0)), EnvFlag::Unset));
+        assert!(policy(false, false, Some((7, 5)), EnvFlag::Enabled));
+        assert!(!policy(false, false, Some((7, 0)), EnvFlag::Disabled));
+        // Apple Silicon converts.
+        assert!(policy(false, true, None, EnvFlag::Unset));
+        // CPU-only builds keep bf16.
+        assert!(!policy(false, false, None, EnvFlag::Unset));
+        // MLXCEL_KEEP_BF16 wins everywhere.
+        assert!(!policy(true, true, None, EnvFlag::Unset));
+        assert!(!policy(true, false, Some((7, 0)), EnvFlag::Enabled));
+    }
+
+    #[test]
+    fn env_flag_parsing_matches_binary_spelling() {
+        use super::EnvFlag;
+        assert_eq!(EnvFlag::parse(""), EnvFlag::Unset);
+        assert_eq!(EnvFlag::parse("  "), EnvFlag::Unset);
+        assert_eq!(EnvFlag::parse("1"), EnvFlag::Enabled);
+        assert_eq!(EnvFlag::parse("true"), EnvFlag::Enabled);
+        assert_eq!(EnvFlag::parse("0"), EnvFlag::Disabled);
+        assert_eq!(EnvFlag::parse("OFF"), EnvFlag::Disabled);
+        assert_eq!(EnvFlag::parse("no"), EnvFlag::Disabled);
+        assert_eq!(EnvFlag::parse("False"), EnvFlag::Disabled);
     }
 
     #[test]

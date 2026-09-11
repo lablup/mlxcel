@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use super::{
-    GatedDeltaCache, RMSNormGated, chain_parity_forfeited_by_shape, compute_g, gated_delta_chunked,
-    gated_delta_ops, gated_delta_step, precise_swiglu_gate, restore_dtype,
-    supports_metal_gated_delta_kernel,
+    CHAIN_PARITY_SEQUENTIAL_MAX_T, GatedDeltaCache, RMSNormGated, chain_parity_forfeited_by_shape,
+    compute_g, gated_delta_chunked, gated_delta_ops, gated_delta_ops_with_parity, gated_delta_step,
+    precise_swiglu_gate, restore_dtype, supports_metal_gated_delta_kernel,
 };
 use mlxcel_core::{dtype, generate::ModelStateSnapshot};
 
@@ -508,5 +508,119 @@ fn chunked_prefill_matches_sequential_reference() {
     assert!(
         s_err < 1e-3,
         "chunked state diverged from sequential reference: rms_rel={s_err}"
+    );
+}
+
+/// Bit-exact comparison: every element equal, including the dtype.
+fn assert_bit_equal(actual: &mlxcel_core::MlxArray, expected: &mlxcel_core::MlxArray, what: &str) {
+    assert_eq!(
+        mlxcel_core::array_dtype(actual),
+        mlxcel_core::array_dtype(expected),
+        "{what}: dtype differs"
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(actual),
+        mlxcel_core::array_shape(expected),
+        "{what}: shape differs"
+    );
+    let a = mlxcel_core::astype(actual, mlxcel_core::dtype::FLOAT32);
+    let e = mlxcel_core::astype(expected, mlxcel_core::dtype::FLOAT32);
+    let diff = mlxcel_core::abs(&mlxcel_core::subtract(&a, &e));
+    let max_diff = mlxcel_core::item_f32(&mlxcel_core::max_all(&diff));
+    assert_eq!(
+        max_diff, 0.0,
+        "{what}: max |diff| = {max_diff}, expected bit-exact"
+    );
+}
+
+/// Issue #1782: on the ops fallback (CUDA / CPU) a chain-parity block of
+/// `T <= CHAIN_PARITY_SEQUENTIAL_MAX_T` rows must equal `T` consecutive
+/// single-token calls bit for bit, because the speculative verify argmax has
+/// to match the classic decode chain at temperature 0. The chunked scan the
+/// block used to take is only close in float32, not identical.
+#[test]
+fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
+    if mlxcel_core::gated_delta_kernel_available() {
+        // The Metal chain-parity kernel owns this contract there (issue #1165).
+        return;
+    }
+    let (b, t, h, dk, dv) = (1, 8usize, 4, 16, 16);
+    assert!(t <= CHAIN_PARITY_SEQUENTIAL_MAX_T);
+    let bf16 = mlxcel_core::dtype::BFLOAT16;
+    let f32 = mlxcel_core::dtype::FLOAT32;
+    // Model regime: Qwen 3.5 RMS-normalizes q and k to unit norm before the
+    // update, so |k| <= 1 and the delta-rule matrix stays contractive. The
+    // chunked scan's 63-step Neumann series runs in the input dtype and is
+    // only stable there; the bit-exactness asserts below do not depend on
+    // it, but the drift sanity check at the end does.
+    let q = mlxcel_core::astype(&synth(&[b, t as i32, h, dk], 0.2, 0.0), bf16);
+    let k = mlxcel_core::astype(&synth(&[b, t as i32, h, dk], 0.2, 1.0), bf16);
+    let v = mlxcel_core::astype(&synth(&[b, t as i32, h, dv], 0.5, 2.0), bf16);
+    // Scalar gating in (0, 1) and beta in (0, 1), float32 like `compute_g`.
+    let g = mlxcel_core::add(
+        &synth(&[b, t as i32, h], 0.2, 3.0),
+        &mlxcel_core::full_f32(&[1], 0.7, f32),
+    );
+    let beta = mlxcel_core::add(
+        &synth(&[b, t as i32, h], 0.3, 4.0),
+        &mlxcel_core::full_f32(&[1], 0.5, f32),
+    );
+    let state0 = synth(&[b, h, dv, dk], 0.1, 5.0);
+
+    let (y_block, s_block) =
+        gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, true);
+
+    // Reference: T single-token calls through the same entry point.
+    let mut s = mlxcel_core::copy(&state0);
+    let mut ys = Vec::with_capacity(t);
+    for ti in 0..t as i32 {
+        let qt = mlxcel_core::slice(&q, &[0, ti, 0, 0], &[b, ti + 1, h, dk]);
+        let kt = mlxcel_core::slice(&k, &[0, ti, 0, 0], &[b, ti + 1, h, dk]);
+        let vt = mlxcel_core::slice(&v, &[0, ti, 0, 0], &[b, ti + 1, h, dv]);
+        let gt = mlxcel_core::slice(&g, &[0, ti, 0], &[b, ti + 1, h]);
+        let bt = mlxcel_core::slice(&beta, &[0, ti, 0], &[b, ti + 1, h]);
+        let (yt, st) = gated_delta_ops_with_parity(&qt, &kt, &vt, &gt, &bt, Some(&s), None, true);
+        ys.push(yt);
+        s = st;
+    }
+    let refs: Vec<&mlxcel_core::MlxArray> = ys.iter().map(|y| y.as_ref().unwrap()).collect();
+    let y_ref = mlxcel_core::concatenate_many(&refs, 1);
+    // Non-vacuity: a reference near zero would make every comparison below
+    // pass for the wrong reason.
+    let rms = |a: &mlxcel_core::MlxArray| {
+        let f = mlxcel_core::astype(a, f32);
+        mlxcel_core::item_f32(&mlxcel_core::mean_all(&mlxcel_core::square(&f))).sqrt()
+    };
+    let (y_rms, s_rms) = (rms(&y_ref), rms(&s));
+    assert!(
+        y_rms > 1e-3 && s_rms > 1e-3,
+        "reference is degenerate: rms(y_ref)={y_rms}, rms(state)={s_rms}"
+    );
+    assert_bit_equal(
+        &y_block,
+        &y_ref,
+        "chain-parity block output vs T single steps",
+    );
+    assert_bit_equal(&s_block, &s, "chain-parity block state vs T single steps");
+
+    // Without the parity flag the same block takes the chunked scan, which is
+    // close but not bit-identical: pin that the flag is what buys exactness.
+    let (y_chunk, _) =
+        gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, false);
+    // `rms_rel` reduces in the input dtype; compare in f32 so a bf16 reduction
+    // does not decide the verdict. Measured on GB10 (CUDA, 3 runs, identical):
+    // rms_rel = 2.72e-3, so the 1e-2 bound has 3.7x of headroom and still
+    // catches a scan that stops tracking the recurrence.
+    let drift = rms_rel(
+        &mlxcel_core::astype(&y_chunk, f32),
+        &mlxcel_core::astype(&y_ref, f32),
+    );
+    eprintln!("chunked-arm drift vs sequential reference: rms_rel={drift}");
+    assert!(
+        drift < 1e-2,
+        "chunked scan drifted far from the sequential reference: rms_rel={drift}, rms(y_chunk)={}, rms(y_ref)={y_rms}, dtype(y_chunk)={:?}, dtype(y_ref)={:?}",
+        rms(&y_chunk),
+        mlxcel_core::array_dtype(&y_chunk),
+        mlxcel_core::array_dtype(&y_ref)
     );
 }

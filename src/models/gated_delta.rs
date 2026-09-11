@@ -24,6 +24,21 @@
 use mlxcel_core::utils::{silu, softplus, stack_arrays};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+/// Longest block the chain-parity ops fallback runs as a sequential loop of
+/// fused single steps instead of the chunked scan.
+///
+/// The chunked scan pays a fixed `C - 1 = 63` Horner matmul steps per layer
+/// whatever `T` is, so a 2-row verify block costs the same as a 64-row one
+/// (measured on GB10 for `qwen3.5-4b-4bit`, issue #1782: about 4400 launches
+/// and a fifth of the device time per verify round, twice that when a partial
+/// accept replays the accepted rows through the same scan). Below this bound
+/// the `T`-step loop launches fewer kernels, scales with the rows the round
+/// actually has, and is bit-identical to `T` single-token decode steps, which
+/// is the parity contract the Metal chain-parity kernel keeps and the ops
+/// fallback used to forfeit. Every shipped speculative block width is 16 or
+/// less; a wider block (or a prefill) keeps the chunked scan.
+pub const CHAIN_PARITY_SEQUENTIAL_MAX_T: usize = 32;
+
 /// Chunk length for the chunked parallel prefill scan (`gated_delta_chunked`).
 ///
 /// The scan trades the per-token loop's `O(T)` sequential dependency for an
@@ -268,9 +283,12 @@ pub fn gated_delta_ops(
 ///
 /// `chain_parity == true` routes the Metal path through the chain-parity
 /// kernel (per-step storage-dtype state rounding, issue #1165) so a `T = K`
-/// block is bit-identical to `K` consecutive `T = 1` calls. The non-Metal
-/// fallback ignores the flag: the parity guarantee is Metal-only today, and
-/// the speculative verify paths that need it are Metal-gated in practice.
+/// block is bit-identical to `K` consecutive `T = 1` calls. On the ops
+/// fallback (CUDA, CPU) the flag routes an unmasked scalar-gated block of at
+/// most [`CHAIN_PARITY_SEQUENTIAL_MAX_T`] rows through the sequential loop of
+/// fused single steps, which is the same arithmetic as `T` single-token decode
+/// calls of [`gated_delta_step`] and therefore bit-identical to them; a wider
+/// block keeps the chunked scan (issue #1782).
 ///
 /// Used by: [`gated_delta_ops`], [`gated_delta_update`],
 /// [`gated_delta_update_chain_parity`]
@@ -403,23 +421,29 @@ fn gated_delta_ops_with_parity(
     // ([B, T, Hv, Dk]) or an explicit batch-recovery mask falls through to the
     // sequential reference loop that follows.
     if mask.is_none() && mlxcel_core::array_ndim(g) == 3 {
-        return gated_delta_chunked(
-            q_ref,
-            k_ref,
-            v,
-            g,
-            beta,
-            &current_state,
-            GATED_DELTA_CHUNK_SIZE,
-            b,
-            t,
-            hv,
-            dk,
-            dv,
-        );
+        // A chain-parity verify block of at most CHAIN_PARITY_SEQUENTIAL_MAX_T
+        // rows takes the sequential loop below: fewer launches than the
+        // fixed 63-step scan and bit-identical to T single decode steps.
+        if !(chain_parity && t <= CHAIN_PARITY_SEQUENTIAL_MAX_T) {
+            return gated_delta_chunked(
+                q_ref,
+                k_ref,
+                v,
+                g,
+                beta,
+                &current_state,
+                GATED_DELTA_CHUNK_SIZE,
+                b,
+                t,
+                hv,
+                dk,
+                dv,
+            );
+        }
     }
 
-    // Sequential fallback (vectorized gating or mask): one step per timestep.
+    // Sequential fallback (chain-parity block, vectorized gating, or mask):
+    // one step per timestep.
     let mut ys = Vec::with_capacity(t);
     for t_idx in 0..t {
         let q_t = mlxcel_core::squeeze_axis(
