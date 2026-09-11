@@ -71,9 +71,18 @@ Verified locally:
 - That clean result was confirmed to be load-bearing rather than vacuous. A negative control containing the same two expressions with `github.reff` and a bogus context field makes `actionlint` fail on the concurrency block, so its expression type-checker does inspect this construct.
 - `git diff --name-only origin/main` returns only `.github/workflows/ci.yml`, confirming the "no change to `release.yml`, `nightly-verify.yml`, or `pipeline-parallel-ci.yml`" criterion.
 
-**Not verified, and deliberately not claimed.** That a newer push actually supersedes an in-flight run is cross-branch behavior that only two racing pushes against live GitHub infrastructure can demonstrate, and a green CI run on this PR would not show it. A staged double-push was considered and rejected on cost: `.github/workflows/ci.yml` appears in all four `changes` path filters (`rust`, `mlx_pin`, `xla_link`, `cuda_arch`), so every push to this branch starts all four GB10 jobs, two of them carrying `timeout-minutes: 120`. Manufacturing the heaviest available load on the single shared runner in order to prove a point about relieving load on it is the wrong trade, and the issue's proposed verification recipe did not account for that filter coverage.
+**Verified live, without staging a race.** A staged double-push was considered and rejected on cost: `.github/workflows/ci.yml` appears in all four `changes` path filters (`rust`, `mlx_pin`, `xla_link`, `cuda_arch`), so every push to this branch starts all four GB10 jobs, two of them carrying `timeout-minutes: 120`. Manufacturing the heaviest available load on the single shared runner in order to prove a point about relieving load on it is the wrong trade, and the issue's proposed verification recipe did not account for that filter coverage.
 
-The behavior is observable without staging anything, because this PR's branch received a second push carrying this report as ordinary required work. The resulting supersession, or its absence, is visible in `gh run list --workflow ci.yml --branch chore/issue-1774-ci-concurrency` and is reported on the PR rather than asserted here in advance.
+The evidence arrived anyway, because committing this report was a second push to the branch as ordinary required work. It reproduces the acceptance criterion exactly:
+
+| Run | Head | Created | Final state |
+|---|---|---|---|
+| `34562655380` | `ab7fd234` (first push) | 04:33:41Z | `completed` / **`cancelled`** at 04:36:33Z |
+| `34562815627` | `bc4ac8c8` (report push) | 04:36:13Z | `queued`, not cancelled |
+
+Exactly one run for the branch is not `cancelled`, and no `gh run cancel` was issued at any point in the session; the older run was cancelled by the concurrency group twenty seconds after the newer push registered. The job breakdown of the cancelled run is the value proposition in miniature: `cargo-clippy` and `OpenXLA feature compile` had already finished on `lablup-dgxspark21`, `OpenXLA feature link` was **cancelled while running on `lablup-dgxspark21`**, and `CUDA sm_70 compile` was cancelled with an empty `runner_name`, meaning it was released before it ever claimed the runner. Those last two are the pair carrying `timeout-minutes: 120`.
+
+**Still not verified, and not claimed.** The `main` half of the expression. That `cancel-in-progress` evaluates false on `refs/heads/main` and therefore leaves an in-flight post-merge run alone can only be observed after a merge to `main`, followed by a second merge while the first run is still going. Nothing in this PR demonstrates it, and the run above exercised only the pull-request branch of the expression, where `github.ref` is `refs/pull/1780/merge`. The `main` behavior rests on the documented semantics of the expression and on reading it, not on an observation.
 
 ---
 
