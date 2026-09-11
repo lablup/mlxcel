@@ -141,6 +141,19 @@ pub struct ChatMessage {
     /// unchanged for every other model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub florence2_result: Option<serde_json::Value>,
+    /// Set only when `true`: this generation produced tokens but `content`
+    /// came back empty anyway, with everything routed to `reasoning_content`
+    /// instead. A reasoning model that exhausts `max_tokens` (or a
+    /// `reasoning_budget`) before closing its thinking block leaves exactly
+    /// this shape, and without this field it is indistinguishable from a
+    /// clean, intentionally empty response. Mirrors
+    /// `reasoning_stream::is_reasoning_only`, which already names this
+    /// condition for the CLI (#1721); this is the same condition surfaced on
+    /// the HTTP API, which previously only logged it, and only for the
+    /// narrower primed-thinking case (#467). Never `Some(false)`; omitted
+    /// (`None`) otherwise so every existing client's wire shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_only: Option<bool>,
 }
 
 /// A single tool call in the response (OpenAI format)
@@ -231,6 +244,7 @@ impl ChatCompletionResponse {
                     reasoning: None,
                     tool_calls: None,
                     florence2_result: None,
+                    reasoning_only: None,
                 },
                 finish_reason,
                 logprobs,
@@ -281,6 +295,7 @@ impl ChatCompletionResponse {
                     reasoning: None,
                     tool_calls: Some(tool_calls),
                     florence2_result: None,
+                    reasoning_only: None,
                 },
                 finish_reason: Some("tool_calls".to_string()),
                 logprobs,
@@ -371,6 +386,22 @@ impl ChatCompletionResponse {
     pub fn with_florence2_result(mut self, structured: Option<serde_json::Value>) -> Self {
         if let Some(choice) = self.choices.first_mut() {
             choice.message.florence2_result = structured;
+        }
+        self
+    }
+
+    /// Flag a generation that produced tokens but left `content` empty because
+    /// everything stayed in `reasoning_content` (see [`ChatMessage::reasoning_only`]
+    /// for why this needs a dedicated field rather than being inferred from
+    /// `finish_reason` plus an empty `content`). `false` leaves the field absent,
+    /// so the common case keeps the existing wire shape. Chaining mirrors
+    /// `with_florence2_result`.
+    ///
+    /// Used by: chat.rs (non-streaming path)
+    #[must_use]
+    pub fn with_reasoning_only(mut self, reasoning_only: bool) -> Self {
+        if let Some(choice) = self.choices.first_mut() {
+            choice.message.reasoning_only = reasoning_only.then_some(true);
         }
         self
     }
@@ -1013,5 +1044,50 @@ mod tests {
         );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["choices"][0]["message"]["content"], "");
+    }
+
+    // -- with_reasoning_only --------------------------------------
+
+    /// `with_reasoning_only(true)` must set the field and serialize it.
+    #[test]
+    fn with_reasoning_only_true_sets_and_serializes_field() {
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            String::new(),
+            50,
+            10,
+            Some("length".to_string()),
+        )
+        .with_reasoning_only(true);
+
+        assert_eq!(resp.choices[0].message.reasoning_only, Some(true));
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["choices"][0]["message"]["reasoning_only"], true);
+    }
+
+    /// `with_reasoning_only(false)` must leave the field absent, so the common
+    /// (not-reasoning-only) case keeps the existing wire shape byte for byte.
+    #[test]
+    fn with_reasoning_only_false_omits_field() {
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            "the answer".to_string(),
+            50,
+            10,
+            Some("stop".to_string()),
+        )
+        .with_reasoning_only(false);
+
+        assert_eq!(resp.choices[0].message.reasoning_only, None);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(
+            !json["choices"][0]["message"]
+                .as_object()
+                .unwrap()
+                .contains_key("reasoning_only"),
+            "reasoning_only must be absent when false"
+        );
     }
 }
