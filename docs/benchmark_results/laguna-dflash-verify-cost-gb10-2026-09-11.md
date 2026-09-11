@@ -75,3 +75,56 @@ Recorded here because the controls established it with repeats and it goes beyon
 | both raised (100 ops, 1000 "MB") | 33.94 (33.53 to 34.27) | +16% |
 
 Two things follow. First, with GB10's default budgets, CUDA graph capture costs this model more than it saves: graphs off beats graphs on by 12%, and capture only pulls ahead of no capture (33.94 against 32.67) once both budgets are raised. Second, the two knobs interact: the op cap alone is worth 2% because the byte cap commits the graph long before 20 ops accumulate (every expert stack and the lm_head exceed 25 "MB" on their own), so the op cap only binds once the byte cap is lifted. This is a per-model-shape result, not a host default: on Qwen 3.5 in #1782 (`qwen3.5-4b-4bit`, affine 4-bit, no matrix over the byte cap) graphs off cost the classic arm 8% and `MLX_MAX_OPS_PER_BUFFER=100` gave +3%, the opposite sign on capture. Any change to the GB10 defaults in `hardware.rs` needs a measurement per model shape (dense against MoE, and matrix size against the byte cap), and it is not made here.
+
+## Attribution: kernel tables per round and the host side of the round
+
+`nsys profile -t cuda,nvtx --cuda-graph-trace=node` (rule 4 of the Volta record). Because `mlxcel generate` also profiles the model load, the prefill and the exactness probe (57 forwards at width 16), each configuration was profiled twice, at 400 and at 200 tokens, and the two were differenced: load, prefill and probe are identical in both, so the delta is exactly the decode work of the extra tokens, normalized by the extra rounds from the runs' own `DFlash:` lines (87 rounds at block 8, 83 at block 16, 200 tokens on the classic arm). Profiling inflated these runs by 3 to 4% only (classic 28.4 and 28.8 tok/s profiled against 29.28; block 8 18.5 against 19.0), which is far less than #1782's 15 to 46% because this pairing's kernels are large. Block 2 could not be differenced this way at first: its 400-token profile (and later a 300-token one) aborted, see below.
+
+### GPU kernel time per round, by category
+
+| category (kernel names) | classic, per token | block 8, per round | block 16, per round |
+|---|---|---|---|
+| bf16 dense projections and lm_head: `gemv_single<bf16>` at one row, `cutlass_80_wmma_tensorop_bf16_s161616gemm_16x16_128x2` at 2 or more rows (q, k, v, o, g, router, lm_head; also the drafter's bf16 matmuls) | 21.16 ms, 243 launches | 33.37 ms, 318 | 33.06 ms, 353 |
+| routed experts, `qmm_sm80_kernel` via `gather_qmm` (`M = 1, B = 8 x rows`, so this family at every width including classic); at 8 rows and above the NVFP4 shared expert joins it | 6.14 ms, 117 | 39.37 ms, 233 | 59.35 ms, 234 |
+| shared expert, `fp_qmv_single` (NVFP4, `M < 8`) | 0.90 ms, 117 | 0.02 ms, 1 | 0 |
+| attention kernels (`kernel_sdpav_1pass` on classic; `cudnn_generated_fort_native_sdpa_sm80_flash_fprop` on the blocks) | 0.66 ms, 42 | 1.09 ms, 45 | 1.16 ms, 45 |
+| elementwise, copies, gather, sort, norms, rope, reductions, arange | 5.28 ms, 1844 | 12.84 ms, 2666 | 14.19 ms, 2669 |
+| **total** | **34.14 ms, 2363 launches** | **86.69 ms, 3262 launches** | **107.70 ms, 3301 launches** |
+| wall per token or per round under nsys (from the runs' own timers) | 35.6 ms | 142.6 ms (device sync 112.7, drafter host build 26.0, verify host build 3.7) | 170.4 ms (136.8, 29.8, 3.7) |
+| GPU busy fraction | 96% | 61% | 63% |
+
+Two corrections to the issue's premises come out of the kernel names. This checkpoint's attention projections, per-head gate, router and lm_head are plain bf16 (`model.layers.*.self_attn.{q,k,v,o}_proj.weight` are BF16 in the safetensors headers; only the routed and shared experts are NVFP4), so the `fp_qmv` to `qmm_sm80` "family switch on the dense projections" does not exist on this pairing: the dense projections go from `gemv_single` at one row to a cutlass bf16 GEMM at two or more, which is what the `dense` row above shows. And `SwitchGLU::forward` expands `x` to `[n, 1, 1, K]`, so `gather_qmm` sees `M = 1, B = 8n` and the routed experts take `qmm_sm80` at every width including classic; the switch at 8 rows only moves the NVFP4 shared expert (117 `fp_qmv` launches per token) into the same family.
+
+The per-row term is GPU work in the routed experts: `qmm_sm80` goes from 39.4 ms at 8 rows to 59.4 at 16, 2.5 ms per row, against a bandwidth floor of about 1.8 ms per row for reading each selected expert once per (row, expert) pair (8 experts x 3 matrices x 0.5 MB x 40 layers). It is inherent to a MoE verify: rows route to different experts, so each row adds its own expert reads. The bf16 dense term is flat from 8 to 16 rows (33.4 against 33.1 ms) and is a fixed 12 ms over the classic step's 21 ms, the price of the cutlass 16x16-tile GEMM over the one-row gemv; the drafter's own bf16 matmuls are inside it.
+
+### The fixed floor is host time in `ScaledDotProductAttention::eval_gpu`
+
+The kernel time per round (86.7 ms at block 8) is far below the round (142.6 ms) and even below the device sync alone (112.7 ms), so the floor is not on the GPU. MLX's NVTX ranges, differenced the same way, put it in one primitive:
+
+| NVTX host range | classic, per token | block 8, per round | block 16, per round |
+|---|---|---|---|
+| `ScaledDotProductAttention::eval_gpu` | 2.82 ms (40 instances) | **67.09 ms (45)** | **75.83 ms (45)** |
+| `CommandEncoder::commit` | 9.91 ms (207) | 21.59 ms (294) | 24.29 ms (310) |
+| `Matmul::eval_gpu` | 0.60 ms (243) | 4.69 ms (280) | 5.37 ms (280) |
+| `cu::CudaEvent::wait` | 0 | 4.57 ms | 5.58 ms |
+| every other primitive | under 1 ms each | under 2 ms each | under 2 ms each |
+
+The 45 instances are the target's 40 attention layers plus the drafter's 5. On the classic arm a one-row call takes the `sdpa_vector` kernel and costs 70 us of host time. On a multi-row masked call with head_dim 128 and bf16 the CUDA backend selects cuDNN (`supports_sdpa_cudnn`: Ampere or later, head_dim at most 128, f16 or bf16; `supports_sdpa_vector` refuses any array mask and any `q_len >= 4`), and MLX caches the cuDNN execution plan in an LRU keyed on the exact q, k, v and mask shapes and strides (`build_sdpa_cache_key`, `scaled_dot_product_attention.cpp:142-176`). A verify round appends rows to the KV cache, so `k_len` and the mask shape are new every round for each of the three shape classes (target full layers, target sliding layers with sinks, drafter layers): three cache misses per round, each running `build_sdpa_graph` (cuDNN frontend validate, build_operation_graph, create_execution_plans, check_support, build_plans), about 22 ms each on this host. That is the fixed term: 67 ms at 8 rows, 76 at 16, and it does not depend on the row count. It also explains why every graph-side control left the floor alone (the plan build is not graph work) and why the drafter's host build was 30 ms at every width: its five layers pay one of the three builds, and it fell to 9 to 11 ms once cuDNN was taken out of the round (control below).
+
+The same LRU (`lru_cache.h`) keeps a lifetime miss counter and throws `Cache thrashing is happening, please set the environment variable MLX_CUDA_SDPA_CACHE_SIZE to a larger value than 256` once it passes twice the capacity, 512. At three misses per round that is about 170 rounds per process: the block 2 profile at 400 tokens (226 rounds) aborted on exactly that throw, twice, and so did a 300-token retry (about 170 rounds), while the 200-token runs (113 rounds) and the block 8 and 16 runs at 400 tokens (163 and 161 rounds) completed. Before this issue, a Laguna DFlash generation longer than about 170 rounds ended the process. `nsys -t cudnn` was also tried to count the builds directly; this nsys (2025.3.2) captured no cuDNN events from the MLX binary, so the count rests on the NVTX ranges and the abort arithmetic.
+
+Graph replay itself is healthy on every arm, as on Qwen 3.5: `cudaGraphInstantiate` 0.1 per token on classic against 199.9 `cudaGraphExecUpdate`, and 0.2 per round against 259.4 at block 8 and 259.8 at block 16. The instantiate-to-update ratio is under 1:1000 on both verify widths, so re-instantiation is ruled out.
+
+### Control: `MLX_CUDA_USE_CUDNN_SDPA=0` (zero code, n = 3)
+
+| config | tok/s mean (min to max) | vs default off | accepted/round | round wall ms | device sync ms/round (min to max) | draft host ms/round | verify host ms/round |
+|---|---|---|---|---|---|---|---|
+| cuDNN off, classic | 29.49 (28.98 to 30.19) | 1.01x | | 33.9 per token | | | |
+| cuDNN off, block 2 | 32.24 (31.44 to 32.95) | **1.10x** (was 0.52x) | 0.74 | 54.0 (was 115.3) | 41.3 (40.5 to 42.7) (was 80.4) | 8.8 (was 31.1) | 3.8 |
+| cuDNN off, block 4 | 39.15 (38.68 to 39.73) | **1.34x** (was 0.70x) | 1.47 | 63.1 | 48.7 (48.3 to 49.1) | 10.3 | 4.1 |
+| cuDNN off, block 8 | 33.58 (33.13 to 33.90) | **1.15x** (was 0.65x) | 1.67 | 79.4 | 64.6 (63.9 to 65.9) | 10.7 | 4.0 |
+| cuDNN off, block 16 | 25.27 (25.09 to 25.52) | 0.86x (was 0.52x) | 1.69 | 106.9 | 91.4 (89.9 to 92.6) | 11.1 | 4.3 |
+
+The classic arm is unchanged (it never enters cuDNN at decode) and the verify round loses about 39 ms of device sync and 21 ms of drafter host build at every width: the two links of the serial chain that held a plan build each. Caveat on this one sweep: the host was not clean for it. My own `nsys stats` exports (CPU-bound sqlite conversions) overlapped it, and load1 reached 3.2 before some runs; the direction and size of the move are not in doubt (every range is disjoint from the baseline by a wide margin), but the after-fix numbers that follow, taken on a quiet host with the same binary and a code-level kill switch, are the ones to quote. The acceptance per round also moves slightly (0.74 against 0.77 at block 2, 1.69 against 1.55 at 16) because the fallback's arithmetic differs from cuDNN's and the greedy path shifts at a tie; that is the numerics side of the exactness question, out of scope here.
+
+Process-wide `MLX_CUDA_USE_CUDNN_SDPA=0` is not the fix: it also takes prefill off cuDNN, which is where cuDNN's flash kernels earn their keep on long prompts (mlxcel's chunked materializing path exists for that case but is slower). The fix routes only the verify shape away from cuDNN, see the next section.
