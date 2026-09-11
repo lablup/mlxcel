@@ -17,9 +17,9 @@
 //! sanitize, the pre-stacked `gate_up_proj` split, and prefill causality on
 //! both layer types.
 
-use super::laguna::{LagunaModel, ModelArgs, RouterScoreFunc, SLIDING_ATTENTION};
+use super::laguna::{FULL_ATTENTION, LagunaModel, ModelArgs, RouterScoreFunc, SLIDING_ATTENTION};
 use super::laguna_layers::LagunaCache;
-use super::laguna_layers::{Attention, GateMode, router_scores, router_select};
+use super::laguna_layers::{Attention, GateMode, SparseMoeBlock, router_scores, router_select};
 use super::laguna_sanitize::sanitize_weights;
 use super::sanitize::f32_to_f8_e4m3;
 use mlxcel_core::weights::WeightMap;
@@ -248,6 +248,200 @@ fn router_sqrtsoftplus_matches_formula() {
     assert!((softmax.iter().sum::<f32>() - 1.0).abs() < 1e-5);
 }
 
+/// Router rows for the routed-block tests: token `[1, 0]` sees logits
+/// `[6, 3, 0]` and token `[0, 1]` sees `[-4, 8, 0]`. The correction bias
+/// lifts only expert 2.
+const ROUTER_ROWS: [[f32; 2]; 3] = [[6.0, -4.0], [3.0, 8.0], [0.0, 0.0]];
+const ROUTER_BIAS: [f32; 3] = [0.0, 0.0, 0.85];
+const ROUTED_SCALE: f64 = 2.5;
+
+/// A two-layer config whose layer 1 is one routed block: hidden 2, three
+/// experts of width 2 at top-2, a width-2 shared expert.
+fn routed_block_args(score_func: &str) -> ModelArgs {
+    serde_json::from_value(serde_json::json!({
+        "model_type": "laguna", "vocab_size": 8, "hidden_size": 2, "intermediate_size": 4,
+        "num_hidden_layers": 2, "num_attention_heads": 1, "num_key_value_heads": 1, "head_dim": 2,
+        "num_experts": 3, "num_experts_per_tok": 2, "moe_intermediate_size": 2,
+        "shared_expert_intermediate_size": 2, "norm_topk_prob": true,
+        "mlp_layer_types": ["dense", "sparse"], "moe_routed_scaling_factor": ROUTED_SCALE,
+        "moe_router_score_func": score_func
+    }))
+    .expect("routed block config")
+}
+
+/// Expert and shared-expert weights for [`routed_block_args`], row-major:
+/// `gate` / `up` are `[E, I, H]`, `down` is `[E, H, I]`, and the shared
+/// expert's are the `E = 1` case.
+struct RoutedBlockWeights {
+    gate: Vec<f32>,
+    up: Vec<f32>,
+    down: Vec<f32>,
+    shared_gate: Vec<f32>,
+    shared_up: Vec<f32>,
+    shared_down: Vec<f32>,
+}
+
+impl RoutedBlockWeights {
+    fn new() -> Self {
+        let mut rng = Lcg(0x1765);
+        let mut draw = |n: usize| (0..n).map(|_| rng.next_f32(1.0)).collect::<Vec<f32>>();
+        Self {
+            gate: draw(12),
+            up: draw(12),
+            down: draw(12),
+            shared_gate: draw(4),
+            shared_up: draw(4),
+            shared_down: draw(4),
+        }
+    }
+
+    fn weight_map(&self) -> WeightMap {
+        let mut w: WeightMap = std::collections::HashMap::new();
+        let rows: Vec<f32> = ROUTER_ROWS.iter().flatten().copied().collect();
+        w.insert("mlp.gate.proj.weight".into(), f32_array(&rows, &[3, 2]));
+        w.insert(
+            "mlp.gate.e_score_correction_bias".into(),
+            f32_array(&ROUTER_BIAS, &[3]),
+        );
+        for (leaf, data) in [
+            ("gate_proj", &self.gate),
+            ("up_proj", &self.up),
+            ("down_proj", &self.down),
+        ] {
+            w.insert(
+                format!("mlp.switch_mlp.{leaf}.weight"),
+                f32_array(data, &[3, 2, 2]),
+            );
+        }
+        for (leaf, data) in [
+            ("gate_proj", &self.shared_gate),
+            ("up_proj", &self.shared_up),
+            ("down_proj", &self.shared_down),
+        ] {
+            w.insert(
+                format!("mlp.shared_expert.{leaf}.weight"),
+                f32_array(data, &[2, 2]),
+            );
+        }
+        w
+    }
+
+    /// `down · (silu(gate · x) * (up · x))` for one width-2 SwiGLU.
+    fn swiglu(gate: &[f32], up: &[f32], down: &[f32], x: [f64; 2]) -> [f64; 2] {
+        let dot = |row: &[f32]| row[0] as f64 * x[0] + row[1] as f64 * x[1];
+        let act: Vec<f64> = (0..2)
+            .map(|i| {
+                let g = dot(&gate[i * 2..i * 2 + 2]);
+                g / (1.0 + (-g).exp()) * dot(&up[i * 2..i * 2 + 2])
+            })
+            .collect();
+        [0, 1].map(|h| down[h * 2] as f64 * act[0] + down[h * 2 + 1] as f64 * act[1])
+    }
+
+    /// Plain-f64 reference for the routed block on one token: select the top
+    /// two experts on `score + bias`, weight them by their bias-free scores
+    /// renormalized over the pair and scaled, then add the shared expert.
+    /// Returns the output and the chosen experts in ascending order.
+    fn reference(&self, x: [f64; 2], score: fn(f64) -> f64) -> ([f64; 2], Vec<usize>) {
+        let scores: Vec<f64> = ROUTER_ROWS
+            .iter()
+            .map(|row| score(row[0] as f64 * x[0] + row[1] as f64 * x[1]))
+            .collect();
+        let biased = |e: usize| scores[e] + ROUTER_BIAS[e] as f64;
+        let mut order = [0usize, 1, 2];
+        order.sort_by(|&a, &b| biased(b).total_cmp(&biased(a)));
+        let mut chosen = order[..2].to_vec();
+        chosen.sort_unstable();
+        let total: f64 = chosen.iter().map(|&e| scores[e]).sum();
+        let mut y = Self::swiglu(&self.shared_gate, &self.shared_up, &self.shared_down, x);
+        for &e in &chosen {
+            let s = e * 4..e * 4 + 4;
+            let out = Self::swiglu(&self.gate[s.clone()], &self.up[s.clone()], &self.down[s], x);
+            let weight = ROUTED_SCALE * scores[e] / total;
+            y[0] += weight * out[0];
+            y[1] += weight * out[1];
+        }
+        (y, chosen)
+    }
+}
+
+/// `moe_router_score_func: "sqrtsoftplus"` must reach the routed block's
+/// forward pass, not just parse. `router_sqrtsoftplus_matches_formula` checks
+/// `router_scores` alone and `legacy_router_use_sigmoid_flag_resolves_the_score_function`
+/// checks the config key alone; neither fails if the block ignores the key.
+///
+/// The case is built so the two score functions route differently. Sigmoid
+/// scores saturate near 1, so on token `[1, 0]` a bias of 0.85 lifts expert 2
+/// past expert 1 (0.95 + 0 < 0.5 + 0.85); sqrt-softplus keeps growing with the
+/// logit, so the same bias falls short (1.75 > 0.83 + 0.85). On token `[0, 1]`
+/// both pick experts 1 and 2 but weight them 2:1 under sigmoid and about
+/// 3.4:1 under sqrt-softplus.
+#[test]
+fn sqrtsoftplus_router_routes_and_weights_a_forward_pass() {
+    let sigmoid: fn(f64) -> f64 = |z| 1.0 / (1.0 + (-z).exp());
+    let sqrt_softplus: fn(f64) -> f64 = |z| z.exp().ln_1p().sqrt();
+    let params = RoutedBlockWeights::new();
+    let weights = params.weight_map();
+    let tokens = [[1.0f64, 0.0], [0.0, 1.0]];
+    let x = f32_array(&[1.0, 0.0, 0.0, 1.0], &[2, 2]);
+
+    // The references themselves disagree, on the chosen experts for token 0
+    // and on the output for both tokens, by far more than the tolerance.
+    assert_eq!(params.reference(tokens[0], sigmoid).1, vec![0, 2]);
+    assert_eq!(params.reference(tokens[0], sqrt_softplus).1, vec![0, 1]);
+    assert_eq!(params.reference(tokens[1], sigmoid).1, vec![1, 2]);
+    assert_eq!(params.reference(tokens[1], sqrt_softplus).1, vec![1, 2]);
+    for token in tokens {
+        let a = params.reference(token, sigmoid).0;
+        let b = params.reference(token, sqrt_softplus).0;
+        let gap = (a[0] - b[0]).abs().max((a[1] - b[1]).abs());
+        assert!(gap > 1e-2, "token {token:?}: the arms differ by only {gap}");
+    }
+
+    for (name, score) in [("sigmoid", sigmoid), ("sqrtsoftplus", sqrt_softplus)] {
+        let args = routed_block_args(name);
+        let quant = args.quant_spec(false);
+        let block = SparseMoeBlock::from_weights(&weights, &args, &quant, "mlp")
+            .expect("routed block builds");
+        let got = to_vec(&block.forward(&x));
+        for (t, token) in tokens.iter().enumerate() {
+            let want = params.reference(*token, score).0;
+            for h in 0..2 {
+                let g = got[t * 2 + h] as f64;
+                assert!(
+                    (g - want[h]).abs() < 1e-4 * (1.0 + want[h].abs()),
+                    "{name}: token {t} feature {h} is {g}, the reference is {}",
+                    want[h]
+                );
+            }
+        }
+    }
+
+    // End to end: the key reaches every routed layer through
+    // `LagunaModel::from_weights`, and the logits move with it.
+    let tiny_logits = |score_func: &str| {
+        let mut config: serde_json::Value = serde_json::from_str(TINY_CONFIG).unwrap();
+        config["moe_router_score_func"] = serde_json::json!(score_func);
+        let args: ModelArgs = serde_json::from_value(config).unwrap();
+        let model = LagunaModel::from_weights(&tiny_weights(&args), &args).expect("tiny model");
+        let ids = mlxcel_core::from_slice_i32(&[1, 5, 9, 3, 7, 2], &[1, 6]);
+        let mut caches = model.make_caches();
+        to_vec(&model.forward_with_caches(&ids, &mut caches))
+    };
+    let sigmoid_logits = tiny_logits("sigmoid");
+    let sqrt_softplus_logits = tiny_logits("sqrtsoftplus");
+    assert!(sqrt_softplus_logits.iter().all(|v| v.is_finite()));
+    let moved = sigmoid_logits
+        .iter()
+        .zip(&sqrt_softplus_logits)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        moved > 1e-3,
+        "sqrtsoftplus left the logits unchanged ({moved})"
+    );
+}
+
 /// Two-head, head_dim 2 attention over a 4-wide hidden state with an identity
 /// `o_proj` and `q/k/v` projections that keep the values in range.
 fn gate_test_args(gating: serde_json::Value) -> ModelArgs {
@@ -322,6 +516,153 @@ fn gate_width_mismatch_is_rejected() {
         .err()
         .expect("a 2-wide gate cannot be per-element over 4 features");
     assert!(err.contains("g_proj"), "{err}");
+}
+
+/// Layer 0 full, layer 1 sliding with a 3-token window; two query heads share
+/// one key/value head of width 2 over a 4-wide hidden state, and no gate.
+fn sink_test_args(sinks_enabled: bool) -> ModelArgs {
+    serde_json::from_value(serde_json::json!({
+        "model_type": "laguna", "vocab_size": 16, "hidden_size": 4, "intermediate_size": 8,
+        "num_hidden_layers": 2, "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 2,
+        "layer_types": ["full_attention", "sliding_attention"], "sliding_window": 3,
+        "rope_parameters": {"sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}},
+        "gating": false,
+        "swa_attention_sink_enabled": sinks_enabled
+    }))
+    .expect("sink test config")
+}
+
+/// `v_proj` rows for the sink tests; the value of token `x` is `SINK_V · x`.
+const SINK_V: [[f32; 4]; 2] = [[0.5, -0.25, 1.0, 0.0], [0.0, 1.0, -0.5, 0.25]];
+
+/// A zero `q_proj` makes every attention logit 0, so each query row's softmax
+/// is uniform over the `n` keys it can see: every value gets `1 / n` without a
+/// sink and `1 / (n + exp(sink_h))` with one. `o_proj` is the identity.
+fn sink_test_weights(sink: Option<[f32; 2]>) -> WeightMap {
+    let mut w: WeightMap = std::collections::HashMap::new();
+    let mut eye = vec![0.0f32; 16];
+    for i in 0..4 {
+        eye[i * 4 + i] = 1.0;
+    }
+    w.insert("attn.q_proj.weight".into(), f32_array(&[0.0; 16], &[4, 4]));
+    w.insert(
+        "attn.k_proj.weight".into(),
+        f32_array(&[0.3, -0.2, 0.5, 0.1, -0.4, 0.6, 0.2, 0.7], &[2, 4]),
+    );
+    let v: Vec<f32> = SINK_V.iter().flatten().copied().collect();
+    w.insert("attn.v_proj.weight".into(), f32_array(&v, &[2, 4]));
+    w.insert("attn.o_proj.weight".into(), f32_array(&eye, &[4, 4]));
+    w.insert("attn.q_norm.weight".into(), f32_array(&[1.0, 1.0], &[2]));
+    w.insert("attn.k_norm.weight".into(), f32_array(&[1.0, 1.0], &[2]));
+    if let Some(sink) = sink {
+        w.insert("attn.sink".into(), f32_array(&sink, &[2]));
+    }
+    w
+}
+
+/// `swa_attention_sink_enabled` gives each sliding layer a per-head sink
+/// logit that joins the softmax denominator, on the prefill path (masked,
+/// window-clipped) and on the single-token decode path (no mask). No published
+/// checkpoint sets the flag, so this is the only coverage the arm has.
+#[test]
+fn sliding_attention_sink_joins_the_softmax_on_prefill_and_decode() {
+    let sink = [0.0f32, 3f32.ln()];
+    let window = 3usize;
+    let mut rng = Lcg(0x5117);
+    let x: Vec<f32> = (0..24).map(|_| rng.next_f32(1.0)).collect();
+    let values: Vec<[f64; 2]> = x
+        .chunks_exact(4)
+        .map(|t| SINK_V.map(|row| (0..4).map(|i| row[i] as f64 * t[i] as f64).sum()))
+        .collect();
+
+    // Token t of the six attends to tokens max(0, t - 2)..=t: a five-token
+    // prefill through the window mask, then one decode step.
+    let expected = |sink: Option<[f32; 2]>| -> Vec<f64> {
+        let mut out = Vec::new();
+        for t in 0..values.len() {
+            let seen = &values[(t + 1).saturating_sub(window)..=t];
+            for h in 0..2 {
+                let denom = seen.len() as f64 + sink.map_or(0.0, |s| (s[h] as f64).exp());
+                for d in 0..2 {
+                    out.push(seen.iter().map(|v| v[d]).sum::<f64>() / denom);
+                }
+            }
+        }
+        out
+    };
+    let run = |args: &ModelArgs, weights: &WeightMap| -> Vec<f32> {
+        let quant = args.quant_spec(false);
+        let rope = args.layer_rope(SLIDING_ATTENTION);
+        let attn = Attention::from_weights(weights, args, &quant, "attn", 1, &rope)
+            .expect("sliding layer builds");
+        let mut cache = LagunaCache::Rotating(mlxcel_core::layers::RotatingKVCache::new(
+            args.sliding_window as i32,
+        ));
+        let mut out = to_vec(&attn.forward(&f32_array(&x[..20], &[1, 5, 4]), &mut cache));
+        out.extend(to_vec(
+            &attn.forward(&f32_array(&x[20..], &[1, 1, 4]), &mut cache),
+        ));
+        out
+    };
+    let check = |label: &str, got: &[f32], want: &[f64]| {
+        assert_eq!(got.len(), want.len(), "{label}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                (*g as f64 - w).abs() < 1e-4 * (1.0 + w.abs()),
+                "{label}: token {} head {} dim {}: got {g}, expected {w}",
+                i / 4,
+                (i / 2) % 2,
+                i % 2
+            );
+        }
+    };
+
+    let with_sink = expected(Some(sink));
+    let without = expected(None);
+    assert!(
+        with_sink
+            .iter()
+            .zip(&without)
+            .any(|(a, b)| (a - b).abs() > 0.05),
+        "the sink must move the expected output"
+    );
+    check(
+        "sinks enabled",
+        &run(&sink_test_args(true), &sink_test_weights(Some(sink))),
+        &with_sink,
+    );
+    // With the flag off, a `sink` tensor in the checkpoint is not read.
+    check(
+        "sinks disabled",
+        &run(&sink_test_args(false), &sink_test_weights(Some(sink))),
+        &without,
+    );
+
+    // Only sliding layers carry a sink: a full layer builds without one even
+    // with the flag on, and an enabled sliding layer refuses to build without it.
+    let args = sink_test_args(true);
+    let quant = args.quant_spec(false);
+    let full = Attention::from_weights(
+        &sink_test_weights(None),
+        &args,
+        &quant,
+        "attn",
+        0,
+        &args.layer_rope(FULL_ATTENTION),
+    )
+    .expect("a full-attention layer never reads a sink");
+    assert!(full.sinks.is_none());
+    let err = Attention::from_weights(
+        &sink_test_weights(None),
+        &args,
+        &quant,
+        "attn",
+        1,
+        &args.layer_rope(SLIDING_ATTENTION),
+    )
+    .err()
+    .expect("an enabled sliding layer needs its sink");
+    assert!(err.contains("attn.sink"), "{err}");
 }
 
 fn compressed_tensors_weights(num_experts: usize) -> (WeightMap, Vec<f32>, Vec<u8>) {
