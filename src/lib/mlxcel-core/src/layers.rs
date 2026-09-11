@@ -4443,9 +4443,13 @@ fn cuda_sdpa_materializes_scores(q: &MlxArray, v: &MlxArray, softcap: f32) -> bo
 /// MLX's ops fallback, from `MLXCEL_SDPA_FALLBACK_MAX_QUERIES` (default 32;
 /// `0` restores upstream dispatch).
 ///
-/// MLX reads the same variable with `atoi`, so an unparseable value is 0 there
-/// and must be 0 here too, or the two would disagree about which calls
-/// materialize.
+/// MLX reads the same variable with `atoi`. The two agree on every integer,
+/// on an empty value (0 on both sides) and on a value with no leading digits
+/// (0 on both sides); they diverge on a value with trailing garbage such as
+/// `32x` (`atoi` reads 32, `parse` fails to 0), on integer overflow and on a
+/// non-UTF-8 value (`std::env::var` errors to the default here, `getenv` sees
+/// the bytes there). Those are misconfigurations, and the divergence only
+/// affects whether an over-budget score matrix is chunked.
 fn sdpa_fallback_max_queries() -> i32 {
     static MAX_QUERIES: OnceLock<i32> = OnceLock::new();
     *MAX_QUERIES.get_or_init(|| {

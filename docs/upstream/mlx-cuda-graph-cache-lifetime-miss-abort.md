@@ -206,7 +206,7 @@ If the window bookkeeping is unwanted, a one-line alternative is to reset the co
 
 That keeps the throw but changes its meaning to "`2 * capacity` lookups in a row without a single hit", which a healthy workload does not produce. It is weaker than the windowed version, since a thrashing subset interleaved with well-behaved traffic is never reported, but it errs toward not aborting.
 
-Two smaller points worth folding in either way: document `MLX_ENABLE_CACHE_THRASHING_CHECK`, and consider whether the check should be off by default for the CUDA graph cache specifically. That cache's key space grows with workload diversity, while the conv, SDPA, and FFT caches are keyed by a comparatively fixed set of layer configurations.
+Two smaller points worth folding in either way: document `MLX_ENABLE_CACHE_THRASHING_CHECK`, and consider whether the check should be off by default for the CUDA graph cache specifically. That cache's key space grows with workload diversity, while the conv and FFT caches are keyed by a comparatively fixed set of layer configurations. The SDPA cache is not: its key carries the exact key length and mask shape, so a multi-row masked call whose key length grows every step (a speculative verify block) misses on every call, and mlxcel#1799 reached the SDPA cache's 512-miss abort in about 170 verify rounds on the Laguna DFlash pairing before routing those calls away from cuDNN.
 
 ## Minimal standalone repro
 
@@ -255,7 +255,7 @@ Every `LRUCache` constructed with the env-name constructor carries the fatal che
 | cuFFT plans | `MLX_CUDA_FFT_CACHE_SIZE` | 128 | 256 | `fft.cu:89-94` |
 | cuDNN SDPA backward | `MLX_CUDA_SDPA_BACKWARD_CACHE_SIZE` | 64 | 128 | `scaled_dot_product_attention.cpp:184-188` |
 
-The graph cache is the one that bites first in practice, because it is the only one whose key space grows with the shape of the host's op stream rather than with a fixed set of layer configurations, and because its per-key working set is the largest.
+The graph cache is the one that bites first in practice on a classic decode workload, because its key space grows with the shape of the host's op stream rather than with a fixed set of layer configurations, and because its per-key working set is the largest.
 
 Scope notes:
 

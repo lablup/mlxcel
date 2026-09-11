@@ -11,7 +11,8 @@
 // fixed floor of that round), and the LRU's lifetime miss counter then aborted
 // the process after 2 * MLX_CUDA_SDPA_CACHE_SIZE misses (lablup/mlxcel#1799).
 // The one-row decode step takes the vector kernel and never enters cuDNN, and
-// prefill keeps cuDNN (k_len == q_len, or more rows than the bound). Setting
+// prefill keeps cuDNN (k_len == q_len, or more rows than the bound; only the
+// trailing short chunk of a chunked prefill changes path). Setting
 // MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0 restores upstream dispatch without a
 // rebuild. Synced to upstream 81ba1c6a.
 
