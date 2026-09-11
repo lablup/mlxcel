@@ -28,7 +28,7 @@ use super::cache::MuseAssistantContextCache;
 use super::config::{MUSE_ASSISTANT_INITIAL_BLOCK_SIZE, MuseAssistantConfig};
 use super::model::{MuseAssistantModel, block_input};
 use crate::drafter::dflash::drafter::{
-    convert_bf16_to_f16_non_quantized, sample_block_per_position_array,
+    apply_drafter_load_dtype_policy, sample_block_per_position_array,
 };
 
 /// Boxed [`Drafter`] for the Muse Glimmer assistant. Owns the model and its
@@ -64,7 +64,7 @@ impl MuseAssistantDrafter {
         let mut weights = crate::weights::load_weights_from_dir(path)
             .map_err(|msg| DrafterError::LoadFailed { reason: msg })?;
         MuseAssistantModel::sanitize(&mut weights);
-        convert_bf16_to_f16_non_quantized(&mut weights);
+        apply_drafter_load_dtype_policy(&mut weights);
         let model = MuseAssistantModel::from_weights(&weights, config)
             .map_err(|msg| DrafterError::LoadFailed { reason: msg })?;
         Ok(Self::from_model(model))

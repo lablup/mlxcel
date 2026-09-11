@@ -98,7 +98,7 @@ impl InklingMtpDraftModel {
             });
         }
         sanitize_weights(&mut weights).map_err(|reason| DrafterError::WeightLoad { reason })?;
-        crate::drafter::dflash::drafter::convert_bf16_to_f16_non_quantized(&mut weights);
+        crate::drafter::dflash::drafter::apply_drafter_load_dtype_policy(&mut weights);
         Self::from_weights(config, &weights)
     }
 
