@@ -165,6 +165,7 @@ pub mod klear;
 pub mod laguna;
 pub mod laguna_layers;
 pub mod laguna_sanitize;
+pub mod laguna_speculative;
 pub mod lfm2;
 pub mod lfm2_embedding;
 pub mod llada2_moe;
@@ -1639,6 +1640,9 @@ mod plamo2_tests;
 #[path = "mellum_tests.rs"]
 mod mellum_tests;
 
+#[cfg(test)]
+#[path = "laguna_dflash_tests.rs"]
+mod laguna_dflash_tests;
 #[cfg(test)]
 #[path = "laguna_tests.rs"]
 mod laguna_tests;

@@ -69,7 +69,7 @@
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
 //! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type); the `glm4_moe_lite_mtp` drafter resolves to this kind here but is built by the binary crate's `mlxcel::models::drafter_loader` (issue #1326) | |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type) | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type) | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
@@ -77,6 +77,7 @@
 //! sub-issue, so calling code gets a clear actionable message instead of
 //! an opaque `unimplemented!` panic.
 
+pub mod laguna_dflash;
 pub mod masks;
 
 use crate::ffi::MlxArray;
@@ -1084,6 +1085,16 @@ pub trait Drafter {
         false
     }
 
+    /// Whether this drafter is a Poolside Laguna DFlash drafter (issue #1351).
+    ///
+    /// Same role as [`Self::is_dspark`]: its `fc` reads five Laguna residual
+    /// streams through `aux_hidden_norms`, and a Laguna target can run no
+    /// other DFlash-family drafter, so the server's DFlash target gate reads
+    /// this to refuse a mismatched pairing by name before any forward runs.
+    fn is_laguna_dflash(&self) -> bool {
+        false
+    }
+
     /// Produce a draft block of proposal tokens.
     ///
     /// Semantics are kind-specific:
@@ -1257,13 +1268,18 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
     let resolved = resolve_drafter_kind(path, kind)?;
     match resolved {
         DrafterKind::Dflash => {
-            // Two concrete families share the kind and the round loop. The
-            // Muse Glimmer assistant (issue #1343) declares its own
-            // `model_type`; everything else (Qwen 3.5 DFlash, LFM2 DSpark)
-            // loads through `DFlashDrafter`.
+            // Three concrete families share the kind and the round loop. The
+            // Muse Glimmer assistant (issue #1343) and the Poolside Laguna
+            // drafter (issue #1351: fused qkv, per-head gate, sliding-window
+            // context) declare their own `model_type`; everything else (Qwen
+            // 3.5 DFlash, LFM2 DSpark) loads through `DFlashDrafter`.
             let model_type = peek_drafter_model_type(path)?;
             if model_type.as_deref() == Some(dflash::MUSE_ASSISTANT_MODEL_TYPE) {
                 let drafter = dflash::MuseAssistantDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
+            if laguna_dflash::LagunaDFlashConfig::is_laguna_dflash_dir(path) {
+                let drafter = laguna_dflash::LagunaDFlashDrafter::load(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
             let drafter = dflash::drafter::DFlashDrafter::load(path)?;

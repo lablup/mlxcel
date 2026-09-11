@@ -1157,6 +1157,64 @@ fn dflash_drafter_is_rejected_on_either_marker_alone() {
     }
 }
 
+/// `config.json` of the published `poolside/Laguna-XS-2.1-DFlash` drafter,
+/// trimmed to the fields detection reads. Its `model_type` is the target's
+/// own `laguna`, so without the structural DFlash arm it would route to
+/// `ModelType::Laguna` and die on the missing `model.embed_tokens.weight`
+/// (#1351).
+const LAGUNA_DFLASH_DRAFTER_CONFIG: &str = r#"{
+    "architectures": ["DFlashLagunaForCausalLM"],
+    "model_type": "laguna",
+    "hidden_size": 2048,
+    "num_hidden_layers": 5,
+    "sliding_window": 512,
+    "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention",
+                    "sliding_attention", "sliding_attention"],
+    "gating": "per-head",
+    "draft_vocab_size": 100352,
+    "vocab_size": 100352,
+    "dflash_config": {"block_size": 16, "mask_token_id": 12, "num_target_layers": 40,
+                      "target_layer_ids": [1, 13, 25, 33, 39], "causal": true},
+    "num_experts": 0
+}"#;
+
+#[test]
+fn laguna_dflash_drafter_is_rejected_as_a_standalone_model() {
+    let model_dir = temp_path("laguna_dflash_drafter");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), LAGUNA_DFLASH_DRAFTER_CONFIG).unwrap();
+
+    let error = super::detection::get_model_type(&model_dir)
+        .expect_err("a Laguna DFlash drafter is not a standalone model")
+        .to_string();
+    assert!(
+        error.contains("DFlash-family speculative drafter")
+            && error.contains("Laguna DFlash")
+            && error.contains("--draft-model"),
+        "the error must name the drafter family and the flag that takes it, got: {error}",
+    );
+
+    // The architecture marker alone is enough: an export that drops the
+    // nested block still must not reach the Laguna loader.
+    let arch_only = temp_path("laguna_dflash_arch_only");
+    fs::create_dir_all(&arch_only).unwrap();
+    fs::write(
+        arch_only.join("config.json"),
+        r#"{"architectures": ["DFlashLagunaForCausalLM"], "model_type": "laguna"}"#,
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(&arch_only)
+        .expect_err("architecture marker alone is sufficient")
+        .to_string();
+    assert!(
+        error.contains("DFlash-family speculative drafter"),
+        "{error}"
+    );
+
+    fs::remove_dir_all(model_dir).unwrap();
+    fs::remove_dir_all(arch_only).unwrap();
+}
+
 #[test]
 fn ordinary_qwen3_full_model_still_detects_as_qwen3() {
     // Non-regression control for the classic `--draft-model` path: a small

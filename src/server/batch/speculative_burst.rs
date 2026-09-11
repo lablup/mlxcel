@@ -1672,12 +1672,14 @@ fn run_dflash_burst(
         LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => m.exactness_allows(bs),
         LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
+        LoadedModel::Laguna(m) => m.exactness_allows(bs),
         _ => {
             tracing::warn!(
                 "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
                  text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
-                 LFM2-VL text-only (DSpark drafter), or Muse Glimmer text-only (Muse Glimmer \
-                 assistant drafter); falling back to classic decode",
+                 LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
+                 assistant drafter), or Laguna (Laguna DFlash drafter); falling back to \
+                 classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1793,6 +1795,7 @@ fn run_dflash_burst(
         LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => drive!(m),
         LoadedModel::Lfm2VL(m) => drive!(m),
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
+        LoadedModel::Laguna(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -2642,6 +2645,9 @@ fn run_dflash_burst_batched(
         LoadedModel::MuseGlimmerVLM(_) => {
             <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::supports_batched()
         }
+        LoadedModel::Laguna(_) => {
+            <crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched()
+        }
         _ => {
             tracing::warn!(
                 "DFlash batched speculative dispatch declined: target is {:?}, expected \
@@ -2808,6 +2814,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Lfm2(_) => "Lfm2",
         LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
         LoadedModel::Lfm2VL(_) => "Lfm2VL",
+        LoadedModel::Laguna(_) => "Laguna",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
         _ => "other",

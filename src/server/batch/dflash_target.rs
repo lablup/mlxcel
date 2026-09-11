@@ -107,6 +107,17 @@ impl DFlashVerifyOutput for crate::models::lfm2::VerifyOutput {
     }
 }
 
+impl DFlashVerifyOutput for crate::models::laguna_speculative::LagunaVerifyOutput {
+    fn logits(&self) -> &MlxArray {
+        self.logits
+            .as_ref()
+            .expect("verify logits must be non-null")
+    }
+    fn hidden_states(&self) -> &[UniquePtr<MlxArray>] {
+        &self.hidden_states
+    }
+}
+
 impl DFlashVerifyOutput for crate::models::muse_glimmer::VerifyOutput {
     fn logits(&self) -> &MlxArray {
         self.logits
@@ -134,6 +145,8 @@ pub(crate) enum DFlashDrafterFamily {
     DSpark,
     /// The Muse Glimmer assistant (issue #1343).
     MuseAssistant,
+    /// The Poolside Laguna DFlash drafter (issue #1351).
+    Laguna,
 }
 
 impl DFlashDrafterFamily {
@@ -143,6 +156,8 @@ impl DFlashDrafterFamily {
             Self::DSpark
         } else if drafter.is_muse_assistant() {
             Self::MuseAssistant
+        } else if drafter.is_laguna_dflash() {
+            Self::Laguna
         } else {
             Self::Dflash
         }
@@ -315,6 +330,38 @@ impl DFlashTargetModel for MuseGlimmerTextWrapper {
     }
 }
 
+/// Laguna (issue #1351). The sliding-window layers' rotating caches are armed
+/// with `block_size` rows of speculative slack before the prefill so a verify
+/// block is appended inside the temporal region and rolled back by a tail
+/// trim; the first draft sees every prompt row (vLLM's Laguna DFlash proposer
+/// hands the drafter the whole prompt, and the drafter keeps the newest
+/// window of it). The exactness probe is the measured block-versus-chain
+/// gate shared with LFM2 and Muse Glimmer.
+impl DFlashTargetModel for crate::models::LagunaWrapper {
+    fn make_dflash_caches(&self) -> Vec<crate::models::laguna_layers::LagunaCache> {
+        self.model.make_caches()
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn enable_speculative_buffers(
+        &self,
+        caches: &mut [crate::models::laguna_layers::LagunaCache],
+        block_size: usize,
+    ) {
+        crate::models::LagunaModel::enable_speculative_buffers(&self.model, caches, block_size);
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.model.dflash_exactness_allows(block_size)
+    }
+    fn required_drafter_family() -> Option<DFlashDrafterFamily> {
+        Some(DFlashDrafterFamily::Laguna)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
 impl DFlashTargetModel for crate::vision::MuseGlimmerVlmModel {
     fn make_dflash_caches(&self) -> Vec<crate::models::muse_glimmer::MuseCache> {
         self.text.make_speculative_caches()
@@ -392,6 +439,7 @@ fn required_family_pairing_error(
         DFlashDrafterFamily::Dflash => "a plain DFlash drafter",
         DFlashDrafterFamily::DSpark => "an LFM2 DSpark drafter",
         DFlashDrafterFamily::MuseAssistant => "the Muse Glimmer assistant drafter",
+        DFlashDrafterFamily::Laguna => "a Laguna DFlash drafter",
     };
     Some(match required {
         DFlashDrafterFamily::DSpark => format!(
@@ -412,6 +460,15 @@ fn required_family_pairing_error(
              a width this target does not produce, and its mask token id indexes a different \
              vocabulary. Point --model-draft at the Muse Glimmer assistant, or drop it to \
              serve this model with classic decode."
+        ),
+        DFlashDrafterFamily::Laguna => format!(
+            "the target is a Laguna checkpoint and the drafter passed to --model-draft is \
+             {got}, not a Laguna DFlash one. A Laguna target can only be paired with the \
+             Poolside DFlash speculator published for its release (Laguna-XS-2.1 with \
+             Laguna-XS-2.1-DFlash, and so on): another drafter's fc projection reads the \
+             residual streams it was trained on, at a width this target does not produce, \
+             and its mask token id indexes a different vocabulary. Point --model-draft at a \
+             Laguna DFlash drafter, or drop it to serve this model with classic decode."
         ),
         DFlashDrafterFamily::Dflash => format!(
             "the target admits only the Qwen 3.5 DFlash drafter and the drafter passed to \
@@ -907,7 +964,7 @@ mod tests {
     /// gate the mismatch reached MLX as a shape throw.
     #[test]
     fn a_restricted_target_declines_every_other_drafter_family() {
-        use DFlashDrafterFamily::{DSpark, Dflash, MuseAssistant};
+        use DFlashDrafterFamily::{DSpark, Dflash, Laguna, MuseAssistant};
         assert_eq!(
             <crate::models::Lfm2Model as DFlashTargetModel>::required_drafter_family(),
             Some(DSpark)
@@ -923,6 +980,10 @@ mod tests {
         assert_eq!(
             <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::required_drafter_family(),
             Some(MuseAssistant)
+        );
+        assert_eq!(
+            <crate::models::LagunaWrapper as DFlashTargetModel>::required_drafter_family(),
+            Some(Laguna)
         );
         assert_eq!(
             <crate::models::Qwen35Model as DFlashTargetModel>::required_drafter_family(),
@@ -948,8 +1009,15 @@ mod tests {
         let reason = required_family_pairing_error(Some(DSpark), MuseAssistant)
             .expect("an LFM2 target with the Muse assistant must decline");
         assert!(reason.contains("Muse Glimmer assistant"), "{reason}");
+        let reason = required_family_pairing_error(Some(Laguna), Dflash)
+            .expect("a Laguna target with a plain DFlash drafter must decline");
+        assert!(reason.contains("Laguna DFlash"), "{reason}");
+        assert!(reason.contains("plain DFlash drafter"), "{reason}");
+        let reason = required_family_pairing_error(Some(DSpark), Laguna)
+            .expect("an LFM2 target with a Laguna drafter must decline");
+        assert!(reason.contains("Laguna DFlash drafter"), "{reason}");
 
-        for family in [Dflash, DSpark, MuseAssistant] {
+        for family in [Dflash, DSpark, MuseAssistant, Laguna] {
             assert!(
                 required_family_pairing_error(Some(family), family).is_none(),
                 "the published pairing must be admitted: {family:?}"
@@ -972,6 +1040,7 @@ mod tests {
         assert!(!<crate::vision::Lfm2VlModel as DFlashTargetModel>::supports_batched());
         assert!(!<crate::models::MuseGlimmerTextWrapper as DFlashTargetModel>::supports_batched());
         assert!(!<crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::supports_batched());
+        assert!(!<crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched());
     }
 
     /// The per-family policies, so a future `impl` that forgets
@@ -994,6 +1063,10 @@ mod tests {
         assert_eq!(
             FirstHiddenRows::EveryPromptRow,
             <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::first_hidden_rows()
+        );
+        assert_eq!(
+            FirstHiddenRows::EveryPromptRow,
+            <crate::models::LagunaWrapper as DFlashTargetModel>::first_hidden_rows()
         );
     }
 }

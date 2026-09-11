@@ -44,9 +44,10 @@ use super::sanitize::sanitize_config_json;
 fn dflash_drafter_not_standalone_error(model_path: &Path) -> anyhow::Error {
     anyhow::anyhow!(
         "{path} is a DFlash-family speculative drafter checkpoint (Qwen 3.5 DFlash, \
-         LFM2 DSpark or Muse Glimmer assistant), not a standalone model. Its \
-         config.json declares the DFlashDraftModel, Lfm2DSparkDraftModel or \
-         MuseGlimmerAssistantModel architecture and/or a dflash_config block, and \
+         LFM2 DSpark, Muse Glimmer assistant or Laguna DFlash), not a standalone model. \
+         Its config.json declares the DFlashDraftModel, Lfm2DSparkDraftModel, \
+         MuseGlimmerAssistantModel or DFlashLagunaForCausalLM architecture and/or a \
+         dflash_config block, and \
          its weights carry no embed_tokens and no lm_head because such a drafter \
          borrows both from the target model when it binds. Pass a full model to -m, \
          and pass this directory to --draft-model on `mlxcel-server` to use it as a \
