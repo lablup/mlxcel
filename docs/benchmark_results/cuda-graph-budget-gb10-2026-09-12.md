@@ -147,3 +147,20 @@ Same harness and prompt as the first single-stream table, three arms. Stacked ro
 | both | 3 | 115 | 61.12 (60.95 to 61.32) | -0.1% | 3272 | 685.6 (682.6 to 687.4) | -2.4% | 168 | 16.15 (16.15 to 16.15) | 0.72 to 1.17 | 0 of 3 |
 | nograph | 3 | 115 | 54.55 (54.50 to 54.60) | -10.8% | 3666 | 243.2 (242.1 to 244.0) | -65.4% | 473 | 15.59 (15.59 to 15.59) | 0.72 to 0.95 | 0 of 3 |
 
+## Phase split: is the gain a reduction or a shift? (Laguna DFlash block 4, `mlxcel generate`, idle host, n = 3)
+
+The failure mode this rules out is the one `MLX_MAX_MB_PER_BUFFER=400` showed in #1782, where the byte budget moved time out of the drafter's host build and into the device sync without changing the round. The #1799 CLI harness splits a speculative round into the drafter's host graph build (`draft host`), the verify forward's host build (`verify host`) and the wait for the round's device work (`device sync`); the three add up to the round wall to within a millisecond. A first pass of this phase overlapped the CI runner's `cargo check` and was discarded; this table is the re-run with the per-run compiler gate (no CI job during any of its 19 runs). `off` is classic decode through the CLI, which has no same-process warm-up, so it sits under the `mlxcel-bench-decode` numbers above; the `both` gain on it (+15%) matches #1799's control (+16%).
+
+| config | n | tok/s mean (min to max) | vs off | accepted/round | round wall ms | device sync ms/round (min to max) | draft host ms/round | verify host ms/round | load1 (min to max) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| off | 3 | 29.40 (28.85 to 30.35) |  |  | | | |  | 0.80 to 0.83 |
+| b4 | 3 | 36.90 (33.29 to 39.03) | 1.26x | 1.41 | 65.6 | 48.8 (48.7 to 48.9) | 12.9 | 3.9 | 0.80 to 1.10 |
+| both-off | 3 | 33.80 (33.68 to 34.00) | 1.15x |  | | | |  | 0.87 to 1.04 |
+| both-b4 | 3 | 40.07 (39.57 to 40.86) | 1.36x | 1.41 | 60.1 | 48.1 (46.9 to 49.1) | 7.6 | 4.3 | 0.69 to 1.07 |
+| nograph-off | 3 | 32.57 (32.46 to 32.70) | 1.11x |  | | | |  | 0.83 to 1.11 |
+| nograph-b4 | 3 | 41.28 (41.12 to 41.48) | 1.40x | 1.41 | 58.4 | 45.7 (45.6 to 45.9) | 7.7 | 4.9 | 0.82 to 1.05 |
+
+Under `both` at block 4 the drafter's host build falls from 12.9 to 7.6 ms per round (its `async_eval` enqueue commits fewer graphs), the device sync is flat (48.8 to 48.1 ms) and the round wall falls from 65.6 to 60.1 ms: the 5.5 ms that left the host phase did not reappear in the sync, so this is a reduction in the total, not a shift between phases. The end-to-end rate agrees (36.90 to 40.07 tok/s; the default's range is wide, 33.29 to 39.03, the #755 bimodality, and `both`'s three runs all sit above its maximum). The token-identity column of the #1799 harness is omitted because Laguna's classic decode is not deterministic across its own runs on this host (#1799 recorded the same), so it cannot serve as a control here; the budget does not change arithmetic, only graph boundaries, and the batched-serving and single-stream tables compare rates only.
+
+Graphs off is faster still on this arm (41.28 tok/s, drafter host build 7.7 ms, device sync 45.7 ms), as #1799 found at block 8: the multi-row verify gains nothing from capture. That is a property of the speculative path and is out of scope here; the classic arm, which this issue is about, loses 11% without capture on Laguna and 6 to 15% on every other model measured.
+
