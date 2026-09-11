@@ -2049,7 +2049,7 @@ fn main() -> anyhow::Result<()> {
     // every other Hopper and Blackwell part: the 25 "MB" default commits a
     // graph on every large-input op (#1798). Gated on the compute capability,
     // per-variable env wins, and must run before any MLX op.
-    mlxcel_core::hardware::apply_cuda_graph_budget_default();
+    mlxcel_core::hardware::apply_cuda_graph_budget_default(cli.server.model.as_deref());
 
     // Publish autotuned CUDA kernel knobs (qmm CTA tile, multirow-qmv row
     // window) into the environment the patched MLX kernels read (#906). Inert

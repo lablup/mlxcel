@@ -960,7 +960,7 @@ fn main() -> Result<()> {
     mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
     // Match the production binaries' GB10 graph budget default (#1798).
     // Same contract: gated on the compute capability, per-variable env wins.
-    mlxcel_core::hardware::apply_cuda_graph_budget_default();
+    mlxcel_core::hardware::apply_cuda_graph_budget_default(args.target.as_deref());
 
     let mut rows: Vec<Row> = Vec::new();
     if args.sweep {

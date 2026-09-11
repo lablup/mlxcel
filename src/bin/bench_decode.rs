@@ -437,7 +437,7 @@ fn main() -> Result<()> {
     // decode benchmarks reflect the shipped default; an explicit
     // MLX_MAX_OPS_PER_BUFFER or MLX_MAX_MB_PER_BUFFER (manual sweep override)
     // always wins, per variable.
-    mlxcel_core::hardware::apply_cuda_graph_budget_default();
+    mlxcel_core::hardware::apply_cuda_graph_budget_default(Some(&args.model));
 
     let kv_cache_mode = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
