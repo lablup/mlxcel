@@ -1,4 +1,4 @@
-// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+// Copyright 2025-2026 Lablup Inc.
 // Licensed under the Apache License, Version 2.0
 
 use super::{PHI4MM_AUDIO_TOKEN_ID, expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
