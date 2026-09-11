@@ -31,7 +31,23 @@ Two pieces, both with an environment kill switch, nothing in the round loop or t
 
 Same binary, same method, quiet host, n = 3 per arm; `ks-*` sets `MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0`.
 
-AFTER_TABLE_PLACEHOLDER
+| config | n | tok/s mean (min to max) | vs classic | round wall ms | device sync ms/round |
+|---|---|---|---|---|---|
+| classic | 3 | 28.78 (28.53 to 29.00) | | 34.7 per token | |
+| block 2 | 3 | 32.44 (32.06 to 33.13) | **1.13x** (was 0.52x) | 54.6 (was 115.3) | 42.0 (was 80.4) |
+| block 4 | 3 | 38.40 (37.81 to 39.19) | **1.33x** (was 0.70x) | 62.8 (was 118.6) | 48.9 (was 84.9) |
+| block 6 | 3 | 38.05 (37.99 to 38.10) | **1.32x** (was 0.72x) | 71.0 (was 126.6) | 56.2 (was 92.5) |
+| block 8 | 3 | 32.19 (31.68 to 32.86) | **1.12x** (was 0.65x) | 81.8 (was 138.3) | 66.8 (was 103.7) |
+| block 10 | 3 | 29.07 (28.42 to 29.49) | 1.01x | 89.4 | 74.6 |
+| block 12 | 3 | 28.58 (27.89 to 28.95) | 0.99x | 95.9 | 80.6 |
+| block 16 (checkpoint default) | 3 | 23.91 (23.73 to 24.05) | 0.83x (was 0.52x) | 108.6 (was 166.9) | 93.5 (was 131.3) |
+| ks, block 2 | 3 | 15.42 (15.35 to 15.51) | 0.54x | 114.8 | 81.9 |
+| ks, block 8 | 3 | 18.90 (18.69 to 19.25) | 0.66x | 139.3 | 104.9 |
+| ks, block 16 | 3 | 15.67 (15.36 to 15.93) | 0.54x | 163.6 | 129.9 |
+
+The kill switch reproduces the baseline within 2% at every width. The device sync is now `36.0 + 3.6 ms per row` (was `71.6 + 3.79`): the floor fell from 2.1x to 1.05x a classic step and the per-row slope is the expert reads, unchanged. Block 4 and 6 win with their whole ranges above the classic range; the crossover is between 10 and 12 rows and the checkpoint default of 16 remains the worst width (0.83x). After the fix the profiled round has no `ScaledDotProductAttention` host range at all (the fallback is ordinary ops), block 2 is 53.8 ms of wall for 54.7 ms of kernels (GPU-bound), and the fallback costs about 10 ms more GPU time per round than cuDNN's flash kernel against the 69 ms of host time it removes.
+
+Qwen 3.5 on the same binary through the #1782 server harness: classic 56.07, block 2 70.56 (1.26x; #1782 had 1.24x), block 4 75.58 (1.35x; 1.32x), greedy text byte-identical to classic at both widths, 3 of 3 runs each.
 
 ## Blast radius and what is not fixed
 

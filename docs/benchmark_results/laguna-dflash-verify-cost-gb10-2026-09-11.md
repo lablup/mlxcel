@@ -128,3 +128,64 @@ Graph replay itself is healthy on every arm, as on Qwen 3.5: `cudaGraphInstantia
 The classic arm is unchanged (it never enters cuDNN at decode) and the verify round loses about 39 ms of device sync and 21 ms of drafter host build at every width: the two links of the serial chain that held a plan build each. Caveat on this one sweep: the host was not clean for it. My own `nsys stats` exports (CPU-bound sqlite conversions) overlapped it, and load1 reached 3.2 before some runs; the direction and size of the move are not in doubt (every range is disjoint from the baseline by a wide margin), but the after-fix numbers that follow, taken on a quiet host with the same binary and a code-level kill switch, are the ones to quote. The acceptance per round also moves slightly (0.74 against 0.77 at block 2, 1.69 against 1.55 at 16) because the fallback's arithmetic differs from cuDNN's and the greedy path shifts at a tie; that is the numerics side of the exactness question, out of scope here.
 
 Process-wide `MLX_CUDA_USE_CUDNN_SDPA=0` is not the fix: it also takes prefill off cuDNN, which is where cuDNN's flash kernels earn their keep on long prompts (mlxcel's chunked materializing path exists for that case but is slower). The fix routes only the verify shape away from cuDNN, see the next section.
+
+## Fix
+
+Two pieces, both with an environment kill switch, nothing in the round loop or the Laguna sources (commit `2b6c7d5e`):
+
+- A patched `mlx/backend/cuda/scaled_dot_product_attention.cpp` (the pinned file with one added gate, the same overlay mechanism as the existing `.cu` patch): `supports_sdpa_cudnn` refuses a masked call with 2 to `MLXCEL_SDPA_FALLBACK_MAX_QUERIES` (default 32) query rows over a longer key sequence, so it takes MLX's own ops fallback, which has no per-shape build. The one-row decode step (vector kernel) and prefill (`k_len == q_len`, or more rows than the bound) are untouched. `MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0` restores upstream dispatch without a rebuild.
+- `MLX_CUDA_SDPA_CACHE_SIZE` defaults to 2000 on CUDA builds (`hardware::apply_cuda_sdpa_cache_default`, the sibling of the #818 graph-cache default), because prefill prompt-length diversity alone crosses the 512-miss abort on a long-lived server.
+
+## After: same binary, kill-switch A/B, quiet host
+
+Rebuilt binary (patched MLX), 20:40 to 21:00, load1 0.49 to 1.30 with two transient spikes (2.15 before one block 12 run, 2.01 before one kill-switch block 2 run; both runs sit inside their arm's range), the process under test the only consumer. `ks-*` sets `MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0`; the classic arm was re-measured in the same session on both settings.
+
+| config | n | tok/s mean (min to max) | vs off | accepted/round | round wall ms | device sync ms/round (min to max) | draft host ms/round | verify host ms/round |
+|---|---|---|---|---|---|---|---|---|
+| off (classic) | 3 | 28.78 (28.53 to 29.00) | | | 34.7 per token | | | |
+| ks, off | 3 | 29.04 (28.57 to 29.29) | 1.01x | | 34.4 per token | | | |
+| block 2 | 3 | 32.44 (32.06 to 33.13) | **1.13x** (was 0.52x) | 0.76 | 54.6 (was 115.3) | 42.0 (41.2 to 42.5) | 8.8 | 3.7 |
+| block 4 | 3 | 38.40 (37.81 to 39.19) | **1.33x** (was 0.70x) | 1.41 | 62.8 (was 118.6) | 48.9 (48.0 to 49.7) | 10.3 | 3.5 |
+| block 6 | 3 | 38.05 (37.99 to 38.10) | **1.32x** (was 0.72x) | 1.69 | 71.0 (was 126.6) | 56.2 (56.1 to 56.3) | 10.9 | 3.9 |
+| block 8 | 3 | 32.19 (31.68 to 32.86) | **1.12x** (was 0.65x) | 1.63 | 81.8 (was 138.3) | 66.8 (65.6 to 68.1) | 11.0 | 3.9 |
+| block 10 | 3 | 29.07 (28.42 to 29.49) | 1.01x (was 0.62x) | 1.58 | 89.4 (was 146.0) | 74.6 (73.4 to 76.4) | 10.7 | 4.0 |
+| block 12 | 3 | 28.58 (27.89 to 28.95) | 0.99x (was 0.59x) | 1.73 | 95.9 (was 152.5) | 80.6 (79.3 to 82.9) | 11.2 | 4.0 |
+| block 16 (checkpoint default) | 3 | 23.91 (23.73 to 24.05) | 0.83x (was 0.52x) | 1.58 | 108.6 (was 166.9) | 93.5 (93.2 to 93.9) | 11.1 | 4.0 |
+| ks, block 2 | 3 | 15.42 (15.35 to 15.51) | 0.54x | 0.77 | 114.8 | 81.9 (81.3 to 82.2) | 29.3 | 3.6 |
+| ks, block 8 | 3 | 18.90 (18.69 to 19.25) | 0.66x | 1.62 | 139.3 | 104.9 (102.9 to 106.3) | 30.6 | 3.8 |
+| ks, block 16 | 3 | 15.67 (15.36 to 15.93) | 0.54x | 1.55 | 163.6 | 129.9 (128.0 to 132.5) | 29.9 | 3.8 |
+
+What moved:
+
+- The kill switch reproduces the baseline within 2% at every width (15.42 against 15.37, 18.90 against 19.04, 15.67 against 15.37), so the A/B is the gate and nothing else in the rebuild.
+- The round lost about 61 ms at every width: 39 ms of device sync and 21 ms of drafter host build, the same two links the zero-code control freed. The device sync is now `36.0 ms + 3.6 ms per row` by least squares (was `71.6 + 3.79`): the fixed floor fell from 2.1x to 1.05x a classic step and the per-row slope is unchanged, as the attribution predicted (the slope is the expert reads).
+- Laguna DFlash now wins on this host: block 4 at 1.33x and block 6 at 1.32x with their whole ranges above the classic range (37.81 and 37.99 against a classic maximum of 29.29), block 2 at 1.13x, block 8 at 1.12x. The crossover is between 10 and 12 rows; the checkpoint's own default of 16 stays on the losing side (0.83x) because acceptance saturates at about 1.6 rows on this prompt while the expert term keeps growing. The served width is #1797's question; `--draft-block-size 4` is the measured setting for this pairing today.
+- Acceptance per round is within 0.05 of the kill-switch arm at every width (0.76 against 0.77 at block 2), so the fallback's arithmetic shifts the greedy path only at ties. Token ids still differ from classic at the same early positions as before (the classic arm itself is not run-to-run deterministic here, see the baseline), which is the out-of-scope exactness question and unchanged by this fix.
+
+### Profile after, per round (same binary and method; block 2 differenced at 200 and 100 tokens because the kill-switch arm aborts past about 170 rounds)
+
+| | block 2, kill switch (before) | block 2, fix | block 8, fix (was: 86.7 ms kernels in 142.6 ms) |
+|---|---|---|---|
+| round wall under nsys | 118.6 ms | 53.8 ms | 76.0 ms |
+| device sync / drafter host build | 87.0 / 28.6 ms | 42.8 / 6.8 ms | 66.1 / 5.9 ms |
+| GPU kernel time | 44.3 ms (3029 launches) | 54.7 ms (3364) | 83.3 ms (3598) |
+| GPU busy fraction | 37% | 102% | 110% |
+| `ScaledDotProductAttention::eval_gpu` host range | 68.9 ms (45 instances) | 0 (the fallback is composed of ordinary ops; no SDPA primitive runs) | 0 |
+| `CommandEncoder::commit` host range | 17.1 ms | 15.9 ms | 23.2 ms |
+| attention on the GPU | 0.72 ms cuDNN flash | 0.19 ms softmax + matmuls inside the dense and copies rows | 0.41 ms |
+
+The round is GPU-bound after the fix (kernel time equals or slightly exceeds the round wall, since the drafter's kernels overlap the host walk); the busy fractions above 100% are the differencing method's rounding on overlapping work, not a measurement of idle time. The fallback costs about 10 ms more GPU time per round at block 2 (bf16 score matmuls, copies and softmax over 45 layers) against the 69 ms of host time it removes. What remains per round is the bf16 dense GEMM at `M` rows (26 to 30 ms, 24 ms of it the cutlass 16x16-tile kernel over the target's q, k, v, o projections and lm_head), the routed experts (11.6 ms at 2 rows, 36.8 at 8) and the graph commits.
+
+### Qwen 3.5 pairing on the same binary (server harness of #1782, streaming greedy, n = 3)
+
+| Configuration | e2e tok/s mean (min to max) | vs classic | round device sync ms | greedy text == classic |
+|---|---|---|---|---|
+| classic | 56.07 (55.85 to 56.25) | | | yes (3 of 3 identical) |
+| block 2 | 70.56 (70.24 to 70.97) | 1.26x (#1782: 1.24x) | 19.3 (18.8 to 20.2) | yes |
+| block 4 | 75.58 (75.33 to 75.75) | 1.35x (#1782: 1.32x) | 30.4 (29.8 to 31.1) | yes |
+
+Qwen 3.5's head_dim of 256 never qualified for cuDNN, so the gate cannot reach it; the numbers agree with #1782 within 3% and greedy text stays byte-identical to classic at both widths.
+
+## Conclusion
+
+The fixed floor of the Laguna DFlash verify round on GB10 was host time: three cuDNN SDPA execution-plan builds per round, because MLX keys its plan cache on the exact key length and mask shape and a verify round's key length is new every round; the one-row classic step never enters cuDNN. The per-row term is the routed experts reading each selected expert per row, inherent to a MoE verify. Routing the small-query masked verify shape to MLX's ops fallback removes the floor (device sync `71.6 + 3.79/row` to `36.0 + 3.6/row` ms), takes the pairing from a best of 0.72x to 1.33x at block 4, and also removes a process abort that ended any Laguna DFlash generation past about 170 rounds. The graph-side candidates (byte and op budgets, capture, re-instantiation), the mask materialization (under 1 ms of GPU time per round) and the NVFP4 dispatch family switch (which does not exist on this pairing's bf16 projections) are each ruled out with a measured bound above.
