@@ -164,3 +164,52 @@ Under `both` at block 4 the drafter's host build falls from 12.9 to 7.6 ms per r
 
 Graphs off is faster still on this arm (41.28 tok/s, drafter host build 7.7 ms, device sync 45.7 ms), as #1799 found at block 8: the multi-row verify gains nothing from capture. That is a property of the speculative path and is out of scope here. On the classic arm, which this issue is about, graphs off also beats Laguna's default (+11% here, the #1799 finding) but not `both` (32.57 against 33.80 through the CLI, 33.79 against 37.60 through `mlxcel-bench-decode`), and it costs 3 to 15% of classic decode on every other model measured (gpt-oss -3%, qwen3-30b-a3b -5%, Llama -6%, Qwen 3.5 4B -10%, gemma-4-26b-a4b -11%, qwen3.5-35b-a3b -15%), so it is not a default candidate either.
 
+## Batched serving (`mlxcel-server --max-batch-size 8`, concurrency 1, 4, 8; idle host, same binary)
+
+One server per (arm, round); the concurrency-1 level is also the server's warm-up. Laguna's `supports_batching()` returns false (`src/models/laguna.rs:650`, its mixed full and sliding caches are not per-sequence isolated), so on Laguna the scheduler serializes concurrent requests: its aggregate stays at the single-stream rate at every level and TTFT grows with the queue (11 s at 4, 26 s at 8). Those rows are therefore a serialized single-stream workload through the server, not a B > 1 measurement; the B > 1 rows are qwen3-30b-a3b, which does batch (per-request decode 79 to 21 to 9 tok/s as the batch fills while the aggregate rises). **The qwen3-30b-a3b arms are partial** (default n = 1, `both` n = 2, `nograph` n = 1): the sweep was stopped by the host-protection halt described below, mid round 1, before its third round.
+
+
+### `laguna-xs-2.1-nvfp4`
+
+| concurrency | config | n | aggregate tok/s mean (min to max) | vs default | per-request decode tok/s mean | TTFT ms mean (p95 mean) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|
+| 1 | default | 3 | 26.90 (26.50 to 27.30) |  | 30.30 | 857 (857) | 0.38 to 0.95 | 0 of 3 |
+| 4 | default | 3 | 28.13 (27.70 to 28.50) |  | 30.67 | 11270 (21910) | 0.38 to 0.95 | 0 of 3 |
+| 8 | default | 3 | 27.67 (27.10 to 28.10) |  | 30.13 | 25969 (51273) | 0.38 to 0.95 | 0 of 3 |
+| 1 | both | 3 | 29.10 (29.00 to 29.30) | +8.2% | 32.23 | 704 (704) | 0.56 to 0.65 | 0 of 3 |
+| 4 | both | 3 | 29.67 (29.40 to 29.90) | +5.5% | 32.47 | 10673 (20758) | 0.56 to 0.65 | 0 of 3 |
+| 8 | both | 3 | 28.83 (28.60 to 29.20) | +4.2% | 31.47 | 24761 (49101) | 0.56 to 0.65 | 0 of 3 |
+| 1 | nograph | 3 | 29.40 (29.20 to 29.60) | +9.3% | 31.17 | 418 (418) | 0.82 to 1.13 | 0 of 3 |
+| 4 | nograph | 3 | 29.47 (28.80 to 30.30) | +4.7% | 30.60 | 10368 (20586) | 0.82 to 1.13 | 0 of 3 |
+| 8 | nograph | 3 | 29.10 (28.30 to 29.90) | +5.2% | 30.20 | 24318 (48426) | 0.82 to 1.13 | 0 of 3 |
+
+### `qwen3-30b-a3b-4bit`
+
+| concurrency | config | n | aggregate tok/s mean (min to max) | vs default | per-request decode tok/s mean | TTFT ms mean (p95 mean) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|
+| 1 | default | 1 | 52.60 (52.60 to 52.60) |  | 78.90 | 1282 (1282) | 0.84 to 0.84 | 0 of 1 |
+| 4 | default | 1 | 66.10 (66.10 to 66.10) |  | 20.60 | 2303 (3066) | 0.84 to 0.84 | 0 of 1 |
+| 8 | default | 1 | 64.00 (64.00 to 64.00) |  | 8.80 | 2083 (4131) | 0.84 to 0.84 | 0 of 1 |
+| 1 | both | 2 | 49.20 (46.10 to 52.30) | -6.5% | 80.15 | 1598 (1598) | 0.63 to 0.83 | 0 of 2 |
+| 4 | both | 2 | 64.65 (62.80 to 66.50) | -2.2% | 20.55 | 2517 (3347) | 0.63 to 0.83 | 0 of 2 |
+| 8 | both | 2 | 59.50 (58.50 to 60.50) | -7.0% | 9.15 | 4810 (6406) | 0.63 to 0.83 | 0 of 2 |
+| 1 | nograph | 1 | 48.20 (48.20 to 48.20) | -8.4% | 67.00 | 1181 (1181) | 0.78 to 0.78 | 0 of 1 |
+| 4 | nograph | 1 | 73.60 (73.60 to 73.60) | +11.3% | 23.00 | 2079 (2766) | 0.78 to 0.78 | 0 of 1 |
+| 8 | nograph | 1 | 79.70 (79.70 to 79.70) | +24.5% | 11.70 | 2869 (4567) | 0.78 to 0.78 | 0 of 1 |
+
+What the completed Laguna rows say: `both` is +8.2% at concurrency 1 (29.0 to 29.3 against 26.5 to 27.3, disjoint) and +4 to +6% at 4 and 8, the same sign as every other Laguna workload, smaller than the same-process harness because each server request pays its own prefill and first-token cost inside the aggregate. What the partial qwen3-30b-a3b rows say, with the caveat that none has n = 3: at concurrency 1 through the server `both` is 46.1 to 52.3 against a single default run of 52.6, and at 4 and 8 it is -2% and -7% against single default runs, while graphs off is +11% and +25% there. That is the opposite sign to this checkpoint's +21% single-stream result, and it is the reason qwen3_moe is not in the shipped allowlist: the production path is the server, batched decode changes the graph set every step as the batch composition changes, and larger graphs appear to pay more for that, as Llama did. Settling it needs the third round and an nsys pair on the batched path, neither of which ran.
+
+## Chain status at the host-protection halt (02:52 local)
+
+The GB10 driver began shedding `NVRM: NV_ERR_NO_MEMORY` allocation errors at an accelerating rate during the batched phase (486 by 02:51, 234 of them in two minutes), the documented precursor of a kernel wedge on this host, and every remaining measurement was stopped and the GPU lock released. What completed, all n = 3 unless stated:
+
+- Single-stream decode and short prefill, six arms: Laguna, Qwen 3.5 4B, Llama 3.1 8B. Complete.
+- Single-stream decode and short prefill, three arms: gpt-oss-20b, qwen3-30b-a3b, qwen3.5-35b-a3b, gemma-4-26b-a4b. Complete.
+- Long prefill (2048 tokens), three arms: Laguna, Qwen 3.5 4B. Complete.
+- nsys graph accounting, default and `both`: Laguna, Qwen 3.5 4B, Llama 3.1 8B. Complete (one profile pair per arm by design).
+- DFlash phase split at block 4, six arms: Laguna. Complete (the gated re-run; the first pass overlapped a CI job and is kept in `data/` as `results_dflash.jsonl` for reference only).
+- Batched serving, three arms at concurrency 1, 4, 8: Laguna complete; qwen3-30b-a3b partial (default 1, `both` 2, `nograph` 1 rounds).
+- Not started: intermediate budgets (ops 50 / mb 1000, ops 100 / mb 100) and the 8192-token prefill peak on Laguna (chain 5); qwen3.6-35b-a3b single-stream and the 2048-token prefill peak on qwen3-30b-a3b and qwen3.5-35b-a3b (chain 6).
+
+Raw records for every run, the harness scripts and the sweep logs are in `docs/benchmark_results/data/cuda-graph-budget-gb10-2026-09-12/`.
+

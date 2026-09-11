@@ -1,0 +1,66 @@
+acquired GB10 GPU lock for 1798
+waiting for idle host: load1=0.68
+waiting for idle host: load1=0.70
+waiting for idle host: load1=0.79
+waiting for idle host: load1=0.85
+waiting for idle host: load1=0.89
+waiting for idle host: load1=0.70
+waiting for idle host: load1=0.56
+IDLE load=0.40 0.82 1.08 1/702 2544404 2026-09-12T01:59:10+09:00
+PHASE_START moe2 2026-09-12T01:59:10+09:00 load=0.40 0.82 1.08 1/701 2544407
+[warmup 0] default dec=72.4 rc=0
+[round 0] default dec=72.54 pre=129.0 ptok=101 peak=14.98 load1=0.80 rc=0
+[round 0] both dec=61.4 pre=111.64 ptok=101 peak=20.37 load1=0.69 rc=0
+[round 0] nograph dec=72.59 pre=138.09 ptok=101 peak=17.72 load1=0.89 rc=0
+[round 1] both dec=75.34 pre=84.66 ptok=101 peak=22.02 load1=0.76 rc=0
+[round 1] nograph dec=72.57 pre=138.41 ptok=101 peak=17.72 load1=0.87 rc=0
+[round 1] default dec=76.91 pre=128.74 ptok=101 peak=14.98 load1=1.10 rc=0
+[round 2] nograph dec=72.82 pre=139.35 ptok=101 peak=17.72 load1=1.00 rc=0
+[round 2] default dec=75.91 pre=125.7 ptok=101 peak=14.98 load1=1.05 rc=0
+[round 2] both dec=73.51 pre=114.24 ptok=101 peak=24.2 load1=0.95 rc=0
+[warmup 0] default dec=81.24 rc=0
+[round 0] default dec=74.91 pre=152.17 ptok=101 peak=17.3 load1=1.36 rc=0
+[round 0] both dec=95.69 pre=161.47 ptok=101 peak=17.82 load1=1.54 rc=0
+[round 0] nograph dec=74.75 pre=434.44 ptok=101 peak=17.35 load1=1.41 rc=0
+[round 1] both dec=95.7 pre=159.67 ptok=101 peak=17.82 load1=1.28 rc=0
+[round 1] nograph dec=75.34 pre=432.89 ptok=101 peak=17.35 load1=1.14 rc=0
+[round 1] default dec=81.03 pre=156.15 ptok=101 peak=17.3 load1=1.03 rc=0
+[round 2] nograph dec=76.16 pre=432.96 ptok=101 peak=17.35 load1=1.07 rc=0
+[round 2] default dec=80.88 pre=154.42 ptok=101 peak=17.3 load1=1.05 rc=0
+[round 2] both dec=94.18 pre=153.6 ptok=101 peak=17.82 load1=0.96 rc=0
+[warmup 0] default dec=59.83 rc=0
+[round 0] default dec=62.47 pre=227.89 ptok=111 peak=20.0 load1=1.20 rc=0
+[round 0] both dec=76.49 pre=236.33 ptok=111 peak=20.52 load1=1.41 rc=0
+[round 0] nograph dec=52.95 pre=462.92 ptok=111 peak=20.06 load1=1.53 rc=0
+[round 1] both dec=76.32 pre=239.87 ptok=111 peak=20.52 load1=1.49 rc=0
+[round 1] nograph dec=51.77 pre=460.7 ptok=111 peak=20.06 load1=1.69 rc=0
+[round 1] default dec=58.24 pre=228.77 ptok=111 peak=19.99 load1=1.78 rc=0
+[round 2] nograph dec=54.69 pre=469.93 ptok=111 peak=20.0 load1=1.68 rc=0
+[round 2] default dec=66.14 pre=233.8 ptok=111 peak=20.01 load1=1.43 rc=0
+[round 2] both dec=76.16 pre=240.57 ptok=111 peak=20.52 load1=1.81 rc=0
+[warmup 0] default dec=61.57 rc=0
+[round 0] default dec=60.62 pre=161.22 ptok=115 peak=15.51 load1=1.45 rc=0
+[round 0] both dec=60.95 pre=167.29 ptok=115 peak=16.15 load1=1.17 rc=0
+[round 0] nograph dec=54.56 pre=471.23 ptok=115 peak=15.59 load1=0.95 rc=0
+[round 1] both dec=61.32 pre=168.48 ptok=115 peak=16.15 load1=0.89 rc=0
+[round 1] nograph dec=54.5 pre=474.93 ptok=115 peak=15.59 load1=0.77 rc=0
+[round 1] default dec=61.48 pre=162.15 ptok=115 peak=15.51 load1=0.83 rc=0
+[round 2] nograph dec=54.6 pre=472.26 ptok=115 peak=15.59 load1=0.72 rc=0
+[round 2] default dec=61.45 pre=168.09 ptok=115 peak=15.51 load1=0.72 rc=0
+[round 2] both dec=61.09 pre=167.45 ptok=115 peak=16.15 load1=0.72 rc=0
+PHASE_END moe2 2026-09-12T02:14:04+09:00 load=0.80 1.14 1.19 1/699 2548204
+waiting for idle host: load1=0.80
+waiting for idle host: load1=0.85
+waiting for idle host: load1=0.61
+waiting for idle host: load1=0.43
+IDLE load=0.46 0.95 1.12 1/700 2548350 2026-09-12T02:15:24+09:00
+PHASE_START nsys_llama 2026-09-12T02:15:24+09:00 load=0.46 0.95 1.12 1/699 2548353
+[round 0] default dec=50.94 pre=1686.62 ptok=101 peak=4.68 load1=0.42 rc=0
+[round 0] default dec=51.09 pre=1722.99 ptok=101 peak=4.68 load1=0.86 rc=0
+NSYS_DONE llama-default
+[round 0] both dec=47.26 pre=1592.18 ptok=101 peak=4.86 load1=0.74 rc=0
+[round 0] both dec=47.49 pre=1542.7 ptok=101 peak=4.82 load1=0.80 rc=0
+NSYS_DONE llama-both
+PHASE_END nsys_llama 2026-09-12T02:16:42+09:00 load=0.83 0.97 1.11 2/704 2548903
+SWEEP2_DONE
+released GB10 GPU lock

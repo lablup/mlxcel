@@ -1,0 +1,157 @@
+== laguna-default: delta tokens 200; per token: 2364.9 kernel launches, 33.465 ms GPU kernel time
+| CUDA API | calls/token | host ms/token | calls (long run, absolute) | host ms (long run, absolute) |
+|---|---|---|---|---|
+| `cuGraphAddKernelNode_v2` | 355.00 | 0.347 | 149573 | 143.6 |
+| `cuGraphCreate` | 0.01 | 0.000 | 5 | 0.0 |
+| `cuGraphGetNodes` | 0.01 | 0.000 | 5 | 0.0 |
+| `cuGraphKernelNodeSetParams_v2` | 31.45 | 0.022 | 6925 | 5.1 |
+| `cuGraphNodeGetDependentNodes_v2` | 62.89 | 0.010 | 13850 | 2.1 |
+| `cuLaunchKernel` | 0.00 | -0.000 | 20 | 0.0 |
+| `cuLaunchKernelEx` | 0.00 | 0.000 | 466 | 3.2 |
+| `cudaEventQuery` | 81.00 | 0.083 | 35170 | 41.6 |
+| `cudaEventRecord` | 201.00 | 0.535 | 88224 | 234.8 |
+| `cudaEventSynchronize` | -0.07 | -0.007 | 21 | 17.2 |
+| `cudaGraphAddChildGraphNode_v10000` | 31.45 | 0.207 | 7421 | 49.1 |
+| `cudaGraphAddDependencies_v12030` | 199.00 | 0.101 | 84215 | 51.7 |
+| `cudaGraphAddEmptyNode_v10000` | 0.30 | 0.001 | 551 | 0.8 |
+| `cudaGraphAddKernelNode_v10000` | 1978.45 | 2.810 | 928084 | 1561.7 |
+| `cudaGraphChildGraphNodeGetGraph_v10000` | 31.45 | 0.013 | 6930 | 3.1 |
+| `cudaGraphCreate_v10000` | 200.00 | 0.070 | 85266 | 50.7 |
+| `cudaGraphDestroy_v10000` | 200.01 | 0.313 | 85757 | 152.6 |
+| `cudaGraphExecDestroy_v10000` | 0.04 | -0.010 | 100 | 7.2 |
+| `cudaGraphExecUpdate_v10020` | 199.96 | 6.611 | 85158 | 2757.8 |
+| `cudaGraphGetNodes_v10000` | 0.03 | -0.000 | 1002 | 0.3 |
+| `cudaGraphGetRootNodes_v10000` | 125.78 | 0.030 | 27700 | 7.2 |
+| `cudaGraphInstantiate_v12000` | 0.04 | 0.032 | 100 | 79.9 |
+| `cudaGraphKernelNodeGetAttribute_v11000` | 0.01 | 0.000 | 649 | 0.3 |
+| `cudaGraphLaunch_v10000` | 200.00 | 4.503 | 85258 | 2434.5 |
+| `cudaGraphNodeGetDependentNodes_v12030` | 31.45 | 0.006 | 6925 | 1.3 |
+| `cudaGraphNodeGetType_v10000` | 0.01 | 0.000 | 654 | 0.2 |
+| `cudaLaunchKernel` | 0.00 | 0.020 | 1156 | 32.5 |
+| `cudaLaunchKernelExC_v11060` | 0.00 | 0.001 | 158 | 4.2 |
+| `cudaMemcpyAsync` | 0.00 | 8.663 | 90651 | 8393.7 |
+| `cudaStreamSynchronize` | 0.00 | -0.000 | 7 | 0.0 |
+| `cudaStreamWaitEvent` | 200.00 | 0.121 | 87577 | 54.9 |
+| all CUDA API calls | 4424.7 | 25.939 | | |
+
+== laguna-both: delta tokens 200; per token: 2364.9 kernel launches, 38.125 ms GPU kernel time
+| CUDA API | calls/token | host ms/token | calls (long run, absolute) | host ms (long run, absolute) |
+|---|---|---|---|---|
+| `cuGraphAddKernelNode_v2` | 355.00 | 0.365 | 149573 | 145.8 |
+| `cuGraphCreate` | 0.01 | 0.000 | 5 | 0.0 |
+| `cuGraphGetNodes` | 0.01 | 0.000 | 5 | 0.0 |
+| `cuGraphKernelNodeSetParams_v2` | 31.45 | 0.012 | 6925 | 2.9 |
+| `cuGraphNodeGetDependentNodes_v2` | 62.89 | 0.009 | 13850 | 2.0 |
+| `cuLaunchKernel` | 0.00 | -0.000 | 20 | 0.0 |
+| `cuLaunchKernelEx` | 0.00 | -0.000 | 466 | 1.8 |
+| `cudaEventQuery` | 81.32 | 0.059 | 35393 | 30.7 |
+| `cudaEventRecord` | 25.01 | 0.078 | 14376 | 47.2 |
+| `cudaEventSynchronize` | 0.37 | 0.048 | 89 | 42.6 |
+| `cudaGraphAddChildGraphNode_v10000` | 31.45 | 0.170 | 7421 | 40.2 |
+| `cudaGraphAddDependencies_v12030` | 24.01 | 0.096 | 10935 | 48.0 |
+| `cudaGraphAddEmptyNode_v10000` | 0.30 | -0.000 | 551 | 0.8 |
+| `cudaGraphAddKernelNode_v10000` | 1978.45 | 2.555 | 928084 | 1432.8 |
+| `cudaGraphChildGraphNodeGetGraph_v10000` | 31.45 | 0.006 | 6930 | 1.5 |
+| `cudaGraphCreate_v10000` | 24.02 | 0.013 | 11418 | 9.0 |
+| `cudaGraphDestroy_v10000` | 24.02 | 0.290 | 11909 | 152.3 |
+| `cudaGraphExecDestroy_v10000` | 0.29 | 0.065 | 251 | 52.0 |
+| `cudaGraphExecUpdate_v10020` | 23.71 | 7.884 | 11159 | 3219.7 |
+| `cudaGraphGetNodes_v10000` | 0.03 | -0.000 | 1002 | 0.2 |
+| `cudaGraphGetRootNodes_v10000` | 125.78 | 0.018 | 27700 | 4.2 |
+| `cudaGraphInstantiate_v12000` | 0.29 | 0.335 | 251 | 501.8 |
+| `cudaGraphKernelNodeGetAttribute_v11000` | 0.01 | -0.000 | 649 | 0.2 |
+| `cudaGraphLaunch_v10000` | 24.01 | 5.344 | 11410 | 2543.3 |
+| `cudaGraphNodeGetDependentNodes_v12030` | 31.45 | 0.005 | 6925 | 1.1 |
+| `cudaGraphNodeGetType_v10000` | 0.01 | -0.000 | 654 | 0.2 |
+| `cudaLaunchKernel` | 0.00 | -0.033 | 1156 | 32.4 |
+| `cudaLaunchKernelExC_v11060` | 0.00 | 0.001 | 158 | 3.8 |
+| `cudaMemcpy` | -0.01 | -0.000 | 0 | 0.0 |
+| `cudaMemcpyAsync` | 0.00 | -9.227 | 90651 | 4791.4 |
+| `cudaStreamSynchronize` | 0.00 | -0.000 | 7 | 0.0 |
+| `cudaStreamWaitEvent` | 24.01 | 0.017 | 13729 | 11.3 |
+| all CUDA API calls | 3022.3 | 7.799 | | |
+
+== qwen3.5-default: delta tokens 200; per token: 1307.0 kernel launches, 17.034 ms GPU kernel time
+| CUDA API | calls/token | host ms/token | calls (long run, absolute) | host ms (long run, absolute) |
+|---|---|---|---|---|
+| `cuGraphAddKernelNode_v2` | 181.00 | 0.163 | 76374 | 66.5 |
+| `cuLaunchKernel` | 24.00 | 0.029 | 10448 | 13.6 |
+| `cudaEventQuery` | 65.35 | 0.057 | 28289 | 27.4 |
+| `cudaEventRecord` | 66.00 | 0.148 | 30385 | 76.4 |
+| `cudaEventSynchronize` | 0.00 | 0.007 | 3 | 11.1 |
+| `cudaGraphAddChildGraphNode_v10000` | 24.00 | 0.060 | 13712 | 33.0 |
+| `cudaGraphAddDependencies_v12030` | 64.00 | 0.055 | 27522 | 24.8 |
+| `cudaGraphAddEmptyNode_v10000` | 24.00 | 0.019 | 10144 | 8.1 |
+| `cudaGraphAddKernelNode_v10000` | 1102.00 | 1.361 | 468974 | 857.6 |
+| `cudaGraphCreate_v10000` | 65.00 | 0.033 | 28110 | 14.5 |
+| `cudaGraphDestroy_v10000` | 89.00 | 0.143 | 41822 | 69.8 |
+| `cudaGraphExecDestroy_v10000` | 0.00 | 0.004 | 251 | 18.1 |
+| `cudaGraphExecUpdate_v10020` | 65.00 | 3.809 | 27856 | 1449.6 |
+| `cudaGraphGetNodes_v10000` | 48.00 | 0.009 | 27424 | 4.5 |
+| `cudaGraphInstantiate_v12000` | 0.00 | 0.012 | 251 | 67.7 |
+| `cudaGraphKernelNodeGetAttribute_v11000` | 24.00 | 0.005 | 13712 | 3.6 |
+| `cudaGraphLaunch_v10000` | 65.00 | 2.656 | 28107 | 1161.9 |
+| `cudaGraphNodeGetType_v10000` | 24.00 | 0.004 | 13712 | 2.4 |
+| `cudaLaunchKernel` | 0.00 | -0.030 | 4188 | 24.8 |
+| `cudaMemcpy` | 0.00 | 0.000 | 1 | 0.1 |
+| `cudaMemcpyAsync` | 0.00 | -0.246 | 924 | 121.4 |
+| `cudaStreamSynchronize` | 0.00 | 0.000 | 7 | 0.1 |
+| `cudaStreamWaitEvent` | 65.00 | 0.036 | 29965 | 17.7 |
+| all CUDA API calls | 2204.3 | 8.636 | | |
+
+== qwen3.5-both: delta tokens 200; per token: 1307.0 kernel launches, 18.249 ms GPU kernel time
+| CUDA API | calls/token | host ms/token | calls (long run, absolute) | host ms (long run, absolute) |
+|---|---|---|---|---|
+| `cuGraphAddKernelNode_v2` | 181.00 | 0.164 | 76374 | 67.9 |
+| `cuLaunchKernel` | 24.00 | 0.029 | 10448 | 12.5 |
+| `cudaEventQuery` | 65.80 | 0.071 | 28441 | 28.8 |
+| `cudaEventRecord` | 15.00 | 0.053 | 8648 | 28.4 |
+| `cudaEventSynchronize` | 0.00 | -0.044 | 3 | 12.5 |
+| `cudaGraphAddChildGraphNode_v10000` | 24.00 | 0.059 | 13712 | 32.6 |
+| `cudaGraphAddDependencies_v12030` | 14.00 | 0.054 | 6207 | 24.6 |
+| `cudaGraphAddEmptyNode_v10000` | 24.00 | 0.021 | 10144 | 8.4 |
+| `cudaGraphAddKernelNode_v10000` | 1102.00 | 1.353 | 468974 | 854.5 |
+| `cudaGraphCreate_v10000` | 14.00 | 0.009 | 6373 | 4.4 |
+| `cudaGraphDestroy_v10000` | 38.00 | 0.190 | 20085 | 89.1 |
+| `cudaGraphExecDestroy_v10000` | 0.00 | 0.001 | 152 | 30.5 |
+| `cudaGraphExecUpdate_v10020` | 14.00 | 3.817 | 6218 | 1572.0 |
+| `cudaGraphGetNodes_v10000` | 48.00 | 0.007 | 27424 | 4.0 |
+| `cudaGraphInstantiate_v12000` | 0.00 | 0.002 | 152 | 132.6 |
+| `cudaGraphKernelNodeGetAttribute_v11000` | 24.00 | 0.006 | 13712 | 3.1 |
+| `cudaGraphLaunch_v10000` | 14.00 | 2.662 | 6370 | 1148.2 |
+| `cudaGraphNodeGetType_v10000` | 24.00 | 0.004 | 13712 | 2.1 |
+| `cudaLaunchKernel` | 0.00 | -0.058 | 4188 | 30.3 |
+| `cudaMemcpy` | 0.00 | -0.000 | 1 | 0.0 |
+| `cudaMemcpyAsync` | 0.00 | 0.026 | 924 | 197.4 |
+| `cudaStreamSynchronize` | 0.00 | -0.000 | 7 | 0.0 |
+| `cudaStreamWaitEvent` | 14.00 | 0.014 | 8228 | 7.2 |
+| all CUDA API calls | 1797.9 | 8.495 | | |
+
+== llama-default: delta tokens 200; per token: 493.0 kernel launches, 20.449 ms GPU kernel time
+| `cuGraphCreate` | 0.00 | 0.000 | 3 | 0.0 |
+| `cudaEventRecord` | 36.00 | 0.179 | 16587 | 77.3 |
+| `cudaEventSynchronize` | 0.00 | 0.008 | 3 | 25.7 |
+| `cudaGraphCreate_v10000` | 35.00 | 0.039 | 15093 | 19.3 |
+| `cudaGraphDestroy_v10000` | 35.00 | 0.159 | 15096 | 64.8 |
+| `cudaGraphExecUpdate_v10020` | 35.00 | 1.873 | 15064 | 851.8 |
+| `cudaGraphInstantiate_v12000` | 0.00 | -0.002 | 23 | 5.1 |
+| `cudaGraphLaunch_v10000` | 35.00 | 1.521 | 15087 | 693.1 |
+| `cudaMemcpyAsync` | 0.00 | -0.312 | 743 | 120.1 |
+| `cudaStreamSynchronize` | 0.00 | -0.000 | 7 | 0.0 |
+| `cudaStreamWaitEvent` | 35.00 | 0.070 | 16196 | 31.2 |
+| all CUDA API calls | 1223.1 | 5.943 | | |
+
+== llama-both: delta tokens 200; per token: 553.5 kernel launches, 23.351 ms GPU kernel time
+| `cuGraphCreate` | 0.00 | -0.000 | 3 | 0.0 |
+| `cudaEventRecord` | 6.99 | 0.035 | 4363 | 18.6 |
+| `cudaEventSynchronize` | 0.93 | 11.135 | 313 | 3663.8 |
+| `cudaGraphCreate_v10000` | 5.98 | 0.005 | 2863 | 3.2 |
+| `cudaGraphDestroy_v10000` | 5.98 | 0.126 | 2866 | 54.8 |
+| `cudaGraphExecUpdate_v10020` | 5.84 | 2.163 | 2614 | 926.7 |
+| `cudaGraphInstantiate_v12000` | 0.14 | 1.143 | 243 | 1477.6 |
+| `cudaGraphLaunch_v10000` | 5.98 | 2.071 | 2857 | 826.7 |
+| `cudaMemcpyAsync` | 0.00 | -0.183 | 743 | 174.7 |
+| `cudaStreamSynchronize` | 0.00 | -0.000 | 7 | 0.1 |
+| `cudaStreamWaitEvent` | 5.99 | 0.013 | 3972 | 6.2 |
+| all CUDA API calls | 1054.0 | 17.636 | | |
+

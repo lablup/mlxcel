@@ -1,0 +1,162 @@
+acquired GB10 GPU lock for 1798
+waiting for idle host: load1=1.42
+waiting for idle host: load1=1.10
+waiting for idle host: load1=0.78
+waiting for idle host: load1=0.62
+waiting for idle host: load1=0.53
+IDLE load=0.38 1.83 1.97 1/728 2498041 2026-09-12T01:22:34+09:00
+PHASE_START single 2026-09-12T01:22:34+09:00 load=0.38 1.83 1.97 1/727 2498044
+[warmup 0] default dec=31.92 rc=0
+[round 0] default dec=31.33 pre=246.86 ptok=112 peak=21.66 load1=0.69 rc=0
+[round 0] nograph dec=33.6 pre=526.97 ptok=112 peak=21.69 load1=0.72 rc=0
+[round 0] ops100 dec=32.12 pre=245.86 ptok=112 peak=21.69 load1=0.72 rc=0
+[round 0] mb1000 dec=35.63 pre=266.47 ptok=112 peak=21.69 load1=1.06 rc=0
+[round 0] both dec=37.14 pre=270.05 ptok=112 peak=22.03 load1=0.97 rc=0
+[round 0] both400 dec=37.68 pre=264.27 ptok=112 peak=22.03 load1=0.97 rc=0
+[round 1] nograph dec=33.95 pre=524.3 ptok=112 peak=21.69 load1=1.05 rc=0
+[round 1] ops100 dec=32.5 pre=256.24 ptok=112 peak=21.69 load1=1.04 rc=0
+[round 1] mb1000 dec=35.79 pre=265.99 ptok=112 peak=21.69 load1=0.95 rc=0
+[round 1] both dec=37.71 pre=266.96 ptok=112 peak=22.03 load1=1.02 rc=0
+[round 1] both400 dec=38.31 pre=270.67 ptok=112 peak=22.03 load1=1.02 rc=0
+[round 1] default dec=32.08 pre=253.18 ptok=112 peak=21.66 load1=1.02 rc=0
+[round 2] ops100 dec=32.81 pre=252.36 ptok=112 peak=21.69 load1=1.13 rc=0
+[round 2] mb1000 dec=35.29 pre=265.3 ptok=112 peak=21.69 load1=1.02 rc=0
+[round 2] both dec=37.94 pre=273.98 ptok=112 peak=22.04 load1=1.01 rc=0
+[round 2] both400 dec=37.86 pre=265.14 ptok=112 peak=22.03 load1=1.00 rc=0
+[round 2] default dec=32.66 pre=261.2 ptok=112 peak=21.66 load1=0.94 rc=0
+[round 2] nograph dec=33.82 pre=520.82 ptok=112 peak=21.7 load1=1.03 rc=0
+[warmup 0] default dec=66.55 rc=0
+[round 0] default dec=67.63 pre=1063.23 ptok=111 peak=2.82 load1=1.01 rc=0
+[round 0] nograph dec=60.96 pre=1233.62 ptok=111 peak=2.83 load1=1.01 rc=0
+[round 0] ops100 dec=70.33 pre=1018.67 ptok=111 peak=3.04 load1=1.01 rc=0
+[round 0] mb1000 dec=68.54 pre=1065.87 ptok=111 peak=2.85 load1=1.09 rc=0
+[round 0] both dec=69.98 pre=1147.74 ptok=111 peak=2.93 load1=1.08 rc=0
+[round 0] both400 dec=70.11 pre=1112.25 ptok=111 peak=2.97 load1=0.99 rc=0
+[round 1] nograph dec=60.64 pre=1246.26 ptok=111 peak=2.86 load1=0.99 rc=0
+[round 1] ops100 dec=70.78 pre=1026.48 ptok=111 peak=3.05 load1=0.99 rc=0
+[round 1] mb1000 dec=68.57 pre=1043.61 ptok=111 peak=2.84 load1=1.58 rc=0
+[round 1] both dec=70.36 pre=1180.47 ptok=111 peak=2.9 load1=1.45 rc=0
+[round 1] both400 dec=69.92 pre=1153.35 ptok=111 peak=2.9 load1=1.42 rc=0
+[round 1] default dec=66.95 pre=1064.54 ptok=111 peak=2.84 load1=1.38 rc=0
+[round 2] ops100 dec=70.71 pre=1012.04 ptok=111 peak=3.08 load1=1.32 rc=0
+[round 2] mb1000 dec=68.06 pre=1036.91 ptok=111 peak=2.85 load1=1.30 rc=0
+[round 2] both dec=69.75 pre=1165.25 ptok=111 peak=2.9 load1=1.27 rc=0
+[round 2] both400 dec=70.0 pre=1174.84 ptok=111 peak=2.9 load1=1.25 rc=0
+[round 2] default dec=67.56 pre=1043.17 ptok=111 peak=2.82 load1=1.13 rc=0
+[round 2] nograph dec=60.94 pre=1247.54 ptok=111 peak=2.8 load1=1.04 rc=0
+[warmup 0] default dec=48.93 rc=0
+[round 0] default dec=52.97 pre=1700.24 ptok=101 peak=4.68 load1=0.96 rc=0
+[round 0] nograph dec=49.84 pre=1950.58 ptok=101 peak=4.75 load1=0.97 rc=0
+[round 0] ops100 dec=53.0 pre=1660.54 ptok=101 peak=4.68 load1=0.97 rc=0
+[round 0] mb1000 dec=52.92 pre=1599.2 ptok=101 peak=4.75 load1=0.98 rc=0
+[round 0] both dec=48.01 pre=1519.15 ptok=101 peak=4.86 load1=0.90 rc=0
+[round 0] both400 dec=47.99 pre=1499.06 ptok=101 peak=4.86 load1=0.91 rc=0
+[round 1] nograph dec=49.75 pre=1918.37 ptok=101 peak=4.75 load1=1.00 rc=0
+[round 1] ops100 dec=52.95 pre=1676.9 ptok=101 peak=4.68 load1=0.92 rc=0
+[round 1] mb1000 dec=52.86 pre=1551.82 ptok=101 peak=4.75 load1=0.85 rc=0
+[round 1] both dec=47.94 pre=1513.11 ptok=101 peak=4.86 load1=0.86 rc=0
+[round 1] both400 dec=48.13 pre=1542.11 ptok=101 peak=4.86 load1=0.88 rc=0
+[round 1] default dec=52.97 pre=1659.83 ptok=101 peak=4.68 load1=0.89 rc=0
+[round 2] ops100 dec=52.62 pre=1725.86 ptok=101 peak=4.68 load1=0.82 rc=0
+[round 2] mb1000 dec=52.98 pre=1543.37 ptok=101 peak=4.75 load1=0.85 rc=0
+[round 2] both dec=48.02 pre=1518.94 ptok=101 peak=4.86 load1=0.78 rc=0
+[round 2] both400 dec=47.98 pre=1562.33 ptok=101 peak=4.86 load1=0.72 rc=0
+[round 2] default dec=52.99 pre=1674.75 ptok=101 peak=4.68 load1=0.83 rc=0
+[round 2] nograph dec=49.82 pre=1905.14 ptok=101 peak=4.75 load1=0.77 rc=0
+PHASE_END single 2026-09-12T01:34:42+09:00 load=0.79 1.03 1.43 1/679 2501115
+waiting for idle host: load1=0.79
+waiting for idle host: load1=0.56
+IDLE load=0.40 0.90 1.36 1/683 2501177 2026-09-12T01:35:22+09:00
+PHASE_START dflash 2026-09-12T01:35:22+09:00 load=0.40 0.90 1.36 1/682 2501180
+[warmup 0] off tok/s=28.31 rc=0
+[round 0] off tok/s=28.87 load1=0.65 rc=0
+[round 0] b4 tok/s=32.55 load1=0.73 rc=0 rounds=83 acc=1.41 draft/r=20.2 vgraph/r=3.8 sync/r=49.9
+[round 0] both-off tok/s=32.96 load1=0.81 rc=0
+[round 0] both-b4 tok/s=31.0 load1=1.02 rc=0 rounds=83 acc=1.41 draft/r=21.8 vgraph/r=5.4 sync/r=50.4
+[round 0] nograph-off tok/s=31.93 load1=1.86 rc=0
+[round 0] nograph-b4 tok/s=38.97 load1=1.74 rc=0 rounds=83 acc=1.41 draft/r=8.2 vgraph/r=6.1 sync/r=47.5
+[round 1] b4 tok/s=36.09 load1=2.40 rc=0 rounds=83 acc=1.41 draft/r=14.0 vgraph/r=4.8 sync/r=47.9
+[round 1] both-off tok/s=33.73 load1=3.15 rc=0
+[round 1] both-b4 tok/s=32.78 load1=3.58 rc=0 rounds=83 acc=1.41 draft/r=14.8 vgraph/r=5.6 sync/r=53.0
+[round 1] nograph-off tok/s=33.06 load1=3.49 rc=0
+[round 1] nograph-b4 tok/s=40.23 load1=3.23 rc=0 rounds=83 acc=1.41 draft/r=8.6 vgraph/r=5.2 sync/r=46.0
+[round 1] off tok/s=29.48 load1=3.85 rc=0
+[round 2] both-off tok/s=33.57 load1=4.03 rc=0
+[round 2] both-b4 tok/s=40.33 load1=3.17 rc=0 rounds=83 acc=1.41 draft/r=8.1 vgraph/r=4.1 sync/r=47.5
+[round 2] nograph-off tok/s=32.62 load1=2.55 rc=0
+[round 2] nograph-b4 tok/s=40.94 load1=2.19 rc=0 rounds=83 acc=1.41 draft/r=8.3 vgraph/r=4.6 sync/r=46.0
+[round 2] off tok/s=29.39 load1=1.93 rc=0
+[round 2] b4 tok/s=40.0 load1=1.62 rc=0 rounds=83 acc=1.41 draft/r=10.5 vgraph/r=3.4 sync/r=46.3
+PHASE_END dflash 2026-09-12T01:41:49+09:00 load=1.37 1.92 1.72 1/700 2540676
+waiting for idle host: load1=1.37
+waiting for idle host: load1=1.06
+waiting for idle host: load1=0.76
+waiting for idle host: load1=0.54
+IDLE load=0.46 1.49 1.58 1/695 2540867 2026-09-12T01:43:09+09:00
+PHASE_START batched 2026-09-12T01:43:09+09:00 load=0.46 1.49 1.58 1/694 2540870
+Traceback (most recent call last):
+  File "/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/1798/bench_srv.py", line 100, in <module>
+    main()
+  File "/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/1798/bench_srv.py", line 91, in main
+    r = run_once(a, cfg, presets); r["round"] = rd; r["tag"] = a.tag
+        ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/1798/bench_srv.py", line 35, in run_once
+    gate_wait_s = hostgate.wait_quiet(log=sys.stderr)
+                  ^^^^^^^^
+NameError: name 'hostgate' is not defined
+Traceback (most recent call last):
+  File "/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/1798/bench_srv.py", line 100, in <module>
+    main()
+  File "/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/1798/bench_srv.py", line 91, in main
+    r = run_once(a, cfg, presets); r["round"] = rd; r["tag"] = a.tag
+        ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/1798/bench_srv.py", line 35, in run_once
+    gate_wait_s = hostgate.wait_quiet(log=sys.stderr)
+                  ^^^^^^^^
+NameError: name 'hostgate' is not defined
+PHASE_END batched 2026-09-12T01:43:10+09:00 load=0.46 1.49 1.58 1/694 2540874
+waiting for idle host: load1=0.46
+IDLE load=0.33 1.39 1.55 1/694 2540927 2026-09-12T01:43:30+09:00
+PHASE_START prefill 2026-09-12T01:43:30+09:00 load=0.33 1.39 1.55 1/693 2540930
+[warmup 0] default dec=32.67 rc=0
+[round 0] default dec=33.78 pre=276.22 ptok=2048 peak=22.74 load1=0.65 rc=0
+[round 0] both dec=36.71 pre=278.57 ptok=2048 peak=29.79 load1=0.56 rc=0
+[round 0] nograph dec=35.67 pre=631.6 ptok=2048 peak=23.93 load1=0.81 rc=0
+[round 1] both dec=35.55 pre=273.54 ptok=2048 peak=29.79 load1=0.89 rc=0
+[round 1] nograph dec=35.98 pre=630.76 ptok=2048 peak=23.93 load1=0.85 rc=0
+[round 1] default dec=32.11 pre=269.13 ptok=2048 peak=22.74 load1=0.83 rc=0
+[round 2] nograph dec=35.9 pre=631.68 ptok=2048 peak=23.93 load1=0.87 rc=0
+[round 2] default dec=34.25 pre=270.05 ptok=2048 peak=22.74 load1=0.70 rc=0
+[round 2] both dec=36.23 pre=275.8 ptok=2048 peak=29.79 load1=0.84 rc=0
+[warmup 0] default dec=67.45 rc=0
+[round 0] default dec=67.05 pre=1328.7 ptok=2048 peak=7.97 load1=0.70 rc=0
+[round 0] both dec=66.93 pre=1191.06 ptok=2048 peak=13.2 load1=0.67 rc=0
+[round 0] nograph dec=61.43 pre=1530.12 ptok=2048 peak=8.72 load1=0.59 rc=0
+[round 1] both dec=65.26 pre=1190.42 ptok=2048 peak=13.2 load1=0.57 rc=0
+[round 1] nograph dec=61.11 pre=1537.81 ptok=2048 peak=8.72 load1=0.56 rc=0
+[round 1] default dec=67.22 pre=1323.13 ptok=2048 peak=7.94 load1=0.57 rc=0
+[round 2] nograph dec=60.9 pre=1531.6 ptok=2048 peak=8.78 load1=0.56 rc=0
+[round 2] default dec=66.84 pre=1338.21 ptok=2048 peak=7.97 load1=0.55 rc=0
+[round 2] both dec=64.82 pre=1198.73 ptok=2048 peak=13.2 load1=1.33 rc=0
+PHASE_END prefill 2026-09-12T01:50:35+09:00 load=1.39 1.08 1.31 1/702 2542555
+waiting for idle host: load1=1.39
+waiting for idle host: load1=0.99
+waiting for idle host: load1=0.78
+waiting for idle host: load1=0.56
+IDLE load=0.40 0.84 1.21 1/702 2542747 2026-09-12T01:51:55+09:00
+PHASE_START nsys 2026-09-12T01:51:55+09:00 load=0.40 0.84 1.21 1/702 2542751
+[round 0] default dec=31.06 pre=259.08 ptok=112 peak=21.67 load1=0.36 rc=0
+[round 0] default dec=31.45 pre=264.75 ptok=112 peak=21.66 load1=0.84 rc=0
+NSYS_DONE laguna-default
+[round 0] both dec=38.24 pre=362.73 ptok=112 peak=21.75 load1=0.82 rc=0
+[round 0] both dec=38.13 pre=344.07 ptok=112 peak=21.75 load1=1.33 rc=0
+NSYS_DONE laguna-both
+[round 0] default dec=64.67 pre=1060.16 ptok=111 peak=2.83 load1=1.30 rc=0
+[round 0] default dec=64.67 pre=1038.82 ptok=111 peak=2.79 load1=1.24 rc=0
+NSYS_DONE qwen3.5-default
+[round 0] both dec=68.48 pre=932.77 ptok=111 peak=2.85 load1=1.08 rc=0
+[round 0] both dec=68.21 pre=936.49 ptok=111 peak=2.85 load1=1.05 rc=0
+NSYS_DONE qwen3.5-both
+PHASE_END nsys 2026-09-12T01:56:24+09:00 load=1.03 1.05 1.20 2/706 2544060
+SWEEP_ALL_DONE
+released GB10 GPU lock
