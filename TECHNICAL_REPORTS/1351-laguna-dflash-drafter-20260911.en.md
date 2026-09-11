@@ -3,7 +3,7 @@
 **Date**: 2026-09-11
 **Author**: mlxcel maintainers
 **Reviewer**: -
-**Status**: Completed (Linux/CUDA host; the `metal,accelerate` workspace gate was not runnable here, the block-versus-chain exactness probe declines this host by default, and the throughput criterion is met only at `--draft-block-size 8` on code text with the override)
+**Status**: Completed (Linux/CUDA host; the `metal,accelerate` workspace gate was not runnable here, the block-versus-chain exactness probe declines this host by default, and the throughput criterion is not met at any block size on this host)
 **Languages**: Rust, Markdown
 **Risk Level**: Medium (a new drafter family in `mlxcel-core`, a `SpeculativeTarget` impl on the Laguna target, a generalized server DFlash burst target trait that the Qwen 3.5 path now also goes through, and a new offline `mlxcel generate --draft-kind dflash` arm)
 
@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-Poolside ships a DFlash speculator for every Laguna release, but mlxcel's DFlash machinery was hard-wired to the Qwen 3.5 drafter shape. This PR adds `mlxcel_core::drafter::laguna_dflash` (fused QKV, per-head softplus gate, `aux_hidden_norms`, sliding-window context attention), implements `SpeculativeTarget` on the Laguna target with rollback across dense and rotating caches, routes `model_type: laguna` drafters through `load_drafter`, and wires the pairing into both `mlxcel-server` and offline `mlxcel generate`. The pairing runs behind the same measured block-versus-chain exactness gate as the LFM2 and Muse Glimmer arms. On Laguna XS 2.1 NVFP4 with the published drafter on a GB10 the probe declines (107246 of 200704 logit bytes differ at the first verify position), so DFlash is off by default there; with `MLXCEL_MTP_ALLOW_INEXACT=1` greedy output equals classic decode except at bf16 logit ties, code completions accept 2.6 to 3.9 proposals per round, and throughput beat classic decode only once, at `--draft-block-size 8` on an idle host (1.14x); a rerun under concurrent load measured 0.82x, and the default block of 16 is slower on this host.
+Poolside ships a DFlash speculator for every Laguna release, but mlxcel's DFlash machinery was hard-wired to the Qwen 3.5 drafter shape. This PR adds `mlxcel_core::drafter::laguna_dflash` (fused QKV, per-head softplus gate, `aux_hidden_norms`, sliding-window context attention), implements `SpeculativeTarget` on the Laguna target with rollback across dense and rotating caches, routes `model_type: laguna` drafters through `load_drafter`, and wires the pairing into both `mlxcel-server` and offline `mlxcel generate`. The pairing runs behind the same measured block-versus-chain exactness gate as the LFM2 and Muse Glimmer arms. On Laguna XS 2.1 NVFP4 with the published drafter on a GB10 the probe declines (107246 of 200704 logit bytes differ at the first verify position), so DFlash is off by default there; with `MLXCEL_MTP_ALLOW_INEXACT=1` greedy output equals classic decode except at bf16 logit ties, code completions accept 2.6 to 3.9 proposals per round, and throughput is below classic decode at every block size on this host (best 0.97x at block 8, n=3, range inside the off arm's; 0.86x at the checkpoint's block 16) because the multi-row verify runs launch-bound against a graph-replayed classic step.
 
 ---
 
@@ -56,7 +56,27 @@ Measured on a GB10 (sm_121), NVFP4 target, bf16 drafter, greedy, 128 tokens, `ml
 | code 1 (`lru_get` body) | 30.81 | 27.13 | 3.88 | differ at 69 (one-ulp tie) |
 | code 2 (`debounce` body) | 32.35 | 21.87 | 2.63 | differ at 103 (one-ulp tie) |
 
-Block-size sweep on code 0 (classic 28.70 tok/s): block 4 gives 25.84 tok/s at 2.20 accepted, block 6 gives 30.45 at 3.00, block 8 gives 32.61 at 3.57, block 12 gives 29.87 at 3.74, block 16 gives 24.81 at 3.27. A post-merge rerun of code 0 reproduced the acceptance counters and the tie positions exactly (3.27 at block 16, 3.57 at block 8) but not the block-8 speed-up: 24.54 tok/s against a 30.00 tok/s classic run, with another agent's cargo builds running on the host at the time. The block-8 advantage is therefore a single quiet-host measurement, not a reliable property of this pairing on the GB10. A 16-row verify forward costs about four single-token decodes on this host (verify 130 ms per round against 35 ms per classic token), so the default block only pays off above roughly five accepted tokens per round.
+**Throughput A/B (same binary, feature off versus on per block size; raw code prompts, no chat template, 200 tokens; GPU lock held for the whole sweep; host otherwise idle: load 0.10, no other model or cargo process, GPU at 0 percent at start; decode tok/s as the CLI reports it):**
+
+| Configuration | n | tok/s mean (min to max) | Mean accepted | vs off |
+|---|---|---|---|---|
+| code 0 (`retry_with_backoff`), off | 5 | 32.50 (31.24 to 33.58) | | |
+| code 0, block 2 | 3 | 16.57 (16.38 to 16.87) | 0.84 | 0.51x |
+| code 0, block 3 | 3 | 22.06 (22.05 to 22.07) | 1.52 | 0.68x |
+| code 0, block 4 | 3 | 27.23 (27.01 to 27.52) | 2.21 | 0.84x |
+| code 0, block 5 | 3 | 29.21 (28.65 to 29.54) | 2.55 | 0.90x |
+| code 0, block 6 | 3 | 30.90 (30.55 to 31.38) | 2.90 | 0.95x |
+| code 0, block 8 | 3 | 31.47 (31.10 to 31.98) | 3.33 | 0.97x |
+| code 0, block 10 | 3 | 31.03 (30.86 to 31.18) | 3.42 | 0.95x |
+| code 0, block 12 | 3 | 29.96 (29.88 to 30.10) | 3.52 | 0.92x |
+| code 0, block 16 (checkpoint default) | 3 | 27.92 (27.36 to 28.45) | 3.55 | 0.86x |
+| code 1 (`lru_get`), off | 3 | 32.31 (32.05 to 32.61) | | |
+| code 1, block 6 | 3 | 30.97 (30.89 to 31.07) | 2.92 | 0.96x |
+| code 1, block 8 | 3 | 30.08 (29.82 to 30.22) | 3.17 | 0.93x |
+
+No configuration is a net win on this host. The best width, block 8, is 0.97x on code 0 with its whole range (31.10 to 31.98) inside the off arm's (31.24 to 33.58), and 0.93x on code 1; the checkpoint's block 16 is 0.86x. The earlier single-run 1.14x at block 8 did not reproduce and is withdrawn. The default block size stays at 16.
+
+Attribution (block 8, per round): about 32 ms of host-side drafter graph construction, 3 ms of target graph construction, and 100 ms of synchronized device work for 4.33 emitted tokens, against 30.8 ms per classic token. The device cost of a verify block is a fixed 77 ms plus 3.3 ms per row (83 ms at 2 rows, 130 ms at 16), 2.7x a single-token step even at 2 rows: the classic step is graph-replayed while the multi-row verify runs eagerly and launch-bound. That is a property of the CUDA backend on this host, not of the drafter, and out of scope here. Even perfect acceptance at block 8 would reach about 17 ms per token (1.8x); at the measured 3.3 to 3.6 accepted, 0.86x to 0.97x.
 
 The drafter's per-position accuracy along the reference path (probe b, shadow drafter): code 0 gives 0.88, 1.00, 0.75, 0.62, 0.38, 0.25 for d_0 to d_5 (mean accepted prefix 4.25 over 8 rounds); chat 0 gives 0.88, 0.50, 0.25, 0.12 (mean 1.38). Poolside's own numbers with a bf16 target are 3.55 to 4.57 on GSM8K, HumanEval, EvalPlus and Math.
 
@@ -207,7 +227,8 @@ None.
 ### Required
 
 - [ ] Decide whether the Qwen 3.5 DFlash arm should run the same measured gate Laguna, LFM2 and Muse Glimmer now run (it keeps the permissive default).
-- [ ] Run the `metal,accelerate` workspace gate and the block-size sweep on an Apple Silicon host; the block 8 recommendation is GB10-specific.
+- [ ] Run the `metal,accelerate` workspace gate and the block-size sweep on an Apple Silicon host, where the classic step is not graph-replayed and the verify overhead may differ.
+- [ ] Graph capture (or `mlx::compile`) for the multi-row verify forward and the drafter forward on the CUDA backend, which is where the GB10 ceiling comes from; a runtime change, not a drafter one.
 
 ### Monitoring Required
 

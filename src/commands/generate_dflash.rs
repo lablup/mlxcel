@@ -210,10 +210,14 @@ pub(super) fn run_offline_dflash(
     } else {
         0.0
     };
+    // `draft_ms` and `verify_graph_ms` are host-side graph construction
+    // (MLX evaluates lazily); the device work of a round is synchronized in
+    // `verify_sync_ms`, so the three together are where a round's time goes.
     println!(
         "DFlash: rounds={} proposed={} accepted={} mean_accepted_length={mean_accepted:.2} \
          acceptance_rate={:.3} emitted_per_verify={:.2} draft_ms={:.1} verify_ms={:.1} \
-         rollback_ms={:.1}",
+         verify_graph_ms={:.1} verify_sync_ms={:.1} hidden_concat_ms={:.1} walk_ms={:.1} \
+         rollback_ms={:.1} decode_ms={:.1}",
         d.rounds,
         d.proposed_tokens,
         d.accepted_tokens,
@@ -221,7 +225,12 @@ pub(super) fn run_offline_dflash(
         d.emitted_per_verify(),
         d.draft_time_ms,
         d.verify_time_ms + d.target_argmax_time_ms,
+        d.verify_time_ms,
+        d.target_argmax_time_ms,
+        d.hidden_concat_time_ms,
+        d.walk_time_ms,
         d.rollback_time_ms,
+        d.total_decode_time_ms,
     );
 
     let mut tokens = Vec::with_capacity(output.tokens.len() + 1);

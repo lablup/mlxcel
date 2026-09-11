@@ -3,7 +3,7 @@
 **작성일**: 2026-09-11
 **작성자**: mlxcel maintainers
 **리뷰어**: -
-**상태**: 완료 (Linux/CUDA 호스트. `metal,accelerate` 워크스페이스 게이트는 이 호스트에서 실행할 수 없었고, block-versus-chain 정확성 probe는 이 호스트를 기본으로 거부하며, 처리량 기준은 override 아래 코드 텍스트에서 `--draft-block-size 8`일 때만 충족)
+**상태**: 완료 (Linux/CUDA 호스트. `metal,accelerate` 워크스페이스 게이트는 이 호스트에서 실행할 수 없었고, block-versus-chain 정확성 probe는 이 호스트를 기본으로 거부하며, 처리량 기준은 이 호스트에서 어떤 블록 크기로도 충족되지 않음)
 **언어**: Rust, Markdown
 **위험도**: Medium (`mlxcel-core`에 새 드래프터 계열 추가, Laguna 타깃의 `SpeculativeTarget` 구현, Qwen 3.5 경로도 함께 지나가게 된 서버 DFlash 버스트 타깃 trait 일반화, 오프라인 `mlxcel generate --draft-kind dflash` 분기 신설)
 
@@ -11,7 +11,7 @@
 
 ## 요약
 
-Poolside는 Laguna 릴리스마다 DFlash speculator를 함께 배포하지만 mlxcel의 DFlash 기계 장치는 Qwen 3.5 드래프터 형태에 고정되어 있었다. 이 PR은 `mlxcel_core::drafter::laguna_dflash`(fused QKV, per-head softplus 게이트, `aux_hidden_norms`, sliding-window 컨텍스트 어텐션)를 추가하고, Laguna 타깃에 dense 캐시와 rotating 캐시를 모두 되감는 `SpeculativeTarget`을 구현하며, `model_type: laguna` 드래프터를 `load_drafter`로 라우팅하고, 이 조합을 `mlxcel-server`와 오프라인 `mlxcel generate` 양쪽에 연결한다. 이 조합은 LFM2, Muse Glimmer arm과 같은 측정형 block-versus-chain 정확성 게이트 뒤에서 동작한다. GB10에서 Laguna XS 2.1 NVFP4와 공개 드래프터를 짝지으면 probe가 거부하므로(첫 verify 위치에서 200704 로짓 바이트 중 107246개가 다름) 기본으로는 DFlash가 꺼지고, `MLXCEL_MTP_ALLOW_INEXACT=1`을 주면 greedy 출력은 bf16 로짓 동률 위치를 제외하고 classic decode와 같고, 코드 완성에서는 라운드당 2.6~3.9개 제안을 수락하며, 처리량은 한적한 호스트에서 `--draft-block-size 8`일 때 한 번 classic을 앞섰고(1.14x), 동시 부하 아래 재실행에서는 0.82x였다. 기본 블록 16은 이 호스트에서 더 느리다.
+Poolside는 Laguna 릴리스마다 DFlash speculator를 함께 배포하지만 mlxcel의 DFlash 기계 장치는 Qwen 3.5 드래프터 형태에 고정되어 있었다. 이 PR은 `mlxcel_core::drafter::laguna_dflash`(fused QKV, per-head softplus 게이트, `aux_hidden_norms`, sliding-window 컨텍스트 어텐션)를 추가하고, Laguna 타깃에 dense 캐시와 rotating 캐시를 모두 되감는 `SpeculativeTarget`을 구현하며, `model_type: laguna` 드래프터를 `load_drafter`로 라우팅하고, 이 조합을 `mlxcel-server`와 오프라인 `mlxcel generate` 양쪽에 연결한다. 이 조합은 LFM2, Muse Glimmer arm과 같은 측정형 block-versus-chain 정확성 게이트 뒤에서 동작한다. GB10에서 Laguna XS 2.1 NVFP4와 공개 드래프터를 짝지으면 probe가 거부하므로(첫 verify 위치에서 200704 로짓 바이트 중 107246개가 다름) 기본으로는 DFlash가 꺼지고, `MLXCEL_MTP_ALLOW_INEXACT=1`을 주면 greedy 출력은 bf16 로짓 동률 위치를 제외하고 classic decode와 같고, 코드 완성에서는 라운드당 2.6~3.9개 제안을 수락하며, 처리량은 이 호스트에서 어떤 블록 크기에서도 classic보다 낮다(블록 8에서 최선 0.97x, n=3, 범위가 off 쪽 안에 포함. 체크포인트의 블록 16은 0.86x). multi-row verify가 그래프 재생되는 classic step에 비해 launch-bound로 돌기 때문이다.
 
 ---
 
@@ -56,7 +56,27 @@ GB10(sm_121), NVFP4 타깃, bf16 드래프터, greedy, 128 토큰, `MLXCEL_MTP_A
 | code 1 (`lru_get` 본문) | 30.81 | 27.13 | 3.88 | 69에서 다름 (1 ulp 동률) |
 | code 2 (`debounce` 본문) | 32.35 | 21.87 | 2.63 | 103에서 다름 (1 ulp 동률) |
 
-code 0 블록 크기 스윕(classic 28.70 tok/s): 블록 4는 25.84 tok/s에 수락 2.20, 블록 6은 30.45에 3.00, 블록 8은 32.61에 3.57, 블록 12는 29.87에 3.74, 블록 16은 24.81에 3.27. 병합 후 code 0 재실행은 수락 카운터와 동률 위치를 정확히 재현했지만(블록 16에서 3.27, 블록 8에서 3.57) 블록 8의 속도 이득은 재현하지 못했다. 다른 에이전트의 cargo 빌드가 호스트에서 돌던 시점에 classic 30.00 tok/s 대 24.54 tok/s였다. 따라서 블록 8의 우위는 한적한 호스트에서 한 번 잰 값이지 GB10에서 이 조합의 안정적인 성질이 아니다. 이 호스트에서 16행 verify forward는 single-token decode 약 4회 비용(라운드당 verify 130 ms 대 classic 토큰당 35 ms)이라, 기본 블록은 라운드당 대략 5개 이상 수락해야 이득이 된다.
+**처리량 A/B (같은 바이너리, 기능 off와 블록 크기별 on. raw 코드 프롬프트, 채팅 템플릿 없음, 200 토큰. 스윕 전체에 GPU lock 유지. 시작 시 호스트는 유휴 상태(load 0.10, 다른 모델/cargo 프로세스 없음, GPU 0%). CLI가 보고하는 decode tok/s):**
+
+| 구성 | n | tok/s 평균 (최소~최대) | 평균 수락 길이 | off 대비 |
+|---|---|---|---|---|
+| code 0 (`retry_with_backoff`), off | 5 | 32.50 (31.24 to 33.58) | | |
+| code 0, block 2 | 3 | 16.57 (16.38 to 16.87) | 0.84 | 0.51x |
+| code 0, block 3 | 3 | 22.06 (22.05 to 22.07) | 1.52 | 0.68x |
+| code 0, block 4 | 3 | 27.23 (27.01 to 27.52) | 2.21 | 0.84x |
+| code 0, block 5 | 3 | 29.21 (28.65 to 29.54) | 2.55 | 0.90x |
+| code 0, block 6 | 3 | 30.90 (30.55 to 31.38) | 2.90 | 0.95x |
+| code 0, block 8 | 3 | 31.47 (31.10 to 31.98) | 3.33 | 0.97x |
+| code 0, block 10 | 3 | 31.03 (30.86 to 31.18) | 3.42 | 0.95x |
+| code 0, block 12 | 3 | 29.96 (29.88 to 30.10) | 3.52 | 0.92x |
+| code 0, block 16 (체크포인트 기본값) | 3 | 27.92 (27.36 to 28.45) | 3.55 | 0.86x |
+| code 1 (`lru_get`), off | 3 | 32.31 (32.05 to 32.61) | | |
+| code 1, block 6 | 3 | 30.97 (30.89 to 31.07) | 2.92 | 0.96x |
+| code 1, block 8 | 3 | 30.08 (29.82 to 30.22) | 3.17 | 0.93x |
+
+이 호스트에서는 어떤 구성도 순이득이 아니다. 가장 나은 폭인 블록 8은 code 0에서 0.97x이고 그 범위 전체(31.10~31.98)가 off 쪽 범위(31.24~33.58) 안에 들어가며, code 1에서는 0.93x다. 체크포인트 기본값인 블록 16은 0.86x다. 앞서 한 번 잰 블록 8의 1.14x는 재현되지 않아 철회한다. 기본 블록 크기는 16으로 둔다.
+
+원인(블록 8, 라운드당): 호스트 쪽 드래프터 그래프 구성 약 32 ms, 타깃 그래프 구성 3 ms, 동기화된 디바이스 작업 100 ms로 4.33 토큰을 내보내며, classic은 토큰당 30.8 ms다. verify 블록의 디바이스 비용은 고정 77 ms에 행당 3.3 ms(2행에서 83 ms, 16행에서 130 ms)로, 2행에서도 single-token step의 2.7배다. classic step은 그래프 재생으로 돌고 multi-row verify는 eager로 launch-bound 상태에서 돈다. 이는 이 호스트 CUDA 백엔드의 성질이지 드래프터의 성질이 아니며 이번 범위 밖이다. 블록 8에서 완벽 수락이어도 토큰당 약 17 ms(1.8x)가 상한이고, 측정된 3.3~3.6 수락에서는 0.86x~0.97x다.
 
 참조 경로를 따라 잰 드래프터의 위치별 정확도(probe b, shadow drafter): code 0은 d_0~d_5가 0.88, 1.00, 0.75, 0.62, 0.38, 0.25(8라운드 평균 수락 prefix 4.25), chat 0은 0.88, 0.50, 0.25, 0.12(평균 1.38). Poolside가 bf16 타깃으로 잰 값은 GSM8K, HumanEval, EvalPlus, Math에서 3.55~4.57이다.
 
@@ -207,7 +227,8 @@ mlxcel-server DFlash burst -> DFlashBurstTarget (Qwen 3.5, Qwen 3.5 VLM, Laguna)
 ### 완료 필요
 
 - [ ] Qwen 3.5 DFlash arm도 Laguna, LFM2, Muse Glimmer가 지금 도는 측정형 게이트를 돌릴지 결정(현재는 허용 기본값 유지).
-- [ ] Apple Silicon 호스트에서 `metal,accelerate` 워크스페이스 게이트와 블록 크기 스윕 실행. 블록 8 권장은 GB10 기준이다.
+- [ ] classic step이 그래프 재생되지 않고 verify 오버헤드가 다를 수 있는 Apple Silicon 호스트에서 `metal,accelerate` 워크스페이스 게이트와 블록 크기 스윕 실행.
+- [ ] CUDA 백엔드에서 multi-row verify forward와 드래프터 forward의 그래프 캡처(또는 `mlx::compile`). GB10 상한이 여기서 온다. 런타임 변경이지 드래프터 변경이 아니다.
 
 ### 모니터링 필요
 
