@@ -38,16 +38,19 @@
 //! mask each other: while the byte cap forces a commit the op cap is never
 //! reached, so the op budget alone reads as inert.
 //!
-//! The sign is a property of the model family, not of the device, and not of
-//! any config-level shape rule that was tried. Raising both budgets on GB10,
-//! same binary, idle host, n = 3, measured: Laguna +17%, qwen3_moe (30B-A3B)
-//! +21%, qwen3_5_moe (35B-A3B) +22%, all with disjoint ranges; Qwen 3.5 4B
-//! dense +4%; gemma4 26B-A4B flat; gpt_oss 20B -7% with +7 GB of peak memory;
-//! Llama 3.1 8B -9%, disjoint. "Stacked expert projection over the byte cap"
-//! predicts neither gpt_oss (over, loses) nor qwen3_moe (under, wins), so the
-//! gate is an allowlist of the families measured to win, exactly as #353's
-//! Metal default is an allowlist of measured silicon generations. Everything
-//! else keeps MLX's table value.
+//! The sign is a property of the model family and the workload, not of the
+//! device, and not of any config-level shape rule that was tried. Raising
+//! both budgets on GB10, same binary, idle host, n = 3, single-stream decode:
+//! Laguna +17%, qwen3_moe (30B-A3B) +21%, qwen3_5_moe (35B-A3B) +22%, all
+//! with disjoint ranges; Qwen 3.5 4B dense +4%; gemma4 26B-A4B flat; gpt_oss
+//! 20B -7% with +7 GB of peak memory; Llama 3.1 8B -9%, disjoint. "Stacked
+//! expert projection over the byte cap" predicts neither gpt_oss (over,
+//! loses) nor qwen3_moe (under, wins). And qwen3_moe's batched-serving rows
+//! (partial, stopped by a host-protection halt) ran negative at concurrency
+//! 4 and 8 while Laguna's serving rows stayed positive, so the gate is an
+//! allowlist of the families whose every measured workload gains, exactly as
+//! #353's Metal default is an allowlist of measured silicon generations.
+//! Today that is Laguna alone; everything else keeps MLX's table value.
 //!
 //! The measurement behind the value here is
 //! `docs/benchmark_results/cuda-graph-budget-gb10-2026-09-12.md`. This is a
@@ -84,12 +87,17 @@ pub const MAX_OPS_ENV: &str = "MLX_MAX_OPS_PER_BUFFER";
 /// Environment variable MLX reads for the byte (element) budget.
 pub const MAX_MB_ENV: &str = "MLX_MAX_MB_PER_BUFFER";
 
-/// The `model_type` values (as `config.json` spells them) whose classic
-/// decode on GB10 was measured to gain from the raised budgets, with disjoint
-/// n = 3 ranges. Families not listed keep MLX's defaults whether or not they
-/// are MoE: `gpt_oss` and `gemma4` MoE checkpoints and dense Llama measured
-/// flat or worse, and every family not named here is unmeasured.
-pub const GB10_RAISED_BUDGET_MODEL_TYPES: &[&str] = &["laguna", "qwen3_moe", "qwen3_5_moe"];
+/// The `model_type` values (as `config.json` spells them) for which every
+/// measured workload on GB10 gains from the raised budgets with disjoint
+/// n = 3 ranges: single-stream decode (+17%), classic CLI decode (+15%),
+/// serialized serving (+4 to +8%), the DFlash round (-8% wall) and long
+/// prefill (-1.5%), at +0.4 GB of peak memory on a short prompt and +7 GB per
+/// 2048-token prefill chunk. Families not listed keep MLX's defaults:
+/// `gpt_oss` (-7%, +7 GB) and dense Llama (-9%) measured worse, `gemma4` MoE
+/// flat, and `qwen3_moe` / `qwen3_5_moe` gained +21% / +22% single-stream but
+/// `qwen3_moe`'s partial batched-serving rows ran the other way, so both wait
+/// on a follow-up measurement of the server path before they can be listed.
+pub const GB10_RAISED_BUDGET_MODEL_TYPES: &[&str] = &["laguna"];
 
 /// What the policy needs to know about a checkpoint, read from its
 /// `config.json` before any weight is loaded.
@@ -178,8 +186,9 @@ pub fn model_graph_shape_from_dir(model_dir: &Path) -> ModelGraphShape {
 /// `None` (Metal, CPU, a CUDA build with no visible device) has nothing to
 /// raise. The checkpoint must be a family measured to gain
 /// ([`ModelGraphShape::family_measured_to_gain`]); the sign differs by family
-/// (+17 to +22% on the listed MoE families, -7% on gpt_oss, -9% on dense
-/// Llama, ranges disjoint), so no broader default has one sign. Pure so both
+/// and by workload (+17% on Laguna everywhere measured, -7% on gpt_oss, -9%
+/// on dense Llama, and +21% single-stream but negative batched on qwen3_moe),
+/// so no broader default has one sign. Pure so both
 /// gates are testable without a device or a checkpoint.
 #[must_use]
 pub fn cuda_graph_budget_default(
@@ -344,16 +353,18 @@ mod tests {
 
     #[test]
     fn every_measured_winner_is_listed_and_every_loser_is_not() {
-        for (t, n) in [("laguna", 256), ("qwen3_moe", 128), ("qwen3_5_moe", 256)] {
-            assert!(shape(t, Some(n)).family_measured_to_gain(), "{t}");
-        }
-        // Measured flat or worse on GB10: gpt_oss -7%, gemma4 MoE flat,
-        // Llama -9%, Qwen 3.5 dense +4% but its family is only listed as MoE.
+        assert!(shape("laguna", Some(256)).family_measured_to_gain());
+        // Measured flat or worse on GB10 (gpt_oss -7%, gemma4 MoE flat,
+        // Llama -9%), dense (Qwen 3.5 4B), single-stream winners whose
+        // batched-serving rows ran the other way (qwen3_moe, qwen3_5_moe by
+        // extension), and unmeasured families.
         for (t, n) in [
             ("gpt_oss", Some(32)),
             ("gemma4", Some(128)),
             ("llama", None),
             ("qwen3_5", None),
+            ("qwen3_moe", Some(128)),
+            ("qwen3_5_moe", Some(256)),
             ("qwen3_vl_moe", Some(128)),
             ("qwen3_next", Some(512)),
             ("mixtral", Some(8)),
@@ -364,8 +375,8 @@ mod tests {
         }
         // A listed family name without a routed-expert count is not the
         // measured variant.
-        assert!(!shape("qwen3_moe", None).family_measured_to_gain());
-        assert!(!shape("qwen3_moe", Some(1)).family_measured_to_gain());
+        assert!(!shape("laguna", None).family_measured_to_gain());
+        assert!(!shape("laguna", Some(1)).family_measured_to_gain());
         assert!(!ModelGraphShape::default().family_measured_to_gain());
     }
 
@@ -414,8 +425,8 @@ mod tests {
         assert_eq!(shape.model_type.as_deref(), Some("gemma4"));
         assert_eq!(shape.routed_experts, Some(128));
         assert!(!shape.family_measured_to_gain());
-        // A VLM whose text tower carries the model_type.
-        let cfg = json!({"text_config": {"model_type": "qwen3_moe", "num_experts": 128}});
+        // A checkpoint whose text tower carries the model_type.
+        let cfg = json!({"text_config": {"model_type": "laguna", "num_experts": 256}});
         assert!(model_graph_shape_from_config(&cfg).family_measured_to_gain());
         // deepseek-style expert key.
         let cfg = json!({"model_type": "deepseek_v3", "n_routed_experts": 256});
@@ -429,8 +440,8 @@ mod tests {
     fn dense_and_malformed_configs_apply_nothing() {
         for cfg in [
             json!({"model_type": "llama", "hidden_size": 4096}),
-            json!({"model_type": "qwen3_moe"}),
-            json!({"model_type": "qwen3_moe", "num_experts": "many"}),
+            json!({"model_type": "laguna"}),
+            json!({"model_type": "laguna", "num_experts": "many"}),
             json!({"num_experts": 256}),
             json!([]),
             json!("not an object"),
