@@ -30,13 +30,24 @@
 //! input has more than `25 << 20` (26.2M) elements therefore commits its own
 //! graph regardless of how many ops precede it: every 256-expert NVFP4 expert
 //! stack on Laguna (about 120 `gather_qmm` per token), and every 4-bit
-//! `lm_head` or tied embedding over 26.2M packed words (Qwen 3.5 4B at 79.5M,
-//! Llama 3.1 8B at 65.7M, Gemma 3 4B at 83.9M). On a model where that happens
-//! per layer, capture at the default budgets costs more than it saves: the
-//! #1799 controls measured Laguna classic decode faster with
-//! `MLX_USE_CUDA_GRAPHS=0` than at the defaults, and faster again with both
-//! budgets raised. The two knobs mask each other: while the byte cap forces a
-//! commit the op cap is never reached, so the op budget alone reads as inert.
+//! `lm_head` or tied embedding over 26.2M packed words. A Laguna token at the
+//! defaults is 200 committed graphs; each boundary costs the device about 20
+//! to 30 us of launch latency and inter-graph event wait, and raising both
+//! budgets to MLX's own row for consumer Blackwell, H100 and B200 (100 ops,
+//! 1000 "MB") cuts it to 24 graphs and 17% of the token time. The two knobs
+//! mask each other: while the byte cap forces a commit the op cap is never
+//! reached, so the op budget alone reads as inert.
+//!
+//! The sign is a property of the model family, not of the device, and not of
+//! any config-level shape rule that was tried. Raising both budgets on GB10,
+//! same binary, idle host, n = 3, measured: Laguna +17%, qwen3_moe (30B-A3B)
+//! +21%, qwen3_5_moe (35B-A3B) +22%, all with disjoint ranges; Qwen 3.5 4B
+//! dense +4%; gemma4 26B-A4B flat; gpt_oss 20B -7% with +7 GB of peak memory;
+//! Llama 3.1 8B -9%, disjoint. "Stacked expert projection over the byte cap"
+//! predicts neither gpt_oss (over, loses) nor qwen3_moe (under, wins), so the
+//! gate is an allowlist of the families measured to win, exactly as #353's
+//! Metal default is an allowlist of measured silicon generations. Everything
+//! else keeps MLX's table value.
 //!
 //! The measurement behind the value here is
 //! `docs/benchmark_results/cuda-graph-budget-gb10-2026-09-12.md`. This is a
@@ -72,34 +83,35 @@ pub const MAX_OPS_ENV: &str = "MLX_MAX_OPS_PER_BUFFER";
 /// Environment variable MLX reads for the byte (element) budget.
 pub const MAX_MB_ENV: &str = "MLX_MAX_MB_PER_BUFFER";
 
-/// MLX's byte budget for compute capability 12.1, in the units the counter
-/// actually uses: `25 "MB"` is `25 << 20` input elements per captured graph
-/// (`get_graph_limits` and `needs_commit`, `mlx/backend/cuda/device.cpp`).
-pub const GB10_DEFAULT_MB_ELEMENTS: u64 = 25 << 20;
+/// The `model_type` values (as `config.json` spells them) whose classic
+/// decode on GB10 was measured to gain from the raised budgets, with disjoint
+/// n = 3 ranges. Families not listed keep MLX's defaults whether or not they
+/// are MoE: `gpt_oss` and `gemma4` MoE checkpoints and dense Llama measured
+/// flat or worse, and every family not named here is unmeasured.
+pub const GB10_RAISED_BUDGET_MODEL_TYPES: &[&str] = &["laguna", "qwen3_moe", "qwen3_5_moe"];
 
 /// What the policy needs to know about a checkpoint, read from its
 /// `config.json` before any weight is loaded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ModelGraphShape {
+    /// The checkpoint's `model_type`, top level or under `text_config`.
+    pub model_type: Option<String>,
     /// Routed experts per MoE layer (`num_local_experts`, `num_experts`,
-    /// `n_routed_experts`, ...), `None` for a dense model.
+    /// `n_routed_experts`, ...), `None` for a dense checkpoint.
     pub routed_experts: Option<u64>,
-    /// Elements of one stacked routed-expert projection as the loader hands it
-    /// to `gather_qmm`: `experts * moe_intermediate * hidden` packed at the
-    /// checkpoint's weight width (8 values per `u32` word at 4 bits, 4 at 8
-    /// bits, 1 per element unquantized). `None` when any of the three
-    /// dimensions is missing.
-    pub expert_stack_elements: Option<u64>,
 }
 
 impl ModelGraphShape {
-    /// True when a single routed-expert projection exceeds MLX's GB10 byte
-    /// budget on its own, so every expert matmul commits its own CUDA graph
-    /// at the default budgets.
+    /// True when this checkpoint belongs to a family in
+    /// [`GB10_RAISED_BUDGET_MODEL_TYPES`] and is the MoE variant that was
+    /// measured (a routed-expert count over 1 in its config).
     #[must_use]
-    pub fn expert_stack_exceeds_gb10_budget(&self) -> bool {
-        self.expert_stack_elements
-            .is_some_and(|elements| (elements >> 20) > (GB10_DEFAULT_MB_ELEMENTS >> 20))
+    pub fn family_measured_to_gain(&self) -> bool {
+        self.routed_experts.is_some_and(|n| n > 1)
+            && self
+                .model_type
+                .as_deref()
+                .is_some_and(|t| GB10_RAISED_BUDGET_MODEL_TYPES.contains(&t))
     }
 }
 
@@ -114,41 +126,19 @@ fn first_u64(config: &Value, keys: &[&str]) -> Option<u64> {
     config_sections(config).find_map(|section| {
         keys.iter().find_map(|key| match section.get(key) {
             Some(Value::Number(n)) => n.as_u64(),
-            // Per-layer lists (hunyuan): the first entry is representative.
-            Some(Value::Array(items)) => items.first().and_then(Value::as_u64),
             _ => None,
         })
     })
 }
 
-/// Values packed per stored element for the checkpoint's weight width:
-/// `quantization.bits` (MLX affine / mxfp4 / nvfp4 checkpoints) or a
-/// compressed-tensors `num_bits`, else 1 (bf16, f16, f32).
-fn values_per_element(config: &Value) -> u64 {
-    let bits = config
-        .get("quantization")
-        .and_then(|q| q.get("bits"))
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            config
-                .get("quantization_config")
-                .and_then(|q| q.get("config_groups"))
-                .and_then(Value::as_object)
-                .and_then(|groups| groups.values().next())
-                .and_then(|g| g.get("weights"))
-                .and_then(|w| w.get("num_bits"))
-                .and_then(Value::as_u64)
-        });
-    match bits {
-        Some(bits) if bits > 0 && bits < 32 => 32 / bits,
-        _ => 1,
-    }
-}
-
 /// Derive the [`ModelGraphShape`] from a parsed `config.json`. Pure, so the
-/// shape rules are testable without a checkpoint on disk.
+/// gate is testable without a checkpoint on disk.
 #[must_use]
 pub fn model_graph_shape_from_config(config: &Value) -> ModelGraphShape {
+    let model_type = [config, config.get("text_config").unwrap_or(&Value::Null)]
+        .into_iter()
+        .find_map(|section| section.get("model_type").and_then(Value::as_str))
+        .map(str::to_owned);
     let routed_experts = first_u64(
         config,
         &[
@@ -158,23 +148,17 @@ pub fn model_graph_shape_from_config(config: &Value) -> ModelGraphShape {
             "num_routed_experts",
             "moe_num_experts",
         ],
-    )
-    .filter(|&n| n > 1);
-    let expert_stack_elements = routed_experts.and_then(|experts| {
-        let intermediate = first_u64(config, &["moe_intermediate_size", "intermediate_size"])?;
-        let hidden = first_u64(config, &["hidden_size"])?;
-        Some(experts * intermediate * hidden / values_per_element(config))
-    });
+    );
     ModelGraphShape {
+        model_type,
         routed_experts,
-        expert_stack_elements,
     }
 }
 
 /// Read `<model_dir>/config.json` into a [`ModelGraphShape`]. Any failure
-/// (no directory, no file, unparsable JSON) reads as a dense model, which
-/// leaves MLX's defaults alone; a model that has not been downloaded yet
-/// is in that set by design.
+/// (no directory, no file, unparsable JSON) reads as an unlisted checkpoint,
+/// which leaves MLX's defaults alone; a model that has not been downloaded
+/// yet is in that set by design.
 #[must_use]
 pub fn model_graph_shape_from_dir(model_dir: &Path) -> ModelGraphShape {
     std::fs::read_to_string(model_dir.join("config.json"))
@@ -191,20 +175,18 @@ pub fn model_graph_shape_from_dir(model_dir: &Path) -> ModelGraphShape {
 /// MLX already gives 12.0, 9.0 and 10.0 the budget applied here, 8.0 has its
 /// own measured row, 7.0 was measured immaterial on Volta in #1545, and
 /// `None` (Metal, CPU, a CUDA build with no visible device) has nothing to
-/// raise. The checkpoint must carry a routed-expert stack that on its own
-/// exceeds the 12.1 byte budget ([`ModelGraphShape::expert_stack_exceeds_gb10_budget`]):
-/// that is the shape on which every expert matmul commits its own graph and
-/// raising both budgets measured +17% (Laguna). Dense checkpoints are left
-/// alone on purpose, because the same budgets measured +4% on Qwen 3.5 4B and
-/// -9% on Llama 3.1 8B, ranges disjoint, so no dense default has one sign.
-/// Pure so both gates are testable without a device or a checkpoint.
+/// raise. The checkpoint must be a family measured to gain
+/// ([`ModelGraphShape::family_measured_to_gain`]); the sign differs by family
+/// (+17 to +22% on the listed MoE families, -7% on gpt_oss, -9% on dense
+/// Llama, ranges disjoint), so no broader default has one sign. Pure so both
+/// gates are testable without a device or a checkpoint.
 #[must_use]
 pub fn cuda_graph_budget_default(
     compute_capability: Option<(u32, u32)>,
-    shape: ModelGraphShape,
+    shape: &ModelGraphShape,
 ) -> Option<CudaGraphBudget> {
     match compute_capability {
-        Some((12, 1)) if shape.expert_stack_exceeds_gb10_budget() => Some(GB10_GRAPH_BUDGET),
+        Some((12, 1)) if shape.family_measured_to_gain() => Some(GB10_GRAPH_BUDGET),
         _ => None,
     }
 }
@@ -237,7 +219,7 @@ pub fn budget_vars_to_set(
 ///
 /// `model_dir` is the `-m` argument when it names a local directory; `None`
 /// (router mode, a repo id that is not downloaded yet, a command with no
-/// model) reads as dense and applies nothing. The budget is process-global
+/// model) reads as unlisted and applies nothing. The budget is process-global
 /// and latched once, so a server hosting several checkpoints takes the
 /// shape of the one it was started with.
 ///
@@ -250,7 +232,7 @@ pub fn budget_vars_to_set(
 /// probe this calls reads device properties only (`device_info`); it does not
 /// construct a `CommandEncoder`, so the variables are still unread when they
 /// are set. No-op on Metal, CPU-only and non-CUDA builds, on every CUDA
-/// capability other than 12.1, and on every dense checkpoint.
+/// capability other than 12.1, and on every checkpoint outside the allowlist.
 pub fn apply_cuda_graph_budget_default(model_dir: Option<&Path>) {
     let ops_set = env::var_os(MAX_OPS_ENV).is_some();
     let mb_set = env::var_os(MAX_MB_ENV).is_some();
@@ -260,7 +242,7 @@ pub fn apply_cuda_graph_budget_default(model_dir: Option<&Path>) {
     let shape = model_dir
         .map(model_graph_shape_from_dir)
         .unwrap_or_default();
-    let budget = cuda_graph_budget_default(cuda_compute_capability(), shape);
+    let budget = cuda_graph_budget_default(cuda_compute_capability(), &shape);
     for (name, value) in budget_vars_to_set(budget, ops_set, mb_set) {
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only if another thread reads or writes the environment concurrently.
@@ -280,19 +262,18 @@ mod tests {
 
     use super::*;
 
-    const LAGUNA: ModelGraphShape = ModelGraphShape {
-        routed_experts: Some(256),
-        expert_stack_elements: Some(256 * 512 * 2048 / 8),
-    };
-    const DENSE: ModelGraphShape = ModelGraphShape {
-        routed_experts: None,
-        expert_stack_elements: None,
-    };
+    fn shape(model_type: &str, experts: Option<u64>) -> ModelGraphShape {
+        ModelGraphShape {
+            model_type: Some(model_type.to_owned()),
+            routed_experts: experts,
+        }
+    }
 
     #[test]
-    fn only_compute_capability_12_1_with_an_over_budget_expert_stack_is_raised() {
+    fn only_compute_capability_12_1_with_a_listed_family_is_raised() {
+        let laguna = shape("laguna", Some(256));
         assert_eq!(
-            cuda_graph_budget_default(Some((12, 1)), LAGUNA),
+            cuda_graph_budget_default(Some((12, 1)), &laguna),
             Some(GB10_GRAPH_BUDGET)
         );
         for cc in [
@@ -306,21 +287,35 @@ mod tests {
             Some((12, 2)),
             Some((13, 1)),
         ] {
-            assert_eq!(cuda_graph_budget_default(cc, LAGUNA), None, "{cc:?}");
+            assert_eq!(cuda_graph_budget_default(cc, &laguna), None, "{cc:?}");
         }
     }
 
     #[test]
-    fn dense_and_under_budget_moe_checkpoints_keep_mlx_defaults_on_12_1() {
-        assert_eq!(cuda_graph_budget_default(Some((12, 1)), DENSE), None);
-        // qwen3-30b-a3b: 128 * 768 * 2048 / 8 = 25.17M packed words, under
-        // the 26.2M budget, so its expert matmuls do not commit on bytes.
-        let under = ModelGraphShape {
-            routed_experts: Some(128),
-            expert_stack_elements: Some(128 * 768 * 2048 / 8),
-        };
-        assert!(!under.expert_stack_exceeds_gb10_budget());
-        assert_eq!(cuda_graph_budget_default(Some((12, 1)), under), None);
+    fn every_measured_winner_is_listed_and_every_loser_is_not() {
+        for (t, n) in [("laguna", 256), ("qwen3_moe", 128), ("qwen3_5_moe", 256)] {
+            assert!(shape(t, Some(n)).family_measured_to_gain(), "{t}");
+        }
+        // Measured flat or worse on GB10: gpt_oss -7%, gemma4 MoE flat,
+        // Llama -9%, Qwen 3.5 dense +4% but its family is only listed as MoE.
+        for (t, n) in [
+            ("gpt_oss", Some(32)),
+            ("gemma4", Some(128)),
+            ("llama", None),
+            ("qwen3_5", None),
+            ("qwen3_vl_moe", Some(128)),
+            ("qwen3_next", Some(512)),
+            ("mixtral", Some(8)),
+        ] {
+            let s = shape(t, n);
+            assert!(!s.family_measured_to_gain(), "{t}");
+            assert_eq!(cuda_graph_budget_default(Some((12, 1)), &s), None, "{t}");
+        }
+        // A listed family name without a routed-expert count is not the
+        // measured variant.
+        assert!(!shape("qwen3_moe", None).family_measured_to_gain());
+        assert!(!shape("qwen3_moe", Some(1)).family_measured_to_gain());
+        assert!(!ModelGraphShape::default().family_measured_to_gain());
     }
 
     #[test]
@@ -329,23 +324,6 @@ mod tests {
         // pair; 1210 is the only row this default moves.
         assert_eq!(GB10_GRAPH_BUDGET.max_ops, 100);
         assert_eq!(GB10_GRAPH_BUDGET.max_mb, 1000);
-        assert_eq!(GB10_DEFAULT_MB_ELEMENTS, 26_214_400);
-    }
-
-    #[test]
-    fn budget_threshold_is_in_mlx_units() {
-        // `needs_commit` compares `bytes >> 20` against the table value, so
-        // exactly 25 << 20 elements is not over budget and one more MiB is.
-        let at = ModelGraphShape {
-            routed_experts: Some(2),
-            expert_stack_elements: Some(25 << 20),
-        };
-        let over = ModelGraphShape {
-            routed_experts: Some(2),
-            expert_stack_elements: Some(26 << 20),
-        };
-        assert!(!at.expert_stack_exceeds_gb10_budget());
-        assert!(over.expert_stack_exceeds_gb10_budget());
     }
 
     #[test]
@@ -363,64 +341,58 @@ mod tests {
 
     #[test]
     fn shape_from_laguna_style_config() {
-        // Laguna: compressed-tensors nvfp4, top-level MoE keys.
         let cfg = json!({
             "model_type": "laguna", "hidden_size": 2048, "num_experts": 256,
-            "moe_intermediate_size": 512, "intermediate_size": 8192,
-            "quantization_config": {"config_groups": {"group_0": {"weights": {"num_bits": 4}}}}
+            "moe_intermediate_size": 512
         });
         let shape = model_graph_shape_from_config(&cfg);
+        assert_eq!(shape.model_type.as_deref(), Some("laguna"));
         assert_eq!(shape.routed_experts, Some(256));
-        assert_eq!(shape.expert_stack_elements, Some(256 * 512 * 2048 / 8));
-        assert!(shape.expert_stack_exceeds_gb10_budget());
+        assert!(shape.family_measured_to_gain());
     }
 
     #[test]
-    fn shape_prefers_moe_intermediate_and_reads_nested_text_config() {
-        // gemma-4-26b-a4b style: keys under text_config, MLX affine 4-bit.
+    fn shape_reads_nested_text_config_and_alternate_expert_keys() {
+        // gemma-4-26b-a4b style: model_type at top level, MoE keys under
+        // text_config; measured flat, so listed nowhere.
         let cfg = json!({
             "model_type": "gemma4",
-            "text_config": {"hidden_size": 2816, "num_experts": 128,
-                            "moe_intermediate_size": 704, "intermediate_size": 11264},
-            "quantization": {"group_size": 64, "bits": 4}
+            "text_config": {"hidden_size": 2816, "num_experts": 128}
         });
         let shape = model_graph_shape_from_config(&cfg);
-        assert_eq!(shape.expert_stack_elements, Some(128 * 704 * 2816 / 8));
-        // deepseek style key, 8-bit packs 4 per word, hunyuan per-layer list.
-        let cfg = json!({
-            "hidden_size": 4096, "n_routed_experts": 64, "moe_intermediate_size": [3072, 3072],
-            "quantization": {"bits": 8}
-        });
+        assert_eq!(shape.model_type.as_deref(), Some("gemma4"));
+        assert_eq!(shape.routed_experts, Some(128));
+        assert!(!shape.family_measured_to_gain());
+        // A VLM whose text tower carries the model_type.
+        let cfg = json!({"text_config": {"model_type": "qwen3_moe", "num_experts": 128}});
+        assert!(model_graph_shape_from_config(&cfg).family_measured_to_gain());
+        // deepseek-style expert key.
+        let cfg = json!({"model_type": "deepseek_v3", "n_routed_experts": 256});
         assert_eq!(
-            model_graph_shape_from_config(&cfg).expert_stack_elements,
-            Some(64 * 3072 * 4096 / 4)
+            model_graph_shape_from_config(&cfg).routed_experts,
+            Some(256)
         );
     }
 
     #[test]
-    fn dense_and_malformed_configs_read_as_dense() {
+    fn dense_and_malformed_configs_apply_nothing() {
         for cfg in [
-            json!({"model_type": "llama", "hidden_size": 4096, "intermediate_size": 14336}),
-            json!({"num_experts": 1, "hidden_size": 8, "intermediate_size": 8}),
-            json!({"num_experts": 0}),
-            json!({"num_experts": 64, "hidden_size": 2048}),
+            json!({"model_type": "llama", "hidden_size": 4096}),
+            json!({"model_type": "qwen3_moe"}),
+            json!({"model_type": "qwen3_moe", "num_experts": "many"}),
+            json!({"num_experts": 256}),
             json!([]),
             json!("not an object"),
+            json!(null),
         ] {
             let shape = model_graph_shape_from_config(&cfg);
-            assert!(!shape.expert_stack_exceeds_gb10_budget(), "{cfg}");
-            assert_eq!(cuda_graph_budget_default(Some((12, 1)), shape), None);
+            assert!(!shape.family_measured_to_gain(), "{cfg}");
+            assert_eq!(cuda_graph_budget_default(Some((12, 1)), &shape), None);
         }
-        // bf16 experts pack 1 per element: 8 * 64 * 64 is tiny, still dense.
-        let cfg = json!({"num_local_experts": 8, "hidden_size": 64, "intermediate_size": 64});
-        assert_eq!(
-            model_graph_shape_from_config(&cfg).expert_stack_elements,
-            Some(8 * 64 * 64)
-        );
     }
 
     #[test]
-    fn missing_model_dir_reads_as_dense() {
+    fn missing_model_dir_reads_as_unlisted() {
         let shape = model_graph_shape_from_dir(Path::new("/nonexistent/mlxcel-1798"));
         assert_eq!(shape, ModelGraphShape::default());
     }
