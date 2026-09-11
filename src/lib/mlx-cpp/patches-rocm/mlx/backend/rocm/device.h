@@ -45,6 +45,25 @@ extern std::atomic<long> g_inline_launches_;
 void set_current_prim(const char* name);
 void record_inline_launch();
 
+// mlxcelverse: add_kernel_node hands HIP the address of every argument, so
+// each argument must have the same size as the kernel parameter it lands in.
+// A narrower argument is read with garbage high bytes (Scatter once passed an
+// int32_t for an int64_t parameter and every update collapsed onto the first
+// index), so the sizes are checked at compile time.
+template <typename Func>
+struct kernel_param_types;
+template <typename... Args>
+struct kernel_param_types<void(Args...)> {
+  using type = std::tuple<Args...>;
+};
+template <typename KernelArgs, typename Passed, std::size_t... I>
+constexpr bool kernel_arg_sizes_match(std::index_sequence<I...>) {
+  return (
+      (sizeof(std::tuple_element_t<I, KernelArgs>) ==
+       sizeof(std::decay_t<std::tuple_element_t<I, Passed>>)) &&
+      ...);
+}
+
 class CommandEncoder {
  public:
   explicit CommandEncoder(Device& d);
@@ -77,6 +96,15 @@ class CommandEncoder {
       uint32_t smem_bytes,
       Params&&... params) {
     constexpr size_t num = sizeof...(Params);
+    using KernelArgs = typename kernel_param_types<Func>::type;
+    static_assert(
+        std::tuple_size_v<KernelArgs> == num,
+        "add_kernel_node: argument count differs from the kernel's parameters");
+    static_assert(
+        kernel_arg_sizes_match<KernelArgs, std::tuple<Params...>>(
+            std::index_sequence_for<Params...>{}),
+        "add_kernel_node: an argument's size differs from its kernel "
+        "parameter; pass the parameter's exact type");
     if (!use_hip_graphs()) {
       // Immediate launch: kernelParams are consumed synchronously, so
       // addresses of the caller's locals are fine.
