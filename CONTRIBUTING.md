@@ -147,6 +147,8 @@ After bumping the pin, re-validate the in-tree fused Metal kernel launchers in `
 
 All three should produce output within RMS < 5e-3 of the graph reference on Apple Silicon.
 
+The ROCm overlay in [`src/lib/mlx-cpp/patches-rocm/`](src/lib/mlx-cpp/patches-rocm/README.md) follows the pin too. A bump 3-way merges its 15 MLX core files like any other overlay, then builds with `--features rocm` on an AMD host: upstream API changes surface as compile errors in `mlx/backend/rocm/`, and new primitives without a ROCm kernel surface as undefined `eval_gpu` symbols at link time (give them a `NO_GPU` stub or an implementation). Record each fix in `patches-rocm/LOCAL_FIXES.md` and the new pin in `patches-rocm/UPSTREAM`; `patches-rocm/README.md` has the full procedure.
+
 ## Development environment
 
 Detailed setup instructions are in [`docs/installation.md`](docs/installation.md).
@@ -156,7 +158,7 @@ Minimum:
 - Rust **1.97+** (project uses edition 2024)
 - CMake available on `PATH` on both platforms (required by the `mlxcel-core` and `sentencepiece-sys` build scripts)
 - macOS: Apple Silicon Mac on macOS Sonoma+; Xcode Command Line Tools
-- Linux: CUDA 13+ toolchain, OpenBLAS, LAPACK (see [`docs/installation.md`](docs/installation.md) for the package list)
+- Linux: CUDA 13+ toolchain, OpenBLAS, LAPACK, `pkg-config` (see [`docs/installation.md`](docs/installation.md) for the package list); for the experimental `rocm` feature, a ROCm installation instead of CUDA (see [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental))
 
 Recommended local tooling:
 

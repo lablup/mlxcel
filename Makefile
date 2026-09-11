@@ -16,7 +16,8 @@ RUSTFLAGS := RUSTFLAGS="-C target-cpu=native"
 #
 # Linux is intentionally accelerator-neutral: a Linux host may carry any of
 # several accelerators, so we never assume CUDA here. Pick an explicit target
-# (`make release-cuda`, plus future siblings) for the chip you actually have.
+# (`make release-cuda`, `make release-rocm`, plus future siblings) for the chip
+# you actually have.
 # ----------------------------------------------------------------------------
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -167,15 +168,22 @@ release-server: ## Build server in release mode
 # ----------------------------------------------------------------------------
 # Linux accelerator release targets (explicit, opt-in)
 #
-# One target per backend. CUDA is the first; add siblings (e.g. release-rocm,
-# release-vulkan) here as backends land. Each builds both binaries with the
-# matching mlxcel-core feature gate.
+# One target per backend: CUDA, and ROCm (experimental, issue #1802). Add
+# siblings (e.g. release-vulkan) here as backends land. Each builds both
+# binaries with the matching mlxcel-core feature gate.
 # ----------------------------------------------------------------------------
 .PHONY: release-cuda
 release-cuda: ## Build in release mode with CUDA (Linux/NVIDIA)
 	@echo "$(CYAN)Building in release mode with CUDA...$(RESET)"
 	$(RUSTFLAGS) $(CARGO) build --release --features cuda
 	@echo "$(GREEN)Release (CUDA) build complete!$(RESET)"
+	@echo "Binaries: target/release/$(BIN_CLI), target/release/$(BIN_SERVER)"
+
+.PHONY: release-rocm
+release-rocm: ## Build in release mode with ROCm (Linux/AMD, experimental; MLX_ROCM_ARCHITECTURES picks gfx targets)
+	@echo "$(CYAN)Building in release mode with ROCm (experimental)...$(RESET)"
+	$(RUSTFLAGS) $(CARGO) build --release --features rocm
+	@echo "$(GREEN)Release (ROCm) build complete!$(RESET)"
 	@echo "Binaries: target/release/$(BIN_CLI), target/release/$(BIN_SERVER)"
 
 .PHONY: debug
