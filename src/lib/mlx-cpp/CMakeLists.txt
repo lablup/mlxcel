@@ -86,12 +86,30 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # Metal and CUDA never compile a ROCm-modified core file. Only CMakeLists.txt
   # and mlx/ are overlays; README.md, UPSTREAM and LOCAL_FIXES.md next to them
   # are records. See patches-rocm/README.md for the pin-bump procedure.
-  if(MLX_BUILD_ROCM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches-rocm")
+  if(MLX_BUILD_ROCM)
     set(_rocm_root "${CMAKE_CURRENT_SOURCE_DIR}/patches-rocm")
+    if(NOT EXISTS "${_rocm_root}/mlx/backend/rocm")
+      message(FATAL_ERROR
+        "MLX_BUILD_ROCM is ON but the ROCm overlay is missing: expected "
+        "${_rocm_root}/mlx/backend/rocm")
+    endif()
     file(GLOB_RECURSE _rocm_patch_files
          RELATIVE "${_rocm_root}"
          "${_rocm_root}/mlx/*")
     list(APPEND _rocm_patch_files "CMakeLists.txt")
+    # Upstream MLX has no mlx/backend/rocm/, so every file there comes from
+    # this overlay. A cached _deps/mlx-src is reused while the pin is unchanged
+    # (build.rs only compares the pin), so drop files the overlay no longer
+    # carries instead of letting them linger in the tree.
+    file(GLOB_RECURSE _rocm_cached_files
+         RELATIVE "${mlx_source_dir}"
+         "${mlx_source_dir}/mlx/backend/rocm/*")
+    foreach(_cached_file ${_rocm_cached_files})
+      if(NOT _cached_file IN_LIST _rocm_patch_files)
+        file(REMOVE "${mlx_source_dir}/${_cached_file}")
+        message(STATUS "Removed stale ROCm overlay file ${_cached_file}")
+      endif()
+    endforeach()
     foreach(_patch_file ${_rocm_patch_files})
       configure_file(
         "${_rocm_root}/${_patch_file}"

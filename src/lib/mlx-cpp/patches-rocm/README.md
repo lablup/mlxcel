@@ -20,3 +20,5 @@ The backend is vendored from the `rocm-support` branch of [NripeshN/mlx](https:/
 1. For each of the 15 core files, 3-way merge the upstream change into the overlay (`git merge-file overlay old-upstream new-upstream`) and compare the result line by line with the new upstream file.
 2. Build with `--features rocm`. Upstream API changes show up as compile errors in `mlx/backend/rocm/`, and new primitives without a ROCm kernel show up as undefined `eval_gpu` symbols at link time; give those a `NO_GPU` stub in `mlx/backend/rocm/primitives.cpp` or an implementation.
 3. Record every fix in `LOCAL_FIXES.md` and update `retargeted_to_mlx_pin` in `UPSTREAM`.
+
+Removing a file from `mlx/backend/rocm/` here also removes it from a cached MLX checkout on the next configure. Dropping one of the 15 core overlays does not restore the upstream file in a cached checkout, because the cache is keyed only by the pin; clear the `mlxcel-core` build directory (`cargo clean -p mlxcel-core`) after doing that.
