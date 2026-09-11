@@ -11,7 +11,7 @@
 
 ## 요약
 
-Poolside는 Laguna 릴리스마다 DFlash speculator를 함께 배포하지만 mlxcel의 DFlash 기계 장치는 Qwen 3.5 드래프터 형태에 고정되어 있었다. 이 PR은 `mlxcel_core::drafter::laguna_dflash`(fused QKV, per-head softplus 게이트, `aux_hidden_norms`, sliding-window 컨텍스트 어텐션)를 추가하고, Laguna 타깃에 dense 캐시와 rotating 캐시를 모두 되감는 `SpeculativeTarget`을 구현하며, `model_type: laguna` 드래프터를 `load_drafter`로 라우팅하고, 이 조합을 `mlxcel-server`와 오프라인 `mlxcel generate` 양쪽에 연결한다. 이 조합은 LFM2, Muse Glimmer arm과 같은 측정형 block-versus-chain 정확성 게이트 뒤에서 동작한다. GB10에서 Laguna XS 2.1 NVFP4와 공개 드래프터를 짝지으면 probe가 거부하므로(첫 verify 위치에서 200704 로짓 바이트 중 107246개가 다름) 기본으로는 DFlash가 꺼지고, `MLXCEL_MTP_ALLOW_INEXACT=1`을 주면 greedy 출력은 bf16 로짓 동률 위치를 제외하고 classic decode와 같고, 코드 완성에서는 라운드당 2.6~3.9개 제안을 수락하며, 처리량은 이 호스트에서 어떤 블록 크기에서도 classic보다 낮다(블록 8에서 최선 0.97x, n=3, 범위가 off 쪽 안에 포함. 체크포인트의 블록 16은 0.86x). multi-row verify가 그래프 재생되는 classic step에 비해 launch-bound로 돌기 때문이다.
+Poolside는 Laguna 릴리스마다 DFlash speculator를 함께 배포하지만 mlxcel의 DFlash 기계 장치는 Qwen 3.5 드래프터 형태에 고정되어 있었다. 이 PR은 `mlxcel_core::drafter::laguna_dflash`(fused QKV, per-head softplus 게이트, `aux_hidden_norms`, sliding-window 컨텍스트 어텐션)를 추가하고, Laguna 타깃에 dense 캐시와 rotating 캐시를 모두 되감는 `SpeculativeTarget`을 구현하며, `model_type: laguna` 드래프터를 `load_drafter`로 라우팅하고, 이 조합을 `mlxcel-server`와 오프라인 `mlxcel generate` 양쪽에 연결한다. 이 조합은 LFM2, Muse Glimmer arm과 같은 측정형 block-versus-chain 정확성 게이트 뒤에서 동작한다. GB10에서 Laguna XS 2.1 NVFP4와 공개 드래프터를 짝지으면 probe가 거부하므로(첫 verify 위치에서 200704 로짓 바이트 중 107246개가 다름) 기본으로는 DFlash가 꺼지고, `MLXCEL_MTP_ALLOW_INEXACT=1`을 주면 greedy 출력은 bf16 로짓 동률 위치를 제외하고 classic decode와 같고, 코드 완성에서는 라운드당 2.6~3.9개 제안을 수락하며, 처리량은 #1795 전후 모두 이 호스트에서 블록 크기 2~16 어디서도 classic 이하다(블록 8에서 최선 1.00x, n=3, 범위가 off 쪽 안에 포함. 기본 블록 16은 0.88x). multi-row verify가 그래프 재생되는 classic step에 비해 launch-bound로 돌기 때문이다.
 
 ---
 
@@ -56,27 +56,33 @@ GB10(sm_121), NVFP4 타깃, bf16 드래프터, greedy, 128 토큰, `MLXCEL_MTP_A
 | code 1 (`lru_get` 본문) | 30.81 | 27.13 | 3.88 | 69에서 다름 (1 ulp 동률) |
 | code 2 (`debounce` 본문) | 32.35 | 21.87 | 2.63 | 103에서 다름 (1 ulp 동률) |
 
-**처리량 A/B (같은 바이너리, 기능 off와 블록 크기별 on. raw 코드 프롬프트, 채팅 템플릿 없음, 200 토큰. 스윕 전체에 GPU lock 유지. 시작 시 호스트는 유휴 상태(load 0.10, 다른 모델/cargo 프로세스 없음, GPU 0%). CLI가 보고하는 decode tok/s):**
+**처리량 A/B (같은 바이너리, 기능 off와 블록 크기별 on. raw 코드 프롬프트, 채팅 템플릿 없음, 200 토큰. 스윕 전체에 GPU lock 유지. main `0c21aed2`(#1795 포함) 병합 후 측정. CLI가 보고하는 decode tok/s).** GPU는 독점(시작 시 0%)이었지만 호스트가 완전히 유휴하지는 않았다. 다른 세션의 `cargo build` / `rustc`가 내내 CPU를 가득 채웠고(load 2.6~3.9), 두 arm에 똑같이 적용된다. #1795 이전 유휴 호스트(load 0.10)에서의 첫 스윕도 같은 그림이었다(블록 8에서 0.97x, 블록 16에서 0.86x).
 
-| 구성 | n | tok/s 평균 (최소~최대) | 평균 수락 길이 | off 대비 |
-|---|---|---|---|---|
-| code 0 (`retry_with_backoff`), off | 5 | 32.50 (31.24 to 33.58) | | |
-| code 0, block 2 | 3 | 16.57 (16.38 to 16.87) | 0.84 | 0.51x |
-| code 0, block 3 | 3 | 22.06 (22.05 to 22.07) | 1.52 | 0.68x |
-| code 0, block 4 | 3 | 27.23 (27.01 to 27.52) | 2.21 | 0.84x |
-| code 0, block 5 | 3 | 29.21 (28.65 to 29.54) | 2.55 | 0.90x |
-| code 0, block 6 | 3 | 30.90 (30.55 to 31.38) | 2.90 | 0.95x |
-| code 0, block 8 | 3 | 31.47 (31.10 to 31.98) | 3.33 | 0.97x |
-| code 0, block 10 | 3 | 31.03 (30.86 to 31.18) | 3.42 | 0.95x |
-| code 0, block 12 | 3 | 29.96 (29.88 to 30.10) | 3.52 | 0.92x |
-| code 0, block 16 (체크포인트 기본값) | 3 | 27.92 (27.36 to 28.45) | 3.55 | 0.86x |
-| code 1 (`lru_get`), off | 3 | 32.31 (32.05 to 32.61) | | |
-| code 1, block 6 | 3 | 30.97 (30.89 to 31.07) | 2.92 | 0.96x |
-| code 1, block 8 | 3 | 30.08 (29.82 to 30.22) | 3.17 | 0.93x |
+| 구성 | n | tok/s 평균 (최소~최대) | 평균 수락 길이 | 디바이스 ms/라운드 | 드래프터 그래프 구성 ms/라운드 | off 대비 |
+|---|---|---|---|---|---|---|
+| code 0 (`retry_with_backoff`), off | 5 | 31.18 (30.41 to 31.98) | | | | |
+| code 0, block 2 | 3 | 16.19 (16.12 to 16.25) | 0.84 | 80 | 30 | 0.52x |
+| code 0, block 3 | 3 | 21.61 (21.52 to 21.77) | 1.52 | 83 | 30 | 0.69x |
+| code 0, block 4 | 3 | 27.05 (26.61 to 27.53) | 2.21 | 85 | 31 | 0.87x |
+| code 0, block 5 | 3 | 28.33 (26.21 to 29.51) | 2.55 | 89 | 34 | 0.91x |
+| code 0, block 6 | 3 | 30.46 (30.05 to 31.26) | 2.90 | 92 | 33 | 0.98x |
+| code 0, block 7 | 3 | 30.24 (30.12 to 30.47) | 3.06 | 97 | 34 | 0.97x |
+| code 0, block 8 | 3 | 31.26 (31.07 to 31.36) | 3.33 | 101 | 34 | 1.00x |
+| code 0, block 9 | 3 | 30.58 (30.37 to 30.75) | 3.33 | 106 | 33 | 0.98x |
+| code 0, block 10 | 3 | 30.02 (29.68 to 30.19) | 3.42 | 109 | 35 | 0.96x |
+| code 0, block 12 | 3 | 28.94 (28.66 to 29.41) | 3.52 | 116 | 37 | 0.93x |
+| code 0, block 16 (기본값) | 3 | 27.41 (26.90 to 27.90) | 3.55 | 127 | 35 | 0.88x |
+| code 1 (`lru_get`), off | 3 | 31.80 (31.50 to 32.38) | | | | |
+| code 1, block 4 | 3 | 26.10 (25.74 to 26.47) | 2.08 | 83 | 31 | 0.82x |
+| code 1, block 6 | 3 | 30.42 (30.11 to 30.64) | 2.92 | 91 | 34 | 0.96x |
+| code 1, block 8 | 3 | 29.95 (29.60 to 30.56) | 3.17 | 102 | 34 | 0.94x |
+| code 1, block 10 | 3 | 30.16 (29.88 to 30.58) | 3.44 | 109 | 35 | 0.95x |
 
-이 호스트에서는 어떤 구성도 순이득이 아니다. 가장 나은 폭인 블록 8은 code 0에서 0.97x이고 그 범위 전체(31.10~31.98)가 off 쪽 범위(31.24~33.58) 안에 들어가며, code 1에서는 0.93x다. 체크포인트 기본값인 블록 16은 0.86x다. 앞서 한 번 잰 블록 8의 1.14x는 재현되지 않아 철회한다. 기본 블록 크기는 16으로 둔다.
+#1795 전후 모두 이 호스트에서는 어떤 구성도 순이득이 아니다. 가장 나은 폭인 블록 8은 code 0에서 1.00x이고 그 범위 전체(31.07~31.36)가 off 쪽 범위(30.41~31.98) 안에 들어가며, code 1에서는 0.94x다. 기본 블록 16은 0.88x다. NVFP4 경로에는 8 미만의 절벽이 없고(5, 6, 7이 매끄러운 곡선 위에 있다. `fp_qmv`에는 2/4/8 누산기 dispatch가 없다) 8 너머의 교차점도 없다. 기본 블록 크기는 16으로 둔다. Laguna의 서빙 폭 변경은 #1797의 몫이다.
 
-원인(블록 8, 라운드당): 호스트 쪽 드래프터 그래프 구성 약 32 ms, 타깃 그래프 구성 3 ms, 동기화된 디바이스 작업 100 ms로 4.33 토큰을 내보내며, classic은 토큰당 30.8 ms다. verify 블록의 디바이스 비용은 고정 77 ms에 행당 3.3 ms(2행에서 83 ms, 16행에서 130 ms)로, 2행에서도 single-token step의 2.7배다. classic step은 그래프 재생으로 돌고 multi-row verify는 eager로 launch-bound 상태에서 돈다. 이는 이 호스트 CUDA 백엔드의 성질이지 드래프터의 성질이 아니며 이번 범위 밖이다. 블록 8에서 완벽 수락이어도 토큰당 약 17 ms(1.8x)가 상한이고, 측정된 3.3~3.6 수락에서는 0.86x~0.97x다.
+원인(블록 8, 라운드당): 호스트 쪽 드래프터 그래프 구성 30~35 ms, 타깃 그래프 구성 약 3 ms, 동기화된 디바이스 작업 101 ms로 4.33 토큰을 내보내며, classic은 토큰당 31~32 ms다. verify 블록의 디바이스 비용은 고정 77 ms에 행당 약 3.1 ms(2행에서 80 ms, 16행에서 127 ms)로, 2행에서도 single-token step의 2.5배다. classic step은 그래프 재생으로 돌고 multi-row verify는 eager로 launch-bound 상태에서 돈다. #1795의 두 수정은 여기에 해당하지 않아(드래프터는 이미 bf16이었고 Laguna에는 gated-delta 레이어가 없다) 수치가 움직이지 않았다. 이는 이 호스트 CUDA 백엔드의 성질이지 드래프터의 성질이 아니며 이번 범위 밖이다. 블록 8에서 완벽 수락이어도 토큰당 약 17 ms(1.8x)가 상한이고, 측정된 3.3~3.6 수락에서는 0.88x~1.00x다.
+
+#1795 이후 다시 돌린 정확성 probe는 여전히 이 호스트를 거부한다(블록 16에서 200704 로짓 바이트 중 107246개, 블록 8에서 107466개가 다름).
 
 참조 경로를 따라 잰 드래프터의 위치별 정확도(probe b, shadow drafter): code 0은 d_0~d_5가 0.88, 1.00, 0.75, 0.62, 0.38, 0.25(8라운드 평균 수락 prefix 4.25), chat 0은 0.88, 0.50, 0.25, 0.12(평균 1.38). Poolside가 bf16 타깃으로 잰 값은 GSM8K, HumanEval, EvalPlus, Math에서 3.55~4.57이다.
 
@@ -217,6 +223,9 @@ mlxcel-server DFlash burst -> DFlashBurstTarget (Qwen 3.5, Qwen 3.5 VLM, Laguna)
 | `912ac708` | fix | validate projection rows at load and drop a per-round copy |
 | `63af4faf` | fix | close the implementation-review findings (offline pairing and greedy guards, requested block width, pre-`fc` window drop, slack rule, routing predicate) |
 | `a73e249f` | fix | bound untrusted config, `greedy_only` on the server, K/V-only context projection, sanitizer shape checks |
+| `edd959bb` | docs | throughput A/B (pre-#1795) and split phase diagnostics |
+| `08e09036` | merge | main at `0c21aed2` (#1795) |
+| `aad08e1c` | fix | load the drafter through the shared dtype policy |
 | `76f16daf` | test | track the oracle drafter's reference position |
 | `fa8f1919` | test | add a real-checkpoint DFlash probe and a RoPE sensitivity test |
 

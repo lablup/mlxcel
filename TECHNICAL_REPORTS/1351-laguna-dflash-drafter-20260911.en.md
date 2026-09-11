@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-Poolside ships a DFlash speculator for every Laguna release, but mlxcel's DFlash machinery was hard-wired to the Qwen 3.5 drafter shape. This PR adds `mlxcel_core::drafter::laguna_dflash` (fused QKV, per-head softplus gate, `aux_hidden_norms`, sliding-window context attention), implements `SpeculativeTarget` on the Laguna target with rollback across dense and rotating caches, routes `model_type: laguna` drafters through `load_drafter`, and wires the pairing into both `mlxcel-server` and offline `mlxcel generate`. The pairing runs behind the same measured block-versus-chain exactness gate as the LFM2 and Muse Glimmer arms. On Laguna XS 2.1 NVFP4 with the published drafter on a GB10 the probe declines (107246 of 200704 logit bytes differ at the first verify position), so DFlash is off by default there; with `MLXCEL_MTP_ALLOW_INEXACT=1` greedy output equals classic decode except at bf16 logit ties, code completions accept 2.6 to 3.9 proposals per round, and throughput is below classic decode at every block size on this host (best 0.97x at block 8, n=3, range inside the off arm's; 0.86x at the checkpoint's block 16) because the multi-row verify runs launch-bound against a graph-replayed classic step.
+Poolside ships a DFlash speculator for every Laguna release, but mlxcel's DFlash machinery was hard-wired to the Qwen 3.5 drafter shape. This PR adds `mlxcel_core::drafter::laguna_dflash` (fused QKV, per-head softplus gate, `aux_hidden_norms`, sliding-window context attention), implements `SpeculativeTarget` on the Laguna target with rollback across dense and rotating caches, routes `model_type: laguna` drafters through `load_drafter`, and wires the pairing into both `mlxcel-server` and offline `mlxcel generate`. The pairing runs behind the same measured block-versus-chain exactness gate as the LFM2 and Muse Glimmer arms. On Laguna XS 2.1 NVFP4 with the published drafter on a GB10 the probe declines (107246 of 200704 logit bytes differ at the first verify position), so DFlash is off by default there; with `MLXCEL_MTP_ALLOW_INEXACT=1` greedy output equals classic decode except at bf16 logit ties, code completions accept 2.6 to 3.9 proposals per round, and throughput is at or below classic decode at every block size 2 to 16 on this host, before and after #1795 (best 1.00x at block 8, n=3, range inside the off arm's; 0.88x at the default block 16), because the multi-row verify runs launch-bound against a graph-replayed classic step.
 
 ---
 
@@ -56,27 +56,33 @@ Measured on a GB10 (sm_121), NVFP4 target, bf16 drafter, greedy, 128 tokens, `ml
 | code 1 (`lru_get` body) | 30.81 | 27.13 | 3.88 | differ at 69 (one-ulp tie) |
 | code 2 (`debounce` body) | 32.35 | 21.87 | 2.63 | differ at 103 (one-ulp tie) |
 
-**Throughput A/B (same binary, feature off versus on per block size; raw code prompts, no chat template, 200 tokens; GPU lock held for the whole sweep; host otherwise idle: load 0.10, no other model or cargo process, GPU at 0 percent at start; decode tok/s as the CLI reports it):**
+**Throughput A/B (same binary, feature off versus on per block size; raw code prompts, no chat template, 200 tokens; GPU lock held for the whole sweep; measured after the merge of main `0c21aed2` with #1795; decode tok/s as the CLI reports it).** The GPU was exclusive (0 percent at start) but the host was not otherwise idle: another session's `cargo build` / `rustc` ran at full CPU throughout (load 2.6 to 3.9), the same for both arms. A first sweep before #1795 on an idle host (load 0.10) gave the same picture (block 8 at 0.97x, block 16 at 0.86x).
 
-| Configuration | n | tok/s mean (min to max) | Mean accepted | vs off |
-|---|---|---|---|---|
-| code 0 (`retry_with_backoff`), off | 5 | 32.50 (31.24 to 33.58) | | |
-| code 0, block 2 | 3 | 16.57 (16.38 to 16.87) | 0.84 | 0.51x |
-| code 0, block 3 | 3 | 22.06 (22.05 to 22.07) | 1.52 | 0.68x |
-| code 0, block 4 | 3 | 27.23 (27.01 to 27.52) | 2.21 | 0.84x |
-| code 0, block 5 | 3 | 29.21 (28.65 to 29.54) | 2.55 | 0.90x |
-| code 0, block 6 | 3 | 30.90 (30.55 to 31.38) | 2.90 | 0.95x |
-| code 0, block 8 | 3 | 31.47 (31.10 to 31.98) | 3.33 | 0.97x |
-| code 0, block 10 | 3 | 31.03 (30.86 to 31.18) | 3.42 | 0.95x |
-| code 0, block 12 | 3 | 29.96 (29.88 to 30.10) | 3.52 | 0.92x |
-| code 0, block 16 (checkpoint default) | 3 | 27.92 (27.36 to 28.45) | 3.55 | 0.86x |
-| code 1 (`lru_get`), off | 3 | 32.31 (32.05 to 32.61) | | |
-| code 1, block 6 | 3 | 30.97 (30.89 to 31.07) | 2.92 | 0.96x |
-| code 1, block 8 | 3 | 30.08 (29.82 to 30.22) | 3.17 | 0.93x |
+| Configuration | n | tok/s mean (min to max) | Mean accepted | Device ms/round | Drafter build ms/round | vs off |
+|---|---|---|---|---|---|---|
+| code 0 (`retry_with_backoff`), off | 5 | 31.18 (30.41 to 31.98) | | | | |
+| code 0, block 2 | 3 | 16.19 (16.12 to 16.25) | 0.84 | 80 | 30 | 0.52x |
+| code 0, block 3 | 3 | 21.61 (21.52 to 21.77) | 1.52 | 83 | 30 | 0.69x |
+| code 0, block 4 | 3 | 27.05 (26.61 to 27.53) | 2.21 | 85 | 31 | 0.87x |
+| code 0, block 5 | 3 | 28.33 (26.21 to 29.51) | 2.55 | 89 | 34 | 0.91x |
+| code 0, block 6 | 3 | 30.46 (30.05 to 31.26) | 2.90 | 92 | 33 | 0.98x |
+| code 0, block 7 | 3 | 30.24 (30.12 to 30.47) | 3.06 | 97 | 34 | 0.97x |
+| code 0, block 8 | 3 | 31.26 (31.07 to 31.36) | 3.33 | 101 | 34 | 1.00x |
+| code 0, block 9 | 3 | 30.58 (30.37 to 30.75) | 3.33 | 106 | 33 | 0.98x |
+| code 0, block 10 | 3 | 30.02 (29.68 to 30.19) | 3.42 | 109 | 35 | 0.96x |
+| code 0, block 12 | 3 | 28.94 (28.66 to 29.41) | 3.52 | 116 | 37 | 0.93x |
+| code 0, block 16 (default) | 3 | 27.41 (26.90 to 27.90) | 3.55 | 127 | 35 | 0.88x |
+| code 1 (`lru_get`), off | 3 | 31.80 (31.50 to 32.38) | | | | |
+| code 1, block 4 | 3 | 26.10 (25.74 to 26.47) | 2.08 | 83 | 31 | 0.82x |
+| code 1, block 6 | 3 | 30.42 (30.11 to 30.64) | 2.92 | 91 | 34 | 0.96x |
+| code 1, block 8 | 3 | 29.95 (29.60 to 30.56) | 3.17 | 102 | 34 | 0.94x |
+| code 1, block 10 | 3 | 30.16 (29.88 to 30.58) | 3.44 | 109 | 35 | 0.95x |
 
-No configuration is a net win on this host. The best width, block 8, is 0.97x on code 0 with its whole range (31.10 to 31.98) inside the off arm's (31.24 to 33.58), and 0.93x on code 1; the checkpoint's block 16 is 0.86x. The earlier single-run 1.14x at block 8 did not reproduce and is withdrawn. The default block size stays at 16.
+No configuration is a net win on this host, before or after #1795. The best width, block 8, is 1.00x on code 0 with its whole range (31.07 to 31.36) inside the off arm's (30.41 to 31.98), and 0.94x on code 1; the default block 16 is 0.88x. There is no sub-8 cliff on the NVFP4 path (5, 6 and 7 sit on a smooth curve; `fp_qmv` has no 2/4/8 accumulator dispatch) and no crossover past 8. The default block size stays at 16; a served-width change for Laguna belongs to #1797.
 
-Attribution (block 8, per round): about 32 ms of host-side drafter graph construction, 3 ms of target graph construction, and 100 ms of synchronized device work for 4.33 emitted tokens, against 30.8 ms per classic token. The device cost of a verify block is a fixed 77 ms plus 3.3 ms per row (83 ms at 2 rows, 130 ms at 16), 2.7x a single-token step even at 2 rows: the classic step is graph-replayed while the multi-row verify runs eagerly and launch-bound. That is a property of the CUDA backend on this host, not of the drafter, and out of scope here. Even perfect acceptance at block 8 would reach about 17 ms per token (1.8x); at the measured 3.3 to 3.6 accepted, 0.86x to 0.97x.
+Attribution (block 8, per round): 30 to 35 ms of host-side drafter graph construction, about 3 ms of target graph construction, and 101 ms of synchronized device work for 4.33 emitted tokens, against 31 to 32 ms per classic token. The device cost of a verify block is a fixed 77 ms plus about 3.1 ms per row (80 ms at 2 rows, 127 ms at 16), 2.5x a single-token step even at 2 rows: the classic step is graph-replayed while the multi-row verify runs eagerly and launch-bound. Neither #1795 fix applies here (the drafter was already bf16; Laguna has no gated-delta layers), so the numbers did not move. That is a property of the CUDA backend on this host, not of the drafter, and out of scope here. Even perfect acceptance at block 8 would reach about 17 ms per token (1.8x); at the measured 3.3 to 3.6 accepted, 0.88x to 1.00x.
+
+The exactness probe, re-run after #1795, still declines this host at block 16 (107246 of 200704 logit bytes) and at block 8 (107466).
 
 The drafter's per-position accuracy along the reference path (probe b, shadow drafter): code 0 gives 0.88, 1.00, 0.75, 0.62, 0.38, 0.25 for d_0 to d_5 (mean accepted prefix 4.25 over 8 rounds); chat 0 gives 0.88, 0.50, 0.25, 0.12 (mean 1.38). Poolside's own numbers with a bf16 target are 3.55 to 4.57 on GSM8K, HumanEval, EvalPlus and Math.
 
@@ -217,6 +223,9 @@ None.
 | `912ac708` | fix | validate projection rows at load and drop a per-round copy |
 | `63af4faf` | fix | close the implementation-review findings (offline pairing and greedy guards, requested block width, pre-`fc` window drop, slack rule, routing predicate) |
 | `a73e249f` | fix | bound untrusted config, `greedy_only` on the server, K/V-only context projection, sanitizer shape checks |
+| `edd959bb` | docs | throughput A/B (pre-#1795) and split phase diagnostics |
+| `08e09036` | merge | main at `0c21aed2` (#1795) |
+| `aad08e1c` | fix | load the drafter through the shared dtype policy |
 | `76f16daf` | test | track the oracle drafter's reference position |
 | `fa8f1919` | test | add a real-checkpoint DFlash probe and a RoPE sensitivity test |
 
