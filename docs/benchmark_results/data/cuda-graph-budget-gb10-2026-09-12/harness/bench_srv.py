@@ -7,7 +7,7 @@ Usage: bench_srv.py --server BIN --client scripts/bench_serving_concurrency.py -
        --out X.jsonl --configs default,both --preset both=K=V,K=V --rounds 3
        [--concurrency 1,4] [--max-tokens 200] [--prompt-tokens 128] [--port 18798]
 """
-import argparse, json, os, re, signal, subprocess, sys, time, urllib.request
+import argparse, json, os, re, shlex, signal, subprocess, sys, time, urllib.request
 import hostgate
 
 ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s*$", re.M)
@@ -36,8 +36,8 @@ def run_once(a, cfg, presets):
     gate_wait_s = hostgate.wait_quiet(log=sys.stderr)
     load1 = os.getloadavg()[0]
     ci_job = hostgate.ci_job_running()
-    cmd = [a.server, "-m", a.model, "--port", str(a.port), "--max-batch-size", str(a.max_batch),
-           "--ignore-eos"]
+    cmd = shlex.split(a.wrap) + [a.server, "-m", a.model, "--port", str(a.port),
+           "--max-batch-size", str(a.max_batch), "--ignore-eos"]
     log = open(f"{a.out}.{cfg}.server.log", "a")
     t0 = time.time()
     srv = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -78,7 +78,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=3); ap.add_argument("--concurrency", default="1,4")
     ap.add_argument("--max-tokens", type=int, default=200); ap.add_argument("--prompt-tokens", type=int, default=128)
     ap.add_argument("--max-batch", type=int, default=8); ap.add_argument("--port", type=int, default=18798)
-    ap.add_argument("--tag", default="")
+    ap.add_argument("--tag", default=""); ap.add_argument("--wrap", default="")
     a = ap.parse_args()
     presets = {}
     for p in a.preset:
