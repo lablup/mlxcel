@@ -1,30 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 297672,
+    "embedded_asset_bytes": 300322,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 80398,
+    "initial_js_gzip_bytes": 81125,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 80398,
+    "total_js_gzip_bytes": 81125,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
-      "bytes": 265173,
-      "gzip_bytes": 80398,
-      "path": "assets/index-DXbYrrU8.js",
-      "sha256": "be84cc94e0a9dd4019e6a77aee7afded53d8c48f48700037cbad925904697f9e"
+      "bytes": 29963,
+      "gzip_bytes": 5617,
+      "path": "assets/index-C7082_aE.css",
+      "sha256": "d75ab620a3d0419a45ebb9cadf884551c5934bc282a7f4744dcbe493c0fca1f8"
     },
     {
-      "bytes": 29043,
-      "gzip_bytes": 5467,
-      "path": "assets/index-Hc-8l_pA.css",
-      "sha256": "f61a3a38367ee783d7b81aa40f0da8ca988a306f8319ec2986b95757d433f10a"
+      "bytes": 266903,
+      "gzip_bytes": 81125,
+      "path": "assets/index-CVmyRZq_.js",
+      "sha256": "1ae3c64ca5b165d36232f539abed6b64c6afb448c0eb744abbb285258d0efdb7"
     },
     {
       "bytes": 453,
-      "gzip_bytes": 286,
+      "gzip_bytes": 288,
       "path": "index.html",
-      "sha256": "d2e944e6c1cde762760a3c15d1c5d76c55f1421f4a1b7d2e3e89900e931d7142"
+      "sha256": "cdb7202527a0243e154f9ad3a1284fa592b738ca1939f97748bb87651daabb52"
     },
     {
       "bytes": 1336,
@@ -54,5 +54,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "9272b89bb802eca5f16e059314c7de67cbd456957bc95a5a219dfa31ab5f0a5b"
+  "source_digest_sha256": "468b3c504b5f3e24d8d05696a135ae2f41febbb0f2e380bd3d8c69befc73d0dc"
 }

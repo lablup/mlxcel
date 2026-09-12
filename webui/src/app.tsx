@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AppShell, type RouteId } from './design-system/shell';
 import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ContrastPreference } from './design-system/preferences';
-import { Button, Dialog, EmptyState, ErrorBanner, Field, Inspector, Select, StatusBadge } from './design-system/primitives';
+import { Button, Dialog, ErrorBanner, Field, Select } from './design-system/primitives';
 import { DesignGallery } from './gallery';
 import { t, testId } from './i18n/catalog';
 
 const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
+const paletteRoutes: RouteId[] = ['models', 'chat', 'activity', 'settings'];
 type Overlay = 'command' | 'help' | null;
 
 function routeFromHash(): RouteId {
@@ -41,7 +42,7 @@ export function App(): React.JSX.Element {
   const body = useMemo(() => renderRoute(route, appearance, setAppearance), [route, appearance]);
   return (
     <>
-      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={t(appearance.locale, 'model.selected.none')} inspector={<RouteInspector route={route} locale={appearance.locale} />}>
+      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={t(appearance.locale, 'model.selected.none')} inspector={null}>
         {body}
       </AppShell>
       <CommandPalette open={overlay === 'command'} locale={appearance.locale} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} />
@@ -62,24 +63,19 @@ function renderRoute(route: RouteId, appearance: AppearancePreferences, setAppea
 }
 
 function ModelsScreen(props: { locale: AppearancePreferences['locale'] }): React.JSX.Element {
-  return (
-    <div className="screen-stack">
-      <section className="screen-heading"><p className="eyebrow">{t(props.locale, 'routes.models.eyebrow')}</p><h1 data-testid={testId('models.title')}>{t(props.locale, 'models.title')}</h1><p>{t(props.locale, 'adapters.pending.body')}</p></section>
-      <EmptyState title={t(props.locale, 'models.empty.title')} body={t(props.locale, 'models.empty.body')} action={<Button disabled title={t(props.locale, 'common.unavailable')}>{t(props.locale, 'common.add_model')}</Button>} />
-      <ErrorBanner tone="info" title={t(props.locale, 'adapters.pending.title')} body={t(props.locale, 'adapters.pending.body')} />
-    </div>
-  );
+  return <ConnectionPrompt locale={props.locale} eyebrow={t(props.locale, 'routes.models.eyebrow')} title={t(props.locale, 'models.title')} titleTestId={testId('models.title')} />;
 }
 
 function ChatScreen(props: { locale: AppearancePreferences['locale'] }): React.JSX.Element {
-  const [message, setMessage] = useState('');
-  return (
-    <div className="screen-stack chat-screen"><section className="screen-heading"><p className="eyebrow">{t(props.locale, 'routes.chat.eyebrow')}</p><h1 data-testid={testId('chat.title')}>{t(props.locale, 'chat.title')}</h1><p>{t(props.locale, 'chat.pending.body')}</p></section><ErrorBanner tone="info" title={t(props.locale, 'adapters.pending.title')} body={t(props.locale, 'chat.pending.body')} /><label className="composer"><span className="sr-only">{t(props.locale, 'chat.placeholder')}</span><textarea value={message} placeholder={t(props.locale, 'chat.placeholder')} onChange={(event) => setMessage(event.currentTarget.value)} onCompositionStart={() => undefined} disabled /><Button tone="primary" disabled title={t(props.locale, 'common.unavailable')}>{t(props.locale, 'common.send')}</Button></label></div>
-  );
+  return <ConnectionPrompt locale={props.locale} eyebrow={t(props.locale, 'routes.chat.eyebrow')} title={t(props.locale, 'chat.title')} titleTestId={testId('chat.title')} />;
 }
 
 function ActivityScreen(props: { locale: AppearancePreferences['locale'] }): React.JSX.Element {
-  return <div className="screen-stack"><section className="screen-heading"><p className="eyebrow">{t(props.locale, 'routes.activity.eyebrow')}</p><h1 data-testid={testId('activity.title')}>{t(props.locale, 'activity.title')}</h1><p>{t(props.locale, 'activity.empty.body')}</p></section><EmptyState title={t(props.locale, 'activity.empty.title')} body={t(props.locale, 'activity.empty.body')} /><ErrorBanner tone="info" title={t(props.locale, 'adapters.pending.title')} body={t(props.locale, 'adapters.pending.body')} /></div>;
+  return <ConnectionPrompt locale={props.locale} eyebrow={t(props.locale, 'routes.activity.eyebrow')} title={t(props.locale, 'activity.title')} titleTestId={testId('activity.title')} />;
+}
+
+function ConnectionPrompt(props: { locale: AppearancePreferences['locale']; eyebrow: string; title: string; titleTestId: string }): React.JSX.Element {
+  return <div className="screen-stack"><section className="screen-heading connection-prompt"><p className="eyebrow">{props.eyebrow}</p><h1 data-testid={props.titleTestId}>{props.title}</h1><p data-testid={testId('connection.prompt.body')}>{t(props.locale, 'connection.prompt.body')}</p><ErrorBanner tone="info" title={t(props.locale, 'connection.prompt.title')} body={t(props.locale, 'connection.prompt.detail')} /></section></div>;
 }
 
 function SettingsScreen(props: { appearance: AppearancePreferences; setAppearance: (next: AppearancePreferences) => void }): React.JSX.Element {
@@ -93,14 +89,10 @@ function Toggle(props: { label: string; checked: boolean; onChange: (checked: bo
   return <label className="toggle"><input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.currentTarget.checked)} data-testid={props.testId} /><span>{props.label}</span></label>;
 }
 
-function RouteInspector(props: { route: RouteId; locale: AppearancePreferences['locale'] }): React.ReactNode {
-  if (props.route === 'gallery') return null;
-  return <Inspector title={t(props.locale, 'gallery.data.inspector')}><p>{t(props.locale, 'adapters.pending.body')}</p><StatusBadge state="unloaded">{t(props.locale, 'models.status.unloaded')}</StatusBadge></Inspector>;
-}
-
 function CommandPalette(props: { open: boolean; locale: AppearancePreferences['locale']; onClose: () => void; onNavigate: (route: RouteId) => void }): React.JSX.Element {
   const [query, setQuery] = useState('');
-  const items = routes.filter((route) => route.includes(query.toLowerCase()));
+  const searchable = props.locale && window.location.hash.includes('gallery') ? routes : paletteRoutes;
+  const items = searchable.filter((route) => route.includes(query.toLowerCase()));
   return (
     <Dialog open={props.open} title={t(props.locale, 'command.title')} onClose={props.onClose} testId="command-dialog" closeLabel={t(props.locale, 'common.close')}>
       <Field label={t(props.locale, 'command.search')} value={query} onChange={setQuery} testId={testId('command.search')} />

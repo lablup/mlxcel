@@ -29,7 +29,7 @@
 .ds-progress [role="progressbar"] { height: 10px; overflow: hidden; border-radius: 999px; background: var(--color-bg-neutral); border: 1px solid var(--color-separator); }
 .ds-progress span { display: block; height: 100%; width: 48%; background: linear-gradient(90deg, #2f6cff, #7b61ff); border-radius: inherit; }
 .ds-progress span[data-progress="indeterminate"] { animation: slide var(--motion-slow) ease-in-out infinite alternate; }
-.ds-empty, .surface-card, .ds-inspector, .ds-banner, .ds-table, .ds-list { background: var(--material-content-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-card); border-radius: var(--radius-lg); }
+.ds-empty, .surface-card, .ds-inspector, .ds-banner, .ds-table, .ds-list, .ds-login { background: var(--material-content-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-card); border-radius: var(--radius-lg); }
 .ds-empty { display: grid; place-items: center; text-align: center; gap: var(--space-2); padding: var(--space-6); }
 .ds-empty div { width: 44px; height: 44px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-selection); color: var(--color-focus); }
 .ds-empty h2, .ds-empty p, .ds-banner p { margin: 0; }
@@ -51,14 +51,21 @@
 .ds-tabs [aria-selected="true"] { color: var(--color-text); background: var(--color-bg-elevated); box-shadow: inset 0 0 0 1px var(--color-separator); }
 .ds-inspector { align-self: start; padding: var(--space-5); min-width: 0; }
 .ds-inspector h2 { margin-top: 0; font-size: 1rem; }
-.ds-table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+.ds-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; overflow: hidden; }
 .ds-table caption { text-align: left; padding: 10px 14px; color: var(--color-muted); }
-.ds-table th, .ds-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--color-separator); }
+.ds-table th, .ds-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--color-separator); overflow: hidden; }
 .ds-table tr:last-child td { border-bottom: 0; }
+.ds-table th:first-child, .ds-table td:first-child { width: 52%; }
+.ds-table th:nth-child(2), .ds-table td:nth-child(2) { width: 22%; }
+.ds-table th:nth-child(3), .ds-table td:nth-child(3) { width: 26%; }
+.ds-table .truncate { max-width: 100%; }
 .ds-list { display: grid; gap: var(--space-2); list-style: none; padding: var(--space-4); margin: 0; }
+.ds-login { display: grid; gap: var(--space-3); padding: var(--space-4); }
+.ds-login h2, .ds-login p { margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { to { opacity: 0.45; } }
 @keyframes slide { from { transform: translateX(-60%); } to { transform: translateX(120%); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition-duration: 1ms !important; } }
 :root[data-reduce-motion="true"] *, :root[data-reduce-motion="true"] *::before, :root[data-reduce-motion="true"] *::after, :root[data-document-hidden="true"] *, :root[data-document-hidden="true"] *::before, :root[data-document-hidden="true"] *::after { animation: none !important; transition-duration: 1ms !important; }
 :root[data-high-contrast="on"] .ds-button, :root[data-high-contrast="on"] .ds-icon-button, :root[data-high-contrast="on"] .surface-card, :root[data-high-contrast="on"] .ds-empty, :root[data-high-contrast="on"] .ds-inspector, :root[data-high-contrast="on"] .ds-banner { border-width: 2px; }
+@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) .ds-button, :root:not([data-high-contrast="off"]) .ds-icon-button, :root:not([data-high-contrast="off"]) .surface-card, :root:not([data-high-contrast="off"]) .ds-empty, :root:not([data-high-contrast="off"]) .ds-inspector, :root:not([data-high-contrast="off"]) .ds-banner { border-width: 2px; } }

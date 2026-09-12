@@ -13,12 +13,17 @@ export const navItems: NavItem[] = [
   { id: 'chat', key: 'nav.chat', icon: 'chat' },
   { id: 'activity', key: 'nav.activity', icon: 'activity' },
   { id: 'settings', key: 'nav.settings', icon: 'settings' },
-  { id: 'gallery', key: 'nav.gallery', icon: 'gallery' },
 ];
 
 export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onCommand: () => void; onHelp: () => void; children: React.ReactNode; inspector?: React.ReactNode; selectedModel: string }): React.JSX.Element {
   const sidebarRef = useRef<HTMLElement>(null);
+  const onCommandRef = useRef(props.onCommand);
+  const onHelpRef = useRef(props.onHelp);
   const [navOpen, setNavOpen] = useState(false);
+  useEffect(() => {
+    onCommandRef.current = props.onCommand;
+    onHelpRef.current = props.onHelp;
+  }, [props.onCommand, props.onHelp]);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const target = event.target;
@@ -28,17 +33,17 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setNavOpen(false);
-        props.onCommand();
+        onCommandRef.current();
       }
-      if (event.key === '?') {
+      if (event.key === '?' || (event.key === '/' && event.shiftKey)) {
         event.preventDefault();
         setNavOpen(false);
-        props.onHelp();
+        onHelpRef.current();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [props]);
+  }, []);
   const moveNav = (direction: number): void => {
     const index = navItems.findIndex((item) => item.id === props.route);
     const next = navItems[(index + direction + navItems.length) % navItems.length];
@@ -74,7 +79,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
             <IconButton label={t(props.locale, 'toolbar.help')} icon="help" onClick={props.onHelp} data-testid={testId('toolbar.help')} />
           </div>
         </header>
-        <div className="app-content-grid">
+        <div className={`app-content-grid ${props.inspector ? 'has-inspector' : ''}`.trim()}>
           <section className="app-content">{props.children}</section>
           {props.inspector}
         </div>
