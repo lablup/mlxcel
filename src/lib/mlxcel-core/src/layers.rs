@@ -5032,7 +5032,11 @@ pub enum PagedDecodeBackend {
     /// pool blocks with no gather pass, so its advantage grows with context;
     /// the Metal-measured batch/context ceilings do not apply.
     Cuda,
-    /// Anything else (CPU): no fused kernel, always gather.
+    /// Any backend with no fused kernel port, which today means CPU-only
+    /// builds and ROCm (issue #1803). Always gather. ROCm is a real GPU here,
+    /// not a CPU, and gets its own variant when its kernels are ported
+    /// (issue #1814); until then the answer is the same, so it shares this one
+    /// rather than pretending the ports exist.
     Other,
 }
 
@@ -5233,7 +5237,14 @@ pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
-        if crate::metal_is_available() {
+        // Asked first, so a backend with no fused kernel port can never be
+        // read as one that has it. `cuda_is_available()` is false on a ROCm
+        // build today, so this is belt and braces rather than a live fix, but
+        // the old order made correctness depend on that staying true
+        // (issue #1803).
+        if !crate::custom_kernels_available() {
+            PagedDecodeBackend::Other
+        } else if crate::metal_is_available() {
             PagedDecodeBackend::Metal
         } else if crate::cuda_is_available() {
             PagedDecodeBackend::Cuda

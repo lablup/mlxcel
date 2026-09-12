@@ -1972,6 +1972,21 @@ impl PagedBlockPool {
             select_paged_v2_dispatch,
         };
 
+        // Both fused paths end in custom kernels with Metal and CUDA ports
+        // only. On a backend without them the launcher would reach
+        // `fast::cuda_kernel`, whose throw crosses the cxx bridge into a
+        // `noexcept` extern and ends the process, so decline before planning
+        // and let the caller's gather-then-SDPA fallback serve the step
+        // (issue #1803).
+        if !crate::ffi::custom_kernels_available() {
+            return Ok((
+                None,
+                PagedDecodeOutcome::NotServable(
+                    "the GPU backend has no fused paged-attention kernel port",
+                ),
+            ));
+        }
+
         // Same single-slab restriction as v1 and as `paged_decode_fused_v2`:
         // both kernels read one contiguous pool buffer per side, so a layer
         // grown past one slab (#235) is declined rather than stitched. This is
@@ -2288,7 +2303,8 @@ impl PagedBlockPool {
 
         let out_f32 = ffi::paged_attention_decode(
             q_in, pool_k, pool_v, &rows_arr, &off_arr, &ls_arr, &vl_arr, scale, num_splits,
-        );
+        )
+        .map_err(|e| format!("paged_attention_decode: {e}"))?;
         let out = if q_dtype == crate::dtype::FLOAT32 {
             out_f32
         } else {

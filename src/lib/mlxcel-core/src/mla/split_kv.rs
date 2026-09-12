@@ -302,7 +302,8 @@ pub fn absorbed_decode_split_kv(
 
         let mut v_out = UniquePtr::null();
         let mut lse_out = UniquePtr::null();
-        ffi::paged_attention_merge_states(&v_in, &lse_in, &o_indptr, &mut v_out, &mut lse_out);
+        ffi::paged_attention_merge_states(&v_in, &lse_in, &o_indptr, &mut v_out, &mut lse_out)
+            .map_err(|e| format!("mla split: merge launch failed: {e}"))?;
         v_out
     } else {
         // One chunk per request: the partial is the answer, no merge launch.

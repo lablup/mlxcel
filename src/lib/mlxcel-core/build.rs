@@ -85,6 +85,9 @@ fn main() {
         // `src/lib/mlx-cpp/turbo/` so the MLX-upstream-commit upgrade
         // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
         // treats this directory as in-scope.
+        // Resolves which GPU backend the custom kernels target (issue
+        // #1803). Shared by the bridge and every turbo/ launcher.
+        .file("../mlx-cpp/turbo/gpu_backend.cpp")
         .file("../mlx-cpp/turbo/sparse_v_sdpa.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised
@@ -152,6 +155,14 @@ fn main() {
     // emitted. Gate on the feature that decides whether the file is built.
     if std::env::var("CARGO_FEATURE_METAL").is_ok() {
         bridge.define("MLXCEL_BRIDGE_METAL_BACKEND", None);
+    }
+
+    // Same shape for ROCm: `mlx/backend/rocm/rocm.h` ships in the ROCm overlay
+    // and CMake copies it into the MLX source tree only for a ROCm build, so
+    // the bridge can only include it when that build is the one running
+    // (issue #1803).
+    if std::env::var("CARGO_FEATURE_ROCM").is_ok() {
+        bridge.define("MLXCEL_BRIDGE_ROCM_BACKEND", None);
     }
 
     // Add optimization flags for release builds
