@@ -54,3 +54,9 @@ Root가 조율한 실제 체크포인트 게이트는 macOS 27 / Apple Silicon�
 이는 process RSS snapshot이며 allocator 측정이나 잔류 메모리 0의 증거가 아니다. 이전 binary를 사용한 negative control(SHA-256 `ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit 미확인)은 같은 harness의 unload-before-stream-drop 단계에서 exit 4로 실패했다. 이 비교는 검증되지 않은 source revision을 binary에 부여하지 않고 새 worker-exit 관찰과 이전 registry-drop 동작을 구분한다.
 
 위 측정은 최종 atomic-reservation 수정과 producer-contract finalization을 포함한다. 임시 로컬 harness 파일은 공개 증거 보관소가 아니므로 실제 측정 결과를 이 문서에 기록했다.
+
+## 사용자 승인 GB10 CI 장애 예외
+
+2026-09-12 사용자가 GB10 러너의 Down 상태를 확인하고, 해당 필수 CI 작업을 생략한 채 통과한 로컬 CI를 근거로 진행하도록 명시적으로 승인했다. 이번 예외는 이 전달 건의 실행 불가능한 GB10 cargo-clippy 및 OpenXLA feature compile 작업에 적용하며, 이 작업들을 통과했다고 보고하지 않는다. CI 설정과 브랜치 보호 규칙은 변경하지 않았다.
+
+로컬 Metal/Accelerate workspace 테스트는 11,151 passed, 0 failed, 361 ignored로 통과했다. 최종 workspace/all-target clippy, CLI 테스트 27개와 호환성 테스트 4개, fixture 32개 계약 게이트 및 포맷 검사를 통과했다. 위 실제 체크포인트 결과는 Apple Silicon 검증 근거이며, CUDA 또는 실행하지 못한 OpenXLA 검증을 주장하지 않는다.

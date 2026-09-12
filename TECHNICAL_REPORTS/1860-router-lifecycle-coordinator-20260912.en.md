@@ -54,3 +54,9 @@ The root-coordinated real checkpoint gate passed on runtime commit `bd85ff07` on
 These are process RSS snapshots, not allocator measurements or proof of zero retained memory. A negative control against an older binary (SHA-256 `ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit unknown) failed the same harness with exit 4 at unload-before-stream-drop. This distinguishes the new observed-worker-exit behavior from the old registry-drop behavior without assigning an unverified source revision to that binary.
 
 These measurements include the final atomic-reservation fix and producer-contract finalization. Temporary local harness files are not a published evidence archive; the measured outcomes are recorded here.
+
+## User-approved GB10 CI outage waiver
+
+On 2026-09-12, the user confirmed that the GB10 runner was down and explicitly authorized proceeding without its required CI jobs, using passing local CI. This waiver covers the unavailable GB10 cargo-clippy and OpenXLA feature compile jobs for this delivery; they are not reported as passed. CI configuration and branch protection are unchanged.
+
+The local Metal/Accelerate workspace suite passed with 11,151 tests, zero failures and 361 ignored cases. Final workspace/all-target clippy, 27 CLI tests plus four compatibility tests, the 32-fixture contract gate and formatting checks passed. The real-checkpoint results above remain Apple Silicon evidence only. No CUDA or unavailable OpenXLA validation is claimed.
