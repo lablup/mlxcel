@@ -636,7 +636,7 @@
             "schema": {
               "type": "string",
               "maxLength": 128,
-              "pattern": "^[A-Za-z0-9._~-]{1,128}$"
+              "pattern": "^[A-Za-z0-9._~-]{1,128}(?![\\s\\S])"
             },
             "description": "Opaque model id or operation target token; never a filesystem path."
           }
@@ -1011,47 +1011,47 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 128,
-        "pattern": "^[A-Za-z0-9._~-]{1,128}$",
+        "pattern": "^[A-Za-z0-9._~-]{1,128}(?![\\s\\S])",
         "description": "Opaque per-process server instance id; never carries a path or credential."
       },
       "ModelId": {
         "type": "string",
-        "pattern": "^mdl_[A-Za-z0-9_-]{43}$",
+        "pattern": "^mdl_[A-Za-z0-9_-]{43}(?![\\s\\S])",
         "description": "Opaque stable UI model id."
       },
       "OperationId": {
         "type": "string",
         "minLength": 1,
         "maxLength": 128,
-        "pattern": "^[A-Za-z0-9._~-]{1,128}$",
+        "pattern": "^[A-Za-z0-9._~-]{1,128}(?![\\s\\S])",
         "description": "Opaque operation id; printable token only."
       },
       "EventId": {
         "type": "string",
         "minLength": 1,
         "maxLength": 160,
-        "pattern": "^evt_[A-Za-z0-9._~-]{1,160}$",
+        "pattern": "^evt_[A-Za-z0-9._~-]{1,160}(?![\\s\\S])",
         "description": "Opaque SSE event id; also sent as the SSE id field."
       },
       "CursorToken": {
         "type": "string",
         "minLength": 1,
         "maxLength": 512,
-        "pattern": "^[A-Za-z0-9._~-]{1,512}$",
+        "pattern": "^[A-Za-z0-9._~-]{1,512}(?![\\s\\S])",
         "description": "Opaque pagination cursor. Control characters, slashes and backslashes are forbidden."
       },
       "IdempotencyKey": {
         "type": "string",
         "minLength": 8,
         "maxLength": 128,
-        "pattern": "^[A-Za-z0-9._~-]{8,128}$",
+        "pattern": "^[A-Za-z0-9._~-]{8,128}(?![\\s\\S])",
         "description": "Client-supplied idempotency token scoped to one server instance; printable token only."
       },
       "HuggingFaceRepoId": {
         "type": "string",
         "minLength": 1,
         "maxLength": 193,
-        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}(?![\\s\\S])",
         "description": "Public HuggingFace owner/name id. Dot-only path segments and URL/path syntax are rejected."
       },
       "RevisionRef": {
@@ -1061,14 +1061,14 @@
         ],
         "minLength": 1,
         "maxLength": 128,
-        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~+/-]+$",
+        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~+/-]+(?![\\s\\S])",
         "description": "Repository revision ref resolved and pinned before writing weights. Dot-only path segments and control characters are rejected."
       },
       "ApiBase": {
         "type": "string",
         "minLength": 0,
         "maxLength": 128,
-        "pattern": "^$|^/(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$",
+        "pattern": "^(?![\\s\\S])|^/(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~!$&'()*+,;=:@%/-]*(?![\\s\\S])",
         "description": "Validated same-origin relative API prefix. Protocol-relative URLs, query strings, fragments, dot segments and doubled slashes are rejected."
       },
       "KvCacheModeName": {
@@ -1121,13 +1121,13 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "pattern": "^[A-Za-z0-9_.:-]+$"
+            "pattern": "^[A-Za-z0-9_.:-]+(?![\\s\\S])"
           },
           "code": {
             "type": "string",
             "minLength": 1,
             "maxLength": 64,
-            "pattern": "^[A-Za-z0-9_.:-]+$"
+            "pattern": "^[A-Za-z0-9_.:-]+(?![\\s\\S])"
           },
           "message": {
             "type": "string",
@@ -1471,7 +1471,7 @@
           },
           "source_key_hash": {
             "type": "string",
-            "pattern": "^[a-f0-9]{64}$",
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])",
             "description": "SHA-256 of the redacted canonical source key; used for collision tests without exposing paths."
           },
           "generation": {
@@ -1673,7 +1673,7 @@
               "null"
             ],
             "maxLength": 512,
-            "pattern": "^[A-Za-z0-9._~-]{1,512}$"
+            "pattern": "^[A-Za-z0-9._~-]{1,512}(?![\\s\\S])"
           },
           "total_known": {
             "type": [
@@ -2363,7 +2363,7 @@
         "properties": {
           "key": {
             "type": "string",
-            "pattern": "^[a-z0-9_.-]+$",
+            "pattern": "^[a-z0-9_.-]+(?![\\s\\S])",
             "maxLength": 128
           },
           "en": {
@@ -2378,7 +2378,7 @@
           },
           "test_id": {
             "type": "string",
-            "pattern": "^[a-z0-9-]+$",
+            "pattern": "^[a-z0-9-]+(?![\\s\\S])",
             "maxLength": 128
           }
         }
@@ -2758,7 +2758,7 @@
           },
           "child": {
             "type": "string",
-            "pattern": "^#[0-9]+$"
+            "pattern": "^#[0-9]+(?![\\s\\S])"
           },
           "contract_artifact": {
             "type": "string",
@@ -3219,7 +3219,7 @@
           },
           "namespace_hash": {
             "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
           },
           "entry_key": {
             "type": "string",
@@ -3259,14 +3259,14 @@
           },
           "source_key_hash": {
             "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
           },
           "canonical_identity": {
             "$ref": "#/components/schemas/CanonicalIdentityInput"
           },
           "expected_id": {
             "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}(?![\\s\\S])"
           }
         }
       },

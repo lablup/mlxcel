@@ -69,3 +69,11 @@ Route owner: verify every response is produced from existing runtime truth, appl
 Client owner: verify generated DTO drift gate passes, all actions use expected revisions and idempotency keys, reset/gap/server-restart events force resnapshot, indeterminate progress is rendered honestly, and request-only settings never become persistent UI state.
 
 Integration owner: verify compatibility routes and UI routes use one coordinator, producer/consumer/fixtures land atomically, browser security checks cover mutation surfaces, screenshot/test IDs match `ux-contract.md`, and no downstream issue invents an API/state/UX decision already frozen here.
+
+## Running the contract gate
+
+Create an isolated Python environment, install `scripts/ci/webui_contract_requirements.txt`, and run `make verify-webui-contract WEBUI_CONTRACT_PY=/path/to/venv/bin/python`. The CLI delegates schema/fixture checks to `scripts/ci/webui_contract_checks.py` and independent negative cases to `scripts/ci/webui_contract_self_tests.py`. `--fix` changes generated TypeScript declarations only; it does not accept failing fixtures. The generated declaration file is exempt from hand-written module size limits because its source of truth is the schema.
+
+Schema patterns use ECMAScript-compatible syntax. The strict end assertion `(?![\s\S])` is intentional: `$` also matches before a final newline in JavaScript and Python and therefore does not exclude trailing control characters. Rust implementations must use equivalent structural/full-string validation rather than copying lookahead expressions into the Rust `regex` crate, which does not support lookaround. Negative cases mutate one field at a time so an unrelated invalid field cannot mask a missing constraint.
+
+The verifier registers an explicit date-time checker and refuses schema formats without an active checker. This avoids silently accepting malformed timestamps when optional `jsonschema` format dependencies are absent. These checks validate contract artifacts, not live Rust serialization or runtime behavior; route and integration owners must exercise actual producers against the same fixtures in their dependent issues.
