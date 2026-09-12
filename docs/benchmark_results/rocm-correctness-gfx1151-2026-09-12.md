@@ -63,7 +63,7 @@ The honest way to state the bound is without a threshold at all: across all twel
 
 `qwen3-30b-a3b` being the only model to show this is consistent with it being the 128-expert MoE in the set: expert routing is a discrete decision taken on small score differences, so a numerical difference there moves more than the same difference in a dense model.
 
-A same-backend control says the same thing. The Metal trace set includes both `default` (fused MoE) and `fused0` (`gather_qmm`) runs for the two MoE models, which is a kernel swap with no hardware change. Five of those six pairs agree at every position; the one that moves is `qwen3-30b-a3b` at `w1`, with one top-1 disagreement out of 128 and zero on its 74 decided positions. The model that reacts to a kernel change within Metal is the same model that reacts to a backend change, which is what you would expect if routing, not arithmetic, is the sensitive part.
+A same-backend control says the same thing. The Metal trace set includes both `default` (fused MoE) and `fused0` (`gather_qmm`) runs for the two MoE models, which is a kernel swap with no hardware change. Five of those six pairs agree at every position; the one that moves is `qwen3-30b-a3b` at `w1`, with one top-1 disagreement out of 128 and zero on its 74 decided positions. The model that reacts to a kernel change within Metal is the same model that reacts to a backend change, which is what you would expect if routing, not arithmetic, is the sensitive part. That one disagreement sits at a reference gap of 0.062, against 1.125 across backends, so a same-hardware kernel swap moves the decision only at gaps an order of magnitude smaller than a backend change does.
 
 ## Results
 
