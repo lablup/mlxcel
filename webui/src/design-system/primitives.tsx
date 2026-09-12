@@ -239,6 +239,7 @@ export function LoginView(props: { title: string; body: string; tokenLabel: stri
   React.useEffect(() => () => setToken(''), []);
   const handleSubmit = (event: React.FormEvent): void => {
     event.preventDefault();
+    if (props.busy || token.trim().length === 0) return;
     const submitted = token;
     setToken('');
     props.onSubmit(submitted);
@@ -248,15 +249,15 @@ export function LoginView(props: { title: string; body: string; tokenLabel: stri
     props.onLogout?.();
   };
   return (
-    <form className="ds-login" data-testid={props.testId} onSubmit={handleSubmit}>
+    <form className="ds-login" data-testid={props.testId} autoComplete="off" onSubmit={handleSubmit}>
       <h2>{props.title}</h2>
       <p>{props.body}</p>
       <label className="ds-field">
         <span>{props.tokenLabel}</span>
-        <input type="password" autoComplete="current-password" value={token} disabled={props.busy} aria-invalid={props.error ? 'true' : undefined} aria-describedby={helpId} onChange={(event) => setToken(event.currentTarget.value)} />
+        <input type="password" autoComplete="off" spellCheck={false} autoCapitalize="none" autoCorrect="off" value={token} disabled={props.busy} aria-invalid={props.error ? 'true' : undefined} aria-describedby={helpId} onChange={(event) => setToken(event.currentTarget.value)} />
         <small id={helpId} data-tone={props.error ? 'error' : 'hint'}>{props.error ?? props.tokenHelp}</small>
       </label>
-      <div className="dialog-actions"><Button tone="primary" type="submit" busy={props.busy} disabled={token.length === 0}>{props.submitLabel}</Button>{props.onLogout && props.logoutLabel ? <Button type="button" onClick={handleLogout}>{props.logoutLabel}</Button> : null}</div>
+      <div className="dialog-actions"><Button tone="primary" type="submit" busy={props.busy} disabled={token.trim().length === 0}>{props.submitLabel}</Button>{props.onLogout && props.logoutLabel ? <Button type="button" onClick={handleLogout}>{props.logoutLabel}</Button> : null}</div>
     </form>
   );
 }

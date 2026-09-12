@@ -4,7 +4,7 @@ export default defineConfig({
   testDir: './tests',
   fullyParallel: false,
   reporter: 'list',
-  snapshotPathTemplate: '{testDir}/screenshots/{arg}{ext}',
+  snapshotPathTemplate: '{testDir}/screenshots/{platform}/{arg}{ext}',
   use: {
     ...devices['Desktop Chrome'],
     baseURL: 'http://127.0.0.1:4173',

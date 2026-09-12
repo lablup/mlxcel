@@ -410,6 +410,15 @@ jobs:
         run: pnpm --dir webui exec playwright install --with-deps chromium
       - name: Run WebUI browser scaffold
         run: pnpm --dir webui run browser
+      - name: Upload WebUI browser screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-browser-screenshots-${{ runner.os }}
+          path: |
+            webui/test-results/**/*.png
+            webui/tests/screenshots/linux/**/*.png
+          if-no-files-found: warn
       - name: Verify generated WebUI bundle
         run: python3 scripts/webui/build_bundle.py --verify
 
