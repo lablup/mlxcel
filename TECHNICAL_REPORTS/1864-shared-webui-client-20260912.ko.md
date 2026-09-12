@@ -1,6 +1,7 @@
 # 기술 보고서: PR #1864 — 공유 WebUI 클라이언트와 상태 관리 경계
 
 **날짜**: 2026-09-12
+**갱신**: 2026-09-13 — 웨이브 2 통합 검증
 **상태**: 머지 전 구현 리뷰 완료, 후속 애플리케이션 통합은 남아 있음
 **언어**: TypeScript, TSX, Rust, Python, JSON 호환 YAML
 **위험 수준**: 중간
@@ -20,7 +21,9 @@ Models, Chat, Activity, Settings는 인증, 모델 식별자, 수명주기, 진�
 
 ### 정식 스키마를 사용하는 경계 검증
 
-`webui/src/api/jsonSchema.ts`는 정식 계약에 필요한 스키마 구문을 평가하고 `validation.ts`는 별도의 수작업 DTO 형태 대신 타입이 있는 검증 함수를 제공한다. 프런트엔드 테스트는 정상 응답의 일부 속성만 보는 것이 아니라 시나리오, 식별자, 문자열 카탈로그를 포함한 공유 fixture 33개 전체를 읽는다. 음성 테스트는 추가 속성, 필수 nullable 필드 누락, 잘못된 타임스탬프, 잘못된 판별자를 검사한다. 스키마와 생성 타입 선언도 결정적 번들의 소스 해시에 포함했다.
+`webui/src/api/jsonSchema.ts`는 정식 계약에 필요한 스키마 구문을 평가하고 `validation.ts`는 별도의 수작업 DTO 형태 대신 타입이 있는 검증 함수를 제공한다. 프런트엔드 테스트는 정상 응답의 일부 속성만 보는 것이 아니라 시나리오, 식별자, 문자열 카탈로그를 포함한 공유 fixture 41개 전체를 읽는다. 음성 테스트는 추가 속성, 필수 nullable 필드 누락, 잘못된 타임스탬프, 잘못된 판별자를 검사한다. 스키마와 생성 타입 선언도 결정적 번들의 소스 해시에 포함했다.
+
+통합된 카탈로그는 원본 `metadata.model_type`, 해석된 `metadata.architecture`, 제한된 `metadata.declared_architectures`를 별개의 사실로 유지한다. 소비자 회귀 테스트가 이 값들과 필수 metadata·unknown-reason·removal 정보, 선언 개수·문자열 길이 제한을 검사한다. 보안·카탈로그 변경과의 통합은 기존 테스트 fixture를 갱신하고 중복 Rust helper·테스트를 제거하며 서로 다른 복사본을 유지하지 않는다.
 
 새 런타임 검증 의존성을 피하는 대신, 평가기는 이 저장소의 정식 스키마에 필요한 범위로 제한된다. 범용 JSON Schema 구현이 아니므로 새 스키마 구문을 도입할 때 평가기와 독립 음성 테스트도 함께 확장해야 한다.
 
@@ -44,22 +47,28 @@ Rust 재생 검증, 코디네이터 구독, 스키마, 생성 TypeScript, 요청
 
 ## 3. 리뷰와 검증
 
-이슈 구현 워크플로에서 세 차례 수정 후 독립 정확성·보안 리뷰가 잔여 지적 없이 완료되었다. 루트는 전체 workspace 검증을 위해 Rust revision `c735bc99`를 고정했다. 문서 최종 정리에서 마지막 데이터 수신 성공 시각의 수용 기준 공백을 발견했고 후속 `cfabec5c`와 `e728c9c9`가 TypeScript에 별도 시각과 회귀 테스트를 추가하고 실제 데이터에 적용하지 않은 알림을 최신성 갱신에서 제외했다. 최종 최신성 변경도 독립 리뷰 승인을 받았다. Rust 소스는 바꾸지 않았으며 최종 정리 담당자는 문서만 변경했다.
+이슈 구현 워크플로에서 세 차례 수정 후 독립 정확성·보안 리뷰가 잔여 지적 없이 완료되었다. 루트는 전체 workspace 검증을 위해 Rust revision `c735bc99`를 고정했다. 문서 최종 정리에서 마지막 데이터 수신 성공 시각의 수용 기준 공백을 발견했고 후속 `cfabec5c`와 `e728c9c9`가 TypeScript에 별도 시각과 회귀 테스트를 추가하고 실제 데이터에 적용하지 않은 알림을 최신성 갱신에서 제외했다. 최종 최신성 변경도 독립 리뷰 승인을 받았다. Rust 소스는 바꾸지 않았으며 최종 정리 담당자는 문서만 변경했다. 웨이브 2 통합에서 보안·카탈로그 변경을 포함한 `5505aae6` 위로 리베이스하고 `7497da98`를 게시했다. 통합 이전 `c735bc99`의 과거 게이트(11,167개 통과, 실패 0개, 무시 361개, workspace Clippy 통과)는 아래 결합된 검증을 대신하지 않는다. 두 독립 통합 리뷰는 `7497da98`를 잔여 지적 없이 승인했다.
 
 | 검사 | 결과와 범위 |
 |---|---|
 | `pnpm --dir webui run typecheck` | 엄격한 TypeScript 검사 통과. |
 | `pnpm --dir webui run lint` | ESLint 경고 없이 통과. |
-| `pnpm --dir webui run unit` | 7개 파일의 44개 테스트 통과. 전체 fixture, SSE 바이트 분할·CJK·CRLF, 인증·중단, 리듀서, 페이지 읽기, 재조정, provider 정리, 데이터 수신 성공 시각을 포함한다. |
-| `pnpm --dir webui run verify-generated` | 깨끗한 임시 빌드 두 번과 커밋된 번들의 일치 확인. 최종 정리에서 추적 자산을 다시 쓸 필요가 없었다. |
-| `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` | fixture 33개, 생성 DTO 드리프트, 엄격성·음성 검사 통과. |
+| `pnpm --dir webui run unit` | 7개 파일의 45개 테스트 통과. 전체 fixture, SSE 바이트 분할·CJK·CRLF, 인증·중단, 리듀서, 페이지 읽기, 재조정, provider 정리, 데이터 수신 성공 시각을 포함한다. |
+| `pnpm --dir webui run verify-generated` | 결합 게이트에서 깨끗한 임시 빌드 두 번과 커밋된 번들의 일치 확인. 검증 해시 `e0a37519f1c21dc11ca6b6b0b163fcb860e860d94b747d027dc1fe22c5ae8b11`. 문서 최종 정리에서는 자산을 다시 쓰지 않았다. |
+| `pnpm --dir webui run browser` | 루트가 Vite preview 대상 Chromium shell 테스트 1개 통과를 확인했다. 실제 Safari나 운영 제어 API 통합 검증은 아니다. |
+| `cargo check --workspace --no-default-features --features metal,accelerate` | 루트가 경고 43개와 함께 성공을 보고했다. 이 설정은 경고 없는 빌드가 아니다. |
+| `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` | fixture 41개, 생성 DTO 드리프트, 엄격성·음성 검사 통과. |
 | `make verify-llama-compat verify-versions verify-kernel-dtype-keys` | 격리 Python 환경을 PATH 앞에 두고 모두 통과. |
 | `cargo fmt --check` | 통과. |
-| `cargo test --workspace --profile test-fast --features metal,accelerate` | 루트가 고정한 Rust revision `c735bc99`에서 전체 workspace 게이트 실행: 123개 요약 기준 11,167개 통과, 실패 0개, 무시 361개. 무시된 테스트는 통과가 아니다. |
-| `cargo test --profile test-fast --features webui ui_events` | 구현 검증에서 선택된 Rust 라우트 테스트 3개 통과. |
-| `cargo test --profile test-fast --features webui lifecycle_coordinator_sequence_replay` | 구현 검증에서 선택된 Rust 코디네이터 테스트 2개 통과. |
+| `make verify-test` | 루트가 `7497da98`에서 실행한 CI와 동일한 결합 게이트: 123개 요약 기준 11,226개 통과, 실패 0개, 무시 361개. 무시된 테스트는 통과가 아니다. |
+| `cargo test --profile test-fast --features webui ui_events` | 결합 게이트 전 검증에서 선택된 Rust 라우트 테스트 3개 통과. |
+| `cargo test --profile test-fast --features webui lifecycle_coordinator_sequence_replay` | 결합 게이트 전 검증에서 선택된 Rust 코디네이터 테스트 2개 통과. |
 | `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` | 구현 워크플로가 최종 수정 후 범위 제한 lint 통과를 보고했다. |
-| `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings` | 루트가 `c735bc99`에서 전체 workspace·all-target 게이트 통과를 보고했다. TypeScript 전용 최신성 수정은 Rust 소스를 바꾸지 않았다. |
+| `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings` | 루트가 `7497da98`의 결합 workspace·all-target 게이트 통과를 보고했다. |
+
+고정한 런타임 `7497da98`의 CI와 동일한 결합 검증 체인이 종료 코드 0으로 완료되었다. workspace 테스트, all-target Clippy, 엄격한 fixture·정적 게이트, 기능 비활성 검사, 프런트엔드 검사, Chromium shell 테스트, 결정적 번들 검증을 포함한다. 이후 최종 정리는 이 보고서와 아키텍처 문서만 변경한다.
+
+첫 결합 workspace 실행은 저장소가 요구하는 단일 테스트 스레드 설정을 누락하여 8,330개 통과, 실패 1개, 무시 144개에서 중단되었고 나머지 게이트는 실행하지 못했다. `vision::llmjp_vl::tests::either_patch_embedding_conv_layout_produces_the_same_features`가 최대 차이 `0.000000015832484`를 보고했다. 루트가 동일 바이너리의 해당 테스트를 직렬로 다섯 번 다시 실행하여 소스나 허용 오차 변경 없이 모두 통과했다. 올바른 게이트는 #1092에 따라 `--no-fail-fast -- --test-threads=1`을 포함하는 `make verify-test`다. 장치 전역 상태 간섭은 병렬 실행 실패의 가능한 설명이지 원인 추적으로 확정한 결과는 아니다. 처음 실패한 실행은 통과로 계산하지 않는다.
 
 매니페스트 측정값은 초기·전체 JavaScript gzip 68,364바이트, 임베디드 자산 227,718바이트다. 새 헤드리스 모듈은 아직 scaffold에 마운트되지 않았으므로 이는 현재 scaffold의 측정값이며 최종 Models·Chat 애플리케이션 크기 예측이 아니다. 이 검사로 실행 성능 향상, GPU 추론, 실제 Safari·VoiceOver, CUDA 실행, 운영 인증 종단 간 검증을 주장하지 않는다.
 

@@ -30,6 +30,8 @@ A catalog entry has two identifiers: `identity.id` is the opaque stable UI model
 
 Source precedence mirrors the existing router: cache `<` models-dir `<` preset. Downloaded, architecturally supported, complete, runnable on this backend, loaded, and selected in the browser are separate facts. `mlxcel list` is not the WebUI catalog and `/v1/models` must not be extended with invented OpenAI semantics.
 
+Catalog metadata preserves three distinct facts: `metadata.model_type` is the raw configuration value, `metadata.architecture` is the resolved loader architecture, and `metadata.declared_architectures` is the bounded declaration list. Do not substitute one for another when displaying support or diagnostics. These fields, `metadata.unknown_reasons`, and the top-level `removal` projection are required by the shared schema; retain nullable values and reasons rather than inferring eligibility from a loaded/downloaded flag. The client fixture suite validates the complete catalog shape and the declaration bounds.
+
 ## Endpoint summary
 
 | Endpoint | Contract |

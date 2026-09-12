@@ -1,6 +1,7 @@
 # Technical Report: PR #1864 — Shared WebUI client and state authority
 
 **Date**: 2026-09-12
+**Updated**: 2026-09-13 — wave-2 integration validation
 **Status**: Pre-merge implementation review complete; downstream application integration remains
 **Languages**: TypeScript, TSX, Rust, Python, JSON-compatible YAML
 **Risk Level**: Medium
@@ -20,7 +21,9 @@ Snapshots are not captured simultaneously. Replaying from the latest global even
 
 ### Canonical validation at the boundary
 
-`webui/src/api/jsonSchema.ts` evaluates the supported canonical schema constructs; `validation.ts` exposes typed validators rather than maintaining a second handwritten DTO shape. The frontend test reads all 33 shared fixture files, including scenarios, identities and string catalogs, not merely selected happy-path response properties. Negative cases exercise unknown fields, missing required nullable fields, malformed timestamps and incorrect discriminators. Schema/generated declaration inputs now participate in the deterministic bundle source digest.
+`webui/src/api/jsonSchema.ts` evaluates the supported canonical schema constructs; `validation.ts` exposes typed validators rather than maintaining a second handwritten DTO shape. The frontend test reads all 41 shared fixture files, including scenarios, identities and string catalogs, not merely selected happy-path response properties. Negative cases exercise unknown fields, missing required nullable fields, malformed timestamps and incorrect discriminators. Schema/generated declaration inputs now participate in the deterministic bundle source digest.
+
+The integrated catalog preserves raw `metadata.model_type`, resolved `metadata.architecture`, and bounded `metadata.declared_architectures` as distinct facts. A consumer regression checks these values, required metadata/unknown-reason/removal projections, and declaration count/string bounds. Integration with the security and catalog work updates existing test fixtures and removes a duplicate Rust helper/test rather than maintaining divergent copies.
 
 This approach avoids a new runtime validation dependency, but the evaluator is deliberately scoped to the canonical schema in this repository, not a general JSON Schema implementation. Future schema constructs need corresponding evaluator and independent negative-test coverage.
 
@@ -44,22 +47,28 @@ One non-overlapping refresh loop uses 2 seconds while visible and 30 seconds whi
 
 ## 3. Review and Validation
 
-Independent correctness and security reviews completed after three fix cycles without remaining findings, as recorded by the issue implementation workflow. The root froze Rust revision `c735bc99` for its full workspace gate. Documentation finalization exposed an acceptance gap in last-successful-data age; the follow-ups `cfabec5c` and `e728c9c9` add a separate timestamp, exclude unapplied notifications and add regression tests in TypeScript only, without changing Rust sources. The final freshness delta received independent approval. The finalizer itself changed documentation only.
+Independent correctness and security reviews completed after three fix cycles without remaining findings, as recorded by the issue implementation workflow. The root froze Rust revision `c735bc99` for its full workspace gate. Documentation finalization exposed an acceptance gap in last-successful-data age; the follow-ups `cfabec5c` and `e728c9c9` add a separate timestamp, exclude unapplied notifications and add regression tests in TypeScript only, without changing Rust sources. The final freshness delta received independent approval. The finalizer itself changed documentation only. Wave-2 integration rebased the branch onto `5505aae6` (security/catalog) and published `7497da98`; the historical pre-integration `c735bc99` gate (11,167 passed, 0 failed, 361 ignored, workspace Clippy passed) does not substitute for the combined gate below. Both independent integration reviews approved `7497da98` without findings.
 
 | Check | Result and scope |
 |---|---|
 | `pnpm --dir webui run typecheck` | Passed strict TypeScript checking. |
 | `pnpm --dir webui run lint` | Passed ESLint with zero warnings. |
-| `pnpm --dir webui run unit` | 44 tests passed across 7 files, including full fixture validation, SSE byte splitting/CJK/CRLF, auth/abort, reducer, pagination, reconciliation, provider cleanup and successful-data freshness. |
-| `pnpm --dir webui run verify-generated` | Two clean temporary builds matched each other and the committed bundle; no checked-in asset rewrite was needed during finalization. |
-| `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` | 33 fixtures, generated DTO drift and strictness/negative checks passed. |
+| `pnpm --dir webui run unit` | 45 tests passed across 7 files, including full fixture validation, SSE byte splitting/CJK/CRLF, auth/abort, reducer, pagination, reconciliation, provider cleanup and successful-data freshness. |
+| `pnpm --dir webui run verify-generated` | Combined gate: two clean temporary builds matched the committed bundle; verified digest `e0a37519f1c21dc11ca6b6b0b163fcb860e860d94b747d027dc1fe22c5ae8b11`. No asset rewrite during documentation finalization. |
+| `pnpm --dir webui run browser` | Root ran 1 passing Chromium shell test against Vite preview; not actual Safari or production control API integration. |
+| `cargo check --workspace --no-default-features --features metal,accelerate` | Root reported success with 43 warnings; this configuration was not warning-free. |
+| `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` | 41 fixtures, generated DTO drift and strictness/negative checks passed. |
 | `make verify-llama-compat verify-versions verify-kernel-dtype-keys` | All passed with the isolated Python environment prepended to PATH. |
 | `cargo fmt --check` | Passed. |
-| `cargo test --workspace --profile test-fast --features metal,accelerate` | Root executed the full workspace gate at frozen Rust revision `c735bc99`: 11,167 passed, 0 failed, 361 ignored across 123 summaries. Ignored tests are not passes. |
-| `cargo test --profile test-fast --features webui ui_events` | Implementation validation: 3 selected Rust route tests passed. |
-| `cargo test --profile test-fast --features webui lifecycle_coordinator_sequence_replay` | Implementation validation: 2 selected Rust coordinator tests passed. |
+| `make verify-test` | Root executed the CI-faithful combined gate at `7497da98`: 11,226 passed, 0 failed, 361 ignored across 123 summaries. Ignored tests are not passes. |
+| `cargo test --profile test-fast --features webui ui_events` | Combined pre-gate validation: 3 selected Rust route tests passed. |
+| `cargo test --profile test-fast --features webui lifecycle_coordinator_sequence_replay` | Combined pre-gate validation: 2 selected Rust coordinator tests passed. |
 | `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` | Implementation workflow reported a passing scoped post-fix lint gate. |
-| `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings` | Root reported the full workspace/all-target gate passed at `c735bc99`; Rust sources are unchanged by the TypeScript-only freshness follow-up. |
+| `cargo clippy --workspace --all-targets --features metal,accelerate -- -D warnings` | Root reported the combined workspace/all-target gate passed at `7497da98`. |
+
+The combined CI-faithful chain completed with exit 0 at frozen runtime `7497da98`, including the workspace tests, all-target Clippy, strict fixture/static gates, feature-off check, frontend checks, Chromium shell test and deterministic bundle verification. Subsequent finalization changes only these reports and architecture documentation.
+
+The first combined workspace invocation omitted the repository-required single-threaded test setting and stopped with 8,330 passes, 1 failure and 144 ignored tests before the remaining gates. `vision::llmjp_vl::tests::either_patch_embedding_conv_layout_produces_the_same_features` reported maximum difference `0.000000015832484`. The root reran that exact test in the same binary five times with serial execution: all five passed without source or tolerance changes. The corrected gate uses `make verify-test`, whose command includes `--no-fail-fast -- --test-threads=1` under #1092. Device-global interference is a possible explanation for the parallel-only failure, not a traced causal finding; the initial failed run is not counted as a pass.
 
 The manifest reports 68,364 bytes of initial/total JavaScript gzip and 227,718 embedded asset bytes. These are the current scaffold's measurements: the new headless modules are not mounted into the scaffold and these numbers are not a prediction of the final Models/Chat application. No runtime performance improvement, GPU inference, actual Safari/VoiceOver, CUDA execution or production authentication end-to-end result is claimed by these checks.
 
