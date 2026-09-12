@@ -259,7 +259,8 @@ impl TunableOp for PagedDecodeSplitsOp<'_> {
             self.visible_lens,
             self.scale,
             splits,
-        );
+        )
+        .map_err(|e| TuneError::infeasible(tactic, format!("launch failed: {e}")))?;
         crate::eval(&out);
         Ok(())
     }

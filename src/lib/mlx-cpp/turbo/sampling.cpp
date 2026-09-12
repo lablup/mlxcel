@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "sampling.h"
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -355,7 +356,7 @@ bool gumbel_max_sample_supported() {
     if (mlx::core::default_device() != mlx::core::Device::gpu) {
         return false;
     }
-    return mlx::core::metal::is_available() || mlx::core::cu::is_available();
+    return mlxcel::custom_kernels_available();
 }
 
 bool gumbel_max_sample_accepts(const mlx::core::array& logits) {
@@ -409,7 +410,8 @@ mlx::core::array gumbel_max_sample(
     // "[metal_kernel] No Metal back-end" on the CUDA backend, so dispatch the
     // `cuda_kernel` port there; `metal::is_available()` is false on a CUDA-only
     // build. Both kernels share the template args, grid, and buffer contract.
-    const bool use_cuda = !mlx::core::metal::is_available();
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel =
         use_cuda ? get_gumbel_kernel_cuda().get() : get_gumbel_kernel().get();
 

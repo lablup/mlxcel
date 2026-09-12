@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "fused_norm.h"
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -325,7 +326,7 @@ inline FusedNormKernelHolderCuda& get_fused_norm_kernel_cuda() {
 } // namespace
 
 bool fused_add_rms_norm_available() {
-    return mlx::core::metal::is_available() || mlx::core::cu::is_available();
+    return mlxcel::custom_kernels_available();
 }
 
 std::vector<mlx::core::array> fused_add_rms_norm(
@@ -367,7 +368,8 @@ std::vector<mlx::core::array> fused_add_rms_norm(
     // Metal kernel on Apple, CUDA port elsewhere. `fast::metal_kernel` throws
     // "[metal_kernel] No Metal back-end" on the CUDA backend and vice versa;
     // `metal::is_available()` is false on a CUDA-only build.
-    const bool use_cuda = !mlx::core::metal::is_available();
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel =
         use_cuda ? get_fused_norm_kernel_cuda().get() : get_fused_norm_kernel().get();
 

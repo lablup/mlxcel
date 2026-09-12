@@ -1313,6 +1313,11 @@ bool default_device_is_gpu();
 // default device; never moves it or creates a stream. Issue #1421.
 bool gpu_backend_available();
 
+// True when the resolved GPU backend has mlxcel's fused kernel ports, that is
+// Metal or CUDA (issue #1803). Narrower than `gpu_backend_available`, which
+// only says a GPU exists.
+bool custom_kernels_available();
+
 // Fused sampling: top-k + top-p + min-p on the untempered distribution, then
 // one temperature scaling, then the categorical draw, in a single function
 // call to minimize FFI round-trips (chain order per issue #1379).

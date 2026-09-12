@@ -187,13 +187,8 @@ fn merge_rejects_natural_log_lse_units() {
         let lse_arr = crate::ffi::from_slice_f32(lse, &[2, HEADS as i32]);
         let mut out_v = cxx::UniquePtr::null();
         let mut out_lse = cxx::UniquePtr::null();
-        crate::ffi::paged_attention_merge_states(
-            &v_arr,
-            &lse_arr,
-            &indptr,
-            &mut out_v,
-            &mut out_lse,
-        );
+        ffi::paged_attention_merge_states(&v_arr, &lse_arr, &indptr, &mut out_v, &mut out_lse)
+            .expect("merge_states");
         to_vec_f32(&out_v)
     };
 

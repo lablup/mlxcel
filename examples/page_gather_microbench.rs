@@ -669,6 +669,7 @@ fn run_config(
             scale,
             0,
         )
+        .expect("paged_attention_decode: this microbench needs a backend with the fused kernel")
     });
     let mut rot = Rotation::new(rot_count);
     let fused_v2 = time_body(warmup, iters, || {

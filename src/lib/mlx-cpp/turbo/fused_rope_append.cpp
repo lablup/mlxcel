@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "fused_rope_append.h"
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -372,7 +373,7 @@ inline FusedRopeKernelHolderCuda& get_fused_rope_kernel_cuda() {
 } // namespace
 
 bool fused_rope_qk_append_available() {
-    return mlx::core::metal::is_available() || mlx::core::cu::is_available();
+    return mlxcel::custom_kernels_available();
 }
 
 std::vector<mlx::core::array> fused_rope_qk_append(
@@ -418,7 +419,8 @@ std::vector<mlx::core::array> fused_rope_qk_append(
             "[fused_rope_qk_append] qkv trailing dim does not match the head geometry.");
     }
 
-    const bool use_cuda = !mlx::core::metal::is_available();
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = use_cuda ? get_fused_rope_kernel_cuda().get()
                             : get_fused_rope_kernel().get();
 

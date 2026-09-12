@@ -2,6 +2,7 @@
 // Direct C++ bridge implementation for MLX via cxx
 
 #include "mlx_cxx_internal.h"
+#include "../../mlx-cpp/turbo/gpu_backend.h"
 
 #include "mlx/primitives.h"
 
@@ -4828,6 +4829,14 @@ bool default_device_is_gpu() {
 // CUDA backend's cached `cudaGetDeviceCount`, are just a magic-static check.
 bool gpu_backend_available() {
     return mlx::core::device_count(mlx::core::Device::gpu) > 0;
+}
+
+// True when the resolved GPU backend has mlxcel's fused kernel ports, that is
+// Metal or CUDA (issue #1803). ROCm answers false until #1814 ports them, so
+// the Rust callers take the graph fallback each family already has instead of
+// reaching a `fast::cuda_kernel` that throws.
+bool custom_kernels_available() {
+    return mlxcel::custom_kernels_available();
 }
 
 // Top-p (nucleus) filtering.

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "sampling_rejection.h"
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -746,7 +747,7 @@ bool rejection_sample_supported() {
     if (mlx::core::default_device() != mlx::core::Device::gpu) {
         return false;
     }
-    return mlx::core::metal::is_available() || mlx::core::cu::is_available();
+    return mlxcel::custom_kernels_available();
 }
 
 bool rejection_sample_accepts(const mlx::core::array& probs) {
@@ -776,7 +777,8 @@ RejectionSampleResult rejection_sample(
     // "[metal_kernel] No Metal back-end" on the CUDA backend, so dispatch the
     // `cuda_kernel` port there; both share the template args, grid, and buffer
     // contract.
-    const bool use_cuda = !mlx::core::metal::is_available();
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = use_cuda ? get_rejection_kernel_cuda().get()
                             : get_rejection_kernel().get();
 
