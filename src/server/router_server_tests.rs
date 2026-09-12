@@ -23,10 +23,12 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use futures::StreamExt;
 use tower::ServiceExt;
 
 use super::{
-    RouterServerState, buffer_dispatch_body, create_router_app, dispatch_model_name, parse_query,
+    RouterServerState, buffer_dispatch_body, create_router_app,
+    create_router_app_with_authenticated_ui, dispatch_model_name, parse_query,
 };
 use crate::downloader::DownloadHooks;
 use crate::server::ServerStartupConfig;
@@ -34,6 +36,8 @@ use crate::server::config::ServerConfig;
 use crate::server::router_cache::{CacheSource, RouterDownloader};
 use crate::server::router_models::{RouterPool, RouterSources};
 use crate::server::router_presets::PresetCliOverrides;
+
+const ROUTER_KEY: &str = "router-key";
 
 fn temp_models_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -98,6 +102,13 @@ fn router_state_from(
     RouterServerState {
         pool,
         config: Arc::new(config),
+    }
+}
+
+fn keyed_config() -> ServerConfig {
+    ServerConfig {
+        api_keys: crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys"),
+        ..Default::default()
     }
 }
 
@@ -167,6 +178,9 @@ async fn send(
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
+
+#[path = "router_contract_test_support.rs"]
+mod contract;
 
 #[tokio::test]
 async fn the_router_inventory_carries_the_b10621_model_object() {
@@ -406,7 +420,7 @@ async fn dispatch_get_patch_api_key_guards_query_selected_models() {
     let root = temp_models_dir("dispatch-auth");
     add_fake_model(&root, "alpha");
     let config = ServerConfig {
-        api_keys: crate::server::resolve_api_keys(&["router-key".to_string()], &[]).expect("keys"),
+        api_keys: crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys"),
         ..Default::default()
     };
     let app = router_app_with(root, config, false);
@@ -422,14 +436,8 @@ async fn dispatch_get_patch_api_key_guards_query_selected_models() {
         let (status, _) = send(app.clone(), method.clone(), path, payload, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
 
-        let (status, body) = send(
-            app.clone(),
-            method.clone(),
-            path,
-            payload,
-            Some("router-key"),
-        )
-        .await;
+        let (status, body) =
+            send(app.clone(), method.clone(), path, payload, Some(ROUTER_KEY)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {body}");
         assert_eq!(
             body["error"]["message"], "model is not loaded",
@@ -481,7 +489,7 @@ async fn health_is_public_and_management_routes_are_keyed() {
     let root = temp_models_dir("auth");
     add_fake_model(&root, "alpha");
     let config = ServerConfig {
-        api_keys: crate::server::resolve_api_keys(&["router-key".to_string()], &[]).expect("keys"),
+        api_keys: crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys"),
         ..Default::default()
     };
     let app = router_app_with(root, config, true);
@@ -507,20 +515,45 @@ async fn health_is_public_and_management_routes_are_keyed() {
             StatusCode::UNAUTHORIZED,
             "{method} {path} must require a key"
         );
-        let status = status_only(
-            app.clone(),
-            method.clone(),
-            path,
-            payload,
-            Some("router-key"),
-        )
-        .await;
+        let status =
+            status_only(app.clone(), method.clone(), path, payload, Some(ROUTER_KEY)).await;
         assert_ne!(
             status,
             StatusCode::UNAUTHORIZED,
             "{method} {path} must accept the configured key"
         );
     }
+}
+
+#[tokio::test]
+async fn base_router_does_not_mount_webui_adapters() {
+    let root = temp_models_dir("ui-off");
+    add_fake_model(&root, "alpha");
+    let app = router_app_with(root, ServerConfig::default(), true);
+    let (status, body) = send(app, Method::GET, "/ui-api/v1/operations", "", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"]["message"],
+        "model name is missing from the request"
+    );
+}
+
+#[tokio::test]
+async fn explicit_webui_router_requires_configured_api_key() {
+    let root = temp_models_dir("ui-auth-required");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        ServerConfig::default(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    let status = status_only(app, Method::GET, "/ui-api/v1/operations", "", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 /// A request cannot smuggle a filesystem path through the model field: names
@@ -711,4 +744,367 @@ async fn dispatch_reaches_the_load_path_through_an_alias() {
         "alias must resolve: {body}"
     );
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+}
+
+async fn first_sse_chunk(app: Router, last_event_id: Option<&str>) -> String {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri("/ui-api/v1/events")
+        .header(header::ACCEPT, "text/event-stream")
+        .header(header::AUTHORIZATION, format!("Bearer {ROUTER_KEY}"));
+    if let Some(event_id) = last_event_id {
+        builder = builder.header("Last-Event-ID", event_id);
+    }
+    let response = app
+        .oneshot(builder.body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("sse chunk timeout")
+        .expect("sse chunk")
+        .expect("sse body ok");
+    String::from_utf8(chunk.to_vec()).expect("utf8 sse")
+}
+
+#[tokio::test]
+async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
+    let root = temp_models_dir("ui-ops");
+    add_fake_model(&root, "alpha");
+    add_fake_model(&root, "beta");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let entry = state.pool.get("alpha").expect("entry");
+    let eviction_entry = state.pool.get("beta").expect("eviction entry");
+    // This fixture seeds the coordinator, not a real inference worker. Real
+    // worker ownership and exit are covered by the separate lifecycle gate.
+    let loaded_lifecycle = crate::server::router_lifecycle::ModelLifecycle::new(
+        crate::server::router_lifecycle::DownloadState::Complete,
+    );
+    loaded_lifecycle.mark_loading();
+    loaded_lifecycle.mark_ready();
+    let accepted = state
+        .pool
+        .lifecycle_coordinator()
+        .begin_operation(
+            crate::server::router_lifecycle::OperationKind::ModelLoad,
+            crate::server::router_lifecycle::OperationTarget::Model {
+                model_id: entry.ui_model_id.clone(),
+                requested_revision: Some(entry.lifecycle_revision()),
+                eviction_target_id: Some(eviction_entry.ui_model_id.clone()),
+            },
+            Some("route-ops-0001"),
+            "route:ops:1".to_string(),
+        )
+        .expect("operation");
+    state.pool.lifecycle_coordinator().update_operation(
+        &accepted.operation_id,
+        crate::server::router_lifecycle::OperationState::Succeeded,
+        Some(
+            crate::server::router_lifecycle::OperationResult::ModelLoad {
+                model_id: entry.ui_model_id.clone(),
+                revision: entry.lifecycle_revision(),
+                lifecycle: loaded_lifecycle.snapshot(),
+                eviction: Some(crate::server::router_lifecycle::ModelEvictionReport {
+                    requested_target_id: Some(eviction_entry.ui_model_id.clone()),
+                    displaced_model_id: Some(eviction_entry.ui_model_id.clone()),
+                    outcome: crate::server::router_lifecycle::ModelEvictionOutcome::Displaced,
+                    rollbackable: false,
+                }),
+            },
+        ),
+        None,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let (status, body) = send(
+        app.clone(),
+        Method::GET,
+        "/ui-api/v1/operations?kind=model_load&limit=10",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    contract::assert_operation_list(&body, &entry.ui_model_id, &eviction_entry.ui_model_id);
+    assert_eq!(body["items"][0]["operation_id"], accepted.operation_id);
+
+    let (status, body) = send(
+        app.clone(),
+        Method::GET,
+        &format!("/ui-api/v1/operations/{}", accepted.operation_id),
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["operation_id"], accepted.operation_id);
+    contract::assert_operation(&body, &entry.ui_model_id, &eviction_entry.ui_model_id);
+
+    let (status, body) = send(
+        app,
+        Method::POST,
+        &format!("/ui-api/v1/operations/{}/cancel", accepted.operation_id),
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "unsupported");
+    assert_eq!(body["error"]["operation_id"], accepted.operation_id);
+}
+
+#[tokio::test]
+async fn ui_model_action_route_validates_profile_fields_and_idempotency() {
+    let root = temp_models_dir("ui-action-profile");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let entry = state.pool.get("alpha").expect("entry");
+    let app = create_router_app_with_authenticated_ui(state);
+    let body = serde_json::json!({
+        "model_id": entry.ui_model_id,
+        "action": "load",
+        "expected_revision": entry.lifecycle_revision(),
+        "idempotency_key": "profile-load-0001",
+        "load_profile": {
+            "ctx_size": 8192,
+            "n_parallel": 4,
+            "kv_cache_mode": "fp16+turbo4"
+        },
+        "eviction_target_id": entry.ui_model_id
+    });
+    let (status, response) = send(
+        app,
+        Method::POST,
+        "/ui-api/v1/model-actions",
+        &body.to_string(),
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(
+        response["error"]["field_errors"][0]["field"],
+        "load_profile"
+    );
+}
+
+#[tokio::test]
+async fn ui_model_action_route_rejects_contract_invalid_fields() {
+    let root = temp_models_dir("ui-action-contract-invalid");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let entry = state.pool.get("alpha").expect("entry");
+    let model_id = entry.ui_model_id.clone();
+    let revision = entry.lifecycle_revision();
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let cases = vec![
+        (
+            serde_json::json!({
+                "model_id": "alpha",
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0001"
+            }),
+            "model_id",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": 0,
+                "idempotency_key": "valid-key-0002"
+            }),
+            "expected_revision",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "short"
+            }),
+            "idempotency_key",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "bad/slash-key"
+            }),
+            "idempotency_key",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "a".repeat(129)
+            }),
+            "idempotency_key",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0003",
+                "eviction_target_id": "mdl_short"
+            }),
+            "eviction_target_id",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0004",
+                "load_profile": { "ctx_size": 0 }
+            }),
+            "load_profile.ctx_size",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0005",
+                "load_profile": { "n_parallel": 33 }
+            }),
+            "load_profile.n_parallel",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0006",
+                "load_profile": { "kv_cache_mode": "q8_0" }
+            }),
+            "load_profile.kv_cache_mode",
+        ),
+    ];
+
+    for (body, field) in cases {
+        let (status, response) = send(
+            app.clone(),
+            Method::POST,
+            "/ui-api/v1/model-actions",
+            &body.to_string(),
+            Some(ROUTER_KEY),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {response}");
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(response["error"]["field_errors"][0]["field"], field);
+    }
+}
+
+#[tokio::test]
+async fn ui_operations_routes_reject_invalid_filters_and_ids() {
+    let root = temp_models_dir("ui-ops-contract-invalid");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let list_cases = vec![
+        ("/ui-api/v1/operations?state=unknown", "state"),
+        ("/ui-api/v1/operations?kind=unknown", "kind"),
+        ("/ui-api/v1/operations?cursor=not-from-server", "cursor"),
+        ("/ui-api/v1/operations?cursor=ops_bad", "cursor"),
+        ("/ui-api/v1/operations?target=bad/path", "target"),
+    ];
+    for (uri, field) in list_cases {
+        let (status, response) = send(app.clone(), Method::GET, uri, "", Some(ROUTER_KEY)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {response}");
+        assert_eq!(response["error"]["field_errors"][0]["field"], field);
+    }
+
+    let (status, response) = send(
+        app.clone(),
+        Method::GET,
+        "/ui-api/v1/operations/bad%20id",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["field_errors"][0]["field"], "id");
+
+    let (status, response) = send(
+        app,
+        Method::POST,
+        "/ui-api/v1/operations/bad%20id/cancel",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["field_errors"][0]["field"], "id");
+}
+
+#[tokio::test]
+async fn ui_events_emit_snapshot_and_gap_reset_with_sse_ids() {
+    let root = temp_models_dir("ui-events");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let server_instance = state
+        .pool
+        .lifecycle_coordinator()
+        .server_instance_id()
+        .to_string();
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let snapshot = first_sse_chunk(app.clone(), None).await;
+    assert!(snapshot.contains("event: snapshot"), "{snapshot}");
+    assert!(snapshot.contains("\"type\":\"snapshot\""), "{snapshot}");
+    assert!(snapshot.contains("id: evt_"), "{snapshot}");
+
+    let missing_same_instance = format!("evt_{server_instance}_99999999");
+    let gap = first_sse_chunk(app, Some(&missing_same_instance)).await;
+    assert!(gap.contains("event: gap"), "{gap}");
+    assert!(gap.contains("\"reason\":\"gap\""), "{gap}");
+    contract::assert_gap_event(&gap, &server_instance);
 }

@@ -279,9 +279,9 @@ async fn unload_refuses_a_model_that_is_not_running() {
     let root = temp_models_dir("unload");
     add_fake_model(&root, "idle");
     let pool = pool(root, 4, true);
-    assert_eq!(pool.unload("idle"), Err(RouterPoolError::NotLoaded));
+    assert_eq!(pool.unload("idle").await, Err(RouterPoolError::NotLoaded));
     assert_eq!(
-        pool.unload("ghost"),
+        pool.unload("ghost").await,
         Err(RouterPoolError::NotFound("ghost".into()))
     );
 }
@@ -633,4 +633,651 @@ async fn load_on_startup_names_come_from_the_preset() {
         true,
     );
     assert_eq!(pool.load_on_startup_names(), vec!["eager"]);
+}
+
+async fn wait_for_operation_state(
+    pool: &RouterPool,
+    operation_id: &str,
+    terminal: &[crate::server::router_lifecycle::OperationState],
+) -> crate::server::router_lifecycle::Operation {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(operation) = pool.lifecycle_coordinator().get_operation(operation_id)
+            && terminal.contains(&operation.state)
+        {
+            return operation;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "operation {operation_id} did not reach {terminal:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn ui_model_action_replay_wins_over_stale_revision_after_failure() {
+    let root = temp_models_dir("ui-replay-stale");
+    add_fake_model(&root, "broken");
+    let pool = Arc::new(pool(root, 4, true));
+    let entry = pool.get("broken").expect("entry");
+    let model_id = entry.ui_model_id.clone();
+    let revision = entry.lifecycle.revision();
+
+    let first = pool
+        .submit_model_action(
+            &model_id,
+            super::RouterModelAction::Load,
+            revision,
+            "replay-load-0001",
+            None,
+        )
+        .expect("accepted");
+    let failed = wait_for_operation_state(
+        &pool,
+        &first.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        failed.state,
+        crate::server::router_lifecycle::OperationState::Failed
+    );
+    assert_ne!(
+        entry.lifecycle.revision(),
+        revision,
+        "failed load must advance revision"
+    );
+
+    let replay = pool
+        .submit_model_action(
+            &model_id,
+            super::RouterModelAction::Load,
+            revision,
+            "replay-load-0001",
+            None,
+        )
+        .expect("idempotent replay must not be rejected as stale");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.operation_id, first.operation_id);
+    assert_eq!(
+        replay.state,
+        crate::server::router_lifecycle::OperationState::Failed
+    );
+}
+
+#[tokio::test]
+async fn ui_load_operation_waits_for_terminal_worker_state() {
+    let root = temp_models_dir("ui-load-terminal");
+    add_fake_model(&root, "broken");
+    let root_display = root.display().to_string();
+    let pool = Arc::new(pool(root, 4, true));
+    let entry = pool.get("broken").expect("entry");
+    let accepted = pool
+        .submit_model_action(
+            &entry.ui_model_id,
+            super::RouterModelAction::Load,
+            entry.lifecycle.revision(),
+            "load-terminal-0001",
+            None,
+        )
+        .expect("accepted");
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[
+            crate::server::router_lifecycle::OperationState::Succeeded,
+            crate::server::router_lifecycle::OperationState::Failed,
+        ],
+    )
+    .await;
+    assert_eq!(
+        terminal.state,
+        crate::server::router_lifecycle::OperationState::Failed,
+        "a broken checkpoint must not be reported as succeeded immediately after begin_load"
+    );
+    assert!(terminal.result.is_none());
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("conflict")
+    );
+    let rendered = serde_json::to_string(&terminal).expect("operation json");
+    assert!(
+        !rendered.contains(&root_display),
+        "operation history must not expose local paths: {rendered}"
+    );
+    assert!(
+        !entry
+            .lifecycle_snapshot()
+            .last_error
+            .unwrap_or_default()
+            .contains(&root_display),
+        "lifecycle error must not expose local paths"
+    );
+}
+
+#[tokio::test]
+async fn ui_load_requires_explicit_eviction_when_capacity_is_reserved() {
+    let root = temp_models_dir("ui-capacity");
+    add_fake_model(&root, "resident");
+    add_fake_model(&root, "candidate");
+    let root_display = root.display().to_string();
+    let pool = Arc::new(pool(root, 1, true));
+    let resident = pool.get("resident").expect("resident");
+    resident.lifecycle.mark_ready();
+    let candidate = pool.get("candidate").expect("candidate");
+
+    let accepted = pool
+        .submit_model_action(
+            &candidate.ui_model_id,
+            super::RouterModelAction::Load,
+            candidate.lifecycle.revision(),
+            "capacity-load-0001",
+            None,
+        )
+        .expect("accepted");
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        terminal.state,
+        crate::server::router_lifecycle::OperationState::Failed
+    );
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("conflict")
+    );
+    assert!(
+        terminal
+            .error
+            .as_ref()
+            .map(|error| !error.message.contains(&root_display))
+            .unwrap_or(false),
+        "capacity refusal must be redacted: {terminal:?}"
+    );
+    assert_eq!(
+        resident.lifecycle.state(),
+        crate::server::router_lifecycle::ModelLifecycleState::Ready
+    );
+}
+
+#[tokio::test]
+async fn rescan_and_remove_preserve_reserved_entries_until_release() {
+    let cache_root = temp_models_dir("reserved-cache");
+    add_fake_model(&cache_root.join("mlx-community"), "reserved");
+    let pool = pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root.clone(), FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    );
+    let entry = pool.get("mlx-community/reserved").expect("entry");
+    entry.lifecycle.mark_loading();
+    std::fs::remove_dir_all(cache_root.join("mlx-community/reserved")).unwrap();
+    pool.rescan().expect("rescan");
+    assert!(
+        pool.get("mlx-community/reserved").is_some(),
+        "reserved entry must not disappear during rescan"
+    );
+    assert_eq!(
+        pool.remove("mlx-community/reserved").await,
+        Err(RouterPoolError::NotLoaded),
+        "cache deletion must not remove a lifecycle-reserved entry without an observed unload"
+    );
+}
+
+#[test]
+fn rescan_preserves_entry_that_becomes_reserved_after_snapshot_clone() {
+    let cache_root = temp_models_dir("reserved-after-clone");
+    add_fake_model(&cache_root.join("mlx-community"), "race");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root, FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    ));
+    let entry = pool.get("mlx-community/race").expect("entry");
+    assert!(!entry.reserves_capacity());
+
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_rescan_after_snapshot_hook(Some(Arc::new(move || {
+        snapshot_tx.send(()).expect("notify snapshot clone");
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("wait for reservation");
+    })));
+
+    let rescan_pool = pool.clone();
+    let rescan_thread = std::thread::spawn(move || rescan_pool.rescan());
+    snapshot_rx.recv().expect("rescan reached snapshot hook");
+    entry.lifecycle.mark_loading();
+    release_tx.send(()).expect("release rescan");
+    rescan_thread
+        .join()
+        .expect("rescan thread")
+        .expect("rescan succeeds");
+    pool.set_rescan_after_snapshot_hook(None);
+
+    let current = pool.get("mlx-community/race").expect("entry after rescan");
+    assert!(
+        Arc::ptr_eq(&entry, &current),
+        "final rescan write must preserve the entry that became reserved after the stale snapshot clone"
+    );
+    assert_eq!(
+        current.lifecycle.state(),
+        crate::server::router_lifecycle::ModelLifecycleState::Loading
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn begin_load_reservation_is_atomic_with_current_registry_entry() {
+    let cache_root = temp_models_dir("load-current-reservation");
+    add_fake_model(&cache_root.join("mlx-community"), "atomic");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root, FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    ));
+    let entry = pool.get("mlx-community/atomic").expect("entry");
+
+    let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+    let (release_checked_tx, release_checked_rx) = std::sync::mpsc::channel();
+    let release_checked_rx = Arc::new(std::sync::Mutex::new(release_checked_rx));
+    pool.set_load_current_check_before_reservation_hook(Some(Arc::new(move || {
+        checked_tx.send(()).expect("notify current check");
+        release_checked_rx
+            .lock()
+            .expect("release current-check mutex")
+            .recv()
+            .expect("release current-check hook");
+    })));
+
+    let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+    let (release_reserved_tx, release_reserved_rx) = std::sync::mpsc::channel();
+    let release_reserved_rx = Arc::new(std::sync::Mutex::new(release_reserved_rx));
+    pool.set_load_after_reservation_hook(Some(Arc::new(move || {
+        reserved_tx.send(()).expect("notify reservation");
+        release_reserved_rx
+            .lock()
+            .expect("release reservation mutex")
+            .recv()
+            .expect("release reservation hook");
+    })));
+
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    pool.set_rescan_after_snapshot_hook(Some(Arc::new(move || {
+        snapshot_tx.send(()).expect("notify stale snapshot clone");
+    })));
+
+    let load_pool = pool.clone();
+    let load_task = tokio::spawn(async move { load_pool.begin_load("mlx-community/atomic").await });
+    checked_rx
+        .recv()
+        .expect("begin_load reached current-check/reservation boundary");
+
+    let rescan_pool = pool.clone();
+    let rescan_thread = std::thread::spawn(move || rescan_pool.rescan());
+    snapshot_rx.recv().expect("rescan cloned stale snapshot");
+    release_checked_tx
+        .send(())
+        .expect("release current-check hook");
+    reserved_rx.recv().expect("load marked reservation");
+    rescan_thread
+        .join()
+        .expect("rescan thread")
+        .expect("rescan succeeds");
+
+    let current = pool.get("mlx-community/atomic").expect("current entry");
+    assert!(
+        Arc::ptr_eq(&entry, &current),
+        "rescan must not replace the entry between the final current check and the load reservation"
+    );
+    assert!(
+        current.reserves_capacity(),
+        "entry must be reserved before rescan is allowed to publish its rebuilt registry"
+    );
+
+    pool.set_rescan_after_snapshot_hook(None);
+    pool.set_load_current_check_before_reservation_hook(None);
+    pool.set_load_after_reservation_hook(None);
+    release_reserved_tx
+        .send(())
+        .expect("release reservation hook");
+    let _ = load_task.await.expect("load task");
+}
+
+#[test]
+fn recreated_cache_entry_keeps_model_id_but_gets_fresh_revision() {
+    let cache_root = temp_models_dir("aba-revision");
+    add_fake_model(&cache_root.join("mlx-community"), "same");
+    let pool = pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root.clone(), FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    );
+    let first = pool.get("mlx-community/same").expect("entry");
+    let first_id = first.ui_model_id.clone();
+    let first_revision = first.lifecycle_revision();
+    std::fs::remove_dir_all(cache_root.join("mlx-community/same")).unwrap();
+    pool.rescan().expect("drop entry");
+    assert!(pool.get("mlx-community/same").is_none());
+
+    add_fake_model(&cache_root.join("mlx-community"), "same");
+    pool.rescan().expect("recreate entry");
+    let recreated = pool.get("mlx-community/same").expect("recreated");
+    assert_eq!(recreated.ui_model_id, first_id);
+    assert_ne!(
+        recreated.lifecycle_revision(),
+        first_revision,
+        "same stable model id must not reuse an old revision after remove/rescan/re-add"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_ui_action_rejects_same_id_recreated_before_execution() {
+    let cache_root = temp_models_dir("queued-same-id");
+    add_fake_model(&cache_root.join("mlx-community"), "queued");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root.clone(), FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    ));
+    let entry = pool.get("mlx-community/queued").expect("entry");
+    let model_id = entry.ui_model_id.clone();
+    let revision = entry.lifecycle_revision();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_model_action_before_execute_hook(Some(Arc::new(move || {
+        let _ = entered_tx.send(());
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("release queued action");
+    })));
+
+    let accepted = pool
+        .submit_model_action(
+            &model_id,
+            super::RouterModelAction::Load,
+            revision,
+            "queued-same-id-0001",
+            None,
+        )
+        .expect("accepted");
+    entered_rx.recv().expect("background reached hook");
+    pool.remove("mlx-community/queued")
+        .await
+        .expect("remove old entry");
+    add_fake_model(&cache_root.join("mlx-community"), "queued");
+    pool.rescan().expect("recreate same id");
+    let recreated = pool.get("mlx-community/queued").expect("recreated");
+    assert_eq!(recreated.ui_model_id, model_id);
+    assert_ne!(recreated.lifecycle_revision(), revision);
+    release_tx.send(()).expect("release hook");
+
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("stale_revision")
+    );
+    pool.set_model_action_before_execute_hook(None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_ui_load_rejects_same_id_recreated_eviction_target_before_execution() {
+    let cache_root = temp_models_dir("queued-target-same-id");
+    add_fake_model(&cache_root.join("mlx-community"), "resident");
+    add_fake_model(&cache_root.join("mlx-community"), "candidate");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root.clone(), FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        1,
+        true,
+    ));
+    let candidate = pool.get("mlx-community/candidate").expect("candidate");
+    let candidate_id = candidate.ui_model_id.clone();
+    let candidate_revision = candidate.lifecycle_revision();
+    let resident = pool.get("mlx-community/resident").expect("resident");
+    let target_id = resident.ui_model_id.clone();
+    let target_revision = resident.lifecycle_revision();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_model_action_before_execute_hook(Some(Arc::new(move || {
+        let _ = entered_tx.send(());
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("release queued action");
+    })));
+
+    let accepted = pool
+        .submit_model_action(
+            &candidate_id,
+            super::RouterModelAction::Load,
+            candidate_revision,
+            "queued-target-same-id-0001",
+            Some(&target_id),
+        )
+        .expect("accepted");
+    entered_rx.recv().expect("background reached hook");
+    std::fs::remove_dir_all(cache_root.join("mlx-community/resident")).unwrap();
+    pool.rescan().expect("drop target");
+    assert!(pool.get("mlx-community/resident").is_none());
+    add_fake_model(&cache_root.join("mlx-community"), "resident");
+    pool.rescan().expect("recreate target");
+    let recreated = pool.get("mlx-community/resident").expect("recreated");
+    assert_eq!(recreated.ui_model_id, target_id);
+    assert_ne!(recreated.lifecycle_revision(), target_revision);
+    recreated.lifecycle.mark_ready();
+    release_tx.send(()).expect("release hook");
+
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("stale_revision")
+    );
+    pool.set_model_action_before_execute_hook(None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_ui_load_rejects_different_id_eviction_target_same_name_before_execution() {
+    let cache_root = temp_models_dir("queued-target-different-id-cache");
+    let models_dir = temp_models_dir("queued-target-different-id-dir");
+    add_fake_model(&cache_root, "resident");
+    add_fake_model(&cache_root, "candidate");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: Some(models_dir.clone()),
+            cache: Some(CacheSource::new(cache_root, FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        1,
+        true,
+    ));
+    let candidate = pool.get("candidate").expect("candidate");
+    let candidate_id = candidate.ui_model_id.clone();
+    let candidate_revision = candidate.lifecycle_revision();
+    let resident = pool.get("resident").expect("resident");
+    assert_eq!(resident.source, RouterModelSource::Cache);
+    let target_id = resident.ui_model_id.clone();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_model_action_before_execute_hook(Some(Arc::new(move || {
+        let _ = entered_tx.send(());
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("release queued action");
+    })));
+
+    let accepted = pool
+        .submit_model_action(
+            &candidate_id,
+            super::RouterModelAction::Load,
+            candidate_revision,
+            "queued-target-different-id-0001",
+            Some(&target_id),
+        )
+        .expect("accepted");
+    entered_rx.recv().expect("background reached hook");
+    add_fake_model(&models_dir, "resident");
+    pool.rescan().expect("models_dir replaces target");
+    let replacement = pool.get("resident").expect("replacement");
+    assert_eq!(replacement.source, RouterModelSource::ModelsDir);
+    assert_ne!(replacement.ui_model_id, target_id);
+    replacement.lifecycle.mark_ready();
+    release_tx.send(()).expect("release hook");
+
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("stale_revision")
+    );
+    pool.set_model_action_before_execute_hook(None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_ui_action_rejects_different_id_with_same_name_before_execution() {
+    let cache_root = temp_models_dir("queued-different-id-cache");
+    let models_dir = temp_models_dir("queued-different-id-dir");
+    add_fake_model(&cache_root, "same-name");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: Some(models_dir.clone()),
+            cache: Some(CacheSource::new(cache_root, FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    ));
+    let entry = pool.get("same-name").expect("cache entry");
+    assert_eq!(entry.source, RouterModelSource::Cache);
+    let model_id = entry.ui_model_id.clone();
+    let revision = entry.lifecycle_revision();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_model_action_before_execute_hook(Some(Arc::new(move || {
+        let _ = entered_tx.send(());
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("release queued action");
+    })));
+
+    let accepted = pool
+        .submit_model_action(
+            &model_id,
+            super::RouterModelAction::Load,
+            revision,
+            "queued-different-id-0001",
+            None,
+        )
+        .expect("accepted");
+    entered_rx.recv().expect("background reached hook");
+    add_fake_model(&models_dir, "same-name");
+    pool.rescan().expect("models_dir replaces same name");
+    let replacement = pool.get("same-name").expect("replacement");
+    assert_eq!(replacement.source, RouterModelSource::ModelsDir);
+    assert_ne!(replacement.ui_model_id, model_id);
+    release_tx.send(()).expect("release hook");
+
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("stale_revision")
+    );
+    pool.set_model_action_before_execute_hook(None);
+}
+
+#[tokio::test]
+async fn response_body_drop_releases_active_request_lease() {
+    let lifecycle = Arc::new(crate::server::router_lifecycle::ModelLifecycle::new(
+        crate::server::router_lifecycle::DownloadState::Complete,
+    ));
+    lifecycle.mark_ready();
+    let lease = lifecycle.clone().try_request_lease().expect("lease");
+    assert_eq!(lifecycle.snapshot().active_requests, 1);
+    let response = axum::response::Response::new(axum::body::Body::from("hello"));
+    let leased = super::response_with_lease(response, lease);
+    assert_eq!(lifecycle.snapshot().active_requests, 1);
+    drop(leased);
+    assert_eq!(lifecycle.snapshot().active_requests, 0);
+}
+
+#[tokio::test]
+async fn shutdown_reports_pending_reserved_entries_within_bound() {
+    let root = temp_models_dir("shutdown-pending");
+    add_fake_model(&root, "reserved");
+    let pool = Arc::new(pool(root, 4, true));
+    let entry = pool.get("reserved").expect("entry");
+    entry.lifecycle.mark_loading();
+    let report = pool
+        .shutdown_all(std::time::Duration::from_millis(50))
+        .await;
+    assert_eq!(report.attempted, 1);
+    assert!(report.remaining.contains(&"reserved".to_string()));
+    assert_eq!(
+        entry.lifecycle.state(),
+        crate::server::router_lifecycle::ModelLifecycleState::Draining
+    );
 }

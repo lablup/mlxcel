@@ -1881,6 +1881,16 @@
               "null"
             ],
             "minimum": 1
+          },
+          "eviction_target_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -1972,6 +1982,49 @@
           }
         }
       },
+      "ModelEvictionReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requested_target_id",
+          "displaced_model_id",
+          "outcome",
+          "rollbackable"
+        ],
+        "properties": {
+          "requested_target_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "displaced_model_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "not_needed",
+              "displaced",
+              "failed_after_displacement"
+            ]
+          },
+          "rollbackable": {
+            "type": "boolean"
+          }
+        }
+      },
       "ModelActionResult": {
         "type": "object",
         "additionalProperties": false,
@@ -1999,6 +2052,16 @@
           },
           "lifecycle": {
             "$ref": "#/components/schemas/LifecycleSnapshot"
+          },
+          "eviction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelEvictionReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },

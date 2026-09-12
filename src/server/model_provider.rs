@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -449,7 +449,83 @@ pub struct ModelProvider {
     /// [`validated_decode_hang_timeout`]. Constructors that do not receive a
     /// `ServerConfig` initialise this to [`DECODE_HANG_TIMEOUT`].
     decode_hang_timeout: Duration,
+    worker_exit: Arc<WorkerExitObserver>,
     _worker_handle: thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Default)]
+struct WorkerExitState {
+    observed: bool,
+    panic_message: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkerExitObserver {
+    state: Mutex<WorkerExitState>,
+    condvar: Condvar,
+}
+
+impl WorkerExitObserver {
+    pub fn observed(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.observed)
+            .unwrap_or(false)
+    }
+
+    pub fn panic_message(&self) -> Option<String> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| state.panic_message.clone())
+    }
+
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.observed {
+            return true;
+        }
+        let Ok((state_after_wait, _)) = self
+            .condvar
+            .wait_timeout_while(state, timeout, |state| !state.observed)
+        else {
+            return false;
+        };
+        state = state_after_wait;
+        state.observed
+    }
+
+    fn mark_observed(&self, panic_message: Option<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.observed = true;
+            state.panic_message = panic_message;
+        }
+        self.condvar.notify_all();
+    }
+}
+
+fn observe_worker_exit(
+    worker_handle: thread::JoinHandle<()>,
+) -> (thread::JoinHandle<()>, Arc<WorkerExitObserver>) {
+    let observer = Arc::new(WorkerExitObserver::default());
+    let observer_for_thread = observer.clone();
+    let watcher = thread::spawn(move || {
+        let panic_message = worker_handle.join().err().map(worker_panic_message);
+        observer_for_thread.mark_observed(panic_message);
+    });
+    (watcher, observer)
+}
+
+fn worker_panic_message(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "model worker panicked with a non-string payload".to_string()
 }
 
 impl ModelProvider {
@@ -719,6 +795,7 @@ impl ModelProvider {
                      /v1/rerank, so the chat worker did not load a second copy of its weights"
                 );
             })?;
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
         Ok(Self {
             request_tx,
             model_id,
@@ -736,6 +813,7 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout,
+            worker_exit,
             _worker_handle: worker_handle,
         })
     }
@@ -791,6 +869,7 @@ impl ModelProvider {
             obs_clone,
             single_stream_queue_admission.clone(),
         );
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
 
         Ok(Self {
             request_tx,
@@ -807,6 +886,7 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
             _worker_handle: worker_handle,
         })
     }
@@ -849,6 +929,7 @@ impl ModelProvider {
             batch_metrics.clone(),
             batch_observability.clone(),
         );
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
 
         Ok(Self {
             request_tx,
@@ -867,6 +948,7 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
             _worker_handle: worker_handle,
         })
     }
@@ -1206,6 +1288,7 @@ impl ModelProvider {
             single_stream_queue_admission.clone(),
             sleeping.clone(),
         );
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
 
         Ok(Self {
             request_tx,
@@ -1222,6 +1305,7 @@ impl ModelProvider {
             prompt_cache: prompt_cache_store,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
             _worker_handle: worker_handle,
         })
     }
@@ -1324,6 +1408,7 @@ impl ModelProvider {
             single_stream_queue_admission.clone(),
             sleeping.clone(),
         );
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
 
         Ok(Self {
             request_tx,
@@ -1340,6 +1425,7 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
             _worker_handle: worker_handle,
         })
     }
@@ -2271,6 +2357,25 @@ pub(crate) fn tokenize_prompt_for_generation_with_ordered_media(
 }
 
 impl ModelProvider {
+    /// Ask the worker to shut down without waiting for it to finish.
+    ///
+    /// Router-pool unload uses this before observing [`Self::worker_exit_observer`].
+    /// Sending the signal is idempotent: a closed channel means the worker has
+    /// already moved past the request loop or exited.
+    pub fn shutdown_worker(&self) -> bool {
+        send_shutdown_signal(&self.request_tx)
+    }
+
+    /// Observe actual worker-thread completion after worker-local model state is
+    /// destroyed, including early returns and panics.
+    pub fn worker_exit_observer(&self) -> Arc<WorkerExitObserver> {
+        self.worker_exit.clone()
+    }
+
+    pub fn worker_exit_observed(&self) -> bool {
+        self.worker_exit.observed()
+    }
+
     /// Submit a background prompt-cache warm-up (issue #1144).
     ///
     /// Fire and forget by design. The caller has already answered the client,

@@ -8,7 +8,8 @@
   "target": {
     "target_kind": "model",
     "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
-    "requested_revision": 7
+    "requested_revision": 7,
+    "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
   },
   "progress": {
     "completed_bytes": 0,

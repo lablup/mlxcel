@@ -220,6 +220,7 @@ export interface ModelOperationTarget {
   readonly target_kind: "model";
   readonly model_id: ModelId;
   readonly requested_revision: number | null;
+  readonly eviction_target_id?: ModelId | null;
 }
 
 export interface DownloadOperationTarget {
@@ -243,11 +244,19 @@ export interface CatalogRefreshResult {
   readonly snapshot_sequence: number;
 }
 
+export interface ModelEvictionReport {
+  readonly requested_target_id: ModelId | null;
+  readonly displaced_model_id: ModelId | null;
+  readonly outcome: "not_needed" | "displaced" | "failed_after_displacement";
+  readonly rollbackable: boolean;
+}
+
 export interface ModelActionResult {
   readonly result_kind: "model_load" | "model_unload" | "model_removal";
   readonly model_id: ModelId;
   readonly revision: number;
   readonly lifecycle: LifecycleSnapshot;
+  readonly eviction?: ModelEvictionReport | null;
 }
 
 export interface DownloadResult {

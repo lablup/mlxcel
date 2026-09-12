@@ -103,6 +103,7 @@ impl ModelProvider {
                 }
             }
         });
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
 
         Self {
             request_tx,
@@ -119,6 +120,7 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
             _worker_handle: worker_handle,
         }
     }
@@ -135,6 +137,7 @@ impl ModelProvider {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         drop(request_rx);
         let batch_metrics = Arc::new(BatchMetrics::new());
+        let (worker_handle, worker_exit) = observe_worker_exit(thread::spawn(|| {}));
         Self {
             request_tx,
             model_id: "route-test-model".to_string(),
@@ -150,7 +153,8 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
-            _worker_handle: thread::spawn(|| {}),
+            worker_exit,
+            _worker_handle: worker_handle,
         }
     }
 
@@ -249,6 +253,7 @@ impl ModelProvider {
                 }
             }
         });
+        let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
         let provider = Self {
             request_tx,
             model_id: "route-test-model".to_string(),
@@ -264,6 +269,7 @@ impl ModelProvider {
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            worker_exit,
             _worker_handle: worker_handle,
         };
         (
