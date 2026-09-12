@@ -40,6 +40,12 @@ pub use crate::cuda_arch::{
     cuda_compute_capability, enforce_cuda_arch_compatibility, entry_coverage,
     parse_cuda_arch_entry, parse_cuda_arch_list, trace_arch_enabled, trace_arch_once,
 };
+pub use crate::cuda_graph_budget::{
+    AppliedCudaGraphBudget, CudaGraphBudget, GB10_GRAPH_BUDGET, GB10_RAISED_BUDGET_MODEL_TYPES,
+    ModelGraphShape, applied_cuda_graph_budget, apply_cuda_graph_budget_default,
+    cuda_graph_budget_default, cuda_graph_budget_startup_summary, model_graph_shape_from_config,
+    model_graph_shape_from_dir,
+};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 

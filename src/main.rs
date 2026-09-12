@@ -2810,6 +2810,30 @@ fn init_cli_tracing(command: &Commands) {
         .try_init();
 }
 
+/// The checkpoint a command was given, for the GB10 graph budget default
+/// (#1798): the `-m` argument as typed. A repo id that is not on disk, router
+/// mode (`serve --models-dir` with no model) and a command without a model
+/// all yield `None` or a path with no `config.json`, both of which the
+/// applier reads as dense and leaves MLX's defaults alone.
+fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
+    match command {
+        Commands::Run(args) => args.model.as_deref(),
+        Commands::Generate(args) => Some(args.model.model.as_path()),
+        Commands::Serve(args) => args.model.as_deref(),
+        Commands::Embed(args) => Some(args.model.as_path()),
+        Commands::Rerank(args) => Some(args.model.as_path()),
+        Commands::Tune(args) => args.model.as_deref(),
+        Commands::Inspect(args) => Some(args.model.as_path()),
+        Commands::Detect(args) => Some(args.model.as_path()),
+        Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
+        // Gated exactly like the variant itself and its dispatch arm below;
+        // without the gate this arm does not compile in feature sets that
+        // exclude `surgery`.
+        #[cfg(feature = "surgery")]
+        Commands::SplitMtp(_) => None,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Hidden machine interface for the llama-server b10621 compatibility
     // manifest (issue #1443): `mlxcel serve --dump-flag-surface` prints the
@@ -2906,6 +2930,12 @@ fn main() -> anyhow::Result<()> {
     // Same class of abort for the cuDNN SDPA plan cache, which prefill shape
     // diversity alone can cross (#1799). Same contract: CUDA only, env wins.
     mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
+    // On GB10 (sm_121) raise MLX's CUDA graph capture budgets
+    // (MLX_MAX_OPS_PER_BUFFER / MLX_MAX_MB_PER_BUFFER) to the row MLX gives
+    // every other Hopper and Blackwell part: the 25 "MB" default commits a
+    // graph on every large-input op (#1798). Gated on the compute capability,
+    // per-variable env wins, and must run before any MLX op.
+    mlxcel_core::hardware::apply_cuda_graph_budget_default(cli_model_dir(&cli.command));
 
     // Publish autotuned CUDA kernel knobs (qmm CTA tile, multirow-qmv row
     // window) into the environment the patched MLX kernels read (#906). Inert

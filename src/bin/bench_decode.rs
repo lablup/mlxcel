@@ -433,6 +433,11 @@ fn main() -> Result<()> {
     // Same class of abort for the cuDNN SDPA plan cache, which prefill shape
     // diversity alone can cross (#1799). Same contract: CUDA only, env wins.
     mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
+    // Match the production binaries' GB10 graph budget default (#1798) so
+    // decode benchmarks reflect the shipped default; an explicit
+    // MLX_MAX_OPS_PER_BUFFER or MLX_MAX_MB_PER_BUFFER (manual sweep override)
+    // always wins, per variable.
+    mlxcel_core::hardware::apply_cuda_graph_budget_default(Some(&args.model));
 
     let kv_cache_mode = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),

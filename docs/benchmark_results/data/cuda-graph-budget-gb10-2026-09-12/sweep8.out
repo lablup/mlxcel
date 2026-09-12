@@ -1,0 +1,76 @@
+waiting for GB10 GPU lock (held by: 1798
+2026-09-12T10:09:12+09:00)
+waiting for GB10 GPU lock (held by: 1798
+2026-09-12T10:09:12+09:00)
+acquired GB10 GPU lock for 1798
+IDLE load=0.41 0.85 1.61 1/876 100392 2026-09-12T10:26:42+09:00
+PHASE_START abcli 2026-09-12T10:26:42+09:00 load=0.41 0.85 1.61 2/875 100395 nvrm=0
+[warmup 0] off tok/s=34.33 rc=0
+[round 0] off tok/s=34.17 load1=0.82 rc=0
+[round 0] restore-off tok/s=29.04 load1=0.86 rc=0
+[round 0] both-off tok/s=33.72 load1=0.83 rc=0
+[round 1] restore-off tok/s=29.17 load1=0.81 rc=0
+[round 1] both-off tok/s=33.69 load1=0.80 rc=0
+[round 1] off tok/s=33.96 load1=0.71 rc=0
+[round 2] both-off tok/s=34.03 load1=0.79 rc=0
+[round 2] off tok/s=34.27 load1=0.72 rc=0
+[round 2] restore-off tok/s=29.67 load1=0.95 rc=0
+PHASE_END abcli 2026-09-12T10:30:41+09:00 load=1.31 0.98 1.48 2/883 117410 nvrm=0
+IDLE load=0.37 0.76 1.35 1/885 128090 2026-09-12T10:32:01+09:00
+PHASE_START absrv 2026-09-12T10:32:01+09:00 load=0.37 0.76 1.35 1/884 128093 nvrm=0
+[round 0] default load1=0.34 start=11s c1:agg=28.5/dec=32.6/ttft=912 
+[round 0] restore load1=0.42 start=12s c1:agg=27.7/dec=30.6/ttft=715 
+[round 0] both load1=0.60 start=12s c1:agg=29.0/dec=32.2/ttft=708 
+[round 1] restore load1=0.52 start=13s c1:agg=28.2/dec=31.3/ttft=728 
+[round 1] both load1=0.61 start=12s c1:agg=29.1/dec=32.2/ttft=688 
+[round 1] default load1=0.58 start=11s c1:agg=29.4/dec=32.5/ttft=680 
+[round 2] both load1=0.96 start=11s c1:agg=29.6/dec=32.8/ttft=693 
+[round 2] default load1=0.97 start=13s c1:agg=29.2/dec=32.4/ttft=716 
+[round 2] restore load1=0.88 start=13s c1:agg=27.2/dec=30.0/ttft=728 
+PHASE_END absrv 2026-09-12T10:35:44+09:00 load=0.98 0.85 1.25 1/882 130721 nvrm=0
+IDLE load=0.36 0.69 1.17 4/884 130867 2026-09-12T10:36:44+09:00
+PHASE_START qbatched 2026-09-12T10:36:44+09:00 load=0.36 0.69 1.17 1/883 130870 nvrm=0
+[round 0] default load1=0.33 start=22s c1:agg=44.7/dec=65.6/ttft=1438 c4:agg=68.6/dec=21.7/ttft=2314 c8:agg=60.3/dec=9.2/ttft=4526 
+[round 0] nograph load1=0.73 start=7s c1:agg=48.6/dec=67.8/ttft=1182 c4:agg=73.2/dec=22.9/ttft=2096 c8:agg=78.0/dec=12.3/ttft=4078 
+[round 0] both load1=0.73 start=8s c1:agg=51.8/dec=79.6/ttft=1364 c4:agg=67.1/dec=21.2/ttft=2381 c8:agg=57.3/dec=8.6/ttft=4648 
+[round 1] nograph load1=0.71 start=8s c1:agg=48.8/dec=67.8/ttft=1167 c4:agg=75.3/dec=23.6/ttft=2067 c8:agg=85.9/dec=12.0/ttft=1862 
+[round 1] both load1=0.66 start=8s c1:agg=51.6/dec=79.1/ttft=1356 c4:agg=67.2/dec=21.3/ttft=2403 c8:agg=61.6/dec=9.5/ttft=4677 
+[round 1] default load1=0.63 start=8s c1:agg=45.8/dec=63.4/ttft=1232 c4:agg=66.7/dec=20.9/ttft=2321 c8:agg=61.9/dec=8.9/ttft=3199 
+[round 2] both load1=0.82 start=8s c1:agg=52.6/dec=81.3/ttft=1352 c4:agg=68.0/dec=21.6/ttft=2391 c8:agg=61.0/dec=8.8/ttft=3291 
+[round 2] default load1=0.55 start=8s c1:agg=48.0/dec=68.6/ttft=1264 c4:agg=65.3/dec=20.3/ttft=2315 c8:agg=62.2/dec=8.9/ttft=3173 
+[gate] busy: ['cargo-clippy', 'clippy-driver'] ci_job=True load1=1.91
+[round 2] nograph load1=1.71 start=8s c1:agg=47.9/dec=66.7/ttft=1193 c4:agg=72.1/dec=22.4/ttft=2097 c8:agg=80.3/dec=11.9/ttft=2873 
+PHASE_END qbatched 2026-09-12T10:45:10+09:00 load=2.61 1.36 1.22 5/1055 143074 nvrm=0
+IDLE load=0.39 0.93 1.08 1/883 144702 2026-09-12T10:47:10+09:00
+PHASE_START q35 2026-09-12T10:47:10+09:00 load=0.39 0.93 1.08 1/882 144705 nvrm=0
+[round 0] default load1=0.44 start=23s c1:agg=40.0/dec=52.4/ttft=1195 c4:agg=66.6/dec=16.9/ttft=220 c8:agg=57.7/dec=7.3/ttft=393 
+[round 0] nograph load1=0.87 start=10s c1:agg=41.0/dec=50.1/ttft=904 c4:agg=57.4/dec=14.5/ttft=210 c8:agg=51.3/dec=6.5/ttft=370 
+[round 0] both load1=0.98 start=10s c1:agg=41.9/dec=55.3/ttft=1174 c4:agg=63.5/dec=16.1/ttft=275 c8:agg=49.8/dec=6.3/ttft=449 
+[round 1] nograph load1=0.92 start=9s c1:agg=39.4/dec=47.5/ttft=893 c4:agg=56.0/dec=14.1/ttft=215 c8:agg=52.3/dec=6.6/ttft=374 
+[round 1] both load1=0.86 start=10s c1:agg=42.6/dec=56.4/ttft=1165 c4:agg=61.7/dec=15.7/ttft=285 c8:agg=50.6/dec=6.4/ttft=446 
+[round 1] default load1=0.98 start=10s c1:agg=42.7/dec=56.5/ttft=1167 c4:agg=61.8/dec=15.6/ttft=219 c8:agg=55.2/dec=7.0/ttft=401 
+[round 2] both load1=1.03 start=8s c1:agg=43.0/dec=57.0/ttft=1159 c4:agg=66.1/dec=16.8/ttft=271 c8:agg=51.1/dec=6.5/ttft=442 
+[round 2] default load1=1.26 start=9s c1:agg=43.8/dec=58.3/ttft=1149 c4:agg=56.9/dec=14.4/ttft=224 c8:agg=56.8/dec=7.2/ttft=404 
+[round 2] nograph load1=1.18 start=9s c1:agg=39.2/dec=47.2/ttft=887 c4:agg=56.4/dec=14.3/ttft=214 c8:agg=51.8/dec=6.5/ttft=381 
+PHASE_END q35 2026-09-12T10:56:56+09:00 load=1.40 1.19 1.13 1/875 146426 nvrm=0
+IDLE load=0.40 0.92 1.04 1/879 146604 2026-09-12T10:58:16+09:00
+PHASE_START qprefill 2026-09-12T10:58:16+09:00 load=0.40 0.92 1.04 1/878 146607 nvrm=0
+[warmup 0] default dec=72.04 rc=0
+[round 0] default dec=71.67 pre=1099.94 ptok=2048 peak=20.59 load1=0.40 rc=0
+[round 0] both dec=79.47 pre=964.05 ptok=2048 peak=36.91 load1=0.52 rc=0
+[round 1] both dec=85.93 pre=1005.82 ptok=2048 peak=36.91 load1=0.71 rc=0
+[round 1] default dec=78.46 pre=1127.63 ptok=2048 peak=20.59 load1=0.69 rc=0
+[round 2] default dec=71.22 pre=1119.64 ptok=2048 peak=20.59 load1=0.76 rc=0
+[gate] busy: ['rustc'] ci_job=True load1=0.80
+[round 2] both dec=84.98 pre=957.46 ptok=2048 peak=36.91 load1=1.29 rc=0
+[gate] busy: ['cargo-clippy', 'clippy-driver'] ci_job=True load1=1.48
+[warmup 0] default dec=58.73 rc=0
+[round 0] default dec=54.63 pre=647.7 ptok=2048 peak=27.74 load1=1.60 rc=0
+[round 0] both dec=58.74 pre=594.72 ptok=2048 peak=35.91 load1=1.42 rc=0
+[round 1] both dec=65.57 pre=596.24 ptok=2048 peak=35.91 load1=1.20 rc=0
+[round 1] default dec=52.53 pre=645.51 ptok=2048 peak=27.74 load1=1.30 rc=0
+[round 2] default dec=57.44 pre=641.71 ptok=2048 peak=27.74 load1=1.12 rc=0
+[round 2] both dec=65.03 pre=601.09 ptok=2048 peak=35.91 load1=1.26 rc=0
+PHASE_END qprefill 2026-09-12T11:03:40+09:00 load=1.26 1.19 1.11 1/878 159317 nvrm=0
+SWEEP8_DONE
+released GB10 GPU lock

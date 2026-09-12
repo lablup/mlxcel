@@ -1,0 +1,25 @@
+acquired GB10 GPU lock for 1798
+waiting for idle host: load1=1.13
+waiting for idle host: load1=1.11
+waiting for idle host: load1=1.50
+waiting for idle host: load1=1.32
+waiting for idle host: load1=0.94
+waiting for idle host: load1=0.68
+waiting for idle host: load1=0.67
+waiting for idle host: load1=0.48
+IDLE load=0.41 0.78 0.93 1/700 2563942 2026-09-12T02:31:12+09:00
+PHASE_START batched 2026-09-12T02:31:12+09:00 load=0.41 0.78 0.93 1/699 2563945
+[round 0] default load1=0.38 start=13s c1:agg=26.5/dec=30.8/ttft=1083 c4:agg=28.5/dec=31.1/ttft=11161 c8:agg=28.1/dec=30.6/ttft=25598 
+[round 0] both load1=0.56 start=14s c1:agg=29.3/dec=32.5/ttft=708 c4:agg=29.9/dec=32.7/ttft=10534 c8:agg=28.7/dec=31.3/ttft=24997 
+[round 0] nograph load1=0.86 start=13s c1:agg=29.6/dec=31.4/ttft=414 c4:agg=28.8/dec=29.9/ttft=10605 c8:agg=29.9/dec=31.1/ttft=23988 
+[round 1] both load1=0.63 start=16s c1:agg=29.0/dec=32.2/ttft=715 c4:agg=29.4/dec=32.1/ttft=10807 c8:agg=29.2/dec=31.9/ttft=24359 
+[round 1] nograph load1=1.13 start=14s c1:agg=29.4/dec=31.1/ttft=415 c4:agg=30.3/dec=31.5/ttft=10210 c8:agg=29.1/dec=30.2/ttft=23923 
+[round 1] default load1=0.95 start=15s c1:agg=26.9/dec=29.8/ttft=743 c4:agg=27.7/dec=30.2/ttft=11350 c8:agg=27.1/dec=29.5/ttft=26539 
+[round 2] nograph load1=0.82 start=15s c1:agg=29.2/dec=31.0/ttft=424 c4:agg=29.3/dec=30.4/ttft=10290 c8:agg=28.3/dec=29.3/ttft=25044 
+[round 2] default load1=0.73 start=16s c1:agg=27.3/dec=30.3/ttft=746 c4:agg=28.2/dec=30.7/ttft=11297 c8:agg=27.8/dec=30.3/ttft=25769 
+[round 2] both load1=0.65 start=11s c1:agg=29.0/dec=32.0/ttft=688 c4:agg=29.7/dec=32.6/ttft=10678 c8:agg=28.6/dec=31.2/ttft=24928 
+[round 0] default load1=0.84 start=12s c1:agg=52.6/dec=78.9/ttft=1282 c4:agg=66.1/dec=20.6/ttft=2303 c8:agg=64.0/dec=8.8/ttft=2083 
+[round 0] both load1=0.63 start=8s c1:agg=46.1/dec=79.9/ttft=1847 c4:agg=66.5/dec=21.2/ttft=2476 c8:agg=58.5/dec=9.0/ttft=4832 
+[round 0] nograph load1=0.78 start=9s c1:agg=48.2/dec=67.0/ttft=1181 c4:agg=73.6/dec=23.0/ttft=2079 c8:agg=79.7/dec=11.7/ttft=2869 
+[round 1] both load1=0.83 start=8s c1:agg=52.3/dec=80.4/ttft=1350 c4:agg=62.8/dec=19.9/ttft=2557 c8:agg=60.5/dec=9.3/ttft=4788 
+released GB10 GPU lock

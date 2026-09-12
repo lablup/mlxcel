@@ -1,0 +1,28 @@
+acquired GB10 GPU lock for 1798
+waiting for idle host: load1=0.76
+waiting for idle host: load1=0.70
+waiting for idle host: load1=0.50
+IDLE load=0.36 0.81 1.04 1/704 2549100 2026-09-12T02:17:48+09:00
+PHASE_START dflash2 2026-09-12T02:17:48+09:00 load=0.36 0.81 1.04 1/703 2549103
+[warmup 0] off tok/s=29.87 rc=0
+[round 0] off tok/s=29.0 load1=0.82 rc=0
+[round 0] b4 tok/s=33.29 load1=1.08 rc=0 rounds=83 acc=1.41 draft/r=19.1 vgraph/r=4.3 sync/r=48.9
+[round 0] both-off tok/s=34.0 load1=1.04 rc=0
+[round 0] both-b4 tok/s=40.86 load1=1.07 rc=0 rounds=83 acc=1.41 draft/r=7.5 vgraph/r=4.5 sync/r=46.9
+[round 0] nograph-off tok/s=32.56 load1=1.11 rc=0
+[round 0] nograph-b4 tok/s=41.48 load1=1.05 rc=0 rounds=83 acc=1.41 draft/r=7.4 vgraph/r=5.0 sync/r=45.7
+[round 1] b4 tok/s=38.39 load1=1.10 rc=0 rounds=83 acc=1.41 draft/r=10.2 vgraph/r=3.9 sync/r=48.7
+[round 1] both-off tok/s=33.68 load1=0.98 rc=0
+[round 1] both-b4 tok/s=39.79 load1=1.04 rc=0 rounds=83 acc=1.41 draft/r=7.5 vgraph/r=3.9 sync/r=49.1
+[round 1] nograph-off tok/s=32.46 load1=0.94 rc=0
+[round 1] nograph-b4 tok/s=41.12 load1=0.82 rc=0 rounds=83 acc=1.41 draft/r=7.8 vgraph/r=4.9 sync/r=45.9
+[round 1] off tok/s=28.85 load1=0.80 rc=0
+[round 2] both-off tok/s=33.72 load1=0.87 rc=0
+[round 2] both-b4 tok/s=39.57 load1=0.69 rc=0 rounds=83 acc=1.41 draft/r=7.9 vgraph/r=4.5 sync/r=48.4
+[round 2] nograph-off tok/s=32.7 load1=0.83 rc=0
+[round 2] nograph-b4 tok/s=41.23 load1=0.96 rc=0 rounds=83 acc=1.41 draft/r=8.0 vgraph/r=4.9 sync/r=45.6
+[round 2] off tok/s=30.35 load1=0.83 rc=0
+[round 2] b4 tok/s=39.03 load1=0.80 rc=0 rounds=83 acc=1.41 draft/r=9.4 vgraph/r=3.6 sync/r=48.7
+PHASE_END dflash2 2026-09-12T02:26:16+09:00 load=1.00 0.95 1.01 1/696 2550867
+SWEEP3_DONE
+released GB10 GPU lock

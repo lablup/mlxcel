@@ -3475,6 +3475,11 @@ pub mod dtype;
 // machine, whichever backend they are on.
 pub mod cuda_arch;
 
+// The CUDA graph capture budget applied on GB10 (#1798): a pure policy over
+// the compute capability plus the env-wins applier, re-exported through
+// `hardware` beside its graph-cache and SDPA-cache siblings.
+pub mod cuda_graph_budget;
+
 // Runtime Apple Silicon generation detection.
 // Public so that mlxcel (the main crate) can log hardware info at startup.
 pub mod hardware;
