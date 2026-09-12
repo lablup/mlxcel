@@ -205,6 +205,20 @@ The same result on the shipped command: no env overlaps the explicit raised pair
 
 Overlapping ranges, identical peak memory, and both rows sit on the pre-wiring `default` row (67.38) rather than its `both` row (70.03). On the same device, in the same binary, one checkpoint moves and the other does not: what fires the default is the allowlist, not sm_121.
 
+### `laguna-xs-2.1-nvfp4` (allowlisted), `mlxcel-server`
+
+One server per (arm, round) at concurrency 1, 128-token prompts, 200 completion tokens, n = 3. Laguna's `supports_batching()` is false (`src/models/laguna.rs:650`), so this is a serialized workload through the serving stack rather than a B > 1 measurement, which is the point here: it exercises the third entry point, `src/bin/mlx_server.rs`.
+
+| config | n | aggregate tok/s mean (min to max) | vs no env | per-request decode tok/s mean | TTFT ms mean | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|
+| no env | 3 | 29.03 (28.50 to 29.40) |  | 32.50 | 769 | 0.34 to 0.97 | 0 of 3 |
+| operator `20` / `25` | 3 | 27.70 (27.20 to 28.20) | -4.6% | 30.63 | 724 | 0.42 to 0.88 | 0 of 3 |
+| operator `100` / `1000` | 3 | 29.23 (29.00 to 29.60) | +0.7% | 32.40 | 696 | 0.60 to 0.96 | 2 of 3 |
+
+The restored arm is disjoint from both of the others (27.20 to 28.20 against 28.50 to 29.40 and 29.00 to 29.60) and reproduces the pre-wiring `default` server row (26.90, 26.50 to 27.30). Per-request decode says the same with the server's prefill and queueing removed: 32.50 and 32.40 against 30.63.
+
+Taken together the three entry points answer the question this section exists for. The shipped binaries reach the raised budget on an allowlisted checkpoint, they leave an unlisted one alone, an operator can restore MLX's values and gets MLX's numbers back, and the budget actually in force is printed at startup rather than inferred.
+
 ### The applied budget at startup
 
 The same three arms through `mlxcel generate` and `mlxcel-server`, reading the startup lines rather than the clock (full transcript in `data/.../sweep7.out`):
