@@ -22,11 +22,19 @@ Whole actual HTTP error JSON is compared against eight independently schema-vali
 
 ## Validation
 
-`cargo test --profile test-fast --features metal,accelerate security` passed 22 selected tests (0 failed, 0 ignored), including 27 HTTP rate/capacity/body cases across nine administrative families. `make verify-webui-contract` validated 40 fixtures (32 before this finalization). Local validation covered formatting, targeted security tests, adversarial secured router tests, scoped clippy, no-default-feature compilation, WebUI contract fixtures, llama compatibility, workspace version consistency, and kernel dtype key static checks. The tests exercise missing and invalid keys, public health behavior, private route denial, hostile/null origins, cross-site Fetch Metadata, credential query rejection on public and private paths, percent-encoded credential names, DNS-rebinding Host rejection, preflight allowlisting, legacy `GET /models?reload`, encoded private paths, SSE permit retention until response-body drop, declared and streamed body limits, startup failure modes, strict allowed Origins, and custom path prefix classification.
+`cargo test --profile test-fast --features metal,accelerate security` passed 24 selected tests (0 failed, 0 ignored), including 27 HTTP rate/capacity/body cases across nine administrative families. `make verify-webui-contract` validated 40 fixtures (32 before this finalization). Local validation covered formatting, targeted security tests, adversarial secured router tests, scoped clippy, no-default-feature compilation, WebUI contract fixtures, llama compatibility, workspace version consistency, and kernel dtype key static checks. The tests exercise missing and invalid keys, public health behavior, private route denial, hostile/null origins, cross-site Fetch Metadata, credential query rejection on public and private paths, percent-encoded credential names, DNS-rebinding Host rejection, preflight allowlisting, legacy `GET /models?reload`, encoded private paths, SSE permit retention until response-body drop, declared and streamed body limits, startup failure modes, strict allowed Origins, and custom path prefix classification.
 
 ## Change summary
 
 The classifier moved into a focused module to keep production security files below 500 lines. Regression coverage includes direct HTTP enforcement for nine administrative route families, prefix-aware classification, and strict whole-error comparisons. The new classifier regression failed against the preceding implementation at `POST /props` (one failed test, exit 101), establishing a failing-before control rather than a pass-only test.
+
+## Frozen body-limit alignment
+
+The final cross-contract audit found the middleware default was 256 KiB while the existing OpenAPI `LimitSummary.json_body_bytes` contract was 2,097,152 bytes. The follow-up changes only that production constant to 2 MiB; it does not change schemas, fixtures, route behavior, or inference. A focused generic-wrapper harness constructs valid JSON at exactly 2,097,152 and 2,097,153 bytes, both with declared Content-Length and a multi-chunk body without Content-Length. The literal boundary is independently cross-checked against the canonical OpenAPI constant, rather than copied from the runtime limit. Its handler consumes `Request<Body>` directly so an extractor limit cannot mask middleware behavior.
+
+After correction, both declared and chunked probes accept exactly 2,097,152 bytes (204) and reject 2,097,153 bytes (413); the existing large data-plane regression also passes unchanged. Both boundary regressions failed before the constant correction: valid 2,097,152-byte declared and chunked requests received 413 instead of 204 (2 failed tests, exit 101).
+
+The preceding `92d77dbd` snapshot passed the root-run full workspace gate (11,184 passed, 0 failed, 361 ignored) and workspace Clippy. Those broad results precede this isolated constant correction; no new GPU/full-workspace run is claimed for the follow-up.
 
 ## Deferred scope
 

@@ -22,11 +22,19 @@ PR #1865는 에픽 #1834와 이슈 #1837을 위해 번들 WebUI의 서버 측 �
 
 ## 검증
 
-`cargo test --profile test-fast --features metal,accelerate security`에서 선택된 테스트 22개가 통과했다(실패·무시 0개). 관리자 경로 9종의 HTTP 요청률/용량/본문 사례 27개를 포함한다. `make verify-webui-contract`는 fixture 40개를 검증했다(마감 수정 전 32개). 로컬 검증은 formatting, targeted security test, adversarial secured router test, scoped clippy, no-default-feature compilation, WebUI contract fixture, llama compatibility, workspace version consistency, kernel dtype key static check를 포함했다. 테스트는 누락/잘못된 key, public health 동작, private route 거부, hostile/null Origin, cross-site Fetch Metadata, public/private path의 credential query 거부, percent-encoded credential 이름, DNS rebinding Host 거부, preflight allowlist, legacy `GET /models?reload`, encoded private path, response body drop까지 유지되는 SSE permit, 선언 및 streamed body limit, startup 실패 모드, 엄격한 allowed Origin, custom path prefix classification을 다룬다.
+`cargo test --profile test-fast --features metal,accelerate security`에서 선택된 테스트 24개가 통과했다(실패·무시 0개). 관리자 경로 9종의 HTTP 요청률/용량/본문 사례 27개를 포함한다. `make verify-webui-contract`는 fixture 40개를 검증했다(마감 수정 전 32개). 로컬 검증은 formatting, targeted security test, adversarial secured router test, scoped clippy, no-default-feature compilation, WebUI contract fixture, llama compatibility, workspace version consistency, kernel dtype key static check를 포함했다. 테스트는 누락/잘못된 key, public health 동작, private route 거부, hostile/null Origin, cross-site Fetch Metadata, public/private path의 credential query 거부, percent-encoded credential 이름, DNS rebinding Host 거부, preflight allowlist, legacy `GET /models?reload`, encoded private path, response body drop까지 유지되는 SSE permit, 선언 및 streamed body limit, startup 실패 모드, 엄격한 allowed Origin, custom path prefix classification을 다룬다.
 
 ## 변경 요약
 
 분류기를 별도 모듈로 옮겨 production 보안 파일을 500줄 이하로 유지했다. 회귀 검사는 관리자 경로 9종의 실제 HTTP 제한, prefix 분류, 전체 오류 비교를 다룬다. 새 분류기 회귀 테스트는 수정 전 `POST /props`에서 실패했다(1개 실패, exit 101). 따라서 수정 후 통과만 확인하는 자기 충족 테스트가 아니다.
+
+## 고정 본문 제한 정합성
+
+최종 계약 대조에서 미들웨어 기본값은 256 KiB지만 기존 OpenAPI `LimitSummary.json_body_bytes` 계약은 2,097,152바이트임을 발견했다. 후속 변경은 production 상수만 2 MiB로 맞추며 스키마·fixture·라우트 동작·추론을 변경하지 않는다. 범용 보안 래퍼 하니스에서 정확히 2,097,152 및 2,097,153바이트인 유효 JSON을 구성하고, Content-Length 선언과 Content-Length 없는 다중 청크 본문을 각각 검사한다. 경계 리터럴은 런타임 상수를 복사하지 않고 정식 OpenAPI 상수와 독립적으로 대조한다. 핸들러는 `Request<Body>`를 직접 소비하여 extractor 제한이 미들웨어 동작을 가리지 않도록 한다.
+
+수정 후 선언/청크 모두 정확히 2,097,152바이트는 204로 허용하고 2,097,153바이트는 413으로 거부한다. 기존 큰 데이터 경로 회귀 테스트도 변경 없이 통과했다. 상수 수정 전 두 경계 회귀 테스트 모두 실패했다. 유효한 2,097,152바이트 선언/청크 요청이 204 대신 413을 받았다(2개 실패, exit 101).
+
+직전 `92d77dbd` 스냅샷은 루트가 실행한 전체 workspace 게이트(11,184개 통과, 실패 0개, 무시 361개)와 workspace Clippy를 통과했다. 이 광범위 검증은 상수 수정 이전 결과이며, 후속 변경에 대한 새 GPU/전체 workspace 실행을 주장하지 않는다.
 
 ## 보류 범위
 

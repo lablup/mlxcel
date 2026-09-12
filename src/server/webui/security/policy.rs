@@ -26,7 +26,7 @@ use super::canonical_authority;
 pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'";
 pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
 
-pub(crate) const WEBUI_CONTROL_BODY_LIMIT_BYTES: usize = 256 * 1024;
+pub(crate) const WEBUI_CONTROL_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_WEBUI_PREFIX: &str = "/webui";
 const DEFAULT_WEBUI_API_PREFIX: &str = "/";
 const DEFAULT_CONTROL_PERMITS: usize = 32;

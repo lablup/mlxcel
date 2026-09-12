@@ -450,3 +450,7 @@ fn webui_error(
 #[cfg(test)]
 #[path = "security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "security_body_boundary_tests.rs"]
+mod security_body_boundary_tests;
