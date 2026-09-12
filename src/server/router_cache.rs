@@ -109,6 +109,7 @@ impl CacheSource {
     pub fn list(&self) -> Vec<(String, PathBuf)> {
         crate::downloader::list_models_with_override(Some(&self.root))
             .into_iter()
+            .filter(|m| regular_file_exists(&m.path.join("config.json")))
             .map(|m| (m.repo_id, m.path))
             .collect()
     }
@@ -167,4 +168,10 @@ impl CacheSource {
             Err(err) => Err(anyhow::anyhow!(err.to_string())),
         }
     }
+}
+
+fn regular_file_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
 }

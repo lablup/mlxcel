@@ -17,9 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::server::router_lifecycle::{
     DownloadState, LifecycleSnapshot, ModelLifecycleState, stable_model_identity,
 };
-use crate::server::router_models::{
-    RouterCatalogModel, RouterCatalogProviderCapabilities, RouterModelSource,
-};
+use crate::server::router_models::{RouterCatalogModel, RouterModelSource};
 
 use super::*;
 
@@ -207,65 +205,6 @@ fn architecture_uses_detection_authority_for_embedding_layouts() {
 }
 
 #[test]
-fn catalog_cache_uses_epoch_and_projects_fresh_provider_lifecycle() {
-    clear_catalog_cache();
-    let root = temp_dir("epoch-cache");
-    let path = write_model(&root, "vision", "qwen2_vl");
-    let id = stable_model_identity("models_dir", 1, "test-root", "vision").0;
-    let first = get_catalog_entry(
-        vec![model("vision", path.clone(), RouterModelSource::ModelsDir)],
-        &id,
-    )
-    .unwrap();
-    assert!(first.complete);
-    assert!(
-        first
-            .capabilities
-            .iter()
-            .any(|capability| capability.task == TaskKind::VisionInput && !capability.available)
-    );
-
-    std::fs::remove_file(path.join("model.safetensors")).expect("remove shard");
-    reset_heavy_metadata_probe_count();
-    let mut same_epoch = model_with_lifecycle(
-        "vision",
-        path.clone(),
-        RouterModelSource::ModelsDir,
-        lifecycle_with(ModelLifecycleState::Ready, true, 3),
-        9,
-    );
-    same_epoch.provider_capabilities = Some(RouterCatalogProviderCapabilities {
-        image_input: true,
-        audio_input: false,
-    });
-    let cached = get_catalog_entry(vec![same_epoch], &id).unwrap();
-    assert!(cached.complete, "same epoch must reuse cached metadata");
-    assert_eq!(cached.identity.revision, 9);
-    assert_eq!(cached.lifecycle.active_requests, 3);
-    assert_eq!(heavy_metadata_probe_count(), 0);
-    assert!(
-        cached
-            .capabilities
-            .iter()
-            .any(|capability| capability.task == TaskKind::VisionInput && capability.available)
-    );
-
-    let mut next_epoch = model("vision", path, RouterModelSource::ModelsDir);
-    next_epoch.catalog_epoch = 2;
-    let refreshed = get_catalog_entry(vec![next_epoch], &id).unwrap();
-    assert!(!refreshed.complete);
-    assert!(
-        refreshed
-            .metadata
-            .support
-            .complete_reason
-            .as_deref()
-            .unwrap()
-            .contains("no non-empty SafeTensors")
-    );
-}
-
-#[test]
 fn raw_model_type_and_declared_architectures_preserve_bounded_config_strings() {
     let root = temp_dir("raw-config-fields");
     let dir = root.join("mixed-case");
@@ -360,6 +299,22 @@ fn invalid_raw_config_strings_are_null_with_reasons() {
                 assert_eq!(
                     entry.metadata.unknown_reasons.model_type.as_deref(),
                     Some(reason),
+                    "{name}"
+                );
+                assert_eq!(
+                    entry.metadata.unknown_reasons.architecture.as_deref(),
+                    Some(reason),
+                    "{name}"
+                );
+                assert!(
+                    entry
+                        .metadata
+                        .unknown_reasons
+                        .architecture
+                        .as_ref()
+                        .unwrap()
+                        .len()
+                        <= 512,
                     "{name}"
                 );
             }
@@ -493,6 +448,9 @@ fn non_chat_task_and_removal_reasons_are_truthful() {
             .contains("managed cache")
     );
 }
+
+#[path = "catalog_cache_tests.rs"]
+mod catalog_cache_tests;
 
 #[path = "catalog_contract_tests.rs"]
 mod catalog_contract_tests;

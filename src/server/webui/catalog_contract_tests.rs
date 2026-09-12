@@ -26,10 +26,12 @@ fn thousand_entry_inventory_paginates_without_duplicates() {
             RouterModelSource::ModelsDir,
         ));
     }
+    let cache = CatalogProjectionCache::new();
     let mut cursor = None;
     let mut seen = std::collections::BTreeSet::new();
     loop {
-        let page = list_catalog(
+        let page = list_catalog_with_cache(
+            &cache,
             models.clone(),
             &CatalogQuery {
                 limit: Some(200),
@@ -53,8 +55,9 @@ fn thousand_entry_inventory_paginates_without_duplicates() {
         }
     }
     assert_eq!(seen.len(), 1000);
-    clear_catalog_cache();
-    let after_refresh = list_catalog(
+    cache.clear();
+    let after_refresh = list_catalog_with_cache(
+        &cache,
         models,
         &CatalogQuery {
             limit: Some(200),
@@ -196,7 +199,9 @@ fn catalog_cache_projects_fresh_lifecycle_without_metadata_rescan() {
     let root = temp_dir("fresh-lifecycle");
     let path = write_model(&root, "alpha", "qwen3");
     let id = stable_model_identity("models_dir", 1, "test-root", "alpha").0;
-    let first = get_catalog_entry(
+    let cache = CatalogProjectionCache::new();
+    let first = get_catalog_entry_with_cache(
+        &cache,
         vec![model_with_lifecycle(
             "alpha",
             path.clone(),
@@ -209,7 +214,8 @@ fn catalog_cache_projects_fresh_lifecycle_without_metadata_rescan() {
     .unwrap();
     assert_eq!(first.lifecycle.active_requests, 0);
 
-    let second = get_catalog_entry(
+    let second = get_catalog_entry_with_cache(
+        &cache,
         vec![model_with_lifecycle(
             "alpha",
             path,
@@ -227,7 +233,6 @@ fn catalog_cache_projects_fresh_lifecycle_without_metadata_rescan() {
 
 #[test]
 fn actual_catalog_producer_matches_whole_expected_shape() {
-    clear_catalog_cache();
     let root = temp_dir("whole-producer");
     let path = write_model(&root, "alpha", "qwen3");
     let model = model("alpha", path, RouterModelSource::ModelsDir);
@@ -281,18 +286,18 @@ fn catalog_fixture_round_trips_through_producer_dtos() {
 }
 
 #[test]
-fn single_model_catalog_accessor_uses_existing_app_state_provider() {
+fn cached_single_model_catalog_accessor_projects_fresh_app_state_provider() {
     use std::sync::{Arc, mpsc};
 
     use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig};
     use crate::tokenizer::MlxcelTokenizer;
 
     let root = temp_dir("single-state");
-    let path = write_model(&root, "single", "qwen3");
+    let path = write_model(&root, "single", "qwen2_vl");
     let (options_tx, _options_rx) = mpsc::channel();
     let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
     let batch_metrics = provider.batch_metrics().clone();
-    let state = AppState::new(
+    let mut state = AppState::new(
         provider,
         ServerConfig {
             model_alias: Some("served-alias".to_string()),
@@ -300,15 +305,54 @@ fn single_model_catalog_accessor_uses_existing_app_state_provider() {
         },
         ChatTemplateProcessor::with_template("ok".to_string()),
         MlxcelTokenizer::stub(),
-        path,
+        path.clone(),
         batch_metrics,
     );
+    state.media_support.image = true;
+    let cache = CatalogProjectionCache::new();
 
-    let entry = single_model_entry_from_state(&state);
+    let entry = single_model_entry_from_state_with_cache(&cache, &state);
     assert_eq!(entry.identity.inference_id, "served-alias");
     assert_eq!(entry.identity.source, CatalogSourceKind::SingleModel);
     assert_eq!(entry.lifecycle.state, ModelLifecycleState::Ready);
+    assert!(
+        entry
+            .capabilities
+            .iter()
+            .any(|capability| { capability.task == TaskKind::VisionInput && capability.available })
+    );
     assert!(!entry.removable);
+
+    std::fs::remove_file(path.join("model.safetensors")).expect("remove shard");
+    cache.reset_heavy_metadata_probe_count();
+    let repeated = single_model_entry_from_state_with_cache(&cache, &state);
+    assert!(repeated.complete, "cache hit should reuse static metadata");
+    assert_eq!(cache.heavy_metadata_probe_count(), 0);
+
+    let unavailable_provider = Arc::new(ModelProvider::chat_unavailable_for_route_tests());
+    let unavailable_metrics = unavailable_provider.batch_metrics().clone();
+    let unavailable = AppState::new(
+        unavailable_provider,
+        ServerConfig {
+            model_alias: Some("served-alias".to_string()),
+            ..Default::default()
+        },
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        path,
+        unavailable_metrics,
+    );
+    let unavailable_entry = single_model_entry_from_state_with_cache(&cache, &unavailable);
+    assert_eq!(
+        unavailable_entry.lifecycle.state,
+        ModelLifecycleState::Failed
+    );
+    assert!(
+        unavailable_entry.capabilities.iter().any(|capability| {
+            capability.task == TaskKind::VisionInput && !capability.available
+        })
+    );
+    assert_eq!(cache.heavy_metadata_probe_count(), 0);
 }
 
 #[test]
@@ -353,6 +397,61 @@ fn gemma4_without_bounded_variant_evidence_is_unknown_not_text() {
             .contains("Gemma 4 text-vs-vision classification requires")
     );
     assert!(!entry.supported);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_config_index_and_shards_are_not_catalog_evidence() {
+    let root = temp_dir("symlinked-catalog-evidence");
+
+    let config_link = root.join("config-link");
+    std::fs::create_dir_all(&config_link).unwrap();
+    let outside_config = root.join("outside-config.json");
+    std::fs::write(&outside_config, r#"{"model_type":"qwen3"}"#).unwrap();
+    std::os::unix::fs::symlink(&outside_config, config_link.join("config.json")).unwrap();
+    std::fs::write(config_link.join("model.safetensors"), b"weights").unwrap();
+    let entry = catalog_entry(model(
+        "config-link",
+        config_link,
+        RouterModelSource::ModelsDir,
+    ));
+    assert!(entry.metadata.model_type.is_none());
+    assert!(!entry.complete);
+
+    let index_link = write_model(&root, "index-link", "qwen3");
+    std::fs::remove_file(index_link.join("model.safetensors")).unwrap();
+    let outside_index = root.join("outside-index.json");
+    std::fs::write(
+        &outside_index,
+        r#"{"weight_map":{"model.embed_tokens.weight":"real.safetensors"}}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        &outside_index,
+        index_link.join("model.safetensors.index.json"),
+    )
+    .unwrap();
+    let entry = catalog_entry(model(
+        "index-link",
+        index_link,
+        RouterModelSource::ModelsDir,
+    ));
+    assert!(!entry.complete);
+    assert!(entry.metadata.format.is_none());
+
+    let shard_link = root.join("shard-link");
+    std::fs::create_dir_all(&shard_link).unwrap();
+    std::fs::write(shard_link.join("config.json"), r#"{"model_type":"qwen3"}"#).unwrap();
+    let outside_shard = root.join("outside.safetensors");
+    std::fs::write(&outside_shard, b"weights").unwrap();
+    std::os::unix::fs::symlink(&outside_shard, shard_link.join("model.safetensors")).unwrap();
+    let entry = catalog_entry(model(
+        "shard-link",
+        shard_link,
+        RouterModelSource::ModelsDir,
+    ));
+    assert!(!entry.complete);
+    assert!(entry.metadata.format.is_none());
 }
 
 #[cfg(unix)]

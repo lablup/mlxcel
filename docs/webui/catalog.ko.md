@@ -38,12 +38,12 @@ Capability에는 적용 단계와 사용할 수 없는 사유가 있습니다. �
 
 Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 제한을 적용합니다. 카탈로그 probe는 SafeTensors 헤더나 payload를 읽지 않습니다. 디스크 계산은 방문·대기 항목 최대 4,096개와 깊이 8을 적용하고 symlink를 건너뛰며 제한 안에서 완료할 수 없으면 사유와 함께 `null`을 반환합니다. 중첩된 `1_Pooling/config.json`은 부모 구성요소가 symlink가 아닌 실제 디렉터리일 때만 증거로 인정합니다.
 
-메타데이터 투영은 blocking worker에서 실행합니다. 크기가 제한된 캐시는 일반 polling의 캐시 적중에서 재귀 디스크 계산, config 파싱, 콘텐츠 fingerprint 계산을 반복하지 않도록 합니다. 다만 lifecycle, revision, provider가 확인한 capability, 제거 가능 여부는 현재 풀 상태로 갱신합니다. 최초 캐시 채우기와 명시적 새로고침은 제한된 파일시스템 검사를 수행합니다. 명시적인 새로고침은 캐시를 비우고 기존 라우터 재탐색을 실행하며, 레거시 라우터 reload도 카탈로그 epoch를 전진시켜 캐시된 메타데이터가 영구히 stale로 남지 않게 합니다.
+메타데이터 투영은 blocking worker에서 실행합니다. 각 라우터 또는 단일 모델 WebUI 컨텍스트가 자체 제한 캐시를 소유하므로 한 풀의 새로고침이나 1,000개 항목 eviction이 다른 풀의 warm 투영을 무효화하지 않습니다. 캐시는 일반 polling의 캐시 적중에서 재귀 디스크 계산, config 파싱, 콘텐츠 fingerprint 계산을 포함한 제한된 메타데이터 획득을 반복하지 않도록 합니다. 다만 lifecycle, revision, provider가 확인한 capability, 제거 가능 여부는 현재 풀 상태로 갱신합니다. 최초 캐시 채우기와 명시적 새로고침은 제한된 파일시스템 검사를 수행합니다. 명시적인 새로고침은 소유 컨텍스트의 캐시만 비우고 기존 라우터 재탐색을 실행하며, 레거시 라우터 reload도 카탈로그 epoch를 전진시켜 캐시된 메타데이터가 영구히 stale로 남지 않게 합니다.
 
 작업이 활성 상태인 동안 서버 인스턴스마다 하나의 새로고침만 실행권을 가집니다. 동시 요청은 별도 재탐색을 시작하지 않고 같은 작업을 재사용하며 완료 후의 요청은 새 작업을 시작할 수 있습니다. `changed_entries`는 항목 signature를 비교하여 개수가 같아도 추가·삭제·감지된 변경을 포함합니다. 클라이언트에 전달하는 새로고침 오류는 경로를 숨기고 진단 상세는 서버 로그에 남깁니다.
 
-제거 가능 여부는 안내 정보이지 파일 삭제 권한이 아닙니다. 관리형 캐시만 제거 대상이 될 수 있으며 busy 항목은 사용할 수 없습니다. 실제 제거와 작업 경계의 검사는 #1841 범위입니다. 단일 모델 모드는 `single_model_entry_from_state(&AppState)`로 기존 provider와 실제 추론 ID를 설명하고 별도 provider를 등록하지 않으며 읽기 전용 제거 사유를 반환합니다. 프로덕션에서 이 accessor를 연결하는 작업은 #1838 범위입니다.
+제거 가능 여부는 안내 정보이지 파일 삭제 권한이 아닙니다. 관리형 캐시만 제거 대상이 될 수 있으며 busy 항목은 사용할 수 없습니다. 실제 제거와 작업 경계의 검사는 #1841 범위입니다. 단일 모델 모드는 cache-aware `single_model_entry_from_state_with_cache(&CatalogProjectionCache, &AppState)` handoff로 기존 provider와 실제 추론 ID를 설명하고 별도 provider를 등록하지 않으며, 캐시된 정적 메타데이터 위에 최신 provider/lifecycle 상태를 투영하고 읽기 전용 제거 사유를 반환합니다. 프로덕션에서 이 accessor를 연결하는 작업은 #1838 범위입니다.
 
 ## 회귀 테스트 범위
 
-집중 테스트는 스키마로 검증된 fixture와 실제 producer 전체 JSON의 비교, 원본 model_type·declared_architectures 제한, unknown 메타데이터, cache epoch 무효화, HTTP 캐시 적중의 heavy probe 0회, 명시적 새로고침 후 동일 크기 config/index 편집 반영, 최신 lifecycle/provider 투영, 공유 감지, symlink 증거, 기존 단일 provider 접근, HTTP 새로고침 전후 1,000개 항목의 전체 순회를 검증합니다. 공유 감지 변경 후의 추론 회귀 검사나 향후 프로덕션·브라우저 보안 수용 검증을 대신하지는 않습니다. 검증 기록과 환경 예외는 [PR #1868](https://github.com/lablup/mlxcel/pull/1868)을 확인하십시오.
+집중 테스트는 스키마로 검증된 fixture와 실제 producer 전체 JSON의 비교, 원본 model_type·declared_architectures 제한, unknown 메타데이터, cache epoch 무효화, HTTP 캐시 적중의 메타데이터 획득 0회, 명시적 새로고침 후 동일 크기 config/index 편집 반영, 최신 lifecycle/provider 투영, 동시 1,000개 항목 카탈로그에서 라우터별 캐시 격리, 공유 감지, symlink 증거, 캐시된 기존 단일 provider 접근, HTTP 새로고침 전후 1,000개 항목의 전체 순회를 검증합니다. 공유 감지 변경 후의 추론 회귀 검사나 향후 프로덕션·브라우저 보안 수용 검증을 대신하지는 않습니다. 검증 기록과 환경 예외는 [PR #1868](https://github.com/lablup/mlxcel/pull/1868)을 확인하십시오.

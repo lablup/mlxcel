@@ -83,9 +83,27 @@ pub(super) fn apply_runtime_fields(entry: &mut CatalogEntry, model: &RouterCatal
     apply_provider_confirmed_capabilities(entry, model.provider_capabilities);
 }
 
+pub(super) fn apply_single_model_runtime_fields(
+    entry: &mut CatalogEntry,
+    lifecycle: LifecycleSnapshot,
+    provider_capabilities: Option<RouterCatalogProviderCapabilities>,
+) {
+    entry.lifecycle = lifecycle;
+    apply_provider_confirmed_capabilities(entry, provider_capabilities);
+}
+
 #[allow(dead_code)]
 pub fn single_model_entry_from_state(state: &AppState) -> CatalogEntry {
-    let lifecycle = LifecycleSnapshot {
+    single_model_entry_with_provider(
+        state.model_path.clone(),
+        state.display_model_id().to_string(),
+        single_model_lifecycle_from_state(state),
+        Some(single_model_provider_capabilities_from_state(state)),
+    )
+}
+
+pub(super) fn single_model_lifecycle_from_state(state: &AppState) -> LifecycleSnapshot {
+    LifecycleSnapshot {
         state: if state.model_provider.is_loaded() {
             ModelLifecycleState::Ready
         } else if state.model_provider.is_chat_unavailable() {
@@ -102,16 +120,16 @@ pub fn single_model_entry_from_state(state: &AppState) -> CatalogEntry {
             .model_provider
             .is_chat_unavailable()
             .then(|| "single-model provider is unavailable".to_string()),
-    };
-    single_model_entry_with_provider(
-        state.model_path.clone(),
-        state.display_model_id().to_string(),
-        lifecycle,
-        Some(RouterCatalogProviderCapabilities {
-            image_input: state.media_support.image,
-            audio_input: state.media_support.audio,
-        }),
-    )
+    }
+}
+
+pub(super) fn single_model_provider_capabilities_from_state(
+    state: &AppState,
+) -> RouterCatalogProviderCapabilities {
+    RouterCatalogProviderCapabilities {
+        image_input: state.media_support.image,
+        audio_input: state.media_support.audio,
+    }
 }
 
 #[allow(dead_code)]
@@ -123,7 +141,7 @@ pub fn single_model_entry(
     single_model_entry_with_provider(model_path, inference_id, lifecycle, None)
 }
 
-fn single_model_entry_with_provider(
+pub(super) fn single_model_entry_with_provider(
     model_path: PathBuf,
     inference_id: String,
     lifecycle: LifecycleSnapshot,
@@ -177,14 +195,20 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
         declared_model_type_from_config(config.as_ref(), config_error.as_deref(), &mut reasons);
     let declared_architectures =
         declared_architectures_from_config(config.as_ref(), config_error.as_deref(), &mut reasons);
-    let detected_model_type = config.as_ref().map_or_else(
-        || Err("config.json is unavailable in bounded metadata".to_string()),
-        |config| {
+    let detected_model_type = match (config.as_ref(), declared_model_type.as_ref()) {
+        (Some(config), Some(_)) => {
             detect_model_type_with_probes(path, config, &BoundedCatalogDetectionProbes)
                 .map(|model_type| model_type.registry_id().to_string())
                 .map_err(|err| sanitize_detection_error(path, &err.to_string()))
-        },
-    );
+        }
+        (Some(_), None) => Err(reasons
+            .model_type
+            .clone()
+            .unwrap_or_else(|| "model_type is unknown".to_string())),
+        (None, _) => Err(config_error
+            .clone()
+            .unwrap_or_else(|| "config.json is unavailable in bounded metadata".to_string())),
+    };
     let family = detected_model_type
         .as_ref()
         .ok()
@@ -351,6 +375,7 @@ fn apply_provider_confirmed_capabilities(
     entry: &mut CatalogEntry,
     provider: Option<RouterCatalogProviderCapabilities>,
 ) {
+    reset_provider_ready_capabilities(entry);
     let Some(provider) = provider else { return };
     for capability in &mut entry.capabilities {
         if capability.task == TaskKind::VisionInput {
@@ -370,6 +395,20 @@ fn apply_provider_confirmed_capabilities(
             } else {
                 entry.metadata.support.reason.clone()
             };
+        }
+    }
+}
+
+fn reset_provider_ready_capabilities(entry: &mut CatalogEntry) {
+    for capability in &mut entry.capabilities {
+        if capability.phase == "provider_ready" {
+            capability.available = false;
+            capability.reason = entry
+                .metadata
+                .support
+                .reason
+                .clone()
+                .or_else(|| Some("provider readiness is confirmed after load".to_string()));
         }
     }
 }

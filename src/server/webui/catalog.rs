@@ -34,52 +34,172 @@ pub use catalog_metadata::{single_model_entry, single_model_entry_from_state};
 pub use catalog_types::*;
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::server::AppState;
 use crate::server::router_lifecycle::{LifecycleSnapshot, ModelLifecycleState, SCHEMA_VERSION};
 use crate::server::router_models::RouterCatalogModel;
 
-use catalog_metadata::{apply_runtime_fields, catalog_entry};
+use catalog_metadata::{
+    apply_runtime_fields, apply_single_model_runtime_fields, catalog_entry,
+    single_model_entry_with_provider, single_model_lifecycle_from_state,
+    single_model_provider_capabilities_from_state,
+};
+use catalog_types::{DEFAULT_LIMIT, MAX_INVENTORY, MAX_LIMIT};
 
-static CATALOG_CACHE: OnceLock<Mutex<BTreeMap<String, (String, CatalogEntry)>>> = OnceLock::new();
-
-#[cfg(test)]
-pub fn reset_heavy_metadata_probe_count() {
-    catalog_fs::reset_heavy_metadata_probe_count();
+/// Per-router metadata projection cache for catalog entries.
+///
+/// The cached value deliberately stores static, provider-independent metadata.
+/// Runtime lifecycle and provider readiness are projected from the current
+/// router snapshot for each response so one RouterPool cannot evict or stale
+/// another pool's catalog view.
+#[derive(Debug, Default)]
+pub struct CatalogProjectionCache {
+    entries: Mutex<BTreeMap<String, (String, CatalogEntry)>>,
+    #[cfg(test)]
+    heavy_metadata_probes: AtomicUsize,
 }
 
-#[cfg(test)]
-pub fn heavy_metadata_probe_count() -> usize {
-    catalog_fs::heavy_metadata_probe_count()
-}
+impl CatalogProjectionCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-pub fn clear_catalog_cache() {
-    if let Some(cache) = CATALOG_CACHE.get()
-        && let Ok(mut cache) = cache.lock()
-    {
-        cache.clear();
+    pub fn clear(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.clear();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn reset_heavy_metadata_probe_count(&self) {
+        self.heavy_metadata_probes.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub fn heavy_metadata_probe_count(&self) -> usize {
+        self.heavy_metadata_probes.load(Ordering::SeqCst)
+    }
+
+    fn record_heavy_metadata_probe(&self) {
+        #[cfg(test)]
+        self.heavy_metadata_probes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn content_signature(&self, model: &RouterCatalogModel) -> String {
+        self.record_heavy_metadata_probe();
+        catalog_metadata::catalog_content_signature(&model.path)
+            .unwrap_or_else(|| "missing-config".to_string())
+    }
+
+    pub fn catalog_change_signatures(
+        &self,
+        models: Vec<RouterCatalogModel>,
+    ) -> BTreeMap<String, String> {
+        models
+            .into_iter()
+            .take(MAX_INVENTORY)
+            .filter(|model| !model.hidden)
+            .map(|model| {
+                let fingerprint = self.content_signature(&model);
+                let signature = format!(
+                    "{}:{}:{}:{}:{}",
+                    model.source.as_str(),
+                    model.path.display(),
+                    model.name,
+                    model.generation,
+                    fingerprint
+                );
+                (model.ui_model_id, signature)
+            })
+            .collect()
+    }
+
+    pub fn single_model_entry_from_state(&self, state: &AppState) -> CatalogEntry {
+        let inference_id = state.display_model_id().to_string();
+        let (id, _) = crate::server::router_lifecycle::stable_model_identity(
+            "single_model",
+            3,
+            "single_model:redacted-path",
+            &inference_id,
+        );
+        let key = format!("single_model:{}:{}", id, state.model_path.display());
+        let lifecycle = single_model_lifecycle_from_state(state);
+        let provider_capabilities = Some(single_model_provider_capabilities_from_state(state));
+        if let Ok(entries) = self.entries.lock()
+            && let Some((cached_key, entry)) = entries.get(&id)
+            && cached_key == &key
+        {
+            let mut projected = entry.clone();
+            apply_single_model_runtime_fields(&mut projected, lifecycle, provider_capabilities);
+            return projected;
+        }
+
+        self.record_heavy_metadata_probe();
+        let static_entry = single_model_entry_with_provider(
+            state.model_path.clone(),
+            inference_id,
+            lifecycle.clone(),
+            None,
+        );
+        if let Ok(mut entries) = self.entries.lock() {
+            if !entries.contains_key(&id)
+                && entries.len() >= MAX_INVENTORY
+                && let Some(evicted) = entries.keys().next().cloned()
+            {
+                entries.remove(&evicted);
+            }
+            entries.insert(id, (key, static_entry.clone()));
+        }
+        let mut projected = static_entry;
+        apply_single_model_runtime_fields(&mut projected, lifecycle, provider_capabilities);
+        projected
+    }
+
+    fn cached_catalog_entry(&self, model: RouterCatalogModel) -> CatalogEntry {
+        let id = model.ui_model_id.clone();
+        let key = format!(
+            "{}:{}:{}:{}",
+            model.source.as_str(),
+            id.as_str(),
+            model.catalog_epoch,
+            model.generation
+        );
+        if let Ok(entries) = self.entries.lock()
+            && let Some((cached_key, entry)) = entries.get(&id)
+            && cached_key == &key
+        {
+            let mut projected = entry.clone();
+            apply_runtime_fields(&mut projected, &model);
+            return projected;
+        }
+
+        self.record_heavy_metadata_probe();
+        let mut cache_model = model.clone();
+        cache_model.provider_capabilities = None;
+        let static_entry = catalog_entry(cache_model);
+        if let Ok(mut entries) = self.entries.lock() {
+            if !entries.contains_key(&id)
+                && entries.len() >= MAX_INVENTORY
+                && let Some(evicted) = entries.keys().next().cloned()
+            {
+                entries.remove(&evicted);
+            }
+            entries.insert(id, (key, static_entry.clone()));
+        }
+        let mut projected = static_entry;
+        apply_runtime_fields(&mut projected, &model);
+        projected
     }
 }
 
+#[allow(dead_code)]
 pub fn catalog_change_signatures(models: Vec<RouterCatalogModel>) -> BTreeMap<String, String> {
-    models
-        .into_iter()
-        .take(MAX_INVENTORY)
-        .filter(|model| !model.hidden)
-        .map(|model| {
-            let fingerprint = catalog_metadata::catalog_content_signature(&model.path)
-                .unwrap_or_else(|| "missing-config".to_string());
-            let signature = format!(
-                "{}:{}:{}:{}:{}",
-                model.source.as_str(),
-                model.path.display(),
-                model.name,
-                model.generation,
-                fingerprint
-            );
-            (model.ui_model_id, signature)
-        })
-        .collect()
+    let cache = CatalogProjectionCache::new();
+    cache.catalog_change_signatures(models)
 }
 
 pub fn count_changed_entries(
@@ -100,36 +220,19 @@ pub fn count_changed_entries(
     changed
 }
 
-fn cached_catalog_entry(model: RouterCatalogModel) -> CatalogEntry {
-    let id = model.ui_model_id.clone();
-    let key = format!(
-        "{}:{}:{}:{}",
-        model.source.as_str(),
-        id.as_str(),
-        model.catalog_epoch,
-        model.generation
-    );
-    let cache = CATALOG_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
-    if let Ok(cache) = cache.lock()
-        && let Some((cached_key, entry)) = cache.get(&id)
-        && cached_key == &key
-    {
-        let mut entry = entry.clone();
-        apply_runtime_fields(&mut entry, &model);
-        return entry;
-    }
-    let entry = catalog_entry(model);
-    if let Ok(mut cache) = cache.lock() {
-        if cache.len() >= MAX_INVENTORY {
-            cache.clear();
-        }
-        cache.insert(id, (key, entry.clone()));
-    }
-    entry
-}
-use catalog_types::{DEFAULT_LIMIT, MAX_INVENTORY, MAX_LIMIT};
-
+#[allow(dead_code)]
 pub fn list_catalog(
+    models: Vec<RouterCatalogModel>,
+    query: &CatalogQuery,
+    server_instance_id: String,
+    snapshot_sequence: u64,
+) -> Result<CatalogListResponse, CatalogError> {
+    let cache = CatalogProjectionCache::new();
+    list_catalog_with_cache(&cache, models, query, server_instance_id, snapshot_sequence)
+}
+
+pub fn list_catalog_with_cache(
+    cache: &CatalogProjectionCache,
     models: Vec<RouterCatalogModel>,
     query: &CatalogQuery,
     server_instance_id: String,
@@ -149,7 +252,7 @@ pub fn list_catalog(
         .into_iter()
         .take(MAX_INVENTORY)
         .filter(|model| !model.hidden)
-        .map(cached_catalog_entry)
+        .map(|model| cache.cached_catalog_entry(model))
         .filter(|entry| filters.matches(entry))
         .collect();
     entries.sort_by(|a, b| a.identity.id.cmp(&b.identity.id));
@@ -169,7 +272,17 @@ pub fn list_catalog(
     })
 }
 
+#[allow(dead_code)]
 pub fn get_catalog_entry(
+    models: Vec<RouterCatalogModel>,
+    model_id: &str,
+) -> Result<CatalogEntry, CatalogError> {
+    let cache = CatalogProjectionCache::new();
+    get_catalog_entry_with_cache(&cache, models, model_id)
+}
+
+pub fn get_catalog_entry_with_cache(
+    cache: &CatalogProjectionCache,
     models: Vec<RouterCatalogModel>,
     model_id: &str,
 ) -> Result<CatalogEntry, CatalogError> {
@@ -177,9 +290,17 @@ pub fn get_catalog_entry(
         .into_iter()
         .take(MAX_INVENTORY)
         .filter(|model| !model.hidden)
-        .map(cached_catalog_entry)
+        .map(|model| cache.cached_catalog_entry(model))
         .find(|entry| entry.identity.id == model_id)
         .ok_or(CatalogError::NotFound)
+}
+
+#[allow(dead_code)]
+pub fn single_model_entry_from_state_with_cache(
+    cache: &CatalogProjectionCache,
+    state: &AppState,
+) -> CatalogEntry {
+    cache.single_model_entry_from_state(state)
 }
 
 fn validate_search(q: Option<&str>) -> Result<(), CatalogError> {

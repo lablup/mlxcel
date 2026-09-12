@@ -537,7 +537,13 @@ impl RouterPool {
         }
         for (name, section) in &self.sources.presets.models {
             if let Some(path) = &section.model_path {
-                discovered.insert(name.clone(), (path.clone(), RouterModelSource::Preset));
+                if regular_file_exists(&path.join("config.json")) {
+                    discovered.insert(name.clone(), (path.clone(), RouterModelSource::Preset));
+                } else {
+                    tracing::warn!(
+                        "router: preset '[{name}]' names a checkpoint without a regular config.json; skipping"
+                    );
+                }
             } else if let Some(repo) = &section.hf_repo {
                 let Some(cache) = &self.sources.cache else {
                     tracing::warn!(
@@ -547,7 +553,7 @@ impl RouterPool {
                     continue;
                 };
                 let path = cache.snapshot_dir(repo);
-                if path.join("config.json").is_file() {
+                if regular_file_exists(&path.join("config.json")) {
                     discovered.insert(name.clone(), (path, RouterModelSource::Preset));
                 } else {
                     tracing::warn!(
@@ -2254,7 +2260,7 @@ pub fn discover_models(models_dir: &Path) -> anyhow::Result<BTreeMap<String, Pat
             );
             continue;
         }
-        if !canonical.is_dir() || !canonical.join("config.json").is_file() {
+        if !canonical.is_dir() || !regular_file_exists(&canonical.join("config.json")) {
             continue;
         }
         found.insert(name, canonical);
@@ -2262,6 +2268,16 @@ pub fn discover_models(models_dir: &Path) -> anyhow::Result<BTreeMap<String, Pat
     Ok(found)
 }
 
+fn regular_file_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 #[path = "router_models_tests.rs"]
 mod router_models_tests;
+
+#[cfg(test)]
+#[path = "router_models_discovery_tests.rs"]
+mod router_models_discovery_tests;

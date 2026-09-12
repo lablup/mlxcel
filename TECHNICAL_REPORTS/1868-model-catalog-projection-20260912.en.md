@@ -1,10 +1,10 @@
 # Technical Report: PR #1868 — Model catalog projection
 
 **Date**: 2026-09-12
-**Status**: Open PR; focused validation plus root full-workspace and real-model gates complete; GB10 CI unavailable
+**Status**: Open PR; final focused CPU validation plus prior root full-workspace and real-model gates complete; GB10 CI unavailable
 **Languages**: Rust, JSON/OpenAPI, TypeScript, Markdown
 **Risk Level**: Medium
-**Implementation snapshot**: `6befcd26ea3d4624c76f64caf345908727922de6`
+**Implementation snapshot**: PR #1868 branch head after the final cache-ownership and symlink-evidence hardening update
 
 ## Executive Summary
 
@@ -26,7 +26,7 @@ The trade-off is deliberate uncertainty: a checkpoint may be inspectable but lac
 
 ### Cached metadata, current lifecycle
 
-The catalog projects `RouterPool::catalog_snapshot()` on blocking workers. Cached metadata is keyed by stable identity plus router catalog epoch and model generation, while current revision, lifecycle, provider-confirmed capability, and removal status are reapplied. Ordinary GET cache hits no longer recompute content fingerprints or repeat heavy metadata filesystem probes; first cache fill and explicit refresh still perform bounded inspection. The fingerprint is not a checksum of weight contents.
+The catalog projects `RouterPool::catalog_snapshot()` on blocking workers. Cached metadata is owned by each `RouterServerState` or single-model catalog context and keyed by stable identity plus router catalog epoch and model generation, while current revision, lifecycle, provider-confirmed capability, and removal status are reapplied. Ordinary GET cache hits no longer recompute content fingerprints or repeat heavy metadata acquisitions; first cache fill and explicit refresh still perform bounded inspection. The fingerprint is not a checksum of weight contents. One router pool cannot clear, evict, or reuse another pool's catalog metadata.
 
 Default pagination is 50, with a 200-item page limit and 1,000-entry inventory bound. Results sort by opaque ID. Stability is guaranteed for an unchanged inventory, not as a cross-request transaction during concurrent mutations.
 
@@ -43,8 +43,8 @@ The authenticated router constructor exposes catalog handlers for tests and futu
 Independent correctness and security reviews cleared the final implementation snapshot after these refinements:
 
 - Bounded metadata reads and shared detection probes prevent fallback to unrestricted weight-header inspection; unknown reasons replace unsupported guesses.
-- Filesystem evidence rejects symlinked sidecars and nested pooling parents. The final fix specifically rejects `1_Pooling` symlink traversal rather than checking only its leaf file.
-- Metadata caching preserves fresh pool lifecycle/provider facts instead of replaying stale readiness from a cached entry, and cache invalidation now follows router catalog epochs rather than per-GET fingerprint walks.
+- Filesystem evidence rejects symlinked sidecars, config files, SafeTensors index files, shard evidence, router cache entries, models-directory entries, preset paths, and nested pooling parents. The final fix rejects `1_Pooling` symlink traversal rather than checking only its leaf file.
+- Metadata caching is owned per router server or single-model catalog context, preserves fresh pool lifecycle/provider facts instead of replaying stale readiness from a cached entry, and follows router catalog epochs rather than per-GET fingerprint walks.
 - Raw `model_type` is preserved exactly within the schema limit, `declared_architectures` is exposed as a bounded nullable raw array, and non-string/oversized values become null with reasons rather than truncated false exactness.
 - Refresh singleflight separates operation acceptance from execution ownership and reports same-count changes through signatures; same-size config/index edits, legacy reloads, and cache downloads have route regressions.
 - Producer tests compare the complete serialized catalog shape against pinned schema-validated fixtures, normalizing only temporary-path-derived IDs/fingerprint and disk bytes.
@@ -57,13 +57,13 @@ The following results were reported by the implementation and independent review
 
 | Gate | Result at report preparation |
 |---|---|
-| Catalog-focused tests | 24 passed |
-| HTTP catalog route tests | 4 passed |
-| Existing catalog refresh singleflight route test | 1 passed |
+| `cargo test --profile test-fast --features metal,accelerate catalog -- --nocapture` | Passed: 32 library catalog/router tests plus 1 CLI-help test |
+| `cargo test --profile test-fast --features metal,accelerate router_models_discovery_tests -- --nocapture` | Passed: 2 router source discovery symlink regressions |
+| `cargo check --no-default-features --features metal,accelerate --lib --tests` | Passed with existing feature-off warnings |
 | `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` | Passed |
 | `cargo fmt --check`, `git diff --check`, and `python3 scripts/insert_apache_header.py --check` | Passed |
-| `make verify-webui-contract` with the isolated verifier Python | Passed, 40 fixtures |
-| `make verify-llama-compat verify-versions verify-kernel-dtype-keys` with Python 3.14 on `PATH` | Passed |
+| `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` | Passed, 40 fixtures |
+| `python3 scripts/ci/check_cross_repo_refs.py`, `python3 scripts/ci/check_kernel_dtype_keys.py`, and `/tmp/mlxcel-webui-contract/bin/python scripts/ci/check_crate_versions.py` | Passed; cross-repo check requested manual confirmation that newly mentioned bare refs are same-repo mlxcel issues/PRs |
 | Root full workspace/local CI and actual Llama + Granite regression | Passed: 11187/0/361 plus clippy; Llama 572-character smoke; Granite affirmative smoke; SIGINT worker-exit 1/1 |
 | GB10-required CI | Runner reported down; user explicitly authorized skipping unavailable runner gates |
 | CUDA execution, production `--webui`, browser acceptance | Not established by this change's scoped evidence |
@@ -79,10 +79,10 @@ The runner exception applies only to unavailable GB10 CI. It does not waive loca
 | Router adapters | Authenticated list/detail/refresh accessors, singleflight execution, redacted refresh failures |
 | Existing provider integration | Current pool capability snapshot and single-model `AppState` accessor |
 | Contracts | OpenAPI, generated TypeScript, and catalog/identity fixtures updated together |
-| Tests | Whole-producer contract checks, restricted filesystem evidence, cached lifecycle/provider projection, zero-heavy HTTP cache hits, same-size refresh edits, reload/download invalidation, 1,000-entry HTTP traversal |
+| Tests | Whole-producer contract checks, restricted filesystem evidence, per-router cache isolation, cached single-model projection, fresh lifecycle/provider projection, zero metadata acquisitions on HTTP cache hits, same-size refresh edits, reload/download invalidation, 1,000-entry HTTP traversal |
 | Documentation | English/Korean integration guide and this pre-merge report |
 
-Implementation commits: `57c1f268` adds the projection and shared probes; `70809247` adds required test license headers; `fafc5cf5` hardens pooling-parent evidence and adds full HTTP refresh pagination coverage; `6befcd26` restores raw bounded metadata fields and makes catalog metadata caching epoch-based.
+Implementation commits: `57c1f268` adds the projection and shared probes; `70809247` adds required test license headers; `fafc5cf5` hardens pooling-parent evidence and adds full HTTP refresh pagination coverage; `6befcd26` restores raw bounded metadata fields and makes catalog metadata caching epoch-based. The final hardening update scopes caches and metadata-acquisition counters to each router or single-model catalog context, rejects symlinked config/index/shard evidence across catalog and router source discovery, and keeps fresh provider/lifecycle projection on cached entries.
 
 ## 6. Learning Points and Follow-up
 

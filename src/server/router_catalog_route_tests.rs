@@ -63,17 +63,14 @@ async fn wait_for_refresh_success(app: Router, operation_id: &str) -> serde_json
     panic!("catalog refresh operation {operation_id} did not finish");
 }
 
-async fn small_catalog_page(app: Router) -> serde_json::Value {
-    let (status, body) = send(
-        app,
-        Method::GET,
-        "/ui-api/v1/catalog?limit=10",
-        "",
-        Some(ROUTER_KEY),
-    )
-    .await;
+async fn catalog_page(app: Router, uri: &str) -> serde_json::Value {
+    let (status, body) = send(app, Method::GET, uri, "", Some(ROUTER_KEY)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body
+}
+
+async fn small_catalog_page(app: Router) -> serde_json::Value {
+    catalog_page(app, "/ui-api/v1/catalog?limit=10").await
 }
 
 async fn refresh_catalog(app: Router) -> serde_json::Value {
@@ -105,6 +102,18 @@ fn item_by_inference_id<'a>(
         .unwrap_or_else(|| panic!("catalog item {inference_id} not found in {body}"))
 }
 
+async fn catalog_model_type(app: Router, inference_id: &str) -> String {
+    let page = catalog_page(
+        app,
+        &format!("/ui-api/v1/catalog?limit=10&q={inference_id}"),
+    )
+    .await;
+    item_by_inference_id(&page, inference_id)["metadata"]["model_type"]
+        .as_str()
+        .expect("model_type")
+        .to_string()
+}
+
 #[tokio::test]
 async fn catalog_route_paginates_thousand_entries_across_http_refresh() {
     let root = temp_models_dir("ui-catalog-page1000");
@@ -120,14 +129,15 @@ async fn catalog_route_paginates_thousand_entries_across_http_refresh() {
         keyed_config(),
         true,
     );
+    let catalog_cache = state.catalog_cache.clone();
     let app = create_router_app_with_authenticated_ui(state);
 
     let before = paginate_catalog_ids(app.clone()).await;
-    crate::server::webui::catalog::reset_heavy_metadata_probe_count();
+    catalog_cache.reset_heavy_metadata_probe_count();
     let cached = paginate_catalog_ids(app.clone()).await;
     assert_eq!(cached, before, "cached HTTP catalog IDs changed");
     assert_eq!(
-        crate::server::webui::catalog::heavy_metadata_probe_count(),
+        catalog_cache.heavy_metadata_probe_count(),
         0,
         "repeated HTTP catalog cache hit performed heavyweight metadata probes"
     );
@@ -149,6 +159,77 @@ async fn catalog_route_paginates_thousand_entries_across_http_refresh() {
 
     let after = paginate_catalog_ids(app).await;
     assert_eq!(after, before, "catalog IDs changed across HTTP refresh");
+}
+
+#[tokio::test]
+async fn catalog_route_cache_is_scoped_per_router_pool() {
+    let root_a = temp_models_dir("ui-catalog-cache-pool-a");
+    let root_b = temp_models_dir("ui-catalog-cache-pool-b");
+    for idx in 0..1000 {
+        let name = format!("model-{idx:04}");
+        add_catalog_model(&root_a, &name, "qwen3");
+        add_catalog_model(&root_b, &name, "qwen2");
+    }
+    let state_a = router_state_from(
+        RouterSources {
+            models_dir: Some(root_a),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let cache_a = state_a.catalog_cache.clone();
+    let app_a = create_router_app_with_authenticated_ui(state_a);
+    let state_b = router_state_from(
+        RouterSources {
+            models_dir: Some(root_b),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let cache_b = state_b.catalog_cache.clone();
+    let app_b = create_router_app_with_authenticated_ui(state_b);
+
+    let (ids_a, ids_b) = tokio::join!(
+        paginate_catalog_ids(app_a.clone()),
+        paginate_catalog_ids(app_b.clone())
+    );
+    assert_eq!(ids_a, ids_b, "identical names should keep stable IDs");
+    let (model_type_a, model_type_b) = tokio::join!(
+        catalog_model_type(app_a.clone(), "model-0000"),
+        catalog_model_type(app_b.clone(), "model-0000")
+    );
+    assert_eq!(model_type_a, "qwen3");
+    assert_eq!(model_type_b, "qwen2");
+
+    cache_a.reset_heavy_metadata_probe_count();
+    cache_b.reset_heavy_metadata_probe_count();
+    let (terminal_b, warm_a) = tokio::join!(
+        refresh_catalog(app_b.clone()),
+        paginate_catalog_ids(app_a.clone())
+    );
+    assert_eq!(terminal_b["result"]["scanned_entries"], 1000);
+    assert_eq!(
+        warm_a, ids_a,
+        "warm pool A IDs changed while pool B refreshed"
+    );
+    assert_eq!(
+        cache_a.heavy_metadata_probe_count(),
+        0,
+        "pool B refresh evicted or invalidated warm pool A cache"
+    );
+    assert!(
+        cache_b.heavy_metadata_probe_count() > 0,
+        "pool B refresh should measure its own metadata"
+    );
+    assert_eq!(
+        catalog_model_type(app_a, "model-0000").await,
+        "qwen3",
+        "pool B metadata leaked into pool A"
+    );
 }
 
 #[tokio::test]

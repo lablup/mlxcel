@@ -113,6 +113,8 @@ fn router_state_from(
     RouterServerState {
         pool,
         config: Arc::new(config),
+        #[cfg(feature = "webui")]
+        catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
     }
 }
 
@@ -192,6 +194,7 @@ async fn send(
 
 #[path = "router_contract_test_support.rs"]
 mod contract;
+#[cfg(feature = "webui")]
 #[path = "router_catalog_route_tests.rs"]
 mod router_catalog_route_tests;
 

@@ -22,42 +22,20 @@ use sha2::{Digest, Sha256};
 
 use super::catalog_types::{MAX_CONFIG_BYTES, MAX_DISK_DEPTH, MAX_DISK_FILES, MAX_INDEX_BYTES};
 
-#[cfg(test)]
-static HEAVY_METADATA_PROBES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(super) fn reset_heavy_metadata_probe_count() {
-    HEAVY_METADATA_PROBES.store(0, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg(test)]
-pub(super) fn heavy_metadata_probe_count() -> usize {
-    HEAVY_METADATA_PROBES.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(test)]
-fn record_heavy_metadata_probe() {
-    HEAVY_METADATA_PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg(not(test))]
-fn record_heavy_metadata_probe() {}
-
 pub(super) struct Completeness {
     pub(super) ok: bool,
     pub(super) reason: String,
 }
 
 pub(super) fn completeness(path: &Path) -> Completeness {
-    if !path.join("config.json").is_file() {
+    if !regular_file_exists(&path.join("config.json")) {
         return Completeness {
             ok: false,
             reason: "config.json is missing".to_string(),
         };
     }
     let index = path.join("model.safetensors.index.json");
-    if index.is_file() {
+    if regular_file_exists(&index) {
         return indexed_completeness(path, &index);
     }
     let entries = match bounded_read_dir_paths(path) {
@@ -191,7 +169,7 @@ pub(super) fn read_json_bounded(path: &Path, max_bytes: u64) -> (Option<Value>, 
 }
 
 pub(super) fn format_for(path: &Path) -> (Option<String>, Option<String>) {
-    if path.join("model.safetensors.index.json").is_file() {
+    if regular_file_exists(&path.join("model.safetensors.index.json")) {
         return (Some("safetensors".to_string()), None);
     }
     let entries = match bounded_read_dir_paths(path) {
@@ -201,7 +179,10 @@ pub(super) fn format_for(path: &Path) -> (Option<String>, Option<String>) {
     (
         entries
             .iter()
-            .any(|entry| entry.extension().is_some_and(|ext| ext == "safetensors"))
+            .any(|entry| {
+                entry.extension().is_some_and(|ext| ext == "safetensors")
+                    && regular_file_exists(entry)
+            })
             .then(|| "safetensors".to_string()),
         None,
     )
@@ -263,6 +244,12 @@ pub(super) fn disk_size(path: &Path) -> (Option<u64>, Option<String>) {
     (Some(total), None)
 }
 
+fn regular_file_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
+}
+
 fn regular_nonzero_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_file() && meta.len() > 0)
@@ -270,7 +257,6 @@ fn regular_nonzero_file(path: &Path) -> bool {
 }
 
 pub(super) fn content_fingerprint(path: &Path) -> Option<String> {
-    record_heavy_metadata_probe();
     let mut facts = Vec::new();
     push_required_metadata_fact(
         &mut facts,
@@ -279,7 +265,7 @@ pub(super) fn content_fingerprint(path: &Path) -> Option<String> {
         MAX_CONFIG_BYTES,
     )?;
     let index = path.join("model.safetensors.index.json");
-    if index.exists() {
+    if regular_file_exists(&index) {
         push_required_metadata_fact(&mut facts, "index", &index, MAX_INDEX_BYTES)?;
         push_index_shard_facts(&mut facts, path, &index);
     } else {
@@ -308,7 +294,9 @@ fn push_direct_shard_facts(facts: &mut Vec<String>, path: &Path) {
     };
     let mut shards: Vec<PathBuf> = entries
         .into_iter()
-        .filter(|entry| entry.extension().is_some_and(|ext| ext == "safetensors"))
+        .filter(|entry| {
+            entry.extension().is_some_and(|ext| ext == "safetensors") && regular_file_exists(entry)
+        })
         .collect();
     shards.sort();
     for (idx, shard) in shards.iter().enumerate() {
