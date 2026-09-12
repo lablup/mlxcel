@@ -281,10 +281,21 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
 
 fn sanitize_detection_error(path: &Path, message: &str) -> String {
     let path_text = path.display().to_string();
-    if path_text.is_empty() {
+    let redacted = if path_text.is_empty() {
         message.to_string()
     } else {
         message.replace(&path_text, "model directory")
+    };
+    // JSON Schema maxLength counts Unicode scalar values, not UTF-8 bytes.
+    // Redact first so truncation cannot leave a partial private path behind.
+    if redacted.chars().count() > 512 {
+        redacted
+            .chars()
+            .take(511)
+            .chain(std::iter::once('…'))
+            .collect()
+    } else {
+        redacted
     }
 }
 
@@ -481,3 +492,7 @@ fn source_kind(source: RouterModelSource) -> CatalogSourceKind {
         RouterModelSource::Preset => CatalogSourceKind::Preset,
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_reason_tests.rs"]
+mod reason_tests;

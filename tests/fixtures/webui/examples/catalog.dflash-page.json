@@ -1,0 +1,75 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "items": [
+    {
+      "identity": {
+        "id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
+        "inference_id": "dflash",
+        "display_name": "dflash",
+        "source": "models_dir",
+        "source_key_hash": "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
+        "generation": 1,
+        "revision": 1,
+        "content_fingerprint": "fixture-content-fingerprint"
+      },
+      "capabilities": [],
+      "lifecycle": {
+        "state": "unloaded",
+        "download": "complete",
+        "busy": false,
+        "active_requests": 0,
+        "draining_requests": 0,
+        "worker_exit_observed": true,
+        "last_error": null
+      },
+      "complete": true,
+      "supported": false,
+      "removable": false,
+      "metadata": {
+        "architecture": null,
+        "declared_architectures": null,
+        "input_tasks": [],
+        "output_tasks": [],
+        "quantization": "4bit",
+        "format": "safetensors",
+        "parameter_count": null,
+        "disk_bytes": 12345,
+        "memory_estimate_bytes": null,
+        "support": {
+          "architecturally_supported": false,
+          "runnable_on_backend": false,
+          "complete": true,
+          "reason": "architecture is not supported by the mlxcel registry",
+          "architecturally_supported_reason": "model directory is a DFlash-family speculative drafter checkpoint (Qwen 3.5 DFlash, LFM2 DSpark, Muse Glimmer assistant or Laguna DFlash), not a standalone model. Its config.json declares the DFlashDraftModel, Lfm2DSparkDraftModel, MuseGlimmerAssistantModel or DFlashLagunaForCausalLM architecture and/or a dflash_config block, and its weights carry no embed_tokens and no lm_head because such a drafter borrows both from the target model when it binds. Pass a full model to -m, and pass this directory to --dra…",
+          "runnable_on_backend_reason": "current backend does not advertise this architecture as runnable",
+          "complete_reason": null,
+          "tested_checkpoint": false,
+          "tested_checkpoint_reason": "No catalog-specific tested-checkpoint evidence is available."
+        },
+        "model_type": "qwen3",
+        "unknown_reasons": {
+          "architecture": "model directory is a DFlash-family speculative drafter checkpoint (Qwen 3.5 DFlash, LFM2 DSpark, Muse Glimmer assistant or Laguna DFlash), not a standalone model. Its config.json declares the DFlashDraftModel, Lfm2DSparkDraftModel, MuseGlimmerAssistantModel or DFlashLagunaForCausalLM architecture and/or a dflash_config block, and its weights carry no embed_tokens and no lm_head because such a drafter borrows both from the target model when it binds. Pass a full model to -m, and pass this directory to --dra…",
+          "declared_architectures": "config.json has no architectures array",
+          "model_type": null,
+          "quantization": null,
+          "format": null,
+          "parameter_count": "parameter count is not measured during metadata-only catalog scans",
+          "disk_bytes": null,
+          "memory_estimate_bytes": "memory estimate requires backend/provider measurement after load"
+        }
+      },
+      "removal": {
+        "eligible": false,
+        "reason": "only managed cache entries can be removed",
+        "instructions": "Use model-free mode with the managed cache to delete downloaded snapshots."
+      }
+    }
+  ],
+  "pagination": {
+    "limit": 50,
+    "next_cursor": null,
+    "total_known": 1
+  },
+  "server_instance_id": "srv_fixture",
+  "snapshot_sequence": 0
+}
