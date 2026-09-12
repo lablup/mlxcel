@@ -4,13 +4,13 @@
 
 ## Scope and ownership
 
-Issue #1840 adds metadata-only catalog projections over the existing `RouterPool`, plus list, detail, and refresh adapters. It does not create a second model registry or start another provider. `create_router_app_with_authenticated_ui` exposes the adapters behind mandatory API-key authentication for integration tests and the future secure startup path. The ordinary `create_router_app` still leaves them unmounted. Production `--webui` startup and browser security integration belong to #1838 and #1837, respectively; these API paths are not a claim that the production flag is already available.
+Issue #1840 adds metadata-only catalog projections over the existing `RouterPool`, plus list, detail, and refresh adapters. It does not create a second model registry or start another provider. `create_router_app_with_authenticated_ui` exposes the adapters behind mandatory API-key authentication for integration tests, and #1838 mounts the same typed API in production `--webui` startup behind the WebUI security wrapper. The ordinary `create_router_app` still leaves the administrative UI routes unmounted when WebUI is off.
 
 Discovery remains owned by the router: managed cache, explicit `--models-dir`, and presets retain their existing collision precedence (cache < models directory < preset), aliases, and hidden-entry policy. Select the repository store explicitly with `--models-dir models/mlx`; catalog code does not invent a working-directory-dependent default or a filesystem picker. Listing projects discovered entries without downloading a checkpoint, opening a tokenizer, constructing a provider, or loading weights.
 
 ## Consuming the projection
 
-The adapter paths below are relative to the server's future validated API prefix. See [the API schema](api.yaml) and [generated TypeScript declarations](generated/ui-api.d.ts) for complete DTO definitions.
+The adapter paths below are relative to the server's validated API prefix. See [the API schema](api.yaml) and [generated TypeScript declarations](generated/ui-api.d.ts) for complete DTO definitions.
 
 | Request | Behavior |
 |---|---|
@@ -42,7 +42,7 @@ Metadata projection runs on blocking workers. Each router or single-model WebUI 
 
 Only one refresh owns execution per server instance while its operation is active. Concurrent requests replay that operation without starting another rescan; a later request after completion may start a new one. `changed_entries` compares entry signatures and includes additions, removals, and detected modifications even when the inventory count is unchanged. Client-facing refresh failures are redacted; diagnostic details stay in server logs.
 
-Removal eligibility is advisory, not permission to unlink a path: only managed cache entries can be eligible, and busy entries are unavailable. The actual removal workflow and operation-boundary checks belong to #1841. Single-model mode uses the cache-aware `single_model_entry_from_state_with_cache(&CatalogProjectionCache, &AppState)` handoff to describe the existing provider and its real inference ID, without registering another provider; it reports read-only removal reasons and projects fresh provider/lifecycle state over cached static metadata. Mounting that accessor in production belongs to #1838.
+Removal eligibility is advisory, not permission to unlink a path: only managed cache entries can be eligible, and busy entries are unavailable. The actual removal workflow and operation-boundary checks belong to #1841. Single-model mode uses the cache-aware `single_model_entry_from_state_with_cache(&CatalogProjectionCache, &AppState)` handoff to describe the existing provider and its real inference ID, without registering another provider; it reports read-only removal reasons and projects fresh provider/lifecycle state over cached static metadata. #1838 mounts that accessor in production through a per-app cache and blocking offload.
 
 ## Regression coverage
 
@@ -50,4 +50,4 @@ Focused tests cover full producer JSON against schema-validated fixtures, raw mo
 
 The final combined gate ran at `808994e353fdab5563966e751ca2c71515d08595`: catalog 32 library + 1 CLI, security 26 and discovery 2 passed; workspace all-target clippy, 40 contract fixtures, structural checks, fmt and diff checks passed. The shared detection/loader path remained unchanged. Both independent reviewers cleared the complete router and single-model cache boundaries at this revision.
 
-`single_model_entry_from_state_with_cache` is synchronous. The #1838 startup owner must retain one per-application `Arc<CatalogProjectionCache>` and invoke this helper inside `tokio::task::spawn_blocking`. Never create a cache per poll or call the uncached convenience accessor in an HTTP handler. Cached-helper/provider transitions are tested here; production single-model route offload and responsiveness are #1838 responsibilities. Router HTTP adapters already offload metadata acquisition.
+`single_model_entry_from_state_with_cache` is synchronous. Production single-model WebUI routes retain one per-application `Arc<CatalogProjectionCache>` and invoke this helper inside `tokio::task::spawn_blocking`; never create a cache per poll or call the uncached convenience accessor in an HTTP handler. Cached-helper/provider transitions are tested here, and #1838 adds mounted-route coverage for the production offload path. Router HTTP adapters already offload metadata acquisition.

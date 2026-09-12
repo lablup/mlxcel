@@ -782,58 +782,24 @@ async fn single_ui_operations_list(
 }
 
 #[cfg(feature = "webui")]
-async fn single_ui_events(
-    State(state): State<AppState>,
-    _headers: HeaderMap,
-    _uri: Uri,
-) -> Response {
-    let (receiver, replay) = match state.webui_lifecycle.subscribe_for_ui(
-        super::router_lifecycle::UiReplayCursor::Snapshot,
-        Vec::new(),
-    ) {
-        Ok(subscription) => subscription,
-        Err(_) => {
+async fn single_ui_events(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let runtime_model_ids = match single_catalog_entry_blocking(state.clone()).await {
+        Ok(entry) => vec![entry.identity.id],
+        Err(err) => {
             return single_webui_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "event cursor is invalid",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                format!("event model identity projection task failed: {err}"),
                 true,
             );
         }
     };
-    let coordinator = state.webui_lifecycle.clone();
-    let stream = futures::stream::unfold(
-        (replay.into_iter(), receiver, coordinator),
-        |state| async move {
-            let (mut replay, mut receiver, coordinator) = state;
-            if let Some(event) = replay.next() {
-                return Some((
-                    Ok::<axum::response::sse::Event, std::convert::Infallible>(event_to_sse(event)),
-                    (replay, receiver, coordinator),
-                ));
-            }
-            match receiver.recv().await {
-                Ok(event) => Some((Ok(event_to_sse(event)), (replay, receiver, coordinator))),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let event = coordinator
-                        .local_reset_event("gap", super::router_lifecycle::ResetEventKind::Gap);
-                    Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)))
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
-            }
-        },
-    );
-    axum::response::sse::Sse::new(stream)
-        .keep_alive(axum::response::sse::KeepAlive::default())
-        .into_response()
-}
-
-#[cfg(feature = "webui")]
-fn event_to_sse(event: super::router_lifecycle::UiEvent) -> axum::response::sse::Event {
-    axum::response::sse::Event::default()
-        .id(event.event_id.clone())
-        .event(event.event_type.clone())
-        .data(serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()))
+    super::webui::events::ui_events_response(
+        state.webui_lifecycle.clone(),
+        runtime_model_ids,
+        headers,
+        uri,
+    )
 }
 
 #[cfg(test)]
@@ -943,6 +909,122 @@ mod tests {
                 post(|| async { StatusCode::NO_CONTENT }),
             )
             .layer(DefaultBodyLimit::max(AUDIO_MAX_UPLOAD_BYTES))
+    }
+
+    #[cfg(feature = "webui")]
+    fn single_webui_state() -> crate::server::AppState {
+        use std::path::PathBuf;
+        use std::sync::{Arc, mpsc};
+
+        let (options_tx, _options_rx) = mpsc::channel();
+        let provider = Arc::new(crate::server::ModelProvider::recording_for_route_tests(
+            options_tx,
+        ));
+        let batch_metrics = provider.batch_metrics().clone();
+        crate::server::AppState::new(
+            provider,
+            crate::server::ServerConfig::default(),
+            crate::server::ChatTemplateProcessor::with_template("ok".to_string()),
+            crate::tokenizer::MlxcelTokenizer::stub(),
+            PathBuf::from("single-webui-route-test-model"),
+            batch_metrics,
+        )
+    }
+
+    #[cfg(feature = "webui")]
+    fn assert_single_model_revision_event(chunk: &str, server_instance: &str, model_id: &str) {
+        let data = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE JSON data");
+        let event_id = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("id: "))
+            .expect("SSE id");
+        let mut actual: Value = serde_json::from_str(data).expect("producer event JSON");
+        assert_eq!(actual["server_instance_id"], server_instance);
+        assert_eq!(actual["type"], "model_revision");
+        assert_eq!(actual["payload"]["model_id"], model_id);
+        assert_eq!(actual["event_id"], event_id);
+        assert!(super::valid_model_id(model_id));
+        assert!(event_id.starts_with("evt_"));
+        assert!(
+            actual["payload"]["revision"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        );
+        assert!(actual["sequence"].as_u64().is_some());
+        assert!(
+            actual["emitted_at"]
+                .as_str()
+                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        );
+        let mut expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/webui/examples/event.1.json"
+        ))
+        .expect("event fixture");
+        for path in [
+            "/server_instance_id",
+            "/event_id",
+            "/sequence",
+            "/emitted_at",
+            "/payload/model_id",
+            "/payload/revision",
+        ] {
+            *actual.pointer_mut(path).expect("actual dynamic") =
+                expected.pointer(path).expect("expected dynamic").clone();
+        }
+        expected
+            .as_object_mut()
+            .expect("fixture object")
+            .remove("$schemaName");
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "webui")]
+    async fn first_single_sse_chunk(app: Router, uri: &str, last_event_id: Option<&str>) -> String {
+        use axum::http::header;
+        use futures::StreamExt;
+
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::ACCEPT, "text/event-stream");
+        if let Some(event_id) = last_event_id {
+            builder = builder.header("Last-Event-ID", event_id);
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("sse chunk timeout")
+            .expect("sse chunk")
+            .expect("sse body ok");
+        String::from_utf8(chunk.to_vec()).expect("utf8 sse")
+    }
+
+    #[cfg(feature = "webui")]
+    async fn single_events_status(
+        app: Router,
+        uri: &str,
+        last_event_id: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder().method(Method::GET).uri(uri);
+        if let Some(event_id) = last_event_id {
+            builder = builder.header("Last-Event-ID", event_id);
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+        let json = serde_json::from_slice(&bytes).expect("json body");
+        (status, json)
     }
 
     #[test]
@@ -1183,6 +1265,45 @@ mod tests {
                 "{path} alias must be mounted"
             );
         }
+    }
+
+    #[cfg(feature = "webui")]
+    #[tokio::test]
+    async fn single_webui_events_use_shared_replay_cursor_and_fixtures() {
+        let state = single_webui_state();
+        let entry = crate::server::webui::catalog::single_model_entry_from_state_with_cache(
+            &state.webui_catalog_cache,
+            &state,
+        );
+        let server_instance = state.webui_lifecycle.server_instance_id().to_string();
+        let lifecycle = crate::server::router_lifecycle::ModelLifecycle::new(
+            crate::server::router_lifecycle::DownloadState::Complete,
+        );
+        lifecycle.mark_loading();
+        state.webui_lifecycle.publish_model_revision(
+            &entry.identity.id,
+            entry.identity.revision,
+            lifecycle.snapshot(),
+        );
+        let app = super::single_webui_api_routes().with_state(state);
+
+        let replay = first_single_sse_chunk(
+            app.clone(),
+            &format!("/ui-api/v1/events?server_instance_id={server_instance}&after_sequence=0"),
+            None,
+        )
+        .await;
+        assert!(replay.contains("event: model_revision"), "{replay}");
+        assert_single_model_revision_event(&replay, &server_instance, &entry.identity.id);
+
+        let (status, response) = single_events_status(
+            app,
+            &format!("/ui-api/v1/events?server_instance_id={server_instance}&after_sequence=1"),
+            Some("evt_conflict"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(response["error"]["field_errors"][0]["code"], "conflict");
     }
 
     #[tokio::test]

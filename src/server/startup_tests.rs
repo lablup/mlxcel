@@ -1855,3 +1855,26 @@ fn sampler_order_accepts_the_adaptive_p_extension_and_reports_it() {
     check_sampler_order(Some("adaptive_p;top_k"), None)
         .expect_err("adaptive_p does not excuse a reordered remainder");
 }
+
+#[cfg(feature = "webui")]
+#[test]
+fn webui_security_treats_bracketed_ipv6_loopback_as_loopback() {
+    use crate::server::webui::security::startup::WebUiListenKind;
+
+    for host in ["::1", "[::1]", "127.0.0.1", "localhost"] {
+        let resolution = crate::server::transport::resolve_listen_target(host, 8080).unwrap();
+        assert_eq!(
+            super::webui_listen_kind(&resolution),
+            WebUiListenKind::LoopbackTcp,
+            "{host} should be WebUI loopback"
+        );
+    }
+    for host in ["::", "[::]", "0.0.0.0", "192.0.2.10"] {
+        let resolution = crate::server::transport::resolve_listen_target(host, 8080).unwrap();
+        assert_eq!(
+            super::webui_listen_kind(&resolution),
+            WebUiListenKind::NonLoopbackTcp,
+            "{host} should remain WebUI non-loopback"
+        );
+    }
+}
