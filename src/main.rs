@@ -2825,11 +2825,12 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Tune(args) => args.model.as_deref(),
         Commands::Inspect(args) => Some(args.model.as_path()),
         Commands::Detect(args) => Some(args.model.as_path()),
-        Commands::List(_)
-        | Commands::Arch(_)
-        | Commands::Download(_)
-        | Commands::Rm(_)
-        | Commands::SplitMtp(_) => None,
+        Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
+        // Gated exactly like the variant itself and its dispatch arm below;
+        // without the gate this arm does not compile in feature sets that
+        // exclude `surgery`.
+        #[cfg(feature = "surgery")]
+        Commands::SplitMtp(_) => None,
     }
 }
 
