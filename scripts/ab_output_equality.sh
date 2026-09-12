@@ -31,6 +31,10 @@
 #
 #   --model / --prompt repeat, and every (model, prompt) pair is checked.
 #
+#   --allow-identical-binaries lets the two arms hold the same bytes. Without it
+#   that is refused, because a `cargo build` that no-ops leaves the copied-aside
+#   baseline and the "rebuilt" arm identical and every pair reports EQUAL.
+#
 # Producing the baseline binary: build at the unpatched commit, copy the binary
 # aside, apply the patch, rebuild.
 #
@@ -46,12 +50,17 @@ set -uo pipefail
 BASELINE_BIN=""
 ARM_BIN="./target/release/mlxcel"
 MAX_TOKENS=128
+ALLOW_IDENTICAL_BINS=0
 OUT_DIR=""
 MODELS=()
 PROMPTS=()
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the whole header comment block rather than a hard-coded line range.
+  # The range spelling (`sed -n '2,45p'`) silently truncated the last line as
+  # soon as the header grew, which is how the documented exit statuses went
+  # missing from `--help`.
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
   exit "${1:-0}"
 }
 
@@ -63,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --prompt) PROMPTS+=("$2"); shift 2 ;;
     -n|--max-tokens) MAX_TOKENS="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
+    --allow-identical-binaries) ALLOW_IDENTICAL_BINS=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown argument: $1" >&2; usage 1 ;;
   esac
@@ -78,6 +88,21 @@ done
 if [[ "$(cd "$(dirname "$BASELINE_BIN")" && pwd)/$(basename "$BASELINE_BIN")" \
       == "$(cd "$(dirname "$ARM_BIN")" && pwd)/$(basename "$ARM_BIN")" ]]; then
   echo "error: --baseline and --arm are the same file; the comparison would be vacuous" >&2
+  exit 1
+fi
+# Two distinct paths holding identical bytes is the other vacuous comparison, and
+# it is the one that actually happens: the documented recipe above copies the
+# binary aside and rebuilds, and a `cargo build` that no-ops leaves the copy and
+# the rebuild byte-identical. That no-op after a bridge `.cpp` edit reproduced on
+# an M5 Max on 2026-09-09 (0.12s, nothing recompiled) while an M1 Ultra rebuilt
+# normally, so the arm can silently be the baseline and every pair then reports
+# EQUAL for the wrong reason. Refuse by default. A source change that genuinely
+# compiles to the same bytes is possible, so `--allow-identical-binaries` exists,
+# but it has to be asked for.
+if [[ "$ALLOW_IDENTICAL_BINS" -eq 0 ]] && cmp -s "$BASELINE_BIN" "$ARM_BIN"; then
+  echo "error: --baseline and --arm are byte-identical binaries at different paths." >&2
+  echo "       The arm was probably never rebuilt (see the cargo no-op note above)." >&2
+  echo "       Rebuild and check the build log, or pass --allow-identical-binaries." >&2
   exit 1
 fi
 if [[ ${#MODELS[@]} -eq 0 ]]; then
