@@ -35,6 +35,13 @@
 #   that is refused, because a `cargo build` that no-ops leaves the copied-aside
 #   baseline and the "rebuilt" arm identical and every pair reports EQUAL.
 #
+# That refusal bounds one failure mode, not the class. It catches a build that
+# no-opped entirely, where the arm is the baseline byte for byte. A build that
+# recompiled the Rust but reused stale C++ objects produces two binaries that
+# differ in bytes, so the check passes while the change under test is still
+# absent from the arm. Reading the build log for the translation unit you edited
+# is what covers that, and this script does not replace it.
+#
 # Producing the baseline binary: build at the unpatched commit, copy the binary
 # aside, apply the patch, rebuild.
 #
