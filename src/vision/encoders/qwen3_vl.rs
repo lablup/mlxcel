@@ -31,6 +31,44 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+/// Test-only observation points for localizing Qwen3-VL vision-tower parity.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Qwen3VLVisionStage {
+    InputPatches,
+    PatchEmbed,
+    PositionEmbedding,
+    AfterPositionEmbedding,
+    RotaryPositionEmbedding,
+    BlockAttention { layer: usize },
+    BlockAfterAttention { layer: usize },
+    BlockMlp { layer: usize },
+    BlockOutput { layer: usize },
+    DeepStack { stack: usize, layer: usize },
+    PreMerger,
+    PostMerger,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Qwen3VLVisionStage {
+    pub fn label(&self) -> String {
+        match self {
+            Self::InputPatches => "input_patches".to_string(),
+            Self::PatchEmbed => "patch_embed".to_string(),
+            Self::PositionEmbedding => "position_embedding".to_string(),
+            Self::AfterPositionEmbedding => "after_position_embedding".to_string(),
+            Self::RotaryPositionEmbedding => "rotary_position_embedding".to_string(),
+            Self::BlockAttention { layer } => format!("block_{layer:02}_attention"),
+            Self::BlockAfterAttention { layer } => format!("block_{layer:02}_after_attention"),
+            Self::BlockMlp { layer } => format!("block_{layer:02}_mlp"),
+            Self::BlockOutput { layer } => format!("block_{layer:02}_output"),
+            Self::DeepStack { stack, layer } => format!("deepstack_{stack}_after_block_{layer:02}"),
+            Self::PreMerger => "pre_merger".to_string(),
+            Self::PostMerger => "post_merger".to_string(),
+        }
+    }
+}
+
 /// Qwen3-VL vision encoder configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct Qwen3VLVisionConfig {
@@ -271,13 +309,13 @@ impl PositionEmbedding {
         let idx_tensor = mlxcel_core::from_slice_i32(&all_idx, &[4, total_hw]);
         let wt_tensor = mlxcel_core::from_slice_f32(&all_wt, &[4, total_hw]);
 
-        // Cast weight tensor to embedding dtype
-        let embed_dtype = mlxcel_core::array_dtype(&self.weight);
-        let wt_tensor = mlxcel_core::astype(&wt_tensor, embed_dtype);
-
-        // Look up embeddings: [4, total_hw] -> [4, total_hw, hidden_size]
+        // Look up embeddings: [4, total_hw] -> [4, total_hw, hidden_size].
+        // Keep the interpolation multiply/add in float32 even when the learned table is stored
+        // as bf16/f16; the Transformers oracle applies float interpolation weights to the
+        // embedding rows instead of quantizing the bilinear weights to the table dtype.
         let idx_flat = mlxcel_core::flatten(&idx_tensor);
         let embeds = mlxcel_core::take(&self.weight, &idx_flat, 0);
+        let embeds = mlxcel_core::astype(&embeds, mlxcel_core::dtype::FLOAT32);
         let hidden_size = mlxcel_core::array_shape(&self.weight)[1];
         let embeds = mlxcel_core::reshape(&embeds, &[4, total_hw, hidden_size]);
 
@@ -513,6 +551,14 @@ impl VisionAttention {
 #[path = "qwen3_vl_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "qwen3_vl_stage_observer_tests.rs"]
+mod stage_observer_tests;
+
+#[cfg(test)]
+#[path = "qwen3_vl_stage_dump_tests.rs"]
+mod stage_dump_tests;
+
 // Vision MLP - GELU (like Qwen2-VL, NOT SwiGLU like Qwen2.5-VL).
 // Weight keys: linear_fc1, linear_fc2 (not fc1/fc2 or gate_proj/up_proj/down_proj).
 struct VisionMLP {
@@ -581,6 +627,34 @@ impl VisionBlock {
         let normed = self.norm2.forward(&h);
         let mlp_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &mlp_out)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn forward_observed<F>(
+        &self,
+        hidden_states: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary_pos_emb: &MlxArray,
+        layer: usize,
+        observe: &mut F,
+    ) -> UniquePtr<MlxArray>
+    where
+        F: FnMut(Qwen3VLVisionStage, &MlxArray),
+    {
+        let normed = self.norm1.forward(hidden_states);
+        let attn_out = self.attn.forward(&normed, cu_seqlens, rotary_pos_emb);
+        observe(Qwen3VLVisionStage::BlockAttention { layer }, &attn_out);
+
+        let h = mlxcel_core::add(hidden_states, &attn_out);
+        observe(Qwen3VLVisionStage::BlockAfterAttention { layer }, &h);
+
+        let normed = self.norm2.forward(&h);
+        let mlp_out = self.mlp.forward(&normed);
+        observe(Qwen3VLVisionStage::BlockMlp { layer }, &mlp_out);
+
+        let h = mlxcel_core::add(&h, &mlp_out);
+        observe(Qwen3VLVisionStage::BlockOutput { layer }, &h);
+        h
     }
 }
 
@@ -826,6 +900,7 @@ impl Qwen3VLVisionEncoder {
         let pos_embeds = self
             .pos_embed
             .fast_pos_embed_interpolate(grid_thw, self.spatial_merge_size);
+        let pos_embeds = mlxcel_core::astype(&pos_embeds, mlxcel_core::array_dtype(&h));
         h = mlxcel_core::add(&h, &pos_embeds);
 
         // 3. Compute rotary position embeddings
@@ -859,6 +934,71 @@ impl Qwen3VLVisionEncoder {
 
         // 6. Apply main merger
         h = self.merger.forward(&h);
+
+        Qwen3VLVisionEncoderOutput {
+            hidden_states: h,
+            deepstack_features,
+        }
+    }
+
+    /// Test-only observed forward pass for stage-by-stage oracle comparison.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn forward_with_grid_observer<F>(
+        &self,
+        hidden_states: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+        mut observe: F,
+    ) -> Qwen3VLVisionEncoderOutput
+    where
+        F: FnMut(Qwen3VLVisionStage, &MlxArray),
+    {
+        observe(Qwen3VLVisionStage::InputPatches, hidden_states);
+        let mut h = self.patch_embed.forward(hidden_states);
+        observe(Qwen3VLVisionStage::PatchEmbed, &h);
+
+        let pos_embeds = self
+            .pos_embed
+            .fast_pos_embed_interpolate(grid_thw, self.spatial_merge_size);
+        observe(Qwen3VLVisionStage::PositionEmbedding, &pos_embeds);
+
+        let pos_embeds_for_add = mlxcel_core::astype(&pos_embeds, mlxcel_core::array_dtype(&h));
+        h = mlxcel_core::add(&h, &pos_embeds_for_add);
+        observe(Qwen3VLVisionStage::AfterPositionEmbedding, &h);
+
+        let rotary_pos_emb = self.rot_pos_emb(grid_thw);
+        observe(Qwen3VLVisionStage::RotaryPositionEmbedding, &rotary_pos_emb);
+
+        let h_shape = mlxcel_core::array_shape(&h);
+        let seq_len = h_shape[0];
+        h = mlxcel_core::reshape(&h, &[seq_len, -1]);
+        let rope_shape = mlxcel_core::array_shape(&rotary_pos_emb);
+        let rotary_pos_emb = mlxcel_core::reshape(&rotary_pos_emb, &[rope_shape[0], -1]);
+        let cu_seqlens = Self::compute_cu_seqlens(grid_thw);
+        let mut deepstack_features: Vec<UniquePtr<MlxArray>> = Vec::new();
+
+        for (layer_num, block) in self.blocks.iter().enumerate() {
+            h = block.forward_observed(&h, &cu_seqlens, &rotary_pos_emb, layer_num, &mut observe);
+
+            if let Some(ds_idx) = self
+                .deepstack_visual_indexes
+                .iter()
+                .position(|&idx| idx == layer_num)
+            {
+                let ds_feature = self.deepstack_merger_list[ds_idx].forward(&h);
+                observe(
+                    Qwen3VLVisionStage::DeepStack {
+                        stack: ds_idx,
+                        layer: layer_num,
+                    },
+                    &ds_feature,
+                );
+                deepstack_features.push(ds_feature);
+            }
+        }
+
+        observe(Qwen3VLVisionStage::PreMerger, &h);
+        h = self.merger.forward(&h);
+        observe(Qwen3VLVisionStage::PostMerger, &h);
 
         Qwen3VLVisionEncoderOutput {
             hidden_states: h,
