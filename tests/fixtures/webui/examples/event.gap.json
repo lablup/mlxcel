@@ -1,0 +1,12 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server_instance_id": "srv_20260912_a",
+  "sequence": 45,
+  "type": "gap",
+  "payload": {
+    "reason": "gap",
+    "resnapshot": true
+  },
+  "event_id": "evt_srv_20260912_a_gap_00000045",
+  "emitted_at": "2026-09-12T03:04:05Z"
+}

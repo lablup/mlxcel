@@ -20,7 +20,7 @@ Post-review 수정은 `begin_load`, rescan, remove, queued UI action 주변의 h
 
 WebUI administrative adapter는 더 이상 production/base router에 mount되지 않는다. `create_router_app`은 기존 라우터만 유지하고, 테스트와 향후 startup integration은 `create_router_app_with_authenticated_ui`를 사용한다. 이 accessor는 API key가 설정되고 제시되지 않으면 모든 `/ui-api/*` 요청을 거절한다. 느린 SSE client는 더 이상 전역 ring에 reset을 publish하지 않고 client-local reset event를 받는다. Route와 operation history의 오류는 bounded typed message로 redaction되고, 원본 build/load 세부 정보는 서버 로그에만 남는다.
 
-WebUI 계약에는 `target.eviction_target_id`와 typed `ModelEvictionReport`가 추가되었고, TypeScript DTO와 fixture가 갱신되었다. Route-level producer test는 실제 `/ui-api/v1/operations` 직렬화 응답을 Rust DTO로 round-trip하고, schema-critical token/model-id/timestamp/nullability field를 검사하며, operation/result discriminator와 eviction outcome을 schema-validated fixture와 대조한다.
+WebUI 계약에는 `target.eviction_target_id`와 typed `ModelEvictionReport`가 추가되었고, TypeScript DTO와 fixture가 갱신되었다. Route-level producer test는 operation 조회, operation 목록, gap SSE envelope의 전체 JSON을 고정된 JSON Schema 검증기를 통과한 canonical fixture와 대조한다. 검증한 동적 ID, RFC3339 timestamp, revision, sequence만 정규화하며, 필수 nullable field, 추가 key, lifecycle field, discriminator는 정확히 일치해야 한다. Coordinator에 직접 넣은 ready load 결과는 별도의 eviction victim을 사용한다. 이는 직렬화 테스트이며 실제 worker 실행을 검증한 것은 아니다. Negative control은 nullable field 누락, 알 수 없는 중첩 field, 잘못된 동적 값, lifecycle/discriminator 변경, envelope/list 누락을 거절한다.
 
 ## 호환성 및 검증
 
@@ -32,13 +32,23 @@ WebUI 계약에는 `target.eviction_target_id`와 typed `ModelEvictionReport`가
 - `cargo fmt --check`
 - `git diff --check`
 - `python3 scripts/insert_apache_header.py --check`
-- `/tmp/mlxcel-webui-contract/bin/python scripts/ci/check_webui_contract.py`
-- `cargo test --profile test-fast --features metal,accelerate router_server_tests:: -- --nocapture` (23 passed)
+- `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` (fixture 32개 및 검증기 negative test)
+- `cargo test --profile test-fast --features metal,accelerate router_server_tests:: -- --nocapture` (26 passed)
 - `cargo test --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` (9 passed)
 - `cargo test --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` (32 passed)
 
 ## 실제 체크포인트 수용 테스트
 
-Root가 조율한 첫 실제 체크포인트 게이트는 post-implementation build(`584249a4`)에서 통과했다. 모델 A `meta-llama-3.1-8b-instruct-4bit`는 572자 streaming 응답을 냈고, response body가 살아 있는 동안 unload를 요청하면 기대한 drain refusal HTTP 400이 발생했으며, 모델 A의 worker exit가 관찰되었고, `--models-max 1` 아래에서 모델 B `granite-4.0-h-tiny-4bit`가 비어 있지 않은 텍스트(`Affirmative.`)를 생성했다. Scoped RSS 스냅샷은 start 32656 KiB, after load A 351824 KiB, after unload A 4173872 KiB, after load B 4257760 KiB였다. RSS는 정보성 측정치이며 0 메모리 보장을 의미하지 않는다.
+Root가 조율한 실제 체크포인트 게이트는 macOS 27 / Apple Silicon에서 runtime commit `42ec0734`로 통과했다. `--models-max 1` 아래에서 모델 A `meta-llama-3.1-8b-instruct-4bit`는 574자 streaming 응답을 생성했다. Response body가 살아 있는 동안 unload를 요청하면 기대한 drain refusal HTTP 400이 발생했으며, stream drop 이후 서버 로그에서 A의 worker exit를 확인했다. 이후 모델 B `granite-4.0-h-tiny-4bit`는 `Affirmative.`를 생성했다. SIGINT shutdown은 lifecycle 종료 시도 1건, 완료 1건을 보고했다.
 
-Root는 오래된 binary에 대한 negative control도 수행했다(`SHA256 ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit unknown). 같은 real harness는 unload-before-stream-drop 단계에서 exit 4로 실패했다. 증거 경로는 `/tmp/epic-1834-run-5tpfu3lc/issue-1839-real-20260912-143914/summary.json` 및 `/tmp/epic-1834-run-5tpfu3lc/negative-control-ef3146d4.log`이다. 리뷰 수정 commit 이후의 최종 real rerun은 root GPU 조율을 기다린다.
+| Process RSS 측정 시점 | KiB |
+|---|---:|
+| 서버 시작 | 33,248 |
+| A 로드 후, 첫 요청 전 | 343,776 |
+| A streaming 중 | 4,363,712 |
+| A unload 후 | 4,139,648 |
+| B 로드 후 | 4,254,784 |
+
+이는 process RSS snapshot이며 allocator 측정이나 잔류 메모리 0의 증거가 아니다. 이전 binary를 사용한 negative control(SHA-256 `ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit 미확인)은 같은 harness의 unload-before-stream-drop 단계에서 exit 4로 실패했다. 이 비교는 검증되지 않은 source revision을 binary에 부여하지 않고 새 worker-exit 관찰과 이전 registry-drop 동작을 구분한다.
+
+위 측정은 최종 atomic-reservation 리뷰 수정 및 test-only finalization 이전 결과다. 통합 HEAD의 실제 모델 재실행과 넓은 범위 최종 검증은 root가 수행하며, 머지 전에 그 결과를 확인해야 한다. 임시 로컬 harness 파일은 공개 증거 보관소가 아니다.

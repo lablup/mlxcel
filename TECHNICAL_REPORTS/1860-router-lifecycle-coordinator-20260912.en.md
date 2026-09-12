@@ -20,7 +20,7 @@ The post-review fixes close the high-risk race windows around `begin_load`, resc
 
 The WebUI administrative adapters are no longer mounted by the production/base router. `create_router_app` keeps the legacy router only, while tests and future startup integration use `create_router_app_with_authenticated_ui`; that accessor rejects every `/ui-api/*` request unless an API key is configured and presented. Slow SSE clients now get client-local reset events instead of publishing a reset into the global ring for every lagging subscriber. Route and operation history errors are redacted to bounded typed messages, while raw build/load details are kept in server logs.
 
-The WebUI contract was extended with `target.eviction_target_id` and typed `ModelEvictionReport`, regenerated TypeScript DTOs, and updated fixtures. The route-level producer test now validates an actual serialized `/ui-api/v1/operations` response by round-tripping it through the Rust DTO, asserting schema-critical token/model-id/timestamp/nullability fields, and comparing operation/result discriminators plus eviction outcome against the schema-validated fixture.
+The WebUI contract was extended with `target.eviction_target_id` and typed `ModelEvictionReport`, regenerated TypeScript DTOs, and updated fixtures. Route-level producer tests compare the complete JSON returned by operation retrieval, operation listing, and a gap SSE envelope with canonical fixtures validated by the pinned JSON Schema gate. Only validated dynamic IDs, RFC3339 timestamps, revisions and sequences are normalized; required nullable fields, extra keys, lifecycle fields and discriminators must match exactly. A coordinator-seeded ready load result uses a distinct eviction victim; this tests serialization, not real worker execution. Negative controls reject missing nullable fields, unknown nested fields, invalid dynamic values, altered lifecycle/discriminator values, and envelope/list omissions.
 
 ## Compatibility and validation
 
@@ -32,13 +32,23 @@ Validation run in the issue worktree:
 - `cargo fmt --check`
 - `git diff --check`
 - `python3 scripts/insert_apache_header.py --check`
-- `/tmp/mlxcel-webui-contract/bin/python scripts/ci/check_webui_contract.py`
-- `cargo test --profile test-fast --features metal,accelerate router_server_tests:: -- --nocapture` (23 passed)
+- `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` (32 fixtures, including validator negative tests)
+- `cargo test --profile test-fast --features metal,accelerate router_server_tests:: -- --nocapture` (26 passed)
 - `cargo test --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` (9 passed)
 - `cargo test --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` (32 passed)
 
 ## Real checkpoint acceptance
 
-Root-coordinated real checkpoint gate passed on the first post-implementation build (`584249a4`): model A `meta-llama-3.1-8b-instruct-4bit` streamed 572 response characters, unload while the response body was live produced the expected drain refusal HTTP 400, worker exit was observed for model A, and model B `granite-4.0-h-tiny-4bit` produced non-empty text (`Affirmative.`) under `--models-max 1`. Scoped RSS snapshots were: start 32656 KiB, after load A 351824 KiB, after unload A 4173872 KiB, after load B 4257760 KiB. RSS is informational and not a zero-memory promise.
+The root-coordinated real checkpoint gate passed on runtime commit `42ec0734` on macOS 27 / Apple Silicon. Under `--models-max 1`, model A `meta-llama-3.1-8b-instruct-4bit` streamed 574 response characters. Unload while the response body remained live produced the expected drain refusal HTTP 400; after the stream was dropped, the server logged observed worker exit for A. Model B `granite-4.0-h-tiny-4bit` then produced `Affirmative.`. SIGINT shutdown reported one attempted and one completed lifecycle shutdown.
 
-Root also ran a negative control against an old binary (`SHA256 ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit unknown), which failed the same real harness with exit 4 at unload-before-stream-drop. Evidence paths: `/tmp/epic-1834-run-5tpfu3lc/issue-1839-real-20260912-143914/summary.json` and `/tmp/epic-1834-run-5tpfu3lc/negative-control-ef3146d4.log`. A final real rerun after the review-fix commit is still pending root GPU coordination.
+| Process RSS scope | KiB |
+|---|---:|
+| Server start | 33,248 |
+| A loaded, before first request | 343,776 |
+| Streaming A | 4,363,712 |
+| After unloading A | 4,139,648 |
+| After loading B | 4,254,784 |
+
+These are process RSS snapshots, not allocator measurements or proof of zero retained memory. A negative control against an older binary (SHA-256 `ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit unknown) failed the same harness with exit 4 at unload-before-stream-drop. This distinguishes the new observed-worker-exit behavior from the old registry-drop behavior without assigning an unverified source revision to that binary.
+
+The measurements above precede the final atomic-reservation review fix and test-only finalization. Root owns the consolidated-head real-model rerun and broad final verification; those results must be checked before merging. Temporary local harness files are not a published evidence archive.

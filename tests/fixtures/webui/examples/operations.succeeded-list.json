@@ -1,0 +1,54 @@
+{
+  "$schemaName": "OperationsListResponse",
+  "items": [
+    {
+      "operation_id": "op_load_002",
+      "kind": "model_load",
+      "state": "succeeded",
+      "created_at": "2026-09-12T03:05:00Z",
+      "updated_at": "2026-09-12T03:05:30Z",
+      "idempotency_scope": "server_instance",
+      "target": {
+        "target_kind": "model",
+        "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+        "requested_revision": 8,
+        "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
+      },
+      "progress": {
+        "completed_bytes": 0,
+        "total_bytes": null,
+        "indeterminate": true
+      },
+      "result": {
+        "result_kind": "model_load",
+        "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+        "revision": 9,
+        "lifecycle": {
+          "state": "ready",
+          "download": "complete",
+          "busy": false,
+          "active_requests": 0,
+          "draining_requests": 0,
+          "worker_exit_observed": false,
+          "last_error": null
+        },
+        "eviction": {
+          "requested_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
+          "displaced_model_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
+          "outcome": "displaced",
+          "rollbackable": false
+        }
+      },
+      "error": null,
+      "cancellable": false,
+      "cancel_reason": null
+    }
+  ],
+  "pagination": {
+    "limit": 10,
+    "next_cursor": null,
+    "total_known": 1
+  },
+  "server_instance_id": "srv_20260912_a",
+  "snapshot_sequence": 43
+}

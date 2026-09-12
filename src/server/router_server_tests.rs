@@ -179,122 +179,8 @@ async fn send(
     (status, json)
 }
 
-fn assert_schema_token(value: &str, max_len: usize, context: &str) {
-    assert!(
-        !value.is_empty() && value.len() <= max_len,
-        "{context} length must match schema: {value}"
-    );
-    assert!(
-        value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '~' | '-')),
-        "{context} must be a printable schema token: {value}"
-    );
-}
-
-fn assert_model_id_schema(value: &str, context: &str) {
-    assert!(
-        value.starts_with("mdl_"),
-        "{context} must start with mdl_: {value}"
-    );
-    assert_eq!(
-        value.len(),
-        47,
-        "{context} must be mdl_ plus 43 URL-safe base64 characters: {value}"
-    );
-    assert!(
-        value[4..]
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')),
-        "{context} must match the ModelId character set: {value}"
-    );
-}
-
-fn assert_rfc3339_timestamp(value: &str, context: &str) {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .unwrap_or_else(|err| panic!("{context} must be RFC3339 date-time: {value}: {err}"));
-}
-
-fn assert_actual_operation_matches_schema_fixture(
-    operation: &serde_json::Value,
-    target_model_id: &str,
-    eviction_target_id: &str,
-) {
-    let dto: crate::server::router_lifecycle::Operation =
-        serde_json::from_value(operation.clone()).expect("actual producer Operation DTO");
-    assert_eq!(
-        serde_json::to_value(dto).expect("Operation serialize"),
-        *operation,
-        "actual producer output must round-trip through the strict Rust DTO without extra keys"
-    );
-
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/webui/examples/operation.succeeded.json"
-    ))
-    .expect("operation fixture");
-    assert_eq!(operation["kind"], fixture["kind"]);
-    assert_eq!(operation["state"], fixture["state"]);
-    assert_eq!(operation["idempotency_scope"], fixture["idempotency_scope"]);
-    assert_eq!(
-        operation["target"]["target_kind"],
-        fixture["target"]["target_kind"]
-    );
-    assert_eq!(
-        operation["result"]["result_kind"],
-        fixture["result"]["result_kind"]
-    );
-    assert_eq!(
-        operation["result"]["eviction"]["outcome"],
-        fixture["result"]["eviction"]["outcome"]
-    );
-    assert_eq!(operation["result"]["eviction"]["rollbackable"], false);
-    assert_eq!(
-        operation["progress"]["total_bytes"],
-        serde_json::Value::Null
-    );
-    assert_eq!(operation["progress"]["indeterminate"], true);
-    assert_eq!(operation["error"], serde_json::Value::Null);
-    assert_eq!(operation["cancel_reason"], serde_json::Value::Null);
-
-    let operation_id = operation["operation_id"]
-        .as_str()
-        .expect("operation_id string");
-    assert_schema_token(operation_id, 128, "operation_id");
-    assert_rfc3339_timestamp(
-        operation["created_at"].as_str().expect("created_at string"),
-        "created_at",
-    );
-    assert_rfc3339_timestamp(
-        operation["updated_at"].as_str().expect("updated_at string"),
-        "updated_at",
-    );
-    assert_eq!(
-        operation["target"]["model_id"].as_str(),
-        Some(target_model_id)
-    );
-    assert_eq!(
-        operation["target"]["eviction_target_id"].as_str(),
-        Some(eviction_target_id)
-    );
-    assert_eq!(
-        operation["result"]["model_id"].as_str(),
-        Some(target_model_id)
-    );
-    assert_eq!(
-        operation["result"]["eviction"]["requested_target_id"].as_str(),
-        Some(eviction_target_id)
-    );
-    assert_eq!(
-        operation["result"]["eviction"]["displaced_model_id"].as_str(),
-        Some(eviction_target_id)
-    );
-    for (context, value) in [
-        ("target.model_id", target_model_id),
-        ("target.eviction_target_id", eviction_target_id),
-    ] {
-        assert_model_id_schema(value, context);
-    }
-}
+#[path = "router_contract_test_support.rs"]
+mod contract;
 
 #[tokio::test]
 async fn the_router_inventory_carries_the_b10621_model_object() {
@@ -887,6 +773,7 @@ async fn first_sse_chunk(app: Router, last_event_id: Option<&str>) -> String {
 async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
     let root = temp_models_dir("ui-ops");
     add_fake_model(&root, "alpha");
+    add_fake_model(&root, "beta");
     let state = router_state_from(
         RouterSources {
             models_dir: Some(root),
@@ -897,6 +784,14 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
         true,
     );
     let entry = state.pool.get("alpha").expect("entry");
+    let eviction_entry = state.pool.get("beta").expect("eviction entry");
+    // This fixture seeds the coordinator, not a real inference worker. Real
+    // worker ownership and exit are covered by the separate lifecycle gate.
+    let loaded_lifecycle = crate::server::router_lifecycle::ModelLifecycle::new(
+        crate::server::router_lifecycle::DownloadState::Complete,
+    );
+    loaded_lifecycle.mark_loading();
+    loaded_lifecycle.mark_ready();
     let accepted = state
         .pool
         .lifecycle_coordinator()
@@ -905,7 +800,7 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
             crate::server::router_lifecycle::OperationTarget::Model {
                 model_id: entry.ui_model_id.clone(),
                 requested_revision: Some(entry.lifecycle_revision()),
-                eviction_target_id: Some(entry.ui_model_id.clone()),
+                eviction_target_id: Some(eviction_entry.ui_model_id.clone()),
             },
             Some("route-ops-0001"),
             "route:ops:1".to_string(),
@@ -918,10 +813,10 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
             crate::server::router_lifecycle::OperationResult::ModelLoad {
                 model_id: entry.ui_model_id.clone(),
                 revision: entry.lifecycle_revision(),
-                lifecycle: entry.lifecycle_snapshot(),
+                lifecycle: loaded_lifecycle.snapshot(),
                 eviction: Some(crate::server::router_lifecycle::ModelEvictionReport {
-                    requested_target_id: Some(entry.ui_model_id.clone()),
-                    displaced_model_id: Some(entry.ui_model_id.clone()),
+                    requested_target_id: Some(eviction_entry.ui_model_id.clone()),
+                    displaced_model_id: Some(eviction_entry.ui_model_id.clone()),
                     outcome: crate::server::router_lifecycle::ModelEvictionOutcome::Displaced,
                     rollbackable: false,
                 }),
@@ -940,31 +835,8 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let list_dto: crate::server::router_lifecycle::OperationsListResponse =
-        serde_json::from_value(body.clone()).expect("actual producer OperationsListResponse DTO");
-    assert_eq!(
-        serde_json::to_value(list_dto).expect("OperationsListResponse serialize"),
-        body,
-        "actual operations list must round-trip through the strict producer DTO"
-    );
-    assert_schema_token(
-        body["server_instance_id"]
-            .as_str()
-            .expect("server_instance_id string"),
-        128,
-        "server_instance_id",
-    );
-    assert_eq!(body["pagination"]["limit"], 10);
-    assert_eq!(body["pagination"]["next_cursor"], serde_json::Value::Null);
-    assert_eq!(body["pagination"]["total_known"], 1);
-    assert!(body["snapshot_sequence"].as_u64().is_some());
-    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    contract::assert_operation_list(&body, &entry.ui_model_id, &eviction_entry.ui_model_id);
     assert_eq!(body["items"][0]["operation_id"], accepted.operation_id);
-    assert_actual_operation_matches_schema_fixture(
-        &body["items"][0],
-        &entry.ui_model_id,
-        &entry.ui_model_id,
-    );
 
     let (status, body) = send(
         app.clone(),
@@ -976,7 +848,7 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["operation_id"], accepted.operation_id);
-    assert_actual_operation_matches_schema_fixture(&body, &entry.ui_model_id, &entry.ui_model_id);
+    contract::assert_operation(&body, &entry.ui_model_id, &eviction_entry.ui_model_id);
 
     let (status, body) = send(
         app,
@@ -1234,4 +1106,5 @@ async fn ui_events_emit_snapshot_and_gap_reset_with_sse_ids() {
     let gap = first_sse_chunk(app, Some(&missing_same_instance)).await;
     assert!(gap.contains("event: gap"), "{gap}");
     assert!(gap.contains("\"reason\":\"gap\""), "{gap}");
+    contract::assert_gap_event(&gap, &server_instance);
 }
