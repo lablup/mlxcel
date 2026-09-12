@@ -67,7 +67,7 @@ name = "mlxcel-bench-decode"
 path = "src/bin/bench_decode.rs"
 
 [features]
-default = ["surgery"]
+default = ["surgery", "webui"]
 metal = ["mlxcel-core/metal"]
 accelerate = ["mlxcel-core/accelerate"]
 cuda = ["mlxcel-core/cuda"]
@@ -125,6 +125,9 @@ xla-diagnostics-cpu = ["xla-iree", "mlxcel-xla/diagnostics"]
 # entirely (e.g. CI parity tests against pre-A1 behaviour or constrained
 # embedded targets).
 surgery = ["dep:mlxcel-surgery"]
+# Bundled offline browser shell for the administrative WebUI epic (#1836).
+# Enabled in default shipping builds; --no-default-features excludes the assets and optional embedding dependencies.
+webui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 # MLX - mlxcel-core (direct C++ bindings via cxx)
@@ -266,6 +269,8 @@ indicatif = "0.18"
 async-stream = "0.3"
 fancy-regex = "0.17.0"
 toml = "0.8"
+rust-embed = { version = "=8.12.0", features = ["debug-embed"], optional = true }
+mime_guess = { version = "2.0.5", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # Used for the RDMA-aware transport backend capability probe (io_uring on
@@ -381,6 +386,10 @@ required-features = ["xla-iree"]
 [[test]]
 name = "molmo2_xla_vision_parity"
 required-features = ["xla-iree"]
+
+[[example]]
+name = "webui_static_harness"
+required-features = ["webui"]
 
 # Reference-equivalence + throughput harness for the OpenXLA/IREE continuous
 # batching engine (#449 M3 Stage 2b). Needs real IREE execution, so it builds

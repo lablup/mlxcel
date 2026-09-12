@@ -1,0 +1,4 @@
+node_modules/
+.playwright-dist/
+playwright-report/
+test-results/

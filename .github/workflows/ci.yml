@@ -104,6 +104,7 @@ jobs:
       mlx_pin: ${{ steps.filter.outputs.mlx_pin }}
       xla_link: ${{ steps.filter.outputs.xla_link }}
       cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
+      webui_bundle: ${{ steps.filter.outputs.webui_bundle }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -153,6 +154,15 @@ jobs:
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'build.rs'
+              - '.github/workflows/ci.yml'
+            webui_bundle:
+              - 'webui/**'
+              - 'src/webui/assets/**'
+              - 'src/server/webui/**'
+              - 'scripts/webui/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Makefile'
               - '.github/workflows/ci.yml'
 
   deny:
@@ -371,6 +381,37 @@ jobs:
         run: python3 scripts/ci/check_llama_compat_manifest.py --check-issues-open
       - name: Validator negative coverage
         run: bash scripts/ci/check_llama_compat_manifest_test.sh
+
+  webui-bundle:
+    name: WebUI bundle
+    needs: changes
+    if: needs.changes.outputs.webui_bundle == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26.5.1'
+      - name: Install pnpm
+        run: npm install --global pnpm@11.18.0
+      - name: Install WebUI dependencies
+        run: pnpm --dir webui install --frozen-lockfile
+      - name: Typecheck WebUI
+        run: pnpm --dir webui run typecheck
+      - name: Lint WebUI
+        run: pnpm --dir webui run lint
+      - name: Test WebUI scaffold
+        run: pnpm --dir webui run unit
+      - name: Install browser runtime
+        run: pnpm --dir webui exec playwright install --with-deps chromium
+      - name: Run WebUI browser scaffold
+        run: pnpm --dir webui run browser
+      - name: Verify generated WebUI bundle
+        run: python3 scripts/webui/build_bundle.py --verify
 
   webui-contract:
     name: WebUI contract
