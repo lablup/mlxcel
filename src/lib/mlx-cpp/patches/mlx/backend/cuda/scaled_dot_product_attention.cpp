@@ -1,20 +1,33 @@
 // Copyright © 2025 Apple Inc.
 //
-// Patched by mlxcel: a masked multi-row SDPA call with prior context (a
-// speculative verify block appended to a KV cache, at most
-// MLXCEL_SDPA_FALLBACK_MAX_QUERIES query rows, default 32) bypasses cuDNN and
-// takes MLX's own ops fallback. The cuDNN execution plan is cached by an LRU
-// keyed on the exact q/k/v/mask shapes and strides (build_sdpa_cache_key), and
-// a verify round appends new keys every round, so every round of every such
+// Patched by mlxcel. The cuDNN execution plan is cached by an LRU keyed on the
+// exact q/k/v/mask shapes and strides (build_sdpa_cache_key), and a speculative
+// verify round appends new keys every round, so every round of every attention
 // layer class missed the cache and rebuilt a plan on the host (about 22 ms per
 // build on GB10, 67 to 76 ms per round on the Laguna DFlash pairing, the whole
 // fixed floor of that round), and the LRU's lifetime miss counter then aborted
 // the process after 2 * MLX_CUDA_SDPA_CACHE_SIZE misses (lablup/mlxcel#1799).
+//
+// Two mlxcel changes sit on top of upstream 81ba1c6a:
+//
+// 1. #1820, the general fix: a small multi-row call carrying an array mask over
+//    a fixed-size KV cache is canonicalized the way upstream already
+//    canonicalizes the one-row decode step. k/v are unsliced to the whole cache
+//    buffer, whose extent T_kv is a multiple of 256, the mask is widened to the
+//    same T_kv columns with the new columns blocked, and the true lengths reach
+//    cuDNN through set_padding_mask / set_seq_len_{q,kv}. One plan then serves
+//    every round inside a 256-position bucket.
+//    MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES=0 disables it without a rebuild, and
+//    MLXCEL_SDPA_PLAN_DEBUG=1 traces the key fields and plan builds per call.
+//
+// 2. #1799, the contained fix, now scoped to what bucketing cannot canonicalize
+//    (a causal-mode block with no array mask): at most
+//    MLXCEL_SDPA_FALLBACK_MAX_QUERIES query rows over a longer key sequence
+//    bypasses cuDNN and takes MLX's own ops fallback, which has no per-shape
+//    build cost. MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0 restores upstream dispatch.
+//
 // The one-row decode step takes the vector kernel and never enters cuDNN, and
-// prefill keeps cuDNN (k_len == q_len, or more rows than the bound; only the
-// trailing short chunk of a chunked prefill changes path). Setting
-// MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0 restores upstream dispatch without a
-// rebuild. Synced to upstream 81ba1c6a.
+// prefill keeps cuDNN unchanged (k_len == q_len, or more rows than the bound).
 
 #include "mlx/backend/cuda/cudnn_utils.h"
 #include "mlx/backend/cuda/device.h"
@@ -23,6 +36,8 @@
 #include "mlx/fast_primitives.h"
 
 #include <nvtx3/nvtx3.hpp>
+
+#include <limits>
 
 namespace mlx::core {
 
@@ -85,6 +100,52 @@ void malloc_with_same_layout(
       {true, false, false});
 }
 
+// The cuDNN SDPA is faster than the vector kernel but for a short sequence the
+// overhead would kill the advantage. Both MLX's decode canonicalization and
+// mlxcel's own KV cache (src/lib/mlxcel-core/src/cache.rs) step by this.
+constexpr int kv_cache_step = 256; // number is from mlx-lm
+
+// Allocated sequence extent of the buffer |kv| is a prefix slice of.
+inline int64_t kv_buffer_extent(const array& kv) {
+  return kv.strides(1) / kv.strides(2);
+}
+
+// Allocated extent when |kv| is a leading slice of one contiguous
+// [B, H, T_kv, D] buffer, else 0. That identity is the whole safety property
+// unslice_kv needs. Upstream's extra `T_kv % kv_cache_step == 0` test is a
+// heuristic for recognizing an mlx-lm cache specifically and is kept only on
+// the decode path below: mlxcel grows its own buffers by the same step but
+// from bases it sets itself (a trimmed window, a prompt-sized first store),
+// so the modulus is an accident of the checkpoint rather than a property to
+// gate on.
+inline int64_t kv_cache_slice_extent(const array& kv) {
+  if (kv.ndim() != 4 || kv.shape(2) <= 0 || kv.strides(3) != 1 ||
+      kv.strides(2) != kv.shape(3)) {
+    return 0;
+  }
+  int64_t T_kv = kv_buffer_extent(kv);
+  if (T_kv < kv.shape(2)) {
+    return 0;
+  }
+  if (kv.size() / kv.shape(2) * T_kv != kv.buffer_size() / kv.itemsize()) {
+    return 0;
+  }
+  return T_kv;
+}
+
+// True when |kv| is a leading slice of a contiguous fixed-size KV cache whose
+// allocated extent is a multiple of |kv_cache_step|. Upstream's own test,
+// unchanged, so the decode path keeps the dispatch it had.
+inline bool is_kv_cache_slice(const array& kv) {
+  int64_t T_kv = kv_buffer_extent(kv);
+  if (kv.size() / kv.shape(2) * T_kv != kv.buffer_size() / kv.itemsize()) {
+    return false;
+  }
+  // It is possible to use heuristic to check slices, but for now just make
+  // mlx-lm work.
+  return T_kv % kv_cache_step == 0;
+}
+
 bool use_cudnn_for_decoding(
     const array& q,
     const array& k,
@@ -96,9 +157,6 @@ bool use_cudnn_for_decoding(
   if (has_arr_mask) {
     return false;
   }
-  // The cuDNN SDPA is faster than vector kernel but for small sequence the
-  // overhead would kill the advantage.
-  constexpr int kv_cache_step = 256; // number is from mlx-lm
   if (k.shape(2) < kv_cache_step) {
     return false;
   }
@@ -108,19 +166,7 @@ bool use_cudnn_for_decoding(
   if ((k.status() != array::evaluated) || (v.status() != array::evaluated)) {
     return false;
   }
-  // Check if k/v are slices from fixed-size kv cache.
-  auto is_slice = [](const array& kv) {
-    // Get pre-sliced sequence length from strides, and check if the buffer
-    // belongs to a contiguous kv cache.
-    int64_t T_kv = kv.strides(1) / kv.strides(2);
-    if (kv.size() / kv.shape(2) * T_kv != kv.buffer_size() / kv.itemsize()) {
-      return false;
-    }
-    // It is possible to use heuristic to check slices, but for now just make
-    // mlx-lm work.
-    return T_kv % kv_cache_step == 0;
-  };
-  return is_slice(k) && is_slice(v);
+  return is_kv_cache_slice(k) && is_kv_cache_slice(v);
 }
 
 // Get original kv from slices, i.e. undo keys[..., :offset, :]
@@ -138,6 +184,205 @@ array unslice_kv(const array& kv) {
 }
 
 constexpr int QKV_NDIM = 4;
+
+// ---------------------------------------------------------------------------
+// mlxcel: plan-cache key bucketing for small masked multi-row calls (#1820).
+//
+// A speculative verify round appends a new block of keys every round, so the
+// exact k/v sequence length and the additive mask's column count are new every
+// round and the plan cache below (keyed on both) never hits. MLX already solves
+// this for the one-row decode step: it unslices k/v to the whole fixed-size KV
+// cache buffer, whose extent T_kv is a multiple of 256, and tells cuDNN the
+// true lengths through set_padding_mask / set_seq_len_{q,kv}. This extends the
+// same canonicalization to a small multi-row call carrying an array mask, which
+// is the shape the verify round uses, by additionally padding the mask out to
+// T_kv with blocked (-inf) columns so its shape and strides stop moving too.
+// The bucket is T_kv itself, so no buffer is reallocated and no key position
+// outside the already-allocated cache is ever addressed.
+// ---------------------------------------------------------------------------
+
+// Upper bound on the query rows eligible for bucketing; 0 disables it.
+inline int sdpa_plan_bucket_max_queries() {
+  static int max_queries =
+      env::get_var("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES", 32);
+  return max_queries;
+}
+
+// Per-call key/dispatch tracing for the #1820 record; 0 disables it.
+inline bool sdpa_plan_debug() {
+  static bool on = env::get_var("MLXCEL_SDPA_PLAN_DEBUG", 0) != 0;
+  return on;
+}
+
+// Shape-only half of the bucketing gate. Must stay answerable during graph
+// building, where strides and buffer sizes are not available yet, so that
+// |supports_sdpa_cudnn| gives the same answer then as it does at eval time.
+inline bool sdpa_plan_bucket_shape_eligible(
+    const array& q,
+    const array& k,
+    bool has_arr_mask,
+    bool do_causal) {
+  int max_queries = sdpa_plan_bucket_max_queries();
+  if (max_queries <= 0 || !has_arr_mask || do_causal) {
+    return false;
+  }
+  int q_len = q.shape(2);
+  return q_len > 1 && q_len <= max_queries && k.shape(2) > q_len;
+}
+
+// Per-tensor ceiling on a materialized padded k or v, from
+// MLXCEL_SDPA_PLAN_BUCKET_MAX_MB. Above it the call keeps its exact shape and
+// pays the plan build, rather than moving hundreds of MB per round per layer.
+inline int64_t sdpa_plan_bucket_max_bytes() {
+  static int64_t mb = env::get_var("MLXCEL_SDPA_PLAN_BUCKET_MAX_MB", 64);
+  return mb * 1024 * 1024;
+}
+
+// How a call reaches its bucketed key width.
+struct SdpaBucketPlan {
+  bool apply = false;
+  // k/v are a leading slice of one cache buffer, so unslicing them to the whole
+  // buffer costs nothing. Otherwise they are copied into a padded buffer.
+  bool by_copy = false;
+  int64_t bucket = 0;
+};
+
+// Layout half of the bucketing gate, decided once the arrays are evaluated.
+//
+// The mask must be the [B, H, L, k_len] broadcast of a contiguous [L, k_len]
+// plane that fast::scaled_dot_product_attention builds, so widening it costs
+// L * bucket elements rather than B * H * L * bucket. Given that, k and v reach
+// the bucket one of two ways: unsliced to their own cache buffer when they are
+// a leading slice of one with room to spare (the dense and speculative-buffered
+// caches), or copied into a zero-padded buffer when they are not (a drafter
+// that concatenates its proposal keys onto the cache window, and anything else
+// that hands SDPA a freshly built array).
+SdpaBucketPlan sdpa_plan_bucket(
+    const array& q,
+    const array& k,
+    const array& v,
+    const std::optional<array>& mask_arr,
+    bool do_causal,
+    bool output_logsumexp) {
+  SdpaBucketPlan plan;
+  if (output_logsumexp || !mask_arr) {
+    return plan;
+  }
+  if (!sdpa_plan_bucket_shape_eligible(q, k, /* has_arr_mask */ true, do_causal)) {
+    return plan;
+  }
+  if ((k.status() != array::evaluated) || (v.status() != array::evaluated) ||
+      (mask_arr->status() != array::evaluated)) {
+    return plan;
+  }
+  int k_len = k.shape(2);
+  if (k.ndim() != QKV_NDIM || v.ndim() != QKV_NDIM || v.shape(2) != k_len) {
+    return plan;
+  }
+  const array& m = *mask_arr;
+  if (m.ndim() != QKV_NDIM || m.shape(2) != q.shape(2) || m.shape(3) != k_len ||
+      m.strides(0) != 0 || m.strides(1) != 0 || m.strides(3) != 1 ||
+      m.strides(2) != m.shape(3)) {
+    return plan;
+  }
+
+  int64_t k_extent = kv_cache_slice_extent(k);
+  if (k_extent > k_len && k_extent == kv_cache_slice_extent(v)) {
+    plan.apply = true;
+    plan.bucket = k_extent;
+    return plan;
+  }
+
+  // Round up to the step both MLX and mlxcel's KV cache grow by, so one plan
+  // covers a whole step of appends.
+  int64_t bucket =
+      (static_cast<int64_t>(k_len) + kv_cache_step - 1) / kv_cache_step * kv_cache_step;
+  int64_t rows = static_cast<int64_t>(k.shape(0)) * k.shape(1) * bucket;
+  int64_t max_bytes = sdpa_plan_bucket_max_bytes();
+  if (rows * k.shape(3) * k.itemsize() > max_bytes ||
+      rows * v.shape(3) * v.itemsize() > max_bytes) {
+    return plan;
+  }
+  plan.apply = true;
+  plan.by_copy = true;
+  plan.bucket = bucket;
+  return plan;
+}
+
+// Widen the additive mask from [B, H, L, k_len] to [B, H, L, bucket], the new
+// columns blocked with -inf. Only the [L, bucket] plane is materialized; the
+// leading two axes stay stride-0 broadcasts, exactly as the input was, so the
+// key's mask strides land on {0, 0, bucket, 1} every round.
+array pad_mask_to_bucket(
+    cu::CommandEncoder& encoder,
+    const array& mask,
+    int bucket,
+    Stream s) {
+  int q_len = mask.shape(2);
+  int k_len = mask.shape(3);
+  array core(Shape{q_len, bucket}, mask.dtype(), nullptr, {});
+  array blocked(-std::numeric_limits<float>::infinity(), mask.dtype());
+  encoder.add_temporary(blocked);
+  fill_gpu(blocked, core, s);
+  copy_gpu_inplace(
+      mask,
+      core,
+      Shape{q_len, k_len},
+      Strides{mask.strides(2), mask.strides(3)},
+      Strides{bucket, 1},
+      /* i_offset */ 0,
+      /* o_offset */ 0,
+      CopyType::GeneralGeneral,
+      s);
+  Shape padded_shape = mask.shape();
+  padded_shape[3] = bucket;
+  array padded(padded_shape, mask.dtype(), nullptr, {});
+  padded.copy_shared_buffer(
+      core,
+      Strides{0, 0, bucket, 1},
+      /* flags */ {false, false, false},
+      /* data_size */ core.size(),
+      /* offset */ 0);
+  encoder.add_temporary(core);
+  encoder.add_temporary(padded);
+  return padded;
+}
+
+// Copy |kv| into a zero-padded [B, H, bucket, D] buffer. Used when k/v are not
+// a leading slice of a cache buffer, so there is nothing to unslice. The tail
+// is zeroed rather than left at whatever the allocator last held, because zero
+// is the one value that cannot turn into a NaN if a future cuDNN release ever
+// applied the bias before the padding mask.
+array pad_kv_to_bucket(
+    cu::CommandEncoder& encoder,
+    const array& kv,
+    int bucket,
+    Stream s) {
+  Shape padded_shape = kv.shape();
+  padded_shape[2] = bucket;
+  array padded(padded_shape, kv.dtype(), nullptr, {});
+  array zero(0, kv.dtype());
+  encoder.add_temporary(zero);
+  fill_gpu(zero, padded, s);
+  copy_gpu_inplace(
+      kv,
+      padded,
+      kv.shape(),
+      kv.strides(),
+      make_contiguous_strides(padded_shape),
+      /* i_offset */ 0,
+      /* o_offset */ 0,
+      CopyType::GeneralGeneral,
+      s);
+  encoder.add_temporary(padded);
+  return padded;
+}
+
+// Thrown when cuDNN refuses to build a graph for the bucketed shape, so the
+// call can be retried unbucketed instead of aborting the process.
+struct SdpaBucketUnsupported : public std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 struct SDPACacheKey {
   int device_id;
@@ -348,11 +593,17 @@ bool supports_sdpa_cudnn(
   // mlxcel: small masked query blocks over a longer key sequence are the
   // speculative verify shape; their k_len changes every round, so a cuDNN plan
   // built for them is used once and rebuilt next round (see the file header).
-  // Route them to the ops fallback, which has no per-shape build cost.
+  // When the bucketing added for #1820 can canonicalize the key for such a
+  // call (an array mask, which is what a multi-row append carries) it stays on
+  // cuDNN and reuses one plan; otherwise #1799's routing applies and it takes
+  // MLX's own ops fallback, which has no per-shape build cost. Both halves
+  // read only shapes, so this answers the same during graph building, where
+  // strides are not available, as it does at eval time.
   static int fallback_max_queries =
       env::get_var("MLXCEL_SDPA_FALLBACK_MAX_QUERIES", 32);
   if ((has_arr_mask || do_causal) && q.shape(2) > 1 &&
-      q.shape(2) <= fallback_max_queries && k.shape(2) > q.shape(2)) {
+      q.shape(2) <= fallback_max_queries && k.shape(2) > q.shape(2) &&
+      !sdpa_plan_bucket_shape_eligible(q, k, has_arr_mask, do_causal)) {
     return false;
   }
 
@@ -376,7 +627,7 @@ bool supports_sdpa_cudnn(
   return dtype == float16 || dtype == bfloat16;
 }
 
-void sdpa_cudnn(
+static void sdpa_cudnn_impl(
     const array& q,
     array k,
     array v,
@@ -387,36 +638,56 @@ void sdpa_cudnn(
     const std::optional<array>& mask_arr,
     const std::optional<array>& sinks,
     bool output_logsumexp,
+    bool allow_bucket,
     Stream s) {
   auto& encoder = cu::get_command_encoder(s);
   auto handle = get_cudnn_handle(encoder.device());
 
-  malloc_with_same_layout(encoder, o, q);
-
-  // For decoding, unslice k/v and apply padding mask.
+  // For decoding, and for a bucketed small multi-row block (#1820), unslice
+  // k/v to the whole KV cache buffer and describe the true lengths with a
+  // padding mask, so consecutive calls share one plan-cache key.
   std::optional<array> seq_len_q;
   std::optional<array> seq_len_kv;
+  std::optional<array> mask_eff = mask_arr;
   bool decoding = use_cudnn_for_decoding(q, k, v, mask_arr.has_value());
-  if (decoding) {
+  SdpaBucketPlan plan;
+  if (allow_bucket && !decoding) {
+    plan = sdpa_plan_bucket(q, k, v, mask_arr, do_causal, output_logsumexp);
+  }
+  bool bucketed = plan.apply;
+  int k_len = k.shape(2);
+  int64_t k_extent_dbg = kv_cache_slice_extent(k);
+  int64_t k_rowstride_dbg = k.ndim() == 4 ? k.strides(2) : -1;
+  int64_t bucket = decoding ? kv_buffer_extent(k) : plan.bucket;
+  if (decoding || bucketed) {
     int B = q.shape(0);
     std::vector<int> seq_len_q_vec(B, q.shape(2));
-    std::vector<int> seq_len_kv_vec(B, k.shape(2));
+    std::vector<int> seq_len_kv_vec(B, k_len);
     seq_len_q = array(seq_len_q_vec.begin(), {B, 1, 1, 1});
     seq_len_kv = array(seq_len_kv_vec.begin(), {B, 1, 1, 1});
     encoder.add_temporary(*seq_len_q);
     encoder.add_temporary(*seq_len_kv);
-    k = unslice_kv(k);
-    v = unslice_kv(v);
-    encoder.add_temporary(k);
-    encoder.add_temporary(v);
+    if (bucketed) {
+      mask_eff =
+          pad_mask_to_bucket(encoder, *mask_arr, static_cast<int>(bucket), s);
+    }
+    if (bucketed && plan.by_copy) {
+      k = pad_kv_to_bucket(encoder, k, static_cast<int>(bucket), s);
+      v = pad_kv_to_bucket(encoder, v, static_cast<int>(bucket), s);
+    } else {
+      k = unslice_kv(k);
+      v = unslice_kv(v);
+      encoder.add_temporary(k);
+      encoder.add_temporary(v);
+    }
   }
 
   encoder.set_input_array(q);
   encoder.set_input_array(k);
   encoder.set_input_array(v);
   encoder.set_output_array(o);
-  if (mask_arr) {
-    encoder.set_input_array(*mask_arr);
+  if (mask_eff) {
+    encoder.set_input_array(*mask_eff);
   }
   if (sinks) {
     encoder.set_input_array(*sinks);
@@ -432,25 +703,73 @@ void sdpa_cudnn(
 
   // Search cache.
   auto cache_key = build_sdpa_cache_key(
-      encoder, q, k, v, do_causal, mask_arr, sinks, decoding, output_logsumexp);
+      encoder,
+      q,
+      k,
+      v,
+      do_causal,
+      mask_eff,
+      sinks,
+      decoding || bucketed,
+      output_logsumexp);
   auto it = sdpa_cache().find(cache_key);
-  if (it == sdpa_cache().end()) {
-    auto graph = build_sdpa_graph(
-        handle,
-        q,
-        k,
-        v,
-        do_causal,
-        mask_arr,
-        sinks,
-        seq_len_q,
-        seq_len_kv,
-        output_logsumexp,
-        o,
-        stats);
-    it = sdpa_cache().emplace(cache_key, std::move(graph)).first;
+  bool built = it == sdpa_cache().end();
+  if (built) {
+    auto build = [&] {
+      return build_sdpa_graph(
+          handle,
+          q,
+          k,
+          v,
+          do_causal,
+          mask_eff,
+          sinks,
+          seq_len_q,
+          seq_len_kv,
+          output_logsumexp,
+          o,
+          stats);
+    };
+    if (bucketed) {
+      // A cuDNN install that cannot plan bias together with a padding mask
+      // must degrade to the exact-shape plan, not abort the process.
+      try {
+        it = sdpa_cache().emplace(cache_key, build()).first;
+      } catch (const std::exception& e) {
+        throw SdpaBucketUnsupported(e.what());
+      }
+    } else {
+      it = sdpa_cache().emplace(cache_key, build()).first;
+    }
   }
   auto& graph = it->second;
+
+  if (sdpa_plan_debug()) {
+    fprintf(
+        stderr,
+        "[mlxcel-sdpa] q=%dx%dx%dx%d k_len=%d k_extent=%lld k_rowstride=%lld "
+        "mask_cols=%d mask_rowstride=%lld mask_lead=%lld,%lld causal=%d "
+        "sinks=%d decode=%d bucket=%d copy=%d bucket_to=%lld built=%d plans=%zu\n",
+        q.shape(0),
+        q.shape(1),
+        q.shape(2),
+        q.shape(3),
+        k_len,
+        static_cast<long long>(k_extent_dbg),
+        static_cast<long long>(k_rowstride_dbg),
+        mask_eff ? mask_eff->shape(3) : -1,
+        mask_eff ? static_cast<long long>(mask_eff->strides(2)) : -1LL,
+        mask_eff ? static_cast<long long>(mask_eff->strides(0)) : -1LL,
+        mask_eff ? static_cast<long long>(mask_eff->strides(1)) : -1LL,
+        static_cast<int>(do_causal),
+        static_cast<int>(sinks.has_value()),
+        static_cast<int>(decoding),
+        static_cast<int>(bucketed),
+        static_cast<int>(plan.by_copy),
+        static_cast<long long>(bucket),
+        static_cast<int>(built),
+        sdpa_cache().size());
+  }
 
   std::unordered_map<int64_t, void*> variant_pack{
       {Q, gpu_ptr<void>(q)},
@@ -458,8 +777,8 @@ void sdpa_cudnn(
       {V, gpu_ptr<void>(v)},
       {SCALE, &scale},
       {O, gpu_ptr<void>(o)}};
-  if (mask_arr) {
-    variant_pack[BIAS] = gpu_ptr<void>(*mask_arr);
+  if (mask_eff) {
+    variant_pack[BIAS] = gpu_ptr<void>(*mask_eff);
   }
   if (sinks) {
     variant_pack[SINKS] = gpu_ptr<void>(*sinks);
@@ -473,6 +792,68 @@ void sdpa_cudnn(
   }
 
   CHECK_CUDNN_ERROR(graph.encode_graph(encoder, std::move(variant_pack)));
+}
+
+void sdpa_cudnn(
+    const array& q,
+    array k,
+    array v,
+    float scale,
+    array& o,
+    std::optional<array>& stats,
+    bool do_causal,
+    const std::optional<array>& mask_arr,
+    const std::optional<array>& sinks,
+    bool output_logsumexp,
+    Stream s) {
+  auto& encoder = cu::get_command_encoder(s);
+  malloc_with_same_layout(encoder, o, q);
+
+  // Cleared for the life of the process the first time cuDNN refuses to plan a
+  // bucketed shape, so the retry cost is paid at most once. Kept per sinks
+  // setting: a cuDNN that cannot plan a sink token beside a padding mask must
+  // not take bucketing away from the layers that have no sinks.
+  static bool bucket_supported[2] = {true, true};
+  bool& bucket_supported_here = bucket_supported[sinks.has_value() ? 1 : 0];
+  if (bucket_supported_here) {
+    try {
+      sdpa_cudnn_impl(
+          q,
+          k,
+          v,
+          scale,
+          o,
+          stats,
+          do_causal,
+          mask_arr,
+          sinks,
+          output_logsumexp,
+          /* allow_bucket */ true,
+          s);
+      return;
+    } catch (const SdpaBucketUnsupported& e) {
+      bucket_supported_here = false;
+      fprintf(
+          stderr,
+          "[mlxcel-sdpa] cuDNN cannot plan the bucketed attention shape "
+          "(sinks=%d), falling back to per-length plans: %s\n",
+          static_cast<int>(sinks.has_value()),
+          e.what());
+    }
+  }
+  sdpa_cudnn_impl(
+      q,
+      k,
+      v,
+      scale,
+      o,
+      stats,
+      do_causal,
+      mask_arr,
+      sinks,
+      output_logsumexp,
+      /* allow_bucket */ false,
+      s);
 }
 
 void sdpa_backward_cudnn(

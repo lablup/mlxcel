@@ -1,0 +1,17 @@
+"""Utilities for a small retry layer used by the ingestion workers."""
+
+import random
+import time
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
+
+def retry_with_backoff(
+    fn: Callable[[], T],
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.1,
+    max_delay: float = 5.0,
+) -> T:
+    """Call ``fn`` until it succeeds or ``attempts`` is exhausted.
