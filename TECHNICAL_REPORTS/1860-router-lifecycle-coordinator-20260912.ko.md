@@ -16,7 +16,7 @@ Unload는 새 admission을 멈추고, 활성 request lease drain을 기다리고
 
 ## 이번 리뷰 수정
 
-Post-review 수정은 `begin_load`, rescan, remove, queued UI action 주변의 high-risk race window를 닫는다. `begin_load`는 registry를 읽기 전에 load lock을 잡고, entry transition guard 아래에서 캡처한 entry를 재검증하며, `loading`으로 표시하기 직전에 다시 확인한다. Rescan은 오래된 snapshot clone 이후 reserved가 된 현재 entry를 보존한다. Remove는 cancel 전, download stop 후, unload 전, registry 삭제 중에 current `Arc`를 재검증한다. 취소된 다운로드의 terminal rescan이 해당 entry를 먼저 제거한 경우에는 replacement entry가 나타나지 않았을 때만 removal을 계속한다. LRU eviction은 serving/draining entry를 거절하고, explicit eviction은 `not_needed`, `displaced`, `failed_after_displacement` typed outcome을 남긴다.
+Post-review 수정은 `begin_load`, rescan, remove, queued UI action 주변의 high-risk race window를 닫는다. `begin_load`는 registry를 읽기 전에 load lock을 잡고, entry transition guard 아래에서 캡처한 entry를 재검증하며, 최종 current-entry 검사와 `loading` reservation을 registry read lock을 유지한 채 수행한다. 따라서 두 단계 사이에 rescan이 교체를 publish할 수 없으며, deterministic barrier test가 정확히 이 경계를 검증한다. Rescan은 오래된 snapshot clone 이후 reserved가 된 현재 entry를 보존한다. Remove는 cancel 전, download stop 후, unload 전, registry 삭제 중에 current `Arc`를 재검증한다. 취소된 다운로드의 terminal rescan이 해당 entry를 먼저 제거한 경우에는 replacement entry가 나타나지 않았을 때만 removal을 계속한다. LRU eviction은 serving/draining entry를 거절하고, explicit eviction은 `not_needed`, `displaced`, `failed_after_displacement` typed outcome을 남긴다.
 
 WebUI administrative adapter는 더 이상 production/base router에 mount되지 않는다. `create_router_app`은 기존 라우터만 유지하고, 테스트와 향후 startup integration은 `create_router_app_with_authenticated_ui`를 사용한다. 이 accessor는 API key가 설정되고 제시되지 않으면 모든 `/ui-api/*` 요청을 거절한다. 느린 SSE client는 더 이상 전역 ring에 reset을 publish하지 않고 client-local reset event를 받는다. Route와 operation history의 오류는 bounded typed message로 redaction되고, 원본 build/load 세부 정보는 서버 로그에만 남는다.
 
@@ -24,7 +24,7 @@ WebUI 계약에는 `target.eviction_target_id`와 typed `ModelEvictionReport`가
 
 ## 호환성 및 검증
 
-기존 `/models`, `/models/load`, `/models/unload`, `/models/sse`, 라우터 dispatch 동작은 b10621 호환 형태를 유지한다. 기존 cache removal은 여전히 라우터 deletion 경로이며, reserved entry를 삭제 전에 멈춰야 할 때 lifecycle 보호를 받는다. Production router는 보안 startup/auth 이슈가 의도적으로 mount하기 전까지 WebUI administrative route를 노출하지 않는다.
+기존 `/models`, `/models/load`, `/models/unload`, `/models/sse` 응답 형태는 유지한다. 의도적인 안전성 차이는 unload가 활성 응답과 worker 종료 관찰을 기다리며, 사용 중인 slot을 해제하는 대신 busy eviction 및 stale replacement를 거절한다는 점이다. Drain 또는 worker-exit timeout에도 reservation을 유지하고 성공한 해제로 보고하지 않는다. 기존 cache removal은 여전히 라우터 deletion 경로이며, reserved entry를 삭제 전에 멈춰야 할 때 lifecycle 보호를 받는다. Production router는 보안 startup/auth 이슈가 의도적으로 mount하기 전까지 WebUI administrative route를 노출하지 않는다.
 
 이슈 worktree에서 검증한 명령은 다음과 같다.
 
@@ -35,20 +35,22 @@ WebUI 계약에는 `target.eviction_target_id`와 typed `ModelEvictionReport`가
 - `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` (fixture 32개 및 검증기 negative test)
 - `cargo test --profile test-fast --features metal,accelerate router_server_tests:: -- --nocapture` (26 passed)
 - `cargo test --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` (9 passed)
-- `cargo test --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` (32 passed)
+- `cargo test --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` (33 passed)
+
+- `cargo test --workspace --profile test-fast --features metal,accelerate` (11,151 passed, 0 failed, 361 ignored; ignored는 통과로 계산하지 않음)
 
 ## 실제 체크포인트 수용 테스트
 
-Root가 조율한 실제 체크포인트 게이트는 macOS 27 / Apple Silicon에서 runtime commit `42ec0734`로 통과했다. `--models-max 1` 아래에서 모델 A `meta-llama-3.1-8b-instruct-4bit`는 574자 streaming 응답을 생성했다. Response body가 살아 있는 동안 unload를 요청하면 기대한 drain refusal HTTP 400이 발생했으며, stream drop 이후 서버 로그에서 A의 worker exit를 확인했다. 이후 모델 B `granite-4.0-h-tiny-4bit`는 `Affirmative.`를 생성했다. SIGINT shutdown은 lifecycle 종료 시도 1건, 완료 1건을 보고했다.
+Root가 조율한 실제 체크포인트 게이트는 macOS 27 / Apple Silicon에서 runtime commit `bd85ff07`로 통과했다. `--models-max 1` 아래에서 모델 A `meta-llama-3.1-8b-instruct-4bit`는 963자 streaming 응답을 생성했다. Unload가 살아 있는 response body의 종료를 기다리는 동안 새 inference 요청은 기대한 drain refusal HTTP 400으로 거절되었으며, stream drop 이후 서버 로그에서 A의 worker exit를 확인했다. 이후 모델 B `granite-4.0-h-tiny-4bit`는 `Affirmative.`를 생성했다. SIGINT shutdown은 lifecycle 종료 시도 1건, 완료 1건을 보고했다.
 
 | Process RSS 측정 시점 | KiB |
 |---|---:|
-| 서버 시작 | 33,248 |
-| A 로드 후, 첫 요청 전 | 343,776 |
-| A streaming 중 | 4,363,712 |
-| A unload 후 | 4,139,648 |
-| B 로드 후 | 4,254,784 |
+| 서버 시작 | 33,184 |
+| A 로드 후, 첫 요청 전 | 353,280 |
+| A streaming 중 | 4,364,832 |
+| A unload 후 | 4,166,832 |
+| B 로드 후 | 4,254,192 |
 
 이는 process RSS snapshot이며 allocator 측정이나 잔류 메모리 0의 증거가 아니다. 이전 binary를 사용한 negative control(SHA-256 `ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit 미확인)은 같은 harness의 unload-before-stream-drop 단계에서 exit 4로 실패했다. 이 비교는 검증되지 않은 source revision을 binary에 부여하지 않고 새 worker-exit 관찰과 이전 registry-drop 동작을 구분한다.
 
-위 측정은 최종 atomic-reservation 리뷰 수정 및 test-only finalization 이전 결과다. 통합 HEAD의 실제 모델 재실행과 넓은 범위 최종 검증은 root가 수행하며, 머지 전에 그 결과를 확인해야 한다. 임시 로컬 harness 파일은 공개 증거 보관소가 아니다.
+위 측정은 최종 atomic-reservation 수정과 producer-contract finalization을 포함한다. 임시 로컬 harness 파일은 공개 증거 보관소가 아니므로 실제 측정 결과를 이 문서에 기록했다.

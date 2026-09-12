@@ -16,7 +16,7 @@ Unload now stops new admission, waits for active request leases to drain, sends 
 
 ## Review fixes in this cycle
 
-The post-review fixes close the high-risk race windows around `begin_load`, rescan, remove, and queued UI actions. `begin_load` now takes the load lock before reading the registry, revalidates the captured entry under the entry transition guard, and rechecks again immediately before marking `loading`. Rescan preserves any current entry that became reserved after the stale snapshot clone. Remove revalidates the current `Arc` before cancel, after download stop, before unload, and while deleting from the registry; if a cancelled download's own terminal rescan has already dropped the entry, removal proceeds only when no replacement entry appeared. LRU eviction refuses serving/draining entries, and explicit eviction has typed `not_needed`, `displaced`, and `failed_after_displacement` outcomes.
+The post-review fixes close the high-risk race windows around `begin_load`, rescan, remove, and queued UI actions. `begin_load` now takes the load lock before reading the registry, revalidates the captured entry under the entry transition guard, and performs the final current-entry check and `loading` reservation while retaining the registry read lock. A concurrent rescan cannot publish between those two steps; a deterministic barrier test exercises that exact boundary. Rescan preserves any current entry that became reserved after the stale snapshot clone. Remove revalidates the current `Arc` before cancel, after download stop, before unload, and while deleting from the registry; if a cancelled download's own terminal rescan has already dropped the entry, removal proceeds only when no replacement entry appeared. LRU eviction refuses serving/draining entries, and explicit eviction has typed `not_needed`, `displaced`, and `failed_after_displacement` outcomes.
 
 The WebUI administrative adapters are no longer mounted by the production/base router. `create_router_app` keeps the legacy router only, while tests and future startup integration use `create_router_app_with_authenticated_ui`; that accessor rejects every `/ui-api/*` request unless an API key is configured and presented. Slow SSE clients now get client-local reset events instead of publishing a reset into the global ring for every lagging subscriber. Route and operation history errors are redacted to bounded typed messages, while raw build/load details are kept in server logs.
 
@@ -24,7 +24,7 @@ The WebUI contract was extended with `target.eviction_target_id` and typed `Mode
 
 ## Compatibility and validation
 
-Legacy `/models`, `/models/load`, `/models/unload`, `/models/sse`, and router dispatch behavior remain b10621-compatible; legacy cache removal remains the existing router deletion path, with lifecycle protection when a reserved entry must be stopped before deletion. The production router still does not expose WebUI administrative routes until the secure startup/auth issues mount them deliberately.
+Legacy `/models`, `/models/load`, `/models/unload`, and `/models/sse` response shapes are preserved. The deliberate safety difference is that unload waits for active responses and observed worker release; busy eviction and stale replacement are refused rather than freeing an in-use slot. Drain or worker-exit timeouts retain the reservation instead of reporting successful release; legacy cache removal remains the existing router deletion path, with lifecycle protection when a reserved entry must be stopped before deletion. The production router still does not expose WebUI administrative routes until the secure startup/auth issues mount them deliberately.
 
 Validation run in the issue worktree:
 
@@ -35,20 +35,22 @@ Validation run in the issue worktree:
 - `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` (32 fixtures, including validator negative tests)
 - `cargo test --profile test-fast --features metal,accelerate router_server_tests:: -- --nocapture` (26 passed)
 - `cargo test --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` (9 passed)
-- `cargo test --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` (32 passed)
+- `cargo test --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` (33 passed)
+
+- `cargo test --workspace --profile test-fast --features metal,accelerate` (11,151 passed, 0 failed, 361 ignored; ignored tests are not counted as passes)
 
 ## Real checkpoint acceptance
 
-The root-coordinated real checkpoint gate passed on runtime commit `42ec0734` on macOS 27 / Apple Silicon. Under `--models-max 1`, model A `meta-llama-3.1-8b-instruct-4bit` streamed 574 response characters. Unload while the response body remained live produced the expected drain refusal HTTP 400; after the stream was dropped, the server logged observed worker exit for A. Model B `granite-4.0-h-tiny-4bit` then produced `Affirmative.`. SIGINT shutdown reported one attempted and one completed lifecycle shutdown.
+The root-coordinated real checkpoint gate passed on runtime commit `bd85ff07` on macOS 27 / Apple Silicon. Under `--models-max 1`, model A `meta-llama-3.1-8b-instruct-4bit` streamed 963 response characters. While unload waited for the live response body, a new inference request received the expected drain refusal HTTP 400; after the stream was dropped, the server logged observed worker exit for A. Model B `granite-4.0-h-tiny-4bit` then produced `Affirmative.`. SIGINT shutdown reported one attempted and one completed lifecycle shutdown.
 
 | Process RSS scope | KiB |
 |---|---:|
-| Server start | 33,248 |
-| A loaded, before first request | 343,776 |
-| Streaming A | 4,363,712 |
-| After unloading A | 4,139,648 |
-| After loading B | 4,254,784 |
+| Server start | 33,184 |
+| A loaded, before first request | 353,280 |
+| Streaming A | 4,364,832 |
+| After unloading A | 4,166,832 |
+| After loading B | 4,254,192 |
 
 These are process RSS snapshots, not allocator measurements or proof of zero retained memory. A negative control against an older binary (SHA-256 `ef3146d4a2722cce81b683bd48e67996fc9b9c4512c66ae4d51549e0844c6a78`, source commit unknown) failed the same harness with exit 4 at unload-before-stream-drop. This distinguishes the new observed-worker-exit behavior from the old registry-drop behavior without assigning an unverified source revision to that binary.
 
-The measurements above precede the final atomic-reservation review fix and test-only finalization. Root owns the consolidated-head real-model rerun and broad final verification; those results must be checked before merging. Temporary local harness files are not a published evidence archive.
+These measurements include the final atomic-reservation fix and producer-contract finalization. Temporary local harness files are not a published evidence archive; the measured outcomes are recorded here.
