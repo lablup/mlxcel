@@ -386,7 +386,7 @@ jobs:
     name: WebUI bundle
     needs: changes
     if: needs.changes.outputs.webui_bundle == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -408,6 +408,10 @@ jobs:
         run: pnpm --dir webui run unit
       - name: Install browser runtime
         run: pnpm --dir webui exec playwright install --with-deps chromium
+      - name: Install WebUI screenshot fonts
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core=2.37-8 fonts-dejavu-extra=2.37-8 fonts-wqy-zenhei=0.9.45-8
+          fc-cache -f
       - name: Log WebUI browser font environment
         run: |
           uname -a
