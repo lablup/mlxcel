@@ -148,6 +148,7 @@ set(HIP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/copy/copy_general_input.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/copy/copy_general_dynamic.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/distributed.hip
+    ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/indexing.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/logsumexp.hip

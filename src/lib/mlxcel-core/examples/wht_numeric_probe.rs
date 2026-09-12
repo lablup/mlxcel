@@ -76,7 +76,12 @@ fn max_abs(a: &MlxArray) -> f32 {
 }
 
 fn main() {
-    println!("host: M1 Ultra, mlxcel wht() = mlx::core::hadamard_transform with no explicit scale\n");
+    // The host is whatever backend this binary was built for, so it is not
+    // named here: a hardcoded name mislabels every run on another machine.
+    // Record the host alongside the numbers when reporting them.
+    println!(
+        "mlxcel wht() = mlx::core::hadamard_transform with no explicit scale, so this measures the 1/sqrt(N) default\n"
+    );
     println!(
         "{:<22}{:>6}{:>8}{:>14}{:>16}{:>16}{:>14}",
         "shape", "d", "dtype", "norm ratio", "roundtrip max", "roundtrip rms", "rel rms"

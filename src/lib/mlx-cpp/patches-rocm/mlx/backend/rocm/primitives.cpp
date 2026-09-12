@@ -30,7 +30,7 @@ namespace mlx::core {
 
 NO_GPU(BlockMaskedMM)
 NO_GPU(FFT)
-NO_GPU(Hadamard)
+// Hadamard is implemented in hadamard.hip (mlxcelverse, lablup/mlxcel#1825).
 NO_GPU_MULTI(LUF)
 NO_GPU_MULTI(QRF)
 NO_GPU(QQMatmul)
