@@ -81,6 +81,8 @@ pub mod tls;
 pub mod tool_calls;
 pub mod transport;
 pub mod types;
+#[cfg(feature = "webui")]
+pub mod webui;
 pub mod whisper_stt;
 
 pub use app::create_app;
