@@ -96,18 +96,24 @@ async function waitFor(assertion: () => unknown, attempts = 80): Promise<void> {
   throw new Error('Timed out waiting for assertion.');
 }
 
+function withoutSchemaName<T>(value: T): T {
+  const copy = structuredClone(value);
+  if (typeof copy === 'object' && copy !== null && '$schemaName' in copy) delete (copy as Record<string, unknown>).$schemaName;
+  return copy;
+}
+
 function makeBootstrap(): typeof bootstrapFixture {
-  return structuredClone(bootstrapFixture);
+  return withoutSchemaName(bootstrapFixture);
 }
 
 function makeCatalog(): typeof catalogFixture {
-  const page = structuredClone(catalogFixture);
+  const page = withoutSchemaName(catalogFixture);
   page.server_instance_id = bootstrapFixture.server.server_instance_id;
   return page;
 }
 
 function makeOperations(): typeof operationsFixture {
-  const page = structuredClone(operationsFixture);
+  const page = withoutSchemaName(operationsFixture);
   page.server_instance_id = bootstrapFixture.server.server_instance_id;
   return page;
 }
@@ -179,6 +185,66 @@ describe('provider-backed WebUI shell', () => {
     await waitFor(() => expect(document.body.textContent).toContain('Could not reach the local WebUI API'));
     expect(`${localStorage.getItem('offline-token')} ${sessionStorage.getItem('offline-token')}`).not.toContain('offline-token');
     expect(document.body.textContent).not.toContain('offline-token');
+  });
+
+
+  it('shows pending counts until authoritative snapshots arrive and keeps failed snapshots honest', async () => {
+    const calls: FetchCall[] = [];
+    let catalogRequested = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? 'GET', auth: new Headers(init?.headers).get('authorization') ?? '', body: init?.body === undefined ? '' : String(init.body) });
+      if (url.startsWith('/ui-api/v1/bootstrap')) return jsonResponse(makeBootstrap());
+      if (url.startsWith('/ui-api/v1/catalog')) {
+        catalogRequested = true;
+        throw new TypeError('Failed to fetch catalog snapshot');
+      }
+      if (url.startsWith('/ui-api/v1/operations')) return jsonResponse(makeOperations());
+      if (url.startsWith('/ui-api/v1/events')) return new Response('data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      return jsonResponse({ error: { code: 'not_found', message: `Unexpected ${url}`, retryable: false }, request_id: 'req_unexpected' }, 404);
+    };
+    renderApp(fetchImpl);
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog pending'));
+    expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('operations pending');
+    await waitFor(() => expect(catalogRequested).toBe(true));
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-error-title"]')).not.toBeNull());
+    expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog pending');
+    expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('operations pending');
+    expect(calls.map((call) => call.url).join('\n')).toContain('/ui-api/v1/catalog');
+  });
+
+  it('ignores stale authentication failures after logout and allows a fresh attempt', async () => {
+    let firstBootstrap: ((response: Response) => void) | null = null;
+    let bootstrapCount = 0;
+    const calls: FetchCall[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? 'GET', auth: new Headers(init?.headers).get('authorization') ?? '', body: init?.body === undefined ? '' : String(init.body) });
+      if (url.startsWith('/ui-api/v1/bootstrap')) {
+        bootstrapCount += 1;
+        if (bootstrapCount === 1) return new Promise<Response>((resolve) => { firstBootstrap = resolve; });
+        return jsonResponse(makeBootstrap());
+      }
+      if (url.startsWith('/ui-api/v1/catalog')) return jsonResponse(makeCatalog());
+      if (url.startsWith('/ui-api/v1/operations')) return jsonResponse(makeOperations());
+      if (url.startsWith('/ui-api/v1/events')) return new Response('data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      return jsonResponse({ error: { code: 'not_found', message: `Unexpected ${url}`, retryable: false }, request_id: 'req_unexpected' }, 404);
+    };
+    renderApp(fetchImpl);
+    await submitSessionKey('old-bad-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="toolbar-logout"]')).not.toBeNull());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-logout"]')?.click());
+    expect(firstBootstrap).not.toBeNull();
+    await act(async () => {
+      firstBootstrap?.(jsonResponse({ error: { code: 'unauthorized', message: 'old bad key', retryable: false }, request_id: 'req_old_bad' }, 401));
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain('The session key was rejected');
+    expect(document.body.textContent).not.toContain('old-bad-key');
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog 1'));
+    expect(calls.map((call) => call.auth).filter(Boolean)).toContain('Bearer good-key');
   });
 
   it('does not autoload models or call inference endpoints while browsing authenticated routes', async () => {

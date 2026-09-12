@@ -135,8 +135,8 @@ function connectedDetail(locale: Locale, snapshot: WebUiSnapshot): string {
     mode: bootstrap.server.mode,
     version: bootstrap.server.build.version,
     status: connectionPhaseLabel(locale, snapshot.connection),
-    count: String(snapshot.catalog.length),
-    operations: String(snapshot.operations.size),
+    count: snapshot.catalogSequence === null ? t(locale, 'connection.snapshot.pending') : String(snapshot.catalog.length),
+    operations: snapshot.resourceFences.operationsSnapshot === null ? t(locale, 'connection.snapshot.pending') : String(snapshot.operations.size),
     sequence: snapshotSequence(locale, snapshot),
   });
 }
