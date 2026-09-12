@@ -247,10 +247,10 @@ async fn router_models_unload(
     };
     // b10621 accepts unload for running AND downloading models (unloading a
     // downloading model cancels the download).
-    if !entry.is_running() && !entry.is_downloading() {
+    if !entry.is_running() && !entry.is_downloading() && !entry.reserves_capacity() {
         return llama_invalid_request("model is not running");
     }
-    match state.pool.unload(&name) {
+    match state.pool.unload(&name).await {
         Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
         Err(err) => pool_error_response(err),
     }

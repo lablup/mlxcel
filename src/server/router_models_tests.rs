@@ -279,9 +279,9 @@ async fn unload_refuses_a_model_that_is_not_running() {
     let root = temp_models_dir("unload");
     add_fake_model(&root, "idle");
     let pool = pool(root, 4, true);
-    assert_eq!(pool.unload("idle"), Err(RouterPoolError::NotLoaded));
+    assert_eq!(pool.unload("idle").await, Err(RouterPoolError::NotLoaded));
     assert_eq!(
-        pool.unload("ghost"),
+        pool.unload("ghost").await,
         Err(RouterPoolError::NotFound("ghost".into()))
     );
 }

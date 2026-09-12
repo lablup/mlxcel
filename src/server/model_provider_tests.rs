@@ -24,9 +24,9 @@ use super::{
     ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
     ModelRequest, PrefillStats, QueueReservationMode, RequestRuntimeDefaults,
     SingleStreamQueueReservation, StopKind, TokenMeta, drain_generation_events,
-    drain_generation_events_with_logprobs_observing_prefill, send_shutdown_signal,
-    tokenize_prompt_for_generation, tokenize_prompt_for_generation_with_ordered_media,
-    validated_decode_hang_timeout,
+    drain_generation_events_with_logprobs_observing_prefill, observe_worker_exit,
+    send_shutdown_signal, tokenize_prompt_for_generation,
+    tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
 use crate::server::batch::BatchObservability;
 use crate::server::state::BatchMetrics;
@@ -226,6 +226,7 @@ fn generate_with_live_enqueues_the_captured_runtime_defaults() {
             .send(GenerateEvent::Done(sample_result()))
             .expect("response receiver");
     });
+    let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
     let provider = ModelProvider {
         request_tx,
         model_id: "test-model".to_string(),
@@ -241,6 +242,7 @@ fn generate_with_live_enqueues_the_captured_runtime_defaults() {
         prompt_cache: None,
         prompt_tokenizer: None,
         decode_hang_timeout: DECODE_HANG_TIMEOUT,
+        worker_exit,
         _worker_handle: worker_handle,
     };
     let mut live = crate::server::ServerConfig::default().live_settings();
@@ -371,6 +373,7 @@ fn single_stream_queue_reservation_releases_on_dequeue_before_processing() {
 fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
     let metrics = Arc::new(BatchMetrics::new());
     let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+    let (worker_handle, worker_exit) = observe_worker_exit(std::thread::spawn(|| {}));
     let provider = ModelProvider {
         request_tx,
         model_id: "test-model".to_string(),
@@ -386,7 +389,8 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
         prompt_cache: None,
         prompt_tokenizer: None,
         decode_hang_timeout: DECODE_HANG_TIMEOUT,
-        _worker_handle: std::thread::spawn(|| {}),
+        worker_exit,
+        _worker_handle: worker_handle,
     };
 
     let queue_reservation = provider.reserve_single_stream_queue_slot().unwrap();
@@ -420,6 +424,7 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
 
 #[test]
 fn scheduler_paths_do_not_create_single_stream_reservations() {
+    let (worker_handle, worker_exit) = observe_worker_exit(std::thread::spawn(|| {}));
     let provider = ModelProvider {
         request_tx: mpsc::channel::<ModelRequest>().0,
         model_id: "test-model".to_string(),
@@ -435,7 +440,8 @@ fn scheduler_paths_do_not_create_single_stream_reservations() {
         prompt_cache: None,
         prompt_tokenizer: None,
         decode_hang_timeout: DECODE_HANG_TIMEOUT,
-        _worker_handle: std::thread::spawn(|| {}),
+        worker_exit,
+        _worker_handle: worker_handle,
     };
 
     assert!(

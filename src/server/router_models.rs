@@ -43,9 +43,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use axum::body::Body;
+use futures::StreamExt;
+
+use super::model_provider::WorkerExitObserver;
 use super::router_cache::CacheSource;
+use super::router_lifecycle::{
+    DownloadState, ErrorBody, LifecycleCoordinator, LifecycleSnapshot, ModelLifecycle,
+    ModelLifecycleState, OperationError, OperationKind, OperationState, OperationTarget,
+    stable_model_identity,
+};
 use super::router_presets::{PresetCliOverrides, PresetSection, RouterPresets};
 use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig};
+
+const ROUTER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const ROUTER_WORKER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// b10621 `server_model_status` (the subset an in-process pool reaches;
 /// `downloaded` is upstream's "erase on next reload" marker, which the
@@ -97,6 +109,8 @@ pub struct RouterModelEntry {
     /// them for request routing).
     pub aliases: Vec<String>,
     pub tags: Vec<String>,
+    pub ui_model_id: String,
+    pub source_key_hash: String,
     /// Hidden by a preset's `dedup-cache-models` (still resolvable by name).
     pub hidden: bool,
     /// The preset section that shaped this entry, for the `status.preset`
@@ -106,6 +120,7 @@ pub struct RouterModelEntry {
     /// this model's preset (issue #1438).
     config: super::config::ServerConfig,
     state: Mutex<EntryState>,
+    lifecycle: Arc<ModelLifecycle>,
     last_used: AtomicI64,
 }
 
@@ -178,6 +193,26 @@ impl RouterModelEntry {
         )
     }
 
+    pub fn reserves_capacity(&self) -> bool {
+        self.lifecycle.reserves_capacity()
+    }
+
+    fn worker_exit_observer(&self) -> Option<Arc<WorkerExitObserver>> {
+        self.state.lock().ok().and_then(|guard| {
+            guard
+                .app
+                .as_ref()
+                .map(|app| app.state.model_provider.worker_exit_observer())
+        })
+    }
+
+    fn worker_exit_observed(&self) -> bool {
+        self.worker_exit_observer()
+            .as_ref()
+            .map(|observer| observer.observed())
+            .unwrap_or(true)
+    }
+
     pub fn is_downloading(&self) -> bool {
         self.state
             .lock()
@@ -192,6 +227,10 @@ impl RouterModelEntry {
             .app
             .as_ref()
             .map(|app| app.router.clone())
+    }
+
+    pub fn lifecycle_snapshot(&self) -> LifecycleSnapshot {
+        self.lifecycle.snapshot()
     }
 
     fn download_progress_json(&self) -> Option<serde_json::Value> {
@@ -246,6 +285,7 @@ pub struct RouterPool {
     pub models_max: usize,
     pub autoload_default: bool,
     events: tokio::sync::broadcast::Sender<serde_json::Value>,
+    lifecycle: Arc<LifecycleCoordinator>,
     /// Serializes model loads so two concurrent autoloads cannot race the
     /// capacity check or contend the accelerator during weight upload.
     load_lock: tokio::sync::Mutex<()>,
@@ -263,6 +303,12 @@ pub enum RouterPoolError {
     NotRemovable(String),
     /// `POST /models` on a name the pool already has.
     AlreadyExists(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouterModelAction {
+    Load,
+    Unload,
 }
 
 impl RouterPool {
@@ -284,6 +330,7 @@ impl RouterPool {
             models_max,
             autoload_default,
             events,
+            lifecycle: Arc::new(LifecycleCoordinator::new()),
             load_lock: tokio::sync::Mutex::new(()),
         };
         pool.rescan()?;
@@ -313,6 +360,15 @@ impl RouterPool {
         aliases.extend(section.aliases.iter().cloned());
         config.model_aliases = aliases;
         config
+    }
+
+    fn ui_identity_for(&self, name: &str, source: RouterModelSource) -> (String, String) {
+        let (source_key, rank) = match source {
+            RouterModelSource::Cache => ("cache:mlxcel-managed-cache-v1".to_string(), 0),
+            RouterModelSource::ModelsDir => ("models_dir:primary-redacted-root".to_string(), 1),
+            RouterModelSource::Preset => (format!("preset:{name}"), 2),
+        };
+        stable_model_identity(source.as_str(), rank, &source_key, name)
     }
 
     /// Scan every source and reconcile the registry (b10621 `load_models`):
@@ -394,7 +450,7 @@ impl RouterPool {
         let mut rebuilt: BTreeMap<String, Arc<RouterModelEntry>> = BTreeMap::new();
         for (name, (path, source)) in &discovered {
             if let Some(entry) = existing.get(name)
-                && (entry.is_running() || entry.is_downloading())
+                && (entry.reserves_capacity() || entry.is_downloading())
             {
                 // A running model keeps serving its current configuration;
                 // source changes apply on its next load (upstream unloads on
@@ -405,6 +461,7 @@ impl RouterPool {
             }
             let section = self.sources.presets.for_model(name);
             let config = self.build_entry_config(name, path, &section);
+            let (ui_model_id, source_key_hash) = self.ui_identity_for(name, *source);
             rebuilt.insert(
                 name.clone(),
                 Arc::new(RouterModelEntry {
@@ -413,10 +470,13 @@ impl RouterPool {
                     source: *source,
                     aliases: section.aliases.clone(),
                     tags: section.tags.clone(),
+                    ui_model_id,
+                    source_key_hash,
                     hidden: hidden_names.contains(name),
                     preset: self.sources.presets.models.get(name).cloned(),
                     config,
                     state: Mutex::new(EntryState::default()),
+                    lifecycle: Arc::new(ModelLifecycle::new(DownloadState::Complete)),
                     last_used: AtomicI64::new(0),
                 }),
             );
@@ -424,7 +484,8 @@ impl RouterPool {
         // Keep running or downloading entries whose source vanished (or, for
         // downloads, never existed yet).
         for (name, entry) in &existing {
-            if !rebuilt.contains_key(name) && (entry.is_running() || entry.is_downloading()) {
+            if !rebuilt.contains_key(name) && (entry.reserves_capacity() || entry.is_downloading())
+            {
                 rebuilt.insert(name.clone(), entry.clone());
             }
         }
@@ -464,6 +525,18 @@ impl RouterPool {
             data["info"] = progress;
         }
         self.notify("status_change", &entry.name, data);
+    }
+
+    pub fn lifecycle_coordinator(&self) -> Arc<LifecycleCoordinator> {
+        self.lifecycle.clone()
+    }
+
+    fn notify_lifecycle(&self, entry: &RouterModelEntry) {
+        self.lifecycle.publish_model_revision(
+            &entry.ui_model_id,
+            entry.lifecycle.revision(),
+            entry.lifecycle_snapshot(),
+        );
     }
 
     /// Resolve a request's model name (b10621 `router_validate_model`):
@@ -559,7 +632,7 @@ impl RouterPool {
     fn running_count(&self) -> usize {
         self.entries
             .read()
-            .map(|entries| entries.values().filter(|e| e.is_running()).count())
+            .map(|entries| entries.values().filter(|e| e.reserves_capacity()).count())
             .unwrap_or(0)
     }
 
@@ -576,8 +649,14 @@ impl RouterPool {
             )));
         }
         let _permit = self.load_lock.lock().await;
+        let _entry_permit = entry.lifecycle.operation_guard().await;
         if entry.is_running() {
-            return Ok(entry);
+            return Ok(entry.clone());
+        }
+        if entry.reserves_capacity() {
+            return Err(RouterPoolError::Capacity(format!(
+                "model '{name}' still owns resources; worker exit has not been observed"
+            )));
         }
 
         // Capacity: evict least-recently-used loaded entries until a slot
@@ -608,9 +687,12 @@ impl RouterPool {
                     name,
                     self.models_max
                 );
-                self.unload_entry(&victim);
+                self.unload_entry(&victim).await?;
             }
         }
+
+        entry.lifecycle.mark_loading();
+        self.notify_lifecycle(&entry);
 
         // Construct the sub-app. The provider constructor returns fast (the
         // weights load on the worker thread), which is what makes `loading`
@@ -620,7 +702,7 @@ impl RouterPool {
         let (path, config) = (entry.path.clone(), entry.config.clone());
         let built = tokio::task::spawn_blocking(move || build_model_app(&path, config))
             .await
-            .map_err(|join_err| RouterPoolError::LoadFailed(join_err.to_string()))?;
+            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
         match built {
             Ok((state, router)) => {
                 if let Ok(mut guard) = entry.state.lock() {
@@ -638,17 +720,76 @@ impl RouterPool {
                     &entry.name,
                     serde_json::json!({ "status": entry.status().as_str() }),
                 );
-                Ok(entry)
+                self.spawn_ready_monitor(entry.clone());
+                Ok(entry.clone())
             }
             Err(err) => {
                 if let Ok(mut guard) = entry.state.lock() {
                     guard.app = None;
                     guard.failed = true;
                 }
+                entry.lifecycle.mark_failed(err.to_string(), true);
+                self.notify_lifecycle(&entry);
                 self.notify_status(&entry);
                 Err(RouterPoolError::LoadFailed(err.to_string()))
             }
         }
+    }
+
+    fn spawn_ready_monitor(&self, entry: Arc<RouterModelEntry>) {
+        let lifecycle = self.lifecycle.clone();
+        tokio::spawn(async move {
+            loop {
+                match entry.status() {
+                    RouterModelStatus::Loaded => {
+                        if entry.lifecycle.state() == ModelLifecycleState::Loading {
+                            entry.lifecycle.mark_ready();
+                            lifecycle.publish_model_revision(
+                                &entry.ui_model_id,
+                                entry.lifecycle.revision(),
+                                entry.lifecycle_snapshot(),
+                            );
+                        }
+                        break;
+                    }
+                    RouterModelStatus::Unloaded => {
+                        if entry.lifecycle.state() == ModelLifecycleState::Loading {
+                            let observer = entry.worker_exit_observer();
+                            let worker_observed = observer
+                                .as_ref()
+                                .map(|observer| observer.observed())
+                                .unwrap_or(true);
+                            entry
+                                .lifecycle
+                                .mark_failed("model worker failed during load", worker_observed);
+                            lifecycle.publish_model_revision(
+                                &entry.ui_model_id,
+                                entry.lifecycle.revision(),
+                                entry.lifecycle_snapshot(),
+                            );
+                            if let Some(observer) = observer
+                                && !worker_observed
+                            {
+                                wait_for_failed_worker_exit(
+                                    entry.clone(),
+                                    lifecycle.clone(),
+                                    observer,
+                                )
+                                .await;
+                            }
+                        }
+                        break;
+                    }
+                    RouterModelStatus::Loading => {
+                        if entry.lifecycle.state() != ModelLifecycleState::Loading {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    RouterModelStatus::Downloading => break,
+                }
+            }
+        });
     }
 
     /// Wait until `name` is loaded (b10621 `ensure_model_ready`), beginning
@@ -663,10 +804,17 @@ impl RouterPool {
         loop {
             match entry.status() {
                 RouterModelStatus::Loaded => {
+                    entry.lifecycle.mark_ready();
+                    self.notify_lifecycle(&entry);
                     self.notify_status(&entry);
-                    return Ok(entry);
+                    return Ok(entry.clone());
                 }
                 RouterModelStatus::Unloaded | RouterModelStatus::Downloading => {
+                    let worker_observed = entry.worker_exit_observed();
+                    entry
+                        .lifecycle
+                        .mark_failed(format!("model '{name}' failed to load"), worker_observed);
+                    self.notify_lifecycle(&entry);
                     self.notify_status(&entry);
                     return Err(RouterPoolError::LoadFailed(format!(
                         "model '{name}' failed to load"
@@ -685,22 +833,217 @@ impl RouterPool {
         }
     }
 
-    fn unload_entry(&self, entry: &RouterModelEntry) {
+    pub fn submit_model_action(
+        self: &Arc<Self>,
+        name: &str,
+        action: RouterModelAction,
+        expected_revision: u64,
+        idempotency_key: &str,
+    ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
+        let entry = self
+            .get(name)
+            .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
+        if entry.lifecycle.revision() != expected_revision {
+            return Err(RouterPoolError::LoadFailed(format!(
+                "stale revision for model '{name}': expected {expected_revision}, current {}",
+                entry.lifecycle.revision()
+            )));
+        }
+        let kind = match action {
+            RouterModelAction::Load => OperationKind::ModelLoad,
+            RouterModelAction::Unload => OperationKind::ModelUnload,
+        };
+        let fingerprint = format!("{kind:?}:{name}:{expected_revision}");
+        let accepted = self
+            .lifecycle
+            .begin_operation(
+                kind,
+                OperationTarget::Model {
+                    model_id: entry.ui_model_id.clone(),
+                    requested_revision: Some(expected_revision),
+                },
+                Some(idempotency_key),
+                fingerprint,
+            )
+            .map_err(|err| match err {
+                OperationError::Conflict { .. } => {
+                    RouterPoolError::LoadFailed("conflicting idempotency key".to_string())
+                }
+                OperationError::TooManyActive => {
+                    RouterPoolError::Capacity("too many active lifecycle operations".to_string())
+                }
+            })?;
+        if accepted.idempotent_replay {
+            return Ok(accepted);
+        }
+        if let Some((err, code, message)) = match action {
+            RouterModelAction::Load if entry.is_running() => Some((
+                RouterPoolError::LoadFailed(format!("model '{name}' is already running")),
+                "conflict",
+                format!("model '{name}' is already running"),
+            )),
+            RouterModelAction::Load if entry.reserves_capacity() => Some((
+                RouterPoolError::Capacity(format!(
+                    "model '{name}' still owns resources; worker exit has not been observed"
+                )),
+                "conflict",
+                format!("model '{name}' still owns resources"),
+            )),
+            RouterModelAction::Unload if !entry.reserves_capacity() && !entry.is_downloading() => {
+                Some((
+                    RouterPoolError::NotLoaded,
+                    "not_loaded",
+                    format!("model '{name}' is not loaded"),
+                ))
+            }
+            _ => None,
+        } {
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(ErrorBody {
+                    code: code.to_string(),
+                    message,
+                    retryable: true,
+                    operation_id: Some(accepted.operation_id.clone()),
+                }),
+            );
+            return Err(err);
+        }
+        let pool = self.clone();
+        let operation_id = accepted.operation_id.clone();
+        let model_name = entry.name.clone();
+        tokio::spawn(async move {
+            pool.lifecycle
+                .update_operation(&operation_id, OperationState::Running, None, None);
+            let result = match action {
+                RouterModelAction::Load => pool.begin_load(&model_name).await.map(|_| ()),
+                RouterModelAction::Unload => pool.unload(&model_name).await,
+            };
+            let entry = pool.get(&model_name);
+            let lifecycle = entry.as_ref().map(|entry| entry.lifecycle_snapshot());
+            match (result, lifecycle) {
+                (Ok(()), Some(lifecycle)) => {
+                    let result_kind = match action {
+                        RouterModelAction::Load => "model_load",
+                        RouterModelAction::Unload => "model_unload",
+                    };
+                    pool.lifecycle.update_operation(
+                        &operation_id,
+                        OperationState::Succeeded,
+                        Some(serde_json::json!({
+                            "result_kind": result_kind,
+                            "model_id": entry.as_ref().map(|e| e.ui_model_id.clone()).unwrap_or(model_name.clone()),
+                            "revision": entry.as_ref().map(|e| e.lifecycle.revision()).unwrap_or(1),
+                            "lifecycle": lifecycle,
+                        })),
+                        None,
+                    );
+                }
+                (Err(err), _) => {
+                    pool.lifecycle.update_operation(
+                        &operation_id,
+                        OperationState::Failed,
+                        None,
+                        Some(ErrorBody {
+                            code: "conflict".to_string(),
+                            message: format!("{err:?}"),
+                            retryable: true,
+                            operation_id: Some(operation_id.clone()),
+                        }),
+                    );
+                }
+                (Ok(()), None) => {
+                    pool.lifecycle.update_operation(
+                        &operation_id,
+                        OperationState::Failed,
+                        None,
+                        Some(ErrorBody {
+                            code: "unknown".to_string(),
+                            message: "model disappeared before operation finished".to_string(),
+                            retryable: true,
+                            operation_id: Some(operation_id.clone()),
+                        }),
+                    );
+                }
+            }
+        });
+        Ok(accepted)
+    }
+
+    async fn unload_entry(&self, entry: &RouterModelEntry) -> Result<(), RouterPoolError> {
+        let _entry_permit = entry.lifecycle.operation_guard().await;
+        let app = entry.state.lock().ok().and_then(|guard| guard.app.clone());
+        let Some(app) = app else {
+            return Err(RouterPoolError::NotLoaded);
+        };
+        entry.lifecycle.begin_drain();
+        self.notify_lifecycle(entry);
+        self.notify_status(entry);
+        if !entry
+            .lifecycle
+            .wait_for_zero_active(ROUTER_DRAIN_TIMEOUT)
+            .await
+        {
+            entry.lifecycle.mark_drain_blocked(format!(
+                "model '{}' still has active requests after {}s drain timeout",
+                entry.name,
+                ROUTER_DRAIN_TIMEOUT.as_secs()
+            ));
+            self.notify_lifecycle(entry);
+            return Err(RouterPoolError::Capacity(format!(
+                "model '{}' is still draining active requests",
+                entry.name
+            )));
+        }
+
+        entry.lifecycle.mark_unloading();
+        self.notify_lifecycle(entry);
+        let observer = app.state.model_provider.worker_exit_observer();
+        let _ = app.state.model_provider.shutdown_worker();
+        let observed =
+            tokio::task::spawn_blocking(move || observer.wait_timeout(ROUTER_WORKER_EXIT_TIMEOUT))
+                .await
+                .unwrap_or(false);
+        if !observed {
+            tracing::warn!(
+                model = %entry.name,
+                ui_model_id = %entry.ui_model_id,
+                timeout_secs = ROUTER_WORKER_EXIT_TIMEOUT.as_secs(),
+                "router: worker exit observation timed out during unload"
+            );
+            entry.lifecycle.mark_drain_blocked(format!(
+                "model '{}' worker exit was not observed within {}s",
+                entry.name,
+                ROUTER_WORKER_EXIT_TIMEOUT.as_secs()
+            ));
+            self.notify_lifecycle(entry);
+            return Err(RouterPoolError::Capacity(format!(
+                "model '{}' worker exit is still pending",
+                entry.name
+            )));
+        }
+        tracing::info!(
+            model = %entry.name,
+            ui_model_id = %entry.ui_model_id,
+            "router: worker exit observed during unload"
+        );
         if let Ok(mut guard) = entry.state.lock() {
-            // Dropping the pool's AppState drops its ModelProvider sender;
-            // the worker thread exits on channel disconnect and the weights
-            // free. In-flight requests hold their own AppState clone, so
-            // they finish before the last Arc drops: graceful by refcount.
             guard.app = None;
             guard.failed = false;
         }
+        drop(app);
+        entry.lifecycle.mark_unloaded();
+        self.notify_lifecycle(entry);
         self.notify_status(entry);
+        Ok(())
     }
 
     /// Unload `name` (b10621 `server_models::unload` through
     /// `POST /models/unload`). Unloading a downloading model cancels the
     /// download, upstream's own unload-during-download behavior.
-    pub fn unload(&self, name: &str) -> Result<(), RouterPoolError> {
+    pub async fn unload(&self, name: &str) -> Result<(), RouterPoolError> {
         let entry = self
             .get(name)
             .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
@@ -710,11 +1053,10 @@ impl RouterPool {
             download.cancel.store(true, Ordering::Relaxed);
             return Ok(());
         }
-        if !entry.is_running() {
+        if !entry.reserves_capacity() {
             return Err(RouterPoolError::NotLoaded);
         }
-        self.unload_entry(&entry);
-        Ok(())
+        self.unload_entry(&entry).await
     }
 
     /// Route a request into `entry`'s sub-app.
@@ -733,10 +1075,61 @@ impl RouterPool {
         let Some(router) = entry.router() else {
             return super::routes::slots::llama_invalid_request("model is not loaded");
         };
+        let lease = match entry.lifecycle.clone().try_request_lease() {
+            Ok(lease) => lease,
+            Err(message) => return super::routes::slots::llama_invalid_request(message),
+        };
         match router.oneshot(request).await {
-            Ok(response) => response,
+            Ok(response) => response_with_lease(response, lease),
             Err(err) => match err {},
         }
+    }
+}
+
+fn response_with_lease(
+    response: axum::response::Response,
+    lease: super::router_lifecycle::RequestLease,
+) -> axum::response::Response {
+    let (parts, body) = response.into_parts();
+    let stream = body.into_data_stream();
+    let leased = futures::stream::unfold((stream, Some(lease)), |(mut stream, lease)| async move {
+        stream.next().await.map(|item| (item, (stream, lease)))
+    });
+    axum::response::Response::from_parts(parts, Body::from_stream(leased))
+}
+
+async fn wait_for_failed_worker_exit(
+    entry: Arc<RouterModelEntry>,
+    lifecycle: Arc<LifecycleCoordinator>,
+    observer: Arc<WorkerExitObserver>,
+) {
+    while entry.lifecycle.state() == ModelLifecycleState::Failed && !observer.observed() {
+        let observer_for_wait = observer.clone();
+        let observed = tokio::task::spawn_blocking(move || {
+            observer_for_wait.wait_timeout(std::time::Duration::from_secs(1))
+        })
+        .await
+        .unwrap_or(false);
+        if observed {
+            break;
+        }
+    }
+    if entry.lifecycle.state() == ModelLifecycleState::Failed && observer.observed() {
+        if let Ok(mut guard) = entry.state.lock() {
+            guard.app = None;
+            guard.failed = true;
+        }
+        entry.lifecycle.mark_worker_exit_observed();
+        tracing::info!(
+            model = %entry.name,
+            ui_model_id = %entry.ui_model_id,
+            "router: worker exit observed after failed load"
+        );
+        lifecycle.publish_model_revision(
+            &entry.ui_model_id,
+            entry.lifecycle.revision(),
+            entry.lifecycle_snapshot(),
+        );
     }
 }
 
@@ -791,12 +1184,15 @@ impl RouterPool {
         let path = cache.snapshot_dir(name);
         let section = PresetSection::default();
         let config = self.build_entry_config(name, &path, &section);
+        let (ui_model_id, source_key_hash) = self.ui_identity_for(name, RouterModelSource::Cache);
         let entry = Arc::new(RouterModelEntry {
             name: name.to_string(),
             path,
             source: RouterModelSource::Cache,
             aliases: Vec::new(),
             tags: Vec::new(),
+            ui_model_id,
+            source_key_hash,
             hidden: false,
             preset: None,
             config,
@@ -808,6 +1204,7 @@ impl RouterPool {
                     progress: serde_json::json!({ "progress": {} }),
                 }),
             }),
+            lifecycle: Arc::new(ModelLifecycle::new(DownloadState::Downloading)),
             last_used: AtomicI64::new(0),
         });
         {
@@ -843,6 +1240,18 @@ impl RouterPool {
                 guard.download = None;
                 guard.failed = !ok;
             }
+            task_entry.lifecycle.mark_download_terminal(if ok {
+                DownloadState::Complete
+            } else if result
+                .as_ref()
+                .err()
+                .is_some_and(crate::downloader::is_download_cancelled)
+            {
+                DownloadState::Incomplete
+            } else {
+                DownloadState::Failed
+            });
+            pool.notify_lifecycle(&task_entry);
             match &result {
                 Ok(()) => tracing::info!("router: download of '{repo}' finished"),
                 Err(err) if crate::downloader::is_download_cancelled(err) => {
@@ -944,9 +1353,9 @@ impl RouterPool {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        if entry.is_running() {
+        if entry.reserves_capacity() {
             tracing::info!("router: stopping model instance '{name}' before removal");
-            self.unload_entry(&entry);
+            self.unload_entry(&entry).await?;
         }
 
         cache
