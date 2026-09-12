@@ -23,6 +23,7 @@ use super::router_lifecycle_dto::*;
 
 pub const EVENT_RING_LIMIT: usize = 1024;
 pub const EVENT_RETENTION: Duration = Duration::from_secs(600);
+pub const MAX_SAFE_EVENT_SEQUENCE: u64 = 9_007_199_254_740_991;
 pub const TERMINAL_OPERATION_LIMIT: usize = 200;
 pub const TERMINAL_OPERATION_RETENTION: Duration = Duration::from_secs(3600);
 pub const MAX_ACTIVE_OPERATIONS: usize = 64;
@@ -77,13 +78,14 @@ impl LifecycleCoordinator {
 
     pub fn subscribe_for_ui(
         &self,
-        last_event_id: Option<&str>,
+        cursor: UiReplayCursor,
         runtime_model_ids: Vec<String>,
-    ) -> (tokio::sync::broadcast::Receiver<UiEvent>, Vec<UiEvent>) {
+    ) -> Result<(tokio::sync::broadcast::Receiver<UiEvent>, Vec<UiEvent>), ReplaySubscribeError>
+    {
         let mut inner = self.inner.lock().expect("lifecycle coordinator poisoned");
         prune_events(&mut inner);
-        match last_event_id.filter(|event_id| !event_id.is_empty()) {
-            None => {
+        match cursor {
+            UiReplayCursor::Snapshot => {
                 let sequence = inner.next_sequence;
                 let payload = UiEventPayload::Snapshot(SnapshotPayload {
                     snapshot_sequence: sequence,
@@ -93,9 +95,9 @@ impl LifecycleCoordinator {
                 });
                 let event = self.ephemeral_event_locked(sequence, "snapshot", payload);
                 let receiver = self.event_tx.subscribe();
-                (receiver, vec![event])
+                Ok((receiver, vec![event]))
             }
-            Some(event_id) => {
+            UiReplayCursor::LastEventId(event_id) => {
                 let replay = if let Some((_, cursor)) = inner
                     .events
                     .iter()
@@ -132,10 +134,46 @@ impl LifecycleCoordinator {
                     let event =
                         self.ephemeral_event_locked(inner.next_sequence, event_type, payload);
                     let receiver = self.event_tx.subscribe();
-                    return (receiver, vec![event]);
+                    return Ok((receiver, vec![event]));
                 };
                 let receiver = self.event_tx.subscribe();
-                (receiver, replay)
+                Ok((receiver, replay))
+            }
+            UiReplayCursor::Sequence {
+                server_instance_id,
+                after_sequence,
+            } => {
+                if after_sequence > MAX_SAFE_EVENT_SEQUENCE || after_sequence > inner.next_sequence
+                {
+                    return Err(ReplaySubscribeError::FutureSequence);
+                }
+                if server_instance_id != self.server_instance_id {
+                    let payload = ResetPayload {
+                        reason: "server_restart".to_string(),
+                        resnapshot: true,
+                    };
+                    let event = self.ephemeral_event_locked(
+                        inner.next_sequence,
+                        "server_restart",
+                        UiEventPayload::ServerRestart(payload),
+                    );
+                    let receiver = self.event_tx.subscribe();
+                    return Ok((receiver, vec![event]));
+                }
+                let replay =
+                    replay_after_sequence_locked(&inner, after_sequence).unwrap_or_else(|| {
+                        let payload = ResetPayload {
+                            reason: "gap".to_string(),
+                            resnapshot: true,
+                        };
+                        vec![self.ephemeral_event_locked(
+                            inner.next_sequence,
+                            "gap",
+                            UiEventPayload::Gap(payload),
+                        )]
+                    });
+                let receiver = self.event_tx.subscribe();
+                Ok((receiver, replay))
             }
         }
     }
@@ -426,6 +464,21 @@ impl LifecycleCoordinator {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiReplayCursor {
+    Snapshot,
+    LastEventId(String),
+    Sequence {
+        server_instance_id: String,
+        after_sequence: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaySubscribeError {
+    FutureSequence,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetEventKind {
     Reset,
@@ -476,6 +529,28 @@ fn prune_events(inner: &mut CoordinatorInner) {
     {
         inner.events.pop_front();
     }
+}
+
+fn replay_after_sequence_locked(
+    inner: &CoordinatorInner,
+    after_sequence: u64,
+) -> Option<Vec<UiEvent>> {
+    if after_sequence == inner.next_sequence {
+        return Some(Vec::new());
+    }
+    let Some((_, oldest)) = inner.events.front() else {
+        return (after_sequence == 0 && inner.next_sequence == 0).then(Vec::new);
+    };
+    if after_sequence < oldest.sequence.saturating_sub(1) {
+        return None;
+    }
+    Some(
+        inner
+            .events
+            .iter()
+            .filter_map(|(_, event)| (event.sequence > after_sequence).then_some(event.clone()))
+            .collect(),
+    )
 }
 
 fn new_server_instance_id() -> String {

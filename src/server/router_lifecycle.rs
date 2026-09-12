@@ -87,7 +87,10 @@ pub use super::router_lifecycle_dto::{
     ProgressBytes, ReplayError, RuntimePayload, RuntimeSettingValue, RuntimeSettingsReport,
     RuntimeSnapshot, SettingsPayload, UiEvent, UiEventPayload,
 };
-pub use super::router_lifecycle_ops::{EVENT_RING_LIMIT, LifecycleCoordinator, ResetEventKind};
+pub use super::router_lifecycle_ops::{
+    EVENT_RING_LIMIT, LifecycleCoordinator, MAX_SAFE_EVENT_SEQUENCE, ReplaySubscribeError,
+    ResetEventKind, UiReplayCursor,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleSnapshot {

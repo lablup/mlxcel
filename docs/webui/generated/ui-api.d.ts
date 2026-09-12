@@ -33,6 +33,13 @@ export type OperationId = string;
 
 export type EventId = string;
 
+export type EventSequence = number;
+
+export interface EventReplayQuery {
+  readonly server_instance_id: ServerInstanceId;
+  readonly after_sequence: EventSequence;
+}
+
 export type CursorToken = string;
 
 export type IdempotencyKey = string;
@@ -181,7 +188,7 @@ export interface CatalogListResponse {
   readonly items: ReadonlyArray<CatalogEntry>;
   readonly pagination: Pagination;
   readonly server_instance_id: ServerInstanceId;
-  readonly snapshot_sequence: number;
+  readonly snapshot_sequence: EventSequence;
 }
 
 export interface LoadProfile {
@@ -242,7 +249,7 @@ export interface CatalogRefreshResult {
   readonly result_kind: "catalog_refresh";
   readonly scanned_entries: number;
   readonly changed_entries: number;
-  readonly snapshot_sequence: number;
+  readonly snapshot_sequence: EventSequence;
 }
 
 export interface ModelEvictionReport {
@@ -307,7 +314,7 @@ export interface OperationsListResponse {
   readonly items: ReadonlyArray<Operation>;
   readonly pagination: Pagination;
   readonly server_instance_id: ServerInstanceId;
-  readonly snapshot_sequence: number;
+  readonly snapshot_sequence: EventSequence;
 }
 
 export interface RuntimeSettingsReport {
@@ -324,7 +331,7 @@ export interface RuntimeSnapshot {
   readonly revision: number;
   readonly measurements: Record<string, MeasuredValue>;
   readonly settings: RuntimeSettingsReport;
-  readonly snapshot_sequence: number;
+  readonly snapshot_sequence: EventSequence;
 }
 
 export type UiEvent = SnapshotEvent | ModelRevisionEvent | OperationEvent | DownloadProgressEvent | RuntimeEvent | SettingsEvent | ResetEvent | GapEvent | ServerRestartEvent | HeartbeatEvent;
@@ -382,7 +389,7 @@ export interface CatalogMetadata {
 }
 
 export interface SnapshotPayload {
-  readonly snapshot_sequence: number;
+  readonly snapshot_sequence: EventSequence;
   readonly catalog_changed: boolean;
   readonly operations_changed: boolean;
   readonly runtime_model_ids: ReadonlyArray<ModelId>;
@@ -440,7 +447,7 @@ export interface StringCatalog {
 export interface SnapshotEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "snapshot";
   readonly payload: SnapshotPayload;
   readonly event_id: EventId;
@@ -450,7 +457,7 @@ export interface SnapshotEvent {
 export interface ModelRevisionEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "model_revision";
   readonly payload: ModelRevisionPayload;
   readonly event_id: EventId;
@@ -460,7 +467,7 @@ export interface ModelRevisionEvent {
 export interface OperationEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "operation";
   readonly payload: OperationPayload;
   readonly event_id: EventId;
@@ -470,7 +477,7 @@ export interface OperationEvent {
 export interface DownloadProgressEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "download_progress";
   readonly payload: DownloadProgressPayload;
   readonly event_id: EventId;
@@ -480,7 +487,7 @@ export interface DownloadProgressEvent {
 export interface RuntimeEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "runtime";
   readonly payload: RuntimePayload;
   readonly event_id: EventId;
@@ -490,7 +497,7 @@ export interface RuntimeEvent {
 export interface SettingsEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "settings";
   readonly payload: SettingsPayload;
   readonly event_id: EventId;
@@ -500,7 +507,7 @@ export interface SettingsEvent {
 export interface ResetEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "reset";
   readonly payload: ResetPayload;
   readonly event_id: EventId;
@@ -510,7 +517,7 @@ export interface ResetEvent {
 export interface GapEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "gap";
   readonly payload: ResetPayload;
   readonly event_id: EventId;
@@ -520,7 +527,7 @@ export interface GapEvent {
 export interface ServerRestartEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "server_restart";
   readonly payload: ResetPayload;
   readonly event_id: EventId;
@@ -530,7 +537,7 @@ export interface ServerRestartEvent {
 export interface HeartbeatEvent {
   readonly schema_version: SchemaVersion;
   readonly server_instance_id: ServerInstanceId;
-  readonly sequence: number;
+  readonly sequence: EventSequence;
   readonly type: "heartbeat";
   readonly payload: HeartbeatPayload;
   readonly event_id: EventId;

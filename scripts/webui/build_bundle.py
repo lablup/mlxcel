@@ -33,6 +33,8 @@ SOURCE_FILES = [
     WEBUI / "vite.config.ts",
     WEBUI / "vitest.config.ts",
     WEBUI / "index.html",
+    ROOT / "docs" / "webui" / "api.yaml",
+    ROOT / "docs" / "webui" / "generated" / "ui-api.d.ts",
 ]
 SOURCE_DIRS = [WEBUI / "src", WEBUI / "public"]
 

@@ -1,0 +1,5 @@
+{
+  "$schemaName": "EventReplayQuery",
+  "server_instance_id": "srv_example_20260912",
+  "after_sequence": 42
+}
