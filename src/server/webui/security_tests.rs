@@ -108,7 +108,7 @@ fn custom_prefixes_classify_private_api_and_public_shell() {
         vec!["127.0.0.1:18037".to_string()],
         vec![origin("http://127.0.0.1:18037")],
         "/admin/webui",
-        "/admin/api",
+        "/admin",
         1,
         1,
     )
@@ -122,13 +122,25 @@ fn custom_prefixes_classify_private_api_and_public_shell() {
     let events = classify_request(
         &policy,
         &axum::http::Method::GET,
-        &"/admin/api/events".parse().unwrap(),
+        &"/admin/ui-api/v1/events".parse().unwrap(),
     );
     assert!(events.sse);
+    let legacy_sse = classify_request(
+        &policy,
+        &axum::http::Method::GET,
+        &"/admin/models/sse".parse().unwrap(),
+    );
+    assert!(legacy_sse.sse);
+    let reload = classify_request(
+        &policy,
+        &axum::http::Method::GET,
+        &"/admin/models?re%6coad=1".parse().unwrap(),
+    );
+    assert!(reload.control);
     let action = classify_request(
         &policy,
         &axum::http::Method::POST,
-        &"/admin/api/model-actions".parse().unwrap(),
+        &"/admin/ui-api/v1/model-actions".parse().unwrap(),
     );
     assert!(action.control);
 }

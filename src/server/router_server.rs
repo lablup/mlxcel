@@ -1196,6 +1196,10 @@ mod router_server_tests;
 mod router_server_security_support_tests;
 
 #[cfg(test)]
+#[path = "router_server_security_prefix_tests.rs"]
+mod router_server_security_prefix_tests;
+
+#[cfg(test)]
 #[path = "router_server_security_tests.rs"]
 mod router_server_security_tests;
 

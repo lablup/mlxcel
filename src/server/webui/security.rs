@@ -14,8 +14,6 @@
 
 #![allow(dead_code)]
 //! Security policy and middleware for the bundled WebUI administrative surface.
-//!
-//! Startup issue #1838 wires the resolver and secured router into the production CLI path; this issue intentionally lands the shared policy and harness first.
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -99,7 +97,7 @@ pub(crate) async fn webui_security_middleware(
                     Err(rejection) => return rejection.into_response(),
                 }
             }
-            _ => return unauthorized_response(request.uri().path()),
+            _ => return unauthorized_response(&security.policy, request.uri().path()),
         },
     };
     if decision.control && request_body_too_large(request.headers()) {
@@ -150,30 +148,27 @@ enum RequestKind {
 
 fn classify_request(policy: &WebUiSecurityPolicy, method: &Method, uri: &Uri) -> Decision {
     let path = uri.path();
+    let relative = api_relative_path(policy, path);
     let public_static = matches!(*method, Method::GET | Method::HEAD)
         && path_matches_prefix(path, &policy.public_webui_prefix);
     let public_health = matches!(*method, Method::GET | Method::HEAD)
-        && matches!(path, "/" | "/health" | "/v1/health");
+        && matches!(relative, Some("/" | "/health" | "/v1/health"));
     let preflight = *method == Method::OPTIONS;
     let legacy_reload = *method == Method::GET
-        && path == "/models"
-        && uri.query().is_some_and(|q| {
-            q.split('&').any(|part| {
-                part.split_once('=')
-                    .map_or(part == "reload", |(name, _)| name == "reload")
-            })
-        });
-    let private_api = path_matches_prefix(path, &policy.private_api_prefix);
-    let sse =
-        path == "/models/sse" || path == format!("{}/events", policy.private_api_prefix).as_str();
+        && matches!(relative, Some("/models"))
+        && query_has_parameter(uri.query(), "reload");
+    let sse = matches!(relative, Some("/models/sse" | "/ui-api/v1/events"));
     let control = !sse
         && (legacy_reload
-            || !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-            || private_api
-            || matches!(
-                path,
-                "/models" | "/models/load" | "/models/unload" | "/settings" | "/props"
-            ));
+            || matches!(relative, Some("/models"))
+                && (*method == Method::POST || *method == Method::DELETE)
+            || *method == Method::POST
+                && matches!(
+                    relative,
+                    Some("/models/load" | "/models/unload" | "/ui-api/v1/model-actions")
+                )
+            || matches!(relative, Some(path) if *method == Method::POST && path.starts_with("/ui-api/v1/operations/") && path.ends_with("/cancel"))
+            || matches!(relative, Some("/settings") if !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)));
     Decision {
         kind: if public_static || public_health {
             RequestKind::Public
@@ -343,6 +338,38 @@ fn query_carries_credential(query: Option<&str>) -> bool {
     })
 }
 
+fn query_has_parameter(query: Option<&str>, expected: &str) -> bool {
+    query.is_some_and(|query| {
+        query.split('&').any(|part| {
+            let name = part.split_once('=').map_or(part, |(name, _)| name);
+            percent_decode_str(name)
+                .decode_utf8_lossy()
+                .eq_ignore_ascii_case(expected)
+        })
+    })
+}
+
+fn api_relative_path<'a>(policy: &WebUiSecurityPolicy, path: &'a str) -> Option<&'a str> {
+    if policy.api_prefix.as_ref() == "/" {
+        return Some(path);
+    }
+    path.strip_prefix(policy.api_prefix.as_ref())
+        .and_then(|tail| {
+            if tail.is_empty() {
+                Some("/")
+            } else if tail.starts_with('/') {
+                Some(tail)
+            } else {
+                None
+            }
+        })
+}
+
+fn is_ui_api_path(policy: &WebUiSecurityPolicy, path: &str) -> bool {
+    api_relative_path(policy, path)
+        .is_some_and(|relative| path_matches_prefix(relative, "/ui-api/v1"))
+}
+
 fn path_matches_prefix(path: &str, prefix: &str) -> bool {
     path == prefix
         || (prefix != "/"
@@ -398,11 +425,11 @@ fn header_to_str(value: &HeaderValue) -> Option<&str> {
     value.to_str().ok().filter(|text| !text.is_empty())
 }
 
-fn unauthorized_response(path: &str) -> Response {
-    if path.starts_with("/ui-api/v1/") {
+fn unauthorized_response(policy: &WebUiSecurityPolicy, path: &str) -> Response {
+    if is_ui_api_path(policy, path) {
         return webui_error(
             StatusCode::UNAUTHORIZED,
-            "authentication",
+            "unauthorized",
             "authentication is required",
             false,
         );
@@ -426,8 +453,8 @@ impl SecurityRejection {
     }
 }
 
-fn forbidden(code: &'static str, message: &'static str) -> SecurityRejection {
-    rejection(StatusCode::FORBIDDEN, code, message, false)
+fn forbidden(_code: &'static str, message: &'static str) -> SecurityRejection {
+    rejection(StatusCode::FORBIDDEN, "forbidden", message, false)
 }
 
 fn rejection(

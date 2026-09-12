@@ -28,7 +28,7 @@ pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geoloc
 
 pub(crate) const WEBUI_CONTROL_BODY_LIMIT_BYTES: usize = 256 * 1024;
 const DEFAULT_WEBUI_PREFIX: &str = "/webui";
-const DEFAULT_WEBUI_API_PREFIX: &str = "/ui-api/v1";
+const DEFAULT_WEBUI_API_PREFIX: &str = "/";
 const DEFAULT_CONTROL_PERMITS: usize = 32;
 const DEFAULT_SSE_PERMITS: usize = 16;
 const DEFAULT_CONTROL_RATE_LIMIT: usize = 120;
@@ -39,7 +39,7 @@ pub(crate) struct WebUiSecurityPolicy {
     pub(super) allowed_hosts: Arc<[String]>,
     pub(super) allowed_origins: Arc<[HeaderValue]>,
     pub(super) public_webui_prefix: Arc<str>,
-    pub(super) private_api_prefix: Arc<str>,
+    pub(super) api_prefix: Arc<str>,
     pub(super) control_permits: Arc<Semaphore>,
     pub(super) sse_permits: Arc<Semaphore>,
     control_rate: Arc<ControlRateLimit>,
@@ -51,7 +51,7 @@ impl fmt::Debug for WebUiSecurityPolicy {
             .field("allowed_hosts", &self.allowed_hosts)
             .field("allowed_origins", &self.allowed_origins)
             .field("public_webui_prefix", &self.public_webui_prefix)
-            .field("private_api_prefix", &self.private_api_prefix)
+            .field("api_prefix", &self.api_prefix)
             .field("control_permits", &self.control_permits.available_permits())
             .field("sse_permits", &self.sse_permits.available_permits())
             .field("control_rate_limit", &self.control_rate.max_requests)
@@ -78,7 +78,7 @@ impl WebUiSecurityPolicy {
         allowed_hosts: Vec<String>,
         allowed_origins: Vec<HeaderValue>,
         public_webui_prefix: &str,
-        private_api_prefix: &str,
+        api_prefix: &str,
         control_limit: usize,
         sse_limit: usize,
     ) -> Result<Self> {
@@ -86,7 +86,7 @@ impl WebUiSecurityPolicy {
             allowed_hosts,
             allowed_origins,
             public_webui_prefix,
-            private_api_prefix,
+            api_prefix,
             control_limit,
             sse_limit,
             DEFAULT_CONTROL_RATE_LIMIT,
@@ -97,7 +97,7 @@ impl WebUiSecurityPolicy {
         allowed_hosts: Vec<String>,
         allowed_origins: Vec<HeaderValue>,
         public_webui_prefix: &str,
-        private_api_prefix: &str,
+        api_prefix: &str,
         control_limit: usize,
         sse_limit: usize,
         control_rate_limit: usize,
@@ -124,7 +124,7 @@ impl WebUiSecurityPolicy {
             allowed_origins: origins.into(),
             public_webui_prefix: normalize_prefix(public_webui_prefix, "WebUI public prefix")?
                 .into(),
-            private_api_prefix: normalize_prefix(private_api_prefix, "WebUI API prefix")?.into(),
+            api_prefix: normalize_prefix(api_prefix, "WebUI API prefix")?.into(),
             control_permits: Arc::new(Semaphore::new(control_limit)),
             sse_permits: Arc::new(Semaphore::new(sse_limit)),
             control_rate: Arc::new(ControlRateLimit::new(
