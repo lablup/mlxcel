@@ -78,7 +78,8 @@ explicit positive `--parallel` keeps split per-slot windows unless
 `--kv-unified` is also set. `--no-kv-unified` forces split windows even for the
 automatic slot count. Families whose cache layout cannot batch are clamped to
 one effective decode row after load without reducing the per-request context
-window.
+window; the post-load whole-window value is what `/props`, `/slots`, and
+`/v1/models` report.
 
 ```bash
 mlxcel-server -m Qwen3.5-0.8B-4bit \

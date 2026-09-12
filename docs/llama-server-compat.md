@@ -668,6 +668,8 @@ Upstream reuses a cached chunk that is not a prefix of the incoming prompt by de
 
 `--kv-unified` (`-kvu` / `-no-kvu`) is implemented as b10621's visible shared-context contract over mlxcel's per-sequence cache pool. When `--parallel` is omitted or `-1`, auto resolves to four slots and enables unified mode by default, so each slot reports the whole configured context while the scheduler enforces that same value as one shared live-token budget. Explicit `--parallel` and explicit `--max-batch-size` keep split per-slot windows unless `--kv-unified` is also explicit, and `--no-kv-unified` forces split behavior.
 
+For a family that reports `supports_batching() == false` only after model load, mlxcel clamps the effective decode width to one. In that case an explicit split configuration cannot retain four simultaneously usable shares, so the single live request regains the whole configured context; the worker publishes the corrected post-load `n_ctx` to `/props`, `/slots`, and `/v1/models` and emits a second resolved-geometry log entry. This is the narrow non-batching divergence from explicit b10621 slot geometry, and avoids both stranding three quarters of the context and reporting the stale pre-load share.
+
 ### Validating a change to the prompt cache
 
 `tests/prompt_cache_compat_e2e.rs` is the differential gate. It runs a real server and compares per-position tokens and logprobs between a cold evaluation, a prefix-cache hit, a per-request `cache_prompt: false`, and three concurrent requests of different prompt lengths against their own solo runs. What a prompt cache has to be is not "good" but "the same as not having one", which is a statement about two runs that no single-run perplexity can express.

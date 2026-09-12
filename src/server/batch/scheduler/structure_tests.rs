@@ -86,4 +86,8 @@ fn shared_budget_enforcement_stays_wired_into_scheduler_paths() {
         ),
         "model worker must install the resolved unified context window as the shared scheduler budget"
     );
+    assert!(
+        worker.contains("batch_metrics.publish_runtime_context_geometry("),
+        "a post-load non-batching clamp must publish its restored whole-window geometry"
+    );
 }

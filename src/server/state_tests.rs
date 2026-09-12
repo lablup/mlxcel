@@ -114,6 +114,18 @@ fn batch_metrics_default_equals_new() {
     assert_eq!(a.queue_depth(), b.queue_depth());
 }
 
+#[test]
+fn batch_metrics_publishes_post_load_context_geometry_atomically() {
+    let metrics = BatchMetrics::new();
+    assert_eq!(metrics.runtime_context_size(), None);
+    assert_eq!(metrics.runtime_max_kv_size(), None);
+
+    metrics.publish_runtime_context_geometry(20_480, Some(4096));
+
+    assert_eq!(metrics.runtime_context_size(), Some(20_480));
+    assert_eq!(metrics.runtime_max_kv_size(), Some(4096));
+}
+
 // ------------------------------------------------------------------
 // can_accept_request logic (tested via BatchMetrics + ServerConfig)
 // ------------------------------------------------------------------

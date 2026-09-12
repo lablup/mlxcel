@@ -290,7 +290,7 @@ fn slot_restore(state: &AppState, root: &std::path::Path, id: usize, filename: &
     // "Restored prompt does not fit in the slot context" refusal. A
     // `--ctx-size` of 0 means the model's own trained window applies and the
     // bound is enforced at prefill time instead.
-    let n_ctx = state.config.context_size;
+    let n_ctx = state.effective_context_size();
     if n_ctx > 0 && envelope.tokens.len() > n_ctx {
         return llama_invalid_request(
             "Unable to restore slot: Restored prompt does not fit in the slot context",

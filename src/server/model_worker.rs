@@ -577,6 +577,25 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         "Model does not support batched decode; restored the per-request KV cap from the original context budget after clamping max_batch_size to 1"
                     );
                 }
+                if effective_max_batch_size == 1
+                    && sched_config.max_batch_size > 1
+                    && !sched_config.kv_unified
+                    && sched_config.context_size_total > 0
+                {
+                    batch_metrics.publish_runtime_context_geometry(
+                        sched_config.context_size_total,
+                        effective_max_kv_size,
+                    );
+                    tracing::info!(
+                        ctx_size = sched_config.context_size_total,
+                        ctx_size_per_slot = sched_config.context_size_total,
+                        context_slots = 1,
+                        kv_unified = false,
+                        configured_max_batch_size = sched_config.max_batch_size,
+                        max_kv_size = ?effective_max_kv_size,
+                        "resolved post-load context and batch geometry after the model clamped decode width"
+                    );
+                }
 
                 tracing::info!(
                     "Starting BatchScheduler (max_batch_size={}, \

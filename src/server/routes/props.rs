@@ -203,6 +203,8 @@ fn chat_template_caps(state: &AppState) -> serde_json::Value {
 pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
     let live = state.live();
     let tokenizer_config = read_model_json(&state, "tokenizer_config.json");
+    let mut geometry = geometry_block(&state.config);
+    geometry["n_kv_max"] = serde_json::json!(state.effective_max_kv_size());
     let mut body = serde_json::json!({
         // -- b10621 key set --
         "default_generation_settings": {
@@ -248,7 +250,7 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         "kv_unified": state.config.kv_unified,
         "kv_bits": state.config.batch_kv_quant.bits,
         "speculative": speculative_config(&state.config),
-        "geometry": geometry_block(&state.config),
+        "geometry": geometry,
     });
     body["capabilities"] = serde_json::to_value(server_capabilities(&state)).unwrap_or_default();
     Json(body)

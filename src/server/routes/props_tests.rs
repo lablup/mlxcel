@@ -28,10 +28,16 @@ use crate::server::config::ServerConfig;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, create_app};
 use crate::tokenizer::MlxcelTokenizer;
 
-fn app_with(config: ServerConfig) -> Router {
+fn app_with_runtime_geometry(
+    config: ServerConfig,
+    runtime_geometry: Option<(usize, Option<usize>)>,
+) -> Router {
     let (options_tx, _options_rx) = mpsc::channel();
     let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
     let batch_metrics = provider.batch_metrics().clone();
+    if let Some((context_size, max_kv_size)) = runtime_geometry {
+        batch_metrics.publish_runtime_context_geometry(context_size, max_kv_size);
+    }
     let state = AppState::new(
         provider,
         config,
@@ -41,6 +47,10 @@ fn app_with(config: ServerConfig) -> Router {
         batch_metrics,
     );
     create_app(state)
+}
+
+fn app_with(config: ServerConfig) -> Router {
+    app_with_runtime_geometry(config, None)
 }
 
 async fn send(app: Router, method: Method, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -319,6 +329,27 @@ async fn get_props_resolves_ctx_size_zero_to_effective_context() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["default_generation_settings"]["n_ctx"], 4096);
+}
+
+#[tokio::test]
+async fn get_props_reports_post_load_non_batching_context_geometry() {
+    let (status, body) = send(
+        app_with_runtime_geometry(
+            ServerConfig {
+                context_size: 5120,
+                max_kv_size: Some(5120),
+                ..Default::default()
+            },
+            Some((20_480, Some(20_480))),
+        ),
+        Method::GET,
+        "/props",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["default_generation_settings"]["n_ctx"], 20_480);
+    assert_eq!(body["geometry"]["n_kv_max"], 20_480);
 }
 
 /// GET /props is ungated in b10621; `--props` gates POST only.
