@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAxeClean, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectNoOverflowOrInlineStyles, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut } from './browser-assertions';
+import { expectAxeClean, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectNoOverflowOrInlineStyles, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut, reportFontDiagnostics } from './browser-assertions';
 import { bootGallery, bootProduct, browserStorageDump, gotoGalleryWithoutReload, installAbortRecorder, installMockApi, loadProductionCss, loginWithMockApi, productVariants, readAbortLog, selectGalleryTab, settleAnimationFrame, submitSessionKey, variants } from './browser-fixtures';
 
 test.describe('design system gallery and shell', () => {
@@ -201,4 +201,14 @@ test.describe('design system gallery and shell', () => {
     await expect(page.locator('html')).toHaveAttribute('data-material', 'glass');
     await expect(page.locator('.material-glass').first()).toHaveCSS('backdrop-filter', /blur\(0px\)|none/);
   });
+
+  if (process.env.MLXCEL_WEBUI_FONT_DIAGNOSTICS === '1') {
+    test('reports browser font diagnostics', async ({ page }) => {
+      await bootGallery(page, variants[0]);
+      await reportFontDiagnostics(page, variants[0].name);
+      await page.goto('about:blank');
+      await bootProduct(page, productVariants[2]);
+      await reportFontDiagnostics(page, productVariants[2].name);
+    });
+  }
 });
