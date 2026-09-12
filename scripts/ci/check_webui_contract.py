@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import datetime as dt
 import hashlib
 import json
 import re
@@ -44,6 +45,15 @@ DTO = ROOT / "docs/webui/generated/ui-api.d.ts"
 FIXTURES = ROOT / "tests/fixtures/webui"
 
 IDENT = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+RFC3339_DATE_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+FORMAT_CHECKER = FormatChecker()
+SEEDED_SENSITIVE_MARKERS = (
+    "/Users/mlxcel-seeded-secret/",
+    "/Volumes/mlxcel-seeded-secret/",
+    "/private/mlxcel-seeded-secret/",
+    "hf_MLXCELE2ESECRET",
+    "Bearer mlxcel-seeded-secret-token",
+)
 ALLOWED_SCHEMA_KEYS = {
     "$ref",
     "additionalProperties",
@@ -72,6 +82,14 @@ class ContractError(Exception):
     pass
 
 
+@FORMAT_CHECKER.checks("date-time", raises=(ValueError,))
+def is_rfc3339_date_time(value: object) -> bool:
+    if not isinstance(value, str) or not RFC3339_DATE_TIME.fullmatch(value):
+        return False
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.tzinfo is not None
+
+
 def load_contract() -> dict[str, Any]:
     try:
         with OPENAPI.open("r", encoding="utf-8") as f:
@@ -83,11 +101,32 @@ def load_contract() -> dict[str, Any]:
     if not isinstance(data.get("components", {}).get("schemas"), dict):
         raise ContractError("OpenAPI components.schemas is required")
     lint_schema_keywords(data["components"]["schemas"])
+    require_active_format_checkers(data)
     for name, schema in data["components"]["schemas"].items():
         Draft202012Validator.check_schema(schema)
         if isinstance(schema, dict) and schema.get("type") == "object" and schema.get("additionalProperties") is not False:
             raise ContractError(f"schema {name} must be strict: set additionalProperties to false or a typed schema")
     return data
+
+
+def iter_schema_formats(node: Any, path: str = "#") -> list[tuple[str, str]]:
+    formats: list[tuple[str, str]] = []
+    if isinstance(node, dict):
+        fmt = node.get("format")
+        if isinstance(fmt, str):
+            formats.append((path, fmt))
+        for key, value in node.items():
+            formats.extend(iter_schema_formats(value, f"{path}/{key}"))
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            formats.extend(iter_schema_formats(value, f"{path}/{i}"))
+    return formats
+
+
+def require_active_format_checkers(contract: dict[str, Any]) -> None:
+    missing = sorted({fmt for _, fmt in iter_schema_formats(contract) if fmt not in FORMAT_CHECKER.checkers})
+    if missing:
+        raise ContractError(f"schema uses format(s) without active checker: {', '.join(missing)}")
 
 
 def lint_schema_keywords(node: Any, path: str = "#/components/schemas") -> None:
@@ -225,7 +264,23 @@ def fixture_schema_name(path: Path, value: Any) -> str:
 def validator_for(contract: dict[str, Any], schema_name: str) -> Draft202012Validator:
     base_uri = "urn:mlxcel:webui:contract"
     registry = Registry().with_resource(base_uri, DRAFT202012.create_resource(contract))
-    return Draft202012Validator({"$ref": f"{base_uri}#/components/schemas/{schema_name}"}, registry=registry, format_checker=FormatChecker())
+    return Draft202012Validator({"$ref": f"{base_uri}#/components/schemas/{schema_name}"}, registry=registry, format_checker=FORMAT_CHECKER)
+
+
+def seeded_sensitive_markers(value: Any) -> list[str]:
+    rendered = json.dumps(value, ensure_ascii=False)
+    return [marker for marker in SEEDED_SENSITIVE_MARKERS if marker in rendered]
+
+
+def check_no_seeded_sensitive_markers() -> None:
+    failures = []
+    for path in iter_fixture_files():
+        value = json.loads(path.read_text(encoding="utf-8"))
+        markers = seeded_sensitive_markers(value)
+        if markers:
+            failures.append(f"{path}: contains seeded sensitive marker(s): {', '.join(markers)}")
+    if failures:
+        raise ContractError("fixture redaction check failed:\n" + "\n".join(failures))
 
 
 def validate_fixtures(contract: dict[str, Any]) -> None:
@@ -431,6 +486,49 @@ def self_test() -> None:
     errors = list(validator_for(contract, "BootstrapResponse").iter_errors(bad2))
     if not errors:
         raise ContractError("negative self-test failed: strict object accepted an unknown property")
+    bad_api_base = copy.deepcopy(bootstrap)
+    bad_api_base["server"]["api_base"] = "//evil.invalid/ui"
+    errors = list(validator_for(contract, "BootstrapResponse").iter_errors(bad_api_base))
+    if not errors:
+        raise ContractError("negative self-test failed: protocol-relative api_base was accepted")
+    bad_timestamp = copy.deepcopy(json.loads((FIXTURES / "examples" / "event.1.json").read_text(encoding="utf-8")))
+    bad_timestamp["emitted_at"] = "not a timestamp"
+    errors = list(validator_for(contract, "UiEvent").iter_errors(bad_timestamp))
+    if not errors:
+        raise ContractError("negative self-test failed: malformed RFC3339 date-time was accepted")
+    bad_catalog = copy.deepcopy(json.loads((FIXTURES / "examples" / "catalog.page.json").read_text(encoding="utf-8")))
+    bad_catalog["items"] = bad_catalog["items"] * 201
+    bad_catalog["pagination"]["next_cursor"] = "x" * 513
+    errors = list(validator_for(contract, "CatalogListResponse").iter_errors(bad_catalog))
+    if not errors:
+        raise ContractError("negative self-test failed: over-limit catalog page/cursor was accepted")
+    bad_download = {
+        "$schemaName": "DownloadRequest",
+        "repo_id": "../..",
+        "revision": "../../weights\nwith-control",
+        "idempotency_key": "download\nsplice",
+    }
+    errors = list(validator_for(contract, "DownloadRequest").iter_errors({k: v for k, v in bad_download.items() if k != "$schemaName"}))
+    if not errors:
+        raise ContractError("negative self-test failed: unsafe repo/revision/idempotency input was accepted")
+    bad_action = copy.deepcopy(json.loads((FIXTURES / "examples" / "request.model-action.load.json").read_text(encoding="utf-8")))
+    bad_action.pop("$schemaName", None)
+    bad_action["load_profile"] = {
+        "ctx_size": 10**18,
+        "n_parallel": 1024,
+        "kv_cache_mode": "q8_0",
+        "sampling_preset": "balanced",
+    }
+    errors = list(validator_for(contract, "ModelActionRequest").iter_errors(bad_action))
+    if not errors:
+        raise ContractError("negative self-test failed: unsupported or unbounded load profile was accepted")
+    leaked_error = copy.deepcopy(json.loads((FIXTURES / "examples" / "error.stale-revision.json").read_text(encoding="utf-8")))
+    leaked_error["error"]["message"] = "failed under /Users/mlxcel-seeded-secret/.cache with token hf_MLXCELE2ESECRET"
+    if not seeded_sensitive_markers(leaked_error):
+        raise ContractError("negative self-test setup failed: seeded sensitive marker was not detected")
+    harmless_auth_word = {"error": {"message": "Authorization required"}}
+    if seeded_sensitive_markers(harmless_auth_word):
+        raise ContractError("negative self-test failed: harmless Authorization wording was treated as a seeded secret")
     vectors = json.loads((FIXTURES / "identity-vectors.json").read_text(encoding="utf-8"))
     bad_vector = copy.deepcopy(vectors["identity_vectors"][0])
     bad_vector["expected_id"] = "mdl_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -483,6 +581,7 @@ def main() -> int:
         print("docs/webui/generated/ui-api.d.ts is stale; run python3 scripts/ci/check_webui_contract.py --fix", file=sys.stderr)
         return 1
     validate_fixtures(contract)
+    check_no_seeded_sensitive_markers()
     check_requirement_map()
     check_identity_vectors()
     check_identity_collision_fixture()

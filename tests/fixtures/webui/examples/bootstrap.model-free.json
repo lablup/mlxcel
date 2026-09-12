@@ -67,6 +67,11 @@
     "terminal_operations_retention_seconds": 3600,
     "max_active_operations": 64,
     "max_concurrent_loads": 1,
-    "max_concurrent_downloads": 1
+    "max_concurrent_downloads": 1,
+    "next_load_ctx_size_max": 262144,
+    "next_load_n_parallel_max": 32,
+    "cursor_bytes": 512,
+    "settings_fields_max": 64,
+    "measurements_max": 64
   }
 }

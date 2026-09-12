@@ -25,6 +25,26 @@ export type TaskKind = "chat" | "completion" | "embedding" | "rerank" | "audio_t
 
 export type UiEventType = "snapshot" | "model_revision" | "operation" | "download_progress" | "runtime" | "settings" | "reset" | "gap" | "server_restart" | "heartbeat";
 
+export type ServerInstanceId = string;
+
+export type ModelId = string;
+
+export type OperationId = string;
+
+export type EventId = string;
+
+export type CursorToken = string;
+
+export type IdempotencyKey = string;
+
+export type HuggingFaceRepoId = string;
+
+export type RevisionRef = string | null;
+
+export type ApiBase = string;
+
+export type KvCacheModeName = "fp16" | "float16" | "int8" | "i8" | "turbo4-asym" | "fp16+turbo4" | "turbo3-asym" | "fp16+turbo3" | "turbo3" | "turbo4" | "turbo4-sym" | "turbo4-delegated" | "fp16+turbo4-delegated";
+
 export type ErrorCode = "invalid_request" | "unauthorized" | "forbidden" | "not_found" | "stale_revision" | "conflict" | "unsupported" | "rate_limited" | "unavailable" | "payload_too_large" | "server_restarted" | "event_gap" | "partial_success";
 
 export interface FieldError {
@@ -38,12 +58,12 @@ export interface ErrorBody {
   readonly message: string;
   readonly retryable: boolean;
   readonly field_errors?: ReadonlyArray<FieldError>;
-  readonly operation_id?: string;
+  readonly operation_id?: OperationId;
 }
 
 export interface ErrorEnvelope {
   readonly error: ErrorBody;
-  readonly request_id: string;
+  readonly request_id: OperationId;
 }
 
 export interface ActionAvailability {
@@ -60,9 +80,9 @@ export interface BuildInfo {
 }
 
 export interface BackendIdentity {
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly mode: ServerMode;
-  readonly api_base: string;
+  readonly api_base: ApiBase;
   readonly auth_required: boolean;
   readonly build: BuildInfo;
 }
@@ -87,6 +107,11 @@ export interface LimitSummary {
   readonly max_active_operations: 64;
   readonly max_concurrent_loads: 1;
   readonly max_concurrent_downloads: 1;
+  readonly next_load_ctx_size_max: 262144;
+  readonly next_load_n_parallel_max: 32;
+  readonly cursor_bytes: 512;
+  readonly settings_fields_max: 64;
+  readonly measurements_max: 64;
 }
 
 export interface BootstrapResponse {
@@ -99,7 +124,7 @@ export interface BootstrapResponse {
 }
 
 export interface ModelIdentity {
-  readonly id: string;
+  readonly id: ModelId;
   readonly inference_id: string;
   readonly display_name: string;
   readonly source: CatalogSourceKind;
@@ -154,61 +179,58 @@ export interface CatalogListResponse {
   readonly schema_version: SchemaVersion;
   readonly items: ReadonlyArray<CatalogEntry>;
   readonly pagination: Pagination;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly snapshot_sequence: number;
 }
 
 export interface LoadProfile {
-  readonly context_tokens?: number | null;
-  readonly batch_size?: number | null;
-  readonly ubatch_size?: number | null;
-  readonly kv_cache?: string | null;
-  readonly reasoning_budget?: number | null;
-  readonly sampling_preset?: string | null;
+  readonly ctx_size?: number | null;
+  readonly n_parallel?: number | null;
+  readonly kv_cache_mode?: KvCacheModeName | null;
 }
 
 export interface ModelActionRequest {
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly action: "load" | "unload";
   readonly expected_revision: number;
-  readonly idempotency_key: string;
+  readonly idempotency_key: IdempotencyKey;
   readonly load_profile?: LoadProfile;
-  readonly eviction_target_id?: string;
+  readonly eviction_target_id?: ModelId;
 }
 
 export interface DownloadRequest {
-  readonly repo_id: string;
-  readonly revision?: string | null;
-  readonly idempotency_key: string;
+  readonly repo_id: HuggingFaceRepoId;
+  readonly revision?: RevisionRef;
+  readonly idempotency_key: IdempotencyKey;
 }
 
 export interface RemovalRequest {
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly expected_revision: number;
-  readonly idempotency_key: string;
+  readonly idempotency_key: IdempotencyKey;
 }
 
 export interface CatalogOperationTarget {
   readonly target_kind: "catalog";
   readonly scope: "full" | "roots" | "entry";
-  readonly model_id?: string | null;
+  readonly model_id?: ModelId | null;
 }
 
 export interface ModelOperationTarget {
   readonly target_kind: "model";
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly requested_revision: number | null;
 }
 
 export interface DownloadOperationTarget {
   readonly target_kind: "download";
-  readonly repo_id: string;
-  readonly revision: string | null;
+  readonly repo_id: HuggingFaceRepoId;
+  readonly revision: RevisionRef;
 }
 
 export interface SettingsOperationTarget {
   readonly target_kind: "settings";
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly scope: "next_load_profile" | "loaded_model_live" | "request_only";
 }
 
@@ -223,29 +245,29 @@ export interface CatalogRefreshResult {
 
 export interface ModelActionResult {
   readonly result_kind: "model_load" | "model_unload" | "model_removal";
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly revision: number;
   readonly lifecycle: LifecycleSnapshot;
 }
 
 export interface DownloadResult {
   readonly result_kind: "download";
-  readonly repo_id: string;
-  readonly revision: string | null;
-  readonly model_id?: string | null;
+  readonly repo_id: HuggingFaceRepoId;
+  readonly revision: RevisionRef;
+  readonly model_id?: ModelId | null;
   readonly download: DownloadState;
 }
 
 export interface SettingsPatchResult {
   readonly result_kind: "settings_patch";
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly settings: RuntimeSettingsReport;
 }
 
 export type OperationResult = CatalogRefreshResult | ModelActionResult | DownloadResult | SettingsPatchResult;
 
 export interface OperationAccepted {
-  readonly operation_id: string;
+  readonly operation_id: OperationId;
   readonly state: OperationState;
   readonly idempotent_replay: boolean;
 }
@@ -257,7 +279,7 @@ export interface ProgressBytes {
 }
 
 export interface Operation {
-  readonly operation_id: string;
+  readonly operation_id: OperationId;
   readonly kind: OperationKind;
   readonly state: OperationState;
   readonly created_at: string;
@@ -274,7 +296,7 @@ export interface Operation {
 export interface OperationsListResponse {
   readonly items: ReadonlyArray<Operation>;
   readonly pagination: Pagination;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly snapshot_sequence: number;
 }
 
@@ -287,8 +309,8 @@ export interface RuntimeSettingsReport {
 
 export interface RuntimeSnapshot {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
-  readonly model_id: string;
+  readonly server_instance_id: ServerInstanceId;
+  readonly model_id: ModelId;
   readonly revision: number;
   readonly measurements: Record<string, MeasuredValue>;
   readonly settings: RuntimeSettingsReport;
@@ -345,11 +367,11 @@ export interface SnapshotPayload {
   readonly snapshot_sequence: number;
   readonly catalog_changed: boolean;
   readonly operations_changed: boolean;
-  readonly runtime_model_ids: ReadonlyArray<string>;
+  readonly runtime_model_ids: ReadonlyArray<ModelId>;
 }
 
 export interface ModelRevisionPayload {
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly revision: number;
   readonly lifecycle: LifecycleSnapshot;
 }
@@ -359,7 +381,7 @@ export interface OperationPayload {
 }
 
 export interface DownloadProgressPayload {
-  readonly operation_id: string;
+  readonly operation_id: OperationId;
   readonly progress: ProgressBytes;
 }
 
@@ -368,7 +390,7 @@ export interface RuntimePayload {
 }
 
 export interface SettingsPayload {
-  readonly model_id: string;
+  readonly model_id: ModelId;
   readonly settings: RuntimeSettingsReport;
 }
 
@@ -399,101 +421,101 @@ export interface StringCatalog {
 
 export interface SnapshotEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "snapshot";
   readonly payload: SnapshotPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface ModelRevisionEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "model_revision";
   readonly payload: ModelRevisionPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface OperationEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "operation";
   readonly payload: OperationPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface DownloadProgressEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "download_progress";
   readonly payload: DownloadProgressPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface RuntimeEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "runtime";
   readonly payload: RuntimePayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface SettingsEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "settings";
   readonly payload: SettingsPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface ResetEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "reset";
   readonly payload: ResetPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface GapEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "gap";
   readonly payload: ResetPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface ServerRestartEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "server_restart";
   readonly payload: ResetPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 
 export interface HeartbeatEvent {
   readonly schema_version: SchemaVersion;
-  readonly server_instance_id: string;
+  readonly server_instance_id: ServerInstanceId;
   readonly sequence: number;
   readonly type: "heartbeat";
   readonly payload: HeartbeatPayload;
-  readonly event_id: string;
+  readonly event_id: EventId;
   readonly emitted_at: string;
 }
 

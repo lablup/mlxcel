@@ -50,6 +50,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -82,6 +92,26 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -102,7 +132,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/CursorToken"
             },
             "description": "Opaque cursor returned by the previous page."
           },
@@ -173,10 +203,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9._~:-]+$"
+              "$ref": "#/components/schemas/ModelId"
             }
           }
         ],
@@ -193,6 +220,26 @@
           },
           "404": {
             "description": "Unknown model id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
             "content": {
               "application/json": {
                 "schema": {
@@ -220,6 +267,26 @@
           },
           "429": {
             "description": "Operation limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
             "content": {
               "application/json": {
                 "schema": {
@@ -284,6 +351,36 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds the WebUI contract limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -324,6 +421,36 @@
           },
           "422": {
             "description": "Invalid or unsupported repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds the WebUI contract limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -388,6 +515,36 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds the WebUI contract limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -407,6 +564,26 @@
                   "fixture": {
                     "externalValue": "../../tests/fixtures/webui/examples/operations.list.json"
                   }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -430,7 +607,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/CursorToken"
             },
             "description": "Opaque cursor returned by the previous page."
           },
@@ -458,7 +635,8 @@
             "required": false,
             "schema": {
               "type": "string",
-              "maxLength": 128
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~-]{1,128}$"
             },
             "description": "Opaque model id or operation target token; never a filesystem path."
           }
@@ -474,10 +652,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9._~:-]+$"
+              "$ref": "#/components/schemas/OperationId"
             }
           }
         ],
@@ -506,6 +681,26 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -519,10 +714,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9._~:-]+$"
+              "$ref": "#/components/schemas/OperationId"
             }
           }
         ],
@@ -546,19 +738,59 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
     },
     "/ui-api/v1/events": {
       "get": {
-        "summary": "Authenticated SSE stream. Last-Event-ID is the minimum resource snapshot_sequence currently held by the client; the client applies each replayed event only if its sequence is newer than the affected resource snapshot. Ring gaps or changed server_instance_id produce a reset event and full resnapshot.",
+        "summary": "Authenticated SSE stream. Last-Event-ID is the last applied opaque event id on reconnect; first subscription omits the header after snapshot fencing. Ring gaps or changed server_instance_id produce a reset event and full resnapshot.",
         "responses": {
           "200": {
             "description": "SSE event stream carrying UiEvent JSON payloads"
           },
           "409": {
             "description": "Replay gap or server restart",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
             "content": {
               "application/json": {
                 "schema": {
@@ -574,9 +806,9 @@
             "in": "header",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/EventId"
             },
-            "description": "Minimum held resource snapshot_sequence for initial subscription, or the last applied event ID on reconnect; the server emits only events with greater sequence numbers."
+            "description": "Opaque event id from the last applied SSE event. Initial snapshot-to-stream fencing starts without this header; reconnect uses it only inside the same server instance and retained ring."
           }
         ]
       }
@@ -590,10 +822,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9._~:-]+$"
+              "$ref": "#/components/schemas/ModelId"
             }
           }
         ],
@@ -615,6 +844,26 @@
           },
           "404": {
             "description": "Unknown model id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
             "content": {
               "application/json": {
                 "schema": {
@@ -758,6 +1007,89 @@
           "heartbeat"
         ]
       },
+      "ServerInstanceId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._~-]{1,128}$",
+        "description": "Opaque per-process server instance id; never carries a path or credential."
+      },
+      "ModelId": {
+        "type": "string",
+        "pattern": "^mdl_[A-Za-z0-9_-]{43}$",
+        "description": "Opaque stable UI model id."
+      },
+      "OperationId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._~-]{1,128}$",
+        "description": "Opaque operation id; printable token only."
+      },
+      "EventId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160,
+        "pattern": "^evt_[A-Za-z0-9._~-]{1,160}$",
+        "description": "Opaque SSE event id; also sent as the SSE id field."
+      },
+      "CursorToken": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^[A-Za-z0-9._~-]{1,512}$",
+        "description": "Opaque pagination cursor. Control characters, slashes and backslashes are forbidden."
+      },
+      "IdempotencyKey": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._~-]{8,128}$",
+        "description": "Client-supplied idempotency token scoped to one server instance; printable token only."
+      },
+      "HuggingFaceRepoId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 193,
+        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+        "description": "Public HuggingFace owner/name id. Dot-only path segments and URL/path syntax are rejected."
+      },
+      "RevisionRef": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~+/-]+$",
+        "description": "Repository revision ref resolved and pinned before writing weights. Dot-only path segments and control characters are rejected."
+      },
+      "ApiBase": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 128,
+        "pattern": "^$|^/(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$",
+        "description": "Validated same-origin relative API prefix. Protocol-relative URLs, query strings, fragments, dot segments and doubled slashes are rejected."
+      },
+      "KvCacheModeName": {
+        "type": "string",
+        "enum": [
+          "fp16",
+          "float16",
+          "int8",
+          "i8",
+          "turbo4-asym",
+          "fp16+turbo4",
+          "turbo3-asym",
+          "fp16+turbo3",
+          "turbo3",
+          "turbo4",
+          "turbo4-sym",
+          "turbo4-delegated",
+          "fp16+turbo4-delegated"
+        ],
+        "description": "Accepted by KVCacheMode::from_str / --kv-cache-mode; GGML-only cache spellings such as q8_0 are intentionally absent."
+      },
       "ErrorCode": {
         "type": "string",
         "enum": [
@@ -787,15 +1119,20 @@
         "properties": {
           "field": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
           },
           "code": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
           },
           "message": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 512
           }
         }
       },
@@ -813,7 +1150,8 @@
           },
           "message": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 512
           },
           "retryable": {
             "type": "boolean"
@@ -822,13 +1160,11 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/FieldError"
-            }
+            },
+            "maxItems": 16
           },
           "operation_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/OperationId"
           }
         }
       },
@@ -844,10 +1180,7 @@
             "$ref": "#/components/schemas/ErrorBody"
           },
           "request_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/OperationId"
           }
         }
       },
@@ -866,13 +1199,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 256
           },
           "instructions": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 512
           }
         }
       },
@@ -918,17 +1253,13 @@
         ],
         "properties": {
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "mode": {
             "$ref": "#/components/schemas/ServerMode"
           },
           "api_base": {
-            "type": "string",
-            "pattern": "^(/[^?#]*)?$"
+            "$ref": "#/components/schemas/ApiBase"
           },
           "auth_required": {
             "type": "boolean"
@@ -957,7 +1288,9 @@
             ]
           },
           "display_name": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           },
           "redacted": {
             "type": "boolean"
@@ -969,7 +1302,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 512
           }
         }
       },
@@ -987,7 +1321,12 @@
           "terminal_operations_retention_seconds",
           "max_active_operations",
           "max_concurrent_loads",
-          "max_concurrent_downloads"
+          "max_concurrent_downloads",
+          "next_load_ctx_size_max",
+          "next_load_n_parallel_max",
+          "cursor_bytes",
+          "settings_fields_max",
+          "measurements_max"
         ],
         "properties": {
           "catalog_default_page_size": {
@@ -1033,6 +1372,26 @@
           "max_concurrent_downloads": {
             "type": "integer",
             "const": 1
+          },
+          "next_load_ctx_size_max": {
+            "type": "integer",
+            "const": 262144
+          },
+          "next_load_n_parallel_max": {
+            "type": "integer",
+            "const": 32
+          },
+          "cursor_bytes": {
+            "type": "integer",
+            "const": 512
+          },
+          "settings_fields_max": {
+            "type": "integer",
+            "const": 64
+          },
+          "measurements_max": {
+            "type": "integer",
+            "const": 64
           }
         }
       },
@@ -1058,19 +1417,22 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/FeatureFlag"
-            }
+            },
+            "maxItems": 16
           },
           "actions": {
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/ActionAvailability"
-            }
+            },
+            "maxProperties": 32
           },
           "roots": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RootSummary"
-            }
+            },
+            "maxItems": 8
           },
           "limits": {
             "$ref": "#/components/schemas/LimitSummary"
@@ -1092,17 +1454,17 @@
         ],
         "properties": {
           "id": {
-            "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$",
-            "description": "base64url(SHA-256(canonical identity JSON)) without padding, prefixed with mdl_."
+            "$ref": "#/components/schemas/ModelId"
           },
           "inference_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 256
           },
           "display_name": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 128
           },
           "source": {
             "$ref": "#/components/schemas/CatalogSourceKind"
@@ -1125,7 +1487,8 @@
               "string",
               "null"
             ],
-            "description": "Fingerprint of currently observed checkpoint content when known; affects generation/revision, not stable ID."
+            "description": "Fingerprint of currently observed checkpoint content when known; affects generation/revision, not stable ID.",
+            "maxLength": 128
           }
         }
       },
@@ -1147,7 +1510,8 @@
             ]
           },
           "unit": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 32
           },
           "scope": {
             "type": "string",
@@ -1160,16 +1524,22 @@
             ]
           },
           "measured_at": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "reason": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 256
           }
         }
       },
@@ -1196,7 +1566,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 256
           }
         }
       },
@@ -1237,7 +1608,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 512
           }
         }
       },
@@ -1261,7 +1633,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Capability"
-            }
+            },
+            "maxItems": 16
           },
           "lifecycle": {
             "$ref": "#/components/schemas/LifecycleSnapshot"
@@ -1298,7 +1671,9 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9._~-]{1,512}$"
           },
           "total_known": {
             "type": [
@@ -1327,16 +1702,14 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CatalogEntry"
-            }
+            },
+            "maxItems": 200
           },
           "pagination": {
             "$ref": "#/components/schemas/Pagination"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "snapshot_sequence": {
             "type": "integer",
@@ -1349,45 +1722,34 @@
         "type": "object",
         "additionalProperties": false,
         "required": [],
+        "description": "Next-load profile override. Contract gate #1835 intentionally exposes only #1846-approved fields backed by existing server startup validators.",
         "properties": {
-          "context_tokens": {
+          "ctx_size": {
             "type": [
               "integer",
               "null"
             ],
-            "minimum": 0
+            "minimum": 1,
+            "maximum": 262144,
+            "description": "Maps to existing --ctx-size; WebUI rejects larger values rather than attempting a new runtime mode."
           },
-          "batch_size": {
+          "n_parallel": {
             "type": [
               "integer",
               "null"
             ],
-            "minimum": 0
+            "minimum": 1,
+            "maximum": 32,
+            "description": "Maps to existing --parallel/--n-parallel slot count."
           },
-          "ubatch_size": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "kv_cache": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reasoning_budget": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "sampling_preset": {
-            "type": [
-              "string",
-              "null"
+          "kv_cache_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KvCacheModeName"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         }
@@ -1403,10 +1765,7 @@
         ],
         "properties": {
           "model_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "action": {
             "type": "string",
@@ -1420,18 +1779,13 @@
             "minimum": 1
           },
           "idempotency_key": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 128
+            "$ref": "#/components/schemas/IdempotencyKey"
           },
           "load_profile": {
             "$ref": "#/components/schemas/LoadProfile"
           },
           "eviction_target_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ModelId"
           }
         }
       },
@@ -1444,19 +1798,13 @@
         ],
         "properties": {
           "repo_id": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            "$ref": "#/components/schemas/HuggingFaceRepoId"
           },
           "revision": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "$ref": "#/components/schemas/RevisionRef"
           },
           "idempotency_key": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 128
+            "$ref": "#/components/schemas/IdempotencyKey"
           }
         }
       },
@@ -1470,19 +1818,14 @@
         ],
         "properties": {
           "model_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "expected_revision": {
             "type": "integer",
             "minimum": 1
           },
           "idempotency_key": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 128
+            "$ref": "#/components/schemas/IdempotencyKey"
           }
         }
       },
@@ -1506,11 +1849,14 @@
             ]
           },
           "model_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -1527,8 +1873,7 @@
             "const": "model"
           },
           "model_id": {
-            "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "requested_revision": {
             "type": [
@@ -1552,14 +1897,10 @@
             "const": "download"
           },
           "repo_id": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            "$ref": "#/components/schemas/HuggingFaceRepoId"
           },
           "revision": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "$ref": "#/components/schemas/RevisionRef"
           }
         }
       },
@@ -1576,8 +1917,7 @@
             "const": "settings"
           },
           "model_id": {
-            "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "scope": {
             "type": "string",
@@ -1651,8 +1991,7 @@
             ]
           },
           "model_id": {
-            "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "revision": {
             "type": "integer",
@@ -1677,21 +2016,20 @@
             "const": "download"
           },
           "repo_id": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            "$ref": "#/components/schemas/HuggingFaceRepoId"
           },
           "revision": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "$ref": "#/components/schemas/RevisionRef"
           },
           "model_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "download": {
             "$ref": "#/components/schemas/DownloadState"
@@ -1711,8 +2049,7 @@
             "const": "settings_patch"
           },
           "model_id": {
-            "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "settings": {
             "$ref": "#/components/schemas/RuntimeSettingsReport"
@@ -1745,10 +2082,7 @@
         ],
         "properties": {
           "operation_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/OperationId"
           },
           "state": {
             "$ref": "#/components/schemas/OperationState"
@@ -1802,10 +2136,7 @@
         ],
         "properties": {
           "operation_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/OperationId"
           },
           "kind": {
             "$ref": "#/components/schemas/OperationKind"
@@ -1860,7 +2191,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 512
           }
         }
       },
@@ -1878,16 +2210,14 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Operation"
-            }
+            },
+            "maxItems": 200
           },
           "pagination": {
             "$ref": "#/components/schemas/Pagination"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "snapshot_sequence": {
             "type": "integer",
@@ -1925,19 +2255,22 @@
                 "boolean",
                 "null"
               ]
-            }
+            },
+            "maxProperties": 64
           },
           "overridden_by_cli": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "maxItems": 64
           },
           "partial_errors": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/FieldError"
-            }
+            },
+            "maxItems": 16
           }
         }
       },
@@ -1958,16 +2291,10 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "model_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "revision": {
             "type": "integer",
@@ -1977,7 +2304,8 @@
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/MeasuredValue"
-            }
+            },
+            "maxProperties": 64
           },
           "settings": {
             "$ref": "#/components/schemas/RuntimeSettingsReport"
@@ -2035,19 +2363,23 @@
         "properties": {
           "key": {
             "type": "string",
-            "pattern": "^[a-z0-9_.-]+$"
+            "pattern": "^[a-z0-9_.-]+$",
+            "maxLength": 128
           },
           "en": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 512
           },
           "ko": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 512
           },
           "test_id": {
             "type": "string",
-            "pattern": "^[a-z0-9-]+$"
+            "pattern": "^[a-z0-9-]+$",
+            "maxLength": 128
           }
         }
       },
@@ -2184,7 +2516,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 512
           }
         }
       },
@@ -2207,31 +2540,36 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 128
           },
           "input_tasks": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TaskKind"
-            }
+            },
+            "maxItems": 16
           },
           "output_tasks": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TaskKind"
-            }
+            },
+            "maxItems": 16
           },
           "quantization": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 128
           },
           "format": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 128
           },
           "parameter_count": {
             "type": [
@@ -2282,8 +2620,9 @@
           "runtime_model_ids": {
             "type": "array",
             "items": {
-              "type": "string"
-            }
+              "$ref": "#/components/schemas/ModelId"
+            },
+            "maxItems": 200
           }
         }
       },
@@ -2297,8 +2636,7 @@
         ],
         "properties": {
           "model_id": {
-            "type": "string",
-            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+            "$ref": "#/components/schemas/ModelId"
           },
           "revision": {
             "type": "integer",
@@ -2330,8 +2668,7 @@
         ],
         "properties": {
           "operation_id": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/components/schemas/OperationId"
           },
           "progress": {
             "$ref": "#/components/schemas/ProgressBytes"
@@ -2359,7 +2696,7 @@
         ],
         "properties": {
           "model_id": {
-            "type": "string"
+            "$ref": "#/components/schemas/ModelId"
           },
           "settings": {
             "$ref": "#/components/schemas/RuntimeSettingsReport"
@@ -2412,20 +2749,24 @@
         ],
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 256
           },
           "epic_requirement": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 256
           },
           "child": {
             "type": "string",
             "pattern": "^#[0-9]+$"
           },
           "contract_artifact": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 256
           },
           "test_fixture": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 256
           }
         }
       },
@@ -2441,7 +2782,8 @@
             "minItems": 1,
             "items": {
               "$ref": "#/components/schemas/RequirementMapEntry"
-            }
+            },
+            "maxItems": 64
           }
         }
       },
@@ -2457,7 +2799,8 @@
             "minItems": 1,
             "items": {
               "$ref": "#/components/schemas/StringContract"
-            }
+            },
+            "maxItems": 256
           }
         }
       },
@@ -2478,10 +2821,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2494,11 +2834,7 @@
             "$ref": "#/components/schemas/SnapshotPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2524,10 +2860,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2540,11 +2873,7 @@
             "$ref": "#/components/schemas/ModelRevisionPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2570,10 +2899,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2586,11 +2912,7 @@
             "$ref": "#/components/schemas/OperationPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2616,10 +2938,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2632,11 +2951,7 @@
             "$ref": "#/components/schemas/DownloadProgressPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2662,10 +2977,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2678,11 +2990,7 @@
             "$ref": "#/components/schemas/RuntimePayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2708,10 +3016,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2724,11 +3029,7 @@
             "$ref": "#/components/schemas/SettingsPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2754,10 +3055,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2770,11 +3068,7 @@
             "$ref": "#/components/schemas/ResetPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2800,10 +3094,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2816,11 +3107,7 @@
             "$ref": "#/components/schemas/ResetPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2846,10 +3133,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2862,11 +3146,7 @@
             "$ref": "#/components/schemas/ResetPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",
@@ -2892,10 +3172,7 @@
             "$ref": "#/components/schemas/SchemaVersion"
           },
           "server_instance_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._~:-]+$"
+            "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
             "type": "integer",
@@ -2908,11 +3185,7 @@
             "$ref": "#/components/schemas/HeartbeatPayload"
           },
           "event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160,
-            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
-            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+            "$ref": "#/components/schemas/EventId"
           },
           "emitted_at": {
             "type": "string",

@@ -68,7 +68,7 @@
       "epic_requirement": "Bearer auth, Host/Origin/Fetch-Metadata, credential storage and redaction",
       "child": "#1837",
       "contract_artifact": "docs/webui/architecture.md",
-      "test_fixture": "tests/fixtures/webui/examples/error.stale-revision.json"
+      "test_fixture": "tests/fixtures/webui/examples/error.unauthorized.json"
     },
     {
       "id": "startup-modes",

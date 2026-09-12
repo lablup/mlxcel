@@ -1,0 +1,15 @@
+{
+  "error": {
+    "code": "forbidden",
+    "message": "browser origin is not allowed for WebUI administrator API",
+    "retryable": false,
+    "field_errors": [
+      {
+        "field": "origin",
+        "code": "forbidden",
+        "message": "origin https://webui.invalid.example did not match the configured host"
+      }
+    ]
+  },
+  "request_id": "req_forbid_origin"
+}

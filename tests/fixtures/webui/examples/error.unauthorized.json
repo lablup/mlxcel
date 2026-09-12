@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "authentication required",
+    "retryable": false
+  },
+  "request_id": "req_unauth"
+}
