@@ -184,6 +184,18 @@ Every table above was taken with the policy module compiled but not called, so e
 
 `default` and `both` overlap across their whole ranges (37.22 to 37.71 against 37.24 to 37.64) and both are disjoint from `restore` (31.09 to 32.31), which is +17.8% for the shipped default over stock MLX. The MLX peak column is an independent fingerprint of which budget was in force and does not depend on timing at all: 22.03 GB on `default` and `both`, 21.66 GB on `restore`, with no overlap in either direction. `restore` also reproduces the pre-wiring `default` row of the first table (31.76 against 32.02, 21.66 GB against 21.66 GB), which is the other half of the check: the operator can put the old behaviour back exactly.
 
+### `laguna-xs-2.1-nvfp4` (allowlisted), `mlxcel generate`
+
+The production CLI rather than the bench binary, 200 tokens through the chat template at `--temp 0`, same three arms, n = 3. This path has no same-process warm-up, so its rates sit below `mlxcel-bench-decode`'s, exactly as the DFlash table's `off` arm does.
+
+| config | n | tok/s mean (min to max) | vs no env | load1 (min to max) |
+|---|---|---|---|---|
+| no env | 3 | 34.13 (33.96 to 34.27) |  | 0.71 to 0.82 |
+| operator `20` / `25` | 3 | 29.29 (29.04 to 29.67) | -14.2% | 0.81 to 0.95 |
+| operator `100` / `1000` | 3 | 33.81 (33.69 to 34.03) | -0.9% | 0.79 to 0.83 |
+
+The same result on the shipped command: no env overlaps the explicit raised pair (33.96 to 34.27 against 33.69 to 34.03) and both are disjoint from the restored MLX values, whose 29.29 reproduces the pre-wiring CLI classic arm of the DFlash table (29.40). Generated token ids are not compared across arms here because Laguna's classic decode is not reproducible across its own repeats on this host, which the #1799 record measured first; the budget changes graph boundaries, not arithmetic.
+
 ### `qwen3.5-4b-4bit` (not allowlisted), `mlxcel-bench-decode`
 
 | config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
