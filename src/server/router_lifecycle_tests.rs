@@ -111,7 +111,7 @@ fn lifecycle_coordinator_replays_idempotent_operations() {
     coordinator.update_operation(
         &accepted.operation_id,
         OperationState::Succeeded,
-        Some(serde_json::json!({ "ok": true })),
+        None,
         None,
     );
     let replay = coordinator
@@ -148,7 +148,7 @@ fn lifecycle_coordinator_prunes_idempotency_with_terminal_history() {
         coordinator.update_operation(
             &accepted.operation_id,
             OperationState::Succeeded,
-            Some(serde_json::json!({ "idx": idx })),
+            None,
             None,
         );
     }
@@ -170,8 +170,9 @@ fn lifecycle_coordinator_prunes_idempotency_with_terminal_history() {
 #[test]
 fn lifecycle_coordinator_replay_reports_gap_or_restart() {
     let coordinator = LifecycleCoordinator::new();
-    let first = coordinator.publish_event("catalog", serde_json::json!({ "n": 1 }));
-    let second = coordinator.publish_event("catalog", serde_json::json!({ "n": 2 }));
+    let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
+    let first = coordinator.publish_model_revision("mdl_test", 1, lifecycle.clone());
+    let second = coordinator.publish_model_revision("mdl_test", 2, lifecycle);
 
     let replay = coordinator
         .replay_after(&first.event_id)
@@ -186,5 +187,147 @@ fn lifecycle_coordinator_replay_reports_gap_or_restart() {
     assert_eq!(
         coordinator.replay_after("evt_other_server_00000001"),
         Err(ReplayError::ServerRestart)
+    );
+}
+
+fn fixture_value(path: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {path}: {err}"));
+    let mut value: serde_json::Value = serde_json::from_str(&text).expect("fixture json");
+    if let Some(object) = value.as_object_mut() {
+        object.remove("$schemaName");
+    }
+    value
+}
+
+#[test]
+fn lifecycle_response_dtos_round_trip_contract_fixtures() {
+    for path in [
+        "tests/fixtures/webui/examples/operation.running.json",
+        "tests/fixtures/webui/examples/operation.succeeded.json",
+    ] {
+        let value = fixture_value(path);
+        let dto: Operation = serde_json::from_value(value.clone()).unwrap_or_else(|err| {
+            panic!("Operation fixture {path} must deserialize through the producer DTO: {err}")
+        });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize"),
+            value,
+            "{path}"
+        );
+    }
+
+    let accepted = fixture_value("tests/fixtures/webui/examples/operation.accepted.json");
+    let dto: OperationAccepted = serde_json::from_value(accepted.clone()).unwrap();
+    assert_eq!(serde_json::to_value(dto).unwrap(), accepted);
+
+    let list = fixture_value("tests/fixtures/webui/examples/operations.list.json");
+    let dto: OperationsListResponse = serde_json::from_value(list.clone()).unwrap();
+    assert_eq!(serde_json::to_value(dto).unwrap(), list);
+
+    for path in [
+        "tests/fixtures/webui/examples/event.1.json",
+        "tests/fixtures/webui/examples/event.2.json",
+        "tests/fixtures/webui/examples/event.3.json",
+    ] {
+        let value = fixture_value(path);
+        let dto: UiEvent = serde_json::from_value(value.clone()).unwrap_or_else(|err| {
+            panic!("UiEvent fixture {path} must deserialize through the producer DTO: {err}")
+        });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize"),
+            value,
+            "{path}"
+        );
+    }
+
+    let runtime = fixture_value("tests/fixtures/webui/examples/runtime.snapshot.json");
+    let dto: RuntimeSnapshot = serde_json::from_value(runtime.clone()).unwrap();
+    assert_eq!(serde_json::to_value(dto).unwrap(), runtime);
+
+    for path in [
+        "tests/fixtures/webui/examples/error.stale-revision.json",
+        "tests/fixtures/webui/examples/error.unauthorized.json",
+    ] {
+        let value = fixture_value(path);
+        let dto: ErrorEnvelope = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(dto).unwrap(), value, "{path}");
+    }
+}
+
+#[test]
+fn lifecycle_coordinator_lists_gets_and_reports_cancel_unsupported() {
+    let coordinator = LifecycleCoordinator::new();
+    let accepted = coordinator
+        .begin_operation(
+            OperationKind::ModelLoad,
+            OperationTarget::Model {
+                model_id: "mdl_test".to_string(),
+                requested_revision: Some(3),
+            },
+            Some("ops-list-key"),
+            "load:mdl_test:3".to_string(),
+        )
+        .expect("operation accepted");
+
+    let listed = coordinator.list_operations(50, None, None, Some(OperationKind::ModelLoad), None);
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].operation_id, accepted.operation_id);
+    assert_eq!(listed.server_instance_id, coordinator.server_instance_id());
+    assert_eq!(listed.snapshot_sequence, coordinator.snapshot_sequence());
+
+    let got = coordinator
+        .get_operation(&accepted.operation_id)
+        .expect("operation retrievable");
+    assert_eq!(got.state, OperationState::Queued);
+    assert_eq!(
+        coordinator.cancel_operation(&accepted.operation_id),
+        Err(CancelError::Unsupported {
+            operation_id: accepted.operation_id.clone()
+        })
+    );
+    assert_eq!(
+        coordinator.cancel_operation("missing"),
+        Err(CancelError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_coordinator_broadcast_order_matches_sequence() {
+    let coordinator = Arc::new(LifecycleCoordinator::new());
+    let mut rx = coordinator.subscribe();
+    let barrier = Arc::new(tokio::sync::Barrier::new(17));
+    for idx in 0..16u64 {
+        let coordinator = coordinator.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
+            coordinator.publish_model_revision(&format!("mdl_order_{idx}"), idx + 1, lifecycle);
+        });
+    }
+    barrier.wait().await;
+
+    let mut seen = Vec::new();
+    for _ in 0..16 {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel open");
+        seen.push(event.sequence);
+    }
+    assert_eq!(seen, (1..=16).collect::<Vec<_>>());
+}
+
+#[test]
+fn lifecycle_event_ring_limit_reports_gap_for_pruned_event() {
+    let coordinator = LifecycleCoordinator::new();
+    let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
+    let first = coordinator.publish_model_revision("mdl_gap", 1, lifecycle.clone());
+    for idx in 0..EVENT_RING_LIMIT {
+        coordinator.publish_model_revision("mdl_gap", idx as u64 + 2, lifecycle.clone());
+    }
+    assert_eq!(
+        coordinator.replay_after(&first.event_id),
+        Err(ReplayError::Gap)
     );
 }

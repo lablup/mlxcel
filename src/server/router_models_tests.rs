@@ -634,3 +634,264 @@ async fn load_on_startup_names_come_from_the_preset() {
     );
     assert_eq!(pool.load_on_startup_names(), vec!["eager"]);
 }
+
+async fn wait_for_operation_state(
+    pool: &RouterPool,
+    operation_id: &str,
+    terminal: &[crate::server::router_lifecycle::OperationState],
+) -> crate::server::router_lifecycle::Operation {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(operation) = pool.lifecycle_coordinator().get_operation(operation_id)
+            && terminal.contains(&operation.state)
+        {
+            return operation;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "operation {operation_id} did not reach {terminal:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn ui_model_action_replay_wins_over_stale_revision_after_failure() {
+    let root = temp_models_dir("ui-replay-stale");
+    add_fake_model(&root, "broken");
+    let pool = Arc::new(pool(root, 4, true));
+    let entry = pool.get("broken").expect("entry");
+    let model_id = entry.ui_model_id.clone();
+    let revision = entry.lifecycle.revision();
+
+    let first = pool
+        .submit_model_action(
+            &model_id,
+            super::RouterModelAction::Load,
+            revision,
+            "replay-load-0001",
+            None,
+        )
+        .expect("accepted");
+    let failed = wait_for_operation_state(
+        &pool,
+        &first.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        failed.state,
+        crate::server::router_lifecycle::OperationState::Failed
+    );
+    assert_ne!(
+        entry.lifecycle.revision(),
+        revision,
+        "failed load must advance revision"
+    );
+
+    let replay = pool
+        .submit_model_action(
+            &model_id,
+            super::RouterModelAction::Load,
+            revision,
+            "replay-load-0001",
+            None,
+        )
+        .expect("idempotent replay must not be rejected as stale");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.operation_id, first.operation_id);
+    assert_eq!(
+        replay.state,
+        crate::server::router_lifecycle::OperationState::Failed
+    );
+}
+
+#[tokio::test]
+async fn ui_load_operation_waits_for_terminal_worker_state() {
+    let root = temp_models_dir("ui-load-terminal");
+    add_fake_model(&root, "broken");
+    let pool = Arc::new(pool(root, 4, true));
+    let entry = pool.get("broken").expect("entry");
+    let accepted = pool
+        .submit_model_action(
+            &entry.ui_model_id,
+            super::RouterModelAction::Load,
+            entry.lifecycle.revision(),
+            "load-terminal-0001",
+            None,
+        )
+        .expect("accepted");
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[
+            crate::server::router_lifecycle::OperationState::Succeeded,
+            crate::server::router_lifecycle::OperationState::Failed,
+        ],
+    )
+    .await;
+    assert_eq!(
+        terminal.state,
+        crate::server::router_lifecycle::OperationState::Failed,
+        "a broken checkpoint must not be reported as succeeded immediately after begin_load"
+    );
+    assert!(terminal.result.is_none());
+    assert_eq!(
+        terminal.error.as_ref().map(|error| error.code.as_str()),
+        Some("conflict")
+    );
+}
+
+#[tokio::test]
+async fn ui_load_requires_explicit_eviction_when_capacity_is_reserved() {
+    let root = temp_models_dir("ui-capacity");
+    add_fake_model(&root, "resident");
+    add_fake_model(&root, "candidate");
+    let pool = Arc::new(pool(root, 1, true));
+    let resident = pool.get("resident").expect("resident");
+    resident.lifecycle.mark_ready();
+    let candidate = pool.get("candidate").expect("candidate");
+
+    let accepted = pool
+        .submit_model_action(
+            &candidate.ui_model_id,
+            super::RouterModelAction::Load,
+            candidate.lifecycle.revision(),
+            "capacity-load-0001",
+            None,
+        )
+        .expect("accepted");
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    assert_eq!(
+        terminal.state,
+        crate::server::router_lifecycle::OperationState::Failed
+    );
+    assert!(
+        terminal
+            .error
+            .as_ref()
+            .map(|error| error.message.contains("explicit eviction target"))
+            .unwrap_or(false),
+        "capacity refusal must mention explicit eviction target: {terminal:?}"
+    );
+    assert_eq!(
+        resident.lifecycle.state(),
+        crate::server::router_lifecycle::ModelLifecycleState::Ready
+    );
+}
+
+#[tokio::test]
+async fn rescan_and_remove_preserve_reserved_entries_until_release() {
+    let cache_root = temp_models_dir("reserved-cache");
+    add_fake_model(&cache_root.join("mlx-community"), "reserved");
+    let pool = pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root.clone(), FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    );
+    let entry = pool.get("mlx-community/reserved").expect("entry");
+    entry.lifecycle.mark_loading();
+    std::fs::remove_dir_all(cache_root.join("mlx-community/reserved")).unwrap();
+    pool.rescan().expect("rescan");
+    assert!(
+        pool.get("mlx-community/reserved").is_some(),
+        "reserved entry must not disappear during rescan"
+    );
+    assert_eq!(
+        pool.remove("mlx-community/reserved").await,
+        Err(RouterPoolError::NotLoaded),
+        "cache deletion must not remove a lifecycle-reserved entry without an observed unload"
+    );
+}
+
+#[test]
+fn rescan_preserves_entry_that_becomes_reserved_after_snapshot_clone() {
+    let cache_root = temp_models_dir("reserved-after-clone");
+    add_fake_model(&cache_root.join("mlx-community"), "race");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root, FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    ));
+    let entry = pool.get("mlx-community/race").expect("entry");
+    assert!(!entry.reserves_capacity());
+
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_rescan_after_snapshot_hook(Some(Arc::new(move || {
+        snapshot_tx.send(()).expect("notify snapshot clone");
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("wait for reservation");
+    })));
+
+    let rescan_pool = pool.clone();
+    let rescan_thread = std::thread::spawn(move || rescan_pool.rescan());
+    snapshot_rx.recv().expect("rescan reached snapshot hook");
+    entry.lifecycle.mark_loading();
+    release_tx.send(()).expect("release rescan");
+    rescan_thread
+        .join()
+        .expect("rescan thread")
+        .expect("rescan succeeds");
+    pool.set_rescan_after_snapshot_hook(None);
+
+    let current = pool.get("mlx-community/race").expect("entry after rescan");
+    assert!(
+        Arc::ptr_eq(&entry, &current),
+        "final rescan write must preserve the entry that became reserved after the stale snapshot clone"
+    );
+    assert_eq!(
+        current.lifecycle.state(),
+        crate::server::router_lifecycle::ModelLifecycleState::Loading
+    );
+}
+
+#[tokio::test]
+async fn response_body_drop_releases_active_request_lease() {
+    let lifecycle = Arc::new(crate::server::router_lifecycle::ModelLifecycle::new(
+        crate::server::router_lifecycle::DownloadState::Complete,
+    ));
+    lifecycle.mark_ready();
+    let lease = lifecycle.clone().try_request_lease().expect("lease");
+    assert_eq!(lifecycle.snapshot().active_requests, 1);
+    let response = axum::response::Response::new(axum::body::Body::from("hello"));
+    let leased = super::response_with_lease(response, lease);
+    assert_eq!(lifecycle.snapshot().active_requests, 1);
+    drop(leased);
+    assert_eq!(lifecycle.snapshot().active_requests, 0);
+}
+
+#[tokio::test]
+async fn shutdown_reports_pending_reserved_entries_within_bound() {
+    let root = temp_models_dir("shutdown-pending");
+    add_fake_model(&root, "reserved");
+    let pool = Arc::new(pool(root, 4, true));
+    let entry = pool.get("reserved").expect("entry");
+    entry.lifecycle.mark_loading();
+    let report = pool
+        .shutdown_all(std::time::Duration::from_millis(50))
+        .await;
+    assert_eq!(report.attempted, 1);
+    assert!(report.remaining.contains(&"reserved".to_string()));
+    assert_eq!(
+        entry.lifecycle.state(),
+        crate::server::router_lifecycle::ModelLifecycleState::Draining
+    );
+}

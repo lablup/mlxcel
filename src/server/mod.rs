@@ -61,6 +61,7 @@ pub mod responses_translator;
 pub mod router_cache;
 pub mod router_front;
 pub mod router_lifecycle;
+mod router_lifecycle_dto;
 mod router_lifecycle_ops;
 pub mod router_models;
 pub mod router_presets;

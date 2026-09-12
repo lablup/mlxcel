@@ -16,148 +16,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-
-use super::router_lifecycle::{LifecycleSnapshot, SCHEMA_VERSION};
+use super::router_lifecycle::LifecycleSnapshot;
+use super::router_lifecycle_dto::*;
 
 pub const EVENT_RING_LIMIT: usize = 1024;
 pub const EVENT_RETENTION: Duration = Duration::from_secs(600);
 pub const TERMINAL_OPERATION_LIMIT: usize = 200;
 pub const TERMINAL_OPERATION_RETENTION: Duration = Duration::from_secs(3600);
 pub const MAX_ACTIVE_OPERATIONS: usize = 64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationState {
-    Queued,
-    Running,
-    Cancelling,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationKind {
-    CatalogRefresh,
-    ModelLoad,
-    ModelUnload,
-    Download,
-    ModelRemoval,
-    SettingsPatch,
-}
-
-impl OperationKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::CatalogRefresh => "catalog_refresh",
-            Self::ModelLoad => "model_load",
-            Self::ModelUnload => "model_unload",
-            Self::Download => "download",
-            Self::ModelRemoval => "model_removal",
-            Self::SettingsPatch => "settings_patch",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProgressBytes {
-    pub completed_bytes: u64,
-    pub total_bytes: Option<u64>,
-    pub indeterminate: bool,
-}
-
-impl Default for ProgressBytes {
-    fn default() -> Self {
-        Self {
-            completed_bytes: 0,
-            total_bytes: None,
-            indeterminate: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "target_kind", rename_all = "snake_case")]
-pub enum OperationTarget {
-    Model {
-        model_id: String,
-        requested_revision: Option<u64>,
-    },
-    Catalog {
-        scope: String,
-        model_id: Option<String>,
-    },
-    Download {
-        repo_id: String,
-        revision: Option<String>,
-    },
-    Settings {
-        model_id: String,
-        scope: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ErrorBody {
-    pub code: String,
-    pub message: String,
-    pub retryable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Operation {
-    pub operation_id: String,
-    pub kind: OperationKind,
-    pub state: OperationState,
-    pub created_at: String,
-    pub updated_at: String,
-    pub idempotency_scope: &'static str,
-    pub target: OperationTarget,
-    pub progress: ProgressBytes,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<ErrorBody>,
-    pub cancellable: bool,
-    pub cancel_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OperationAccepted {
-    pub operation_id: String,
-    pub state: OperationState,
-    pub idempotent_replay: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiEvent {
-    pub schema_version: &'static str,
-    pub server_instance_id: String,
-    pub sequence: u64,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub payload: serde_json::Value,
-    pub event_id: String,
-    pub emitted_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OperationError {
-    Conflict { operation_id: Option<String> },
-    TooManyActive,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayError {
-    UnknownEvent,
-    Gap,
-    ServerRestart,
-}
 
 #[derive(Debug, Clone)]
 struct IdempotencyRecord {
@@ -172,12 +40,12 @@ struct CoordinatorInner {
     idempotency: BTreeMap<String, IdempotencyRecord>,
     events: VecDeque<(Instant, UiEvent)>,
     next_operation: u64,
+    next_sequence: u64,
 }
 
 #[derive(Debug)]
 pub struct LifecycleCoordinator {
     server_instance_id: String,
-    sequence: AtomicU64,
     event_tx: tokio::sync::broadcast::Sender<UiEvent>,
     inner: Mutex<CoordinatorInner>,
 }
@@ -187,7 +55,6 @@ impl LifecycleCoordinator {
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_RING_LIMIT);
         Self {
             server_instance_id: new_server_instance_id(),
-            sequence: AtomicU64::new(0),
             event_tx,
             inner: Mutex::new(CoordinatorInner::default()),
         }
@@ -198,11 +65,79 @@ impl LifecycleCoordinator {
     }
 
     pub fn snapshot_sequence(&self) -> u64 {
-        self.sequence.load(Ordering::Relaxed)
+        self.inner
+            .lock()
+            .map(|inner| inner.next_sequence)
+            .unwrap_or(0)
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<UiEvent> {
         self.event_tx.subscribe()
+    }
+
+    pub fn subscribe_for_ui(
+        &self,
+        last_event_id: Option<&str>,
+        runtime_model_ids: Vec<String>,
+    ) -> (tokio::sync::broadcast::Receiver<UiEvent>, Vec<UiEvent>) {
+        let mut inner = self.inner.lock().expect("lifecycle coordinator poisoned");
+        prune_events(&mut inner);
+        match last_event_id.filter(|event_id| !event_id.is_empty()) {
+            None => {
+                let sequence = inner.next_sequence;
+                let payload = UiEventPayload::Snapshot(SnapshotPayload {
+                    snapshot_sequence: sequence,
+                    catalog_changed: true,
+                    operations_changed: true,
+                    runtime_model_ids,
+                });
+                let event = self.ephemeral_event_locked(sequence, "snapshot", payload);
+                let receiver = self.event_tx.subscribe();
+                (receiver, vec![event])
+            }
+            Some(event_id) => {
+                let replay = if let Some((_, cursor)) = inner
+                    .events
+                    .iter()
+                    .find(|(_, event)| event.event_id == event_id)
+                {
+                    let cursor_sequence = cursor.sequence;
+                    inner
+                        .events
+                        .iter()
+                        .filter_map(|(_, event)| {
+                            (event.sequence > cursor_sequence).then_some(event.clone())
+                        })
+                        .collect()
+                } else {
+                    let reason = if event_id.contains(&self.server_instance_id) {
+                        "gap"
+                    } else {
+                        "server_restart"
+                    };
+                    let payload = ResetPayload {
+                        reason: reason.to_string(),
+                        resnapshot: true,
+                    };
+                    let event_type = if reason == "gap" {
+                        "gap"
+                    } else {
+                        "server_restart"
+                    };
+                    let payload = if reason == "gap" {
+                        UiEventPayload::Gap(payload)
+                    } else {
+                        UiEventPayload::ServerRestart(payload)
+                    };
+                    let event =
+                        self.ephemeral_event_locked(inner.next_sequence, event_type, payload);
+                    let receiver = self.event_tx.subscribe();
+                    return (receiver, vec![event]);
+                };
+                let receiver = self.event_tx.subscribe();
+                (receiver, replay)
+            }
+        }
     }
 
     pub fn begin_operation(
@@ -253,7 +188,7 @@ impl LifecycleCoordinator {
             state: OperationState::Queued,
             created_at: now.clone(),
             updated_at: now,
-            idempotency_scope: "server_instance",
+            idempotency_scope: "server_instance".to_string(),
             target,
             progress: ProgressBytes::default(),
             result: None,
@@ -271,13 +206,17 @@ impl LifecycleCoordinator {
             );
         }
         inner.active.insert(operation_id.clone(), operation.clone());
+        self.append_and_broadcast_locked(
+            &mut inner,
+            UiEventPayload::Operation(OperationPayload {
+                operation: operation.clone(),
+            }),
+        );
         let accepted = OperationAccepted {
             operation_id,
             state: OperationState::Queued,
             idempotent_replay: false,
         };
-        drop(inner);
-        self.publish_event("operation", serde_json::json!({ "operation": operation }));
         Ok(accepted)
     }
 
@@ -285,7 +224,7 @@ impl LifecycleCoordinator {
         &self,
         operation_id: &str,
         state: OperationState,
-        result: Option<serde_json::Value>,
+        result: Option<OperationResult>,
         error: Option<ErrorBody>,
     ) -> Option<Operation> {
         let mut inner = self.inner.lock().ok()?;
@@ -309,12 +248,75 @@ impl LifecycleCoordinator {
                 .active
                 .insert(operation.operation_id.clone(), operation.clone());
         }
-        drop(inner);
-        self.publish_event(
-            "operation",
-            serde_json::json!({ "operation": operation.clone() }),
+        self.append_and_broadcast_locked(
+            &mut inner,
+            UiEventPayload::Operation(OperationPayload {
+                operation: operation.clone(),
+            }),
         );
         Some(operation)
+    }
+
+    pub fn get_operation(&self, operation_id: &str) -> Option<Operation> {
+        let inner = self.inner.lock().ok()?;
+        inner.active.get(operation_id).cloned().or_else(|| {
+            inner
+                .terminal
+                .iter()
+                .find_map(|(_, op)| (op.operation_id == operation_id).then_some(op.clone()))
+        })
+    }
+
+    pub fn list_operations(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+        state: Option<OperationState>,
+        kind: Option<OperationKind>,
+        target: Option<&str>,
+    ) -> OperationsListResponse {
+        let limit = limit.clamp(1, 200);
+        let offset = cursor
+            .and_then(|cursor| cursor.strip_prefix("ops_"))
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0);
+        let inner = self.inner.lock().expect("lifecycle coordinator poisoned");
+        let mut operations: Vec<Operation> = inner
+            .active
+            .values()
+            .cloned()
+            .chain(inner.terminal.iter().rev().map(|(_, op)| op.clone()))
+            .filter(|op| state.is_none_or(|s| op.state == s))
+            .filter(|op| kind.is_none_or(|k| op.kind == k))
+            .filter(|op| target.is_none_or(|token| op.target.matches_token(token)))
+            .collect();
+        operations.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(a.operation_id.cmp(&b.operation_id))
+        });
+        let total = operations.len();
+        let items: Vec<_> = operations.into_iter().skip(offset).take(limit).collect();
+        let next = (offset + items.len() < total).then(|| format!("ops_{}", offset + items.len()));
+        OperationsListResponse {
+            items,
+            pagination: Pagination {
+                limit,
+                next_cursor: next,
+                total_known: Some(total),
+            },
+            server_instance_id: self.server_instance_id.clone(),
+            snapshot_sequence: inner.next_sequence,
+        }
+    }
+
+    pub fn cancel_operation(&self, operation_id: &str) -> Result<OperationAccepted, CancelError> {
+        let operation = self
+            .get_operation(operation_id)
+            .ok_or(CancelError::NotFound)?;
+        Err(CancelError::Unsupported {
+            operation_id: operation.operation_id,
+        })
     }
 
     pub fn publish_model_revision(
@@ -322,34 +324,31 @@ impl LifecycleCoordinator {
         model_id: &str,
         revision: u64,
         lifecycle: LifecycleSnapshot,
-    ) {
-        self.publish_event(
-            "model_revision",
-            serde_json::json!({
-                "model_id": model_id,
-                "revision": revision,
-                "lifecycle": lifecycle,
-            }),
-        );
+    ) -> UiEvent {
+        self.publish_payload(UiEventPayload::ModelRevision(ModelRevisionPayload {
+            model_id: model_id.to_string(),
+            revision,
+            lifecycle,
+        }))
     }
 
-    pub fn publish_event(&self, event_type: &str, payload: serde_json::Value) -> UiEvent {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let event = UiEvent {
-            schema_version: SCHEMA_VERSION,
-            server_instance_id: self.server_instance_id.clone(),
-            sequence,
-            event_type: event_type.to_string(),
-            payload,
-            event_id: format!("evt_{}_{sequence:08}", self.server_instance_id),
-            emitted_at: rfc3339_now(),
+    pub fn publish_reset(&self, reason: &str, event_kind: ResetEventKind) -> UiEvent {
+        let payload = ResetPayload {
+            reason: reason.to_string(),
+            resnapshot: true,
         };
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.events.push_back((Instant::now(), event.clone()));
-            prune_events(&mut inner);
+        match event_kind {
+            ResetEventKind::Reset => self.publish_payload(UiEventPayload::Reset(payload)),
+            ResetEventKind::Gap => self.publish_payload(UiEventPayload::Gap(payload)),
+            ResetEventKind::ServerRestart => {
+                self.publish_payload(UiEventPayload::ServerRestart(payload))
+            }
         }
-        let _ = self.event_tx.send(event.clone());
-        event
+    }
+
+    pub fn publish_payload(&self, payload: UiEventPayload) -> UiEvent {
+        let mut inner = self.inner.lock().expect("lifecycle coordinator poisoned");
+        self.append_and_broadcast_locked(&mut inner, payload)
     }
 
     pub fn replay_after(&self, event_id: &str) -> Result<Vec<UiEvent>, ReplayError> {
@@ -367,6 +366,46 @@ impl LifecycleCoordinator {
             .filter_map(|(_, event)| (event.sequence > cursor_sequence).then_some(event.clone()))
             .collect())
     }
+
+    fn ephemeral_event_locked(
+        &self,
+        sequence: u64,
+        suffix: &str,
+        payload: UiEventPayload,
+    ) -> UiEvent {
+        let mut event = UiEvent::new(&self.server_instance_id, sequence, payload);
+        event.event_id = format!("evt_{}_{suffix}_{sequence:08}", self.server_instance_id);
+        event
+    }
+
+    fn append_event_locked(
+        &self,
+        inner: &mut CoordinatorInner,
+        payload: UiEventPayload,
+    ) -> UiEvent {
+        inner.next_sequence += 1;
+        let event = UiEvent::new(&self.server_instance_id, inner.next_sequence, payload);
+        inner.events.push_back((Instant::now(), event.clone()));
+        prune_events(inner);
+        event
+    }
+
+    fn append_and_broadcast_locked(
+        &self,
+        inner: &mut CoordinatorInner,
+        payload: UiEventPayload,
+    ) -> UiEvent {
+        let event = self.append_event_locked(inner, payload);
+        let _ = self.event_tx.send(event.clone());
+        event
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetEventKind {
+    Reset,
+    Gap,
+    ServerRestart,
 }
 
 impl Default for LifecycleCoordinator {

@@ -79,10 +79,14 @@ pub enum DownloadState {
 }
 
 #[allow(unused_imports)]
-pub use super::router_lifecycle_ops::{
-    ErrorBody, LifecycleCoordinator, Operation, OperationAccepted, OperationError, OperationKind,
-    OperationState, OperationTarget, ProgressBytes, ReplayError, UiEvent,
+pub use super::router_lifecycle_dto::{
+    CancelError, ErrorBody, ErrorEnvelope, FieldError, MeasuredValue, Operation, OperationAccepted,
+    OperationError, OperationKind, OperationResult, OperationState, OperationTarget,
+    OperationsListResponse, Pagination, ProgressBytes, ReplayError, RuntimePayload,
+    RuntimeSettingValue, RuntimeSettingsReport, RuntimeSnapshot, SettingsPayload, UiEvent,
+    UiEventPayload,
 };
+pub use super::router_lifecycle_ops::{EVENT_RING_LIMIT, LifecycleCoordinator, ResetEventKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleSnapshot {
@@ -253,6 +257,16 @@ impl ModelLifecycle {
             g.worker_exit_observed = worker_exit_observed;
             g.last_error = Some(error.into());
             g.revision += 1;
+        });
+    }
+
+    pub fn mark_loading_blocked(&self, error: impl Into<String>) {
+        self.mutate(|g| {
+            if g.state == ModelLifecycleState::Loading {
+                g.admission_stopped = true;
+                g.last_error = Some(error.into());
+                g.revision += 1;
+            }
         });
     }
 

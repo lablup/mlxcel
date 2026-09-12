@@ -50,14 +50,19 @@ use super::model_provider::WorkerExitObserver;
 use super::router_cache::CacheSource;
 use super::router_lifecycle::{
     DownloadState, ErrorBody, LifecycleCoordinator, LifecycleSnapshot, ModelLifecycle,
-    ModelLifecycleState, OperationError, OperationKind, OperationState, OperationTarget,
-    stable_model_identity,
+    ModelLifecycleState, OperationError, OperationKind, OperationResult, OperationState,
+    OperationTarget, stable_model_identity,
 };
 use super::router_presets::{PresetCliOverrides, PresetSection, RouterPresets};
 use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig};
 
 const ROUTER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const ROUTER_WORKER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const ROUTER_LOAD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub const ROUTER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+
+#[cfg(test)]
+type RescanAfterSnapshotHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// b10621 `server_model_status` (the subset an in-process pool reaches;
 /// `downloaded` is upstream's "erase on next reload" marker, which the
@@ -233,6 +238,10 @@ impl RouterModelEntry {
         self.lifecycle.snapshot()
     }
 
+    pub fn lifecycle_revision(&self) -> u64 {
+        self.lifecycle.revision()
+    }
+
     fn download_progress_json(&self) -> Option<serde_json::Value> {
         self.state
             .lock()
@@ -289,6 +298,8 @@ pub struct RouterPool {
     /// Serializes model loads so two concurrent autoloads cannot race the
     /// capacity check or contend the accelerator during weight upload.
     load_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    rescan_after_snapshot_hook: Mutex<Option<RescanAfterSnapshotHook>>,
 }
 
 /// Why a name failed to resolve, load, download, or be removed.
@@ -303,12 +314,22 @@ pub enum RouterPoolError {
     NotRemovable(String),
     /// `POST /models` on a name the pool already has.
     AlreadyExists(String),
+    /// A WebUI operation was recorded but rejected before background execution.
+    OperationRejected(ErrorBody),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouterModelAction {
     Load,
     Unload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterShutdownReport {
+    pub attempted: usize,
+    pub completed: Vec<String>,
+    pub remaining: Vec<String>,
+    pub timed_out: bool,
 }
 
 impl RouterPool {
@@ -332,9 +353,19 @@ impl RouterPool {
             events,
             lifecycle: Arc::new(LifecycleCoordinator::new()),
             load_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            rescan_after_snapshot_hook: Mutex::new(None),
         };
         pool.rescan()?;
         Ok(pool)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_rescan_after_snapshot_hook(&self, hook: Option<RescanAfterSnapshotHook>) {
+        *self
+            .rescan_after_snapshot_hook
+            .lock()
+            .expect("rescan hook mutex poisoned") = hook;
     }
 
     /// Build the per-model [`super::config::ServerConfig`] by overlaying the
@@ -447,6 +478,16 @@ impl RouterPool {
             .map_err(|_| anyhow::anyhow!("router pool poisoned"))?
             .clone();
 
+        #[cfg(test)]
+        if let Some(hook) = self
+            .rescan_after_snapshot_hook
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+        {
+            hook();
+        }
+
         let mut rebuilt: BTreeMap<String, Arc<RouterModelEntry>> = BTreeMap::new();
         for (name, (path, source)) in &discovered {
             if let Some(entry) = existing.get(name)
@@ -494,6 +535,11 @@ impl RouterPool {
             .entries
             .write()
             .map_err(|_| anyhow::anyhow!("router pool poisoned"))?;
+        for (name, current) in entries.iter() {
+            if current.reserves_capacity() || current.is_downloading() {
+                rebuilt.insert(name.clone(), current.clone());
+            }
+        }
         *entries = rebuilt;
         drop(entries);
         self.notify("models_reload", "*", serde_json::Value::Null);
@@ -565,6 +611,15 @@ impl RouterPool {
         self.entries.read().ok()?.get(name).cloned()
     }
 
+    pub fn get_by_model_id(&self, model_id: &str) -> Option<Arc<RouterModelEntry>> {
+        self.entries
+            .read()
+            .ok()?
+            .values()
+            .find(|entry| entry.ui_model_id == model_id)
+            .cloned()
+    }
+
     /// Name-or-alias lookup (request routing).
     pub fn lookup(&self, name: &str) -> Option<Arc<RouterModelEntry>> {
         let entries = self.entries.read().ok()?;
@@ -575,6 +630,19 @@ impl RouterPool {
             .values()
             .find(|e| e.aliases.iter().any(|a| a == name))
             .cloned()
+    }
+
+    pub fn runtime_model_ids(&self) -> Vec<String> {
+        self.entries
+            .read()
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| entry.reserves_capacity() || entry.is_downloading())
+                    .map(|entry| entry.ui_model_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn snapshot(&self) -> Vec<RouterModelSnapshot> {
@@ -640,6 +708,16 @@ impl RouterPool {
     /// loaded model first when `--models-max` is reached. Returns without
     /// waiting; [`Self::ensure_ready`] waits.
     pub async fn begin_load(&self, name: &str) -> Result<Arc<RouterModelEntry>, RouterPoolError> {
+        self.begin_load_with_policy(name, None, true, None).await
+    }
+
+    async fn begin_load_with_policy(
+        &self,
+        name: &str,
+        eviction_target: Option<&str>,
+        allow_lru_eviction: bool,
+        expected_revision: Option<u64>,
+    ) -> Result<Arc<RouterModelEntry>, RouterPoolError> {
         let entry = self
             .get(name)
             .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
@@ -650,6 +728,7 @@ impl RouterPool {
         }
         let _permit = self.load_lock.lock().await;
         let _entry_permit = entry.lifecycle.operation_guard().await;
+        reject_stale_revision(&entry, expected_revision)?;
         if entry.is_running() {
             return Ok(entry.clone());
         }
@@ -663,26 +742,55 @@ impl RouterPool {
         // frees. A pool whose running entries are all still loading cannot be
         // evicted from and refuses the new load instead of thrashing.
         if self.models_max > 0 {
+            let mut explicit_victim = eviction_target.map(ToString::to_string);
             while self.running_count() >= self.models_max {
-                let victim = self
-                    .entries
-                    .read()
-                    .ok()
-                    .and_then(|entries| {
-                        entries
-                            .values()
-                            .filter(|e| e.status() == RouterModelStatus::Loaded)
-                            .min_by_key(|e| e.last_used.load(Ordering::Relaxed))
-                            .cloned()
-                    })
-                    .ok_or_else(|| {
-                        RouterPoolError::Capacity(format!(
-                            "models_max ({}) reached and every loaded model is busy loading",
-                            self.models_max
-                        ))
-                    })?;
+                let victim = if let Some(target_name) = explicit_victim.take() {
+                    let victim = self
+                        .get(&target_name)
+                        .ok_or_else(|| RouterPoolError::NotFound(target_name.clone()))?;
+                    if victim.name == entry.name {
+                        return Err(RouterPoolError::Capacity(
+                            "eviction target cannot be the model being loaded".to_string(),
+                        ));
+                    }
+                    if victim.lifecycle_snapshot().active_requests > 0
+                        || victim.lifecycle.state() != ModelLifecycleState::Ready
+                    {
+                        return Err(RouterPoolError::Capacity(format!(
+                            "eviction target '{}' is busy",
+                            victim.name
+                        )));
+                    }
+                    victim
+                } else if allow_lru_eviction {
+                    self.entries
+                        .read()
+                        .ok()
+                        .and_then(|entries| {
+                            entries
+                                .values()
+                                .filter(|e| {
+                                    e.status() == RouterModelStatus::Loaded
+                                        && e.lifecycle_snapshot().active_requests == 0
+                                        && e.lifecycle.state() == ModelLifecycleState::Ready
+                                })
+                                .min_by_key(|e| e.last_used.load(Ordering::Relaxed))
+                                .cloned()
+                        })
+                        .ok_or_else(|| {
+                            RouterPoolError::Capacity(format!(
+                                "models_max ({}) reached and every loaded model is busy",
+                                self.models_max
+                            ))
+                        })?
+                } else {
+                    return Err(RouterPoolError::Capacity(format!(
+                        "models_max ({}) reached; provide an explicit eviction target",
+                        self.models_max
+                    )));
+                };
                 tracing::info!(
-                    "router: evicting LRU model '{}' to load '{}' (models_max {})",
+                    "router: evicting model '{}' to load '{}' (models_max {})",
                     victim.name,
                     name,
                     self.models_max
@@ -800,6 +908,15 @@ impl RouterPool {
         timeout: std::time::Duration,
     ) -> Result<Arc<RouterModelEntry>, RouterPoolError> {
         let entry = self.begin_load(name).await?;
+        self.wait_for_ready_entry(entry, name, timeout).await
+    }
+
+    async fn wait_for_ready_entry(
+        &self,
+        entry: Arc<RouterModelEntry>,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Arc<RouterModelEntry>, RouterPoolError> {
         let started = std::time::Instant::now();
         loop {
             match entry.status() {
@@ -822,10 +939,14 @@ impl RouterPool {
                 }
                 RouterModelStatus::Loading => {
                     if started.elapsed() > timeout {
-                        return Err(RouterPoolError::LoadFailed(format!(
+                        let message = format!(
                             "model '{name}' did not become ready within {}s",
                             timeout.as_secs()
-                        )));
+                        );
+                        entry.lifecycle.mark_loading_blocked(message.clone());
+                        self.notify_lifecycle(&entry);
+                        self.notify_status(&entry);
+                        return Err(RouterPoolError::LoadFailed(message));
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
@@ -833,33 +954,106 @@ impl RouterPool {
         }
     }
 
+    pub async fn shutdown_all(
+        self: &Arc<Self>,
+        timeout: std::time::Duration,
+    ) -> RouterShutdownReport {
+        let entries: Vec<_> = self
+            .entries
+            .read()
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| entry.reserves_capacity() || entry.is_downloading())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for entry in &entries {
+            if entry.lifecycle.begin_drain() {
+                self.notify_lifecycle(entry);
+                self.notify_status(entry);
+            }
+        }
+        let attempted = entries.len();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for entry in entries {
+            let pool = self.clone();
+            let name = entry.name.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = pool.unload(&name).await;
+                let _ = tx.send((name, result));
+            });
+        }
+        drop(tx);
+
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut completed = Vec::new();
+        let mut observed = 0usize;
+        let mut timed_out = false;
+        while observed < attempted {
+            tokio::select! {
+                message = rx.recv() => {
+                    match message {
+                        Some((name, Ok(()))) => {
+                            observed += 1;
+                            completed.push(name);
+                        }
+                        Some((_name, Err(_))) => {
+                            observed += 1;
+                        }
+                        None => break,
+                    }
+                }
+                _ = &mut deadline => {
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+        let remaining = self
+            .entries
+            .read()
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| entry.reserves_capacity() || entry.is_downloading())
+                    .map(|entry| entry.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        RouterShutdownReport {
+            attempted,
+            completed,
+            remaining,
+            timed_out,
+        }
+    }
+
     pub fn submit_model_action(
         self: &Arc<Self>,
-        name: &str,
+        model_id: &str,
         action: RouterModelAction,
         expected_revision: u64,
         idempotency_key: &str,
+        eviction_target_id: Option<&str>,
     ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
-        let entry = self
-            .get(name)
-            .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
-        if entry.lifecycle.revision() != expected_revision {
-            return Err(RouterPoolError::LoadFailed(format!(
-                "stale revision for model '{name}': expected {expected_revision}, current {}",
-                entry.lifecycle.revision()
-            )));
-        }
         let kind = match action {
             RouterModelAction::Load => OperationKind::ModelLoad,
             RouterModelAction::Unload => OperationKind::ModelUnload,
         };
-        let fingerprint = format!("{kind:?}:{name}:{expected_revision}");
+        let fingerprint = format!(
+            "{kind:?}:{model_id}:{expected_revision}:{}",
+            eviction_target_id.unwrap_or("")
+        );
         let accepted = self
             .lifecycle
             .begin_operation(
                 kind,
                 OperationTarget::Model {
-                    model_id: entry.ui_model_id.clone(),
+                    model_id: model_id.to_string(),
                     requested_revision: Some(expected_revision),
                 },
                 Some(idempotency_key),
@@ -876,24 +1070,87 @@ impl RouterPool {
         if accepted.idempotent_replay {
             return Ok(accepted);
         }
+
+        let Some(entry) = self.get_by_model_id(model_id) else {
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(ErrorBody {
+                    code: "not_found".to_string(),
+                    message: format!("model id '{model_id}' not found"),
+                    retryable: true,
+                    field_errors: None,
+                    operation_id: Some(accepted.operation_id.clone()),
+                }),
+            );
+            return Err(RouterPoolError::NotFound(model_id.to_string()));
+        };
+        if entry.lifecycle.revision() != expected_revision {
+            let error = ErrorBody {
+                code: "stale_revision".to_string(),
+                message: "catalog entry revision changed; refresh before retrying".to_string(),
+                retryable: true,
+                field_errors: Some(vec![super::router_lifecycle::FieldError {
+                    field: "expected_revision".to_string(),
+                    code: "stale".to_string(),
+                    message: format!(
+                        "expected {expected_revision} but current revision is {}",
+                        entry.lifecycle.revision()
+                    ),
+                }]),
+                operation_id: Some(accepted.operation_id.clone()),
+            };
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(error.clone()),
+            );
+            return Err(RouterPoolError::OperationRejected(error));
+        }
+
+        let eviction_target_name = match eviction_target_id {
+            Some(target_id) => match self.get_by_model_id(target_id) {
+                Some(target) => Some(target.name.clone()),
+                None => {
+                    self.lifecycle.update_operation(
+                        &accepted.operation_id,
+                        OperationState::Failed,
+                        None,
+                        Some(ErrorBody {
+                            code: "not_found".to_string(),
+                            message: format!("eviction target id '{target_id}' not found"),
+                            retryable: true,
+                            field_errors: None,
+                            operation_id: Some(accepted.operation_id.clone()),
+                        }),
+                    );
+                    return Err(RouterPoolError::NotFound(target_id.to_string()));
+                }
+            },
+            None => None,
+        };
+
         if let Some((err, code, message)) = match action {
             RouterModelAction::Load if entry.is_running() => Some((
-                RouterPoolError::LoadFailed(format!("model '{name}' is already running")),
+                RouterPoolError::LoadFailed(format!("model '{}' is already running", entry.name)),
                 "conflict",
-                format!("model '{name}' is already running"),
+                format!("model '{}' is already running", entry.name),
             )),
             RouterModelAction::Load if entry.reserves_capacity() => Some((
                 RouterPoolError::Capacity(format!(
-                    "model '{name}' still owns resources; worker exit has not been observed"
+                    "model '{}' still owns resources; worker exit has not been observed",
+                    entry.name
                 )),
                 "conflict",
-                format!("model '{name}' still owns resources"),
+                format!("model '{}' still owns resources", entry.name),
             )),
             RouterModelAction::Unload if !entry.reserves_capacity() && !entry.is_downloading() => {
                 Some((
                     RouterPoolError::NotLoaded,
-                    "not_loaded",
-                    format!("model '{name}' is not loaded"),
+                    "invalid_request",
+                    format!("model '{}' is not loaded", entry.name),
                 ))
             }
             _ => None,
@@ -906,6 +1163,7 @@ impl RouterPool {
                     code: code.to_string(),
                     message,
                     retryable: true,
+                    field_errors: None,
                     operation_id: Some(accepted.operation_id.clone()),
                 }),
             );
@@ -918,27 +1176,63 @@ impl RouterPool {
             pool.lifecycle
                 .update_operation(&operation_id, OperationState::Running, None, None);
             let result = match action {
-                RouterModelAction::Load => pool.begin_load(&model_name).await.map(|_| ()),
-                RouterModelAction::Unload => pool.unload(&model_name).await,
+                RouterModelAction::Load => match pool
+                    .begin_load_with_policy(
+                        &model_name,
+                        eviction_target_name.as_deref(),
+                        false,
+                        Some(expected_revision),
+                    )
+                    .await
+                {
+                    Ok(entry) => pool
+                        .wait_for_ready_entry(entry, &model_name, ROUTER_LOAD_READY_TIMEOUT)
+                        .await
+                        .map(|_| ()),
+                    Err(err) => Err(err),
+                },
+                RouterModelAction::Unload => {
+                    pool.unload_with_expected(&model_name, Some(expected_revision))
+                        .await
+                }
             };
             let entry = pool.get(&model_name);
             let lifecycle = entry.as_ref().map(|entry| entry.lifecycle_snapshot());
             match (result, lifecycle) {
                 (Ok(()), Some(lifecycle)) => {
-                    let result_kind = match action {
-                        RouterModelAction::Load => "model_load",
-                        RouterModelAction::Unload => "model_unload",
+                    let model_id = entry
+                        .as_ref()
+                        .map(|e| e.ui_model_id.clone())
+                        .unwrap_or(model_name.clone());
+                    let revision = entry.as_ref().map(|e| e.lifecycle.revision()).unwrap_or(1);
+                    let result = match action {
+                        RouterModelAction::Load => OperationResult::ModelLoad {
+                            model_id,
+                            revision,
+                            lifecycle,
+                        },
+                        RouterModelAction::Unload => OperationResult::ModelUnload {
+                            model_id,
+                            revision,
+                            lifecycle,
+                        },
                     };
                     pool.lifecycle.update_operation(
                         &operation_id,
                         OperationState::Succeeded,
-                        Some(serde_json::json!({
-                            "result_kind": result_kind,
-                            "model_id": entry.as_ref().map(|e| e.ui_model_id.clone()).unwrap_or(model_name.clone()),
-                            "revision": entry.as_ref().map(|e| e.lifecycle.revision()).unwrap_or(1),
-                            "lifecycle": lifecycle,
-                        })),
+                        Some(result),
                         None,
+                    );
+                }
+                (Err(RouterPoolError::OperationRejected(mut error)), _) => {
+                    if error.operation_id.is_none() {
+                        error.operation_id = Some(operation_id.clone());
+                    }
+                    pool.lifecycle.update_operation(
+                        &operation_id,
+                        OperationState::Failed,
+                        None,
+                        Some(error),
                     );
                 }
                 (Err(err), _) => {
@@ -950,6 +1244,7 @@ impl RouterPool {
                             code: "conflict".to_string(),
                             message: format!("{err:?}"),
                             retryable: true,
+                            field_errors: None,
                             operation_id: Some(operation_id.clone()),
                         }),
                     );
@@ -960,9 +1255,10 @@ impl RouterPool {
                         OperationState::Failed,
                         None,
                         Some(ErrorBody {
-                            code: "unknown".to_string(),
+                            code: "not_found".to_string(),
                             message: "model disappeared before operation finished".to_string(),
                             retryable: true,
+                            field_errors: None,
                             operation_id: Some(operation_id.clone()),
                         }),
                     );
@@ -973,7 +1269,16 @@ impl RouterPool {
     }
 
     async fn unload_entry(&self, entry: &RouterModelEntry) -> Result<(), RouterPoolError> {
+        self.unload_entry_with_expected(entry, None).await
+    }
+
+    async fn unload_entry_with_expected(
+        &self,
+        entry: &RouterModelEntry,
+        expected_revision: Option<u64>,
+    ) -> Result<(), RouterPoolError> {
         let _entry_permit = entry.lifecycle.operation_guard().await;
+        reject_stale_revision(entry, expected_revision)?;
         let app = entry.state.lock().ok().and_then(|guard| guard.app.clone());
         let Some(app) = app else {
             return Err(RouterPoolError::NotLoaded);
@@ -1044,19 +1349,54 @@ impl RouterPool {
     /// `POST /models/unload`). Unloading a downloading model cancels the
     /// download, upstream's own unload-during-download behavior.
     pub async fn unload(&self, name: &str) -> Result<(), RouterPoolError> {
+        self.unload_with_expected(name, None).await
+    }
+
+    async fn unload_with_expected(
+        &self,
+        name: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<(), RouterPoolError> {
         let entry = self
             .get(name)
             .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
-        if let Ok(guard) = entry.state.lock()
-            && let Some(download) = &guard.download
-        {
-            download.cancel.store(true, Ordering::Relaxed);
-            return Ok(());
+        reject_stale_revision(&entry, expected_revision)?;
+        let cancel_download = entry
+            .state
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard.download.as_ref().map(|download| {
+                    download.cancel.store(true, Ordering::Relaxed);
+                })
+            })
+            .is_some();
+        if cancel_download {
+            return self.wait_for_download_stop(&entry).await;
         }
         if !entry.reserves_capacity() {
             return Err(RouterPoolError::NotLoaded);
         }
-        self.unload_entry(&entry).await
+        self.unload_entry_with_expected(&entry, expected_revision)
+            .await
+    }
+
+    async fn wait_for_download_stop(
+        &self,
+        entry: &RouterModelEntry,
+    ) -> Result<(), RouterPoolError> {
+        let started = std::time::Instant::now();
+        while entry.is_downloading() {
+            if started.elapsed() > ROUTER_WORKER_EXIT_TIMEOUT {
+                return Err(RouterPoolError::LoadFailed(format!(
+                    "model '{}' download did not stop within {}s",
+                    entry.name,
+                    ROUTER_WORKER_EXIT_TIMEOUT.as_secs()
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Ok(())
     }
 
     /// Route a request into `entry`'s sub-app.
@@ -1084,6 +1424,38 @@ impl RouterPool {
             Err(err) => match err {},
         }
     }
+}
+
+fn stale_revision_error(entry: &RouterModelEntry, expected_revision: u64) -> ErrorBody {
+    ErrorBody {
+        code: "stale_revision".to_string(),
+        message: "catalog entry revision changed; refresh before retrying".to_string(),
+        retryable: true,
+        field_errors: Some(vec![super::router_lifecycle::FieldError {
+            field: "expected_revision".to_string(),
+            code: "stale".to_string(),
+            message: format!(
+                "expected {expected_revision} but current revision is {}",
+                entry.lifecycle.revision()
+            ),
+        }]),
+        operation_id: None,
+    }
+}
+
+fn reject_stale_revision(
+    entry: &RouterModelEntry,
+    expected_revision: Option<u64>,
+) -> Result<(), RouterPoolError> {
+    if let Some(expected_revision) = expected_revision
+        && entry.lifecycle.revision() != expected_revision
+    {
+        return Err(RouterPoolError::OperationRejected(stale_revision_error(
+            entry,
+            expected_revision,
+        )));
+    }
+    Ok(())
 }
 
 fn response_with_lease(
