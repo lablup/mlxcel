@@ -1,0 +1,11 @@
+host: Apple M1 Ultra / 128 GiB
+os: macOS 27.0 (26A428)
+mlxcel_commit: bec64748a5a1ac8112cbaebded0252d4d04fbb24
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+metallib_sha256: dca1bb428fd549cdc38060af471792a3901f5453c722cf8beacef45cec8e07d8
+logit_trace_sha256: c7d0b533215967645b1bccd0956f41a13027347359bfa7829c51dcce29176edd
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+args: w1='1 128 8 0' w8='8 80 8 512' w256='256 2 8 0' (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+env: MLXCEL_KEEP_BF16 unset (all four checkpoints are affine 4-bit, bf16 scales kept on both backends)
+tags: 'default' = MLXCEL_FUSED_MOE unset (fused MoE ON for the MoE models); 'fused0' = MLXCEL_FUSED_MOE=0 (gather_qmm path)
+metal path: M1 Ultra is Apple GPU gen 13, so no NAX path is taken
