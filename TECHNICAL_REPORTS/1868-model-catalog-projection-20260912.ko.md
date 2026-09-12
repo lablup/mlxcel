@@ -1,10 +1,10 @@
 # 기술 리포트: PR #1868 — 모델 카탈로그 투영
 
 **작성일**: 2026-09-12
-**상태**: 열린 PR; 집중 검증 완료, 전체 workspace·실모델 게이트 대기
+**상태**: 열린 PR; 집중 검증과 루트 전체 workspace·실모델 게이트 완료, GB10 CI 사용 불가
 **언어**: Rust, JSON/OpenAPI, TypeScript, Markdown
 **위험도**: 중간
-**구현 스냅샷**: `fafc5cf52835b4e7cc12a708c2f924b7cc88d7d1`
+**구현 스냅샷**: `6befcd26ea3d4624c76f64caf345908727922de6`
 
 ## 요약
 
@@ -26,7 +26,7 @@
 
 ### 메타데이터는 캐시하고 수명주기는 현재 상태로 유지
 
-카탈로그는 blocking worker에서 `RouterPool::catalog_snapshot()`을 투영합니다. 메타데이터 캐시는 식별자와 소스·경로·fingerprint·provider capability 정보를 키로 사용하고 현재 revision, generation, lifecycle, 제거 가능 여부를 다시 적용합니다. 디스크 계산은 제한된 범위에서 수행하여 재사용하지만 fingerprint 확인에는 파일시스템 메타데이터 작업이 남습니다. Fingerprint는 가중치 내용의 체크섬이 아닙니다.
+카탈로그는 blocking worker에서 `RouterPool::catalog_snapshot()`을 투영합니다. 메타데이터 캐시는 안정 ID와 라우터 catalog epoch, 모델 generation을 키로 사용하고 현재 revision, lifecycle, provider가 확인한 capability, 제거 가능 여부를 다시 적용합니다. 일반 GET 캐시 적중은 content fingerprint를 다시 계산하거나 무거운 메타데이터 파일시스템 probe를 반복하지 않으며, 최초 캐시 채우기와 명시적 새로고침은 제한된 검사를 수행합니다. Fingerprint는 가중치 내용의 체크섬이 아닙니다.
 
 기본 페이지 크기는 50, 최대 200이며 인벤토리는 1,000개로 제한합니다. 결과는 불투명 ID 순으로 정렬합니다. 안정성은 인벤토리가 변하지 않을 때의 보장이며 동시 변경 중 요청 간 트랜잭션을 제공하지 않습니다.
 
@@ -44,8 +44,9 @@
 
 - 제한된 메타데이터 읽기와 공유 감지 probe로 제한 없는 가중치 헤더 검사로의 fallback을 막고 근거 없는 추정 대신 unknown 사유를 제공합니다.
 - Symlink sidecar와 중첩 pooling 부모를 증거에서 제외합니다. 마지막 수정은 leaf 파일만 확인하지 않고 `1_Pooling` symlink 경유를 거절합니다.
-- 캐시한 항목의 오래된 readiness를 재사용하지 않고 현재 풀의 lifecycle·provider 사실을 적용합니다.
-- 새로고침 singleflight는 작업 접수와 실행 소유권을 분리하고 signature를 통해 동일 개수의 변경도 보고합니다.
+- 캐시한 항목의 오래된 readiness를 재사용하지 않고 현재 풀의 lifecycle·provider 사실을 적용하며, 캐시 무효화는 매 GET fingerprint 순회가 아니라 라우터 catalog epoch를 따릅니다.
+- 원본 `model_type`은 스키마 한도 안에서 정확히 보존하고 `declared_architectures`는 제한된 nullable 원본 배열로 노출하며, 문자열이 아니거나 너무 긴 값은 잘라낸 가짜 정확성이 아니라 사유가 있는 null이 됩니다.
+- 새로고침 singleflight는 작업 접수와 실행 소유권을 분리하고 signature를 통해 동일 개수의 변경도 보고합니다. 동일 크기 config/index 편집, 레거시 reload, 캐시 download 회귀 테스트를 추가했습니다.
 - Producer 테스트는 고정된 스키마 검증 fixture와 직렬화된 카탈로그 전체 구조를 비교하며 임시 경로에서 파생한 ID·fingerprint와 디스크 바이트만 정규화합니다.
 
 Config·sidecar는 256 KiB, index JSON은 512 KiB로 읽기를 제한합니다. 디스크 순회는 방문·대기 항목 4,096개와 깊이 8을 제한으로 사용하고 측정할 수 없는 값은 사유가 있는 null로 반환합니다. 측정한 지연시간이나 메모리 감소를 주장하지 않습니다.
@@ -56,19 +57,18 @@ Config·sidecar는 256 KiB, index JSON은 512 KiB로 읽기를 제한합니다. 
 
 | 게이트 | 리포트 작성 시점 결과 |
 |---|---|
-| 카탈로그 집중 테스트 | 21개 통과 |
-| 최종 pooling 부모 symlink 회귀 테스트 | 1개 통과 |
-| HTTP 새로고침 전후 1,000개 전체 페이지 순회 | 1개 통과 |
-| 라우터 카탈로그·새로고침 테스트 | 2개 통과 |
+| 카탈로그 집중 테스트 | 24개 통과 |
+| HTTP 카탈로그 route 테스트 | 4개 통과 |
+| 기존 카탈로그 새로고침 singleflight route 테스트 | 1개 통과 |
 | `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` | 통과 |
-| `cargo fmt --check`, `git diff --check` | 구현 검증에서 통과 |
-| 격리된 검증용 Python으로 `make verify-webui-contract` | fixture 32개 통과 |
-| `make verify-llama-compat verify-versions verify-kernel-dtype-keys` | 통과 |
-| 루트의 전체 workspace·로컬 CI와 실제 Llama + Granite 회귀 검증 | 작성 시점 대기; 통과로 계산하지 않음 |
+| `cargo fmt --check`, `git diff --check`, `python3 scripts/insert_apache_header.py --check` | 통과 |
+| 격리된 검증용 Python으로 `make verify-webui-contract` | fixture 40개 통과 |
+| Python 3.14를 `PATH`에 둔 `make verify-llama-compat verify-versions verify-kernel-dtype-keys` | 통과 |
+| 루트의 전체 workspace·로컬 CI와 실제 Llama + Granite 회귀 검증 | 통과: 11187/0/361과 clippy, Llama 572자 smoke, Granite affirmative smoke, SIGINT worker-exit 1/1 |
 | GB10 필수 CI | 러너가 down 상태임을 확인했고 사용자가 해당 불가 게이트 생략을 명시적으로 승인 |
 | CUDA 실행, 프로덕션 `--webui`, 브라우저 수용 검증 | 이 변경의 집중 증거로 확립하지 않음 |
 
-러너 예외는 사용 불가능한 GB10 CI에만 적용합니다. 로컬 실패를 면제하거나 CUDA 컴파일·추론 성공을 뜻하지 않습니다. 공유 모델 감지를 변경했으므로 전체 workspace와 실제 dense·hybrid 검사가 필요합니다. 오케스트레이터가 해당 게이트의 순차 실행과 최종 PR 검증 갱신을 담당합니다.
+러너 예외는 사용 불가능한 GB10 CI에만 적용합니다. 로컬 실패를 면제하거나 CUDA 컴파일·추론 성공을 뜻하지 않습니다. 직렬화된 루트 게이트는 전체 workspace·로컬 CI와 실제 dense·hybrid smoke로 공유 감지 변경 위험을 확인했습니다. 프로덕션 WebUI 시작과 브라우저 수용 검증은 후속 범위입니다.
 
 ## 5. 변경 요약
 
@@ -79,15 +79,15 @@ Config·sidecar는 256 KiB, index JSON은 512 KiB로 읽기를 제한합니다. 
 | 라우터 어댑터 | 인증된 목록·상세·새로고침 accessor, singleflight 실행, 새로고침 오류 경로 숨김 |
 | 기존 provider 통합 | 현재 풀 capability 스냅샷과 단일 모델 `AppState` accessor |
 | 계약 | OpenAPI, 생성 TypeScript, 카탈로그·식별자 fixture의 동시 갱신 |
-| 테스트 | 전체 producer 계약, 제한된 파일시스템 증거, 캐시 lifecycle, 새로고침 소유권, 1,000개 HTTP 순회 |
+| 테스트 | 전체 producer 계약, 제한된 파일시스템 증거, 캐시 lifecycle/provider 투영, HTTP 캐시 적중 heavy probe 0회, 동일 크기 새로고침 편집, reload/download 무효화, 1,000개 HTTP 순회 |
 | 문서 | 영어·한국어 통합 안내와 이 머지 전 리포트 |
 
-구현 커밋은 `57c1f268`(투영과 공유 probe), `70809247`(필수 테스트 라이선스 헤더), `fafc5cf5`(pooling 부모 증거 강화와 전체 HTTP 새로고침 페이지 검증)입니다.
+구현 커밋은 `57c1f268`(투영과 공유 probe), `70809247`(필수 테스트 라이선스 헤더), `fafc5cf5`(pooling 부모 증거 강화와 전체 HTTP 새로고침 페이지 검증), `6befcd26`(원본 제한 메타데이터 복원과 epoch 기반 카탈로그 메타데이터 캐시)입니다.
 
 ## 6. 학습 포인트와 후속 조치
 
 읽기 전용 관찰자에게 필요한 것은 별도 모델 분류 체계가 아니라 제한된 증거 획득 경계입니다. 또한 캐시 적중 시 비싼 메타데이터는 재사용해도 최신 lifecycle 사실은 필요하며 멱등 응답이 자동으로 단일 실행을 뜻하지 않습니다.
 
-PR 최종 완료 전에 전체 workspace와 실제 Llama·Granite 결과를 추가해야 합니다. 후속 통합은 null·사유 의미를 유지하고 제어에는 카탈로그 ID, 추론에는 inference ID를 사용하며 변경 작업의 권한 경계에서 다시 검사해야 합니다. 인증된 handler 테스트만으로 추정하지 말고 프로덕션 시작·보안을 검증해야 합니다.
+후속 통합은 null·사유 의미를 유지하고 제어에는 카탈로그 ID, 추론에는 inference ID를 사용하며 변경 작업의 권한 경계에서 다시 검사해야 합니다. 인증된 handler 테스트만으로 추정하지 말고 프로덕션 시작·보안을 검증해야 합니다.
 
 [카탈로그 통합](../docs/webui/catalog.ko.md), [API 계약](../docs/webui/api.yaml), [아키텍처](../docs/webui/architecture.md)를 참고하십시오.
