@@ -83,3 +83,11 @@ The verifier registers an explicit date-time checker and refuses schema formats 
 ## Catalog implementation boundary
 
 The metadata-only catalog adapter and its current integration limits are documented in [catalog.md](catalog.md) ([한국어](catalog.ko.md)). It projects the existing router/provider authority; production startup mounting remains a separate integration step.
+
+## Shared typed client and state authority
+
+`webui/src/api` is the only browser transport layer. `WebUiApiClient` accepts an optional `apiBase` for tests and integration, but it must validate to a same-origin path prefix and every request stays under `/ui-api/v1`; pages must not construct absolute backend URLs or put credentials in query strings. The client keeps the bearer key in memory only, attaches it as `Authorization: Bearer ...`, clears it on 401, treats 403 as forbidden rather than a login retry, and sends model observation through `GET /runtime?model_id=<opaque id>&autoload=false` so browsing never loads a model.
+
+`webui/src/state` is the shared headless state authority for downstream screens. Integrators wrap the app in `WebUiProvider({children, apiBase?})`, read `useWebUi()` for `{auth, connection, bootstrap, catalog, operations, runtimes, selectedModelId, lastUpdatedAt, error}`, and call `useWebUiActions()` for `login(token)`, `logout()`, `refresh()`, `selectModel(modelId)`, `loadModel(request)`, `unloadModel(request)`, `downloadModel(request)`, `removeModel(request)`, and `refreshRuntime(modelId)`. Models, Chat, Activity and Settings pages must compose these hooks instead of creating private fetch wrappers, persistence, polling timers or model caches.
+
+The reducer uses per-resource sequence fences: catalog snapshots, operation records, model lifecycle revisions and runtime snapshots each discard only events older than their own authoritative sequence. The reconnect cursor is the minimum held fence, not the newest global event, so independently fetched catalog/operations/runtime snapshots cannot hide a transition that occurred between them. Unknown POST outcomes are recorded by idempotency key and reconciled through catalog/operation refreshes; the client never blindly retries a load, download or removal after a connection break.

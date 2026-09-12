@@ -8,6 +8,9 @@ const outDir = process.env.MLXCEL_WEBUI_OUT_DIR ?? resolve(fileURLToPath(new URL
 export default defineConfig({
   base: './',
   plugins: [react()],
+  server: {
+    fs: { allow: ['..'] },
+  },
   build: {
     outDir,
     emptyOutDir: true,
