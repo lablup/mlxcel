@@ -30,7 +30,7 @@ namespace mlx::core {
 
 NO_GPU(BlockMaskedMM)
 NO_GPU(FFT)
-NO_GPU(Hadamard)
+// Hadamard is implemented in hadamard.hip (mlxcelverse, lablup/mlxcel#1825).
 NO_GPU_MULTI(LUF)
 NO_GPU_MULTI(QRF)
 NO_GPU(QQMatmul)
@@ -42,7 +42,7 @@ NO_GPU_MULTI(Eig)
 NO_GPU_MULTI(Eigh)
 // Added upstream after the fork's merge base; no ROCm kernels yet.
 NO_GPU(GatherQQMM)
-NO_GPU(SearchSorted)
+// SearchSorted is implemented in sort.hip (mlxcelverse, lablup/mlxcel#1825).
 
 namespace fast {
 NO_GPU_USE_FALLBACK(CrossEntropy)

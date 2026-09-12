@@ -22,6 +22,44 @@
 
 namespace mlx::core {
 
+namespace {
+
+// mlxcelverse (lablup/mlxcel#1853): widen a narrow index array to int32.
+//
+// The dispatch sites below pick the kernel's index type with a two-way branch,
+// int32_t for int32 and uint32 and int64_t for everything else. That sent
+// int8, uint8, int16, uint16 and bool index arrays to a kernel that reads
+// eight bytes per element out of a one or two byte buffer, which on ROCm is an
+// HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: the GPU queue aborts and the
+// process spins. MLX accepts any integer dtype for indices, and mlxcel reaches
+// this with uint8, because the TurboQuant 4-bit codebook lookup is a `take`
+// with uint8 indices.
+//
+// Widening once here rather than instantiating every kernel for every integer
+// dtype is a deliberate trade. Measured on this backend, giving each of the
+// eight integer dtypes its own instantiation took the compile time of this
+// translation unit from 26 s to 348 s, because the index type multiplies an
+// existing product of twelve value dtypes and five to six index-count
+// branches. Widening keeps the two instantiations and costs one copy pass over
+// the index array, and only on the paths that are broken today.
+bool index_dtype_needs_widening(Dtype dt) {
+  return dt == int8 || dt == uint8 || dt == int16 || dt == uint16 ||
+      dt == bool_;
+}
+
+array widen_index_to_int32(
+    const array& idx,
+    rocm::CommandEncoder& encoder,
+    const Stream& s) {
+  array wide(idx.shape(), int32, nullptr, {});
+  copy_gpu(idx, wide, CopyType::General, s);
+  encoder.add_temporary(wide);
+  return wide;
+}
+
+} // namespace
+
+
 namespace rocm {
 
 // General gather kernel - handles arbitrary indexing
@@ -605,6 +643,22 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   int nidx = inputs.size() - 1;
   int32_t idx_ndim = nidx > 0 ? inputs[1].ndim() : 0;
 
+  // mlxcelverse (lablup/mlxcel#1853): widen narrow index dtypes once, so the
+  // two-way index-type dispatch below cannot read a one or two byte buffer as
+  // int64_t. Reserved so the references handed out below stay valid.
+  std::vector<array> widened_idx;
+  widened_idx.reserve(nidx);
+  std::vector<const array*> idx_arrays(std::max(nidx, 1), nullptr);
+  for (int i = 0; i < nidx; ++i) {
+    const array& given = inputs[i + 1];
+    if (index_dtype_needs_widening(given.dtype())) {
+      widened_idx.push_back(widen_index_to_int32(given, encoder, s));
+      idx_arrays[i] = &widened_idx.back();
+    } else {
+      idx_arrays[i] = &given;
+    }
+  }
+
   uint32_t slice_size = std::accumulate(
       slice_sizes_.begin(), slice_sizes_.end(), 1, std::multiplies<uint32_t>());
 
@@ -620,15 +674,19 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   std::vector<int64_t> h_indices_strides(std::max(nidx, 1) * std::max(idx_ndim, 1));
 
   for (int i = 0; i < nidx; ++i) {
-    h_indices[i] = gpu_ptr<void>(inputs[i + 1]);
+    const array& idx_in = *idx_arrays[i];
+    h_indices[i] = gpu_ptr<void>(idx_in);
     for (int j = 0; j < idx_ndim; ++j) {
-      h_indices_shape[i * idx_ndim + j] = inputs[i + 1].shape(j);
-      h_indices_strides[i * idx_ndim + j] = inputs[i + 1].strides(j);
+      h_indices_shape[i * idx_ndim + j] = idx_in.shape(j);
+      h_indices_strides[i * idx_ndim + j] = idx_in.strides(j);
     }
   }
 
   for (const auto& in : inputs) {
     encoder.set_input_array(in);
+  }
+  for (const auto& widened : widened_idx) {
+    encoder.set_input_array(widened);
   }
   encoder.set_output_array(out);
 
@@ -640,7 +698,7 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   // contiguous (flattened) index -> coalesced per-row copy (gather_rows_kernel).
   bool fast_rows = (nidx == 1) && (axes_.size() == 1) && (axes_[0] == 0) &&
       src.ndim() >= 2 && src.flags().row_contiguous &&
-      inputs[1].flags().contiguous &&
+      idx_arrays[0]->flags().contiguous &&
       ((int)slice_sizes_.size() == (int)src.ndim()) && (slice_sizes_[0] == 1);
   if (fast_rows) {
     for (int d = 1; d < (int)src.ndim(); ++d) {
@@ -668,7 +726,7 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
       int64_t n_rows = total / (int64_t)slice_size;
       dim3 grid((unsigned int)n_rows);
       dim3 blk(256);
-      Dtype it = inputs[1].dtype();
+      Dtype it = idx_arrays[0]->dtype();
       int32_t src_dim0 = (int32_t)src.shape(0);
       #define LAUNCH_ROWS(T, IdxT) \
         encoder.add_kernel_node((&rocm::gather_rows_kernel<T, IdxT>), grid, blk, 0, \
@@ -725,7 +783,7 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
         default: LAUNCH_GATHER(T, IdxT, 8); break; \
       }
 
-    Dtype idx_dtype = nidx > 0 ? inputs[1].dtype() : int32;
+    Dtype idx_dtype = nidx > 0 ? idx_arrays[0]->dtype() : int32;
     
     if (idx_dtype == int32 || idx_dtype == uint32) {
       switch (out.dtype()) {
@@ -793,6 +851,22 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   int nidx = axes_.size();
   int32_t idx_ndim = nidx > 0 ? inputs[1].ndim() : 0;
 
+  // mlxcelverse (lablup/mlxcel#1853): widen narrow index dtypes once, so the
+  // two-way index-type dispatch below cannot read a one or two byte buffer as
+  // int64_t. Reserved so the references handed out below stay valid.
+  std::vector<array> widened_idx;
+  widened_idx.reserve(nidx);
+  std::vector<const array*> idx_arrays(std::max(nidx, 1), nullptr);
+  for (int i = 0; i < nidx; ++i) {
+    const array& given = inputs[i + 1];
+    if (index_dtype_needs_widening(given.dtype())) {
+      widened_idx.push_back(widen_index_to_int32(given, encoder, s));
+      idx_arrays[i] = &widened_idx.back();
+    } else {
+      idx_arrays[i] = &given;
+    }
+  }
+
   // mlxcelverse: int64_t to match scatter_general_kernel's parameter.
   // add_kernel_node passes argument addresses straight to HIP, so an int32_t
   // here was read as an 8-byte value with garbage high bytes; every index
@@ -816,15 +890,19 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   std::vector<int64_t> h_indices_strides(std::max(nidx, 1) * std::max(idx_ndim, 1));
 
   for (int i = 0; i < nidx; ++i) {
-    h_indices[i] = gpu_ptr<void>(inputs[i + 1]);
+    const array& idx_in = *idx_arrays[i];
+    h_indices[i] = gpu_ptr<void>(idx_in);
     for (int j = 0; j < idx_ndim; ++j) {
-      h_indices_shape[i * idx_ndim + j] = inputs[i + 1].shape(j);
-      h_indices_strides[i * idx_ndim + j] = inputs[i + 1].strides(j);
+      h_indices_shape[i * idx_ndim + j] = idx_in.shape(j);
+      h_indices_strides[i * idx_ndim + j] = idx_in.strides(j);
     }
   }
 
   for (const auto& in : inputs) {
     encoder.set_input_array(in);
+  }
+  for (const auto& widened : widened_idx) {
+    encoder.set_input_array(widened);
   }
   encoder.set_output_array(out);
 
@@ -891,7 +969,7 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
         default: DISPATCH_REDUCE(T, IdxT, 4); break; \
       }
 
-    Dtype idx_dtype = nidx > 0 ? inputs[1].dtype() : int32;
+    Dtype idx_dtype = nidx > 0 ? idx_arrays[0]->dtype() : int32;
     
     if (idx_dtype == int32 || idx_dtype == uint32) {
       switch (out.dtype()) {
@@ -938,10 +1016,15 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
 void GatherAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() > 1);
   const auto& src = inputs[0];
-  const auto& idx = inputs[1];
 
   auto& s = stream();
   auto& encoder = rocm::get_command_encoder(s);
+
+  // mlxcelverse (lablup/mlxcel#1853): see index_dtype_needs_widening. An array
+  // is a handle, so binding by value here costs nothing when no widening runs.
+  array idx = index_dtype_needs_widening(inputs[1].dtype())
+      ? widen_index_to_int32(inputs[1], encoder, s)
+      : inputs[1];
 
   out.set_data(mlx::core::rocm::malloc_async(out.nbytes(), encoder));
   if (out.size() == 0) {
@@ -1068,7 +1151,6 @@ void GatherAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
 void ScatterAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() > 2);
   const auto& src = inputs[0];
-  const auto& idx = inputs[1];
   const auto& upd = inputs[2];
 
   // Copy src into out
@@ -1088,7 +1170,12 @@ void ScatterAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   auto& s = stream();
   auto& encoder = rocm::get_command_encoder(s);
-  
+
+  // mlxcelverse (lablup/mlxcel#1853): see index_dtype_needs_widening.
+  array idx = index_dtype_needs_widening(inputs[1].dtype())
+      ? widen_index_to_int32(inputs[1], encoder, s)
+      : inputs[1];
+
   encoder.set_input_array(upd);
   encoder.set_input_array(idx);
   encoder.set_output_array(out);

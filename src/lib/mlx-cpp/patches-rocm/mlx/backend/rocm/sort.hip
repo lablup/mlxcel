@@ -22,6 +22,7 @@ __device__ inline void operator delete[](void*, void*) noexcept {}
 #endif
 
 #include <rocprim/rocprim.hpp>
+#include <algorithm>
 #include <cassert>
 #include <limits>
 
@@ -390,6 +391,49 @@ __global__ void iota_kernel(uint32_t* out, int n) {
   }
 }
 
+// Binary search of one value in a 1-D sorted sequence, mirroring
+// mlx/backend/cuda/sort.cu. `Right` selects numpy's `side="right"`, which
+// returns the index after an equal run rather than before it. `LessThan`
+// carries this backend's NaN ordering, so the two sides agree with the CPU on
+// NaN placement without a separate comparison here.
+template <typename T, bool Right>
+__device__ __forceinline__ uint32_t
+searchsorted_impl(const T* a, T v, uint32_t n, int64_t a_stride) {
+  LessThan<T> lt;
+  uint32_t lo = 0;
+  uint32_t hi = n;
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2;
+    T m = a[static_cast<int64_t>(mid) * a_stride];
+    bool below = Right ? !lt(v, m) : lt(m, v);
+    if (below) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+// Grid-stride, like the other kernels in this backend: the launch geometry
+// below caps the grid, so a one-index-per-thread kernel would silently leave
+// the tail of a large output unwritten.
+template <typename T, bool Right>
+__global__ void searchsorted_kernel(
+    const T* a,
+    const T* v,
+    uint32_t* out,
+    int64_t size,
+    uint32_t n,
+    int64_t a_stride) {
+  int64_t index =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+  for (int64_t i = index; i < size; i += stride) {
+    out[i] = searchsorted_impl<T, Right>(a, v[i], n, a_stride);
+  }
+}
+
 } // namespace rocm
 
 namespace {
@@ -652,6 +696,59 @@ void ArgPartition::eval_gpu(const std::vector<array>& inputs, array& out) {
 
 void Partition::eval_gpu(const std::vector<array>& inputs, array& out) {
   gpu_sort(stream(), inputs[0], out, axis_, false);
+}
+
+void SearchSorted::eval_gpu(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 2);
+  auto& s = stream();
+  auto& a = inputs[0];
+  auto v = inputs[1];
+
+  auto& encoder = rocm::get_command_encoder(s);
+  out.set_data(mlx::core::rocm::malloc_async(out.nbytes(), encoder));
+  if (out.size() == 0) {
+    return;
+  }
+
+  if (!v.flags().row_contiguous) {
+    v = contiguous_copy_gpu(v, s);
+    encoder.add_temporary(v);
+  }
+
+  encoder.set_input_array(a);
+  encoder.set_input_array(v);
+  encoder.set_output_array(out);
+
+  // The sequence is 1-D, so a single stride describes it.
+  int64_t a_stride = a.strides()[0];
+
+  constexpr int block_size = 256;
+  int64_t needed = (static_cast<int64_t>(out.size()) + block_size - 1) / block_size;
+  // The kernel is grid-stride, so a capped grid still covers the whole output.
+  int num_blocks = static_cast<int>(std::min<int64_t>(needed, 65535));
+
+  dispatch_all_types(a.dtype(), [&](auto type_tag) {
+    using CTYPE = MLX_GET_TYPE(type_tag);
+    if constexpr (!std::is_same_v<CTYPE, complex64_t>) {
+      using T = hip_type_t<CTYPE>;
+      dispatch_bool(right_, [&](auto right) {
+        encoder.add_kernel_node(
+            &rocm::searchsorted_kernel<T, right.value>,
+            dim3(num_blocks),
+            dim3(block_size),
+            0,
+            gpu_ptr<T>(a),
+            gpu_ptr<T>(v),
+            gpu_ptr<uint32_t>(out),
+            static_cast<int64_t>(out.size()),
+            static_cast<uint32_t>(a.size()),
+            a_stride);
+      });
+    } else {
+      throw std::runtime_error(
+          "[SearchSorted] complex64 is not supported on ROCm.");
+    }
+  });
 }
 
 } // namespace mlx::core
