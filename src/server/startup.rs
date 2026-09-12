@@ -18,7 +18,7 @@
 //! chat-template resolution, model warmup, and socket binding out of
 //! `server/mod.rs` so the server root can focus on shared types and state.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -35,12 +35,53 @@ use crate::distributed::{
     validate_supported_runtime, write_plan_toml,
 };
 
+#[cfg(feature = "webui")]
+use super::app::create_app_with_secured_ui;
 use super::batch::BatchObservability;
 use super::state::ModelMediaSupport;
 use super::{
     AppState, BatchMetrics, ChatTemplateProcessor, ModelProvider, PipelineParallelRuntimeConfig,
     ServerConfig, ServerGenerateOptions, create_app,
 };
+
+#[cfg(feature = "webui")]
+use std::io::IsTerminal;
+
+#[cfg(feature = "webui")]
+#[derive(Clone)]
+pub(crate) struct WebUiTerminalSecret(String);
+
+#[cfg(feature = "webui")]
+impl std::fmt::Debug for WebUiTerminalSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WebUiTerminalSecret(<redacted>)")
+    }
+}
+
+#[cfg(feature = "webui")]
+impl WebUiTerminalSecret {
+    fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
+    fn expose_once(&self) {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                let _ = writeln!(tty, "mlxcel WebUI session key (shown once): {}", self.0);
+                return;
+            }
+        }
+        if std::io::stderr().is_terminal() {
+            eprintln!("mlxcel WebUI session key (shown once): {}", self.0);
+            return;
+        }
+        tracing::warn!(
+            "WebUI session key was generated but no controlling terminal was available after bind"
+        );
+    }
+}
 
 struct ResolvedDistributedStartup {
     _node_registry: Option<NodeRegistry>,
@@ -125,6 +166,14 @@ pub struct ServerStartupConfig {
     pub api_prefix: String,
     /// `--sse-ping-interval`; `None` = pings disabled (`-1` upstream).
     pub sse_ping_interval: Option<std::time::Duration>,
+    /// Serve the bundled local WebUI and authenticated `/ui-api/v1` adapter routes.
+    pub webui_enabled: bool,
+    /// Restart-local WebUI key generated before bind and printed after bind.
+    #[cfg(feature = "webui")]
+    pub(crate) webui_terminal_secret: Option<WebUiTerminalSecret>,
+    /// Shared policy clone updated with the exact bound authority after bind.
+    #[cfg(feature = "webui")]
+    pub(crate) webui_security_policy: Option<super::webui::security::WebUiSecurityPolicy>,
     /// `--threads-http`, already resolved to a concrete worker count by
     /// [`crate::server::transport::resolve_http_threads`].
     pub threads_http: usize,
@@ -610,6 +659,11 @@ impl Default for ServerStartupConfig {
             sse_ping_interval: Some(std::time::Duration::from_secs(
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
             )),
+            webui_enabled: false,
+            #[cfg(feature = "webui")]
+            webui_terminal_secret: None,
+            #[cfg(feature = "webui")]
+            webui_security_policy: None,
             threads_http: crate::server::transport::resolve_http_threads(
                 crate::server::transport::DEFAULT_THREADS_HTTP,
                 4,
@@ -1951,6 +2005,159 @@ fn validate_pipeline_parallel_startup(startup: &ServerStartupConfig) -> Result<(
         .map(|_| ())
 }
 
+fn prefixed_path(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        path.to_string()
+    } else {
+        format!("{prefix}{path}")
+    }
+}
+
+#[cfg(feature = "webui")]
+fn webui_api_prefix(prefix: &str) -> String {
+    if prefix.is_empty() {
+        "/".to_string()
+    } else {
+        prefix.to_string()
+    }
+}
+
+#[cfg(feature = "webui")]
+fn webui_authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+#[cfg(feature = "webui")]
+fn webui_origin(scheme: &str, authority: &str) -> Result<axum::http::HeaderValue> {
+    format!("{scheme}://{authority}")
+        .parse()
+        .context("failed to build WebUI allowed Origin")
+}
+
+#[cfg(feature = "webui")]
+fn is_loopback_webui_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
+}
+
+#[cfg(feature = "webui")]
+fn webui_listen_kind(
+    resolution: &crate::server::transport::ListenResolution,
+) -> super::webui::security::startup::WebUiListenKind {
+    match &resolution.target {
+        crate::server::transport::ListenTarget::Unix(_) => {
+            super::webui::security::startup::WebUiListenKind::UnixSocket
+        }
+        crate::server::transport::ListenTarget::Tcp { host, .. }
+            if is_loopback_webui_host(host) =>
+        {
+            super::webui::security::startup::WebUiListenKind::LoopbackTcp
+        }
+        crate::server::transport::ListenTarget::Tcp { .. } => {
+            super::webui::security::startup::WebUiListenKind::NonLoopbackTcp
+        }
+    }
+}
+
+#[cfg(feature = "webui")]
+fn webui_allowed_hosts(host: &str, port: u16) -> Vec<String> {
+    let mut hosts = vec![webui_authority(host, port)];
+    if is_loopback_webui_host(host) {
+        hosts.extend([
+            webui_authority("127.0.0.1", port),
+            webui_authority("localhost", port),
+            webui_authority("::1", port),
+        ]);
+    }
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+#[cfg(feature = "webui")]
+fn webui_can_show_secret() -> bool {
+    #[cfg(unix)]
+    {
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    std::io::stderr().is_terminal()
+}
+
+#[cfg(feature = "webui")]
+fn resolve_webui_startup(
+    startup: &mut ServerStartupConfig,
+    mut api_keys: crate::server::ApiKeys,
+) -> Result<(
+    crate::server::ApiKeys,
+    Option<super::webui::security::WebUiSecurityPolicy>,
+)> {
+    if !startup.webui_enabled {
+        return Ok((api_keys, None));
+    }
+    let resolution = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
+    let (host, port) = match &resolution.target {
+        crate::server::transport::ListenTarget::Tcp { host, port } => (host.as_str(), *port),
+        crate::server::transport::ListenTarget::Unix(_) => ("localhost", startup.port),
+    };
+    let scheme = if startup.tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let allowed_hosts = webui_allowed_hosts(host, port);
+    let allowed_origins = allowed_hosts
+        .iter()
+        .map(|host| webui_origin(scheme, host))
+        .collect::<Result<Vec<_>>>()?;
+    let security = super::webui::security::startup::resolve_webui_security(
+        super::webui::security::startup::WebUiSecurityConfig {
+            enabled: true,
+            listen: webui_listen_kind(&resolution),
+            tls_enabled: startup.tls.is_some(),
+            configured_key_present: !api_keys.is_empty(),
+            interactive_terminal: webui_can_show_secret(),
+            allowed_hosts,
+            allowed_origins,
+            public_webui_prefix: prefixed_path(&startup.api_prefix, "/webui"),
+            api_prefix: webui_api_prefix(&startup.api_prefix),
+        },
+    )?;
+    let Some(security) = security else {
+        return Ok((api_keys, None));
+    };
+    if let Some(credential) = security.generated_credential {
+        let secret = credential.into_terminal_secret();
+        startup.webui_terminal_secret = Some(WebUiTerminalSecret::new(secret.clone()));
+        api_keys = api_keys.with_extra_key(secret);
+        tracing::info!("WebUI startup generated a restart-local session key");
+    }
+    startup.webui_security_policy = Some(security.policy.clone());
+    Ok((api_keys, Some(security.policy)))
+}
+
+#[cfg(not(feature = "webui"))]
+fn resolve_webui_startup(
+    startup: &mut ServerStartupConfig,
+    api_keys: crate::server::ApiKeys,
+) -> Result<(crate::server::ApiKeys, Option<()>)> {
+    if startup.webui_enabled {
+        anyhow::bail!(
+            "--webui requires a binary built with the Cargo `webui` feature; rebuild mlxcel with bundled WebUI support"
+        );
+    }
+    Ok((api_keys, None))
+}
+
 fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
     tracing::info!("Starting mlxcel server on {}", addr);
     // Surface the backend's GPU count at startup (epic #486, sub-issue #487).
@@ -1983,6 +2190,28 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
         tracing::info!("  POST {prefix}/slots/:id_slot       - Slot save/restore/erase");
     }
     tracing::info!("  GET  {prefix}/health               - Health check");
+    if startup.webui_enabled {
+        let webui_path = prefixed_path(prefix, "/webui");
+        #[cfg(feature = "webui")]
+        if let Some(policy) = startup.webui_security_policy.as_ref() {
+            match axum::http::HeaderValue::from_str(addr)
+                .map_err(anyhow::Error::from)
+                .and_then(|origin| policy.update_exact_origin(origin))
+            {
+                Ok(()) => {}
+                Err(err) => tracing::error!(
+                    error = %err,
+                    "failed to install exact bound WebUI origin; browser requests may be rejected"
+                ),
+            }
+        }
+        tracing::info!("  GET  {webui_path}/                         - Bundled WebUI");
+        tracing::info!("Bundled WebUI: {addr}{webui_path}/");
+        #[cfg(feature = "webui")]
+        if let Some(secret) = startup.webui_terminal_secret.as_ref() {
+            secret.expose_once();
+        }
+    }
 }
 
 /// Bind and serve, applying the b10621 transport options (#1432).
@@ -2458,6 +2687,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // checks must use the actual parsed keys: a configured key file may contain
     // only comments and blank lines, which is still an unauthenticated server.
     let api_keys = crate::server::resolve_api_keys(&startup.api_keys, &startup.api_key_files)?;
+    let (api_keys, webui_policy) = resolve_webui_startup(&mut startup, api_keys)?;
     validate_settings_endpoint_exposure(
         startup.enable_settings,
         &startup.host,
@@ -2487,9 +2717,12 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // per model inside the router startup; a parse error or untranslatable
     // key fails startup there.
     if startup.model_path.as_os_str().is_empty()
-        && (startup.router_models_dir.is_some() || startup.models_preset.is_some())
+        && (startup.router_models_dir.is_some()
+            || startup.models_preset.is_some()
+            || startup.webui_enabled)
     {
-        return crate::server::router_server::run_router_server(startup, api_keys).await;
+        return crate::server::router_server::run_router_server(startup, api_keys, webui_policy)
+            .await;
     }
 
     // Outside router mode `--models-preset` steers nothing; accepting and
@@ -3196,7 +3429,13 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     .with_audio_model(audio_model)
     .with_embedding_model(embedding_model)
     .with_rerank_model(rerank_model);
-    let app = create_app(state);
+    #[cfg(feature = "webui")]
+    let state = state.with_webui_startup(Arc::new(startup.clone()));
+    let app = match webui_policy {
+        #[cfg(feature = "webui")]
+        Some(policy) => create_app_with_secured_ui(state, policy),
+        _ => create_app(state),
+    };
 
     serve_http(&startup, app).await
 }

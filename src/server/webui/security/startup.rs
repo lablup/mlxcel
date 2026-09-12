@@ -59,6 +59,8 @@ pub(crate) struct WebUiSecurityConfig {
     pub(crate) interactive_terminal: bool,
     pub(crate) allowed_hosts: Vec<String>,
     pub(crate) allowed_origins: Vec<HeaderValue>,
+    pub(crate) public_webui_prefix: String,
+    pub(crate) api_prefix: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +104,14 @@ pub(crate) fn resolve_webui_security(
         );
     }
     Ok(Some(ResolvedWebUiSecurity {
-        policy: WebUiSecurityPolicy::new(config.allowed_hosts, config.allowed_origins)?,
+        policy: WebUiSecurityPolicy::with_prefixes_and_limits(
+            config.allowed_hosts,
+            config.allowed_origins,
+            &config.public_webui_prefix,
+            &config.api_prefix,
+            32,
+            16,
+        )?,
         generated_credential,
     }))
 }

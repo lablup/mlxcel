@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the b10621 Web UI / tools / MCP / agent group (#1435).
+//! Unit tests for the b10621 WebUI flag and adjacent tools / MCP / agent group (#1435, #1838).
 
 use clap::Parser;
 
@@ -76,8 +76,10 @@ fn every_manifest_spelling_parses() {
 }
 
 #[test]
-fn the_inert_forms_are_accepted_as_no_ops() {
+fn supported_webui_and_negative_forms_do_not_fail_the_compat_checker() {
     for argv in [
+        &["--ui"][..],
+        &["--webui"][..],
         &["--no-ui"][..],
         &["--no-webui"][..],
         &["--no-agent"][..],
@@ -92,10 +94,8 @@ fn the_inert_forms_are_accepted_as_no_ops() {
 }
 
 #[test]
-fn every_enabling_form_is_rejected_with_its_flag_named() {
+fn every_unsupported_enabling_form_is_rejected_with_its_flag_named() {
     for (argv, named) in [
-        (&["--ui"][..], "--ui"),
-        (&["--webui"][..], "--ui"),
         (&["--ui-config", "{}"][..], "--ui-config"),
         (&["--ui-config-file", "f"][..], "--ui-config-file"),
         (&["--path", "/srv/ui"][..], "--path"),
@@ -109,7 +109,7 @@ fn every_enabling_form_is_rejected_with_its_flag_named() {
     ] {
         let err = parse(argv)
             .ensure_inert()
-            .expect_err("an enabling form must be refused");
+            .expect_err("an unsupported enabling form must be refused");
         assert!(
             err.contains(named),
             "{argv:?}: diagnostic must name {named}, got: {err}"
@@ -122,9 +122,26 @@ fn every_enabling_form_is_rejected_with_its_flag_named() {
 }
 
 #[test]
+fn webui_enable_disable_resolves_with_last_flag_winning() {
+    assert!(parse(&["--ui"]).webui_enabled().expect("supported"));
+    assert!(parse(&["--webui"]).webui_enabled().expect("supported"));
+    assert!(!parse(&["--no-ui"]).webui_enabled().expect("supported"));
+    assert!(
+        !parse(&["--ui", "--no-webui"])
+            .webui_enabled()
+            .expect("supported")
+    );
+    assert!(
+        parse(&["--no-ui", "--webui"])
+            .webui_enabled()
+            .expect("supported")
+    );
+}
+
+#[test]
 fn bool_pair_env_bindings_follow_b10621_rules() {
     let _guard = crate::test_support::env_lock::env_lock();
-    // Truthy enables the positive form, which the startup check refuses.
+    // Truthy enables the positive form.
     // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
     unsafe {
         std::env::set_var("LLAMA_ARG_UI", "on");
@@ -132,7 +149,7 @@ fn bool_pair_env_bindings_follow_b10621_rules() {
     let mut args = UiCompatArgs::default();
     args.apply_env_bindings().expect("binding resolves");
     assert!(args.ui);
-    assert!(args.ensure_inert().is_err());
+    assert!(args.webui_enabled().expect("supported"));
 
     // Falsy selects the inert negative form.
     // SAFETY: as above.

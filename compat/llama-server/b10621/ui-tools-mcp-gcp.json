@@ -224,14 +224,18 @@
       "default": "enabled",
       "description": "whether to enable the Web UI (default: enabled) (env: LLAMA_ARG_UI)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
-      "issue": 1435,
-      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
-      "notes": "mlxcel ships no web UI, so there is nothing to serve and nothing to alias. --no-ui and --no-webui ask for the state the server is permanently in and are accepted as inert; --ui and --webui fail startup with a diagnostic pointing at the HTTP API. LLAMA_ARG_UI resolves at runtime with b10621's parse_bool_value rules (LLAMA_ARG_NO_UI wins and means false), so a falsy value is the inert form and a truthy one reaches the same refusal the flag does.",
+      "state": "by_design",
+      "issue": 1838,
+      "test": "src/cli/ui_compat_args_tests.rs::webui_enable_disable_resolves_with_last_flag_winning",
+      "notes": "mlxcel now accepts --ui/--webui as aliases for the bundled WebUI and accepts --no-ui/--no-webui as explicit disables. LLAMA_ARG_UI resolves at runtime with b10621's parse_bool_value rules (LLAMA_ARG_NO_UI wins and means false), CLI flags take precedence, and repeated flag pairs use clap's last-wins override behavior.",
       "divergence": [
-        "b10621 serves its embedded web UI at / by default; mlxcel has none, --ui/--webui fail startup, and / answers the health check."
+        "b10621 enables its Web UI by default at /; mlxcel keeps the WebUI opt-in and serves it at ${api-prefix}/webui/."
       ],
-      "rationale": null,
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel keeps the browser surface opt-in and under ${api-prefix}/webui/ so existing llama-compatible API deployments do not expose a static shell by default or repurpose / away from the health handler.",
+        "revisit_if": "mlxcel intentionally adopts llama.cpp WebUI default-on behavior and moves the shell to /."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--ui",
@@ -389,15 +393,21 @@
       "source": "tools/server/server-http.cpp",
       "condition": "webui enabled (--ui / --path static mount)",
       "discovery": "source-static-mount",
-      "state": "not_applicable",
-      "issue": 1435,
-      "test": "src/cli/ui_compat_args_tests.rs::every_enabling_form_is_rejected_with_its_flag_named",
-      "notes": "b10621 serves its embedded SvelteKit bundle (or the --path directory) at the root; mlxcel ships no UI assets and answers the health check at /. The flags that would select a bundle (--ui, --webui, --path, --ui-config, --ui-config-file) fail startup with a diagnostic pointing at the HTTP API, so the root can never become a UI mount.",
+      "state": "by_design",
+      "issue": 1838,
+      "test": "src/server/router_server_security_support_tests.rs",
+      "notes": "With --ui/--webui, mlxcel serves the bundled static shell at ${api-prefix}/webui/ and keeps / as the health check. --path, --ui-config and --ui-config-file remain rejected rather than selecting an arbitrary static directory or llama.cpp UI configuration.",
       "divergence": [
-        "b10621 answers the web UI at /; mlxcel answers the health check there."
+        "b10621 answers the web UI at /; mlxcel answers the health check there and mounts the WebUI under ${api-prefix}/webui/."
       ],
-      "rationale": null,
-      "mlxcel": null
+      "rationale": {
+        "kind": "policy",
+        "reason": "mlxcel keeps / as the health handler and mounts the bundled WebUI under ${api-prefix}/webui/ so the shell can coexist with existing llama-compatible routes and API prefixes.",
+        "revisit_if": "the server API surface reserves / for WebUI and moves health checks elsewhere."
+      },
+      "mlxcel": {
+        "route": "GET ${api-prefix}/webui/"
+      }
     },
     {
       "kind": "route",

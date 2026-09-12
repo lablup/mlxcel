@@ -146,6 +146,8 @@ fn router_probe_app() -> axum::Router {
             pool,
             config: Arc::new(ServerConfig::default()),
             #[cfg(feature = "webui")]
+            startup: Arc::new(crate::server::ServerStartupConfig::default()),
+            #[cfg(feature = "webui")]
             catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
         },
     )
