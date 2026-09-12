@@ -711,7 +711,7 @@ async fn ui_bootstrap(State(state): State<RouterServerState>) -> Response {
         &state.config,
         coordinator.server_instance_id().to_string(),
         mode,
-        state.startup.model_store_root.is_some(),
+        state.pool.has_cache(),
     ))
     .into_response()
 }

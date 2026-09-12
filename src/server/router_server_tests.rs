@@ -196,6 +196,71 @@ async fn send(
     (status, json)
 }
 
+fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+    // SAFETY: callers hold `crate::test_support::env_lock::env_lock()` for the
+    // full mutation window.
+    unsafe {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+}
+
+#[cfg(feature = "webui")]
+fn resolved_models_root_for_bootstrap_test(
+    models_dir: Option<&Path>,
+    cache_dir: Option<&Path>,
+) -> PathBuf {
+    let _guard = crate::test_support::env_lock::env_lock();
+    let old_models_dir = std::env::var_os("MLXCEL_MODELS_DIR");
+    let old_cache_dir = std::env::var_os("MLXCEL_CACHE_DIR");
+    // SAFETY: serialized through the crate-wide env lock.
+    unsafe {
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+        std::env::remove_var("MLXCEL_CACHE_DIR");
+        if let Some(path) = models_dir {
+            std::env::set_var("MLXCEL_MODELS_DIR", path);
+        }
+        if let Some(path) = cache_dir {
+            std::env::set_var("MLXCEL_CACHE_DIR", path);
+        }
+    }
+    let root = crate::downloader::models_root(None).expect("test model store root");
+    restore_env_var("MLXCEL_MODELS_DIR", old_models_dir);
+    restore_env_var("MLXCEL_CACHE_DIR", old_cache_dir);
+    root
+}
+
+#[cfg(feature = "webui")]
+fn assert_bootstrap_reports_cache_authority(body: &serde_json::Value) {
+    assert_eq!(body["server"]["mode"], "model_free", "{body}");
+    assert_eq!(body["actions"]["load"]["state"], "enabled", "{body}");
+    assert_eq!(body["actions"]["unload"]["state"], "enabled", "{body}");
+    assert_eq!(body["actions"]["download"]["state"], "read_only", "{body}");
+    assert_eq!(
+        body["actions"]["download"]["reason"], "download adapter is not mounted in this build",
+        "{body}"
+    );
+    assert_eq!(
+        body["actions"]["cache_delete"]["state"], "read_only",
+        "{body}"
+    );
+    assert_eq!(
+        body["actions"]["cache_delete"]["reason"],
+        "cache removal adapter is not mounted in this build",
+        "{body}"
+    );
+    let roots = body["roots"].as_array().expect("roots array");
+    assert!(
+        roots.iter().any(|root| root["kind"] == "cache"
+            && root["display_name"] == "mlxcel managed cache"
+            && root["writable"] == true),
+        "bootstrap roots must expose the actual configured pool cache: {body}"
+    );
+}
+
 #[path = "router_contract_test_support.rs"]
 mod contract;
 #[cfg(feature = "webui")]
@@ -556,6 +621,68 @@ async fn base_router_does_not_mount_webui_adapters() {
         body["error"]["message"],
         "model name is missing from the request"
     );
+}
+
+#[cfg(feature = "webui")]
+#[tokio::test]
+async fn ui_bootstrap_reports_default_cache_root_from_pool_authority() {
+    let cache_home = temp_models_dir("ui-bootstrap-default-cache-home");
+    let cache_root = resolved_models_root_for_bootstrap_test(None, Some(&cache_home));
+    assert_eq!(cache_root, cache_home.join("models"));
+
+    let state = router_state_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root, Arc::new(InstantDownloader))),
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    let (status, body) = send(
+        app,
+        Method::GET,
+        "/ui-api/v1/bootstrap",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_bootstrap_reports_cache_authority(&body);
+}
+
+#[cfg(feature = "webui")]
+#[tokio::test]
+async fn ui_bootstrap_reports_env_models_root_from_pool_authority() {
+    let env_root = temp_models_dir("ui-bootstrap-env-models-root");
+    let decoy_cache_home = temp_models_dir("ui-bootstrap-env-decoy-cache-home");
+    let cache_root =
+        resolved_models_root_for_bootstrap_test(Some(&env_root), Some(&decoy_cache_home));
+    assert_eq!(cache_root, env_root);
+
+    let state = router_state_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root, Arc::new(InstantDownloader))),
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    let (status, body) = send(
+        app,
+        Method::GET,
+        "/ui-api/v1/bootstrap",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_bootstrap_reports_cache_authority(&body);
 }
 
 #[tokio::test]

@@ -406,7 +406,7 @@
         "revisit_if": "the server API surface reserves / for WebUI and moves health checks elsewhere."
       },
       "mlxcel": {
-        "route": "GET ${api-prefix}/webui/"
+        "route": "GET ${api-prefix}/ (Web UI static assets)"
       }
     },
     {
