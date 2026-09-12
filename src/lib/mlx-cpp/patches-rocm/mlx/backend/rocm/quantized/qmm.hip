@@ -6258,16 +6258,20 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
       return;
     }
 
+    // mlxcelverse: f16 takes the same warp-shared kernel as bf16. It was gated
+    // to bf16 only, so f16 checkpoints (for example Mixtral) fell through to
+    // the generic gather_qmv_kernel at about 200 ms per call.
     if (use_fast_gather_qmv && mode_ == QuantizationMode::Affine &&
-        x.dtype() == bfloat16 && group_size_ == 64 &&
+        (x.dtype() == bfloat16 || x.dtype() == float16) && group_size_ == 64 &&
         (bits_ == 4 || bits_ == 6 || bits_ == 8)) {
-      auto launch_fast_kernel = [&](auto bits_tag) {
+      auto launch_fast_kernel = [&](auto type_tag, auto bits_tag) {
+        using T = typename decltype(type_tag)::type;
         constexpr int BITS = decltype(bits_tag)::value;
         if (fast_threads_per_col == 16) {
           enc.add_kernel_node(
               &rocm::gather_qmv_warp_shared_kernel<
-                  hip_bfloat16,
-                  hip_bfloat16,
+                  T,
+                  T,
                   BITS,
                   64,
                   true,
@@ -6275,17 +6279,17 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
               fast_grid,
               fast_block,
               0u,
-              (const hip_bfloat16*)x_ptr,
+              (const T*)x_ptr,
               (const uint8_t*)w_ptr,
-              (const hip_bfloat16*)scales_ptr,
-              (const hip_bfloat16*)biases_ptr,
+              (const T*)scales_ptr,
+              (const T*)biases_ptr,
               li_ptr,
               ri_ptr,
               batch_shape_param,
               lhs_idx_strides_param,
               rhs_idx_strides_param,
               batch_ndim,
-              (hip_bfloat16*)out_ptr,
+              (T*)out_ptr,
               B,
               M,
               N,
@@ -6297,8 +6301,8 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         } else {
           enc.add_kernel_node(
               &rocm::gather_qmv_warp_shared_kernel<
-                  hip_bfloat16,
-                  hip_bfloat16,
+                  T,
+                  T,
                   BITS,
                   64,
                   true,
@@ -6306,17 +6310,17 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
               fast_grid,
               fast_block,
               0u,
-              (const hip_bfloat16*)x_ptr,
+              (const T*)x_ptr,
               (const uint8_t*)w_ptr,
-              (const hip_bfloat16*)scales_ptr,
-              (const hip_bfloat16*)biases_ptr,
+              (const T*)scales_ptr,
+              (const T*)biases_ptr,
               li_ptr,
               ri_ptr,
               batch_shape_param,
               lhs_idx_strides_param,
               rhs_idx_strides_param,
               batch_ndim,
-              (hip_bfloat16*)out_ptr,
+              (T*)out_ptr,
               B,
               M,
               N,
@@ -6328,12 +6332,19 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         }
       };
 
-      if (bits_ == 4) {
-        launch_fast_kernel(std::integral_constant<int, 4>{});
-      } else if (bits_ == 6) {
-        launch_fast_kernel(std::integral_constant<int, 6>{});
+      auto launch_fast_bits = [&](auto type_tag) {
+        if (bits_ == 4) {
+          launch_fast_kernel(type_tag, std::integral_constant<int, 4>{});
+        } else if (bits_ == 6) {
+          launch_fast_kernel(type_tag, std::integral_constant<int, 6>{});
+        } else {
+          launch_fast_kernel(type_tag, std::integral_constant<int, 8>{});
+        }
+      };
+      if (x.dtype() == float16) {
+        launch_fast_bits(local_type_identity<__half>{});
       } else {
-        launch_fast_kernel(std::integral_constant<int, 8>{});
+        launch_fast_bits(local_type_identity<hip_bfloat16>{});
       }
       return;
     }
