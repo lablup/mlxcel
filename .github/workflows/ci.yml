@@ -871,3 +871,163 @@ jobs:
             echo "expected sm_70 only, found: $ARCHES" >&2
             exit 1
           fi
+
+  issue-1773-cuda-diagnostic:
+    name: issue-1773 CUDA diagnostic (temporary)
+    if: github.repository == 'lablup/mlxcel' && github.event_name == 'pull_request' && github.head_ref == 'fix/issue-1773-paged-dense-contract'
+    runs-on: GB10
+    timeout-minutes: 180
+    env:
+      MLX_CUDA_ARCHITECTURES: '90a;100;121'
+      MLX_ENABLE_TF32: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          clean: false
+
+      - name: Use persistent CUDA target directory
+        run: |
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-aarch64"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> "$GITHUB_ENV"
+
+      - name: Run issue 1773 CUDA bisect
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG="$GITHUB_WORKSPACE/issue-1773-cuda-diagnostic.log"
+          : > "$LOG"
+          exec > >(tee -a "$LOG") 2>&1
+          echo "## host"
+          date -Is
+          uname -a
+          nvidia-smi -L || true
+          nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv || true
+          echo "MLX_ENABLE_TF32=$MLX_ENABLE_TF32"
+          echo "MLX_CUDA_ARCHITECTURES=$MLX_CUDA_ARCHITECTURES"
+          echo "git=$(git rev-parse HEAD)"
+
+          echo "## build"
+          cargo build --release --features cuda --bins
+
+          find_model_dir() {
+            local name="$1"
+            for d in \
+              "$GITHUB_WORKSPACE/models/mlx/$name" \
+              "$GITHUB_WORKSPACE/models/$name" \
+              "$HOME/models/mlx/$name" \
+              "$HOME/models/$name" \
+              "/models/mlx/$name" \
+              "/models/$name"; do
+              if [ -d "$d" ]; then
+                printf '%s\n' "$d"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          if MODEL_DIR=$(find_model_dir llm-jp-4-vl-9b-beta); then
+            echo "llmjpvl model=$MODEL_DIR"
+          else
+            echo "llmjpvl model not present; downloading llm-jp/llm-jp-4-vl-9b-beta"
+            "$CARGO_TARGET_DIR/release/mlxcel" download llm-jp/llm-jp-4-vl-9b-beta
+            MODEL_DIR=$(find_model_dir llm-jp-4-vl-9b-beta)
+            echo "llmjpvl model=$MODEL_DIR"
+          fi
+
+          if QWEN_DIR=$(find_model_dir qwen3-0.6b-4bit); then
+            echo "qwen3 model=$QWEN_DIR"
+          else
+            echo "qwen3 model not present; downloading mlx-community/Qwen3-0.6B-4bit"
+            "$CARGO_TARGET_DIR/release/mlxcel" download mlx-community/Qwen3-0.6B-4bit
+            QWEN_DIR=$(find_model_dir qwen3-0.6b-4bit)
+            echo "qwen3 model=$QWEN_DIR"
+          fi
+
+          python3 - <<'PY'
+import struct, zlib
+w = h = 512
+raw = b''.join(b'\x00' + b'\xff\x00\x00' * w for _ in range(h))
+def chunk(t, data):
+    return struct.pack('>I', len(data)) + t + data + struct.pack('>I', zlib.crc32(t + data) & 0xffffffff)
+png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b'')
+open('solid_red_512.png', 'wb').write(png)
+PY
+          IMG_B64=$(base64 -w0 solid_red_512.png 2>/dev/null || base64 < solid_red_512.png | tr -d '\n')
+          PROMPT='この画像について説明してください。'
+          export IMG_B64 PROMPT
+          python3 - <<PY > request.json
+import json, os
+payload = {
+    "model": "llm-jp-4-vl-9b-beta",
+    "temperature": 0,
+    "max_tokens": 32,
+    "messages": [{"role": "user", "content": [
+        {"type": "text", "text": os.environ.get("PROMPT", "この画像について説明してください。")},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + os.environ["IMG_B64"]}},
+    ]}],
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+
+          echo "## CLI generate"
+          echo "MLX_ENABLE_TF32=0 "$CARGO_TARGET_DIR/release/mlxcel" generate -m '$MODEL_DIR' --image solid_red_512.png -p '$PROMPT' -n 32 --temp 0 --profile"
+          MLX_ENABLE_TF32=0 "$CARGO_TARGET_DIR/release/mlxcel" generate -m "$MODEL_DIR" --image solid_red_512.png -p "$PROMPT" -n 32 --temp 0 --profile
+
+          run_server_case() {
+            local label="$1"
+            shift
+            local port="$1"
+            shift
+            local server_log="server-${label}.log"
+            echo "## server $label"
+            echo "MLX_ENABLE_TF32=0 "$CARGO_TARGET_DIR/release/mlxcel-server" -m '$MODEL_DIR' --host 127.0.0.1 --port '$port' $*"
+            MLX_ENABLE_TF32=0 "$CARGO_TARGET_DIR/release/mlxcel-server" -m "$MODEL_DIR" --host 127.0.0.1 --port "$port" "$@" > "$server_log" 2>&1 &
+            local pid=$!
+            trap 'kill $pid 2>/dev/null || true' RETURN
+            for _ in $(seq 1 240); do
+              if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+                break
+              fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "server $label exited before readiness"
+                cat "$server_log"
+                return 1
+              fi
+              sleep 1
+            done
+            curl -fsS "http://127.0.0.1:$port/v1/chat/completions" -H 'content-type: application/json' --data-binary @request.json > "response-${label}.json"
+            python3 - <<PY
+import json
+label = "$label"
+with open(f"response-{label}.json", encoding="utf-8") as f:
+    data = json.load(f)
+content = data["choices"][0]["message"].get("content", "")
+usage = data.get("usage", {})
+print(f"response[{label}]={content}")
+print(f"usage[{label}]={usage}")
+PY
+            echo "-- server log $label (backend/path lines) --"
+            grep -E 'Starting BatchScheduler|decode_storage|paged|fused|gather|native' "$server_log" || true
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            trap - RETURN
+          }
+
+          run_server_case default 18080
+          run_server_case maxbatch1 18081 --max-batch-size 1
+          run_server_case dense 18082 --decode-storage-backend dense
+
+          echo "## CUDA parity test"
+          echo "MLX_ENABLE_TF32=0 cargo test --test paged_scheduler_parity --release --features cuda -- --ignored --nocapture --test-threads=1"
+          MLX_ENABLE_TF32=0 cargo test --test paged_scheduler_parity --release --features cuda -- --ignored --nocapture --test-threads=1
+
+      - name: Upload issue 1773 diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-1773-cuda-diagnostic
+          path: issue-1773-cuda-diagnostic.log
+          if-no-files-found: ignore
