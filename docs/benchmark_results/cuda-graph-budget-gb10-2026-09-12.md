@@ -311,16 +311,29 @@ This family's server path had never been measured; its +22.5% came from single-s
 
 This is the clearer of the two, and it goes the wrong way. At concurrency 1 and 4 the raised budgets do nothing (+0.8% and +3.2%, both overlapping). At concurrency 8 they cost 10.7% with disjoint ranges (49.80 to 51.10 against 55.20 to 57.70). A family whose single-stream decode gains 22.5% with disjoint ranges loses 10.7% with disjoint ranges on the path a server actually runs. Note also that graphs off, which was the big winner on qwen3-30b-a3b's batched rows, is uniformly worse here (-5.5%, -8.4%, -8.4%): even within one architecture family the sign of a capture-policy change does not carry across checkpoints.
 
+### Long prefill and its memory cost on the two Qwen MoE families
+
+2048-token prompt (one prefill chunk at the default `MLXCEL_PREFILL_CHUNK`), 16 decode tokens, n = 3. This is the workload that priced Laguna's default at +7 GB per chunk, and it is the fourth measured workload for these two families.
+
+| model | config | n | decode tok/s mean (min to max) | vs default | prefill ms mean (min to max) | vs default | MLX peak GB | load1 (min to max) |
+|---|---|---|---|---|---|---|---|---|
+| qwen3-30b-a3b | default | 3 | 73.78 (71.22 to 78.46) |  | 1835.8 (1816.2 to 1861.9) |  | 20.59 | 0.40 to 0.76 |
+| qwen3-30b-a3b | both | 3 | 83.46 (79.47 to 85.93) | +13.1% | 2099.8 (2036.2 to 2139.0) | +14.4% | 36.91 | 0.52 to 1.29 |
+| qwen3.5-35b-a3b | default | 3 | 54.87 (52.53 to 57.44) |  | 3175.4 (3161.9 to 3191.5) |  | 27.74 | 1.12 to 1.60 |
+| qwen3.5-35b-a3b | both | 3 | 63.11 (58.74 to 65.57) | +15.0% | 3428.6 (3407.1 to 3443.7) | +8.0% | 35.91 | 1.20 to 1.42 |
+
+Decode after the long prompt gains on both, and prefill itself is slower on both (+14.4% and +8.0%, disjoint ranges in both cases). The memory is the bigger number: +16.3 GB on qwen3-30b-a3b (20.59 to 36.91) and +8.2 GB on qwen3.5-35b-a3b (27.74 to 35.91), against Laguna's +7.0 GB. Peak memory is exactly reproducible across all three repeats on every arm here, so these are not noise. That is a third measured workload on which neither family gains, independent of the serving result.
+
 ### The verdict on both
 
 Neither family joins the allowlist, and the allowlist stays `["laguna"]`.
 
-- `qwen3_moe`: +20.6% single-stream and +12.6% at concurrency 1, but no measurable effect at 4 or 8. Not a regression, but not a gain either, and the bar is that every measured workload gains.
-- `qwen3_5_moe`: +22.5% single-stream, nothing at 1 and 4, and a disjoint -10.7% at concurrency 8. This one would have been an outright regression on a batched server.
+- `qwen3_moe`: +20.6% single-stream and +12.6% at concurrency 1, no measurable effect at 4 or 8, prefill 14.4% slower at 2048 tokens, and +16.3 GB of peak memory there. Not a regression on the serving path, but not a gain either, and the bar is that every measured workload gains.
+- `qwen3_5_moe`: +22.5% single-stream, nothing at concurrency 1 and 4, a disjoint -10.7% at concurrency 8, prefill 8.0% slower and +8.2 GB at 2048 tokens. This one would have been an outright regression on a batched server.
 
 The general lesson for the next family considered is in `qwen3_5_moe`: single-stream decode and batched serving disagreed in sign on the same checkpoint, with disjoint ranges on both sides. Any future addition has to clear the serving path at more than one concurrency level, not only `mlxcel-bench-decode`.
 
-## Chain status at the host-protection halt (02:52 local)
+## Chain status: the host-protection halt, and what the reboot completed
 
 The GB10 driver began shedding `NVRM: NV_ERR_NO_MEMORY` allocation errors at an accelerating rate during the batched phase (486 by 02:51, 234 of them in two minutes), the documented precursor of a kernel wedge on this host, and every remaining measurement was stopped and the GPU lock released. What completed, all n = 3 unless stated:
 
@@ -330,7 +343,16 @@ The GB10 driver began shedding `NVRM: NV_ERR_NO_MEMORY` allocation errors at an 
 - nsys graph accounting, default and `both`: Laguna, Qwen 3.5 4B, Llama 3.1 8B. Complete (one profile pair per arm by design).
 - DFlash phase split at block 4, six arms: Laguna. Complete (the gated re-run; the first pass overlapped a CI job and is kept in `data/` as `results_dflash.jsonl` for reference only).
 - Batched serving, three arms at concurrency 1, 4, 8: Laguna complete; qwen3-30b-a3b partial (default 1, `both` 2, `nograph` 1 rounds).
-- Not started: intermediate budgets (ops 50 / mb 1000, ops 100 / mb 100) and the 8192-token prefill peak on Laguna (chain 5); qwen3.6-35b-a3b single-stream and the 2048-token prefill peak on qwen3-30b-a3b and qwen3.5-35b-a3b (chain 6).
+- Not started at the halt: intermediate budgets (ops 50 / mb 1000, ops 100 / mb 100) and the 8192-token prefill peak on Laguna (chain 5); qwen3.6-35b-a3b single-stream and the 2048-token prefill peak on qwen3-30b-a3b and qwen3.5-35b-a3b (chain 6).
+
+The host was rebooted, which cleared the driver's error counter to 0, and the chain resumed. Completed after the reboot, all n = 3, `NVRM: NV_ERR_NO_MEMORY` still 0 at the end:
+
+- The default-binary A/B on the wired binary: `mlxcel-bench-decode`, `mlxcel generate` and `mlxcel-server` on Laguna, plus the dense negative control and the startup-line table.
+- Batched serving on qwen3-30b-a3b, all three rounds of all three arms, superseding the partial first pass.
+- Batched serving on qwen3.5-35b-a3b, which had never been measured.
+- The 2048-token prefill peak on both Qwen MoE checkpoints.
+
+Still not run, and not needed for the decision this record supports: the intermediate budgets, the 8192-token Laguna prefill peak, qwen3.6-35b-a3b single-stream, and an nsys pair on the batched path. The last of those would explain why the raised budgets stop helping as a batch fills; it is a mechanism question for the capture-policy follow-up, not a gate on the allowlist, which the throughput rows already settle in the negative for both families. The Metal and Accelerate test gates were not run at all: this is a Linux CUDA host with neither backend.
 
 Raw records for every run, the harness scripts and the sweep logs are in `docs/benchmark_results/data/cuda-graph-budget-gb10-2026-09-12/`.
 

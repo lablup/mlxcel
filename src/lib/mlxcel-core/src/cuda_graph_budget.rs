@@ -45,12 +45,14 @@
 //! with disjoint ranges; Qwen 3.5 4B dense +4%; gemma4 26B-A4B flat; gpt_oss
 //! 20B -7% with +7 GB of peak memory; Llama 3.1 8B -9%, disjoint. "Stacked
 //! expert projection over the byte cap" predicts neither gpt_oss (over,
-//! loses) nor qwen3_moe (under, wins). And qwen3_moe's batched-serving rows
-//! (partial, stopped by a host-protection halt) ran negative at concurrency
-//! 4 and 8 while Laguna's serving rows stayed positive, so the gate is an
-//! allowlist of the families whose every measured workload gains, exactly as
-//! #353's Metal default is an allowlist of measured silicon generations.
-//! Today that is Laguna alone; everything else keeps MLX's table value.
+//! loses) nor qwen3_moe (under, wins). Nor does single-stream decode predict
+//! the serving path: measured at n = 3 through `mlxcel-server`, qwen3_moe
+//! gains at concurrency 1 and does nothing at 4 or 8, and qwen3_5_moe loses
+//! 10.7% at concurrency 8 with disjoint ranges despite its +22% single-stream
+//! result. So the gate is an allowlist of the families whose every measured
+//! workload gains, exactly as #353's Metal default is an allowlist of
+//! measured silicon generations. Today that is Laguna alone; everything else
+//! keeps MLX's table value.
 //!
 //! The measurement behind the value here is
 //! `docs/benchmark_results/cuda-graph-budget-gb10-2026-09-12.md`. This is a
@@ -95,8 +97,10 @@ pub const MAX_MB_ENV: &str = "MLX_MAX_MB_PER_BUFFER";
 /// 2048-token prefill chunk. Families not listed keep MLX's defaults:
 /// `gpt_oss` (-7%, +7 GB) and dense Llama (-9%) measured worse, `gemma4` MoE
 /// flat, and `qwen3_moe` / `qwen3_5_moe` gained +21% / +22% single-stream but
-/// `qwen3_moe`'s partial batched-serving rows ran the other way, so both wait
-/// on a follow-up measurement of the server path before they can be listed.
+/// failed on the serving path at n = 3: `qwen3_moe` is flat at concurrency 4
+/// and 8, and `qwen3_5_moe` is -10.7% at concurrency 8 with disjoint ranges.
+/// A candidate family has to clear the server at more than one concurrency
+/// level, not only `mlxcel-bench-decode`.
 pub const GB10_RAISED_BUDGET_MODEL_TYPES: &[&str] = &["laguna"];
 
 /// What the policy needs to know about a checkpoint, read from its
@@ -187,9 +191,9 @@ pub fn model_graph_shape_from_dir(model_dir: &Path) -> ModelGraphShape {
 /// raise. The checkpoint must be a family measured to gain
 /// ([`ModelGraphShape::family_measured_to_gain`]); the sign differs by family
 /// and by workload (+17% on Laguna everywhere measured, -7% on gpt_oss, -9%
-/// on dense Llama, and +21% single-stream but negative batched on qwen3_moe),
-/// so no broader default has one sign. Pure so both
-/// gates are testable without a device or a checkpoint.
+/// on dense Llama, and on qwen3_5_moe +22% single-stream against -10.7%
+/// batched at concurrency 8), so no broader default has one sign. Pure so
+/// both gates are testable without a device or a checkpoint.
 #[must_use]
 pub fn cuda_graph_budget_default(
     compute_capability: Option<(u32, u32)>,
@@ -355,9 +359,10 @@ mod tests {
     fn every_measured_winner_is_listed_and_every_loser_is_not() {
         assert!(shape("laguna", Some(256)).family_measured_to_gain());
         // Measured flat or worse on GB10 (gpt_oss -7%, gemma4 MoE flat,
-        // Llama -9%), dense (Qwen 3.5 4B), single-stream winners whose
-        // batched-serving rows ran the other way (qwen3_moe, qwen3_5_moe by
-        // extension), and unmeasured families.
+        // Llama -9%), dense (Qwen 3.5 4B), single-stream winners that failed
+        // the serving path at n = 3 (qwen3_moe flat at concurrency 4 and 8,
+        // qwen3_5_moe -10.7% at 8 with disjoint ranges), and unmeasured
+        // families.
         for (t, n) in [
             ("gpt_oss", Some(32)),
             ("gemma4", Some(128)),
