@@ -106,7 +106,7 @@ const PAGED_DENSE_MAX_RELATIVE_RMS: f64 = 5e-5;
 #[derive(Debug)]
 struct DecodeStepTrace {
     token: i32,
-    logits: Vec<f32>,
+    next_logits: Vec<f32>,
 }
 
 /// Fixed prompt token ids (deterministic; no tokenizer needed). Identical bytes
@@ -179,7 +179,7 @@ fn assert_trace_within_relative_rms(
         "{label}: greedy tokens differ between paged and dense backends"
     );
     for (idx, (actual, reference)) in actual.iter().zip(reference.iter()).enumerate() {
-        let rms = relative_rms(&actual.logits, &reference.logits);
+        let rms = relative_rms(&actual.next_logits, &reference.next_logits);
         assert!(
             rms <= max_relative_rms,
             "{label}: decode step {idx} relative RMS {rms:e} exceeded {max_relative_rms:e}"
@@ -198,7 +198,8 @@ fn scheduler_paged_layout(num_layers: usize) -> SequenceStateLayout {
 
 /// Run prefill + `DECODE_STEPS` greedy decode steps via single-sequence
 /// `model.forward` (the scheduler's `execute_full_prefill` + `decode_single_step`
-/// path), returning each emitted token with the logit row that selected it.
+/// path), returning each emitted token with the next-step logit row produced
+/// after appending it.
 fn run_single_sequence_trace(
     model: &mlxcel::LoadedModel,
     caches: &mut [mlxcel_core::cache::KVCache],
@@ -219,7 +220,7 @@ fn run_single_sequence_trace(
         mlxcel_core::eval(&logits);
         decoded.push(DecodeStepTrace {
             token: next,
-            logits: logit_row(&logits, 0, 0),
+            next_logits: logit_row(&logits, 0, 0),
         });
         next = greedy_token(&logits, 0, 0);
     }
@@ -362,11 +363,11 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
         mlxcel_core::eval(&logits);
         batched[0].push(DecodeStepTrace {
             token: next[0],
-            logits: logit_row(&logits, 0, 0),
+            next_logits: logit_row(&logits, 0, 0),
         });
         batched[1].push(DecodeStepTrace {
             token: next[1],
-            logits: logit_row(&logits, 1, 0),
+            next_logits: logit_row(&logits, 1, 0),
         });
         next[0] = greedy_token(&logits, 0, 0);
         next[1] = greedy_token(&logits, 1, 0);
