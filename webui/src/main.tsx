@@ -14,63 +14,12 @@
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { App } from './app';
+import { WebUiProvider } from './state';
 import './styles.css';
-
-type Capability = {
-  label: string;
-  detail: string;
-};
-
-const capabilities: Capability[] = [
-  {
-    label: 'Model-free startup',
-    detail: 'Start the control plane first, then discover, download, and load models explicitly.',
-  },
-  {
-    label: 'Offline bundle',
-    detail: 'Every script, style, and asset is served by mlxcel from the same local origin.',
-  },
-  {
-    label: 'Native-feeling shell',
-    detail: 'macOS-style glass navigation, keyboard focus, and readable content surfaces.',
-  },
-];
-
-function App(): React.JSX.Element {
-  return (
-    <main className="shell" aria-labelledby="app-title">
-      <aside className="sidebar" aria-label="Primary navigation">
-        <div className="brand" aria-hidden="true">mlx</div>
-        <nav>
-          <a aria-current="page" href="#models">Models</a>
-          <a href="#chat">Chat</a>
-          <a href="#activity">Activity</a>
-          <a href="#settings">Settings</a>
-        </nav>
-        <p className="status">Local WebUI shell ready</p>
-      </aside>
-      <section className="content">
-        <header className="toolbar">
-          <p>Bundled WebUI</p>
-          <span>Waiting for server adapters</span>
-        </header>
-        <div className="hero">
-          <p className="eyebrow">Issue #1836 foundation</p>
-          <h1 id="app-title">mlxcel WebUI loads from a reproducible offline bundle.</h1>
-          <p className="lead">This minimal shell verifies the React, TypeScript, Vite, and Rust embedding pipeline before model controls land in later issues.</p>
-          <div className="cards" aria-label="Planned capabilities">
-            {capabilities.map((item) => (
-              <article key={item.label}>
-                <h2>{item.label}</h2>
-                <p>{item.detail}</p>
-              </article>
-            ))}
-          </div>
-        </div>
-      </section>
-    </main>
-  );
-}
+import './design-system/tokens.css';
+import './design-system/components.css';
+import './design-system/glass-intensity.css';
 
 const rootElement = document.getElementById('root');
 if (rootElement === null) {
@@ -79,6 +28,8 @@ if (rootElement === null) {
 
 createRoot(rootElement).render(
   <React.StrictMode>
-    <App />
+    <WebUiProvider>
+      <App />
+    </WebUiProvider>
   </React.StrictMode>,
 );

@@ -1,0 +1,106 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius-xs: 8px;
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+  --radius-xxl: 28px;
+  --motion-fast: 120ms;
+  --motion-standard: 160ms;
+  --motion-slow: 180ms;
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--color-focus) 42%, transparent);
+  --color-bg: #f3f4f6;
+  --color-bg-elevated: #ffffff;
+  --color-bg-neutral: #f8f8fa;
+  --color-text: #151a24;
+  --color-muted: #59647a;
+  --color-separator: rgba(33, 42, 61, 0.12);
+  --color-focus: #245bd8;
+  --color-selection: rgba(36, 42, 55, 0.08);
+  --color-warning: #8a5200;
+  --color-warning-bg: #fff4d8;
+  --color-error: #b42318;
+  --color-error-bg: #fff0ed;
+  --color-success: #137333;
+  --color-success-bg: #eaf7ee;
+  --material-tint: rgba(76, 93, 135, 0.06);
+  --material-glass-alpha: 0.72;
+  --material-glass-blur: 18px;
+  --material-glass-saturation: 118%;
+  --material-glass-bg: rgba(248, 249, 251, var(--material-glass-alpha));
+  --material-content-bg: rgba(255, 255, 255, 0.82);
+  --material-control-bg: rgba(255, 255, 255, 0.58);
+  --shadow-chrome: 0 1px 0 rgba(255, 255, 255, 0.62) inset;
+  --shadow-card: 0 12px 36px rgba(31, 37, 52, 0.07);
+}
+
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #0e1117;
+    --color-bg-elevated: #181d27;
+    --color-bg-neutral: #111722;
+    --color-text: #f5f7fb;
+    --color-muted: #aeb8c9;
+    --color-separator: rgba(255, 255, 255, 0.12);
+    --color-focus: #9dbdff;
+    --color-selection: rgba(255, 255, 255, 0.10);
+    --color-warning: #ffd28a;
+    --color-warning-bg: rgba(139, 92, 0, 0.22);
+    --color-error: #ffb4a8;
+    --color-error-bg: rgba(152, 43, 28, 0.24);
+    --color-success: #9be6b0;
+    --color-success-bg: rgba(25, 108, 55, 0.22);
+    --material-tint: rgba(107, 137, 210, 0.10);
+    --material-glass-bg: rgba(24, 28, 36, var(--material-glass-alpha));
+    --material-content-bg: rgba(25, 29, 38, 0.84);
+    --material-control-bg: rgba(255, 255, 255, 0.08);
+    --shadow-chrome: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+    --shadow-card: 0 14px 40px rgba(0, 0, 0, 0.22);
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #0e1117;
+  --color-bg-elevated: #181d27;
+  --color-bg-neutral: #111722;
+  --color-text: #f5f7fb;
+  --color-muted: #aeb8c9;
+  --color-separator: rgba(255, 255, 255, 0.12);
+  --color-focus: #9dbdff;
+  --color-selection: rgba(255, 255, 255, 0.10);
+  --color-warning: #ffd28a;
+  --color-warning-bg: rgba(139, 92, 0, 0.22);
+  --color-error: #ffb4a8;
+  --color-error-bg: rgba(152, 43, 28, 0.24);
+  --color-success: #9be6b0;
+  --color-success-bg: rgba(25, 108, 55, 0.22);
+  --material-tint: rgba(107, 137, 210, 0.10);
+  --material-glass-bg: rgba(24, 28, 36, var(--material-glass-alpha));
+  --material-content-bg: rgba(25, 29, 38, 0.84);
+  --material-control-bg: rgba(255, 255, 255, 0.08);
+  --shadow-chrome: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  --shadow-card: 0 14px 40px rgba(0, 0, 0, 0.22);
+}
+
+:root[data-material="tinted"] { --material-glass-bg: color-mix(in srgb, var(--color-bg-elevated) 64%, #6f87ff 12%); }
+:root[data-material="opaque"], :root[data-reduce-transparency="true"], :root[data-backdrop-filter="unsupported"] { --material-glass-bg: var(--color-bg-elevated); --material-glass-blur: 0px; --material-glass-saturation: 100%; }
+:root[data-high-contrast="on"] { --color-separator: currentColor; --color-selection: color-mix(in srgb, var(--color-focus) 30%, transparent); --material-glass-bg: var(--color-bg-elevated); }
+
+@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) { --color-separator: currentColor; --material-glass-bg: var(--color-bg-elevated); --color-selection: color-mix(in srgb, var(--color-focus) 30%, transparent); } }
+@media (prefers-reduced-transparency: reduce) { :root { --material-glass-bg: var(--color-bg-elevated); --material-glass-blur: 0px; } }
+@media (prefers-reduced-motion: reduce) { :root { --motion-fast: 1ms; --motion-standard: 1ms; --motion-slow: 1ms; } }
+:root[data-reduce-motion="true"] { --motion-fast: 1ms; --motion-standard: 1ms; --motion-slow: 1ms; }
+:root[data-test-text-scale="200"] { font-size: 200%; }

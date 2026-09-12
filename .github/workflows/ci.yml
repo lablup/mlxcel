@@ -386,7 +386,7 @@ jobs:
     name: WebUI bundle
     needs: changes
     if: needs.changes.outputs.webui_bundle == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -408,8 +408,36 @@ jobs:
         run: pnpm --dir webui run unit
       - name: Install browser runtime
         run: pnpm --dir webui exec playwright install --with-deps chromium
+      - name: Install WebUI screenshot fonts
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core=2.37-8 fonts-dejavu-extra=2.37-8 fonts-wqy-zenhei=0.9.45-8
+          fc-cache -f
+      - name: Log WebUI browser font environment
+        run: |
+          uname -a
+          cat /etc/os-release
+          node --version
+          pnpm --version
+          pnpm --dir webui exec playwright --version
+          pnpm --dir webui exec playwright install --dry-run chromium
+          fc-match sans-serif || true
+          fc-match system-ui || true
+          fc-match 'system-ui:weight=bold' || true
+          fc-match Arial || true
+          fc-list | wc -l
       - name: Run WebUI browser scaffold
+        env:
+          MLXCEL_WEBUI_FONT_DIAGNOSTICS: '1'
         run: pnpm --dir webui run browser
+      - name: Upload WebUI browser screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-browser-screenshots-${{ runner.os }}
+          path: |
+            webui/test-results/**/*.png
+            webui/tests/screenshots/linux/**/*.png
+          if-no-files-found: warn
       - name: Verify generated WebUI bundle
         run: python3 scripts/webui/build_bundle.py --verify
 
