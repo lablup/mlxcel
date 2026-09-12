@@ -328,8 +328,10 @@ Apache License 2.0 unless otherwise noted. See [LICENSE](LICENSE). Third-party a
 ## Acknowledgments
 
 - [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework.
+- [NripeshN/mlx](https://github.com/NripeshN/mlx), whose `rocm-support` branch is the AMD GPU (ROCm/HIP) MLX backend vendored as the ROCm part of mlxcelverse, under the MIT License. See [NOTICE](NOTICE).
 - [mlx-lm](https://github.com/ml-explore/mlx-lm), [mlx-vlm](https://github.com/Blaizzy/mlx-vlm), and [mlx-audio](https://github.com/Blaizzy/mlx-audio), whose model coverage and behavior mlxcel ports and mirrors. See [NOTICE](NOTICE).
 - [MLX Community](https://huggingface.co/mlx-community), pre-converted MLX checkpoints.
 - [turboquant_plus](https://github.com/TheTom/turboquant_plus), whose TurboQuant KV-cache algorithms are ported under Apache-2.0. See [NOTICE](NOTICE).
 - [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3), whose tiktoken pre-tokenization pattern and XTML chat grammar are reimplemented in Rust under the Kimi K3 License. See [NOTICE](NOTICE).
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer), whose paged-attention, split-KV, cascade state-merge, and sampling designs inform mlxcel's serving kernels.
+- [IREE](https://github.com/iree-org/iree) and [StableHLO](https://github.com/openxla/stablehlo), the runtime and graph format behind the alpha OpenXLA backend: mlxcel emits StableHLO, `iree-compile` lowers it, and the IREE runtime executes it under the opt-in `xla-iree` build. See [NOTICE](NOTICE).

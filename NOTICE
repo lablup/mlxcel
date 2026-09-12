@@ -122,6 +122,26 @@ contributors; the MIT License text in the mlx-lm section above covers it.
 Vendored files keep their original headers.
 
 
+IREE and StableHLO (OpenXLA backend, `xla-iree` feature only)
+------------------------------------------------------------
+
+No IREE or StableHLO source is vendored in this tree. The optional OpenXLA
+backend emits StableHLO (https://github.com/openxla/stablehlo) graphs, and
+under the off-by-default `xla-iree` cargo feature the C shim in
+src/lib/mlxcel-xla/csrc/xla_iree.c is compiled against the IREE runtime
+headers and linked against a prebuilt or source-built IREE runtime
+(https://github.com/iree-org/iree), Copyright The IREE Authors, licensed
+under the Apache License, Version 2.0 with LLVM Exceptions. `iree-compile`
+from the same distribution lowers the emitted graphs ahead of time.
+
+Release builds do not enable that feature, so shipped binaries contain no
+IREE code. A locally built `xla-iree` binary statically links the IREE
+runtime; the LLVM Exception to the Apache 2.0 License covers that Object
+form embedding without the Section 4(a), 4(b), and 4(d) obligations, and
+IREE ships a LICENSE with no NOTICE file, so nothing is carried forward
+here. This section records the dependency.
+
+
 moonshotai/Kimi-K3 (tokenizer pattern and XTML chat grammar)
 -----------------------------------------------------------
 
