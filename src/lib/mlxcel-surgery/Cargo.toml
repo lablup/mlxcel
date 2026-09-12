@@ -10,6 +10,9 @@ crate-type = ["lib"]
 
 [features]
 default = []
+# Present so `--workspace --features rocm` reaches this crate's build script,
+# which emits the ROCm rpath its own test binaries need (issue #1802).
+rocm = ["mlxcel-core/rocm"]
 
 [dependencies]
 # WeightMap and WeightTransform trait — the integration point with the

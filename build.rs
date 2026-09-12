@@ -31,23 +31,14 @@
 use std::env;
 use std::path::PathBuf;
 
+#[path = "src/lib/mlxcel-core/build_support/rocm_rpath.rs"]
+mod rocm_rpath;
+
 fn main() {
     // ROCm (`rocm` feature, #1802): mlxcel-core links the ROCm shared libraries,
-    // but ROCm installs do not always register their library directory with the
-    // dynamic loader, and mlxcel-core's rpath link arg does not reach this
-    // crate's binaries for the reason given above. Keep the default in step with
-    // `rocm_path` in src/lib/mlxcel-core/build.rs.
-    println!("cargo:rerun-if-env-changed=ROCM_PATH");
-    if env::var_os("CARGO_FEATURE_ROCM").is_some() {
-        let rocm = env::var_os("ROCM_PATH")
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/opt/rocm"));
-        println!(
-            "cargo:rustc-link-arg=-Wl,-rpath,{}",
-            rocm.join("lib").display()
-        );
-    }
+    // but its rpath link arg does not reach this crate's binaries for the reason
+    // given above, so this crate emits its own.
+    rocm_rpath::emit();
 
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
