@@ -19,5 +19,6 @@
 //! server's validated API prefix when `--webui` becomes active.
 
 pub(crate) mod assets;
+pub(crate) mod security;
 
 pub use assets::{WEBUI_PREFIX, manifest_json, router};

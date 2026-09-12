@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "payload_too_large",
+    "message": "WebUI control request body is too large",
+    "retryable": true
+  },
+  "request_id": "req_security_fixture"
+}

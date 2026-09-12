@@ -1112,10 +1112,10 @@ fn router_ui_routes(state: RouterServerState) -> axum::Router<RouterServerState>
         ))
 }
 
-fn finish_router_app(
+fn finish_router_layers(
     routes: axum::Router<RouterServerState>,
-    state: RouterServerState,
-) -> axum::Router {
+    state: &RouterServerState,
+) -> axum::Router<RouterServerState> {
     routes
         .fallback(dispatch_fallback)
         .layer(middleware::from_fn_with_state(
@@ -1127,7 +1127,28 @@ fn finish_router_app(
             router_cors_middleware,
         ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(state)
+}
+
+fn finish_router_app(
+    routes: axum::Router<RouterServerState>,
+    state: RouterServerState,
+) -> axum::Router {
+    finish_router_layers(routes, &state).with_state(state)
+}
+
+#[cfg(feature = "webui")]
+fn finish_router_app_with_security(
+    routes: axum::Router<RouterServerState>,
+    state: RouterServerState,
+    policy: super::webui::security::WebUiSecurityPolicy,
+) -> axum::Router {
+    let api_keys = state.config.api_keys.clone();
+    super::webui::security::secure_webui_router(
+        finish_router_layers(routes, &state),
+        api_keys,
+        policy,
+    )
+    .with_state(state)
 }
 
 /// Assemble the router-mode llama-compatible application. WebUI management
@@ -1145,9 +1166,32 @@ pub fn create_router_app_with_authenticated_ui(state: RouterServerState) -> axum
     finish_router_app(routes, state)
 }
 
+/// Assemble the WebUI-enabled router with the browser security policy outside Trace/CORS/auth.
+#[cfg(feature = "webui")]
+#[allow(dead_code)]
+pub(crate) fn create_router_app_with_secured_ui(
+    state: RouterServerState,
+    policy: super::webui::security::WebUiSecurityPolicy,
+) -> axum::Router {
+    let routes = router_base_routes().merge(router_ui_routes(state.clone()));
+    finish_router_app_with_security(routes, state, policy)
+}
+
 #[cfg(test)]
 #[path = "router_server_tests.rs"]
 mod router_server_tests;
+
+#[cfg(test)]
+#[path = "router_server_security_support_tests.rs"]
+mod router_server_security_support_tests;
+
+#[cfg(test)]
+#[path = "router_server_security_prefix_tests.rs"]
+mod router_server_security_prefix_tests;
+
+#[cfg(test)]
+#[path = "router_server_security_tests.rs"]
+mod router_server_security_tests;
 
 /// Run the router server: discover models (cache, `--models-dir`, presets),
 /// build the pool, and serve the b10621 router surface (issue #1438).

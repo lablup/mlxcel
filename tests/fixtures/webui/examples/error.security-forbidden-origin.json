@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "forbidden",
+    "message": "Origin header is not allowed",
+    "retryable": false
+  },
+  "request_id": "req_security_fixture"
+}
