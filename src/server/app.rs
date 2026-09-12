@@ -17,9 +17,10 @@
 use axum::{
     Router,
     body::Body,
-    extract::{DefaultBodyLimit, State},
-    http::{Method, Request},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    http::{HeaderMap, Method, Request, StatusCode, Uri},
     middleware::{self, Next},
+    response::Json,
     response::{IntoResponse, Response},
     routing::{MethodRouter, get, post},
 };
@@ -165,6 +166,35 @@ pub fn create_app(state: AppState) -> Router {
 /// `Access-Control-Allow-Origin` to the same response.
 pub fn create_app_without_cors(state: AppState) -> Router {
     create_app_impl(state, false)
+}
+
+#[cfg(feature = "webui")]
+pub(crate) fn create_app_with_secured_ui(
+    state: AppState,
+    policy: super::webui::security::WebUiSecurityPolicy,
+) -> Router {
+    let api_keys = state.config.api_keys.clone();
+    let api_prefix = state.config.api_prefix.clone();
+    let ui_api = single_webui_api_routes().layer(DefaultBodyLimit::max(
+        super::webui::api::WEBUI_JSON_BODY_BYTES as usize,
+    ));
+    let ui_api = if api_prefix.is_empty() {
+        ui_api
+    } else {
+        Router::new().nest(&api_prefix, ui_api)
+    };
+    let static_routes = if api_prefix.is_empty() {
+        super::webui::assets::router()
+    } else {
+        Router::new().nest(&api_prefix, super::webui::assets::router())
+    };
+    super::webui::security::secure_webui_router(
+        create_app_impl(state.clone(), true)
+            .merge(ui_api.with_state(state.clone()))
+            .merge(static_routes.with_state(state.clone())),
+        api_keys,
+        policy,
+    )
 }
 
 fn create_app_impl(state: AppState, with_cors: bool) -> Router {
@@ -520,6 +550,290 @@ fn build_routes(state: &AppState) -> Router<AppState> {
     }
 
     app
+}
+
+#[cfg(feature = "webui")]
+fn single_webui_api_routes() -> Router<AppState> {
+    Router::new()
+        .route("/ui-api/v1/bootstrap", get(single_ui_bootstrap))
+        .route("/ui-api/v1/catalog", get(single_ui_catalog_list))
+        .route("/ui-api/v1/catalog/:id", get(single_ui_catalog_get))
+        .route("/ui-api/v1/runtime", get(single_ui_runtime))
+        .route("/ui-api/v1/operations", get(single_ui_operations_list))
+        .route("/ui-api/v1/events", get(single_ui_events))
+}
+
+#[cfg(feature = "webui")]
+fn single_webui_error(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+) -> Response {
+    (
+        status,
+        Json(super::router_lifecycle::ErrorEnvelope {
+            error: super::router_lifecycle::ErrorBody {
+                code: code.to_string(),
+                message: message.into(),
+                retryable,
+                field_errors: None,
+                operation_id: None,
+            },
+            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "webui")]
+fn single_invalid_field(field: &'static str, message: &'static str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(super::router_lifecycle::ErrorEnvelope {
+            error: super::router_lifecycle::ErrorBody {
+                code: "invalid_request".to_string(),
+                message: "request does not match the WebUI contract".to_string(),
+                retryable: true,
+                field_errors: Some(vec![super::router_lifecycle::FieldError {
+                    field: field.to_string(),
+                    code: "invalid_format".to_string(),
+                    message: message.to_string(),
+                }]),
+                operation_id: None,
+            },
+            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "webui")]
+fn valid_model_id(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("mdl_") else {
+        return false;
+    };
+    suffix.len() == 43
+        && suffix
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+#[cfg(feature = "webui")]
+async fn single_catalog_entry_blocking(
+    state: AppState,
+) -> Result<super::webui::catalog::CatalogEntry, tokio::task::JoinError> {
+    let cache = state.webui_catalog_cache.clone();
+    tokio::task::spawn_blocking(move || {
+        super::webui::catalog::single_model_entry_from_state_with_cache(&cache, &state)
+    })
+    .await
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_bootstrap(State(state): State<AppState>) -> Response {
+    Json(super::webui::api::bootstrap_response(
+        &state.webui_startup,
+        &state.config,
+        state.webui_lifecycle.server_instance_id().to_string(),
+        super::webui::api::WebUiServerMode::SingleModel,
+        false,
+    ))
+    .into_response()
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_catalog_list(
+    State(state): State<AppState>,
+    Query(query): Query<super::webui::catalog::CatalogQuery>,
+) -> Response {
+    let limit = query
+        .limit
+        .unwrap_or(super::webui::api::CATALOG_DEFAULT_PAGE_SIZE as usize);
+    if !(1..=super::webui::api::CATALOG_MAX_PAGE_SIZE as usize).contains(&limit) {
+        return single_invalid_field("limit", "limit must be between 1 and 200");
+    }
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > super::webui::api::CURSOR_BYTES as usize)
+    {
+        return single_invalid_field("cursor", "cursor is too long");
+    }
+    let server_instance_id = state.webui_lifecycle.server_instance_id().to_string();
+    let snapshot_sequence = state.webui_lifecycle.snapshot_sequence();
+    match single_catalog_entry_blocking(state).await {
+        Ok(entry) => {
+            let items = if query.cursor.is_some() {
+                Vec::new()
+            } else {
+                vec![entry]
+            };
+            Json(super::webui::catalog::CatalogListResponse {
+                schema_version: super::router_lifecycle::SCHEMA_VERSION.to_string(),
+                pagination: super::webui::catalog::Pagination {
+                    limit,
+                    next_cursor: None,
+                    total_known: Some(items.len()),
+                },
+                items,
+                server_instance_id,
+                snapshot_sequence,
+            })
+            .into_response()
+        }
+        Err(err) => single_webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("catalog projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_catalog_get(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if !valid_model_id(&id) {
+        return single_invalid_field("id", "model_id must match ^mdl_[A-Za-z0-9_-]{43}$");
+    }
+    match single_catalog_entry_blocking(state).await {
+        Ok(entry) if entry.identity.id == id => Json(entry).into_response(),
+        Ok(_) => single_webui_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "catalog entry not found",
+            true,
+        ),
+        Err(err) => single_webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("catalog projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+#[derive(Default, serde::Deserialize)]
+struct SingleRuntimeQuery {
+    model_id: Option<String>,
+    autoload: Option<bool>,
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_runtime(
+    State(state): State<AppState>,
+    Query(query): Query<SingleRuntimeQuery>,
+) -> Response {
+    if query.autoload.unwrap_or(false) {
+        return single_invalid_field("autoload", "runtime observations must use autoload=false");
+    }
+    let Some(model_id) = query.model_id else {
+        return single_invalid_field("model_id", "model_id is required");
+    };
+    if !valid_model_id(&model_id) {
+        return single_invalid_field("model_id", "model_id must match ^mdl_[A-Za-z0-9_-]{43}$");
+    }
+    match single_catalog_entry_blocking(state.clone()).await {
+        Ok(entry) if entry.identity.id == model_id => Json(super::webui::api::runtime_snapshot(
+            state.webui_lifecycle.server_instance_id().to_string(),
+            model_id,
+            entry.identity.revision,
+            state.webui_lifecycle.snapshot_sequence(),
+            &state.config,
+        ))
+        .into_response(),
+        Ok(_) => single_webui_error(StatusCode::NOT_FOUND, "not_found", "model not found", true),
+        Err(err) => single_webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("runtime projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+#[derive(Default, serde::Deserialize)]
+struct SingleOperationsQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_operations_list(
+    State(state): State<AppState>,
+    Query(query): Query<SingleOperationsQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return single_invalid_field("limit", "limit must be between 1 and 200");
+    }
+    Json(
+        state
+            .webui_lifecycle
+            .list_operations(limit, query.cursor.as_deref(), None, None, None),
+    )
+    .into_response()
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_events(
+    State(state): State<AppState>,
+    _headers: HeaderMap,
+    _uri: Uri,
+) -> Response {
+    let (receiver, replay) = match state.webui_lifecycle.subscribe_for_ui(
+        super::router_lifecycle::UiReplayCursor::Snapshot,
+        Vec::new(),
+    ) {
+        Ok(subscription) => subscription,
+        Err(_) => {
+            return single_webui_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "event cursor is invalid",
+                true,
+            );
+        }
+    };
+    let coordinator = state.webui_lifecycle.clone();
+    let stream = futures::stream::unfold(
+        (replay.into_iter(), receiver, coordinator),
+        |state| async move {
+            let (mut replay, mut receiver, coordinator) = state;
+            if let Some(event) = replay.next() {
+                return Some((
+                    Ok::<axum::response::sse::Event, std::convert::Infallible>(event_to_sse(event)),
+                    (replay, receiver, coordinator),
+                ));
+            }
+            match receiver.recv().await {
+                Ok(event) => Some((Ok(event_to_sse(event)), (replay, receiver, coordinator))),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let event = coordinator
+                        .local_reset_event("gap", super::router_lifecycle::ResetEventKind::Gap);
+                    Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+            }
+        },
+    );
+    axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
+#[cfg(feature = "webui")]
+fn event_to_sse(event: super::router_lifecycle::UiEvent) -> axum::response::sse::Event {
+    axum::response::sse::Event::default()
+        .id(event.event_id.clone())
+        .event(event.event_type.clone())
+        .data(serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()))
 }
 
 #[cfg(test)]

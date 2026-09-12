@@ -14,7 +14,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -36,8 +36,8 @@ const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(crate) struct WebUiSecurityPolicy {
-    pub(super) allowed_hosts: Arc<[String]>,
-    pub(super) allowed_origins: Arc<[HeaderValue]>,
+    pub(super) allowed_hosts: Arc<RwLock<Vec<String>>>,
+    pub(super) allowed_origins: Arc<RwLock<Vec<HeaderValue>>>,
     pub(super) public_webui_prefix: Arc<str>,
     pub(super) api_prefix: Arc<str>,
     pub(super) control_permits: Arc<Semaphore>,
@@ -48,8 +48,8 @@ pub(crate) struct WebUiSecurityPolicy {
 impl fmt::Debug for WebUiSecurityPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebUiSecurityPolicy")
-            .field("allowed_hosts", &self.allowed_hosts)
-            .field("allowed_origins", &self.allowed_origins)
+            .field("allowed_hosts", &self.allowed_hosts.read().ok())
+            .field("allowed_origins", &self.allowed_origins.read().ok())
             .field("public_webui_prefix", &self.public_webui_prefix)
             .field("api_prefix", &self.api_prefix)
             .field("control_permits", &self.control_permits.available_permits())
@@ -120,8 +120,8 @@ impl WebUiSecurityPolicy {
             bail!("WebUI security requires at least one explicit allowed Origin");
         }
         Ok(Self {
-            allowed_hosts: hosts.into(),
-            allowed_origins: origins.into(),
+            allowed_hosts: Arc::new(RwLock::new(hosts)),
+            allowed_origins: Arc::new(RwLock::new(origins)),
             public_webui_prefix: normalize_prefix(public_webui_prefix, "WebUI public prefix")?
                 .into(),
             api_prefix: normalize_prefix(api_prefix, "WebUI API prefix")?.into(),
@@ -136,6 +136,27 @@ impl WebUiSecurityPolicy {
 
     pub(super) fn try_record_control_request(&self) -> bool {
         self.control_rate.try_record()
+    }
+
+    pub(crate) fn update_exact_origin(&self, origin: HeaderValue) -> Result<()> {
+        let origin = validate_allowed_origin(origin)?;
+        let origin_text = origin
+            .to_str()
+            .map_err(|_| anyhow::anyhow!("WebUI allowed Origin must be visible ASCII"))?;
+        let uri: Uri = origin_text
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid WebUI allowed Origin '{origin_text}'"))?;
+        let authority = uri
+            .authority()
+            .and_then(|authority| canonical_authority(authority.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("WebUI allowed Origin authority is malformed"))?;
+        if let Ok(mut hosts) = self.allowed_hosts.write() {
+            *hosts = vec![authority];
+        }
+        if let Ok(mut origins) = self.allowed_origins.write() {
+            *origins = vec![origin];
+        }
+        Ok(())
     }
 }
 

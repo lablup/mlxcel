@@ -159,7 +159,12 @@ fn validate_host(
     let host = header_to_str(hosts[0])
         .and_then(canonical_authority)
         .ok_or_else(|| forbidden("invalid_host", "Host header is malformed"))?;
-    if !policy.allowed_hosts.iter().any(|allowed| allowed == &host) {
+    let host_allowed = policy
+        .allowed_hosts
+        .read()
+        .ok()
+        .is_some_and(|hosts| hosts.iter().any(|allowed| allowed == &host));
+    if !host_allowed {
         return Err(forbidden("invalid_host", "Host header is not allowed"));
     }
     if let Some(authority) = request.uri().authority()
@@ -196,8 +201,9 @@ fn validate_origin(
     if origin_text == "null"
         || !policy
             .allowed_origins
-            .iter()
-            .any(|allowed| allowed == *origin)
+            .read()
+            .ok()
+            .is_some_and(|origins| origins.iter().any(|allowed| allowed == *origin))
     {
         return Err(forbidden("invalid_origin", "Origin header is not allowed"));
     }

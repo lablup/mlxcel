@@ -16,24 +16,25 @@
 //! options (issue #1435, epic #1431).
 //!
 //! Every surface in this group exists for b10621's embedded browser UI:
-//! `--ui` serves the SvelteKit bundle, `--path` replaces it with a
+//! `--ui` serves the upstream bundle by default, `--path` replaces it with a
 //! directory, `--tools` / `--tools-runtime` expose server-executed tools to
 //! that UI through `/tools` (upstream's own developer docs mark the endpoint
 //! UI-internal and tell applications not to use it), `--mcp-servers-config` /
 //! `--mcp-servers-json` feed the same endpoint from stdio MCP child
 //! processes, `--ui-mcp-proxy` opens the generic `/cors-proxy` URL proxy so
 //! the browser can reach remote MCP servers, and `--agent` turns the proxy
-//! and every built-in tool on at once. mlxcel ships no web UI and executes
-//! nothing server-side on a model's behalf, so none of this has an
-//! implementation to alias to; a server-side MCP tool loop is tracked
-//! separately as a product feature (#1457), outside b10621 compatibility.
+//! and every built-in tool on at once. mlxcel accepts the `--ui`/`--webui`
+//! flag pair for its bundled WebUI, but still executes no server-side tools
+//! on a model's behalf and does not serve arbitrary static directories; a
+//! server-side MCP tool loop is tracked separately as a product feature
+//! (#1457), outside b10621 compatibility.
 //!
-//! The classification (issue #1435) is therefore uniform: the flags parse
-//! (hidden), the forms that ask for nothing (`--no-ui`, `--no-webui`,
-//! `--no-agent`, `--no-ui-mcp-proxy`, `--no-webui-mcp-proxy`) are accepted
-//! as inert, and every form that would enable a surface fails startup with a
-//! one-line diagnostic naming the supported alternative, before the model
-//! load. The `/tools` and `/cors-proxy` routes are mounted as b10621's own
+//! The classification is now split between #1435 and #1838: the flags parse
+//! (hidden), `--ui`/`--webui` enable mlxcel's bundled WebUI, the negative
+//! forms (`--no-ui`, `--no-webui`, `--no-agent`, `--no-ui-mcp-proxy`,
+//! `--no-webui-mcp-proxy`) are accepted as disables/no-ops, and every
+//! unsupported adjacent surface fails startup with a one-line diagnostic
+//! naming the supported alternative, before the model load. The `/tools` and `/cors-proxy` routes are mounted as b10621's own
 //! disabled-feature stubs: 403 with
 //! `{"error":{"message":"this feature is disabled","type":"feature_disabled"}}`,
 //! which is exactly what upstream answers when the features are off.
@@ -46,8 +47,8 @@
 //! `LLAMA_ARG_AGENT`, `LLAMA_ARG_UI_MCP_PROXY`) resolve at runtime through
 //! [`crate::cli::ggml_compat_args::env_bool_pair`], b10621's
 //! `parse_bool_value` rules with the `LLAMA_ARG_NO_*` alias meaning false,
-//! so `LLAMA_ARG_UI=0` is the inert `--no-ui` and `LLAMA_ARG_UI=on` reaches
-//! the same startup refusal `--ui` does.
+//! so `LLAMA_ARG_UI=0` is the disabled `--no-ui` form and `LLAMA_ARG_UI=on`
+//! enables mlxcel's bundled WebUI.
 //!
 //! Used by: mlxcel serve, mlxcel-server.
 //!
@@ -60,22 +61,28 @@ use crate::cli::ggml_compat_args::env_bool_pair;
 
 /// llama-server b10621 Web UI / tools / MCP / agent compatibility surface.
 ///
-/// All hidden: these are compatibility arguments, not mlxcel features, and
-/// rendering them in `--help` would imply a web UI that does not exist.
+/// All hidden: these are llama-server compatibility arguments. The bundled
+/// WebUI has its own docs and startup log instead of expanding the existing
+/// llama-compatible help surface.
 #[derive(Debug, Clone, Default, Args)]
 pub struct UiCompatArgs {
-    /// b10621 `--ui` / `--webui`: serve the embedded Web UI. mlxcel has
-    /// none; rejected at startup.
-    #[arg(long = "ui", alias = "webui", hide = true, default_value_t = false)]
+    /// b10621 `--ui` / `--webui`: serve the bundled WebUI.
+    #[arg(
+        long = "ui",
+        alias = "webui",
+        hide = true,
+        action = clap::ArgAction::SetTrue,
+        overrides_with = "no_ui"
+    )]
     pub ui: bool,
 
-    /// b10621 `--no-ui` / `--no-webui`: disable the Web UI. mlxcel never
-    /// serves one, so this asks for what already holds; accepted as inert.
+    /// b10621 `--no-ui` / `--no-webui`: explicitly disable the bundled WebUI.
     #[arg(
         long = "no-ui",
         alias = "no-webui",
         hide = true,
-        default_value_t = false
+        action = clap::ArgAction::SetTrue,
+        overrides_with = "ui"
     )]
     pub no_ui: bool,
 
@@ -103,7 +110,7 @@ pub struct UiCompatArgs {
 
     /// b10621 `--path`: serve a static directory at `/` in place of the
     /// embedded UI bundle (only effective there when the UI is on).
-    /// Rejected at startup: mlxcel has no static file server to alias to.
+    /// Rejected at startup: mlxcel serves only its bundled WebUI shell.
     #[arg(
         long = "path",
         value_name = "PATH",
@@ -200,33 +207,32 @@ impl UiCompatArgs {
         Ok(())
     }
 
-    /// Refuse every form that would enable a surface mlxcel does not have.
-    /// The inert forms (`--no-ui`, `--no-webui`, `--no-agent`,
-    /// `--no-ui-mcp-proxy`) are accepted silently: they ask for the state
-    /// the server is permanently in.
-    pub fn ensure_inert(&self) -> Result<(), String> {
-        if self.ui {
-            return Err(reject(
-                "--ui/--webui",
-                "mlxcel ships no web UI; the server exposes the HTTP API only (use the /v1 routes; --no-ui and --no-webui are accepted as no-ops)",
-            ));
-        }
+    /// Return whether the bundled WebUI is enabled after CLI/env precedence.
+    /// Unsupported adjacent llama-server UI surfaces still fail below.
+    pub fn webui_enabled(&self) -> Result<bool, String> {
+        self.ensure_supported()?;
+        Ok(self.ui && !self.no_ui)
+    }
+
+    /// Refuse every unsupported form in the old llama-server browser surface.
+    /// The bundled WebUI flag pair is handled separately by [`Self::webui_enabled`].
+    pub fn ensure_supported(&self) -> Result<(), String> {
         if self.ui_config.is_some() {
             return Err(reject(
                 "--ui-config",
-                "it configures llama-server's web UI and mlxcel ships none",
+                "it configures llama-server's web UI; mlxcel's bundled WebUI does not consume upstream UI JSON",
             ));
         }
         if self.ui_config_file.is_some() {
             return Err(reject(
                 "--ui-config-file",
-                "it configures llama-server's web UI and mlxcel ships none",
+                "it configures llama-server's web UI; mlxcel's bundled WebUI does not consume upstream UI JSON files",
             ));
         }
         if self.static_path.is_some() {
             return Err(reject(
                 "--path",
-                "it replaces llama-server's web UI bundle and mlxcel ships no web UI or static file server",
+                "it replaces llama-server's web UI bundle; mlxcel serves only the compiled-in WebUI shell",
             ));
         }
         if self.tools.is_some() {
@@ -266,6 +272,11 @@ impl UiCompatArgs {
             ));
         }
         Ok(())
+    }
+
+    /// Compatibility wrapper for older tests and call sites.
+    pub fn ensure_inert(&self) -> Result<(), String> {
+        self.ensure_supported()
     }
 }
 
