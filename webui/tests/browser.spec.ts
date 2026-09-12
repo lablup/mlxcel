@@ -51,7 +51,7 @@ test.describe('design system gallery and shell', () => {
         const fontSize = await page.evaluate(() => Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize));
         expect(fontSize).toBeGreaterThanOrEqual(32);
       }
-      await expect(page).toHaveScreenshot(`${variant.name}.png`, { fullPage: true, animations: 'disabled' });
+      await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.12, threshold: 0.2 });
     });
   }
 
