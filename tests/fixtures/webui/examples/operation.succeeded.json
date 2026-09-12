@@ -1,0 +1,35 @@
+{
+  "operation_id": "op_unload_001",
+  "kind": "model_unload",
+  "state": "succeeded",
+  "created_at": "2026-09-12T03:05:00Z",
+  "updated_at": "2026-09-12T03:05:30Z",
+  "idempotency_scope": "server_instance",
+  "target": {
+    "target_kind": "model",
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "requested_revision": 8
+  },
+  "progress": {
+    "completed_bytes": 0,
+    "total_bytes": null,
+    "indeterminate": true
+  },
+  "result": {
+    "result_kind": "model_unload",
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "revision": 9,
+    "lifecycle": {
+      "state": "unloaded",
+      "download": "complete",
+      "busy": false,
+      "active_requests": 0,
+      "draining_requests": 0,
+      "worker_exit_observed": true,
+      "last_error": null
+    }
+  },
+  "error": null,
+  "cancellable": false,
+  "cancel_reason": null
+}

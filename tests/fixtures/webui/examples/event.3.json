@@ -6,5 +6,7 @@
   "payload": {
     "reason": "gap",
     "resnapshot": true
-  }
+  },
+  "event_id": "evt_srv_20260912_a_00000045",
+  "emitted_at": "2026-09-12T03:04:05Z"
 }

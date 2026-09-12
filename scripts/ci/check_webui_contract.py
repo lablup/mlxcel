@@ -364,10 +364,39 @@ def check_transition_fixtures() -> None:
         ("ready", "download_progress_unknown_total", "ready"),
     }
     failures = []
+    expected_keys = {
+        "duplicate_load": {"single_operation"},
+        "load_unload_race": {"worker_exit_required", "continuous"},
+        "busy_eviction": {"surprise_eviction"},
+        "stale_revision": {"refresh_required"},
+        "failed_load": {"resource_owner_absent_precondition"},
+        "download_cancel": {"final_state", "indeterminate_not_percent"},
+        "deletion_refusal": {"requires_cache_and_not_busy"},
+        "sse_gap": {"resnapshot"},
+        "server_restart": {"do_not_repost_actions"},
+        "unknown_null_partial_error": {"partial_errors", "progress"},
+    }
+    given_keys = {
+        "duplicate_load": {"model_id", "revision"},
+        "load_unload_race": {"model_id", "revision"},
+        "busy_eviction": {"model_id", "eviction_target_id"},
+        "stale_revision": {"model_id", "client_revision", "server_revision"},
+        "failed_load": {"model_id"},
+        "download_cancel": {"operation_id", "progress"},
+        "deletion_refusal": {"model_id", "source"},
+        "sse_gap": {"server_instance_id", "snapshot_sequence", "last_event_id"},
+        "server_restart": {"old_server_instance_id", "new_server_instance_id"},
+        "unknown_null_partial_error": {"settings_patch", "download_total"},
+    }
     for path in sorted((FIXTURES / "scenarios").glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("$schemaName"):
             continue
+        scenario = data.get("scenario", "")
+        if set(data.get("given", {})) != given_keys.get(scenario, set()):
+            failures.append(f"{path}: scenario given keys are not the executable contract set for {scenario}")
+        if set(data.get("expected", {})) != expected_keys.get(scenario, set()):
+            failures.append(f"{path}: scenario expected keys are not the executable contract set for {scenario}")
         steps = data.get("steps", [])
         if data.get("expected", {}).get("continuous"):
             for prev, nxt in zip(steps, steps[1:]):
@@ -379,6 +408,12 @@ def check_transition_fixtures() -> None:
                 failures.append(f"{path}: allowed edge is not in the contract table: {edge}")
             if not step["allowed"] and step.get("error") is None:
                 failures.append(f"{path}: rejected edge must carry a structured error: {edge}")
+        if scenario == "sse_gap" and not str(data["given"]["last_event_id"]).startswith("evt_"):
+            failures.append(f"{path}: Last-Event-ID fixture must use the same opaque event id format as UiEvent.event_id")
+        if scenario == "unknown_null_partial_error":
+            progress = data["expected"]["progress"]
+            if progress.get("total_bytes") is not None or progress.get("indeterminate") is not True:
+                failures.append(f"{path}: unknown total progress must stay indeterminate with total_bytes null")
     if failures:
         raise ContractError("transition fixture validation failed:\n" + "\n".join(failures))
 
@@ -420,6 +455,18 @@ def self_test() -> None:
         pass
     else:
         raise ContractError("negative self-test failed: unknown schema keyword was not rejected")
+    event = json.loads((FIXTURES / "examples" / "event.1.json").read_text(encoding="utf-8"))
+    missing_event_id = copy.deepcopy(event)
+    missing_event_id.pop("event_id", None)
+    errors = list(validator_for(contract, "UiEvent").iter_errors(missing_event_id))
+    if not errors:
+        raise ContractError("negative self-test failed: event without an opaque event_id was accepted")
+    operation = json.loads((FIXTURES / "examples" / "operation.running.json").read_text(encoding="utf-8"))
+    permissive_target = copy.deepcopy(operation)
+    permissive_target["target"]["filesystem_path"] = "/Volumes/private/model"
+    errors = list(validator_for(contract, "Operation").iter_errors(permissive_target))
+    if not errors:
+        raise ContractError("negative self-test failed: operation target accepted a permissive metadata bag")
 
 
 def main() -> int:

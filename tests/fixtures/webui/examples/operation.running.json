@@ -6,7 +6,9 @@
   "updated_at": "2026-09-12T03:04:05Z",
   "idempotency_scope": "server_instance",
   "target": {
-    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU"
+    "target_kind": "model",
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "requested_revision": 7
   },
   "progress": {
     "completed_bytes": 0,

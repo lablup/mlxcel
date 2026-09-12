@@ -15,5 +15,7 @@
       "worker_exit_observed": false,
       "last_error": null
     }
-  }
+  },
+  "event_id": "evt_srv_20260912_a_00000043",
+  "emitted_at": "2026-09-12T03:04:05Z"
 }

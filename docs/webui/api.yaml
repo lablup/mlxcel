@@ -1486,6 +1486,255 @@
           }
         }
       },
+      "CatalogOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "scope"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "catalog"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "full",
+              "roots",
+              "entry"
+            ]
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+          }
+        }
+      },
+      "ModelOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "model_id",
+          "requested_revision"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "model"
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+          },
+          "requested_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        }
+      },
+      "DownloadOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "repo_id",
+          "revision"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "download"
+          },
+          "repo_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SettingsOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "model_id",
+          "scope"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "settings"
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "next_load_profile",
+              "loaded_model_live",
+              "request_only"
+            ]
+          }
+        }
+      },
+      "OperationTarget": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CatalogOperationTarget"
+          },
+          {
+            "$ref": "#/components/schemas/ModelOperationTarget"
+          },
+          {
+            "$ref": "#/components/schemas/DownloadOperationTarget"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsOperationTarget"
+          }
+        ]
+      },
+      "CatalogRefreshResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "scanned_entries",
+          "changed_entries",
+          "snapshot_sequence"
+        ],
+        "properties": {
+          "result_kind": {
+            "const": "catalog_refresh"
+          },
+          "scanned_entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "changed_entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "snapshot_sequence": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ModelActionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "model_id",
+          "revision",
+          "lifecycle"
+        ],
+        "properties": {
+          "result_kind": {
+            "type": "string",
+            "enum": [
+              "model_load",
+              "model_unload",
+              "model_removal"
+            ]
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/LifecycleSnapshot"
+          }
+        }
+      },
+      "DownloadResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "repo_id",
+          "revision",
+          "download"
+        ],
+        "properties": {
+          "result_kind": {
+            "const": "download"
+          },
+          "repo_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+          },
+          "download": {
+            "$ref": "#/components/schemas/DownloadState"
+          }
+        }
+      },
+      "SettingsPatchResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "model_id",
+          "settings"
+        ],
+        "properties": {
+          "result_kind": {
+            "const": "settings_patch"
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}$"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/RuntimeSettingsReport"
+          }
+        }
+      },
+      "OperationResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CatalogRefreshResult"
+          },
+          {
+            "$ref": "#/components/schemas/ModelActionResult"
+          },
+          {
+            "$ref": "#/components/schemas/DownloadResult"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsPatchResult"
+          }
+        ]
+      },
       "OperationAccepted": {
         "type": "object",
         "additionalProperties": false,
@@ -1545,7 +1794,11 @@
           "updated_at",
           "idempotency_scope",
           "target",
-          "progress"
+          "progress",
+          "result",
+          "error",
+          "cancellable",
+          "cancel_reason"
         ],
         "properties": {
           "operation_id": {
@@ -1575,32 +1828,20 @@
             "const": "server_instance"
           },
           "target": {
-            "type": "object",
-            "additionalProperties": {
-              "type": [
-                "string",
-                "number",
-                "boolean",
-                "null"
-              ]
-            }
+            "$ref": "#/components/schemas/OperationTarget"
           },
           "progress": {
             "$ref": "#/components/schemas/ProgressBytes"
           },
           "result": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "additionalProperties": {
-              "type": [
-                "string",
-                "number",
-                "boolean",
-                "null"
-              ]
-            }
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "error": {
             "anyOf": [
@@ -2228,7 +2469,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2249,6 +2492,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/SnapshotPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2260,7 +2515,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2281,6 +2538,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/ModelRevisionPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2292,7 +2561,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2313,6 +2584,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/OperationPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2324,7 +2607,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2345,6 +2630,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/DownloadProgressPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2356,7 +2653,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2377,6 +2676,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/RuntimePayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2388,7 +2699,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2409,6 +2722,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/SettingsPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2420,7 +2745,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2441,6 +2768,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/ResetPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2452,7 +2791,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2473,6 +2814,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/ResetPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2484,7 +2837,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2505,6 +2860,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/ResetPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },
@@ -2516,7 +2883,9 @@
           "server_instance_id",
           "sequence",
           "type",
-          "payload"
+          "payload",
+          "event_id",
+          "emitted_at"
         ],
         "properties": {
           "schema_version": {
@@ -2537,6 +2906,18 @@
           },
           "payload": {
             "$ref": "#/components/schemas/HeartbeatPayload"
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^evt_[A-Za-z0-9._~:-]+$",
+            "description": "Opaque SSE event id; it is also sent as the SSE id field and encodes this server instance and sequence for replay only."
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
           }
         }
       },

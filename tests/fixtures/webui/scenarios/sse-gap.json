@@ -4,7 +4,7 @@
   "given": {
     "server_instance_id": "srv_20260912_a",
     "snapshot_sequence": 42,
-    "last_event_id": "seq_17"
+    "last_event_id": "evt_srv_20260912_a_00000017"
   },
   "steps": [
     {

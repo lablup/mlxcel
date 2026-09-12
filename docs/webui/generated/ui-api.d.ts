@@ -188,6 +188,62 @@ export interface RemovalRequest {
   readonly idempotency_key: string;
 }
 
+export interface CatalogOperationTarget {
+  readonly target_kind: "catalog";
+  readonly scope: "full" | "roots" | "entry";
+  readonly model_id?: string | null;
+}
+
+export interface ModelOperationTarget {
+  readonly target_kind: "model";
+  readonly model_id: string;
+  readonly requested_revision: number | null;
+}
+
+export interface DownloadOperationTarget {
+  readonly target_kind: "download";
+  readonly repo_id: string;
+  readonly revision: string | null;
+}
+
+export interface SettingsOperationTarget {
+  readonly target_kind: "settings";
+  readonly model_id: string;
+  readonly scope: "next_load_profile" | "loaded_model_live" | "request_only";
+}
+
+export type OperationTarget = CatalogOperationTarget | ModelOperationTarget | DownloadOperationTarget | SettingsOperationTarget;
+
+export interface CatalogRefreshResult {
+  readonly result_kind: "catalog_refresh";
+  readonly scanned_entries: number;
+  readonly changed_entries: number;
+  readonly snapshot_sequence: number;
+}
+
+export interface ModelActionResult {
+  readonly result_kind: "model_load" | "model_unload" | "model_removal";
+  readonly model_id: string;
+  readonly revision: number;
+  readonly lifecycle: LifecycleSnapshot;
+}
+
+export interface DownloadResult {
+  readonly result_kind: "download";
+  readonly repo_id: string;
+  readonly revision: string | null;
+  readonly model_id?: string | null;
+  readonly download: DownloadState;
+}
+
+export interface SettingsPatchResult {
+  readonly result_kind: "settings_patch";
+  readonly model_id: string;
+  readonly settings: RuntimeSettingsReport;
+}
+
+export type OperationResult = CatalogRefreshResult | ModelActionResult | DownloadResult | SettingsPatchResult;
+
 export interface OperationAccepted {
   readonly operation_id: string;
   readonly state: OperationState;
@@ -207,12 +263,12 @@ export interface Operation {
   readonly created_at: string;
   readonly updated_at: string;
   readonly idempotency_scope: "server_instance";
-  readonly target: Record<string, string | number | boolean | null>;
+  readonly target: OperationTarget;
   readonly progress: ProgressBytes;
-  readonly result?: Record<string, string | number | boolean | null> | null;
-  readonly error?: ErrorBody | null;
-  readonly cancellable?: boolean;
-  readonly cancel_reason?: string | null;
+  readonly result: OperationResult | null;
+  readonly error: ErrorBody | null;
+  readonly cancellable: boolean;
+  readonly cancel_reason: string | null;
 }
 
 export interface OperationsListResponse {
@@ -347,6 +403,8 @@ export interface SnapshotEvent {
   readonly sequence: number;
   readonly type: "snapshot";
   readonly payload: SnapshotPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface ModelRevisionEvent {
@@ -355,6 +413,8 @@ export interface ModelRevisionEvent {
   readonly sequence: number;
   readonly type: "model_revision";
   readonly payload: ModelRevisionPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface OperationEvent {
@@ -363,6 +423,8 @@ export interface OperationEvent {
   readonly sequence: number;
   readonly type: "operation";
   readonly payload: OperationPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface DownloadProgressEvent {
@@ -371,6 +433,8 @@ export interface DownloadProgressEvent {
   readonly sequence: number;
   readonly type: "download_progress";
   readonly payload: DownloadProgressPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface RuntimeEvent {
@@ -379,6 +443,8 @@ export interface RuntimeEvent {
   readonly sequence: number;
   readonly type: "runtime";
   readonly payload: RuntimePayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface SettingsEvent {
@@ -387,6 +453,8 @@ export interface SettingsEvent {
   readonly sequence: number;
   readonly type: "settings";
   readonly payload: SettingsPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface ResetEvent {
@@ -395,6 +463,8 @@ export interface ResetEvent {
   readonly sequence: number;
   readonly type: "reset";
   readonly payload: ResetPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface GapEvent {
@@ -403,6 +473,8 @@ export interface GapEvent {
   readonly sequence: number;
   readonly type: "gap";
   readonly payload: ResetPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface ServerRestartEvent {
@@ -411,6 +483,8 @@ export interface ServerRestartEvent {
   readonly sequence: number;
   readonly type: "server_restart";
   readonly payload: ResetPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface HeartbeatEvent {
@@ -419,6 +493,8 @@ export interface HeartbeatEvent {
   readonly sequence: number;
   readonly type: "heartbeat";
   readonly payload: HeartbeatPayload;
+  readonly event_id: string;
+  readonly emitted_at: string;
 }
 
 export interface CanonicalIdentityInput {
