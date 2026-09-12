@@ -29,15 +29,17 @@
 //! `--cache-reuse` names a quantity mlxcel does *not* have, and says so at
 //! startup rather than accepting the number and ignoring it.
 //!
-//! b10621's `--slot-prompt-similarity`, `--kv-unified`, `--cache-idle-slots`,
-//! `--ctx-checkpoints` and `--checkpoint-min-step` are deliberately absent:
-//! they tune per-slot retained prompts and context checkpoints, and mlxcel has
-//! neither. Its reuse is a process-wide radix trie over token prefixes rather
-//! than a scan of what each slot happens to be holding, so there is no slot
-//! prompt for a similarity threshold to compare against and no checkpoint
-//! spacing to set. Accepting them inert would be the silent-acceptance failure
-//! epic #1431 exists to remove; their manifest entries carry the divergence
-//! instead. See `docs/llama-server-compat.md`.
+//! b10621's slot and checkpoint options live in `slot_args`, not this prompt
+//! cache group. `--kv-unified` is implemented there as a shared logical
+//! live-token budget; `--slot-prompt-similarity`, `--cache-idle-slots`,
+//! `--ctx-checkpoints` and `--checkpoint-min-step` keep the diagnostic path
+//! because mlxcel has no per-slot prompt-selection policy or checkpoint ring.
+//! Its reuse is a process-wide radix trie over token prefixes rather than a
+//! scan of what each slot happens to be holding, so there is no slot prompt for
+//! a similarity threshold to compare against and no checkpoint spacing to set.
+//! Accepting those values inert would be the silent-acceptance failure epic
+//! #1431 exists to remove; their manifest entries carry the divergence instead.
+//! See `docs/llama-server-compat.md`.
 //!
 //! Used by: mlxcel serve, mlxcel-server.
 

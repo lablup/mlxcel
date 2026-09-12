@@ -1706,10 +1706,11 @@ struct ServerArgs {
     #[command(flatten)]
     context_compat: ContextCompatArgs,
 
-    /// Slot-state and context-checkpoint flag group (`--cache-idle-slots`,
+    /// Slot-state, unified-KV and context-checkpoint flag group (`--cache-idle-slots`,
     /// `--slot-prompt-similarity`, `--kv-unified`, `--ctx-checkpoints`,
     /// `--checkpoint-min-step`). Defined once in `mlxcel::cli::slot_args` so
-    /// both server binaries refuse the same command lines with one message.
+    /// both server binaries resolve `--kv-unified` the same way and keep the
+    /// same diagnostics for the remaining unsupported slot/checkpoint behavior.
     #[command(flatten)]
     slot_compat: SlotCompatArgs,
 

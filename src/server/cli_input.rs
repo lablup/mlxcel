@@ -604,11 +604,12 @@ pub struct ServerStartupInput {
     /// Resolved (and refused, for `--swa-full`) by
     /// [`ServerStartupInput::into_startup_config`].
     pub context_compat: crate::cli::context_args::ContextCompatArgs,
-    /// llama-server b10621 slot-state and context-checkpoint flags
+    /// llama-server b10621 slot-state, unified-KV and context-checkpoint flags
     /// (`--cache-idle-slots`, `--slot-prompt-similarity`, `--kv-unified`,
     /// `--ctx-checkpoints`, `--checkpoint-min-step`), straight off the shared
-    /// clap group (#1473). Every one of them is `not_applicable`: the inert
-    /// value is accepted and a request for the behavior is refused by
+    /// clap group. `--kv-unified` participates in startup context resolution;
+    /// the remaining slot/checkpoint flags keep the #1473 diagnostic path where
+    /// inert values are accepted and behavior requests are refused by
     /// [`ServerStartupInput::into_startup_config`].
     pub slot_compat: crate::cli::slot_args::SlotCompatArgs,
     /// llama-server b10621 RoPE / YaRN runtime overrides, straight off the

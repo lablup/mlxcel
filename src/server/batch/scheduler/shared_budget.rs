@@ -20,6 +20,35 @@ fn shared_kv_budget_allows(live_tokens: usize, additional_tokens: usize, budget:
         .is_some_and(|total| total <= budget)
 }
 
+fn shared_kv_live_tokens_from(
+    active_batch: &ActiveBatch,
+    chunked_prefill_seq: Option<&SequenceInfo>,
+) -> usize {
+    let active = active_batch
+        .iter_sequences()
+        .filter(|seq| !seq.state.is_finished())
+        .map(BatchScheduler::sequence_live_tokens)
+        .sum::<usize>();
+    let chunked = chunked_prefill_seq
+        .filter(|seq| !seq.state.is_finished())
+        .map_or(0, BatchScheduler::sequence_live_tokens);
+    active.saturating_add(chunked)
+}
+
+#[cfg(test)]
+fn shared_kv_budget_allows_growth(
+    active_batch: &ActiveBatch,
+    chunked_prefill_seq: Option<&SequenceInfo>,
+    additional_tokens: usize,
+    budget: usize,
+) -> bool {
+    shared_kv_budget_allows(
+        shared_kv_live_tokens_from(active_batch, chunked_prefill_seq),
+        additional_tokens,
+        budget,
+    )
+}
+
 impl BatchScheduler {
     /// Configured logical live-token budget shared by all slots when
     /// `--kv-unified` is active. `None` is the legacy split-window mode.
@@ -40,18 +69,7 @@ impl BatchScheduler {
     /// Current logical live-token usage across decode-active and parked
     /// chunked-prefill sequences.
     pub(super) fn shared_kv_live_tokens(&self) -> usize {
-        let active = self
-            .active_batch
-            .iter_sequences()
-            .filter(|seq| !seq.state.is_finished())
-            .map(Self::sequence_live_tokens)
-            .sum::<usize>();
-        let chunked = self
-            .chunked_prefill_seq
-            .as_ref()
-            .filter(|seq| !seq.state.is_finished())
-            .map_or(0, Self::sequence_live_tokens);
-        active.saturating_add(chunked)
+        shared_kv_live_tokens_from(&self.active_batch, self.chunked_prefill_seq.as_ref())
     }
 
     fn evict_prompt_cache_for_shared_budget(&mut self) {
@@ -149,7 +167,68 @@ impl BatchScheduler {
 
 #[cfg(test)]
 mod tests {
-    use super::shared_kv_budget_allows;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::SamplingConfig;
+
+    use super::{
+        shared_kv_budget_allows, shared_kv_budget_allows_growth, shared_kv_live_tokens_from,
+    };
+    use crate::server::batch::active::ActiveBatch;
+    use crate::server::batch::sequence::{FinishReason, SequenceInfo, SequenceState};
+    use crate::server::batch::stop_matcher::StopMatcher;
+    use crate::server::model_provider::GenerateEvent;
+    use crate::server::model_provider::model_worker::StreamingDecodeState;
+
+    fn make_sequence(
+        id: u64,
+        state: SequenceState,
+        prompt_len: usize,
+        generated_len: usize,
+    ) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+        let prompt_tokens = vec![1; prompt_len];
+        let decode_state = StreamingDecodeState::new(&tokenizer, &prompt_tokens);
+        let seq = SequenceInfo {
+            bounds: Default::default(),
+            retention: Default::default(),
+            seq_id: SequenceId::from_raw(id),
+            state,
+            prompt_tokens,
+            sampling: SamplingConfig::default(),
+            max_tokens: 100,
+            eos_token_ids: vec![2],
+            priority: crate::server::batch::RequestPriority::Normal,
+            lora_scales: None,
+            logprobs_config: Default::default(),
+            vlm_embeddings: None,
+            images: Vec::new(),
+            audio: Vec::new(),
+            generated_tokens: vec![3; generated_len],
+            generated_text: String::new(),
+            decode_state,
+            stop_matcher: StopMatcher::default(),
+            prefill_offset: 0,
+            prefill_start_offset: 0,
+            already_cached_tokens: 0,
+            response_tx: tx,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            created_at: Instant::now(),
+            prefill_start: None,
+            first_token_time: None,
+            token_history: Vec::new(),
+            sampler_state: None,
+            merged_eos: Vec::new(),
+            thinking: crate::server::thinking_budget::ThinkingState::disabled(),
+            structured: None,
+        };
+        (seq, rx)
+    }
 
     #[test]
     fn shared_budget_admits_up_to_the_logical_token_limit() {
@@ -160,5 +239,28 @@ mod tests {
     #[test]
     fn shared_budget_rejects_overflowing_totals() {
         assert!(!shared_kv_budget_allows(usize::MAX, 1, usize::MAX));
+    }
+
+    #[test]
+    fn shared_budget_counts_active_and_chunked_sequences() {
+        let mut active = ActiveBatch::new(4);
+        let (mut decoding, _rx) = make_sequence(1, SequenceState::Decoding, 3, 2);
+        decoding.retention.context_exhausted = false;
+        active.add(decoding).unwrap();
+        let (finished, _rx) = make_sequence(2, SequenceState::Finished(FinishReason::Length), 9, 9);
+        active.add(finished).unwrap();
+        let (chunked, _rx) = make_sequence(3, SequenceState::Prefilling, 4, 1);
+
+        assert_eq!(shared_kv_live_tokens_from(&active, Some(&chunked)), 10);
+    }
+
+    #[test]
+    fn shared_budget_growth_rejects_when_active_rows_would_cross_limit() {
+        let mut active = ActiveBatch::new(4);
+        let (seq, _rx) = make_sequence(1, SequenceState::Decoding, 4, 2);
+        active.add(seq).unwrap();
+
+        assert!(shared_kv_budget_allows_growth(&active, None, 2, 8));
+        assert!(!shared_kv_budget_allows_growth(&active, None, 3, 8));
     }
 }

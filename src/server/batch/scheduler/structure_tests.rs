@@ -45,3 +45,45 @@ fn scheduler_modules_stay_below_documented_anti_pattern_threshold() {
         oversized.join(", ")
     );
 }
+
+fn collapsed(source: &str) -> String {
+    source.split_whitespace().collect()
+}
+
+#[test]
+fn shared_budget_enforcement_stays_wired_into_scheduler_paths() {
+    let admission = collapsed(include_str!("admission.rs"));
+    let prefill = collapsed(include_str!("prefill.rs"));
+    let decode = collapsed(include_str!("decode_tick.rs"));
+    let speculative = collapsed(include_str!("speculative_finalize.rs"));
+    let worker = collapsed(include_str!("../../model_worker.rs"));
+
+    assert!(
+        admission.contains("!self.shared_budget_admits_prompt(prompt_tokens.len())")
+            && admission.contains("Self::send_shared_budget_rejection("),
+        "request admission must reject prompts that do not fit the unified shared-token budget"
+    );
+    assert!(
+        prefill.contains("!self.shared_budget_admits_prompt(seq.prompt_tokens.len())")
+            && prefill.contains(
+                "!self.shared_budget_has_prefill_first_token_room(seq.prompt_tokens.len())"
+            ),
+        "prefill must re-check unified budget at dequeue and before committing the first sampled token"
+    );
+    assert!(
+        decode.contains("execute_batched_decode(&mutself,seq_ids:&[SequenceId]){ifseq_ids.is_empty()")
+            && decode.contains("!self.shared_budget_has_decode_room(seq_ids.len())")
+            && decode.contains("decode_single_step(&mutself,seq_id:SequenceId){if!self.shared_budget_has_decode_room(1)"),
+        "batched and single-row decode must enforce unified budget before appending the next token"
+    );
+    assert!(
+        speculative.contains("ifself.shared_kv_budget().is_some(){returnSome(seq);}"),
+        "speculative burst loops must route to classic scheduler paths while unified budget is active"
+    );
+    assert!(
+        worker.contains(
+            ".with_shared_kv_budget(ifsched_config.kv_unified{effective_max_kv_size}else{None})"
+        ),
+        "model worker must install the resolved unified context window as the shared scheduler budget"
+    );
+}
