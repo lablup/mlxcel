@@ -3582,6 +3582,14 @@ mod grouped_gemm_arch_tests;
 #[path = "grouped_gemm_numeric_tests.rs"]
 mod grouped_gemm_numeric_tests;
 
+// [#1820] The bucketed cuDNN SDPA plan-cache path points the kernel at the
+// whole KV cache buffer instead of the live prefix, so these check that the
+// columns past `k_len` stay out of the result. CUDA-only: the patched file
+// compiles into the CUDA backend and nowhere else.
+#[cfg(all(test, feature = "cuda"))]
+#[path = "sdpa_plan_bucket_tests.rs"]
+mod sdpa_plan_bucket_tests;
+
 // Numeric-parity, determinism, and SGY-invariance tests for the fused
 // single-token decode-MoE GeGLU kernel (#886). GPU-only (Metal or CUDA);
 // they skip on CPU-only builds.
