@@ -154,6 +154,7 @@ impl BatchScheduler {
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
             max_kv_size: None,
+            shared_kv_budget: None,
             context_retention: ContextRetentionPolicy::default(),
             // multimodal prefix-cache sharing stays off until the operator
             // opts in via `with_vlm_prefix_cache` (#124 step c).
@@ -335,6 +336,13 @@ impl BatchScheduler {
     /// Returns the configured maximum KV cache size (for tests).
     pub fn max_kv_size(&self) -> Option<usize> {
         self.max_kv_size
+    }
+
+    /// Set the logical live-token budget shared by every slot in unified mode.
+    /// `None` keeps the legacy split-window accounting.
+    pub fn with_shared_kv_budget(mut self, budget: Option<usize>) -> Self {
+        self.shared_kv_budget = budget;
+        self
     }
 
     /// Install the context-retention policy (#1472, b10621 `--context-shift`

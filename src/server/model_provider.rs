@@ -653,6 +653,11 @@ impl ModelProvider {
                 config.batch_kv_quant,
                 // forward the --max-kv-size cap to the scheduler.
                 config.max_kv_size,
+                // forward unified-context metadata so the worker can enforce
+                // the shared budget and repair post-load non-batching clamps.
+                config.kv_unified,
+                config.context_size_total,
+                config.explicit_max_kv_size,
                 // forward the b10621 context-retention policy (#1472).
                 crate::server::batch::ContextRetentionPolicy {
                     context_shift: config.context_shift,
@@ -1033,6 +1038,9 @@ impl ModelProvider {
             kv_cache_mode,
             batch_kv_quant,
             max_kv_size,
+            false,
+            0,
+            None,
             // legacy wrapper: b10621 defaults (shift disabled, keep 0).
             Default::default(),
             kv_cache_budget,
@@ -1088,6 +1096,9 @@ impl ModelProvider {
         kv_cache_mode: mlxcel_core::cache::KVCacheMode,
         batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig,
         max_kv_size: Option<usize>,
+        kv_unified: bool,
+        context_size_total: usize,
+        explicit_max_kv_size: Option<usize>,
         // b10621 context-retention policy at the KV bound (#1472).
         context_retention: crate::server::batch::ContextRetentionPolicy,
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
@@ -1152,6 +1163,9 @@ impl ModelProvider {
             batch_kv_quant,
             // cap plain KVCache growth when configured.
             max_kv_size,
+            kv_unified,
+            context_size_total,
+            explicit_max_kv_size,
             // b10621 context-retention policy (#1472).
             context_retention,
             // paged KV pool block-budget directive; resolved to a block count
@@ -1277,6 +1291,9 @@ impl ModelProvider {
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,              // unbounded in minimal test path
+            kv_unified: false,              // split/default in minimal test path
+            context_size_total: 0,          // model default in minimal test path
+            explicit_max_kv_size: None,     // unset in minimal test path
             kv_cache_budget: None,          // unbounded in minimal test path
             enable_vlm_prefix_cache: false, // off in minimal test path
             // minimal test path is single-node.

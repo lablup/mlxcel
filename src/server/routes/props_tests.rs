@@ -28,10 +28,16 @@ use crate::server::config::ServerConfig;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, create_app};
 use crate::tokenizer::MlxcelTokenizer;
 
-fn app_with(config: ServerConfig) -> Router {
+fn app_with_runtime_geometry(
+    config: ServerConfig,
+    runtime_geometry: Option<(usize, Option<usize>)>,
+) -> Router {
     let (options_tx, _options_rx) = mpsc::channel();
     let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
     let batch_metrics = provider.batch_metrics().clone();
+    if let Some((context_size, max_kv_size)) = runtime_geometry {
+        batch_metrics.publish_runtime_context_geometry(context_size, max_kv_size);
+    }
     let state = AppState::new(
         provider,
         config,
@@ -41,6 +47,10 @@ fn app_with(config: ServerConfig) -> Router {
         batch_metrics,
     );
     create_app(state)
+}
+
+fn app_with(config: ServerConfig) -> Router {
+    app_with_runtime_geometry(config, None)
 }
 
 async fn send(app: Router, method: Method, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -199,6 +209,7 @@ fn geometry_block_reports_batch_and_kv_bounds() {
         prefill_chunk_size: 512,
         max_batch_size: 4,
         max_kv_size: Some(4096),
+        kv_unified: true,
         ..Default::default()
     };
     let block = geometry_block(&config);
@@ -206,6 +217,7 @@ fn geometry_block_reports_batch_and_kv_bounds() {
     assert_eq!(block["n_ubatch"], 512);
     assert_eq!(block["n_batch_decode"], 4);
     assert_eq!(block["n_kv_max"], 4096);
+    assert_eq!(block["kv_unified"], true);
 }
 
 /// `--batch-size` (b10621's `n_batch` spelling) is `aliased` rather than
@@ -274,6 +286,8 @@ async fn get_props_carries_the_b10621_key_set() {
     // b10621 shape details a schema-driven client depends on.
     assert_eq!(body["total_slots"], 3);
     assert_eq!(body["default_generation_settings"]["n_ctx"], 2048);
+    assert_eq!(body["kv_unified"], false);
+    assert_eq!(body["geometry"]["kv_unified"], false);
     assert!(body["default_generation_settings"]["params"].is_object());
     let modalities = body["modalities"].as_object().expect("modalities object");
     let mut modality_keys: Vec<&str> = modalities.keys().map(String::as_str).collect();
@@ -315,6 +329,27 @@ async fn get_props_resolves_ctx_size_zero_to_effective_context() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["default_generation_settings"]["n_ctx"], 4096);
+}
+
+#[tokio::test]
+async fn get_props_reports_post_load_non_batching_context_geometry() {
+    let (status, body) = send(
+        app_with_runtime_geometry(
+            ServerConfig {
+                context_size: 5120,
+                max_kv_size: Some(5120),
+                ..Default::default()
+            },
+            Some((20_480, Some(20_480))),
+        ),
+        Method::GET,
+        "/props",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["default_generation_settings"]["n_ctx"], 20_480);
+    assert_eq!(body["geometry"]["n_kv_max"], 20_480);
 }
 
 /// GET /props is ungated in b10621; `--props` gates POST only.

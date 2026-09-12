@@ -126,6 +126,19 @@ impl BatchScheduler {
             Some(s) => s,
             None => return,
         };
+        if seq.images.is_empty()
+            && seq.audio.is_empty()
+            && !self.shared_budget_admits_prompt(seq.prompt_tokens.len())
+        {
+            Self::send_shared_budget_rejection(
+                &seq.response_tx,
+                seq.prompt_tokens.len(),
+                self.shared_kv_budget(),
+            );
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
 
         // #122 b2: paged KV block-budget admission gate. Opt-in — a no-op
         // unless a budget is configured (`free_paged_block_budget()` is `None`
@@ -1338,6 +1351,22 @@ impl BatchScheduler {
             return;
         }
         let sampled_first_token = mlxcel_core::item_i32(&first_token_arr);
+        if !self.shared_budget_has_prefill_first_token_room(seq.prompt_tokens.len()) {
+            seq.retention.context_exhausted = true;
+            if let Err(err) = seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::Length))
+            {
+                tracing::error!("State transition error: {err}");
+            }
+            let cached = seq.already_cached_tokens;
+            let result = seq.take_generation_result(&self.tokenizer, cached, None);
+            let _ = seq.response_tx.send(GenerateEvent::Done(result));
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            self.batch_observability.record_sequence_completed();
+            return;
+        }
 
         // advance the matcher state with the just-sampled token.
         // If consume_token errors, transition the sequence to Finished(Error)

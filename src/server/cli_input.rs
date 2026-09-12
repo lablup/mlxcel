@@ -75,6 +75,11 @@ pub struct ServerStartupInput {
     /// prepended by [`env_fallback_api_key_files`] for the same reason.
     pub api_key_files: Vec<PathBuf>,
     pub n_parallel: usize,
+    /// Whether the raw `--parallel`/`-np` value used llama-server's auto
+    /// sentinel (`-1`). The resolved `n_parallel` is already concrete; this
+    /// source bit is needed because b10621's auto also enables `kv_unified`
+    /// by default.
+    pub parallel_auto: bool,
     pub ctx_size: usize,
     pub n_predict: i32,
 
@@ -599,11 +604,12 @@ pub struct ServerStartupInput {
     /// Resolved (and refused, for `--swa-full`) by
     /// [`ServerStartupInput::into_startup_config`].
     pub context_compat: crate::cli::context_args::ContextCompatArgs,
-    /// llama-server b10621 slot-state and context-checkpoint flags
+    /// llama-server b10621 slot-state, unified-KV and context-checkpoint flags
     /// (`--cache-idle-slots`, `--slot-prompt-similarity`, `--kv-unified`,
     /// `--ctx-checkpoints`, `--checkpoint-min-step`), straight off the shared
-    /// clap group (#1473). Every one of them is `not_applicable`: the inert
-    /// value is accepted and a request for the behavior is refused by
+    /// clap group. `--kv-unified` participates in startup context resolution;
+    /// the remaining slot/checkpoint flags keep the #1473 diagnostic path where
+    /// inert values are accepted and behavior requests are refused by
     /// [`ServerStartupInput::into_startup_config`].
     pub slot_compat: crate::cli::slot_args::SlotCompatArgs,
     /// llama-server b10621 RoPE / YaRN runtime overrides, straight off the
@@ -793,6 +799,9 @@ impl ServerStartupInput {
         } else {
             self.max_batch_size
         };
+        let kv_unified = self
+            .slot_compat
+            .resolve_kv_unified(self.parallel_auto, self.max_batch_size.is_some());
         let resolution =
             resolve_prefill_chunk_size(self.prefill_chunk_size, self.batch_size, self.ubatch_size);
         // resolve the server-wide thinking budget once, up-front.
@@ -1009,6 +1018,7 @@ impl ServerStartupInput {
             api_keys: self.api_keys,
             api_key_files: self.api_key_files,
             n_parallel: self.n_parallel,
+            kv_unified,
             ctx_size: self.ctx_size,
             n_predict: self.n_predict,
             http_timeout: self.timeout,
@@ -1193,8 +1203,8 @@ impl ServerStartupInput {
 /// `-1`, the upstream default, means "let the server choose"; b10621's auto
 /// resolves it to 4 slots (`server.cpp`: "n_parallel is set to auto, using
 /// n_parallel = 4 and kv_unified = true") and mlxcel resolves the slot count
-/// identically. The `kv_unified` half of upstream's auto is a KV-layout
-/// switch mlxcel records separately on the `--kv-unified` surface (#1473).
+/// identically. The `kv_unified` half of upstream's auto is resolved from the
+/// raw auto bit and the slot compatibility flags during startup (#1815).
 /// Zero and values below `-1` are refused: upstream would fail to allocate a
 /// zero-slot context, and refusing at the flag names the domain.
 pub fn resolve_n_parallel(raw: i64) -> Result<usize, String> {

@@ -325,17 +325,29 @@ fn parallel_context_size_divides_total_budget_by_active_slots() {
     for (ctx_size, slots, expected_per_slot) in [(4096, 1, 4096), (4096, 2, 2048), (4096, 4, 1024)]
     {
         assert_eq!(
-            resolve_parallel_context_size(ctx_size, slots, None, false),
+            resolve_parallel_context_size(ctx_size, slots, None, false, false),
             expected_per_slot
         );
         assert_eq!(
-            resolve_parallel_context_size(ctx_size, slots, None, false)
-                * effective_parallel_context_slots(slots, None, false),
+            resolve_parallel_context_size(ctx_size, slots, None, false, false)
+                * effective_parallel_context_slots(slots, None, false, false),
             ctx_size
         );
     }
 
-    assert_eq!(resolve_parallel_context_size(4097, 4, None, false), 1024);
+    assert_eq!(
+        resolve_parallel_context_size(4097, 4, None, false, false),
+        1024
+    );
+}
+
+#[test]
+fn unified_context_size_gives_each_slot_the_total_budget() {
+    assert_eq!(
+        resolve_parallel_context_size(20_480, 4, None, false, true),
+        20_480
+    );
+    assert_eq!(effective_parallel_context_slots(4, None, false, true), 1);
 }
 
 #[test]
@@ -351,6 +363,21 @@ fn build_server_config_uses_max_batch_size_as_context_divisor() {
     assert_eq!(config.context_size, 2048);
     assert_eq!(config.max_batch_size, 4);
     assert_eq!(config.max_kv_size, Some(2048));
+}
+
+#[test]
+fn build_server_config_keeps_whole_window_for_unified_context() {
+    let startup = ServerStartupConfig {
+        ctx_size: 20_480,
+        n_parallel: 4,
+        kv_unified: true,
+        ..ServerStartupConfig::default()
+    };
+
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
+    assert_eq!(config.context_size, 20_480);
+    assert_eq!(config.max_kv_size, Some(20_480));
+    assert!(config.kv_unified);
 }
 
 #[test]

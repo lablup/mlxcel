@@ -36,7 +36,10 @@ roofline, while per-request decode rate falls proportionally. The defaults:
 - `--parallel 4`: admit a decode batch of up to 4. The worker clamps this to 1
   for families that cannot batch (SSM / hybrid / mixed-cache, i.e. any model
   where `supports_batching()` is false), so the default is safe for every
-  architecture.
+  architecture. When an explicit split configuration is clamped this way, the
+  worker restores the whole configured context as the one effective request
+  window and publishes that post-load value to `/props`, `/slots`, and
+  `/v1/models`.
   `supports_batching()` being true does not by itself mean a family runs one
   forward per tick: only families that override `forward_batched()` (Llama 3,
   Llama 4, Qwen 3, Qwen 3.5, Gemma 3, Helium, Muse Glimmer, and Qwen3-MoE
@@ -78,9 +81,14 @@ Escape hatches restore the previous single-client behavior: `--parallel 1`
 > and the prompt cache remain independent wins on CUDA.
 
 Memory sizing: the KV footprint grows with the active batch, so budget for up to
-`--parallel` concurrent sequences' KV. When `--ctx-size` is set it is divided
-across the active slots (`ctx_size / parallel` per slot, floor 512 tokens);
-leave it at 0 to use the model default per slot. Admission control
+`--parallel` concurrent sequences' KV. With auto `--parallel -1`, mlxcel
+matches b10621's unified default: four slots are exposed, every slot can use
+the whole `--ctx-size` window, and the scheduler enforces that all live
+prompt+generated tokens together stay within that shared budget. With an
+explicit positive `--parallel` (or explicit `--max-batch-size`) the context is
+split across the active slots (`ctx_size / parallel` per slot) unless
+`--kv-unified` is also set; `--no-kv-unified` forces split windows. Leave
+`--ctx-size` at 0 to use the model default. Admission control
 (`--kv-cache-budget`, `--max-kv-size`) still sheds load under pressure, so a
 large `--parallel` degrades to queueing rather than OOM.
 

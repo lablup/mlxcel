@@ -58,6 +58,9 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "model_alias",
     "model_aliases",
     "context_size",
+    "context_size_total",
+    "explicit_max_kv_size",
+    "kv_unified",
     "n_parallel",
     "enable_slots_endpoint",
     "enable_props_endpoint",
@@ -503,6 +506,9 @@ fn read_only_reason(field: &str) -> &'static str {
         | "kv_cache_mode"
         | "batch_kv_quant"
         | "max_kv_size"
+        | "context_size_total"
+        | "explicit_max_kv_size"
+        | "kv_unified"
         | "context_shift"
         | "n_keep"
         | "kv_cache_budget"
@@ -563,6 +569,9 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "model_alias" => json!(config.model_alias),
         "model_aliases" => json!(config.model_aliases),
         "context_size" => json!(config.context_size),
+        "context_size_total" => json!(config.context_size_total),
+        "explicit_max_kv_size" => json!(config.explicit_max_kv_size),
+        "kv_unified" => json!(config.kv_unified),
         "n_parallel" => json!(config.n_parallel),
         "enable_slots_endpoint" => json!(config.enable_slots_endpoint),
         "enable_props_endpoint" => json!(config.enable_props_endpoint),
@@ -676,12 +685,14 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "enable_metrics_endpoint"
         | "enable_settings_endpoint"
         | "enable_preemption"
+        | "kv_unified"
         | "no_batch"
         | "enable_vlm_prefix_cache"
         | "context_shift"
         | "model_is_gemma4_family"
         | "default_adaptive_p_named" => KnobKind::Bool,
         "context_size"
+        | "context_size_total"
         | "n_parallel"
         | "n_keep"
         | "default_mirostat"
@@ -709,6 +720,7 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "draft_block_size"
         | "embedding_max_length"
         | "prefill_grant_interval"
+        | "explicit_max_kv_size"
         | "max_batch_prefill_tokens"
         | "max_kv_size" => KnobKind::IntOrNull,
         "video_fps"

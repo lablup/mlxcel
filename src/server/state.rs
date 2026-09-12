@@ -91,6 +91,18 @@ pub struct BatchMetrics {
     /// Cumulative number of preemptive evictions.
     pub preemptions_total: AtomicU64,
 
+    /// Post-load per-request context window published by the model worker.
+    ///
+    /// Zero means startup geometry remains authoritative. A non-zero value is
+    /// published when a model that cannot batch clamps the configured decode
+    /// width to one and therefore restores the whole server context to that
+    /// request (#1815).
+    runtime_context_size: AtomicUsize,
+    /// Post-load KV cap paired with [`Self::runtime_context_size`]. The worker
+    /// stores this first and then release-publishes the context size, allowing
+    /// route readers to acquire a coherent geometry pair.
+    runtime_max_kv_size: AtomicUsize,
+
     // -- prompt-prefix cache Prometheus counters --
     /// Cumulative successful prompt-cache adoptions (hits). Incremented by the
     /// scheduler's `try_adopt_cached_prefix` when an entry is adopted.
@@ -137,6 +149,8 @@ impl BatchMetrics {
             total_sequences_processed: AtomicU64::new(0),
             total_tokens_generated: AtomicU64::new(0),
             preemptions_total: AtomicU64::new(0),
+            runtime_context_size: AtomicUsize::new(0),
+            runtime_max_kv_size: AtomicUsize::new(0),
             prompt_cache_hits_total: AtomicU64::new(0),
             prompt_cache_misses_total: AtomicU64::new(0),
             prompt_cache_prefix_tokens_reused_total: AtomicU64::new(0),
@@ -215,6 +229,31 @@ impl BatchMetrics {
     /// Record a preemptive eviction (called by scheduler thread).
     pub fn record_preemption(&self) {
         self.preemptions_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Publish the effective post-load context geometry for route metadata.
+    pub fn publish_runtime_context_geometry(
+        &self,
+        context_size: usize,
+        max_kv_size: Option<usize>,
+    ) {
+        self.runtime_max_kv_size
+            .store(max_kv_size.unwrap_or(0), Ordering::Relaxed);
+        self.runtime_context_size
+            .store(context_size, Ordering::Release);
+    }
+
+    /// Return the post-load context override, when the worker published one.
+    pub fn runtime_context_size(&self) -> Option<usize> {
+        let value = self.runtime_context_size.load(Ordering::Acquire);
+        (value > 0).then_some(value)
+    }
+
+    /// Return the post-load KV-cap override paired with the context override.
+    pub fn runtime_max_kv_size(&self) -> Option<usize> {
+        self.runtime_context_size()?;
+        let value = self.runtime_max_kv_size.load(Ordering::Relaxed);
+        (value > 0).then_some(value)
     }
 
     // -- Prompt-prefix cache helpers --
@@ -546,12 +585,23 @@ pub struct AppState {
 impl AppState {
     /// Effective per-slot context window reported on b10621 metadata surfaces.
     ///
-    /// An explicit `--ctx-size` is already divided across active slots before
-    /// it reaches `config.context_size`. When it is zero, generation resolves
-    /// the same "model default" window from the checkpoint and falls back to
-    /// 4096 if the checkpoint does not declare one.
+    /// An explicit `--ctx-size` is divided across configured slots before it
+    /// reaches `config.context_size`. If the model later clamps decode width to
+    /// one, the worker publishes the restored whole-window value through
+    /// `batch_metrics`. When startup context is zero, generation resolves the
+    /// same model-default window from the checkpoint and falls back to 4096 if
+    /// the checkpoint does not declare one.
     pub(crate) fn effective_context_size(&self) -> usize {
-        self.effective_context_size
+        self.batch_metrics
+            .runtime_context_size()
+            .unwrap_or(self.effective_context_size)
+    }
+
+    /// Effective post-load KV cap reported in the `/props` geometry block.
+    pub(crate) fn effective_max_kv_size(&self) -> Option<usize> {
+        self.batch_metrics
+            .runtime_max_kv_size()
+            .or(self.config.max_kv_size)
     }
 }
 

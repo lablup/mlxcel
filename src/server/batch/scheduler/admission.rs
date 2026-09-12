@@ -188,6 +188,18 @@ impl BatchScheduler {
             )));
             return;
         }
+        if images.is_empty()
+            && audio.is_empty()
+            && videos.is_empty()
+            && !self.shared_budget_admits_prompt(prompt_tokens.len())
+        {
+            Self::send_shared_budget_rejection(
+                &response_tx,
+                prompt_tokens.len(),
+                self.shared_kv_budget(),
+            );
+            return;
+        }
 
         let mut sampling = merge_config_stop_tokens(options.sampling.clone(), &self.config_eos);
 

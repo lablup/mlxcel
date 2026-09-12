@@ -404,9 +404,9 @@
       "description": "size of the prompt context (default: 0, 0 = loaded from model) (env: LLAMA_ARG_CTX_SIZE)",
       "discovery": "help-entry-head",
       "state": "supported",
-      "issue": 1450,
-      "test": "src/server/routes/props_tests.rs",
-      "notes": "Same semantics: 0 = derive from the model, and the total is shared across slots (ctx_size / slots) exactly as llama-server splits n_ctx across n_parallel. The resolved positive per-slot window is reported as `n_ctx` in /slots, /props, and /v1/models, and logged at startup.",
+      "issue": 1815,
+      "test": "src/server/startup_tests.rs::unified_context_size_gives_each_slot_the_total_budget",
+      "notes": "Same semantics: 0 = derive from the model. In split mode the total is divided across active slots (ctx_size / slots), and in unified mode every slot receives the whole configured window while the scheduler enforces one shared live-token budget across all slots. The resolved positive per-slot/full-window value is reported as `n_ctx` in /slots, /props, and /v1/models, and the startup geometry log includes `kv_unified`.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -466,13 +466,11 @@
       "default": "enabled if number of slots is auto",
       "description": "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto) (env: LLAMA_ARG_KV_UNIFIED)",
       "discovery": "help-entry-head",
-      "state": "not_applicable",
-      "issue": 1473,
-      "test": "src/cli/slot_args_tests.rs",
-      "notes": "Declared on both binaries since #1473 so the refusal is a diagnostic rather than clap's unknown-argument error: KV is allocated per sequence through the scheduler's cache pool, which divides --ctx-size into per-slot shares; there is no unified shared buffer to switch to. --no-kv-unified (and -no-kvu) is accepted as the inert spelling of mlxcel's only layout, and a request for the unified buffer is refused at startup with a diagnostic that points at --parallel 1 for the whole-context case. See the --parallel entry, whose by_design divergence is the auto default's other half.",
-      "divergence": [
-        "a request for the behavior is refused at startup with a diagnostic; only the inert value is accepted"
-      ],
+      "state": "supported",
+      "issue": 1815,
+      "test": "src/server/batch/scheduler/shared_budget.rs::shared_budget_growth_rejects_when_active_rows_would_cross_limit",
+      "notes": "Supported as b10621's visible context-budget contract over mlxcel's per-sequence KV allocation. When enabled, every slot receives the whole `--ctx-size` window and the scheduler enforces the same value as a shared logical live-token budget across active and parked sequences; prompt-cache entries are evicted before deterministic shared-budget exhaustion. The flag can be passed as `--kv-unified` / `-kvu` or through `LLAMA_ARG_KV_UNIFIED`; `--no-kv-unified` / `-no-kvu` forces split windows.",
+      "divergence": [],
       "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
@@ -499,18 +497,12 @@
       "default": "-1, -1 = auto",
       "description": "number of server slots (default: -1, -1 = auto) (env: LLAMA_ARG_N_PARALLEL)",
       "discovery": "help-entry-head",
-      "state": "by_design",
-      "issue": 1473,
-      "test": "src/bin/mlx_server.rs::a_negative_parallel_resolves_to_the_automatic_slot_count",
-      "notes": "Spelling, env, -np and b10621's whole value domain: the default is -1 (auto) and auto resolves to 4 slots, which is upstream's own auto resolution (server-context.cpp: \"n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\"). What differs permanently is the second half of that upstream line. Upstream's auto also switches to one unified KV buffer shared by the slots, so a default-config single request can use the whole context; mlxcel's scheduler owns a cache pool that allocates KV per sequence and divides --ctx-size into per-slot shares, and --kv-unified is not_applicable for the same reason. An operator who wants one request to have the whole context passes --parallel 1, which is the same allocation upstream's unified buffer gives that request.",
-      "divergence": [
-        "b10621's auto default also enables a unified KV buffer shared by the slots, so a default-config single request may use the whole context; mlxcel keeps per-slot context shares (see --kv-unified)"
-      ],
-      "rationale": {
-        "kind": "policy",
-        "reason": "The KV layout is a property of the scheduler cache pool, which allocates and reclaims per sequence so a slot can be freed and reused independently; a shared buffer would make one sequence's footprint depend on its neighbours' liveness. The slot count itself matches upstream exactly, and --parallel 1 reproduces the whole-context allocation upstream's unified buffer gives a single request.",
-        "revisit_if": "the paged cache pool gains a cross-sequence context budget, so an idle slot's unused share can be lent to an active sequence without breaking per-sequence reclamation"
-      },
+      "state": "supported",
+      "issue": 1815,
+      "test": "src/server/cli_input_tests.rs::kv_unified_defaults_on_only_for_auto_parallel_without_explicit_batch_size",
+      "notes": "Spelling, env, -np and b10621's whole value domain: the default is -1 (auto) and auto resolves to 4 slots, which is upstream's own auto resolution (server-context.cpp: \"n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\"). mlxcel now matches both halves of that visible contract: auto enables unified context budgeting by default, explicit positive --parallel keeps split windows unless --kv-unified is also explicit, explicit --max-batch-size keeps split windows, and --no-kv-unified forces split windows.",
+      "divergence": [],
+      "rationale": null,
       "mlxcel": {
         "accepted_spellings": [
           "--parallel",

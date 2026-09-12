@@ -113,9 +113,10 @@ fn default_generation_settings_with_live(
 ///
 /// An operator passes `--ctx-size` and `--batch-size` and has no other way to
 /// confirm what the server resolved them to (#1450). `n_ctx` is the effective
-/// PER-SLOT window (`--ctx-size 8192 --parallel 4` gives each slot 2048),
-/// matching llama-server. When `--ctx-size 0`, it reports the model-derived
-/// window used by generation, falling back to 4096 if the checkpoint omits it.
+/// PER-SLOT window in split mode (`--ctx-size 8192 --parallel 4` gives each
+/// slot 2048) and the whole configured window in unified mode. When
+/// `--ctx-size 0`, it reports the model-derived window used by generation,
+/// falling back to 4096 if the checkpoint omits it.
 pub(crate) fn geometry_block(config: &ServerConfig) -> serde_json::Value {
     serde_json::json!({
         // The logical prefill batch `--batch-size` / `-b` resolves to. mlxcel
@@ -130,6 +131,7 @@ pub(crate) fn geometry_block(config: &ServerConfig) -> serde_json::Value {
         // `--max-kv-size` and the per-slot share of `--ctx-size` together the
         // way `resolve_context_kv_cap` does.
         "n_kv_max": config.max_kv_size,
+        "kv_unified": config.kv_unified,
     })
 }
 
@@ -201,6 +203,8 @@ fn chat_template_caps(state: &AppState) -> serde_json::Value {
 pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
     let live = state.live();
     let tokenizer_config = read_model_json(&state, "tokenizer_config.json");
+    let mut geometry = geometry_block(&state.config);
+    geometry["n_kv_max"] = serde_json::json!(state.effective_max_kv_size());
     let mut body = serde_json::json!({
         // -- b10621 key set --
         "default_generation_settings": {
@@ -243,9 +247,10 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         // The effective KV mode, not the requested one: startup has already
         // substituted anything this model family cannot hold (issue #1350).
         "kv_cache_mode": state.config.kv_cache_mode.to_string(),
+        "kv_unified": state.config.kv_unified,
         "kv_bits": state.config.batch_kv_quant.bits,
         "speculative": speculative_config(&state.config),
-        "geometry": geometry_block(&state.config),
+        "geometry": geometry,
     });
     body["capabilities"] = serde_json::to_value(server_capabilities(&state)).unwrap_or_default();
     Json(body)

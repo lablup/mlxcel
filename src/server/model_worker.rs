@@ -132,6 +132,13 @@ pub(crate) struct WorkerSchedulerConfig {
     /// window and bypass this cap. `None` (the default) preserves the
     /// legacy unbounded behaviour.
     pub max_kv_size: Option<usize>,
+    /// Whether unified shared-budget context is active.
+    pub kv_unified: bool,
+    /// Original configured context budget before split-mode lowering.
+    pub context_size_total: usize,
+    /// Operator-supplied `--max-kv-size` before startup clamped it to the
+    /// effective per-slot window.
+    pub explicit_max_kv_size: Option<usize>,
     /// context-retention policy at the KV bound (#1472, b10621
     /// `--context-shift` / `--keep`). Default: shifting disabled, which makes
     /// the bound a hard stop rather than a silent trim.
@@ -205,6 +212,28 @@ pub(crate) struct WorkerSchedulerConfig {
     /// serve-level `--diffusion-threshold` for the confidence-threshold
     /// sampler (diffusion models only). Ignored by non-diffusion models.
     pub diffusion_threshold: f32,
+}
+
+pub(crate) fn resolve_worker_effective_max_kv_size(
+    startup_max_kv_size: Option<usize>,
+    context_size_total: usize,
+    explicit_max_kv_size: Option<usize>,
+    configured_max_batch_size: usize,
+    effective_max_batch_size: usize,
+    kv_unified: bool,
+) -> Option<usize> {
+    if kv_unified
+        || effective_max_batch_size != 1
+        || configured_max_batch_size <= 1
+        || context_size_total == 0
+    {
+        return startup_max_kv_size;
+    }
+
+    Some(match explicit_max_kv_size {
+        Some(max_kv_size) => max_kv_size.min(context_size_total),
+        None => context_size_total,
+    })
 }
 
 pub(crate) fn spawn_model_worker_with_batch_config(
@@ -534,6 +563,39 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     }
                     1
                 };
+                let effective_max_kv_size = resolve_worker_effective_max_kv_size(
+                    sched_config.max_kv_size,
+                    sched_config.context_size_total,
+                    sched_config.explicit_max_kv_size,
+                    sched_config.max_batch_size,
+                    effective_max_batch_size,
+                    sched_config.kv_unified,
+                );
+                if effective_max_kv_size != sched_config.max_kv_size {
+                    tracing::info!(
+                        max_kv_size = ?effective_max_kv_size,
+                        "Model does not support batched decode; restored the per-request KV cap from the original context budget after clamping max_batch_size to 1"
+                    );
+                }
+                if effective_max_batch_size == 1
+                    && sched_config.max_batch_size > 1
+                    && !sched_config.kv_unified
+                    && sched_config.context_size_total > 0
+                {
+                    batch_metrics.publish_runtime_context_geometry(
+                        sched_config.context_size_total,
+                        effective_max_kv_size,
+                    );
+                    tracing::info!(
+                        ctx_size = sched_config.context_size_total,
+                        ctx_size_per_slot = sched_config.context_size_total,
+                        context_slots = 1,
+                        kv_unified = false,
+                        configured_max_batch_size = sched_config.max_batch_size,
+                        max_kv_size = ?effective_max_kv_size,
+                        "resolved post-load context and batch geometry after the model clamped decode width"
+                    );
+                }
 
                 tracing::info!(
                     "Starting BatchScheduler (max_batch_size={}, \
@@ -632,7 +694,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     model.num_layers(),
                     crate::server::batch::scheduler::DEFAULT_PAGED_BLOCK_SIZE,
                     effective_max_batch_size.max(1) as u64,
-                    sched_config.max_kv_size.unwrap_or(0) as u64,
+                    effective_max_kv_size.unwrap_or(0) as u64,
                     false,
                     paged_block_budget,
                 );
@@ -676,7 +738,13 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 .with_kv_cache_mode(sched_config.kv_cache_mode)
                 .with_batch_kv_quant(sched_config.batch_kv_quant)
                 // cap plain KVCache growth to --max-kv-size when set.
-                .with_max_kv_size(sched_config.max_kv_size)
+                .with_max_kv_size(effective_max_kv_size)
+                // enforce unified mode's shared live-token context budget.
+                .with_shared_kv_budget(if sched_config.kv_unified {
+                    effective_max_kv_size
+                } else {
+                    None
+                })
                 // b10621 context-retention policy (#1472).
                 .with_context_retention(sched_config.context_retention)
                 // install the resolved paged KV block budget (epic #116 #122 b3).
