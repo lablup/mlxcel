@@ -14,6 +14,7 @@ oracle setup closely enough to separate forward-pass differences from BF16 stora
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import math
 import os
@@ -35,6 +36,44 @@ from transformers.vision_utils import (
 )
 
 TRANSFORMERS_GIT_FOR_ISSUE_1738 = "df04b012229d50d2b6dfba32c61c3057c3a40ea1"
+
+
+def _transformers_provenance() -> dict[str, Any]:
+    version = __import__("transformers").__version__
+    try:
+        distribution = importlib.metadata.distribution("transformers")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError("transformers distribution metadata is not installed") from error
+
+    direct_url_text = distribution.read_text("direct_url.json")
+    if direct_url_text is None:
+        raise RuntimeError(
+            "transformers direct_url.json is missing; install the oracle environment "
+            f"from the pinned git commit {TRANSFORMERS_GIT_FOR_ISSUE_1738}"
+        )
+
+    try:
+        direct_url = json.loads(direct_url_text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("transformers direct_url.json is not valid JSON") from error
+
+    vcs_info = direct_url.get("vcs_info")
+    actual_commit = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+    if actual_commit != TRANSFORMERS_GIT_FOR_ISSUE_1738:
+        raise RuntimeError(
+            "transformers oracle commit mismatch: "
+            f"direct_url.json has {actual_commit!r}, expected {TRANSFORMERS_GIT_FOR_ISSUE_1738}"
+        )
+
+    return {
+        "version": version,
+        "direct_url": direct_url.get("url"),
+        "requested_revision": (
+            vcs_info.get("requested_revision") if isinstance(vcs_info, dict) else None
+        ),
+        "actual_commit": actual_commit,
+        "expected_commit": TRANSFORMERS_GIT_FOR_ISSUE_1738,
+    }
 
 
 def _load_manifest(rust_dump: pathlib.Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -104,6 +143,7 @@ def _load_vision(model_dir: pathlib.Path, model_dtype: torch.dtype) -> CohereCom
 def compare(args: argparse.Namespace) -> None:
     model_dir = args.model.resolve()
     rust_dump = args.rust_dump.resolve()
+    transformers_provenance = _transformers_provenance()
     manifest, stages = _load_manifest(rust_dump)
     cfg = AutoConfig.from_pretrained(model_dir)
     model_dtype = _dtype_from_arg(args.model_dtype)
@@ -195,8 +235,8 @@ def compare(args: argparse.Namespace) -> None:
         records.append(stats("post_merger", vision.merger(hidden)))
 
     result = {
-        "transformers_version": __import__("transformers").__version__,
-        "transformers_git_expected_for_issue_1738": TRANSFORMERS_GIT_FOR_ISSUE_1738,
+        "transformers_version": transformers_provenance["version"],
+        "transformers_provenance": transformers_provenance,
         "torch_version": torch.__version__,
         "model": str(model_dir),
         "rust_dump": str(rust_dump),
