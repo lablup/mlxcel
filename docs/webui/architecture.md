@@ -79,3 +79,7 @@ Create an isolated Python environment, install `scripts/ci/webui_contract_requir
 Schema patterns use ECMAScript-compatible syntax. The strict end assertion `(?![\s\S])` is intentional: `$` also matches before a final newline in JavaScript and Python and therefore does not exclude trailing control characters. Rust implementations must use equivalent structural/full-string validation rather than copying lookahead expressions into the Rust `regex` crate, which does not support lookaround. Negative cases mutate one field at a time so an unrelated invalid field cannot mask a missing constraint.
 
 The verifier registers an explicit date-time checker and refuses schema formats without an active checker. This avoids silently accepting malformed timestamps when optional `jsonschema` format dependencies are absent. These checks validate contract artifacts, not live Rust serialization or runtime behavior; route and integration owners must exercise actual producers against the same fixtures in their dependent issues.
+
+## Catalog implementation boundary
+
+The metadata-only catalog adapter and its current integration limits are documented in [catalog.md](catalog.md) ([한국어](catalog.ko.md)). It projects the existing router/provider authority; production startup mounting remains a separate integration step.

@@ -1,0 +1,49 @@
+# 모델 카탈로그 통합
+
+[English](catalog.md)
+
+## 범위와 책임
+
+이슈 #1840은 기존 `RouterPool`의 메타데이터 전용 카탈로그 투영과 목록·상세·새로고침 어댑터를 추가합니다. 별도 모델 레지스트리를 만들거나 새 provider를 시작하지 않습니다. `create_router_app_with_authenticated_ui`는 통합 테스트와 향후 안전한 시작 경로를 위해 필수 API 키 인증 뒤에 어댑터를 노출합니다. 일반 `create_router_app`에는 아직 마운트하지 않습니다. 프로덕션 `--webui` 시작과 브라우저 보안 통합은 각각 #1838과 #1837의 범위이며, 아래 API 경로가 프로덕션 플래그의 제공을 뜻하지는 않습니다.
+
+탐색의 소유자는 여전히 라우터입니다. 관리형 캐시, 명시적인 `--models-dir`, 프리셋은 기존 충돌 우선순위(캐시 < 모델 디렉터리 < 프리셋), 별칭, 숨김 정책을 유지합니다. 저장소의 모델은 `--models-dir models/mlx`로 명시적으로 선택합니다. 카탈로그는 현재 작업 디렉터리에 따라 달라지는 기본값이나 파일시스템 선택기를 추가하지 않습니다. 목록 조회는 발견된 항목을 투영하며 체크포인트 다운로드, tokenizer 열기, provider 생성, 가중치 로드를 하지 않습니다.
+
+## 투영 데이터 사용
+
+아래 어댑터 경로는 향후 검증된 서버 API 접두사를 기준으로 합니다. 전체 DTO는 [API 스키마](api.yaml)와 [생성된 TypeScript 선언](generated/ui-api.d.ts)을 확인하십시오.
+
+| 요청 | 동작 |
+|---|---|
+| `GET /ui-api/v1/catalog` | 불투명 카탈로그 ID 순으로 정렬한 필터링 목록 |
+| `GET /ui-api/v1/catalog/{id}` | 표시 가능한 항목 하나 또는 구조화된 not-found 오류 |
+| `POST /ui-api/v1/catalog/refresh` | 설정된 소스를 명시적으로 재탐색하는 수명주기 coordinator 작업 접수 |
+
+목록은 `limit`(기본 50, 최대 200), 반환받은 `cursor`, `q`(최대 128바이트), `source`, `task`, `lifecycle`, `support`, `completeness`를 받습니다. 커서는 최대 512바이트이며 투영 대상은 1,000개 항목으로 제한됩니다. 페이지 순서는 인벤토리가 변하지 않을 때 결정적이며 동시 새로고침을 가로지르는 트랜잭션 스냅샷은 아닙니다. `server_instance_id`와 `snapshot_sequence`를 보관하고 상태 변경 시 [architecture.md](architecture.md)의 재스냅샷 규칙을 따릅니다.
+
+카탈로그 작업과 선택에는 `identity.id`, 추론 요청에는 `identity.inference_id`를 사용합니다. 표시 이름은 어느 쪽의 식별자도 아닙니다. 콘텐츠 fingerprint는 파일시스템 메타데이터 변경을 나타내며 가중치 내용의 암호학적 검증값이 아닙니다. revision과 lifecycle은 브라우저가 관리하는 별도 상태 머신이 아니라 풀에서 가져옵니다.
+
+다음 사실을 하나의 “작동함” 배지로 합치지 마십시오.
+
+- `complete`는 로컬 체크포인트 파일 구성을 나타내며 로드 성공이나 텐서 무결성 검증이 아닙니다.
+- `metadata.support.architecturally_supported`는 공유 모델 감지와 아키텍처 레지스트리에서 도출하며 공급업체 제목의 일치 여부가 아닙니다.
+- `runnable_on_backend`는 컴파일된 백엔드에 대한 레지스트리 지원 상태이며 실제 추론 측정 결과가 아닙니다.
+- `tested_checkpoint`는 현재 명시적인 사유와 함께 false입니다. 카탈로그에는 체크포인트별 검증 증거 데이터베이스가 없습니다.
+- `lifecycle.state`는 현재 provider 수명주기를 나타냅니다. 로드 전 capability가 있다고 `ready`인 것은 아닙니다.
+
+`metadata.model_type`과 `metadata.architecture`는 감지·레지스트리에서 해석한 식별자이며 검증하지 않은 `architectures[0]` 복사본이 아닙니다. 카탈로그는 로더와 동일한 dispatch 판단을 사용하되 제한된 probe를 제공합니다. 변형 구분에 가중치 헤더가 필요하고 제한된 sidecar 증거가 없으면 사유와 함께 unknown으로 남깁니다. 관련 Gemma 4, Inkling, Kimi K3 변형을 임의로 텍스트 모델이라고 추정하지 않는 것도 이 원칙에 포함됩니다.
+
+Capability에는 적용 단계와 사용할 수 없는 사유가 있습니다. 이미지 입력은 준비된 기존 provider에서 확인하며 메타데이터만으로 이미지 전송을 활성화하지 않습니다. 비채팅 출력 task는 채팅과 구분합니다. 알 수 없는 파라미터 수와 메모리 추정값은 0이 아니라 사유가 있는 `null`입니다. 디스크 바이트는 파일 크기이며 프로세스 RSS나 allocator 메모리가 아닙니다.
+
+## 파일시스템과 새로고침 경계
+
+Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 제한을 적용합니다. 카탈로그 probe는 SafeTensors 헤더나 payload를 읽지 않습니다. 디스크 계산은 방문·대기 항목 최대 4,096개와 깊이 8을 적용하고 symlink를 건너뛰며 제한 안에서 완료할 수 없으면 사유와 함께 `null`을 반환합니다. 중첩된 `1_Pooling/config.json`은 부모 구성요소가 symlink가 아닌 실제 디렉터리일 때만 증거로 인정합니다.
+
+메타데이터 투영은 blocking worker에서 실행합니다. 크기가 제한된 캐시는 일반 polling마다 재귀 디스크 계산을 반복하지 않도록 합니다. 파일시스템 fingerprint는 관련 메타데이터를 계속 확인하고 lifecycle, revision, 제거 가능 여부는 현재 풀 상태로 갱신합니다. 캐시 적중 시 파일시스템 호출이 전혀 없다는 뜻은 아닙니다. 명시적인 새로고침은 캐시를 비우고 기존 라우터 재탐색을 실행합니다.
+
+작업이 활성 상태인 동안 서버 인스턴스마다 하나의 새로고침만 실행권을 가집니다. 동시 요청은 별도 재탐색을 시작하지 않고 같은 작업을 재사용하며 완료 후의 요청은 새 작업을 시작할 수 있습니다. `changed_entries`는 항목 signature를 비교하여 개수가 같아도 추가·삭제·감지된 변경을 포함합니다. 클라이언트에 전달하는 새로고침 오류는 경로를 숨기고 진단 상세는 서버 로그에 남깁니다.
+
+제거 가능 여부는 안내 정보이지 파일 삭제 권한이 아닙니다. 관리형 캐시만 제거 대상이 될 수 있으며 busy 항목은 사용할 수 없습니다. 실제 제거와 작업 경계의 검사는 #1841 범위입니다. 단일 모델 모드는 `single_model_entry_from_state(&AppState)`로 기존 provider와 실제 추론 ID를 설명하고 별도 provider를 등록하지 않으며 읽기 전용 제거 사유를 반환합니다. 프로덕션에서 이 accessor를 연결하는 작업은 #1838 범위입니다.
+
+## 회귀 테스트 범위
+
+집중 테스트는 스키마로 검증된 fixture와 실제 producer 전체 JSON의 비교, unknown 메타데이터, 캐시 무효화와 최신 lifecycle 투영, 공유 감지, symlink 증거, 기존 단일 provider 접근, HTTP 새로고침 전후 1,000개 항목의 전체 순회를 검증합니다. 공유 감지 변경 후의 추론 회귀 검사나 향후 프로덕션·브라우저 보안 수용 검증을 대신하지는 않습니다. 검증 기록과 환경 예외는 [PR #1868](https://github.com/lablup/mlxcel/pull/1868)을 확인하십시오.
