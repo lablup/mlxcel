@@ -42,7 +42,7 @@ NO_GPU_MULTI(Eig)
 NO_GPU_MULTI(Eigh)
 // Added upstream after the fork's merge base; no ROCm kernels yet.
 NO_GPU(GatherQQMM)
-NO_GPU(SearchSorted)
+// SearchSorted is implemented in sort.hip (mlxcelverse, lablup/mlxcel#1825).
 
 namespace fast {
 NO_GPU_USE_FALLBACK(CrossEntropy)
