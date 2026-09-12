@@ -236,7 +236,7 @@ The second row is the per-variable half of the env-wins contract: with only the 
 
 ## Batched serving (`mlxcel-server --max-batch-size 8`, concurrency 1, 4, 8; idle host, same binary)
 
-One server per (arm, round); the concurrency-1 level is also the server's warm-up. Laguna's `supports_batching()` returns false (`src/models/laguna.rs:650`, its mixed full and sliding caches are not per-sequence isolated), so on Laguna the scheduler serializes concurrent requests: its aggregate stays at the single-stream rate at every level and TTFT grows with the queue (11 s at 4, 26 s at 8). Those rows are therefore a serialized single-stream workload through the server, not a B > 1 measurement; the B > 1 rows are qwen3-30b-a3b, which does batch (per-request decode 79 to 21 to 9 tok/s as the batch fills while the aggregate rises). **The qwen3-30b-a3b arms are partial** (default n = 1, `both` n = 2, `nograph` n = 1): the sweep was stopped by the host-protection halt described below, mid round 1, before its third round.
+One server per (arm, round); the concurrency-1 level is also the server's warm-up. Laguna's `supports_batching()` returns false (`src/models/laguna.rs:650`, its mixed full and sliding caches are not per-sequence isolated), so on Laguna the scheduler serializes concurrent requests: its aggregate stays at the single-stream rate at every level and TTFT grows with the queue (11 s at 4, 26 s at 8). Those rows are therefore a serialized single-stream workload through the server, not a B > 1 measurement; the B > 1 rows are qwen3-30b-a3b, which does batch (per-request decode 79 to 21 to 9 tok/s as the batch fills while the aggregate rises). **The qwen3-30b-a3b arms below are the partial first pass** (default n = 1, `both` n = 2, `nograph` n = 1): the sweep was stopped by the host-protection halt described below, mid round 1, before its third round. They are kept as recorded; the completed n = 3 re-run on a freshly booted host is the section after this one, and it is what the allowlist decision rests on.
 
 
 ### `laguna-xs-2.1-nvfp4`
@@ -268,6 +268,57 @@ One server per (arm, round); the concurrency-1 level is also the server's warm-u
 | 8 | nograph | 1 | 79.70 (79.70 to 79.70) | +24.5% | 11.70 | 2869 (4567) | 0.78 to 0.78 | 0 of 1 |
 
 What the completed Laguna rows say: `both` is +8.2% at concurrency 1 (29.0 to 29.3 against 26.5 to 27.3, disjoint) and +4 to +6% at 4 and 8, the same sign as every other Laguna workload, smaller than the same-process harness because each server request pays its own prefill and first-token cost inside the aggregate. What the partial qwen3-30b-a3b rows say, with the caveat that none has n = 3: at concurrency 1 through the server `both` is 46.1 to 52.3 against a single default run of 52.6, and at 4 and 8 it is -2% and -7% against single default runs, while graphs off is +11% and +25% there. That is the opposite sign to this checkpoint's +21% single-stream result, and it is the reason qwen3_moe is not in the shipped allowlist: the production path is the server, batched decode changes the graph set every step as the batch composition changes, and larger graphs appear to pay more for that, as Llama did. Settling it needs the third round and an nsys pair on the batched path, neither of which ran.
+
+## Batched serving, completed rounds: do the Qwen MoE families clear the bar? (idle host, n = 3, same binary)
+
+`qwen3_moe` and `qwen3_5_moe` were the two families held out of the allowlist. Neither was held out for losing: both gained about +21% on single-stream decode with disjoint ranges. `qwen3_moe` was held out because its batched-serving rows ran the other way at n = 1 to 2 before the host-protection halt, and `qwen3_5_moe` because its server path had never been measured at all. Both are settled here, on a freshly booted host, n = 3 per arm, one server per (arm, round).
+
+Unlike Laguna these two do batch, so these are B > 1 rows: per-request decode falls as the batch fills while the aggregate rises.
+
+### `qwen3-30b-a3b-4bit` (`model_type` `qwen3_moe`)
+
+| concurrency | config | n | aggregate tok/s mean (min to max) | vs default | per-request decode tok/s mean | TTFT ms mean (p95 mean) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|
+| 1 | default | 3 | 46.17 (44.70 to 48.00) |  | 65.87 | 1311 (1311) | 0.33 to 0.63 | 0 of 3 |
+| 4 | default | 3 | 66.87 (65.30 to 68.60) |  | 20.97 | 2317 (3084) | 0.33 to 0.63 | 0 of 3 |
+| 8 | default | 3 | 61.47 (60.30 to 62.20) |  | 9.00 | 3633 (5397) | 0.33 to 0.63 | 0 of 3 |
+| 1 | both | 3 | 52.00 (51.60 to 52.60) | +12.6% | 80.00 | 1357 (1357) | 0.66 to 0.82 | 0 of 3 |
+| 4 | both | 3 | 67.43 (67.10 to 68.00) | +0.8% | 21.37 | 2392 (3180) | 0.66 to 0.82 | 0 of 3 |
+| 8 | both | 3 | 59.97 (57.30 to 61.60) | -2.4% | 8.97 | 4205 (5887) | 0.66 to 0.82 | 0 of 3 |
+| 1 | nograph | 3 | 48.43 (47.90 to 48.80) | +4.9% | 67.43 | 1181 (1181) | 0.71 to 1.71 | 0 of 3 |
+| 4 | nograph | 3 | 73.53 (72.10 to 75.30) | +10.0% | 22.97 | 2087 (2777) | 0.71 to 1.71 | 0 of 3 |
+| 8 | nograph | 3 | 81.40 (78.00 to 85.90) | +32.4% | 12.07 | 2938 (4562) | 0.71 to 1.71 | 0 of 3 |
+
+At concurrency 1, where the server is doing a single-stream workload, `both` reproduces the single-stream finding: +12.6% with disjoint ranges (51.60 to 52.60 against 44.70 to 48.00), and per-request decode 80.0 against 65.9. At 4 and 8, which is what `--max-batch-size 8` exists for, it does nothing: +0.8% and -2.4% with overlapping ranges in both. The first pass's apparent regression at 4 and 8 was therefore mostly its n of 1 to 2; the honest n = 3 reading is no effect, not a loss. Either way it is not a gain, so the bar is not met.
+
+The largest number in this table belongs to neither arm of this issue's question. Graphs off is +32.4% at concurrency 8 with disjoint ranges (78.00 to 85.90 against 60.30 to 62.20), +10.0% at 4 and +4.9% at 1, and it beats `both` at every level. On batched MoE decode the cost is capture itself, not the budget, which is the same shape the prefill rows showed and is filed as a follow-up rather than decided here.
+
+### `qwen3.5-35b-a3b-4bit` (`model_type` `qwen3_5_moe`)
+
+This family's server path had never been measured; its +22.5% came from single-stream decode alone.
+
+| concurrency | config | n | aggregate tok/s mean (min to max) | vs default | per-request decode tok/s mean | TTFT ms mean (p95 mean) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|
+| 1 | default | 3 | 42.17 (40.00 to 43.80) |  | 55.73 | 1171 (1171) | 0.44 to 1.26 | 0 of 3 |
+| 4 | default | 3 | 61.77 (56.90 to 66.60) |  | 15.63 | 221 (348) | 0.44 to 1.26 | 0 of 3 |
+| 8 | default | 3 | 56.57 (55.20 to 57.70) |  | 7.17 | 399 (707) | 0.44 to 1.26 | 0 of 3 |
+| 1 | both | 3 | 42.50 (41.90 to 43.00) | +0.8% | 56.23 | 1166 (1166) | 0.86 to 1.03 | 0 of 3 |
+| 4 | both | 3 | 63.77 (61.70 to 66.10) | +3.2% | 16.20 | 277 (418) | 0.86 to 1.03 | 0 of 3 |
+| 8 | both | 3 | 50.50 (49.80 to 51.10) | -10.7% | 6.40 | 446 (785) | 0.86 to 1.03 | 0 of 3 |
+| 1 | nograph | 3 | 39.87 (39.20 to 41.00) | -5.5% | 48.27 | 895 (895) | 0.87 to 1.18 | 0 of 3 |
+| 4 | nograph | 3 | 56.60 (56.00 to 57.40) | -8.4% | 14.30 | 213 (338) | 0.87 to 1.18 | 0 of 3 |
+| 8 | nograph | 3 | 51.80 (51.30 to 52.30) | -8.4% | 6.53 | 375 (669) | 0.87 to 1.18 | 0 of 3 |
+
+This is the clearer of the two, and it goes the wrong way. At concurrency 1 and 4 the raised budgets do nothing (+0.8% and +3.2%, both overlapping). At concurrency 8 they cost 10.7% with disjoint ranges (49.80 to 51.10 against 55.20 to 57.70). A family whose single-stream decode gains 22.5% with disjoint ranges loses 10.7% with disjoint ranges on the path a server actually runs. Note also that graphs off, which was the big winner on qwen3-30b-a3b's batched rows, is uniformly worse here (-5.5%, -8.4%, -8.4%): even within one architecture family the sign of a capture-policy change does not carry across checkpoints.
+
+### The verdict on both
+
+Neither family joins the allowlist, and the allowlist stays `["laguna"]`.
+
+- `qwen3_moe`: +20.6% single-stream and +12.6% at concurrency 1, but no measurable effect at 4 or 8. Not a regression, but not a gain either, and the bar is that every measured workload gains.
+- `qwen3_5_moe`: +22.5% single-stream, nothing at 1 and 4, and a disjoint -10.7% at concurrency 8. This one would have been an outright regression on a batched server.
+
+The general lesson for the next family considered is in `qwen3_5_moe`: single-stream decode and batched serving disagreed in sign on the same checkpoint, with disjoint ranges on both sides. Any future addition has to clear the serving path at more than one concurrency level, not only `mlxcel-bench-decode`.
 
 ## Chain status at the host-protection halt (02:52 local)
 
