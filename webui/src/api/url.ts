@@ -50,8 +50,10 @@ export function apiBaseFromDocument(): string {
 }
 
 export function apiPath(apiBase: string, path: string, query?: Readonly<Record<string, string | number | boolean | null | undefined>>): string {
-  if (!path.startsWith('/ui-api/v1/')) {
-    throw new Error('WebUI client paths must stay under /ui-api/v1/.');
+  const isUiPath = path.startsWith('/ui-api/v1/');
+  const isInferenceStreamPath = path === '/v1/chat/completions' || path === '/v1/responses';
+  if (!isUiPath && !isInferenceStreamPath) {
+    throw new Error('WebUI client paths must stay under /ui-api/v1/ or the approved inference stream endpoints.');
   }
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query ?? {})) {

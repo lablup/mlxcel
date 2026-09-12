@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { WEBUI_SCHEMA_VERSION } from '../api/types';
-import type { BootstrapResponse, CatalogEntry, CatalogListResponse, ModelId, Operation, PendingReconciliation, UiClientError, UiEvent, WebUiSnapshot } from '../api/types';
+import type { BootstrapResponse, CatalogEntry, CatalogListResponse, ModelId, Operation, PendingReconciliation, RuntimeSnapshot, UiClientError, UiEvent, WebUiSnapshot } from '../api/types';
 
 export type WebUiAction =
   | { readonly type: 'login-start' }
@@ -22,6 +22,7 @@ export type WebUiAction =
   | { readonly type: 'select-model'; readonly modelId: ModelId | null }
   | { readonly type: 'catalog'; readonly response: CatalogListResponse; readonly now: number }
   | { readonly type: 'operation'; readonly operation: Operation; readonly sequence: number | null; readonly now: number }
+  | { readonly type: 'runtime'; readonly runtime: RuntimeSnapshot; readonly sequence: number | null; readonly now: number }
   | { readonly type: 'event'; readonly event: UiEvent; readonly now: number }
   | { readonly type: 'pending'; readonly item: PendingReconciliation }
   | { readonly type: 'reconciled'; readonly idempotencyKey: string }
@@ -33,21 +34,31 @@ export function initialSnapshot(): WebUiSnapshot {
 
 export function reduceWebUiSnapshot(state: WebUiSnapshot, action: WebUiAction): WebUiSnapshot {
   if (action.type === 'login-start') return { ...state, auth: { status: 'authenticating', tokenPresent: true }, connection: 'bootstrapping', error: null };
-  if (action.type === 'login-success') return { ...state, auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap: action.bootstrap, serverInstanceId: action.bootstrap.server.server_instance_id, lastUpdatedAt: action.now, error: null };
+  if (action.type === 'login-success') return loginSuccess(state, action.bootstrap, action.now);
   if (action.type === 'logout') return { ...initialSnapshot(), lastUpdatedAt: action.now };
   if (action.type === 'select-model') return { ...state, selectedModelId: action.modelId };
   if (action.type === 'catalog') return applyCatalog(state, action.response, action.now);
   if (action.type === 'operation') return applyOperation(state, action.operation, action.sequence, action.now);
+  if (action.type === 'runtime') return applyRuntimeSnapshot(state, action.runtime, action.sequence, action.now);
   if (action.type === 'event') return applyEvent(state, action.event, action.now);
   if (action.type === 'pending') return { ...state, pendingReconciliations: mapSet(state.pendingReconciliations, action.item.idempotencyKey, action.item) };
   if (action.type === 'reconciled') return { ...state, pendingReconciliations: mapDelete(state.pendingReconciliations, action.idempotencyKey) };
   return { ...state, connection: action.connection, error: action.error ?? null, lastUpdatedAt: action.now };
 }
 
+function loginSuccess(state: WebUiSnapshot, bootstrap: BootstrapResponse, now: number): WebUiSnapshot {
+  const serverInstanceId = bootstrap.server.server_instance_id;
+  if (state.serverInstanceId !== null && state.serverInstanceId !== serverInstanceId) {
+    return { ...initialSnapshot(), auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap, serverInstanceId, selectedModelId: state.selectedModelId, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now };
+  }
+  return { ...state, auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap, serverInstanceId, lastUpdatedAt: now, error: null };
+}
+
 function applyCatalog(state: WebUiSnapshot, response: CatalogListResponse, now: number): WebUiSnapshot {
   if (state.serverInstanceId !== null && response.server_instance_id !== state.serverInstanceId) return restart(state, response.server_instance_id, now);
   if (state.catalogSequence !== null && response.snapshot_sequence < state.catalogSequence) return state;
-  return { ...state, connection: state.connection === 'bootstrapping' ? 'ready' : state.connection, catalog: mergeCatalogPage(state.catalog, response), catalogSequence: response.snapshot_sequence, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence({ ...state.resourceFences, catalog: response.snapshot_sequence }), lastUpdatedAt: now, error: null, resourceFences: { ...state.resourceFences, catalog: response.snapshot_sequence } };
+  const shouldMerge = state.catalogSequence === response.snapshot_sequence;
+  return { ...state, connection: state.connection === 'bootstrapping' ? 'ready' : state.connection, catalog: mergeCatalogPage(shouldMerge ? state.catalog : [], response), catalogSequence: response.snapshot_sequence, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence({ ...state.resourceFences, catalog: response.snapshot_sequence }), lastUpdatedAt: now, error: null, resourceFences: { ...state.resourceFences, catalog: response.snapshot_sequence } };
 }
 
 function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: number | null, now: number): WebUiSnapshot {
@@ -59,11 +70,19 @@ function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: nu
   return { ...state, operations, lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
 }
 
+function applyRuntimeSnapshot(state: WebUiSnapshot, runtime: RuntimeSnapshot, sequence: number | null, now: number): WebUiSnapshot {
+  const previousFence = state.resourceFences.runtimes.get(runtime.model_id);
+  if (sequence !== null && previousFence !== undefined && sequence <= previousFence) return state;
+  const fences = sequence === null ? state.resourceFences.runtimes : mapSet(state.resourceFences.runtimes, runtime.model_id, sequence);
+  const resourceFences = { ...state.resourceFences, runtimes: fences };
+  return { ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
+}
+
 function applyEvent(state: WebUiSnapshot, event: UiEvent, now: number): WebUiSnapshot {
   if (event.schema_version !== WEBUI_SCHEMA_VERSION) return { ...state, connection: 'schema-mismatch', error: { code: 'schema_mismatch', message: `Unsupported WebUI schema ${event.schema_version}`, retryable: false }, lastUpdatedAt: now };
   if (state.serverInstanceId !== null && event.server_instance_id !== state.serverInstanceId) return restart(state, event.server_instance_id, now);
   if (event.type === 'heartbeat') return { ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, connection: state.connection === 'polling' ? 'polling' : 'streaming', lastUpdatedAt: now };
-  if (event.type === 'server_restart' || event.type === 'gap' || event.type === 'reset') return { ...state, connection: 'stale', serverInstanceId: event.server_instance_id, lastEventId: event.event_id, error: { code: event.type, message: event.payload.reason, retryable: event.payload.resnapshot }, lastUpdatedAt: now };
+  if (event.type === 'server_restart' || event.type === 'gap' || event.type === 'reset') return resetForResnapshot(state, event, now);
   if (event.type === 'operation') return { ...applyOperation(state, event.payload.operation, event.sequence, now), serverInstanceId: event.server_instance_id, lastEventId: event.event_id, connection: 'streaming' };
   if (event.type === 'model_revision') return applyModelRevision(state, event, now);
   if (event.type === 'runtime') return applyRuntime(state, event, now);
@@ -91,12 +110,16 @@ function applyRuntime(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'run
   return { ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', lastUpdatedAt: now, resourceFences };
 }
 
+function resetForResnapshot(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'server_restart' | 'gap' | 'reset' }>, now: number): WebUiSnapshot {
+  return { ...initialSnapshot(), auth: state.auth, connection: 'stale', serverInstanceId: event.server_instance_id, selectedModelId: state.selectedModelId, lastEventId: event.event_id, error: { code: event.type, message: event.payload.reason, retryable: event.payload.resnapshot }, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now };
+}
+
 function restart(state: WebUiSnapshot, serverInstanceId: string, now: number): WebUiSnapshot {
   return { ...initialSnapshot(), auth: state.auth, connection: 'stale', serverInstanceId, selectedModelId: state.selectedModelId, error: { code: 'server_restarted', message: 'The mlxcel server restarted; refresh the authoritative snapshot before continuing.', retryable: true }, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now };
 }
 
 function mergeCatalogPage(current: ReadonlyArray<CatalogEntry>, response: CatalogListResponse): ReadonlyArray<CatalogEntry> {
-  if (response.pagination.next_cursor !== null && response.pagination.total_known !== null && current.length > 0) {
+  if (current.length > 0) {
     const map = new Map(current.map((entry) => [entry.identity.id, entry]));
     for (const item of response.items) map.set(item.identity.id, item);
     return Array.from(map.values()).sort((left, right) => left.identity.display_name.localeCompare(right.identity.display_name));

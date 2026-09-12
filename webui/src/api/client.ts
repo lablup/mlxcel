@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { SseParser } from './sse';
+import { SseParser, type SseMessage } from './sse';
 import { apiPath, encodeOpaquePathSegment, validateApiBase } from './url';
 import { parseJson, validateBootstrap, validateCatalogEntry, validateCatalogList, validateErrorEnvelope, validateOperation, validateOperationAccepted, validateOperationsList, validateRuntime, validateUiEvent } from './validation';
 import type { BootstrapResponse, CatalogEntry, CatalogListResponse, CatalogQuery, DownloadRequest, EventId, EventStreamHandlers, ModelActionRequest, ModelId, Operation, OperationAccepted, OperationId, OperationsListResponse, RemovalRequest, RuntimeSnapshot } from './types';
@@ -24,12 +24,25 @@ export interface WebUiApiClientOptions {
   readonly onUnauthorized?: () => void;
 }
 
+export interface ChatStreamHandlers {
+  readonly onFrame: (message: SseMessage) => void;
+  readonly onDone?: () => void;
+}
+
+export interface EventReplayCursor {
+  readonly lastEventId: EventId | null;
+  readonly serverInstanceId: string | null;
+  readonly afterSequence: number | null;
+}
+
 export class WebUiHttpError extends Error {
-  constructor(readonly status: number, readonly envelope: ReturnType<typeof validateErrorEnvelope> | null) {
-    super(envelope?.error.message ?? `WebUI request failed with HTTP ${status}`);
+  constructor(readonly status: number, readonly envelope: ReturnType<typeof validateErrorEnvelope> | null, message?: string) {
+    super(message ?? envelope?.error.message ?? `WebUI request failed with HTTP ${status}`);
     this.name = 'WebUiHttpError';
   }
 }
+
+const maxJsonBytes = 2 * 1024 * 1024;
 
 export class WebUiApiClient {
   readonly apiBase: string;
@@ -62,8 +75,7 @@ export class WebUiApiClient {
   }
 
   async catalogEntry(modelId: ModelId, signal?: AbortSignal): Promise<CatalogEntry> {
-    const path = `/ui-api/v1/catalog/${encodeOpaquePathSegment(modelId)}`;
-    return this.request(path, validateCatalogEntry, { method: 'GET', signal });
+    return this.request(`/ui-api/v1/catalog/${encodeOpaquePathSegment(modelId)}`, validateCatalogEntry, { method: 'GET', signal });
   }
 
   async refreshCatalog(idempotencyKey: string, signal?: AbortSignal): Promise<OperationAccepted> {
@@ -82,12 +94,19 @@ export class WebUiApiClient {
     return this.request('/ui-api/v1/model-removals', validateOperationAccepted, { method: 'POST', body: request, signal });
   }
 
-  async operationsPage(signal?: AbortSignal): Promise<OperationsListResponse> {
-    return this.request('/ui-api/v1/operations', validateOperationsList, { method: 'GET', signal });
+  async operationsPage(query: { readonly cursor?: string } = {}, signal?: AbortSignal): Promise<OperationsListResponse> {
+    return this.request('/ui-api/v1/operations', validateOperationsList, { method: 'GET', query, signal });
   }
 
   async operations(signal?: AbortSignal): Promise<ReadonlyArray<Operation>> {
-    return (await this.operationsPage(signal)).items;
+    const items: Operation[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.operationsPage(cursor === undefined ? {} : { cursor }, signal);
+      items.push(...page.items);
+      if (page.pagination.next_cursor === null) return items;
+      cursor = page.pagination.next_cursor;
+    }
   }
 
   async operation(operationId: OperationId, signal?: AbortSignal): Promise<Operation> {
@@ -102,21 +121,45 @@ export class WebUiApiClient {
     return this.request('/ui-api/v1/runtime', validateRuntime, { method: 'GET', query: { model_id: modelId, autoload: false }, signal });
   }
 
-  async events(handlers: EventStreamHandlers, signal?: AbortSignal, lastEventId?: EventId | null): Promise<void> {
+  async events(handlers: EventStreamHandlers, signal?: AbortSignal, cursor?: EventReplayCursor): Promise<void> {
+    const hasSequenceCursor = cursor?.serverInstanceId !== undefined && cursor.serverInstanceId !== null && cursor.afterSequence !== null && cursor.afterSequence !== undefined;
+    const query = hasSequenceCursor ? { server_instance_id: cursor.serverInstanceId, after_sequence: cursor.afterSequence } : undefined;
     const headers = new Headers({ Accept: 'text/event-stream' });
-    if (lastEventId !== undefined && lastEventId !== null) headers.set('Last-Event-ID', lastEventId);
-    const fetched = await this.fetchWithAuth(apiPath(this.apiBase, '/ui-api/v1/events'), { method: 'GET', signal, headers });
+    if (!hasSequenceCursor && cursor?.lastEventId !== undefined && cursor.lastEventId !== null) headers.set('Last-Event-ID', cursor.lastEventId);
+    await this.sse(apiPath(this.apiBase, '/ui-api/v1/events', query), { method: 'GET', signal, headers }, {
+      onDone: handlers.onDone,
+      onFrame: (message: SseMessage) => {
+        if (message.retry !== null) handlers.onRetryAfter?.(message.retry);
+        if (message.data.length > 0) handlers.onEvent(validateUiEvent(parseJson(message.data)));
+      },
+    });
+  }
+
+  async chatCompletions(body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<void> {
+    await this.sse(apiPath(this.apiBase, '/v1/chat/completions'), { method: 'POST', body, signal, headers: { Accept: 'text/event-stream' } }, handlers);
+  }
+
+  async responses(body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<void> {
+    await this.sse(apiPath(this.apiBase, '/v1/responses'), { method: 'POST', body, signal, headers: { Accept: 'text/event-stream' } }, handlers);
+  }
+
+  private async request<T>(path: string, validate: (value: unknown) => T, options: RequestOptions): Promise<T> {
+    const fetched = await this.fetchWithAuth(apiPath(this.apiBase, path, options.query), options);
+    try {
+      if (!fetched.response.ok) await this.throwHttp(fetched.response);
+      return validate(parseJson(await this.readBody(fetched.response)));
+    } finally {
+      this.controllers.delete(fetched.controller);
+    }
+  }
+
+  private async sse(url: string, options: RequestOptions, handlers: ChatStreamHandlers): Promise<void> {
+    const fetched = await this.fetchWithAuth(url, options);
     try {
       const response = fetched.response;
       if (!response.ok) await this.throwHttp(response);
       if (response.body === null) throw new Error('WebUI event stream response has no body.');
-      const parser = new SseParser({
-        onDone: handlers.onDone,
-        onMessage: (message) => {
-          if (message.retry !== null) handlers.onRetryAfter?.(message.retry);
-          if (message.data.length > 0) handlers.onEvent(validateUiEvent(parseJson(message.data)));
-        },
-      });
+      const parser = new SseParser({ onDone: handlers.onDone, onMessage: handlers.onFrame });
       const reader = response.body.getReader();
       try {
         for (;;) {
@@ -125,23 +168,13 @@ export class WebUiApiClient {
           parser.push(read.value);
         }
         parser.close();
-        if (!parser.done && signal?.aborted !== true) throw new Error('WebUI event stream ended before a DONE frame.');
+        if (!parser.done && options.signal?.aborted !== true) throw new Error('WebUI event stream ended before a DONE frame.');
       } catch (error) {
         await reader.cancel().catch(() => undefined);
         throw error;
       } finally {
         reader.releaseLock();
       }
-    } finally {
-      this.controllers.delete(fetched.controller);
-    }
-  }
-
-  private async request<T>(path: string, validate: (value: unknown) => T, options: RequestOptions): Promise<T> {
-    const fetched = await this.fetchWithAuth(apiPath(this.apiBase, path, options.query), options);
-    try {
-      if (!fetched.response.ok) await this.throwHttp(fetched.response);
-      return validate(parseJson(await fetched.response.text()));
     } finally {
       this.controllers.delete(fetched.controller);
     }
@@ -155,20 +188,65 @@ export class WebUiApiClient {
     headers.set('Accept', headers.get('Accept') ?? 'application/json');
     if (this.bearerToken !== null) headers.set('Authorization', `Bearer ${this.bearerToken}`);
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
-    const response = await this.fetchImpl(url, { method: options.method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal, credentials: 'same-origin', cache: 'no-store' });
+    const response = await this.fetchImpl(url, { method: options.method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
     return { response, controller };
   }
 
   private async throwHttp(response: Response): Promise<never> {
+    const tokenForRedaction = this.bearerToken;
     if (response.status === 401) {
       this.bearerToken = null;
       this.abortAll();
       this.onUnauthorized?.();
     }
-    const text = await response.text().catch(() => '');
-    const envelope = text.length > 0 ? validateErrorEnvelope(parseJson(text)) : null;
-    throw new WebUiHttpError(response.status, envelope);
+    let envelope: ReturnType<typeof validateErrorEnvelope> | null = null;
+    try {
+      const text = await this.readBody(response);
+      if (text.length > 0) envelope = validateErrorEnvelope(parseJson(text));
+    } catch {
+      envelope = null;
+    }
+    throw new WebUiHttpError(response.status, redactEnvelope(envelope, tokenForRedaction), redactMessage(envelope?.error.message ?? `WebUI request failed with HTTP ${response.status}`, tokenForRedaction));
   }
+
+  private async readBody(response: Response): Promise<string> {
+    if (response.body === null) return '';
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const read = await reader.read();
+        if (read.done) break;
+        total += read.value.byteLength;
+        if (total > maxJsonBytes) throw new Error('WebUI JSON response exceeded the configured byte limit.');
+        chunks.push(read.value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(merged);
+  }
+}
+
+function redactEnvelope(envelope: ReturnType<typeof validateErrorEnvelope> | null, token: string | null): ReturnType<typeof validateErrorEnvelope> | null {
+  if (envelope === null) return null;
+  return { ...envelope, error: { ...envelope.error, message: redactMessage(envelope.error.message, token), field_errors: envelope.error.field_errors?.map((field) => ({ ...field, message: redactMessage(field.message, token) })) } };
+}
+
+function redactMessage(message: string, token: string | null): string {
+  let redacted = message.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').replace(/token[=:]\s*\S+/gi, 'token=[redacted]');
+  if (token !== null && token.length > 0) redacted = redacted.split(token).join('[redacted]');
+  return redacted;
 }
 
 interface FetchedResponse {

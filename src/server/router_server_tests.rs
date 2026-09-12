@@ -34,6 +34,7 @@ use crate::downloader::DownloadHooks;
 use crate::server::ServerStartupConfig;
 use crate::server::config::ServerConfig;
 use crate::server::router_cache::{CacheSource, RouterDownloader};
+use crate::server::router_lifecycle::{DownloadState, ModelLifecycle};
 use crate::server::router_models::{RouterPool, RouterSources};
 use crate::server::router_presets::PresetCliOverrides;
 
@@ -837,9 +838,13 @@ async fn dispatch_reaches_the_load_path_through_an_alias() {
 }
 
 async fn first_sse_chunk(app: Router, last_event_id: Option<&str>) -> String {
+    first_sse_chunk_uri(app, "/ui-api/v1/events", last_event_id).await
+}
+
+async fn first_sse_chunk_uri(app: Router, uri: &str, last_event_id: Option<&str>) -> String {
     let mut builder = Request::builder()
         .method(Method::GET)
-        .uri("/ui-api/v1/events")
+        .uri(uri)
         .header(header::ACCEPT, "text/event-stream")
         .header(header::AUTHORIZATION, format!("Bearer {ROUTER_KEY}"));
     if let Some(event_id) = last_event_id {
@@ -857,6 +862,31 @@ async fn first_sse_chunk(app: Router, last_event_id: Option<&str>) -> String {
         .expect("sse chunk")
         .expect("sse body ok");
     String::from_utf8(chunk.to_vec()).expect("utf8 sse")
+}
+
+async fn ui_events_status(
+    app: Router,
+    uri: &str,
+    last_event_id: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header(header::ACCEPT, "text/event-stream")
+        .header(header::AUTHORIZATION, format!("Bearer {ROUTER_KEY}"));
+    if let Some(event_id) = last_event_id {
+        builder = builder.header("Last-Event-ID", event_id);
+    }
+    let response = app
+        .oneshot(builder.body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let json = serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+    (status, json)
 }
 
 #[tokio::test]
@@ -1280,4 +1310,137 @@ async fn catalog_refresh_singleflights_and_reports_same_size_changes() {
     let body = terminal.expect("refresh terminal");
     assert_eq!(body["result"]["scanned_entries"], 1);
     assert_eq!(body["result"]["changed_entries"], 2);
+}
+
+#[tokio::test]
+async fn ui_events_replay_from_paired_sequence_cursor() {
+    let root = temp_models_dir("ui-events-sequence");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let coordinator = state.pool.lifecycle_coordinator();
+    let server_instance = coordinator.server_instance_id().to_string();
+    let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
+    coordinator.publish_model_revision("mdl_route_sequence", 1, lifecycle);
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let replay = first_sse_chunk_uri(
+        app,
+        &format!("/ui-api/v1/events?server_instance_id={server_instance}&after_sequence=0"),
+        None,
+    )
+    .await;
+    assert!(replay.contains("event: model_revision"), "{replay}");
+    assert!(replay.contains("\"sequence\":1"), "{replay}");
+}
+
+#[tokio::test]
+async fn ui_events_reject_invalid_paired_replay_cursors() {
+    let root = temp_models_dir("ui-events-invalid");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    for (uri, header, field_code) in [
+        ("/ui-api/v1/events?after_sequence=0", None, "required"),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example",
+            None,
+            "required",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=1&after_sequence=2",
+            None,
+            "duplicate",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=9007199254740992",
+            None,
+            "out_of_range",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=1",
+            Some("evt_opaque"),
+            "conflict",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=1",
+            None,
+            "future_sequence",
+        ),
+    ] {
+        let (status, response) = ui_events_status(app.clone(), uri, header).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {response}");
+        assert_eq!(
+            response["error"]["field_errors"][0]["code"], field_code,
+            "{uri}: {response}"
+        );
+    }
+}
+
+
+#[tokio::test]
+async fn ui_events_reject_invalid_paired_replay_cursors() {
+    let root = temp_models_dir("ui-events-invalid");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    for (uri, header, field_code) in [
+        ("/ui-api/v1/events?after_sequence=0", None, "required"),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example",
+            None,
+            "required",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=1&after_sequence=2",
+            None,
+            "duplicate",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=9007199254740992",
+            None,
+            "out_of_range",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=1",
+            Some("evt_opaque"),
+            "conflict",
+        ),
+        (
+            "/ui-api/v1/events?server_instance_id=srv_example&after_sequence=1",
+            None,
+            "future_sequence",
+        ),
+    ] {
+        let (status, response) = ui_events_status(app.clone(), uri, header).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {response}");
+        assert_eq!(
+            response["error"]["field_errors"][0]["code"], field_code,
+            "{uri}: {response}"
+        );
+    }
+>>>>>>> 946bd7fe (fix: harden WebUI replay and streaming state)
 }

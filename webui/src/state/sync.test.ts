@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
 import catalogFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
 import operationsFixture from '../../../tests/fixtures/webui/examples/operations.list.json';
+import runtimeFixture from '../../../tests/fixtures/webui/examples/runtime.snapshot.json';
 import { WebUiApiClient } from '../api/client';
 import { validateBootstrap } from '../api/validation';
 import type { PendingReconciliation } from '../api/types';
@@ -69,9 +70,11 @@ function stripSchemaName(value: unknown): unknown {
 function makeImmediateFetch(methods?: string[]): typeof fetch {
   return async (input, init) => {
     methods?.push(`${init?.method ?? 'GET'} ${String(input)}`);
-    if (String(input).endsWith('/events')) return new Response(streamDone(), { status: 200 });
-    if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
-    if (String(input).endsWith('/catalog')) return new Response(JSON.stringify(catalogFixture));
+    const url = String(input);
+    if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
+    if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
+    if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
+    if (url.includes('/runtime')) return new Response(JSON.stringify(runtimeFixture));
     return new Response(JSON.stringify(operations));
   };
 }
@@ -83,13 +86,13 @@ describe('WebUI synchronizer', () => {
     let maxActive = 0;
     let release: () => void = () => undefined;
     const fetchImpl: typeof fetch = async (input) => {
-      if (String(input).endsWith('/events')) return new Response(streamDone(), { status: 200 });
+      if (String(input).includes('/events')) return new Response(streamDone(), { status: 200 });
       active += 1;
       maxActive = Math.max(maxActive, active);
       await new Promise<void>((resolve) => { release = resolve; });
       active -= 1;
       if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
-      if (String(input).endsWith('/catalog')) return new Response(JSON.stringify(catalogFixture));
+      if (String(input).includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
       return new Response(JSON.stringify(operations));
     };
     let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
@@ -142,6 +145,41 @@ describe('WebUI synchronizer', () => {
     clock.runOne();
     await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
     expect(clock.delays).toContain(30_000);
+    sync.dispose();
+  });
+
+  it('starts SSE with the minimum authoritative resource fence as paired replay query', async () => {
+    const methods: string[] = [];
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch(methods) }), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(methods).toContain('GET /ui-api/v1/events?server_instance_id=srv_20260912_a&after_sequence=42');
+    sync.dispose();
+  });
+
+  it('keeps catalog pages and operation pages until their final cursor', async () => {
+    const secondCatalog = structuredClone(catalogFixture);
+    secondCatalog.items[0].identity.id = 'mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUV';
+    secondCatalog.items[0].identity.display_name = 'Zed Model';
+    const firstCatalog = { ...structuredClone(catalogFixture), pagination: { limit: 50, next_cursor: 'cat_2', total_known: 2 } };
+    const secondOperations = structuredClone(operations);
+    secondOperations.items[0].operation_id = 'op_second';
+    const firstOperations = { ...structuredClone(operations), pagination: { limit: 50, next_cursor: 'ops_1', total_known: 2 } };
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
+      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
+      if (url === '/ui-api/v1/catalog') return new Response(JSON.stringify(firstCatalog));
+      if (url === '/ui-api/v1/catalog?cursor=cat_2') return new Response(JSON.stringify(secondCatalog));
+      if (url === '/ui-api/v1/operations') return new Response(JSON.stringify(firstOperations));
+      if (url === '/ui-api/v1/operations?cursor=ops_1') return new Response(JSON.stringify(secondOperations));
+      return new Response(JSON.stringify(runtimeFixture));
+    };
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(snapshot.catalog.map((item) => item.identity.display_name)).toEqual(['Qwen3 4B 4-bit', 'Zed Model']);
+    expect([...snapshot.operations.keys()].sort()).toEqual(['op_second', operations.items[0].operation_id].sort());
     sync.dispose();
   });
 });

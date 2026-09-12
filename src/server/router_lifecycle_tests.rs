@@ -350,3 +350,89 @@ fn lifecycle_event_ring_limit_reports_gap_for_pruned_event() {
         Err(ReplayError::Gap)
     );
 }
+
+#[test]
+fn lifecycle_coordinator_sequence_replay_respects_instance_gap_and_current_fences() {
+    let coordinator = LifecycleCoordinator::new();
+    let instance = coordinator.server_instance_id().to_string();
+    let (_, replay) = coordinator
+        .subscribe_for_ui(
+            UiReplayCursor::Sequence {
+                server_instance_id: instance.clone(),
+                after_sequence: 0,
+            },
+            Vec::new(),
+        )
+        .expect("subscribe at empty current");
+    assert!(replay.is_empty());
+
+    let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
+    let first = coordinator.publish_model_revision("mdl_sequence", 1, lifecycle.clone());
+    let (_, replay) = coordinator
+        .subscribe_for_ui(
+            UiReplayCursor::Sequence {
+                server_instance_id: instance.clone(),
+                after_sequence: 0,
+            },
+            Vec::new(),
+        )
+        .expect("subscribe after zero");
+    assert_eq!(replay, vec![first.clone()]);
+
+    let (_, replay) = coordinator
+        .subscribe_for_ui(
+            UiReplayCursor::Sequence {
+                server_instance_id: instance.clone(),
+                after_sequence: first.sequence,
+            },
+            Vec::new(),
+        )
+        .expect("subscribe at current");
+    assert!(replay.is_empty());
+
+    let (_, replay) = coordinator
+        .subscribe_for_ui(
+            UiReplayCursor::Sequence {
+                server_instance_id: "srv_other".to_string(),
+                after_sequence: first.sequence,
+            },
+            Vec::new(),
+        )
+        .expect("wrong instance becomes typed restart");
+    assert_eq!(replay[0].event_type, "server_restart");
+
+    assert!(matches!(
+        coordinator.subscribe_for_ui(
+            UiReplayCursor::Sequence {
+                server_instance_id: instance,
+                after_sequence: first.sequence + 1,
+            },
+            Vec::new(),
+        ),
+        Err(ReplaySubscribeError::FutureSequence)
+    ));
+}
+
+#[test]
+fn lifecycle_coordinator_sequence_replay_reports_ring_gap() {
+    let coordinator = LifecycleCoordinator::new();
+    let instance = coordinator.server_instance_id().to_string();
+    let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
+    for idx in 0..=EVENT_RING_LIMIT {
+        coordinator.publish_model_revision(
+            &format!("mdl_gap_{idx}"),
+            idx as u64 + 1,
+            lifecycle.clone(),
+        );
+    }
+    let (_, replay) = coordinator
+        .subscribe_for_ui(
+            UiReplayCursor::Sequence {
+                server_instance_id: instance,
+                after_sequence: 0,
+            },
+            Vec::new(),
+        )
+        .expect("gap event subscribe");
+    assert_eq!(replay[0].event_type, "gap");
+}

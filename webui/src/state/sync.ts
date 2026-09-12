@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { WebUiApiClient } from '../api/client';
-import type { PendingReconciliation, WebUiSnapshot } from '../api/types';
+import type { EventReplayCursor, WebUiApiClient } from '../api/client';
+import type { CatalogListResponse, OperationsListResponse, PendingReconciliation, UiEvent, WebUiSnapshot } from '../api/types';
 import type { WebUiAction } from './reducer';
 
 export interface SyncClock {
@@ -96,15 +96,21 @@ export class WebUiSynchronizer {
       const bootstrap = await this.client.bootstrap(controller.signal);
       if (this.getSnapshot().auth.status === 'signed-out') return;
       this.dispatch({ type: 'login-success', bootstrap, now });
-      const catalog = await this.client.catalog({}, controller.signal);
-      this.dispatch({ type: 'catalog', response: catalog, now });
-      const operationsPage = await this.client.operationsPage(controller.signal);
-      if (operationsPage.server_instance_id !== catalog.server_instance_id) {
+      const catalogPages = await this.catalogSnapshot(controller.signal);
+      for (const page of catalogPages) this.dispatch({ type: 'catalog', response: page, now });
+      const catalog = catalogPages.at(-1);
+      const operationPages = await this.operationSnapshot(controller.signal);
+      const firstOperationPage = operationPages[0];
+      if (catalog !== undefined && firstOperationPage !== undefined && firstOperationPage.server_instance_id !== catalog.server_instance_id) {
         this.dispatch({ type: 'connection', connection: 'stale', error: { code: 'snapshot_mismatch', message: 'Operation and catalog snapshots came from different server instances.', retryable: true }, now });
         return;
       }
-      for (const operation of operationsPage.items) this.dispatch({ type: 'operation', operation, sequence: operationsPage.snapshot_sequence, now });
-      const unresolvedExpired = this.reconcilePending(operationsPage.items, now);
+      const operations = operationPages.flatMap((page) => {
+        for (const operation of page.items) this.dispatch({ type: 'operation', operation, sequence: page.snapshot_sequence, now });
+        return page.items;
+      });
+      await this.refreshSelectedRuntime(controller.signal, now);
+      const unresolvedExpired = this.reconcilePending(operations, now);
       this.failures = 0;
       if (!unresolvedExpired) this.dispatch({ type: 'connection', connection: 'ready', now });
       if (this.eventAbort === null) this.startEvents();
@@ -128,7 +134,8 @@ export class WebUiSynchronizer {
     this.eventAbort?.abort();
     const controller = new AbortController();
     this.eventAbort = controller;
-    void this.client.events({ onEvent: (event) => this.dispatch({ type: 'event', event, now: this.clock.now() }), onRetryAfter: (ms) => this.reschedule(ms) }, controller.signal, this.getSnapshot().lastEventId).then(() => {
+    const cursor = replayCursor(this.getSnapshot());
+    void this.client.events({ onEvent: (event) => this.handleEvent(event), onRetryAfter: (ms) => this.reschedule(ms) }, controller.signal, cursor).then(() => {
       if (this.eventAbort === controller) this.eventAbort = null;
       if (!controller.signal.aborted && !this.stopped) this.reschedule(this.backoffDelay());
     }).catch((error: unknown) => {
@@ -138,6 +145,44 @@ export class WebUiSynchronizer {
       this.dispatch({ type: 'connection', connection: classifyConnectionError(error), error: safeClientError(error), now: this.clock.now() });
       this.reschedule(this.backoffDelay());
     });
+  }
+
+  private handleEvent(event: UiEvent): void {
+    this.dispatch({ type: 'event', event, now: this.clock.now() });
+    if ((event.type === 'server_restart' || event.type === 'gap' || event.type === 'reset') && event.payload.resnapshot) {
+      this.eventAbort?.abort();
+      this.eventAbort = null;
+      void this.refresh();
+    }
+  }
+
+  private async catalogSnapshot(signal: AbortSignal): Promise<ReadonlyArray<CatalogListResponse>> {
+    const pages: CatalogListResponse[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.client.catalog(cursor === undefined ? {} : { cursor }, signal);
+      pages.push(page);
+      if (page.pagination.next_cursor === null) return pages;
+      cursor = page.pagination.next_cursor;
+    }
+  }
+
+  private async operationSnapshot(signal: AbortSignal): Promise<ReadonlyArray<OperationsListResponse>> {
+    const pages: OperationsListResponse[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.client.operationsPage(cursor === undefined ? {} : { cursor }, signal);
+      pages.push(page);
+      if (page.pagination.next_cursor === null) return pages;
+      cursor = page.pagination.next_cursor;
+    }
+  }
+
+  private async refreshSelectedRuntime(signal: AbortSignal, now: number): Promise<void> {
+    const modelId = this.getSnapshot().selectedModelId;
+    if (modelId === null) return;
+    const runtime = await this.client.runtime(modelId, signal);
+    this.dispatch({ type: 'runtime', runtime, sequence: null, now });
   }
 
   private reconcilePending(operations: ReadonlyArray<{ readonly operation_id: string }>, now: number): boolean {
@@ -172,6 +217,14 @@ export class WebUiSynchronizer {
     const base = Math.min(maxBackoffMs, 500 * 2 ** Math.min(6, this.failures));
     return Math.round(base / 2 + this.random() * (base / 2));
   }
+}
+
+function replayCursor(snapshot: WebUiSnapshot): EventReplayCursor | undefined {
+  if (snapshot.serverInstanceId !== null && snapshot.lastSequence !== null) {
+    return { lastEventId: null, serverInstanceId: snapshot.serverInstanceId, afterSequence: snapshot.lastSequence };
+  }
+  if (snapshot.lastEventId !== null) return { lastEventId: snapshot.lastEventId, serverInstanceId: null, afterSequence: null };
+  return undefined;
 }
 
 function classifyConnectionError(error: unknown): WebUiSnapshot['connection'] {

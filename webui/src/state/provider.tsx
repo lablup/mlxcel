@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import React from 'react';
-import { WebUiApiClient, WebUiHttpError } from '../api/client';
+import { WebUiApiClient, WebUiHttpError, type ChatStreamHandlers } from '../api/client';
 import type { DownloadRequest, ModelActionRequest, ModelId, RemovalRequest, RuntimeSnapshot, WebUiSnapshot } from '../api/types';
 import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
 import { WebUiSynchronizer } from './sync';
@@ -36,6 +36,8 @@ export interface WebUiActions {
   readonly refreshRuntime: (modelId: ModelId) => Promise<RuntimeSnapshot>;
   readonly refreshCatalog: (idempotencyKey: string) => Promise<void>;
   readonly cancelOperation: (operationId: string) => Promise<void>;
+  readonly streamChatCompletions: (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => Promise<void>;
+  readonly streamResponses: (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => Promise<void>;
 }
 
 const SnapshotContext = React.createContext<WebUiSnapshot | null>(null);
@@ -111,13 +113,23 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
     removeModel: async (request: RemovalRequest) => {
       await submitOperation('removal', request.idempotency_key, request.model_id, () => client.removeModel(request));
     },
-    refreshRuntime: async (modelId: ModelId) => client.runtime(modelId),
+    refreshRuntime: async (modelId: ModelId) => {
+      const runtime = await client.runtime(modelId);
+      dispatch({ type: 'runtime', runtime, sequence: null, now: Date.now() });
+      return runtime;
+    },
     refreshCatalog: async (idempotencyKey: string) => {
       await submitOperation('catalog-refresh', idempotencyKey, undefined, () => client.refreshCatalog(idempotencyKey));
     },
     cancelOperation: async (operationId: string) => {
       await client.cancelOperation(operationId);
       await syncRef.current?.refresh();
+    },
+    streamChatCompletions: async (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
+      await client.chatCompletions(body, handlers, signal);
+    },
+    streamResponses: async (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
+      await client.responses(body, handlers, signal);
     },
   }), [client]);
 

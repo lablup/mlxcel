@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
 import type { CatalogListResponse, Operation, PendingReconciliation, UiEvent } from '../api/types';
+import { validateBootstrap } from '../api/validation';
 import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
 
 const lifecycle = { state: 'ready', download: 'complete', busy: false, active_requests: 0, draining_requests: 0, worker_exit_observed: true, last_error: null } as const;
 const entry = { identity: { id: 'mdl_a', inference_id: 'model/a', display_name: 'Model A', source: 'cache', source_key_hash: 'h', generation: 1, revision: 5, content_fingerprint: null }, capabilities: [], lifecycle, complete: true, supported: true, removable: true, metadata: { architecture: null, input_tasks: ['chat'], output_tasks: ['chat'], quantization: null, format: null, parameter_count: null, disk_bytes: null, memory_estimate_bytes: null, support: { architecturally_supported: true, runnable_on_backend: true, complete: true, reason: null } } } as const;
+const bootstrap = validateBootstrap(bootstrapFixture);
 
 function catalog(sequence: number): CatalogListResponse {
   return { schema_version: 'webui.ui-api.v1', items: [entry], pagination: { limit: 50, next_cursor: null, total_known: 1 }, server_instance_id: 'srv', snapshot_sequence: sequence };
@@ -39,6 +42,16 @@ describe('WebUI reducer', () => {
     state = reduceWebUiSnapshot(state, { type: 'event', event: { schema_version: 'webui.ui-api.v1', server_instance_id: 'srv', sequence: 11, type: 'gap', payload: { reason: 'gap', resnapshot: true }, event_id: 'evt_gap', emitted_at: '2026-09-12T00:00:00Z' }, now: 2 });
     expect(state.connection).toBe('stale');
     expect(state.error?.retryable).toBe(true);
+    expect(state.catalog).toEqual([]);
+    expect(state.lastSequence).toBeNull();
+  });
+
+  it('clears stale instance data when login succeeds against a new server instance', () => {
+    let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'catalog', response: catalog(10), now: 1 });
+    state = reduceWebUiSnapshot(state, { type: 'login-success', bootstrap: { ...bootstrap, server: { ...bootstrap.server, server_instance_id: 'srv2' } }, now: 2 });
+    expect(state.serverInstanceId).toBe('srv2');
+    expect(state.catalog).toEqual([]);
+    expect(state.resourceFences.catalog).toBeNull();
   });
 
   it('preserves unknown POST reconciliation records across server restart reset', () => {

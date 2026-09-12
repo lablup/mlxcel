@@ -764,7 +764,7 @@
     },
     "/ui-api/v1/events": {
       "get": {
-        "summary": "Authenticated SSE stream. Last-Event-ID is the last applied opaque event id on reconnect; first subscription omits the header after snapshot fencing. Ring gaps or changed server_instance_id produce a reset event and full resnapshot.",
+        "summary": "Authenticated SSE stream. Clients normally reconnect with the paired server_instance_id and after_sequence query cursor computed from the minimum authoritative resource fence. Last-Event-ID remains supported only as an opaque legacy replay cursor and must not be sent together with the paired query cursor. Ring gaps or changed server_instance_id produce a reset event and full resnapshot.",
         "responses": {
           "200": {
             "description": "SSE event stream carrying UiEvent JSON payloads"
@@ -808,7 +808,25 @@
             "schema": {
               "$ref": "#/components/schemas/EventId"
             },
-            "description": "Opaque event id from the last applied SSE event. Initial snapshot-to-stream fencing starts without this header; reconnect uses it only inside the same server instance and retained ring."
+            "description": "Opaque event id from the last applied SSE event. It is a legacy cursor and is rejected when either paired replay query parameter is present."
+          },
+          {
+            "name": "server_instance_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ServerInstanceId"
+            },
+            "description": "Server instance that produced after_sequence. Required exactly when after_sequence is supplied; a different instance returns a typed server_restart event."
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EventSequence"
+            },
+            "description": "Replay every retained event with sequence greater than this value. Required exactly when server_instance_id is supplied; 0 and the current sequence are valid. Non-safe integers, future sequences, duplicate parameters and malformed values are rejected."
           }
         ]
       }
@@ -1032,6 +1050,28 @@
         "maxLength": 160,
         "pattern": "^evt_[A-Za-z0-9._~-]{1,160}(?![\\s\\S])",
         "description": "Opaque SSE event id; also sent as the SSE id field."
+      },
+      "EventSequence": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991,
+        "description": "Non-negative UI event sequence small enough to round-trip through JavaScript Number without precision loss."
+      },
+      "EventReplayQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "server_instance_id",
+          "after_sequence"
+        ],
+        "properties": {
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "after_sequence": {
+            "$ref": "#/components/schemas/EventSequence"
+          }
+        }
       },
       "CursorToken": {
         "type": "string",
@@ -1716,8 +1756,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "snapshot_sequence": {
-            "type": "integer",
-            "minimum": 0,
+            "$ref": "#/components/schemas/EventSequence",
             "description": "Single global event sequence after which this snapshot is authoritative."
           }
         }
@@ -1981,8 +2020,7 @@
             "minimum": 0
           },
           "snapshot_sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           }
         }
       },
@@ -2287,8 +2325,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "snapshot_sequence": {
-            "type": "integer",
-            "minimum": 0,
+            "$ref": "#/components/schemas/EventSequence",
             "description": "Single global event sequence after which this snapshot is authoritative."
           }
         }
@@ -2378,8 +2415,7 @@
             "$ref": "#/components/schemas/RuntimeSettingsReport"
           },
           "snapshot_sequence": {
-            "type": "integer",
-            "minimum": 0,
+            "$ref": "#/components/schemas/EventSequence",
             "description": "Single global event sequence after which this snapshot is authoritative."
           }
         }
@@ -2738,8 +2774,7 @@
         ],
         "properties": {
           "snapshot_sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "catalog_changed": {
             "type": "boolean"
@@ -2954,8 +2989,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "snapshot"
@@ -2993,8 +3027,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "model_revision"
@@ -3032,8 +3065,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "operation"
@@ -3071,8 +3103,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "download_progress"
@@ -3110,8 +3141,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "runtime"
@@ -3149,8 +3179,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "settings"
@@ -3188,8 +3217,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "reset"
@@ -3227,8 +3255,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "gap"
@@ -3266,8 +3293,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "server_restart"
@@ -3305,8 +3331,7 @@
             "$ref": "#/components/schemas/ServerInstanceId"
           },
           "sequence": {
-            "type": "integer",
-            "minimum": 0
+            "$ref": "#/components/schemas/EventSequence"
           },
           "type": {
             "const": "heartbeat"
