@@ -793,11 +793,15 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   int nidx = axes_.size();
   int32_t idx_ndim = nidx > 0 ? inputs[1].ndim() : 0;
 
-  int32_t upd_post_idx_size = std::accumulate(
+  // mlxcelverse: int64_t to match scatter_general_kernel's parameter.
+  // add_kernel_node passes argument addresses straight to HIP, so an int32_t
+  // here was read as an 8-byte value with garbage high bytes; every index
+  // element then collapsed onto the first index (only one update landed).
+  int64_t upd_post_idx_size = std::accumulate(
       upd.shape().begin() + idx_ndim,
       upd.shape().end(),
-      1,
-      std::multiplies<int32_t>());
+      int64_t{1},
+      std::multiplies<int64_t>());
 
   // Prepare host data for parameters
   std::vector<int32_t> h_upd_shape(upd.shape().begin(), upd.shape().end());
