@@ -85,6 +85,24 @@
       "test_id": "connection-offline"
     },
     {
+      "key": "connection.prompt.title",
+      "en": "Connect to the local WebUI API",
+      "ko": "로컬 WebUI API에 연결하세요",
+      "test_id": "connection-prompt-title"
+    },
+    {
+      "key": "connection.prompt.body",
+      "en": "The shell is loaded, but catalog, chat and activity data wait for the authenticated local server connection.",
+      "ko": "셸은 로드되었지만 카탈로그, 대화, 활동 데이터는 인증된 로컬 서버 연결을 기다립니다.",
+      "test_id": "connection-prompt-body"
+    },
+    {
+      "key": "connection.prompt.detail",
+      "en": "Start mlxcel-server with --webui, enter the terminal session key when prompted, then refresh this view.",
+      "ko": "mlxcel-server를 --webui로 시작하고, 요청되면 터미널 세션 키를 입력한 뒤 이 화면을 새로고침하세요.",
+      "test_id": "connection-prompt-detail"
+    },
+    {
       "key": "models.title",
       "en": "Model library",
       "ko": "모델 라이브러리",
@@ -767,6 +785,36 @@
       "en": "Sample fixture",
       "ko": "샘플 픽스처",
       "test_id": "gallery-sample-label"
+    },
+    {
+      "key": "login.token.label",
+      "en": "Session key",
+      "ko": "세션 키",
+      "test_id": "login-token-label"
+    },
+    {
+      "key": "login.token.help",
+      "en": "Use the key printed once by the local server. It stays in memory only.",
+      "ko": "로컬 서버가 한 번 출력한 키를 사용하세요. 키는 메모리에만 유지됩니다.",
+      "test_id": "login-token-help"
+    },
+    {
+      "key": "login.submit",
+      "en": "Connect",
+      "ko": "연결",
+      "test_id": "login-submit"
+    },
+    {
+      "key": "login.logout",
+      "en": "Clear key",
+      "ko": "키 지우기",
+      "test_id": "login-logout"
+    },
+    {
+      "key": "login.error.sample",
+      "en": "Sample error: the key was not accepted by the local API.",
+      "ko": "샘플 오류: 로컬 API가 키를 허용하지 않았습니다.",
+      "test_id": "login-error-sample"
     },
     {
       "key": "gallery.delete_token",

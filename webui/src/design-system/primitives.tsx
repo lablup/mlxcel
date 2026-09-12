@@ -51,7 +51,7 @@ export function Select(props: { label: string; value: string; options: { value: 
   return (
     <label className="ds-field" htmlFor={id} data-disabled={props.disabled || props.busy || undefined}>
       <span>{props.label}</span>
-      <select id={id} value={props.value} disabled={props.disabled || props.busy} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange(event.currentTarget.value)}>
+      <select id={id} value={props.value} disabled={props.disabled || props.busy} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onKeyDown={(event) => { if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return; const current = props.options.findIndex((option) => option.value === props.value); const delta = event.key === 'ArrowDown' ? 1 : -1; const next = props.options[(current + delta + props.options.length) % props.options.length]; if (!next.disabled) { event.preventDefault(); props.onChange(next.value); } }} onChange={(event) => props.onChange(event.currentTarget.value)}>
         {props.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
       </select>
       {props.hint ? <small id={hintId} data-tone="hint">{props.hint}</small> : null}
@@ -233,6 +233,34 @@ export function AuthGate(props: { title: string; body: string; actionLabel: stri
   return <ErrorBanner tone="warning" title={props.title} body={props.body} action={<Button><Icon name="key" />{props.actionLabel}</Button>} />;
 }
 
-export function SchemaMismatchView(props: { title: string; body: string; actionLabel: string }): React.JSX.Element {
-  return <ErrorBanner tone="error" title={props.title} body={props.body} action={<Button><Icon name="schema" />{props.actionLabel}</Button>} />;
+export function LoginView(props: { title: string; body: string; tokenLabel: string; tokenHelp: string; submitLabel: string; logoutLabel?: string; error?: string; busy?: boolean; onSubmit: (token: string) => void; onLogout?: () => void; testId?: string }): React.JSX.Element {
+  const [token, setToken] = React.useState('');
+  const helpId = React.useId();
+  React.useEffect(() => () => setToken(''), []);
+  const handleSubmit = (event: React.FormEvent): void => {
+    event.preventDefault();
+    const submitted = token;
+    setToken('');
+    props.onSubmit(submitted);
+  };
+  const handleLogout = (): void => {
+    setToken('');
+    props.onLogout?.();
+  };
+  return (
+    <form className="ds-login" data-testid={props.testId} onSubmit={handleSubmit}>
+      <h2>{props.title}</h2>
+      <p>{props.body}</p>
+      <label className="ds-field">
+        <span>{props.tokenLabel}</span>
+        <input type="password" autoComplete="current-password" value={token} disabled={props.busy} aria-invalid={props.error ? 'true' : undefined} aria-describedby={helpId} onChange={(event) => setToken(event.currentTarget.value)} />
+        <small id={helpId} data-tone={props.error ? 'error' : 'hint'}>{props.error ?? props.tokenHelp}</small>
+      </label>
+      <div className="dialog-actions"><Button tone="primary" type="submit" busy={props.busy} disabled={token.length === 0}>{props.submitLabel}</Button>{props.onLogout && props.logoutLabel ? <Button type="button" onClick={handleLogout}>{props.logoutLabel}</Button> : null}</div>
+    </form>
+  );
+}
+
+export function SchemaMismatchView(props: { title: string; body: string; actionLabel: string; onRecover: () => void }): React.JSX.Element {
+  return <ErrorBanner tone="error" title={props.title} body={props.body} action={<Button onClick={props.onRecover}><Icon name="schema" />{props.actionLabel}</Button>} />;
 }

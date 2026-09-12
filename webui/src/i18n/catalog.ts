@@ -129,6 +129,14 @@ export type StringKey =
   | 'gallery.lifecycle.samples'
   | 'gallery.sample.caption'
   | 'gallery.sample.label'
+  | 'connection.prompt.title'
+  | 'connection.prompt.body'
+  | 'connection.prompt.detail'
+  | 'login.token.label'
+  | 'login.token.help'
+  | 'login.submit'
+  | 'login.logout'
+  | 'login.error.sample'
   | 'gallery.delete_token'
 ;
 
@@ -149,6 +157,9 @@ export const entries: Entry[] = [
   { key: 'toolbar.menu', en: 'Open navigation', ko: '내비게이션 열기', test_id: 'toolbar-menu' },
   { key: 'connection.ready', en: 'Shell loaded; local API not connected', ko: '셸 로드됨; 로컬 API 미연결', test_id: 'connection-ready' },
   { key: 'connection.offline', en: 'Server connection is offline', ko: '서버 연결이 오프라인입니다', test_id: 'connection-offline' },
+  { key: 'connection.prompt.title', en: 'Connect to the local WebUI API', ko: '로컬 WebUI API에 연결하세요', test_id: 'connection-prompt-title' },
+  { key: 'connection.prompt.body', en: 'The shell is loaded, but catalog, chat and activity data wait for the authenticated local server connection.', ko: '셸은 로드되었지만 카탈로그, 대화, 활동 데이터는 인증된 로컬 서버 연결을 기다립니다.', test_id: 'connection-prompt-body' },
+  { key: 'connection.prompt.detail', en: 'Start mlxcel-server with --webui, enter the terminal session key when prompted, then refresh this view.', ko: 'mlxcel-server를 --webui로 시작하고, 요청되면 터미널 세션 키를 입력한 뒤 이 화면을 새로고침하세요.', test_id: 'connection-prompt-detail' },
   { key: 'models.title', en: 'Model library', ko: '모델 라이브러리', test_id: 'models-title' },
   { key: 'models.empty.title', en: 'No local models yet', ko: '아직 로컬 모델이 없습니다', test_id: 'models-empty-title' },
   { key: 'models.empty.body', en: 'Browse, download, and load models explicitly. The shell never autoloads a checkpoint.', ko: '모델을 명시적으로 탐색, 다운로드, 로드하세요. 셸은 체크포인트를 자동 로드하지 않습니다.', test_id: 'models-empty-body' },
@@ -265,6 +276,11 @@ export const entries: Entry[] = [
   { key: 'gallery.lifecycle.samples', en: 'Lifecycle sample badges', ko: '수명주기 샘플 배지', test_id: 'gallery-lifecycle-samples' },
   { key: 'gallery.sample.caption', en: 'Sample model table', ko: '샘플 모델 표', test_id: 'gallery-sample-caption' },
   { key: 'gallery.sample.label', en: 'Sample fixture', ko: '샘플 픽스처', test_id: 'gallery-sample-label' },
+  { key: 'login.token.label', en: 'Session key', ko: '세션 키', test_id: 'login-token-label' },
+  { key: 'login.token.help', en: 'Use the key printed once by the local server. It stays in memory only.', ko: '로컬 서버가 한 번 출력한 키를 사용하세요. 키는 메모리에만 유지됩니다.', test_id: 'login-token-help' },
+  { key: 'login.submit', en: 'Connect', ko: '연결', test_id: 'login-submit' },
+  { key: 'login.logout', en: 'Clear key', ko: '키 지우기', test_id: 'login-logout' },
+  { key: 'login.error.sample', en: 'Sample error: the key was not accepted by the local API.', ko: '샘플 오류: 로컬 API가 키를 허용하지 않았습니다.', test_id: 'login-error-sample' },
   { key: 'gallery.delete_token', en: 'DELETE', ko: 'DELETE', test_id: 'gallery-delete-token' },
 ];
 

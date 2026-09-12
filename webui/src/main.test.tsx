@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import stringsFixture from '../../tests/fixtures/webui/strings.json';
 import { App } from './app';
+import { LoginView, SchemaMismatchView } from './design-system/primitives';
 import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, saveAppearance } from './design-system/preferences';
 import { entries } from './i18n/catalog';
 
@@ -91,9 +92,9 @@ describe('mlxcel WebUI shell', () => {
 
   it('does not open global overlays from editable fields, IME composition, or Alt chords', () => {
     renderApp();
-    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-gallery"]')?.click());
-    const input = document.querySelector<HTMLInputElement>('[data-testid="gallery-field"]');
-    input?.focus();
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-settings"]')?.click());
+    const select = document.querySelector<HTMLSelectElement>('[data-testid="settings-theme"]');
+    select?.focus();
     act(() => keydown('k', { metaKey: true }));
     expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(false);
     act(() => keydown('?', { isComposing: true }));
@@ -119,6 +120,30 @@ describe('mlxcel WebUI shell', () => {
     vi.restoreAllMocks();
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError'); });
     expect(() => saveAppearance(DEFAULT_APPEARANCE)).not.toThrow();
+  });
+
+
+  it('submits LoginView tokens without persisting them and clears recovery state', () => {
+    const submitted: string[] = [];
+    act(() => root?.render(<><LoginView title="Login" body="Use local key" tokenLabel="Session key" tokenHelp="Memory only" submitLabel="Connect" logoutLabel="Clear" onSubmit={(token) => submitted.push(token)} onLogout={() => submitted.push('logout')} testId="login-view" /><SchemaMismatchView title="Mismatch" body="Update required" actionLabel="Reload" onRecover={() => submitted.push('recover')} /></>));
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]');
+    expect(input).not.toBeNull();
+    if (!input) return;
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    act(() => { valueSetter?.call(input, 'secret-token'); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    act(() => document.querySelector<HTMLFormElement>('[data-testid="login-view"]')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(submitted).toContain('secret-token');
+    expect(input?.value).toBe('');
+    expect(localStorage.getItem('secret-token')).toBeNull();
+    act(() => document.querySelectorAll('button')[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(submitted).toContain('logout');
+    act(() => document.querySelectorAll('button')[2]?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(submitted).toContain('recover');
+    act(() => root?.render(<LoginView title="Login" body="Use local key" tokenLabel="Session key" tokenHelp="Memory only" submitLabel="Connect" error="Denied" busy onSubmit={(token) => submitted.push(token)} testId="login-view" />));
+    const busyInput = document.querySelector<HTMLInputElement>('input[type="password"]');
+    expect(busyInput?.disabled).toBe(true);
+    expect(busyInput?.getAttribute('aria-invalid')).toBe('true');
+    expect(document.body.textContent).toContain('Denied');
   });
 
   it('keeps the checked string fixture synchronized with typed keys', () => {
