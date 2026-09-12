@@ -17,6 +17,14 @@
 // and mlxcel relies on that: `wht(wht(x))` must return `x`. A kernel that
 // hardcoded a different scale would pass a round-trip test that only checks
 // shape or finiteness while silently corrupting KV values.
+//
+// The involution is a property of that one scale, not of the transform. For the
+// unscaled sign matrix H, H * H = n * I, so applying scale s twice gives
+// s^2 * n * I: the round trip is the identity only at s = 1/sqrt(n). At any
+// other scale the inverse scale is 1/(s * n) and the forward norm ratio is
+// s * sqrt(n). A caller passing its own scale, which the bridge does not do
+// today, has to check against those two expressions rather than against a
+// round trip.
 
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/allocator.h"
