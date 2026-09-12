@@ -372,6 +372,24 @@ jobs:
       - name: Validator negative coverage
         run: bash scripts/ci/check_llama_compat_manifest_test.sh
 
+  webui-contract:
+    name: WebUI contract
+    # Contract-first gate for the bundled WebUI epic. It needs no Rust
+    # toolchain and intentionally runs as its own drift check: schema changes
+    # must update generated TypeScript DTOs and representative fixtures in the
+    # same PR before backend or frontend owners consume the contract.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install pinned contract verifier
+        run: python3 -m pip install -r scripts/ci/webui_contract_requirements.txt
+      - name: Validate WebUI schema, DTOs, and fixtures
+        run: python3 scripts/ci/check_webui_contract.py --self-test
+
   mlx-pin:
     name: MLX pin extraction
     needs: changes

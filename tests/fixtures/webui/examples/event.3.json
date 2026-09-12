@@ -1,0 +1,10 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server_instance_id": "srv_20260912_a",
+  "sequence": 45,
+  "type": "reset",
+  "payload": {
+    "reason": "gap",
+    "resnapshot": true
+  }
+}

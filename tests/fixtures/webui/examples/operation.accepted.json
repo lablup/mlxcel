@@ -1,0 +1,6 @@
+{
+  "$schemaName": "OperationAccepted",
+  "operation_id": "op_load_001",
+  "state": "queued",
+  "idempotent_replay": false
+}

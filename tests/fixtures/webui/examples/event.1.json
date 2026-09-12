@@ -1,0 +1,19 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server_instance_id": "srv_20260912_a",
+  "sequence": 43,
+  "type": "model_revision",
+  "payload": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "revision": 8,
+    "lifecycle": {
+      "state": "loading",
+      "download": "complete",
+      "busy": true,
+      "active_requests": 0,
+      "draining_requests": 0,
+      "worker_exit_observed": false,
+      "last_error": null
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "$schemaName": "DownloadRequest",
+  "repo_id": "mlx-community/Qwen3-4B-4bit",
+  "revision": "main",
+  "idempotency_key": "download-qwen3-0001"
+}

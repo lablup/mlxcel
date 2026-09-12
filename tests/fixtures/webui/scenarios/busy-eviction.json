@@ -1,0 +1,38 @@
+{
+  "scenario": "busy_eviction",
+  "description": "Capacity eviction requires explicit target and preserves busy resources.",
+  "given": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
+  },
+  "steps": [
+    {
+      "from": "ready",
+      "action": "load_other_without_target",
+      "to": "ready",
+      "http_status": 429,
+      "event": "operation",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "rate_limited",
+          "message": "capacity reached; choose a model to unload",
+          "retryable": true
+        },
+        "request_id": "req_cap"
+      }
+    },
+    {
+      "from": "ready",
+      "action": "explicit_eviction",
+      "to": "draining",
+      "http_status": 202,
+      "event": "operation",
+      "allowed": true,
+      "error": null
+    }
+  ],
+  "expected": {
+    "surprise_eviction": false
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "operation_id": "op_load_001",
+  "kind": "model_load",
+  "state": "running",
+  "created_at": "2026-09-12T03:04:05Z",
+  "updated_at": "2026-09-12T03:04:05Z",
+  "idempotency_scope": "server_instance",
+  "target": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU"
+  },
+  "progress": {
+    "completed_bytes": 0,
+    "total_bytes": null,
+    "indeterminate": true
+  },
+  "result": null,
+  "error": null,
+  "cancellable": false,
+  "cancel_reason": "loader does not support cooperative cancellation"
+}

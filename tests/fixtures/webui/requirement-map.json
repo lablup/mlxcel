@@ -1,0 +1,116 @@
+{
+  "requirements": [
+    {
+      "id": "api-adapters",
+      "epic_requirement": "Exact UI adapter schemas, status codes, examples and compatibility mappings",
+      "child": "#1835",
+      "contract_artifact": "docs/webui/api.yaml",
+      "test_fixture": "tests/fixtures/webui/examples/catalog.page.json"
+    },
+    {
+      "id": "identity",
+      "epic_requirement": "Stable model ID, generation/revision and collision-safe redacted identity inputs",
+      "child": "#1840",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/scenarios/identity-collision.json"
+    },
+    {
+      "id": "lifecycle",
+      "epic_requirement": "Transitions, preconditions, idempotency, stale revisions, busy/drain/worker-exit",
+      "child": "#1839",
+      "contract_artifact": "docs/webui/state-machines.md",
+      "test_fixture": "tests/fixtures/webui/scenarios/duplicate-load.json"
+    },
+    {
+      "id": "events",
+      "epic_requirement": "Snapshot-to-SSE fencing, reset envelopes, queues, slow consumer and polling fallback",
+      "child": "#1842",
+      "contract_artifact": "docs/webui/state-machines.md",
+      "test_fixture": "tests/fixtures/webui/scenarios/sse-gap.json"
+    },
+    {
+      "id": "limits",
+      "epic_requirement": "Bounded pages, bodies, metadata, operation history, loads and downloads",
+      "child": "#1848",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/examples/bootstrap.model-free.json"
+    },
+    {
+      "id": "settings",
+      "epic_requirement": "Startup defaults, presets, next-load profiles, CLI authority and request-only overrides",
+      "child": "#1846",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/scenarios/unknown-null-partial-error.json"
+    },
+    {
+      "id": "ux",
+      "epic_requirement": "Screen states, controls, en/ko keys, keyboard map, units and screenshot fixtures",
+      "child": "#1843",
+      "contract_artifact": "docs/webui/ux-contract.md",
+      "test_fixture": "tests/fixtures/webui/strings.json"
+    },
+    {
+      "id": "integration",
+      "epic_requirement": "Contract review checklist and atomic producer/consumer/fixture update rule",
+      "child": "#1848",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/requirement-map.json"
+    },
+    {
+      "id": "bundle-offline-assets",
+      "epic_requirement": "Offline embedded bundle owner consumes api_base/auth/bootstrap contract",
+      "child": "#1836",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/examples/bootstrap.model-free.json"
+    },
+    {
+      "id": "secure-admin-surface",
+      "epic_requirement": "Bearer auth, Host/Origin/Fetch-Metadata, credential storage and redaction",
+      "child": "#1837",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/examples/error.stale-revision.json"
+    },
+    {
+      "id": "startup-modes",
+      "epic_requirement": "No-model, preset-only, single-model, --webui/--ui/--no-webui mode boundaries",
+      "child": "#1838",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/examples/bootstrap.model-free.json"
+    },
+    {
+      "id": "downloads-removal",
+      "epic_requirement": "Download progress, cancellation, cache-only removal and unknown totals",
+      "child": "#1841",
+      "contract_artifact": "docs/webui/state-machines.md",
+      "test_fixture": "tests/fixtures/webui/scenarios/download-cancel.json"
+    },
+    {
+      "id": "models-page",
+      "epic_requirement": "Model library journey, destructive copy and lifecycle controls",
+      "child": "#1844",
+      "contract_artifact": "docs/webui/ux-contract.md",
+      "test_fixture": "tests/fixtures/webui/scenarios/deletion-refusal.json"
+    },
+    {
+      "id": "chat-page",
+      "epic_requirement": "Streaming content/reasoning/tool/usage display and stop behavior",
+      "child": "#1845",
+      "contract_artifact": "docs/webui/ux-contract.md",
+      "test_fixture": "tests/fixtures/webui/strings.json"
+    },
+    {
+      "id": "activity-runtime",
+      "epic_requirement": "Operation history, runtime units and unsupported/null measurements",
+      "child": "#1847",
+      "contract_artifact": "docs/webui/ux-contract.md",
+      "test_fixture": "tests/fixtures/webui/examples/runtime.snapshot.json"
+    },
+    {
+      "id": "final-docs",
+      "epic_requirement": "Operator docs must explain flags, security defaults, roots and local history",
+      "child": "#1849",
+      "contract_artifact": "docs/webui/architecture.md",
+      "test_fixture": "tests/fixtures/webui/requirement-map.json"
+    }
+  ]
+}

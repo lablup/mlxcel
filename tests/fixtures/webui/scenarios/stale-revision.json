@@ -1,0 +1,38 @@
+{
+  "scenario": "stale_revision",
+  "description": "Mutation with an old revision is rejected and points the client to resnapshot.",
+  "given": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "client_revision": 7,
+    "server_revision": 8
+  },
+  "steps": [
+    {
+      "from": "ready",
+      "action": "unload_old_revision",
+      "to": "ready",
+      "http_status": 409,
+      "event": "model_revision",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "stale_revision",
+          "message": "catalog entry revision changed; refresh before retrying",
+          "retryable": true,
+          "field_errors": [
+            {
+              "field": "expected_revision",
+              "code": "stale",
+              "message": "expected 7 but current revision is 8"
+            }
+          ],
+          "operation_id": "op_load_001"
+        },
+        "request_id": "req_123"
+      }
+    }
+  ],
+  "expected": {
+    "refresh_required": true
+  }
+}

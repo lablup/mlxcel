@@ -1,0 +1,14 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server_instance_id": "srv_20260912_a",
+  "sequence": 44,
+  "type": "download_progress",
+  "payload": {
+    "operation_id": "op_dl_001",
+    "progress": {
+      "completed_bytes": 1048576,
+      "total_bytes": null,
+      "indeterminate": true
+    }
+  }
+}

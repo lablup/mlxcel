@@ -1,0 +1,16 @@
+{
+  "$schemaName": "ModelActionRequest",
+  "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+  "action": "load",
+  "expected_revision": 7,
+  "idempotency_key": "load-qwen3-0001",
+  "load_profile": {
+    "context_tokens": 8192,
+    "batch_size": 512,
+    "ubatch_size": 128,
+    "kv_cache": "q8_0",
+    "reasoning_budget": 1024,
+    "sampling_preset": "balanced"
+  },
+  "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
+}

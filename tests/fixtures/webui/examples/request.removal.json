@@ -1,0 +1,6 @@
+{
+  "$schemaName": "RemovalRequest",
+  "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+  "expected_revision": 9,
+  "idempotency_key": "remove-qwen3-0001"
+}

@@ -1,0 +1,34 @@
+{
+  "identity_vectors": [
+    {
+      "source": "cache",
+      "source_rank": 0,
+      "redacted_source_key": "cache:mlxcel-managed-cache-v1",
+      "entry_key": "mlx-community/Qwen3-4B-4bit",
+      "source_key_hash": "4f2c4c3046647722cfc55a225ea614494cf5f289d267e454c7970d70cfa43f07",
+      "canonical_identity": {
+        "entry_key": "mlx-community/Qwen3-4B-4bit",
+        "namespace_hash": "4f2c4c3046647722cfc55a225ea614494cf5f289d267e454c7970d70cfa43f07",
+        "source": "cache",
+        "source_rank": 0,
+        "version": 1
+      },
+      "expected_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU"
+    },
+    {
+      "source": "models_dir",
+      "source_rank": 1,
+      "redacted_source_key": "models_dir:primary-redacted-root",
+      "entry_key": "Qwen3-4B-4bit",
+      "source_key_hash": "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
+      "canonical_identity": {
+        "entry_key": "Qwen3-4B-4bit",
+        "namespace_hash": "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
+        "source": "models_dir",
+        "source_rank": 1,
+        "version": 1
+      },
+      "expected_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
+    }
+  ]
+}
