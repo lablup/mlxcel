@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 use axum::http::HeaderMap;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -55,6 +55,7 @@ const AUTOLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Matches the most permissive sub-app limit (the 25 MiB audio uploads) with
 /// headroom.
 const DISPATCH_BODY_CAP: usize = 64 * 1024 * 1024;
+const ROUTER_CONTROL_BODY_LIMIT_BYTES: usize = 256 * 1024;
 
 /// Shared state of the router-mode top level.
 #[derive(Clone)]
@@ -1088,11 +1089,19 @@ fn router_base_routes() -> axum::Router<RouterServerState> {
             "/models",
             get(router_models_list)
                 .post(router_models_add)
-                .delete(router_models_delete),
+                .delete(router_models_delete)
+                .layer(DefaultBodyLimit::max(ROUTER_CONTROL_BODY_LIMIT_BYTES)),
         )
         .route("/v1/models", get(router_models_list))
-        .route("/models/load", post(router_models_load))
-        .route("/models/unload", post(router_models_unload))
+        .route(
+            "/models/load",
+            post(router_models_load).layer(DefaultBodyLimit::max(ROUTER_CONTROL_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/models/unload",
+            post(router_models_unload)
+                .layer(DefaultBodyLimit::max(ROUTER_CONTROL_BODY_LIMIT_BYTES)),
+        )
         .route("/models/sse", get(router_models_sse))
 }
 
@@ -1106,16 +1115,17 @@ fn router_ui_routes(state: RouterServerState) -> axum::Router<RouterServerState>
             post(ui_operation_cancel),
         )
         .route("/ui-api/v1/events", get(ui_events))
+        .layer(DefaultBodyLimit::max(ROUTER_CONTROL_BODY_LIMIT_BYTES))
         .layer(middleware::from_fn_with_state(
             state,
             router_ui_api_key_auth,
         ))
 }
 
-fn finish_router_app(
+fn finish_router_layers(
     routes: axum::Router<RouterServerState>,
-    state: RouterServerState,
-) -> axum::Router {
+    state: &RouterServerState,
+) -> axum::Router<RouterServerState> {
     routes
         .fallback(dispatch_fallback)
         .layer(middleware::from_fn_with_state(
@@ -1127,7 +1137,28 @@ fn finish_router_app(
             router_cors_middleware,
         ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(state)
+}
+
+fn finish_router_app(
+    routes: axum::Router<RouterServerState>,
+    state: RouterServerState,
+) -> axum::Router {
+    finish_router_layers(routes, &state).with_state(state)
+}
+
+#[cfg(feature = "webui")]
+fn finish_router_app_with_security(
+    routes: axum::Router<RouterServerState>,
+    state: RouterServerState,
+    policy: super::webui::security::WebUiSecurityPolicy,
+) -> axum::Router {
+    let api_keys = state.config.api_keys.clone();
+    super::webui::security::secure_webui_router(
+        finish_router_layers(routes, &state),
+        api_keys,
+        policy,
+    )
+    .with_state(state)
 }
 
 /// Assemble the router-mode llama-compatible application. WebUI management
@@ -1145,9 +1176,24 @@ pub fn create_router_app_with_authenticated_ui(state: RouterServerState) -> axum
     finish_router_app(routes, state)
 }
 
+/// Assemble the WebUI-enabled router with the browser security policy outside Trace/CORS/auth.
+#[cfg(feature = "webui")]
+#[allow(dead_code)]
+pub(crate) fn create_router_app_with_secured_ui(
+    state: RouterServerState,
+    policy: super::webui::security::WebUiSecurityPolicy,
+) -> axum::Router {
+    let routes = router_base_routes().merge(router_ui_routes(state.clone()));
+    finish_router_app_with_security(routes, state, policy)
+}
+
 #[cfg(test)]
 #[path = "router_server_tests.rs"]
 mod router_server_tests;
+
+#[cfg(test)]
+#[path = "router_server_security_tests.rs"]
+mod router_server_security_tests;
 
 /// Run the router server: discover models (cache, `--models-dir`, presets),
 /// build the pool, and serve the b10621 router surface (issue #1438).

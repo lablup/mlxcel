@@ -25,6 +25,8 @@ use axum::{
 use rust_embed::RustEmbed;
 use sha2::{Digest, Sha256};
 
+use super::security::{CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY};
+
 const INDEX_HTML_SENTINEL: &str = include_str!("../../webui/assets/index.html");
 const LICENSE_SENTINEL: &str = include_str!("../../webui/assets/third-party-licenses.txt");
 
@@ -171,9 +173,10 @@ fn response_builder(status: StatusCode) -> axum::http::response::Builder {
         .status(status)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY)
         .header(
-            header::CONTENT_SECURITY_POLICY,
-            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'",
+            header::HeaderName::from_static("permissions-policy"),
+            PERMISSIONS_POLICY,
         )
 }
 
