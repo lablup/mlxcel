@@ -51,7 +51,7 @@ use super::router_cache::CacheSource;
 use super::router_lifecycle::{
     DownloadState, ErrorBody, LifecycleCoordinator, LifecycleSnapshot, ModelEvictionOutcome,
     ModelEvictionReport, ModelLifecycle, ModelLifecycleState, OperationError, OperationKind,
-    OperationResult, OperationState, OperationTarget, stable_model_identity,
+    OperationResult, OperationState, OperationTarget, ProgressBytes, stable_model_identity,
 };
 use super::router_presets::{PresetCliOverrides, PresetSection, RouterPresets};
 use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig};
@@ -148,6 +148,7 @@ struct EntryState {
 
 struct DownloadInFlight {
     cancel: Arc<AtomicBool>,
+    operation_id: String,
     /// b10621 `loaded_info` during a download:
     /// `{"progress": {url: {"done": n, "total": n}}}`.
     progress: serde_json::Value,
@@ -331,6 +332,9 @@ pub struct RouterPool {
     /// Serializes model loads so two concurrent autoloads cannot race the
     /// capacity check or contend the accelerator during weight upload.
     load_lock: tokio::sync::Mutex<()>,
+    /// Serializes cache writers; additional accepted downloads remain queued
+    /// in the bounded operation coordinator until this lock is available.
+    download_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
     rescan_after_snapshot_hook: Mutex<Option<RescanAfterSnapshotHook>>,
     #[cfg(test)]
@@ -423,6 +427,7 @@ impl RouterPool {
             revision_authority: Arc::new(AtomicU64::new(1)),
             catalog_epoch: AtomicU64::new(0),
             load_lock: tokio::sync::Mutex::new(()),
+            download_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             rescan_after_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
@@ -738,6 +743,26 @@ impl RouterPool {
             .values()
             .find(|entry| entry.ui_model_id == model_id)
             .cloned()
+    }
+
+    fn has_case_alias_entry(&self, name: &str) -> bool {
+        self.entries
+            .read()
+            .map(|entries| {
+                entries
+                    .keys()
+                    .any(|existing| existing.eq_ignore_ascii_case(name))
+            })
+            .unwrap_or(true)
+    }
+
+    fn ensure_no_case_alias_in_registry(
+        entries: &BTreeMap<String, Arc<RouterModelEntry>>,
+        name: &str,
+    ) -> bool {
+        !entries
+            .keys()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
     }
 
     fn ensure_entry_is_current(
@@ -1800,6 +1825,28 @@ fn reject_stale_revision(
     Ok(())
 }
 
+fn operation_begin_error(err: OperationError, operation_id: Option<String>) -> ErrorBody {
+    match err {
+        OperationError::Conflict {
+            operation_id: conflicting,
+        } => ErrorBody {
+            code: "conflict".to_string(),
+            message: "operation idempotency key conflicts with another active operation"
+                .to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: operation_id.or(conflicting),
+        },
+        OperationError::TooManyActive => ErrorBody {
+            code: "rate_limited".to_string(),
+            message: "too many active operations".to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id,
+        },
+    }
+}
+
 fn operation_error_for_router_error(err: &RouterPoolError, operation_id: String) -> ErrorBody {
     match err {
         RouterPoolError::OperationRejected(error) => {
@@ -1932,21 +1979,28 @@ impl RouterPool {
 
     /// Synchronously validate that `repo_id` is fetchable (b10621's metadata
     /// probe before it starts a download). Blocking.
-    pub fn validate_cache_repo(&self, repo_id: &str) -> anyhow::Result<()> {
+    pub fn validate_cache_repo(&self, repo_id: &str, revision: Option<&str>) -> anyhow::Result<()> {
         let cache = self
             .sources
             .cache
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no model cache is configured"))?;
-        cache.validate(repo_id)
+        cache.validate(repo_id, revision)
     }
 
-    /// Start downloading `name` into the cache (`POST /models`). The name
-    /// must already be validated (non-empty, normalized, not present,
-    /// metadata probe passed). Registers a transient `downloading` entry,
-    /// then fetches on a background task, forwarding progress into the SSE
-    /// stream and rescanning when the snapshot lands.
+    /// Start downloading `name` into the cache (`POST /models`). The legacy
+    /// compatibility facade keeps its wire schema but now uses the same
+    /// bounded operation primitive as the WebUI adapter.
     pub fn start_download(self: &Arc<Self>, name: &str) -> Result<(), RouterPoolError> {
+        self.submit_download(name, None, None).map(|_| ())
+    }
+
+    pub fn submit_download(
+        self: &Arc<Self>,
+        repo_id: &str,
+        revision: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
         let Some(cache) = &self.sources.cache else {
             return Err(RouterPoolError::LoadFailed(
                 "no model cache is configured (set --model-store-root, MLXCEL_MODELS_DIR, or \
@@ -1954,16 +2008,40 @@ impl RouterPool {
                     .to_string(),
             ));
         };
-        if self.lookup(name).is_some() {
-            return Err(RouterPoolError::AlreadyExists(name.to_string()));
+        if let Some(operation) = self
+            .lifecycle
+            .find_active_download(repo_id, revision.unwrap_or("main"))
+        {
+            return Ok(super::router_lifecycle::OperationAccepted {
+                operation_id: operation.operation_id,
+                state: operation.state,
+                idempotent_replay: true,
+            });
+        }
+        if self.has_case_alias_entry(repo_id) {
+            return Err(RouterPoolError::AlreadyExists(repo_id.to_string()));
+        }
+        let requested_revision = revision.unwrap_or("main").to_string();
+        let fingerprint = format!("download:{repo_id}:{requested_revision}");
+        let target = OperationTarget::Download {
+            repo_id: repo_id.to_string(),
+            revision: Some(requested_revision.clone()),
+        };
+        let accepted = self
+            .lifecycle
+            .begin_download_operation(target, idempotency_key, fingerprint)
+            .map_err(|err| RouterPoolError::OperationRejected(operation_begin_error(err, None)))?;
+        if accepted.idempotent_replay {
+            return Ok(accepted);
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let path = cache.snapshot_dir(name);
+        let path = cache.snapshot_dir(repo_id);
         let section = PresetSection::default();
-        let config = self.build_entry_config(name, &path, &section);
-        let (ui_model_id, source_key_hash) = self.ui_identity_for(name, RouterModelSource::Cache);
+        let config = self.build_entry_config(repo_id, &path, &section);
+        let (ui_model_id, source_key_hash) =
+            self.ui_identity_for(repo_id, RouterModelSource::Cache);
         let entry = Arc::new(RouterModelEntry {
-            name: name.to_string(),
+            name: repo_id.to_string(),
             path,
             source: RouterModelSource::Cache,
             aliases: Vec::new(),
@@ -1978,6 +2056,7 @@ impl RouterPool {
                 failed: false,
                 download: Some(DownloadInFlight {
                     cancel: cancel.clone(),
+                    operation_id: accepted.operation_id.clone(),
                     progress: serde_json::json!({ "progress": {} }),
                 }),
             }),
@@ -1989,16 +2068,54 @@ impl RouterPool {
                 .entries
                 .write()
                 .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?;
+            if !Self::ensure_no_case_alias_in_registry(&entries, repo_id) {
+                self.lifecycle.update_operation(
+                    &accepted.operation_id,
+                    OperationState::Failed,
+                    None,
+                    Some(operation_begin_error(
+                        OperationError::Conflict { operation_id: None },
+                        Some(accepted.operation_id.clone()),
+                    )),
+                );
+                return Err(RouterPoolError::AlreadyExists(repo_id.to_string()));
+            }
             entries.insert(entry.name.clone(), entry.clone());
         }
+        self.lifecycle
+            .register_cancellation(&accepted.operation_id, cancel.clone());
         self.notify_status(&entry);
 
         let pool = self.clone();
         let task_entry = entry;
-        let repo = name.to_string();
+        let repo = repo_id.to_string();
+        let requested_revision_for_task = requested_revision.clone();
+        let revision_for_task = revision.map(str::to_string);
+        let operation_id = accepted.operation_id.clone();
         tokio::spawn(async move {
+            let _download_permit = pool.download_lock.lock().await;
+            if cancel.load(Ordering::Relaxed) {
+                pool.finish_download_task(
+                    &task_entry,
+                    &repo,
+                    &operation_id,
+                    &requested_revision_for_task,
+                    Err(anyhow::Error::new(crate::downloader::DownloadCancelled)),
+                    requested_revision_for_task.clone(),
+                );
+                return;
+            }
+            pool.lifecycle
+                .update_operation(&operation_id, OperationState::Running, None, None);
+            let plan_state = Arc::new(Mutex::new((requested_revision_for_task.clone(), None)));
             let hooks = crate::downloader::DownloadHooks {
-                progress: Some(pool.download_progress_hook(&task_entry)),
+                progress: Some(
+                    pool.download_progress_hook(&task_entry, Some(operation_id.clone())),
+                ),
+                plan: Some(pool.download_plan_hook(&operation_id, plan_state.clone())),
+                begin_publish: Some(
+                    pool.download_begin_publish_hook(&operation_id, cancel.clone()),
+                ),
                 cancel: Some(cancel),
             };
             let blocking_pool = pool.clone();
@@ -2007,52 +2124,146 @@ impl RouterPool {
                 let Some(cache) = &blocking_pool.sources.cache else {
                     return Err(anyhow::anyhow!("no model cache configured"));
                 };
-                cache.download(&blocking_repo, hooks)
+                cache.download(&blocking_repo, revision_for_task.as_deref(), hooks)
             })
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+            let resolved_revision = plan_state
+                .lock()
+                .ok()
+                .map(|guard| guard.0.clone())
+                .unwrap_or_else(|| requested_revision_for_task.clone());
+            pool.finish_download_task(
+                &task_entry,
+                &repo,
+                &operation_id,
+                &requested_revision_for_task,
+                result,
+                resolved_revision,
+            );
+        });
+        Ok(accepted)
+    }
 
-            let ok = result.is_ok();
-            if let Ok(mut guard) = task_entry.state.lock() {
-                guard.download = None;
-                guard.failed = !ok;
+    fn download_plan_hook(
+        self: &Arc<Self>,
+        operation_id: &str,
+        state: Arc<Mutex<(String, Option<u64>)>>,
+    ) -> Arc<dyn Fn(crate::downloader::DownloadPlan) + Send + Sync> {
+        let pool = self.clone();
+        let operation_id = operation_id.to_string();
+        Arc::new(move |plan| {
+            if let Ok(mut guard) = state.lock() {
+                guard.0 = plan.resolved_revision.clone();
+                guard.1 = plan.total_bytes;
             }
-            task_entry.lifecycle.mark_download_terminal(if ok {
+            pool.lifecycle.update_operation_progress(
+                &operation_id,
+                ProgressBytes {
+                    completed_bytes: 0,
+                    total_bytes: plan.total_bytes,
+                    indeterminate: plan.total_bytes.is_none(),
+                },
+            );
+        })
+    }
+
+    fn download_begin_publish_hook(
+        self: &Arc<Self>,
+        operation_id: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let pool = self.clone();
+        let operation_id = operation_id.to_string();
+        Arc::new(move || {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            pool.lifecycle.begin_publish_operation(&operation_id)
+        })
+    }
+
+    fn finish_download_task(
+        self: &Arc<Self>,
+        entry: &Arc<RouterModelEntry>,
+        repo: &str,
+        operation_id: &str,
+        requested_revision: &str,
+        result: anyhow::Result<()>,
+        resolved_revision: String,
+    ) {
+        let ok = result.is_ok();
+        if let Ok(mut guard) = entry.state.lock() {
+            guard.download = None;
+            guard.failed = !ok;
+        }
+        let cancelled = result
+            .as_ref()
+            .err()
+            .is_some_and(crate::downloader::is_download_cancelled);
+        entry.lifecycle.mark_download_terminal(if ok {
+            DownloadState::Complete
+        } else if cancelled {
+            DownloadState::Incomplete
+        } else {
+            DownloadState::Failed
+        });
+        self.notify_lifecycle(entry);
+        let terminal_state = if ok {
+            OperationState::Succeeded
+        } else if cancelled {
+            OperationState::Cancelled
+        } else {
+            OperationState::Failed
+        };
+        let error = if ok || cancelled {
+            None
+        } else {
+            Some(ErrorBody {
+                code: "conflict".to_string(),
+                message: "download failed; see server logs".to_string(),
+                retryable: true,
+                field_errors: None,
+                operation_id: Some(operation_id.to_string()),
+            })
+        };
+        let result_body = Some(OperationResult::Download {
+            repo_id: repo.to_string(),
+            revision: Some(if ok {
+                resolved_revision
+            } else {
+                requested_revision.to_string()
+            }),
+            model_id: ok.then(|| entry.ui_model_id.clone()),
+            download: if ok {
                 DownloadState::Complete
-            } else if result
-                .as_ref()
-                .err()
-                .is_some_and(crate::downloader::is_download_cancelled)
-            {
+            } else if cancelled {
                 DownloadState::Incomplete
             } else {
                 DownloadState::Failed
-            });
-            pool.notify_lifecycle(&task_entry);
-            match &result {
-                Ok(()) => tracing::info!("router: download of '{repo}' finished"),
-                Err(err) if crate::downloader::is_download_cancelled(err) => {
-                    tracing::info!("router: download of '{repo}' cancelled");
-                }
-                Err(err) => tracing::warn!("router: download of '{repo}' failed: {err:#}"),
-            }
-            // b10621 order: the terminal download event first, then the
-            // reload that reconciles the entry (a finished snapshot becomes a
-            // regular cache entry; a failed one drops out of the list).
-            pool.notify(
-                if ok {
-                    "download_finished"
-                } else {
-                    "download_failed"
-                },
-                &repo,
-                serde_json::Value::Null,
-            );
-            if let Err(err) = pool.rescan() {
-                tracing::warn!("router: rescan after download of '{repo}' failed: {err:#}");
-            }
+            },
         });
-        Ok(())
+        self.lifecycle
+            .update_operation(operation_id, terminal_state, result_body, error);
+        match &result {
+            Ok(()) => tracing::info!("router: download of '{repo}' finished"),
+            Err(err) if crate::downloader::is_download_cancelled(err) => {
+                tracing::info!("router: download of '{repo}' cancelled");
+            }
+            Err(err) => tracing::warn!("router: download of '{repo}' failed: {err:#}"),
+        }
+        self.notify(
+            if ok {
+                "download_finished"
+            } else {
+                "download_failed"
+            },
+            repo,
+            serde_json::Value::Null,
+        );
+        if let Err(err) = self.rescan() {
+            tracing::warn!("router: rescan after download of '{repo}' failed: {err:#}");
+        }
     }
 
     /// The per-chunk progress hook: updates the entry's progress block and
@@ -2061,12 +2272,13 @@ impl RouterPool {
     fn download_progress_hook(
         self: &Arc<Self>,
         entry: &Arc<RouterModelEntry>,
+        operation_id: Option<String>,
     ) -> Arc<dyn Fn(&str, u64, u64) + Send + Sync> {
         let pool = self.clone();
         let entry = entry.clone();
         let last_emit: Mutex<Option<std::time::Instant>> = Mutex::new(None);
         Arc::new(move |url: &str, done: u64, total: u64| {
-            let snapshot = {
+            let (snapshot, progress_bytes) = {
                 let Ok(mut guard) = entry.state.lock() else {
                     return;
                 };
@@ -2075,8 +2287,36 @@ impl RouterPool {
                 };
                 download.progress["progress"][url] =
                     serde_json::json!({ "done": done, "total": total });
-                download.progress.clone()
+                let mut completed_bytes = 0u64;
+                let mut total_bytes = 0u64;
+                let mut all_known = true;
+                if let Some(progresses) = download.progress["progress"].as_object() {
+                    for value in progresses.values() {
+                        completed_bytes = completed_bytes.saturating_add(
+                            value
+                                .get("done")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0),
+                        );
+                        match value.get("total").and_then(serde_json::Value::as_u64) {
+                            Some(total) if total > 0 => {
+                                total_bytes = total_bytes.saturating_add(total);
+                            }
+                            _ => all_known = false,
+                        }
+                    }
+                }
+                let progress_bytes = ProgressBytes {
+                    completed_bytes,
+                    total_bytes: all_known.then_some(total_bytes),
+                    indeterminate: !all_known,
+                };
+                (download.progress.clone(), progress_bytes)
             };
+            if let Some(operation_id) = operation_id.as_deref() {
+                pool.lifecycle
+                    .update_operation_progress(operation_id, progress_bytes);
+            }
             let terminal = total > 0 && done >= total;
             let due = {
                 let Ok(mut last) = last_emit.lock() else {
@@ -2098,6 +2338,204 @@ impl RouterPool {
         })
     }
 
+    /// Submit a WebUI-safe cache removal. Unlike the compatibility
+    /// `DELETE /models` path, this never unloads or cancels implicitly: the
+    /// catalog revision must match and the model must be idle, cache-sourced,
+    /// and not downloading before deletion starts.
+    pub fn submit_cache_removal_by_model_id(
+        self: &Arc<Self>,
+        model_id: &str,
+        expected_revision: u64,
+        idempotency_key: &str,
+    ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
+        let target = OperationTarget::Model {
+            model_id: model_id.to_string(),
+            requested_revision: Some(expected_revision),
+            eviction_target_id: None,
+        };
+        let fingerprint = format!("model_removal:{model_id}:{expected_revision}");
+        let accepted = self
+            .lifecycle
+            .begin_operation(
+                OperationKind::ModelRemoval,
+                target,
+                Some(idempotency_key),
+                fingerprint,
+            )
+            .map_err(|err| RouterPoolError::OperationRejected(operation_begin_error(err, None)))?;
+        if accepted.idempotent_replay {
+            return Ok(accepted);
+        }
+        let Some(entry) = self.get_by_model_id(model_id) else {
+            let error = ErrorBody {
+                code: "not_found".to_string(),
+                message: "model was not found; refresh the catalog before retrying".to_string(),
+                retryable: true,
+                field_errors: None,
+                operation_id: Some(accepted.operation_id.clone()),
+            };
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(error.clone()),
+            );
+            return Err(RouterPoolError::OperationRejected(error));
+        };
+        let expectation = LoadEntryExpectation {
+            model_id: model_id.to_string(),
+            revision: expected_revision,
+        };
+        if let Err(err) = self.ensure_entry_is_current(&entry, Some(&expectation)) {
+            let error = operation_error_for_router_error(&err, accepted.operation_id.clone());
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(error.clone()),
+            );
+            return Err(RouterPoolError::OperationRejected(error));
+        }
+        if entry.source != RouterModelSource::Cache {
+            let error = ErrorBody {
+                code: "unsupported".to_string(),
+                message: "only cache-sourced models can be removed from the WebUI".to_string(),
+                retryable: false,
+                field_errors: None,
+                operation_id: Some(accepted.operation_id.clone()),
+            };
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(error.clone()),
+            );
+            return Err(RouterPoolError::OperationRejected(error));
+        }
+        let snapshot = entry.lifecycle_snapshot();
+        if snapshot.busy || entry.reserves_capacity() || entry.is_downloading() {
+            let error = ErrorBody {
+                code: "conflict".to_string(),
+                message:
+                    "model is busy; unload or wait for current lifecycle work before removing it"
+                        .to_string(),
+                retryable: true,
+                field_errors: None,
+                operation_id: Some(accepted.operation_id.clone()),
+            };
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
+                Some(error.clone()),
+            );
+            return Err(RouterPoolError::OperationRejected(error));
+        }
+        entry.lifecycle.mark_operation_busy();
+        self.notify_lifecycle(&entry);
+        let operation_revision = entry.lifecycle_revision();
+
+        let pool = self.clone();
+        let operation_id = accepted.operation_id.clone();
+        let model_id = model_id.to_string();
+        let removal_entry = entry.clone();
+        tokio::spawn(async move {
+            pool.lifecycle
+                .update_operation(&operation_id, OperationState::Running, None, None);
+            let expectation = LoadEntryExpectation {
+                model_id: model_id.clone(),
+                revision: operation_revision,
+            };
+            let entry = removal_entry;
+            let _guard = entry.lifecycle.operation_guard().await;
+            if let Err(err) = pool.ensure_entry_is_current(&entry, Some(&expectation)) {
+                let error = operation_error_for_router_error(&err, operation_id.clone());
+                entry.lifecycle.mark_operation_idle();
+                pool.notify_lifecycle(&entry);
+                pool.lifecycle.update_operation(
+                    &operation_id,
+                    OperationState::Failed,
+                    None,
+                    Some(error),
+                );
+                return;
+            }
+            if entry.source != RouterModelSource::Cache {
+                let error = ErrorBody {
+                    code: "unsupported".to_string(),
+                    message: "only cache-sourced models can be removed from the WebUI".to_string(),
+                    retryable: false,
+                    field_errors: None,
+                    operation_id: Some(operation_id.clone()),
+                };
+                entry.lifecycle.mark_operation_idle();
+                pool.notify_lifecycle(&entry);
+                pool.lifecycle.update_operation(
+                    &operation_id,
+                    OperationState::Failed,
+                    None,
+                    Some(error),
+                );
+                return;
+            }
+            let snapshot = entry.lifecycle_snapshot();
+            let remove_name = entry.name.clone();
+            let remove_pool = pool.clone();
+            let remove_name_for_blocking = remove_name.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                let Some(cache) = &remove_pool.sources.cache else {
+                    anyhow::bail!("no model cache is configured");
+                };
+                cache.remove(&remove_name_for_blocking)
+            })
+            .await
+            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+            match removed {
+                Ok(()) => {
+                    if let Ok(mut entries) = pool.entries.write()
+                        && entries
+                            .get(&remove_name)
+                            .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                    {
+                        entries.remove(&remove_name);
+                    }
+                    pool.catalog_epoch.fetch_add(1, Ordering::SeqCst);
+                    pool.notify("model_remove", &remove_name, serde_json::Value::Null);
+                    pool.lifecycle.update_operation(
+                        &operation_id,
+                        OperationState::Succeeded,
+                        Some(OperationResult::ModelRemoval {
+                            model_id: model_id.clone(),
+                            revision: entry.lifecycle_revision(),
+                            lifecycle: snapshot,
+                            eviction: None,
+                        }),
+                        None,
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(model_id = %model_id, error = %format_args!("{err:#}"), "router: model removal failed");
+                    entry.lifecycle.mark_operation_idle();
+                    pool.notify_lifecycle(&entry);
+                    let error = ErrorBody {
+                        code: "conflict".to_string(),
+                        message: "model removal failed; see server logs".to_string(),
+                        retryable: true,
+                        field_errors: None,
+                        operation_id: Some(operation_id.clone()),
+                    };
+                    pool.lifecycle.update_operation(
+                        &operation_id,
+                        OperationState::Failed,
+                        None,
+                        Some(error),
+                    );
+                }
+            }
+        });
+        Ok(accepted)
+    }
+
     /// Remove `name` from the cache (`DELETE /models`, b10621
     /// `server_models::remove`): cancel an in-flight download or stop a
     /// running instance, delete the snapshot from disk (containment-checked
@@ -2114,11 +2552,15 @@ impl RouterPool {
         };
         self.ensure_entry_is_current(&entry, None)?;
 
-        if let Ok(guard) = entry.state.lock()
-            && let Some(download) = &guard.download
-        {
+        let download_operation_id = entry.state.lock().ok().and_then(|guard| {
+            guard
+                .download
+                .as_ref()
+                .map(|download| download.operation_id.clone())
+        });
+        if let Some(operation_id) = download_operation_id {
             tracing::info!("router: cancelling download for model '{name}'");
-            download.cancel.store(true, Ordering::Relaxed);
+            let _ = self.lifecycle.cancel_operation(&operation_id);
         }
         // Wait for the download worker to acknowledge the cancel (it clears
         // the download state in its completion block). The method does not

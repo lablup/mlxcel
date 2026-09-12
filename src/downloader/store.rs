@@ -391,6 +391,9 @@ fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
         let Some(top_name) = top.file_name().to_str().map(str::to_owned) else {
             continue;
         };
+        if top_name.starts_with('.') {
+            continue;
+        }
 
         // Case 1: a bare-id snapshot stored directly at models/<name>.
         if snapshot_is_complete(&top_path) {
@@ -609,6 +612,12 @@ fn remove_model_under(
     // Use a lexical/canonical comparison that does not require the target to
     // exist.
     if !is_within(models_root, &target) {
+        return Err(RemoveError::OutsideStore(target));
+    }
+
+    if let Ok(meta) = std::fs::symlink_metadata(&target)
+        && meta.file_type().is_symlink()
+    {
         return Err(RemoveError::OutsideStore(target));
     }
 

@@ -1273,10 +1273,10 @@ async fn ui_events(
         .into_response()
 }
 
-/// POST /models (b10621 `post_router_models`): validate the name as a
-/// fetchable HuggingFace repository, then download it into the model cache
+/// POST /models (b10621 `post_router_models`): enqueue a cache download
 /// in the background, reporting progress through `GET /models/sse`
-/// (issue #1438).
+/// (issue #1438). Network validation runs inside the bounded download
+/// operation so duplicate/queue admission happens before any Hub request.
 async fn router_models_add(
     State(state): State<RouterServerState>,
     body: axum::body::Bytes,
@@ -1304,17 +1304,6 @@ async fn router_models_add(
     };
     if repo_id != name && state.pool.lookup(&repo_id).is_some() {
         return llama_invalid_request(&format!("model '{repo_id}' already exists"));
-    }
-    // b10621 validates by fetching repository metadata before answering; a
-    // failed probe is a 500 from its handler wrapper. The probe blocks on
-    // the network, so it runs on the blocking pool.
-    let probe_pool = state.pool.clone();
-    let probe_repo = repo_id.clone();
-    let probed = tokio::task::spawn_blocking(move || probe_pool.validate_cache_repo(&probe_repo))
-        .await
-        .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
-    if let Err(err) = probed {
-        return llama_server_error(&format!("model validation failed: {err:#}"));
     }
     match state.pool.start_download(&repo_id) {
         Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
@@ -1538,6 +1527,7 @@ fn router_ui_routes(state: RouterServerState) -> axum::Router<RouterServerState>
             post(ui_operation_cancel),
         )
         .route("/ui-api/v1/events", get(ui_events))
+        .nest("/ui-api/v1", super::webui::library::routes())
         .layer(middleware::from_fn_with_state(
             state,
             router_ui_api_key_auth,

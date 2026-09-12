@@ -1,0 +1,22 @@
+{
+  "operation_id": "op_download_003",
+  "kind": "download",
+  "state": "running",
+  "created_at": "2026-09-12T03:06:00Z",
+  "updated_at": "2026-09-12T03:06:05Z",
+  "idempotency_scope": "server_instance",
+  "target": {
+    "target_kind": "download",
+    "repo_id": "mlx-community/SmolLM-135M-Instruct-4bit",
+    "revision": "main"
+  },
+  "progress": {
+    "completed_bytes": 1048576,
+    "total_bytes": 75789919,
+    "indeterminate": false
+  },
+  "result": null,
+  "error": null,
+  "cancellable": true,
+  "cancel_reason": null
+}
