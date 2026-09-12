@@ -1,6 +1,144 @@
 {
   "strings": [
     {
+      "key": "app.title",
+      "en": "mlxcel WebUI",
+      "ko": "mlxcel 웹 UI",
+      "test_id": "app-title"
+    },
+    {
+      "key": "app.subtitle",
+      "en": "Local model control plane",
+      "ko": "로컬 모델 제어판",
+      "test_id": "app-subtitle"
+    },
+    {
+      "key": "nav.models",
+      "en": "Models",
+      "ko": "모델",
+      "test_id": "nav-models"
+    },
+    {
+      "key": "nav.chat",
+      "en": "Chat",
+      "ko": "대화",
+      "test_id": "nav-chat"
+    },
+    {
+      "key": "nav.activity",
+      "en": "Activity",
+      "ko": "활동",
+      "test_id": "nav-activity"
+    },
+    {
+      "key": "nav.settings",
+      "en": "Settings",
+      "ko": "설정",
+      "test_id": "nav-settings"
+    },
+    {
+      "key": "nav.gallery",
+      "en": "Gallery",
+      "ko": "갤러리",
+      "test_id": "nav-gallery"
+    },
+    {
+      "key": "nav.primary",
+      "en": "Primary navigation",
+      "ko": "주 내비게이션",
+      "test_id": "nav-primary"
+    },
+    {
+      "key": "nav.home",
+      "en": "mlxcel home",
+      "ko": "mlxcel 홈",
+      "test_id": "nav-home"
+    },
+    {
+      "key": "toolbar.command",
+      "en": "Command",
+      "ko": "명령",
+      "test_id": "toolbar-command"
+    },
+    {
+      "key": "toolbar.help",
+      "en": "Keyboard help",
+      "ko": "키보드 도움말",
+      "test_id": "toolbar-help"
+    },
+    {
+      "key": "connection.ready",
+      "en": "Local shell ready; adapters pending",
+      "ko": "로컬 셸 준비됨; 어댑터 대기 중",
+      "test_id": "connection-ready"
+    },
+    {
+      "key": "connection.offline",
+      "en": "Server connection is offline",
+      "ko": "서버 연결이 오프라인입니다",
+      "test_id": "connection-offline"
+    },
+    {
+      "key": "models.title",
+      "en": "Model library",
+      "ko": "모델 라이브러리",
+      "test_id": "models-title"
+    },
+    {
+      "key": "models.empty.title",
+      "en": "No local models yet",
+      "ko": "아직 로컬 모델이 없습니다",
+      "test_id": "models-empty-title"
+    },
+    {
+      "key": "models.empty.body",
+      "en": "Browse, download, and load models explicitly. The shell never autoloads a checkpoint.",
+      "ko": "모델을 명시적으로 탐색, 다운로드, 로드하세요. 셸은 체크포인트를 자동 로드하지 않습니다.",
+      "test_id": "models-empty-body"
+    },
+    {
+      "key": "models.long_name",
+      "en": "Qwen3 Very Long Local Checkpoint Name With Mixed English and 한국어 모델 이름",
+      "ko": "Qwen3 매우 긴 로컬 체크포인트 이름과 한국어 모델 이름",
+      "test_id": "models-long-name"
+    },
+    {
+      "key": "models.unsupported.reason",
+      "en": "Vision input is unavailable for this backend; chat remains text-only.",
+      "ko": "이 백엔드에서는 비전 입력을 사용할 수 없어 대화는 텍스트 전용입니다.",
+      "test_id": "models-unsupported-reason"
+    },
+    {
+      "key": "models.load",
+      "en": "Load",
+      "ko": "로드",
+      "test_id": "models-load"
+    },
+    {
+      "key": "models.unload",
+      "en": "Unload",
+      "ko": "언로드",
+      "test_id": "models-unload"
+    },
+    {
+      "key": "models.status.ready",
+      "en": "Ready",
+      "ko": "준비됨",
+      "test_id": "models-status-ready"
+    },
+    {
+      "key": "models.status.unloaded",
+      "en": "Unloaded",
+      "ko": "언로드됨",
+      "test_id": "models-status-unloaded"
+    },
+    {
+      "key": "models.status.failed",
+      "en": "Failed",
+      "ko": "실패",
+      "test_id": "models-status-failed"
+    },
+    {
       "key": "models.delete.confirm.title",
       "en": "Delete model from cache?",
       "ko": "캐시에서 모델을 삭제할까요?",
@@ -13,16 +151,532 @@
       "test_id": "dialog-delete-model-body"
     },
     {
+      "key": "models.delete.confirm.token_label",
+      "en": "Type DELETE to confirm",
+      "ko": "확인하려면 DELETE를 입력하세요",
+      "test_id": "dialog-delete-model-token"
+    },
+    {
+      "key": "models.unload.confirm.body",
+      "en": "Unload {model} after active requests drain; browser tabs will keep their selected model.",
+      "ko": "활성 요청이 비워진 뒤 {model} 모델을 언로드합니다. 브라우저 탭의 선택 모델은 유지됩니다.",
+      "test_id": "dialog-unload-model-body"
+    },
+    {
+      "key": "chat.title",
+      "en": "Chat",
+      "ko": "대화",
+      "test_id": "chat-title"
+    },
+    {
+      "key": "chat.placeholder",
+      "en": "Type a message; IME composition is preserved.",
+      "ko": "메시지를 입력하세요. IME 조합은 보존됩니다.",
+      "test_id": "chat-placeholder"
+    },
+    {
+      "key": "chat.streaming.status",
+      "en": "Streaming tokens from the selected ready model.",
+      "ko": "선택한 준비 모델에서 토큰을 스트리밍 중입니다.",
+      "test_id": "chat-streaming-status"
+    },
+    {
+      "key": "chat.reasoning",
+      "en": "Reasoning",
+      "ko": "추론",
+      "test_id": "chat-reasoning"
+    },
+    {
+      "key": "chat.tool_call",
+      "en": "Tool call preview",
+      "ko": "도구 호출 미리보기",
+      "test_id": "chat-tool-call"
+    },
+    {
+      "key": "downloads.cancel.confirm.body",
+      "en": "Cancel this download only after the server acknowledges worker shutdown.",
+      "ko": "서버가 작업자 중지를 확인한 뒤에만 이 다운로드를 취소합니다.",
+      "test_id": "dialog-cancel-download-body"
+    },
+    {
+      "key": "activity.title",
+      "en": "Activity",
+      "ko": "활동",
+      "test_id": "activity-title"
+    },
+    {
       "key": "activity.progress.indeterminate",
       "en": "Downloaded {bytes}; total size is not known yet.",
       "ko": "{bytes} 다운로드됨; 전체 크기는 아직 알 수 없습니다.",
       "test_id": "activity-progress-indeterminate"
     },
     {
+      "key": "activity.sse_reset",
+      "en": "Event stream reset; take a fresh snapshot before resuming updates.",
+      "ko": "이벤트 스트림이 재설정되었습니다. 업데이트를 재개하기 전에 새 스냅샷을 가져오세요.",
+      "test_id": "activity-sse-reset"
+    },
+    {
+      "key": "settings.title",
+      "en": "Settings",
+      "ko": "설정",
+      "test_id": "settings-title"
+    },
+    {
+      "key": "settings.appearance",
+      "en": "Appearance preferences",
+      "ko": "화면 표시 설정",
+      "test_id": "settings-appearance"
+    },
+    {
+      "key": "settings.theme",
+      "en": "Theme",
+      "ko": "테마",
+      "test_id": "settings-theme"
+    },
+    {
+      "key": "settings.material",
+      "en": "Material",
+      "ko": "재질",
+      "test_id": "settings-material"
+    },
+    {
+      "key": "settings.glass_intensity",
+      "en": "Glass intensity",
+      "ko": "글래스 강도",
+      "test_id": "settings-glass-intensity"
+    },
+    {
+      "key": "settings.reduce_motion",
+      "en": "Reduce motion",
+      "ko": "동작 줄이기",
+      "test_id": "settings-reduce-motion"
+    },
+    {
+      "key": "settings.reduce_transparency",
+      "en": "Reduce transparency",
+      "ko": "투명도 줄이기",
+      "test_id": "settings-reduce-transparency"
+    },
+    {
+      "key": "settings.high_contrast",
+      "en": "High contrast",
+      "ko": "고대비",
+      "test_id": "settings-high-contrast"
+    },
+    {
+      "key": "settings.locale",
+      "en": "Language",
+      "ko": "언어",
+      "test_id": "settings-locale"
+    },
+    {
       "key": "settings.partial_success",
       "en": "Some settings changed; fields controlled by CLI or the loaded worker were left unchanged.",
       "ko": "일부 설정만 변경되었습니다. CLI 또는 로드된 워커가 제어하는 필드는 변경되지 않았습니다.",
       "test_id": "settings-partial-success"
+    },
+    {
+      "key": "settings.clear_history.confirm.body",
+      "en": "Clear only the explicit local browser history store; API keys are never persisted there.",
+      "ko": "명시적으로 켠 로컬 브라우저 기록 저장소만 지웁니다. API 키는 그곳에 저장하지 않습니다.",
+      "test_id": "dialog-clear-history-body"
+    },
+    {
+      "key": "state.unauthorized.title",
+      "en": "Authentication required",
+      "ko": "인증이 필요합니다",
+      "test_id": "state-unauthorized-title"
+    },
+    {
+      "key": "state.unauthorized.body",
+      "en": "Enter the session key printed by the local server terminal.",
+      "ko": "로컬 서버 터미널에 한 번 표시된 세션 키를 입력하세요.",
+      "test_id": "state-unauthorized-body"
+    },
+    {
+      "key": "state.offline.title",
+      "en": "Server offline",
+      "ko": "서버 오프라인",
+      "test_id": "state-offline-title"
+    },
+    {
+      "key": "state.offline.body",
+      "en": "The shell is available, but model data waits for the local API.",
+      "ko": "셸은 사용할 수 있지만 모델 데이터는 로컬 API를 기다립니다.",
+      "test_id": "state-offline-body"
+    },
+    {
+      "key": "command.title",
+      "en": "Command palette",
+      "ko": "명령 팔레트",
+      "test_id": "command-title"
+    },
+    {
+      "key": "command.search",
+      "en": "Search commands",
+      "ko": "명령 검색",
+      "test_id": "command-search"
+    },
+    {
+      "key": "command.no_results",
+      "en": "No commands match this search.",
+      "ko": "검색과 일치하는 명령이 없습니다.",
+      "test_id": "command-no-results"
+    },
+    {
+      "key": "help.title",
+      "en": "Keyboard shortcuts",
+      "ko": "키보드 단축키",
+      "test_id": "help-title"
+    },
+    {
+      "key": "help.body",
+      "en": "Command opens search. Escape closes overlays. Brackets move navigation only while the sidebar has focus.",
+      "ko": "Command는 검색을 엽니다. Escape는 오버레이를 닫습니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.",
+      "test_id": "help-body"
+    },
+    {
+      "key": "gallery.title",
+      "en": "Design system gallery",
+      "ko": "디자인 시스템 갤러리",
+      "test_id": "gallery-title"
+    },
+    {
+      "key": "gallery.subtitle",
+      "en": "Shared tokens, controls, states, and viewport fixtures for page implementers.",
+      "ko": "페이지 구현자를 위한 공유 토큰, 컨트롤, 상태, 뷰포트 픽스처입니다.",
+      "test_id": "gallery-subtitle"
+    },
+    {
+      "key": "gallery.long_cjk",
+      "en": "Long English and 한국어 labels truncate with accessible full labels.",
+      "ko": "긴 English 및 한국어 레이블은 접근 가능한 전체 레이블을 유지하며 줄임표 처리됩니다.",
+      "test_id": "gallery-long-cjk"
+    },
+    {
+      "key": "model.selected.none",
+      "en": "No model selected",
+      "ko": "선택한 모델 없음",
+      "test_id": "model-selected-none"
+    },
+    {
+      "key": "common.unavailable",
+      "en": "Unavailable until server adapters connect",
+      "ko": "서버 어댑터 연결 전에는 사용할 수 없습니다",
+      "test_id": "common-unavailable"
+    },
+    {
+      "key": "common.cancel",
+      "en": "Cancel",
+      "ko": "취소",
+      "test_id": "common-cancel"
+    },
+    {
+      "key": "common.delete",
+      "en": "Delete",
+      "ko": "삭제",
+      "test_id": "common-delete"
+    },
+    {
+      "key": "common.retry",
+      "en": "Retry",
+      "ko": "다시 시도",
+      "test_id": "common-retry"
+    },
+    {
+      "key": "common.enter_key",
+      "en": "Enter key",
+      "ko": "키 입력",
+      "test_id": "common-enter-key"
+    },
+    {
+      "key": "common.add_model",
+      "en": "Add model",
+      "ko": "모델 추가",
+      "test_id": "common-add-model"
+    },
+    {
+      "key": "common.send",
+      "en": "Send",
+      "ko": "보내기",
+      "test_id": "common-send"
+    },
+    {
+      "key": "routes.models.eyebrow",
+      "en": "Local library",
+      "ko": "로컬 라이브러리",
+      "test_id": "routes-models-eyebrow"
+    },
+    {
+      "key": "routes.chat.eyebrow",
+      "en": "Conversation",
+      "ko": "대화",
+      "test_id": "routes-chat-eyebrow"
+    },
+    {
+      "key": "routes.activity.eyebrow",
+      "en": "Operations",
+      "ko": "작업",
+      "test_id": "routes-activity-eyebrow"
+    },
+    {
+      "key": "routes.settings.eyebrow",
+      "en": "Browser only",
+      "ko": "브라우저 전용",
+      "test_id": "routes-settings-eyebrow"
+    },
+    {
+      "key": "adapters.pending.title",
+      "en": "Server adapters are not connected yet",
+      "ko": "서버 어댑터가 아직 연결되지 않았습니다",
+      "test_id": "adapters-pending-title"
+    },
+    {
+      "key": "adapters.pending.body",
+      "en": "This route shows the production shell only. Catalog, lifecycle, and runtime data will come from the shared typed client in the integration wave.",
+      "ko": "이 경로는 프로덕션 셸만 보여줍니다. 카탈로그, 수명주기, 런타임 데이터는 통합 웨이브의 공유 typed client에서 제공됩니다.",
+      "test_id": "adapters-pending-body"
+    },
+    {
+      "key": "chat.pending.body",
+      "en": "Chat controls stay disabled until an authenticated ready model is selected by the shared state provider.",
+      "ko": "공유 상태 provider가 인증된 준비 모델을 선택하기 전까지 대화 컨트롤은 비활성화됩니다.",
+      "test_id": "chat-pending-body"
+    },
+    {
+      "key": "activity.empty.title",
+      "en": "No active operations",
+      "ko": "활성 작업 없음",
+      "test_id": "activity-empty-title"
+    },
+    {
+      "key": "activity.empty.body",
+      "en": "Loads, downloads, drains and SSE resets appear here after the lifecycle adapter connects.",
+      "ko": "수명주기 어댑터가 연결된 뒤 로드, 다운로드, drain, SSE reset이 여기에 표시됩니다.",
+      "test_id": "activity-empty-body"
+    },
+    {
+      "key": "gallery.tab.sections",
+      "en": "Gallery sections",
+      "ko": "갤러리 섹션",
+      "test_id": "gallery-tab-sections"
+    },
+    {
+      "key": "gallery.tab.controls",
+      "en": "Controls",
+      "ko": "컨트롤",
+      "test_id": "gallery-tab-controls"
+    },
+    {
+      "key": "gallery.tab.states",
+      "en": "States",
+      "ko": "상태",
+      "test_id": "gallery-tab-states"
+    },
+    {
+      "key": "gallery.tab.data",
+      "en": "Data display",
+      "ko": "데이터 표시",
+      "test_id": "gallery-tab-data"
+    },
+    {
+      "key": "gallery.controls.title",
+      "en": "Buttons and fields",
+      "ko": "버튼과 필드",
+      "test_id": "gallery-controls-title"
+    },
+    {
+      "key": "gallery.controls.primary",
+      "en": "Primary",
+      "ko": "기본",
+      "test_id": "gallery-controls-primary"
+    },
+    {
+      "key": "gallery.controls.secondary",
+      "en": "Secondary",
+      "ko": "보조",
+      "test_id": "gallery-controls-secondary"
+    },
+    {
+      "key": "gallery.controls.danger",
+      "en": "Danger",
+      "ko": "위험",
+      "test_id": "gallery-controls-danger"
+    },
+    {
+      "key": "gallery.controls.busy",
+      "en": "Busy",
+      "ko": "진행 중",
+      "test_id": "gallery-controls-busy"
+    },
+    {
+      "key": "gallery.field.repo",
+      "en": "Repository ID",
+      "ko": "저장소 ID",
+      "test_id": "gallery-field-repo"
+    },
+    {
+      "key": "gallery.field.repo_error",
+      "en": "Use owner/name without a URL.",
+      "ko": "URL 없이 owner/name 형식을 사용하세요.",
+      "test_id": "gallery-field-repo-error"
+    },
+    {
+      "key": "gallery.select.native",
+      "en": "Native select combobox",
+      "ko": "네이티브 select 콤보박스",
+      "test_id": "gallery-select-native"
+    },
+    {
+      "key": "gallery.overlays.title",
+      "en": "Overlays",
+      "ko": "오버레이",
+      "test_id": "gallery-overlays-title"
+    },
+    {
+      "key": "gallery.tooltip",
+      "en": "Tooltips are descriptive only",
+      "ko": "툴팁은 설명 전용입니다",
+      "test_id": "gallery-tooltip"
+    },
+    {
+      "key": "gallery.dialog.open",
+      "en": "Open dialog",
+      "ko": "다이얼로그 열기",
+      "test_id": "gallery-dialog-open"
+    },
+    {
+      "key": "gallery.states.load_failed",
+      "en": "Load failed",
+      "ko": "로드 실패",
+      "test_id": "gallery-states-load-failed"
+    },
+    {
+      "key": "gallery.states.load_failed_body",
+      "en": "The worker exited before becoming ready; retry after checking logs.",
+      "ko": "워커가 준비되기 전에 종료되었습니다. 로그 확인 후 다시 시도하세요.",
+      "test_id": "gallery-states-load-failed-body"
+    },
+    {
+      "key": "gallery.data.title",
+      "en": "Model rows",
+      "ko": "모델 행",
+      "test_id": "gallery-data-title"
+    },
+    {
+      "key": "gallery.data.name",
+      "en": "Name",
+      "ko": "이름",
+      "test_id": "gallery-data-name"
+    },
+    {
+      "key": "gallery.data.status",
+      "en": "Status",
+      "ko": "상태",
+      "test_id": "gallery-data-status"
+    },
+    {
+      "key": "gallery.data.rate",
+      "en": "Rate",
+      "ko": "속도",
+      "test_id": "gallery-data-rate"
+    },
+    {
+      "key": "gallery.data.inspector",
+      "en": "Inspector",
+      "ko": "인스펙터",
+      "test_id": "gallery-data-inspector"
+    },
+    {
+      "key": "gallery.sample.reasoning_body",
+      "en": "Reasoning text is visually separated from answer content.",
+      "ko": "추론 텍스트는 답변 본문과 시각적으로 분리됩니다.",
+      "test_id": "gallery-sample-reasoning-body"
+    },
+    {
+      "key": "gallery.sample.tool_preview",
+      "en": "{ \"tool\": \"display_only\" }",
+      "ko": "{ \"tool\": \"표시_전용\" }",
+      "test_id": "gallery-sample-tool-preview"
+    },
+    {
+      "key": "common.close",
+      "en": "Close",
+      "ko": "닫기",
+      "test_id": "common-close"
+    },
+    {
+      "key": "settings.theme.system",
+      "en": "System",
+      "ko": "시스템",
+      "test_id": "settings-theme-system"
+    },
+    {
+      "key": "settings.theme.light",
+      "en": "Light",
+      "ko": "라이트",
+      "test_id": "settings-theme-light"
+    },
+    {
+      "key": "settings.theme.dark",
+      "en": "Dark",
+      "ko": "다크",
+      "test_id": "settings-theme-dark"
+    },
+    {
+      "key": "settings.material.glass",
+      "en": "Glass",
+      "ko": "글래스",
+      "test_id": "settings-material-glass"
+    },
+    {
+      "key": "settings.material.tinted",
+      "en": "Tinted",
+      "ko": "틴트",
+      "test_id": "settings-material-tinted"
+    },
+    {
+      "key": "settings.material.opaque",
+      "en": "Opaque",
+      "ko": "불투명",
+      "test_id": "settings-material-opaque"
+    },
+    {
+      "key": "settings.locale.en",
+      "en": "English",
+      "ko": "영어",
+      "test_id": "settings-locale-en"
+    },
+    {
+      "key": "settings.locale.ko",
+      "en": "Korean",
+      "ko": "한국어",
+      "test_id": "settings-locale-ko"
+    },
+    {
+      "key": "gallery.issue",
+      "en": "Issue #1843",
+      "ko": "이슈 #1843",
+      "test_id": "gallery-issue"
+    },
+    {
+      "key": "gallery.hover_focus",
+      "en": "Hover or focus",
+      "ko": "호버 또는 포커스",
+      "test_id": "gallery-hover-focus"
+    },
+    {
+      "key": "gallery.download",
+      "en": "Download",
+      "ko": "다운로드",
+      "test_id": "gallery-download"
+    },
+    {
+      "key": "gallery.delete_token",
+      "en": "DELETE",
+      "ko": "DELETE",
+      "test_id": "gallery-delete-token"
     }
   ]
 }
