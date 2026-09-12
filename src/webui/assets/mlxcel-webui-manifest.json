@@ -1,30 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 301835,
+    "embedded_asset_bytes": 439196,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 81162,
+    "initial_js_gzip_bytes": 101618,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 81162,
+    "total_js_gzip_bytes": 101618,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
-      "bytes": 267008,
-      "gzip_bytes": 81162,
-      "path": "assets/index-CNOfo-kS.js",
-      "sha256": "36e3e954376bb541ade3d366a2713c6c4b69b6322d0cafb99c380ae6c89c8526"
+      "bytes": 31842,
+      "gzip_bytes": 5893,
+      "path": "assets/index-DeaXwDDN.css",
+      "sha256": "a19d0b78aefb4b2ade802eb63c03a8c0128d6a7cf6c2aa5373241732ac311464"
     },
     {
-      "bytes": 31371,
-      "gzip_bytes": 5800,
-      "path": "assets/index-D7K7HCXu.css",
-      "sha256": "b57b1a1d6ad721c11404c2582df9da352203de3e39a9ff226ef8beef4d491027"
+      "bytes": 403895,
+      "gzip_bytes": 101618,
+      "path": "assets/index-Dj6xouJX.js",
+      "sha256": "4a31acccf66e02db79a2c4b3daec373bc61533dfd627e2327ef76f886bd3490f"
     },
     {
       "bytes": 453,
-      "gzip_bytes": 289,
+      "gzip_bytes": 286,
       "path": "index.html",
-      "sha256": "21873fe5c42c351d27709237f74bc4a5b3cff0e995898e9cdbad8c0ba1361f40"
+      "sha256": "361cd43ebd15aa0bafc84940be1461e992d278cb59088ec1b9871a771adfda7e"
     },
     {
       "bytes": 1336,
@@ -54,5 +54,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "69ea30852a763816bd7dc35c8216dbf5e83cad46b7553d832d79bd45bccf0010"
+  "source_digest_sha256": "632f388a78e92d6709ba0740645dd4dce8fefdfad01420725d12fe2ff2ed3ec7"
 }

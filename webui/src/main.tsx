@@ -15,6 +15,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './app';
+import { WebUiProvider } from './state';
 import './styles.css';
 import './design-system/tokens.css';
 import './design-system/components.css';
@@ -27,6 +28,8 @@ if (rootElement === null) {
 
 createRoot(rootElement).render(
   <React.StrictMode>
-    <App />
+    <WebUiProvider>
+      <App />
+    </WebUiProvider>
   </React.StrictMode>,
 );

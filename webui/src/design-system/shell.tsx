@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
 import { IconButton, Sheet } from './primitives';
 import type { StringKey, Locale } from '../i18n/catalog';
+import type { ConnectionPhase } from '../api/types';
 import { t, testId } from '../i18n/catalog';
 
 export type RouteId = 'models' | 'chat' | 'activity' | 'settings' | 'gallery';
@@ -15,7 +16,7 @@ export const navItems: NavItem[] = [
   { id: 'settings', key: 'nav.settings', icon: 'settings' },
 ];
 
-export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onCommand: () => void; onHelp: () => void; children: React.ReactNode; inspector?: React.ReactNode; selectedModel: string }): React.JSX.Element {
+export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onCommand: () => void; onHelp: () => void; children: React.ReactNode; inspector?: React.ReactNode; selectedModel: string; connectionLabel: string; connectionState: ConnectionPhase }): React.JSX.Element {
   const sidebarRef = useRef<HTMLElement>(null);
   const onCommandRef = useRef(props.onCommand);
   const onHelpRef = useRef(props.onHelp);
@@ -62,9 +63,9 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
   };
   return (
     <div className="app-shell">
-      <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} ref={sidebarRef} className="app-sidebar desktop-sidebar material-glass" />
+      <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} ref={sidebarRef} className="app-sidebar desktop-sidebar material-glass" connectionLabel={props.connectionLabel} connectionState={props.connectionState} />
       <Sheet open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
-        <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" />
+        <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" connectionLabel={props.connectionLabel} connectionState={props.connectionState} />
       </Sheet>
       <main className="app-main" aria-labelledby="app-title">
         <header className="app-toolbar material-glass">
@@ -88,7 +89,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
   );
 }
 
-const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string }>((props, ref) => (
+const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string; connectionLabel: string; connectionState: ConnectionPhase }>((props, ref) => (
   <aside className={props.className} aria-label={t(props.locale, 'nav.primary')} onKeyDown={props.onKeyDown} ref={ref} tabIndex={-1}>
     <a className="brand-mark" href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onRouteChange('models'); }}>mx</a>
     <nav className="app-nav">
@@ -100,8 +101,8 @@ const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; 
       ))}
     </nav>
     <footer>
-      <span className="connection-dot" aria-hidden="true" />
-      <span data-testid={testId('connection.ready')}>{t(props.locale, 'connection.ready')}</span>
+      <span className="connection-dot" data-state={props.connectionState} aria-hidden="true" />
+      <span data-testid={testId('connection.ready')}>{props.connectionLabel}</span>
     </footer>
   </aside>
 ));

@@ -16,6 +16,9 @@ button { cursor: pointer; }
 .app-nav a:hover { background: color-mix(in srgb, var(--color-selection) 72%, transparent); }
 .app-sidebar footer { margin-top: auto; display: flex; align-items: center; gap: var(--space-2); color: var(--color-muted); font-size: 0.9rem; }
 .connection-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--color-muted); box-shadow: 0 0 0 3px var(--color-bg-neutral); }
+.connection-dot[data-state="ready"], .connection-dot[data-state="streaming"], .connection-dot[data-state="polling"] { background: var(--color-success); }
+.connection-dot[data-state="bootstrapping"], .connection-dot[data-state="stale"] { background: var(--color-warning); }
+.connection-dot[data-state="offline"], .connection-dot[data-state="unauthorized"], .connection-dot[data-state="forbidden"], .connection-dot[data-state="schema-mismatch"], .connection-dot[data-state="error"] { background: var(--color-error); }
 .app-main { min-width: 0; display: grid; grid-template-rows: auto 1fr; border-radius: var(--radius-xxl); overflow: clip; background: color-mix(in srgb, var(--material-content-bg) 92%, transparent); border: 1px solid var(--color-separator); }
 .app-toolbar { min-height: 58px; display: grid; grid-template-columns: auto minmax(160px, auto) minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: 0 var(--space-4); border-width: 0 0 1px; border-radius: 0; box-shadow: none; }
 .mobile-menu-button.ds-icon-button { display: none; }

@@ -132,11 +132,38 @@ export type StringKey =
   | 'connection.prompt.title'
   | 'connection.prompt.body'
   | 'connection.prompt.detail'
+  | 'connection.footer.connected'
+  | 'connection.snapshot.pending'
+  | 'connection.authenticated.title'
+  | 'connection.authenticated.body'
+  | 'connection.authenticated.detail'
+  | 'connection.error.title'
+  | 'connection.error.stale'
+  | 'connection.error.forbidden'
+  | 'connection.error.unauthorized'
+  | 'connection.error.generic'
+  | 'connection.status.idle'
+  | 'connection.status.bootstrapping'
+  | 'connection.status.ready'
+  | 'connection.status.streaming'
+  | 'connection.status.polling'
+  | 'connection.status.offline'
+  | 'connection.status.stale'
+  | 'connection.status.unauthorized'
+  | 'connection.status.forbidden'
+  | 'connection.status.schema_mismatch'
+  | 'connection.status.error'
+  | 'auth.login'
   | 'login.token.label'
   | 'login.token.help'
   | 'login.submit'
   | 'login.logout'
   | 'login.error.sample'
+  | 'login.error.wrong_key'
+  | 'login.error.offline'
+  | 'login.error.forbidden'
+  | 'login.error.schema'
+  | 'login.error.generic'
   | 'gallery.delete_token'
 ;
 
@@ -160,6 +187,28 @@ export const entries: Entry[] = [
   { key: 'connection.prompt.title', en: 'Connect to the local WebUI API', ko: '로컬 WebUI API에 연결하세요', test_id: 'connection-prompt-title' },
   { key: 'connection.prompt.body', en: 'The shell is loaded, but catalog, chat and activity data wait for the authenticated local server connection.', ko: '셸은 로드되었지만 카탈로그, 대화, 활동 데이터는 인증된 로컬 서버 연결을 기다립니다.', test_id: 'connection-prompt-body' },
   { key: 'connection.prompt.detail', en: 'Start mlxcel-server with --webui, enter the terminal session key when prompted, then refresh this view.', ko: 'mlxcel-server를 --webui로 시작하고, 요청되면 터미널 세션 키를 입력한 뒤 이 화면을 새로고침하세요.', test_id: 'connection-prompt-detail' },
+  { key: 'connection.footer.connected', en: '{mode} · {status} · v{version} · seq {sequence}', ko: '{mode} · {status} · v{version} · seq {sequence}', test_id: 'connection-footer-connected' },
+  { key: 'connection.snapshot.pending', en: 'pending', ko: '대기 중', test_id: 'connection-snapshot-pending' },
+  { key: 'connection.authenticated.title', en: 'Authenticated local API session', ko: '인증된 로컬 API 세션', test_id: 'connection-authenticated-title' },
+  { key: 'connection.authenticated.body', en: 'This route is connected to the shared provider. Browsing does not load models or start inference; load, unload and chat actions remain explicit.', ko: '이 경로는 공유 provider에 연결되어 있습니다. 탐색만으로 모델을 로드하거나 추론을 시작하지 않으며, 로드·언로드·대화 동작은 명시적으로 실행됩니다.', test_id: 'connection-authenticated-body' },
+  { key: 'connection.authenticated.detail', en: 'Backend {mode}; build {version}; state {status}; catalog {count}; operations {operations}; snapshot {sequence}.', ko: '백엔드 {mode}; 빌드 {version}; 상태 {status}; 카탈로그 {count}; 작업 {operations}; 스냅샷 {sequence}.', test_id: 'connection-authenticated-detail' },
+  { key: 'connection.error.title', en: 'Provider connection needs attention', ko: 'Provider 연결 확인 필요', test_id: 'connection-error-title' },
+  { key: 'connection.error.stale', en: 'The server snapshot changed; retry to take a fresh catalog and operation snapshot before continuing.', ko: '서버 스냅샷이 바뀌었습니다. 계속하기 전에 다시 시도해 새 카탈로그와 작업 스냅샷을 가져오세요.', test_id: 'connection-error-stale' },
+  { key: 'connection.error.forbidden', en: 'The authenticated session is not allowed to access this UI endpoint.', ko: '인증된 세션이 이 UI 엔드포인트에 접근할 수 없습니다.', test_id: 'connection-error-forbidden' },
+  { key: 'connection.error.unauthorized', en: 'The server rejected the current session key. Sign in again with the latest terminal key.', ko: '서버가 현재 세션 키를 거부했습니다. 터미널에 표시된 최신 키로 다시 로그인하세요.', test_id: 'connection-error-unauthorized' },
+  { key: 'connection.error.generic', en: 'Retry the shared provider snapshot before issuing any model control action.', ko: '모델 제어 동작을 실행하기 전에 공유 provider 스냅샷을 다시 가져오세요.', test_id: 'connection-error-generic' },
+  { key: 'connection.status.idle', en: 'idle', ko: '대기', test_id: 'connection-status-idle' },
+  { key: 'connection.status.bootstrapping', en: 'bootstrapping', ko: '부트스트랩', test_id: 'connection-status-bootstrapping' },
+  { key: 'connection.status.ready', en: 'ready', ko: '준비', test_id: 'connection-status-ready' },
+  { key: 'connection.status.streaming', en: 'streaming', ko: '스트리밍', test_id: 'connection-status-streaming' },
+  { key: 'connection.status.polling', en: 'polling', ko: '폴링', test_id: 'connection-status-polling' },
+  { key: 'connection.status.offline', en: 'offline', ko: '오프라인', test_id: 'connection-status-offline' },
+  { key: 'connection.status.stale', en: 'stale', ko: '낡음', test_id: 'connection-status-stale' },
+  { key: 'connection.status.unauthorized', en: 'unauthorized', ko: '인증 실패', test_id: 'connection-status-unauthorized' },
+  { key: 'connection.status.forbidden', en: 'forbidden', ko: '거부됨', test_id: 'connection-status-forbidden' },
+  { key: 'connection.status.schema_mismatch', en: 'schema mismatch', ko: '스키마 불일치', test_id: 'connection-status-schema-mismatch' },
+  { key: 'connection.status.error', en: 'error', ko: '오류', test_id: 'connection-status-error' },
+  { key: 'auth.login', en: 'WebUI session login', ko: 'WebUI 세션 로그인', test_id: 'auth-login' },
   { key: 'models.title', en: 'Model library', ko: '모델 라이브러리', test_id: 'models-title' },
   { key: 'models.empty.title', en: 'No local models yet', ko: '아직 로컬 모델이 없습니다', test_id: 'models-empty-title' },
   { key: 'models.empty.body', en: 'Browse, download, and load models explicitly. The shell never autoloads a checkpoint.', ko: '모델을 명시적으로 탐색, 다운로드, 로드하세요. 셸은 체크포인트를 자동 로드하지 않습니다.', test_id: 'models-empty-body' },
@@ -281,6 +330,11 @@ export const entries: Entry[] = [
   { key: 'login.submit', en: 'Connect', ko: '연결', test_id: 'login-submit' },
   { key: 'login.logout', en: 'Clear key', ko: '키 지우기', test_id: 'login-logout' },
   { key: 'login.error.sample', en: 'Sample error: the key was not accepted by the local API.', ko: '샘플 오류: 로컬 API가 키를 허용하지 않았습니다.', test_id: 'login-error-sample' },
+  { key: 'login.error.wrong_key', en: 'The session key was rejected. Copy the latest key printed by the local server terminal.', ko: '세션 키가 거부되었습니다. 로컬 서버 터미널에 표시된 최신 키를 복사하세요.', test_id: 'login-error-wrong-key' },
+  { key: 'login.error.offline', en: 'Could not reach the local WebUI API. Check that mlxcel-server is still running with --webui.', ko: '로컬 WebUI API에 연결할 수 없습니다. mlxcel-server가 --webui로 계속 실행 중인지 확인하세요.', test_id: 'login-error-offline' },
+  { key: 'login.error.forbidden', en: 'The key authenticated, but this UI endpoint is forbidden for the current server session.', ko: '키 인증은 되었지만 현재 서버 세션에서 이 UI 엔드포인트가 금지되어 있습니다.', test_id: 'login-error-forbidden' },
+  { key: 'login.error.schema', en: 'The server response does not match this bundled UI schema. Reload after updating the server or bundle.', ko: '서버 응답이 번들된 UI 스키마와 일치하지 않습니다. 서버나 번들을 업데이트한 뒤 새로고침하세요.', test_id: 'login-error-schema' },
+  { key: 'login.error.generic', en: 'The local API could not complete authentication. Retry with the latest terminal key.', ko: '로컬 API 인증을 완료할 수 없습니다. 터미널에 표시된 최신 키로 다시 시도하세요.', test_id: 'login-error-generic' },
   { key: 'gallery.delete_token', en: 'DELETE', ko: 'DELETE', test_id: 'gallery-delete-token' },
 ];
 

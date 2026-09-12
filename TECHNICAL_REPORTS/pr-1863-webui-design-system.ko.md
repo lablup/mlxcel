@@ -1,32 +1,28 @@
-# PR #1863 WebUI 디자인 시스템 보고서
+# PR #1863 WebUI 디자인 시스템 및 provider 통합 보고서
 
-**작성일**: 2026-09-12
-**상태**: 부분 완료 — 컴포넌트 준비, provider 통합 및 수동 수용 검증 대기
+**작성일**: 2026-09-13
+**상태**: provider 기반 셸 구현 완료; Safari/VoiceOver/스타일 수동 승인과 사용 불가 GB10 CI는 로컬 검증 범위 밖
 **위험도**: 중간
 
 ## 요약
 
-PR #1863은 에픽 #1834의 공유 WebUI 디자인 시스템 계층을 구현합니다. semantic CSS 토큰, 절제된 macOS 27 방향의 셸, typed 영어/한국어 문자열, 재사용 가능한 primitive, appearance 저장, `#gallery` 컴포넌트 갤러리를 제공합니다. 글래스는 장식적 chrome에만 쓰고 콘텐츠는 중립 표면에 올리며, Apple 에셋 대신 프로젝트 작성 SVG 아이콘을 사용하고 각 레이아웃·재질 결정에 사용한 공식 Apple reference를 문서화했습니다.
+PR #1863은 이제 정적 placeholder나 두 번째 인증 cache 대신 공유 #1842 provider에 WebUI 디자인 셸을 연결합니다. production route는 로그인, 로그아웃, 연결 상태, 선택된 catalog identity, lifecycle label, catalog/operation freshness, 안전한 schema mismatch recovery를 provider snapshot과 action으로 처리합니다. 직접 접근용 `#gallery` artifact route는 deterministic visual baseline을 위해 격리되어 있고, 명시적 로그인 전에는 로컬 API에 접촉하지 않습니다.
 
-## 문제 정의
+## 변경 요약
 
-후속 페이지는 개별 스타일이나 중복 인증 상태 대신 하나의 공유 재질·간격·지역화·키보드 계약을 사용해야 합니다. 공유 client가 준비되기 전에 컴포넌트 갤러리로 primitive를 검증할 수 있지만, 이는 실제 인증이나 네이티브 브라우저 접근성 수용 검증을 대신하지 않습니다.
-
-## 변경 요약 및 리뷰 보강
-
-수정 사이클에서 production 화면의 과장된 placeholder를 하나의 중립 connection prompt로 교체했고, Gallery를 primary navigation에서 숨기되 direct artifact route로 유지했으며, production route의 빈 inspector chrome을 제거하고 desktop grid를 정리했습니다. 또한 controlled LoginView 및 SchemaMismatchView contract를 추가했고, 브라우저 테스트를 단순 시각 smoke에서 실제 동작 검증으로 확장했습니다. production 화면은 공유 #1842 provider가 머지된 뒤 통합될 때까지 사실을 과장하지 않는 placeholder로 남으며, 이 PR은 #1842 provider state를 복사하거나 별도 cache하지 않습니다.
+구현은 앱을 `WebUiProvider`로 감싸고, LoginView 제출은 `actions.login`, 로그아웃은 `actions.logout`으로 보냅니다. 세션 키는 provider/client 메모리에만 머물며, 인증 실패는 localized presentation code로 축약해 raw token이나 서버 메시지를 DOM에 반사하지 않습니다. Models, Chat, Activity는 여전히 정직한 단계적 route입니다. signed-out 상태에서는 provider 기반 로그인 표면을 보여주고, authenticated 상태에서는 모델을 로드하거나 추론을 시작하지 않은 채 backend mode, build version, provider state, catalog count, operation count, snapshot sequence만 보고합니다. toolbar의 selected-model pill은 선택된 catalog entry와 lifecycle state가 실제로 있을 때만 그 값에서 파생하고, 없으면 “선택한 모델 없음”으로 유지합니다.
 
 ## 검증 상태
 
-최종 로컬 검증 범위는 `pnpm --dir webui run typecheck`, `pnpm --dir webui run lint`, `pnpm --dir webui run unit`의 Vitest 10개 통과, `pnpm --dir webui run browser`의 Playwright 12개 통과, deterministic bundle verification digest `44b731231da59d5454c3d2956bc50fe22c6fddecffa306d0134f93d06c804ece`, `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python`, `make verify-llama-compat verify-versions verify-kernel-dtype-keys`입니다. 현재 환경에서는 실제 Safari on macOS 27, VoiceOver, native browser 200% zoom 수동 검증을 실행하지 않았고, `docs/webui/design-system.md`에 후속 수동 gate용 정확한 체크리스트와 로컬 preview URL을 기록했습니다. 필수 GB10 runner가 down 상태이므로 CUDA/GB10 검증은 통과로 주장하지 않으며, 합의된 진행 방식은 unavailable required GB10 job skip 및 local CI 통과입니다.
+이번 단계의 최종 로컬 검증은 다음과 같습니다.
 
+- `pnpm --dir webui run typecheck` 통과.
+- `pnpm --dir webui run lint` 통과.
+- `pnpm --dir webui run unit` 통과: Vitest 8파일, 60개 테스트.
+- `pnpm --dir webui run browser` 통과: strict Darwin gallery baseline 및 behavior/a11y 검사를 포함한 Playwright 12개 테스트.
+- `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` 통과: WebUI contract fixture 41개와 DTO drift/schema strictness 검사.
+- `make verify-webui-bundle` 통과: deterministic checked-in asset 검증 및 bundle digest `cd7c54baf8b191aee79e80beb5ff4711ff91596adbb80fa52ea76edccf74f7dc`.
 
 ## 수용 검증 경계
 
-브라우저 테스트 12개 중 8개는 390·1024·1440 CSS px 너비에서 Darwin/Linux별로 분리된 screenshot baseline을 검사하며, 나머지는 상호작용과 appearance를 검사합니다. 통합 담당자의 screenshot 리뷰는 구현 기준선 확인이지 사용자 승인이 아닙니다. 최종 시각적 승인은 아직 필요합니다. 수동 피드백용 root preview는 최종 200% text-scale reflow 수정 이전의 고정 snapshot `b3f0cd04`이므로 최종 소스의 검증 증거가 아닙니다.
-
-LoginView는 form과 password field에 `autocomplete="off"`를 요청하고 제출 또는 자체 logout 동작 때 로컬 입력값을 지웁니다. 이 힌트는 브라우저나 password-manager 확장의 자격 증명 저장을 막는 보장이 아닙니다. 세션 상태와 실제 인증은 공유 #1842 provider가 담당해야 하며, #1843 완료 또는 머지 전에 해당 통합이 필요합니다.
-
-이번 단계별 마감 검증은 `b202f221`에서 typecheck, lint, unit 10개와 contract fixture 32개를 포함한 공유 정적 검사를 다시 통과했습니다. 브라우저 테스트 12개 및 플랫폼별 baseline 리뷰는 앞선 리뷰/CI 사이클의 증거이며 이번 문서 전용 수정에서 재실행하지 않았습니다. 실제 Safari, VoiceOver, 네이티브 브라우저 200% zoom, 사용자 screenshot 승인은 여전히 필요하며 GB10 예외로 면제되지 않습니다.
-
-`b202f221`의 [Linux WebUI bundle job](https://github.com/lablup/mlxcel/actions/runs/34695797255/job/103558967545)은 typecheck·lint·unit·browser·generated-bundle verification 단계를 실제 실행하여 통과했습니다. 사용할 수 없는 GB10 job 두 개는 통과가 아니라 queued 상태입니다. 앞의 asset-tree digest와 manifest의 `source_digest_sha256`은 서로 다른 값이며, 후자는 `e5d0a9c8274fe0893d287339ea29f2598b01e493695337f7653b3ba7ecbd939e`입니다. 단계별 마감 검증에서 두 digest를 각각 다시 계산했습니다.
+새 provider/mock HTTP 테스트는 submit 전 초기 요청 없음, Bearer가 붙은 bootstrap/catalog/operations/events 호출, 401 세션 purge, malformed bootstrap schema fail-closed recovery, wrong-key/offline localized error, token의 DOM/storage/URL 미반사, authenticated route 탐색 중 autoload 및 inference endpoint 미호출을 검증합니다. 실제 Safari on macOS 27, VoiceOver, native browser 200% zoom, 최종 사용자 스타일 승인은 현재 환경에서 실행하지 않았으며 수동 후속 gate로 남습니다. 필수 GB10 runner가 down 상태이므로 CUDA/GB10 검증은 통과로 주장하지 않고, 합의된 진행 방식은 unavailable required GB10 job skip 및 local CI 통과입니다.

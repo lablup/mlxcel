@@ -7,6 +7,7 @@ import { App } from './app';
 import { LoginView, SchemaMismatchView } from './design-system/primitives';
 import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, saveAppearance } from './design-system/preferences';
 import { entries } from './i18n/catalog';
+import { WebUiProvider } from './state';
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -32,8 +33,12 @@ afterEach(() => {
   host = null;
 });
 
+function neverFetch(): Promise<Response> {
+  throw new Error('Unexpected WebUI API request before explicit login.');
+}
+
 function renderApp(): void {
-  act(() => root?.render(<App />));
+  act(() => root?.render(<WebUiProvider fetchImpl={neverFetch as typeof fetch}><App /></WebUiProvider>));
 }
 
 function keydown(key: string, init: KeyboardEventInit = {}): void {

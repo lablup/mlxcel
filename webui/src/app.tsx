@@ -1,8 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import type { WebUiSnapshot } from './api/types';
 import { AppShell, type RouteId } from './design-system/shell';
 import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ContrastPreference } from './design-system/preferences';
 import { Button, Dialog, ErrorBanner, Field, Select } from './design-system/primitives';
 import { DesignGallery } from './gallery';
+import { classifyAuthFailure, connectionFooterLabel, ProductConnectionSurface, selectedModelLabel, type AuthFailure } from './provider-surfaces';
+import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
 
 const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
@@ -15,9 +18,13 @@ function routeFromHash(): RouteId {
 }
 
 export function App(): React.JSX.Element {
+  const snapshot = useWebUi();
+  const actions = useWebUiActions();
   const [route, setRoute] = useState<RouteId>(routeFromHash);
   const [appearance, setAppearance] = useState<AppearancePreferences>(loadAppearance);
   const [overlay, setOverlay] = useState<Overlay>(null);
+  const [authFailure, setAuthFailure] = useState<AuthFailure | null>(null);
+
   useEffect(() => {
     const handleHash = (): void => setRoute(routeFromHash());
     window.addEventListener('hashchange', handleHash);
@@ -35,14 +42,34 @@ export function App(): React.JSX.Element {
     document.addEventListener('visibilitychange', applyVisibility);
     return () => document.removeEventListener('visibilitychange', applyVisibility);
   }, []);
+  useEffect(() => {
+    if (snapshot.auth.status === 'authenticated') setAuthFailure(null);
+  }, [snapshot.auth.status]);
+
   const navigate = (next: RouteId): void => {
     setRoute(next);
     window.history.replaceState(null, '', `#${next}`);
   };
-  const body = useMemo(() => renderRoute(route, appearance, setAppearance), [route, appearance]);
+  const login = (token: string): void => {
+    setAuthFailure(null);
+    void actions.login(token).catch((error: unknown) => setAuthFailure(classifyAuthFailure(error)));
+  };
+  const logout = (): void => {
+    setAuthFailure(null);
+    actions.logout();
+  };
+  const retry = (): void => {
+    setAuthFailure(null);
+    void actions.refresh();
+  };
+  const recoverSchema = (): void => {
+    logout();
+    window.location.reload();
+  };
+  const body = renderRoute(route, appearance, setAppearance, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
     <>
-      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={t(appearance.locale, 'model.selected.none')} inspector={null}>
+      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={selectedModelLabel(appearance.locale, snapshot)} connectionLabel={connectionFooterLabel(appearance.locale, snapshot)} connectionState={snapshot.connection} inspector={null}>
         {body}
       </AppShell>
       <CommandPalette open={overlay === 'command'} locale={appearance.locale} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} />
@@ -54,28 +81,33 @@ export function App(): React.JSX.Element {
   );
 }
 
-function renderRoute(route: RouteId, appearance: AppearancePreferences, setAppearance: (next: AppearancePreferences) => void): React.ReactNode {
-  if (route === 'models') return <ModelsScreen locale={appearance.locale} />;
-  if (route === 'chat') return <ChatScreen locale={appearance.locale} />;
-  if (route === 'activity') return <ActivityScreen locale={appearance.locale} />;
+interface ProviderRouteContext {
+  readonly snapshot: WebUiSnapshot;
+  readonly authFailure: AuthFailure | null;
+  readonly login: (token: string) => void;
+  readonly logout: () => void;
+  readonly retry: () => void;
+  readonly recoverSchema: () => void;
+}
+
+function renderRoute(route: RouteId, appearance: AppearancePreferences, setAppearance: (next: AppearancePreferences) => void, context: ProviderRouteContext): React.ReactNode {
+  if (route === 'models') return <ModelsScreen locale={appearance.locale} context={context} />;
+  if (route === 'chat') return <ChatScreen locale={appearance.locale} context={context} />;
+  if (route === 'activity') return <ActivityScreen locale={appearance.locale} context={context} />;
   if (route === 'settings') return <SettingsScreen appearance={appearance} setAppearance={setAppearance} />;
   return <DesignGallery locale={appearance.locale} />;
 }
 
-function ModelsScreen(props: { locale: AppearancePreferences['locale'] }): React.JSX.Element {
-  return <ConnectionPrompt locale={props.locale} eyebrow={t(props.locale, 'routes.models.eyebrow')} title={t(props.locale, 'models.title')} titleTestId={testId('models.title')} />;
+function ModelsScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
+  return <ProductConnectionSurface locale={props.locale} eyebrow={t(props.locale, 'routes.models.eyebrow')} title={t(props.locale, 'models.title')} titleTestId={testId('models.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
 }
 
-function ChatScreen(props: { locale: AppearancePreferences['locale'] }): React.JSX.Element {
-  return <ConnectionPrompt locale={props.locale} eyebrow={t(props.locale, 'routes.chat.eyebrow')} title={t(props.locale, 'chat.title')} titleTestId={testId('chat.title')} />;
+function ChatScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
+  return <ProductConnectionSurface locale={props.locale} eyebrow={t(props.locale, 'routes.chat.eyebrow')} title={t(props.locale, 'chat.title')} titleTestId={testId('chat.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
 }
 
-function ActivityScreen(props: { locale: AppearancePreferences['locale'] }): React.JSX.Element {
-  return <ConnectionPrompt locale={props.locale} eyebrow={t(props.locale, 'routes.activity.eyebrow')} title={t(props.locale, 'activity.title')} titleTestId={testId('activity.title')} />;
-}
-
-function ConnectionPrompt(props: { locale: AppearancePreferences['locale']; eyebrow: string; title: string; titleTestId: string }): React.JSX.Element {
-  return <div className="screen-stack"><section className="screen-heading connection-prompt"><p className="eyebrow">{props.eyebrow}</p><h1 data-testid={props.titleTestId}>{props.title}</h1><p data-testid={testId('connection.prompt.body')}>{t(props.locale, 'connection.prompt.body')}</p><ErrorBanner tone="info" title={t(props.locale, 'connection.prompt.title')} body={t(props.locale, 'connection.prompt.detail')} /></section></div>;
+function ActivityScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
+  return <ProductConnectionSurface locale={props.locale} eyebrow={t(props.locale, 'routes.activity.eyebrow')} title={t(props.locale, 'activity.title')} titleTestId={testId('activity.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
 }
 
 function SettingsScreen(props: { appearance: AppearancePreferences; setAppearance: (next: AppearancePreferences) => void }): React.JSX.Element {
