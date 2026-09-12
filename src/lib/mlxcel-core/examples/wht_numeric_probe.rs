@@ -43,7 +43,10 @@
 use mlxcel_core::{self, MlxArray, UniquePtr, dtype};
 
 const HEAD_DIMS: &[i32] = &[64, 128, 256];
-const SHAPES: &[(&str, [i32; 3])] = &[("decode [1,32,1,d]", [1, 32, 1]), ("prefill [1,32,512,d]", [1, 32, 512])];
+const SHAPES: &[(&str, [i32; 3])] = &[
+    ("decode [1,32,1,d]", [1, 32, 1]),
+    ("prefill [1,32,512,d]", [1, 32, 512]),
+];
 
 fn random_input(shape: &[i32], seed: u64, dt: i32) -> UniquePtr<MlxArray> {
     let key = mlxcel_core::random_key(seed);
@@ -99,7 +102,10 @@ fn main() {
 
                 let nx = l2_norm(&x);
                 let ny = l2_norm(&y);
-                let diff = mlxcel_core::subtract(&mlxcel_core::astype(&z, dtype::FLOAT32), &mlxcel_core::astype(&x, dtype::FLOAT32));
+                let diff = mlxcel_core::subtract(
+                    &mlxcel_core::astype(&z, dtype::FLOAT32),
+                    &mlxcel_core::astype(&x, dtype::FLOAT32),
+                );
                 let n_diff = l2_norm(&diff);
                 let elems = (shape.iter().product::<i32>()) as f32;
                 println!(
