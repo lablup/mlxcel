@@ -148,6 +148,7 @@ set(HIP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/copy/copy_general_input.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/copy/copy_general_dynamic.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/distributed.hip
+    ${CMAKE_CURRENT_SOURCE_DIR}/fft.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/indexing.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm.hip
@@ -379,9 +380,19 @@ find_library(HIPRTC_LIB hiprtc PATHS ${ROCM_PATH}/lib /opt/rocm/lib
 find_library(HIPBLASLT_LIB hipblaslt PATHS ${ROCM_PATH}/lib /opt/rocm/lib
                                            /opt/rocm-6.0.0/lib)
 
+# Find hipFFT, used by the FFT primitive (lablup/mlxcel#1825)
+find_library(HIPFFT_LIB hipfft PATHS ${ROCM_PATH}/lib /opt/rocm/lib
+                                     /opt/rocm-6.0.0/lib)
+if(NOT HIPFFT_LIB)
+  message(
+    FATAL_ERROR
+      "hipfft not found. Install the ROCm hipFFT runtime (package rocm-hip-libraries or hipfft), or set ROCM_PATH to a root that provides lib/libhipfft.so."
+  )
+endif()
+
 message(
   STATUS
-    "ROCm libraries: rocblas=${ROCBLAS_LIB}, hiprand=${HIPRAND_LIB}, amdhip64=${AMDHIP64_LIB}, hiprtc=${HIPRTC_LIB}, hipblaslt=${HIPBLASLT_LIB}"
+    "ROCm libraries: rocblas=${ROCBLAS_LIB}, hiprand=${HIPRAND_LIB}, amdhip64=${AMDHIP64_LIB}, hiprtc=${HIPRTC_LIB}, hipblaslt=${HIPBLASLT_LIB}, hipfft=${HIPFFT_LIB}"
 )
 
 # Link the static library and ROCm libraries to mlx We link directly to the .so
@@ -389,7 +400,7 @@ message(
 # -x hip
 target_link_libraries(
   mlx PRIVATE ${HIP_STATIC_LIB} ${AMDHIP64_LIB} ${ROCBLAS_LIB} ${HIPRAND_LIB}
-              ${HIPRTC_LIB} ${HIPBLASLT_LIB})
+              ${HIPRTC_LIB} ${HIPBLASLT_LIB} ${HIPFFT_LIB})
 
 # Include ROCm headers for mlx C++ files Get the HIP include directory from the
 # hip package

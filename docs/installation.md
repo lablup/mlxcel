@@ -298,7 +298,7 @@ CDNA parts (for example MI300) compile but carry no tuning.
 - BLAS and LAPACK development packages, including `lapacke.h` (see
   [Linux with CUDA](#linux-with-cuda)).
 - A ROCm installation that provides the `hip`, `rocblas`, `rocthrust`,
-  `rocprim`, `hiprand`, `rocwmma`, `hipblaslt` and `hiprtc` CMake packages
+  `rocprim`, `hiprand`, `rocwmma`, `hipblaslt`, `hipfft` and `hiprtc` CMake packages
   (`ls "${ROCM_PATH:-/opt/rocm}"/lib/cmake` lists them), plus `hipcc` and
   `rocminfo`.
 - Access to the GPU device nodes: the build and run user must be in the `video`
@@ -387,6 +387,7 @@ thinking model that spends its whole budget inside the thinking block reports
 | Memory estimation on UMA hosts | Reads host RAM, not the VRAM carve-out; set `MLXCEL_MEMORY_LIMIT` if a model that fits is refused (lablup/mlxcel#1805). |
 | Diagnostics | Print a CUDA compute capability line for the AMD device (lablup/mlxcel#1805). |
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
+| Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; `MLX_ROCM_FFT_CACHE_SIZE` bounds how many transform plans stay alive (lablup/mlxcel#1825). |
 | Windows, multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only
