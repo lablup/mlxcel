@@ -126,12 +126,21 @@ describe('mlxcel WebUI shell', () => {
   it('submits LoginView tokens without persisting them and clears recovery state', () => {
     const submitted: string[] = [];
     act(() => root?.render(<><LoginView title="Login" body="Use local key" tokenLabel="Session key" tokenHelp="Memory only" submitLabel="Connect" logoutLabel="Clear" onSubmit={(token) => submitted.push(token)} onLogout={() => submitted.push('logout')} testId="login-view" /><SchemaMismatchView title="Mismatch" body="Update required" actionLabel="Reload" onRecover={() => submitted.push('recover')} /></>));
+    const form = document.querySelector<HTMLFormElement>('[data-testid="login-view"]');
     const input = document.querySelector<HTMLInputElement>('input[type="password"]');
+    expect(form).not.toBeNull();
     expect(input).not.toBeNull();
-    if (!input) return;
+    if (!input || !form) return;
+    expect(form.getAttribute('autocomplete')).toBe('off');
+    expect(input.getAttribute('autocomplete')).toBe('off');
+    expect(input.getAttribute('spellcheck')).toBe('false');
+    expect(input.getAttribute('autocapitalize')).toBe('none');
+    expect(input.getAttribute('autocorrect')).toBe('off');
     const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    act(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(submitted).toEqual([]);
     act(() => { valueSetter?.call(input, 'secret-token'); input.dispatchEvent(new Event('input', { bubbles: true })); });
-    act(() => document.querySelector<HTMLFormElement>('[data-testid="login-view"]')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    act(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
     expect(submitted).toContain('secret-token');
     expect(input?.value).toBe('');
     expect(localStorage.getItem('secret-token')).toBeNull();
@@ -143,7 +152,26 @@ describe('mlxcel WebUI shell', () => {
     const busyInput = document.querySelector<HTMLInputElement>('input[type="password"]');
     expect(busyInput?.disabled).toBe(true);
     expect(busyInput?.getAttribute('aria-invalid')).toBe('true');
+    act(() => document.querySelector<HTMLFormElement>('[data-testid="login-view"]')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(submitted.filter((value) => value === '')).toHaveLength(0);
+    expect(submitted.filter((value) => value === 'secret-token')).toHaveLength(1);
     expect(document.body.textContent).toContain('Denied');
+  });
+
+  it('blocks programmatic LoginView submits while busy even with a buffered token', () => {
+    const submitted: string[] = [];
+    const renderLogin = (busy: boolean) => root?.render(<LoginView title="Login" body="Use local key" tokenLabel="Session key" tokenHelp="Memory only" submitLabel="Connect" busy={busy} onSubmit={(token) => submitted.push(token)} testId="login-view" />);
+    act(() => renderLogin(false));
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]');
+    const form = document.querySelector<HTMLFormElement>('[data-testid="login-view"]');
+    expect(input).not.toBeNull();
+    expect(form).not.toBeNull();
+    if (!input || !form) return;
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    act(() => { valueSetter?.call(input, 'busy-token'); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    act(() => renderLogin(true));
+    act(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(submitted).toEqual([]);
   });
 
   it('keeps the checked string fixture synchronized with typed keys', () => {
