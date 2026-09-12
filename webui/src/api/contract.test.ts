@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { validateCatalogEntry } from './validation';
 import { validateAgainstSchema } from './jsonSchema';
 
 type MutableJsonObject = Record<string, unknown>;
@@ -43,6 +44,7 @@ function schemaFor(path: string): string {
   const name = path.split('/').at(-1) ?? path;
   const annotated = fixtures[path] as MutableJsonObject | undefined;
   if (typeof annotated?.$schemaName === 'string') return annotated.$schemaName;
+  if (path.includes('/examples/error.security-')) return 'ErrorEnvelope';
   if (path.includes('/examples/')) return exampleSchemas.get(name) ?? failSchema(path);
   if (path.includes('/scenarios/')) return 'WebUiContractFixture';
   if (name === 'identity-vectors.json') return 'IdentityVectors';
@@ -58,8 +60,35 @@ function failSchema(path: string): never {
 describe('canonical WebUI contract fixtures', () => {
   it('validates every shared fixture at the JavaScript runtime boundary', () => {
     const entries = Object.entries(fixtures).sort(([left], [right]) => left.localeCompare(right));
-    expect(entries).toHaveLength(33);
+    expect(entries).toHaveLength(41);
     for (const [path] of entries) validateAgainstSchema(schemaFor(path), cloneFixture(path), path);
+  });
+
+  it('preserves raw and resolved catalog identity and validates additive bounds', () => {
+    const page = cloneFixture('../../../tests/fixtures/webui/examples/catalog.page.json');
+    const entry = (page.items as MutableJsonObject[])[0];
+    const metadata = entry.metadata as MutableJsonObject;
+    metadata.model_type = 'qwen3';
+    metadata.architecture = 'qwen3_embedding';
+    metadata.declared_architectures = ['Qwen3ForSequenceClassification'];
+    const parsed = validateCatalogEntry(entry);
+    expect(parsed.metadata.model_type).toBe('qwen3');
+    expect(parsed.metadata.architecture).toBe('qwen3_embedding');
+    expect(parsed.metadata.declared_architectures).toEqual(['Qwen3ForSequenceClassification']);
+    expect(parsed.removal.eligible).toBe(false);
+    expect(parsed.removal.reason).not.toBeNull();
+    for (const field of ['removal', 'metadata']) {
+      const missing = Object.fromEntries(Object.entries(entry).filter(([key]) => key !== field));
+      expect(() => validateCatalogEntry(missing)).toThrow(/missing required/);
+    }
+    for (const field of ['model_type', 'declared_architectures', 'unknown_reasons']) {
+      const missing = Object.fromEntries(Object.entries(metadata).filter(([key]) => key !== field));
+      expect(() => validateCatalogEntry({ ...entry, metadata: missing })).toThrow(/missing required/);
+    }
+    metadata.declared_architectures = Array(17).fill('Architecture');
+    expect(() => validateCatalogEntry(entry)).toThrow();
+    metadata.declared_architectures = ['a'.repeat(129)];
+    expect(() => validateCatalogEntry(entry)).toThrow();
   });
 
   it('rejects extra properties, missing required nulls, invalid date-time and wrong discriminators', () => {

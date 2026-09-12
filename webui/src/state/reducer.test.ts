@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import catalogFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
 import type { CatalogListResponse, Operation, PendingReconciliation, UiEvent } from '../api/types';
-import { validateBootstrap } from '../api/validation';
+import { validateBootstrap, validateCatalogList } from '../api/validation';
 import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
 
 const lifecycle = { state: 'ready', download: 'complete', busy: false, active_requests: 0, draining_requests: 0, worker_exit_observed: true, last_error: null } as const;
-const entry = { identity: { id: 'mdl_a', inference_id: 'model/a', display_name: 'Model A', source: 'cache', source_key_hash: 'h', generation: 1, revision: 5, content_fingerprint: null }, capabilities: [], lifecycle, complete: true, supported: true, removable: true, metadata: { architecture: null, input_tasks: ['chat'], output_tasks: ['chat'], quantization: null, format: null, parameter_count: null, disk_bytes: null, memory_estimate_bytes: null, support: { architecturally_supported: true, runnable_on_backend: true, complete: true, reason: null } } } as const;
+const fixtureEntry = validateCatalogList(catalogFixture).items[0];
+const entry = { ...fixtureEntry, identity: { ...fixtureEntry.identity, id: 'mdl_a', inference_id: 'model/a', display_name: 'Model A', revision: 5 }, lifecycle };
 const bootstrap = validateBootstrap(bootstrapFixture);
 
 function catalog(sequence: number): CatalogListResponse {

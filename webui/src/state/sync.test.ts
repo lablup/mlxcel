@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
-import catalogFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
+import catalogContractFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
 import operationsFixture from '../../../tests/fixtures/webui/examples/operations.list.json';
 import runtimeFixture from '../../../tests/fixtures/webui/examples/runtime.snapshot.json';
 import { WebUiApiClient } from '../api/client';
@@ -57,6 +57,8 @@ function streamDone(): ReadableStream<Uint8Array> {
 }
 
 const bootstrap = validateBootstrap(bootstrapFixture);
+// Compose independently captured producer fixtures into one coherent mock session.
+const catalogFixture = { ...catalogContractFixture, server_instance_id: bootstrap.server.server_instance_id, snapshot_sequence: 42 };
 const operations = stripSchemaName(operationsFixture) as typeof operationsFixture;
 
 function stripSchemaName(value: unknown): unknown {
@@ -252,7 +254,7 @@ describe('WebUI synchronizer', () => {
     let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
     const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
     await sync.refresh();
-    expect(snapshot.catalog.map((item) => item.identity.display_name)).toEqual(['Qwen3 4B 4-bit', 'Zed Model']);
+    expect(snapshot.catalog.map((item) => item.identity.display_name)).toEqual([catalogFixture.items[0].identity.display_name, 'Zed Model'].sort((left, right) => left.localeCompare(right)));
     expect([...snapshot.operations.keys()].sort()).toEqual(['op_second', operations.items[0].operation_id].sort());
     sync.dispose();
   });
