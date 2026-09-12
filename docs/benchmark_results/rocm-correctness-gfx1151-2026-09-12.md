@@ -106,6 +106,22 @@ Perplexity deltas stay inside +/- 0.5% except for the two shortest runs (`qwen3-
 
 An earlier plan was to run the same trace twice on one backend to establish a same-device noise floor, then require the cross-backend difference to sit inside it. That is unnecessary here. The threshold sweep above already shows where the disagreements stop, and it stops at a specific measured value (a 1.125 gap) rather than at a line borrowed from same-device noise. A floor would answer a question this data already answers directly.
 
+## Serving on ROCm
+
+`mlxcel-server` was built from the merged `1206f863` (`make release-rocm`) and run on this host for one dense and one MoE checkpoint, one at a time so neither competed for the GPU. `scripts/server_chat_smoke.sh` is the check, so the result is reproducible rather than a transcript of hand-typed curl calls.
+
+| Check | `Meta-Llama-3.1-8B-Instruct-4bit` | `Qwen3-30B-A3B-4bit`, `MLXCEL_FUSED_MOE=0` |
+|---|---|---|
+| `GET /health` | 200, `{"status":"ok"}` | 200, `{"status":"ok"}` |
+| `GET /v1/models` | 200, the loaded id | 200, the loaded id |
+| `POST /v1/chat/completions`, non-streaming | 200, `finish_reason: stop`, content `Paris.` (0.46 s) | 200, `finish_reason: stop`, content `Paris.` after 205 tokens (3.51 s) |
+| `POST /v1/chat/completions`, streaming | 200, 12 SSE frames closed by `[DONE]`, assembled `One, two, three, four, five.` | 200, 221 SSE frames closed by `[DONE]`, `finish_reason: stop` |
+| Script verdict | `OK` | `OK` |
+
+Both models answered coherently, the streaming and non-streaming paths agreed, and neither server log carried an error, a panic or a terminate. The MoE model runs through `gather_qmm` because the fused MoE kernel has no ROCm port (#1803).
+
+Two things about the check are worth recording, because both look like backend faults and are not. `model` is a required field on the request body, and omitting it returns 422 with a deserialization message. And a thinking model fills `reasoning_content` before `content`, so a budget too small to close the thinking block yields `finish_reason: length` with empty `content`: `Qwen3-0.6B-4bit` does this even at 2048 tokens. The script reads both channels and names which one carried the text, the same answer `scripts/ab_output_equality.sh` reaches with `--show-reasoning`.
+
 ## The test gate alongside the matrix
 
 `make verify-test-rocm` runs the workspace suite against a ROCm build. It is the broader of the two checks and it is not green: the missing primitives in #1825 throw through the cxx bridge, which ends in `std::terminate`, so a binary that reaches one aborts rather than reporting a failure. Run at the same commit as the traces, with aborting tests skipped so the rest of each binary can finish:
@@ -144,9 +160,17 @@ The checkpoint directory name is host-local: this host holds `models/mlx/Qwen3-3
 
 `compare_logit_traces.py` prints the largest reference gap at a disagreement on every run, so the 1.125 figure above is reproducible from any pair without a separate script.
 
+The serving check:
+
+```bash
+MLXCEL_FUSED_MOE=0 ./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4bit --port 8080 &
+./scripts/server_chat_smoke.sh --port 8080
+```
+
 ## Known gaps at the time of this run
 
 - Fused MoE has no ROCm kernel, so MoE models run through `gather_qmm` (#1803).
 - `FFT`, `Hadamard` and `SearchSorted` are `NO_GPU` stubs, so audio, TurboQuant KV cache and stochastic speculative decoding abort (#1825).
 - Only affine 4-bit was traced. mxfp4, mxfp8 and nvfp4 coverage is #1806, #1807 and #1808.
 - Prefill through the sorted large-row `gather_qmm` path is slow on both dtypes (#1814).
+- The model matrix in #1809 also names a sliding-window model, an SSM hybrid pair and a VLM. Those rows are not in this run; they wait on #1803 and #1805.

@@ -359,6 +359,21 @@ On a UMA host the GPU shares memory with the operating system and with any
 other GPU process, so check `rocm-smi --showpids` for other tenants before
 loading a large model.
 
+To check the HTTP server rather than the CLI, start it and run the chat smoke
+script against it. Both a dense and an affine MoE checkpoint pass on `gfx1151`;
+the results are in
+[`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-12.md).
+
+```bash
+MLXCEL_FUSED_MOE=0 ./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4bit --port 8080 &
+./scripts/server_chat_smoke.sh --port 8080
+```
+
+The script checks `/health`, `/v1/models`, and `/v1/chat/completions` both
+streaming and non-streaming. It counts the reasoning channel as output, so a
+thinking model that spends its whole budget inside the thinking block reports
+`channel=reasoning only` rather than looking like an empty response.
+
 ### Current status
 
 | Area | Status on ROCm |
@@ -371,6 +386,7 @@ loading a large model.
 | GPU faults | May show up as NaN output or a hang instead of an error (lablup/mlxcel#1804). |
 | Memory estimation on UMA hosts | Reads host RAM, not the VRAM carve-out; set `MLXCEL_MEMORY_LIMIT` if a model that fits is refused (lablup/mlxcel#1805). |
 | Diagnostics | Print a CUDA compute capability line for the AMD device (lablup/mlxcel#1805). |
+| `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Windows, multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only
