@@ -131,6 +131,30 @@ fn regular_file_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn rooted_regular_file_exists(root: &Path, components: &[&str]) -> bool {
+    if components.is_empty() {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(root) else {
+        return false;
+    };
+    if !meta.file_type().is_dir() {
+        return false;
+    }
+    let mut path = root.to_path_buf();
+    for component in &components[..components.len() - 1] {
+        path.push(component);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if !meta.file_type().is_dir() {
+            return false;
+        }
+    }
+    path.push(components[components.len() - 1]);
+    regular_file_exists(&path)
+}
+
 fn bounded_embedding_checkpoint(
     model_path: &Path,
     config: &Value,
@@ -146,7 +170,7 @@ fn bounded_embedding_checkpoint(
     let layout_says_embedding = encoder_only
         || config_has_embedding_architecture(config)
         || bounded_modules_json_has_pooling(model_path)?
-        || regular_file_exists(&model_path.join("1_Pooling").join("config.json"));
+        || rooted_regular_file_exists(model_path, &["1_Pooling", "config.json"]);
     if !layout_says_embedding {
         return Ok(None);
     }

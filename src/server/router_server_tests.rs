@@ -192,6 +192,8 @@ async fn send(
 
 #[path = "router_contract_test_support.rs"]
 mod contract;
+#[path = "router_catalog_route_tests.rs"]
+mod router_catalog_route_tests;
 
 #[tokio::test]
 async fn the_router_inventory_carries_the_b10621_model_object() {

@@ -377,3 +377,22 @@ fn gemma4_processor_config_symlink_is_not_variant_evidence() {
     );
     assert!(!entry.supported);
 }
+
+#[cfg(unix)]
+#[test]
+fn pooling_parent_symlink_is_not_embedding_layout_evidence() {
+    let root = temp_dir("pooling-parent-symlink");
+    let path = write_model(&root, "qwen", "qwen3");
+    let outside = root.join("outside_1_pooling");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("config.json"),
+        r#"{"pooling_mode_mean_tokens":true}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, path.join("1_Pooling")).unwrap();
+
+    let entry = catalog_entry(model("qwen", path, RouterModelSource::ModelsDir));
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("qwen3"));
+    assert!(entry.supported);
+}
