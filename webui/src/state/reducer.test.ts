@@ -21,6 +21,42 @@ function operation(id: string): Operation {
 }
 
 describe('WebUI reducer', () => {
+  it('tracks last successful data freshness separately from state transitions', () => {
+    let state = initialSnapshot();
+    expect(state.lastSuccessfulAt).toBeNull();
+    state = reduceWebUiSnapshot(state, { type: 'login-start' });
+    state = reduceWebUiSnapshot(state, { type: 'login-success', bootstrap: { ...bootstrap, server: { ...bootstrap.server, server_instance_id: 'srv' } }, now: 1 });
+    expect(state.lastSuccessfulAt).toBeNull();
+    state = reduceWebUiSnapshot(state, { type: 'catalog', response: catalog(10), now: 10 });
+    expect(state.lastSuccessfulAt).toBe(10);
+    state = reduceWebUiSnapshot(state, { type: 'event', event: { schema_version: 'webui.ui-api.v1', server_instance_id: 'srv', sequence: 11, type: 'snapshot', payload: { snapshot_sequence: 11, catalog_changed: true, operations_changed: true, runtime_model_ids: ['mdl_a'] }, event_id: 'evt_snapshot', emitted_at: '2026-09-12T00:00:00Z' }, now: 15 });
+    expect(state.lastUpdatedAt).toBe(15);
+    expect(state.lastSuccessfulAt).toBe(10);
+    state = reduceWebUiSnapshot(state, { type: 'connection', connection: 'offline', error: { code: 'offline', message: 'offline', retryable: true }, now: 20 });
+    expect(state.lastUpdatedAt).toBe(20);
+    expect(state.lastSuccessfulAt).toBe(10);
+    state = reduceWebUiSnapshot(state, { type: 'event', event: { schema_version: 'webui.ui-api.v1', server_instance_id: 'srv', sequence: 11, type: 'heartbeat', payload: { server_time: '2026-09-12T00:00:00Z' }, event_id: 'evt_heartbeat', emitted_at: '2026-09-12T00:00:00Z' }, now: 30 });
+    expect(state.lastSuccessfulAt).toBe(10);
+    state = reduceWebUiSnapshot(state, { type: 'event', event: { schema_version: 'webui.ui-api.v1', server_instance_id: 'srv', sequence: 12, type: 'gap', payload: { reason: 'gap', resnapshot: true }, event_id: 'evt_gap', emitted_at: '2026-09-12T00:00:00Z' }, now: 40 });
+    expect(state.connection).toBe('stale');
+    expect(state.lastSuccessfulAt).toBe(10);
+    state = reduceWebUiSnapshot(state, { type: 'event', event: { schema_version: 'webui.ui-api.v1', server_instance_id: 'srv2', sequence: 1, type: 'server_restart', payload: { reason: 'server_restart', resnapshot: true }, event_id: 'evt_restart', emitted_at: '2026-09-12T00:00:00Z' }, now: 50 });
+    expect(state.lastSuccessfulAt).toBeNull();
+    state = reduceWebUiSnapshot(state, { type: 'catalog', response: { ...catalog(1), server_instance_id: 'srv2' }, now: 60 });
+    expect(state.lastSuccessfulAt).toBe(60);
+    state = reduceWebUiSnapshot(state, { type: 'logout', now: 70 });
+    expect(state.lastSuccessfulAt).toBeNull();
+  });
+
+  it('does not refresh data freshness for duplicate or older per-resource events', () => {
+    let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'catalog', response: catalog(10), now: 10 });
+    state = reduceWebUiSnapshot(state, { type: 'event', event: event(12, 6), now: 12 });
+    expect(state.lastSuccessfulAt).toBe(12);
+    state = reduceWebUiSnapshot(state, { type: 'event', event: event(11, 99), now: 20 });
+    expect(state.catalog[0]?.identity.revision).toBe(6);
+    expect(state.lastSuccessfulAt).toBe(12);
+  });
+
   it('uses per-resource sequence fences rather than one global maximum', () => {
     let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'catalog', response: catalog(100), now: 1 });
     state = reduceWebUiSnapshot(state, { type: 'event', event: { ...event(101, 6), event_id: 'evt_101' }, now: 2 });

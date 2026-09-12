@@ -80,6 +80,7 @@ export interface WebUiSnapshot {
   readonly lastEventId: EventId | null;
   readonly lastSequence: number | null;
   readonly lastUpdatedAt: number | null;
+  readonly lastSuccessfulAt: number | null;
   readonly error: UiClientError | null;
   readonly pendingReconciliations: ReadonlyMap<string, PendingReconciliation>;
   readonly resourceFences: ResourceFences;

@@ -148,6 +148,33 @@ describe('WebUI synchronizer', () => {
     sync.dispose();
   });
 
+  it('publishes lastSuccessfulAt from the synchronizer clock only on successful data refreshes', async () => {
+    const clock = new FakeClock();
+    clock.nowValue = 1_234;
+    let failBootstrap = false;
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
+      if (url.endsWith('/bootstrap')) {
+        if (failBootstrap) return new Response(JSON.stringify({ error: { code: 'offline', message: 'offline', retryable: true }, request_id: 'req_offline' }), { status: 503 });
+        return new Response(JSON.stringify(bootstrap));
+      }
+      if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
+      if (url.includes('/runtime')) return new Response(JSON.stringify(runtimeFixture));
+      return new Response(JSON.stringify(operations));
+    };
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), clock, visibility: visibleSource(() => false), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(snapshot.lastSuccessfulAt).toBe(1_234);
+    clock.nowValue = 2_000;
+    failBootstrap = true;
+    await sync.refresh();
+    expect(snapshot.lastUpdatedAt).toBe(2_000);
+    expect(snapshot.lastSuccessfulAt).toBe(1_234);
+    sync.dispose();
+  });
+
   it('starts SSE with the minimum authoritative resource fence as paired replay query', async () => {
     const methods: string[] = [];
     let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });

@@ -43,6 +43,7 @@ describe('WebUiProvider auth races', () => {
     await expect(login).rejects.toMatchObject({ name: 'AbortError' });
     await act(async () => Promise.resolve());
     expect(mounted.latest().snapshot.auth.status).toBe('signed-out');
+    expect(mounted.latest().snapshot.lastSuccessfulAt).toBeNull();
     act(() => mounted.root.unmount());
     mounted.element.remove();
   });
@@ -78,6 +79,7 @@ describe('WebUiProvider auth races', () => {
     await act(async () => Promise.resolve());
     expect(mounted.latest().snapshot.auth.status).toBe('signed-out');
     expect(mounted.latest().snapshot.runtimes.size).toBe(0);
+    expect(mounted.latest().snapshot.lastSuccessfulAt).toBeNull();
     act(() => mounted.root.unmount());
     mounted.element.remove();
   });

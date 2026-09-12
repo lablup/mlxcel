@@ -30,7 +30,7 @@ export type WebUiAction =
   | { readonly type: 'connection'; readonly connection: WebUiSnapshot['connection']; readonly error?: UiClientError | null; readonly now: number };
 
 export function initialSnapshot(): WebUiSnapshot {
-  return { schemaVersion: WEBUI_SCHEMA_VERSION, auth: { status: 'signed-out', tokenPresent: false }, connection: 'idle', bootstrap: null, catalog: [], catalogSequence: null, operations: new Map(), runtimes: new Map(), selectedModelId: null, serverInstanceId: null, lastEventId: null, lastSequence: null, lastUpdatedAt: null, error: null, pendingReconciliations: new Map(), resourceFences: { catalog: null, operationsSnapshot: null, operations: new Map(), models: new Map(), runtimes: new Map() } };
+  return { schemaVersion: WEBUI_SCHEMA_VERSION, auth: { status: 'signed-out', tokenPresent: false }, connection: 'idle', bootstrap: null, catalog: [], catalogSequence: null, operations: new Map(), runtimes: new Map(), selectedModelId: null, serverInstanceId: null, lastEventId: null, lastSequence: null, lastUpdatedAt: null, lastSuccessfulAt: null, error: null, pendingReconciliations: new Map(), resourceFences: { catalog: null, operationsSnapshot: null, operations: new Map(), models: new Map(), runtimes: new Map() } };
 }
 
 export function reduceWebUiSnapshot(state: WebUiSnapshot, action: WebUiAction): WebUiSnapshot {
@@ -60,7 +60,7 @@ function applyCatalog(state: WebUiSnapshot, response: CatalogListResponse, now: 
   if (state.serverInstanceId !== null && response.server_instance_id !== state.serverInstanceId) return restart(state, response.server_instance_id, now);
   if (state.catalogSequence !== null && response.snapshot_sequence < state.catalogSequence) return state;
   const shouldMerge = state.catalogSequence === response.snapshot_sequence;
-  return { ...state, connection: state.connection === 'bootstrapping' ? 'ready' : state.connection, catalog: mergeCatalogPage(shouldMerge ? state.catalog : [], response), catalogSequence: response.snapshot_sequence, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence({ ...state.resourceFences, catalog: response.snapshot_sequence }), lastUpdatedAt: now, error: null, resourceFences: { ...state.resourceFences, catalog: response.snapshot_sequence } };
+  return markSuccessful({ ...state, connection: state.connection === 'bootstrapping' ? 'ready' : state.connection, catalog: mergeCatalogPage(shouldMerge ? state.catalog : [], response), catalogSequence: response.snapshot_sequence, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence({ ...state.resourceFences, catalog: response.snapshot_sequence }), error: null, resourceFences: { ...state.resourceFences, catalog: response.snapshot_sequence } }, now);
 }
 
 function applyOperationsSnapshot(state: WebUiSnapshot, response: OperationsListResponse, now: number): WebUiSnapshot {
@@ -74,7 +74,7 @@ function applyOperationsSnapshot(state: WebUiSnapshot, response: OperationsListR
     operationFences.set(operation.operation_id, response.snapshot_sequence);
   }
   const resourceFences = { ...state.resourceFences, operationsSnapshot: response.snapshot_sequence, operations: operationFences };
-  return { ...state, operations, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
+  return markSuccessful({ ...state, operations, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
 }
 
 function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: number | null, now: number): WebUiSnapshot {
@@ -84,7 +84,7 @@ function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: nu
   const operations = mapSet(state.operations, operation.operation_id, operation);
   const fences = sequence === null ? state.resourceFences.operations : mapSet(state.resourceFences.operations, operation.operation_id, sequence);
   const resourceFences = { ...state.resourceFences, operations: fences };
-  return { ...state, operations, lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
+  return markSuccessful({ ...state, operations, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
 }
 
 function applyRuntimeSnapshot(state: WebUiSnapshot, runtime: RuntimeSnapshot, sequence: number | null, now: number): WebUiSnapshot {
@@ -93,7 +93,7 @@ function applyRuntimeSnapshot(state: WebUiSnapshot, runtime: RuntimeSnapshot, se
   if (sequence !== null && previousFence !== undefined && sequence <= previousFence) return state;
   const fences = sequence === null ? state.resourceFences.runtimes : mapSet(state.resourceFences.runtimes, runtime.model_id, sequence);
   const resourceFences = { ...state.resourceFences, runtimes: fences };
-  return { ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: runtime.server_instance_id, lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
+  return markSuccessful({ ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: runtime.server_instance_id, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
 }
 
 function applyEvent(state: WebUiSnapshot, event: UiEvent, now: number): WebUiSnapshot {
@@ -108,7 +108,7 @@ function applyEvent(state: WebUiSnapshot, event: UiEvent, now: number): WebUiSna
     const resourceFences = { ...state.resourceFences, catalog: event.payload.catalog_changed ? event.sequence : state.resourceFences.catalog };
     return { ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', lastUpdatedAt: now, resourceFences };
   }
-  return { ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, connection: 'streaming', lastUpdatedAt: now };
+  return markSuccessful({ ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, connection: 'streaming' }, now);
 }
 
 function applyModelRevision(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'model_revision' }>, now: number): WebUiSnapshot {
@@ -117,7 +117,7 @@ function applyModelRevision(state: WebUiSnapshot, event: Extract<UiEvent, { type
   if (previousFence !== undefined && event.sequence <= previousFence) return state;
   const catalog = state.catalog.map((entry) => entry.identity.id === modelId && event.payload.revision >= entry.identity.revision ? { ...entry, identity: { ...entry.identity, revision: event.payload.revision }, lifecycle: event.payload.lifecycle } : entry);
   const resourceFences = { ...state.resourceFences, models: mapSet(state.resourceFences.models, modelId, event.sequence) };
-  return { ...state, catalog, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', lastUpdatedAt: now, resourceFences };
+  return markSuccessful({ ...state, catalog, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', resourceFences }, now);
 }
 
 function applyRuntime(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'runtime' }>, now: number): WebUiSnapshot {
@@ -125,15 +125,20 @@ function applyRuntime(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'run
   const previousFence = state.resourceFences.runtimes.get(runtime.model_id);
   if (previousFence !== undefined && event.sequence <= previousFence) return state;
   const resourceFences = { ...state.resourceFences, runtimes: mapSet(state.resourceFences.runtimes, runtime.model_id, event.sequence) };
-  return { ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', lastUpdatedAt: now, resourceFences };
+  return markSuccessful({ ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', resourceFences }, now);
 }
 
 function resetForResnapshot(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'server_restart' | 'gap' | 'reset' }>, now: number): WebUiSnapshot {
-  return { ...initialSnapshot(), auth: state.auth, connection: 'stale', serverInstanceId: event.server_instance_id, selectedModelId: state.selectedModelId, lastEventId: event.event_id, error: { code: event.type, message: event.payload.reason, retryable: event.payload.resnapshot }, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now };
+  const lastSuccessfulAt = event.type === 'server_restart' ? null : state.lastSuccessfulAt;
+  return { ...initialSnapshot(), auth: state.auth, connection: 'stale', serverInstanceId: event.server_instance_id, selectedModelId: state.selectedModelId, lastEventId: event.event_id, error: { code: event.type, message: event.payload.reason, retryable: event.payload.resnapshot }, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now, lastSuccessfulAt };
 }
 
 function restart(state: WebUiSnapshot, serverInstanceId: string, now: number): WebUiSnapshot {
   return { ...initialSnapshot(), auth: state.auth, connection: 'stale', serverInstanceId, selectedModelId: state.selectedModelId, error: { code: 'server_restarted', message: 'The mlxcel server restarted; refresh the authoritative snapshot before continuing.', retryable: true }, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now };
+}
+
+function markSuccessful(state: WebUiSnapshot, now: number): WebUiSnapshot {
+  return { ...state, lastUpdatedAt: now, lastSuccessfulAt: now };
 }
 
 function mergeCatalogPage(current: ReadonlyArray<CatalogEntry>, response: CatalogListResponse): ReadonlyArray<CatalogEntry> {
