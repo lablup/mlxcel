@@ -40,3 +40,36 @@ describe('WebUI API client', () => {
     expect(urls[0]).toBe(`/ui-api/v1/runtime?model_id=${runtimeFixture.model_id}&autoload=false`);
   });
 });
+
+describe('WebUI API client security edges', () => {
+  it('revokes the token on 401 before parsing an invalid response body', async () => {
+    let unauthorized = 0;
+    const seenAuth: string[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      seenAuth.push(new Headers(init?.headers).get('authorization') ?? '');
+      return new Response('{invalid json', { status: 401 });
+    };
+    const client = new WebUiApiClient({ fetchImpl, onUnauthorized: () => { unauthorized += 1; } });
+    client.setBearerToken('secret-token');
+    await expect(client.bootstrap()).rejects.toThrow();
+    await expect(client.bootstrap()).rejects.toThrow();
+    expect(unauthorized).toBe(2);
+    expect(seenAuth).toEqual(['Bearer secret-token', '']);
+  });
+
+  it('sends Last-Event-ID and rejects EOF without DONE so sync can reconnect', async () => {
+    const lastIds: string[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      lastIds.push(new Headers(init?.headers).get('last-event-id') ?? '');
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(': eof\n\n'));
+          controller.close();
+        },
+      }), { status: 200 });
+    };
+    const client = new WebUiApiClient({ fetchImpl });
+    await expect(client.events({ onEvent: () => undefined }, undefined, 'evt_0000000000000001')).rejects.toThrow(/ended before/);
+    expect(lastIds).toEqual(['evt_0000000000000001']);
+  });
+});

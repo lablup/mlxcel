@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
 import catalogFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
+import operationsFixture from '../../../tests/fixtures/webui/examples/operations.list.json';
 import { WebUiApiClient } from '../api/client';
+import { validateBootstrap } from '../api/validation';
 import type { PendingReconciliation } from '../api/types';
 import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
 import { WebUiSynchronizer, type SyncClock, type VisibilitySource } from './sync';
@@ -53,13 +55,24 @@ function streamDone(): ReadableStream<Uint8Array> {
   });
 }
 
+const bootstrap = validateBootstrap(bootstrapFixture);
+const operations = stripSchemaName(operationsFixture) as typeof operationsFixture;
+
+function stripSchemaName(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripSchemaName);
+  if (typeof value !== 'object' || value === null) return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) if (key !== '$schemaName') result[key] = stripSchemaName(entry);
+  return result;
+}
+
 function makeImmediateFetch(methods?: string[]): typeof fetch {
   return async (input, init) => {
     methods?.push(`${init?.method ?? 'GET'} ${String(input)}`);
     if (String(input).endsWith('/events')) return new Response(streamDone(), { status: 200 });
-    if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrapFixture));
+    if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
     if (String(input).endsWith('/catalog')) return new Response(JSON.stringify(catalogFixture));
-    return new Response(JSON.stringify({ items: [] }));
+    return new Response(JSON.stringify(operations));
   };
 }
 
@@ -75,11 +88,11 @@ describe('WebUI synchronizer', () => {
       maxActive = Math.max(maxActive, active);
       await new Promise<void>((resolve) => { release = resolve; });
       active -= 1;
-      if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrapFixture));
+      if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
       if (String(input).endsWith('/catalog')) return new Response(JSON.stringify(catalogFixture));
-      return new Response(JSON.stringify({ items: [] }));
+      return new Response(JSON.stringify(operations));
     };
-    let snapshot = initialSnapshot();
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
     const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), clock, visibility: visibleSource(() => false), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
     sync.start();
     clock.runOne();
@@ -97,9 +110,9 @@ describe('WebUI synchronizer', () => {
   it('reconciles unknown POST outcomes by polling without replaying the POST', async () => {
     const clock = new FakeClock();
     const methods: string[] = [];
-    let snapshot = initialSnapshot();
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
     const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch(methods) }), clock, visibility: visibleSource(() => true), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
-    const pending: PendingReconciliation = { kind: 'model-action', idempotencyKey: 'idem-unknown', operationId: null, modelId: 'mdl_a', createdAt: 1 };
+    const pending: PendingReconciliation = { kind: 'model-action', idempotencyKey: 'idem-unknown', operationId: operations.items[0]?.operation_id ?? null, modelId: 'mdl_a', createdAt: 1 };
     sync.noteUnknownPost(pending);
     await sync.refresh();
     expect(methods.every((entry) => !entry.startsWith('POST /ui-api/v1/model-actions'))).toBe(true);
@@ -107,9 +120,23 @@ describe('WebUI synchronizer', () => {
     sync.dispose();
   });
 
+
+
+  it('expires unmatched unknown POST outcomes explicitly instead of silently clearing them', async () => {
+    const clock = new FakeClock();
+    clock.nowValue = 61_000;
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch() }), clock, visibility: visibleSource(() => false), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    sync.noteUnknownPost({ kind: 'model-action', idempotencyKey: 'idem-lost', operationId: null, modelId: 'mdl_a', createdAt: 0 });
+    await sync.refresh();
+    expect(snapshot.pendingReconciliations.size).toBe(0);
+    expect(snapshot.error?.code).toBe('unknown_post_unresolved');
+    sync.dispose();
+  });
+
   it('uses the hidden-tab polling interval after a successful refresh', async () => {
     const clock = new FakeClock();
-    let snapshot = initialSnapshot();
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
     const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch() }), clock, visibility: visibleSource(() => true), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
     sync.start();
     clock.runOne();

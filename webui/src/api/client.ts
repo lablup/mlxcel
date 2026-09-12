@@ -14,13 +14,14 @@
 
 import { SseParser } from './sse';
 import { apiPath, encodeOpaquePathSegment, validateApiBase } from './url';
-import { parseJson, validateBootstrap, validateCatalogList, validateErrorEnvelope, validateOperation, validateOperationAccepted, validateRuntime, validateUiEvent, ValidationError } from './validation';
-import type { BootstrapResponse, CatalogListResponse, CatalogQuery, DownloadRequest, EventStreamHandlers, ModelActionRequest, ModelId, Operation, OperationAccepted, OperationId, RemovalRequest, RuntimeSnapshot } from './types';
+import { parseJson, validateBootstrap, validateCatalogEntry, validateCatalogList, validateErrorEnvelope, validateOperation, validateOperationAccepted, validateOperationsList, validateRuntime, validateUiEvent } from './validation';
+import type { BootstrapResponse, CatalogEntry, CatalogListResponse, CatalogQuery, DownloadRequest, EventId, EventStreamHandlers, ModelActionRequest, ModelId, Operation, OperationAccepted, OperationId, OperationsListResponse, RemovalRequest, RuntimeSnapshot } from './types';
 
 export interface WebUiApiClientOptions {
   readonly apiBase?: string;
   readonly fetchImpl?: typeof fetch;
   readonly now?: () => number;
+  readonly onUnauthorized?: () => void;
 }
 
 export class WebUiHttpError extends Error {
@@ -34,11 +35,13 @@ export class WebUiApiClient {
   readonly apiBase: string;
   private readonly fetchImpl: typeof fetch;
   private bearerToken: string | null = null;
+  private readonly onUnauthorized?: () => void;
   private readonly controllers = new Set<AbortController>();
 
   constructor(options: WebUiApiClientOptions = {}) {
     this.apiBase = validateApiBase(options.apiBase);
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
+    this.onUnauthorized = options.onUnauthorized;
   }
 
   setBearerToken(token: string | null): void {
@@ -58,9 +61,9 @@ export class WebUiApiClient {
     return this.request('/ui-api/v1/catalog', validateCatalogList, { method: 'GET', query: { ...query }, signal });
   }
 
-  async catalogEntry(modelId: ModelId, signal?: AbortSignal): Promise<CatalogListResponse['items'][number]> {
+  async catalogEntry(modelId: ModelId, signal?: AbortSignal): Promise<CatalogEntry> {
     const path = `/ui-api/v1/catalog/${encodeOpaquePathSegment(modelId)}`;
-    return this.request(path, (value) => validateCatalogList({ schema_version: 'webui.ui-api.v1', items: [value], pagination: { limit: 1, next_cursor: null, total_known: 1 }, server_instance_id: 'entry-projection', snapshot_sequence: 0 }).items[0], { method: 'GET', signal });
+    return this.request(path, validateCatalogEntry, { method: 'GET', signal });
   }
 
   async refreshCatalog(idempotencyKey: string, signal?: AbortSignal): Promise<OperationAccepted> {
@@ -79,11 +82,12 @@ export class WebUiApiClient {
     return this.request('/ui-api/v1/model-removals', validateOperationAccepted, { method: 'POST', body: request, signal });
   }
 
+  async operationsPage(signal?: AbortSignal): Promise<OperationsListResponse> {
+    return this.request('/ui-api/v1/operations', validateOperationsList, { method: 'GET', signal });
+  }
+
   async operations(signal?: AbortSignal): Promise<ReadonlyArray<Operation>> {
-    const value = await this.request('/ui-api/v1/operations', (entry) => entry, { method: 'GET', signal });
-    const object = value as { readonly items?: unknown };
-    if (!Array.isArray(object.items)) throw new ValidationError('$.items', 'expected operations list');
-    return object.items.map((item, index) => validateOperation(item, `$.items[${index}]`));
+    return (await this.operationsPage(signal)).items;
   }
 
   async operation(operationId: OperationId, signal?: AbortSignal): Promise<Operation> {
@@ -98,37 +102,52 @@ export class WebUiApiClient {
     return this.request('/ui-api/v1/runtime', validateRuntime, { method: 'GET', query: { model_id: modelId, autoload: false }, signal });
   }
 
-  async events(handlers: EventStreamHandlers, signal?: AbortSignal): Promise<void> {
-    const response = await this.fetchWithAuth(apiPath(this.apiBase, '/ui-api/v1/events'), { method: 'GET', signal, headers: { Accept: 'text/event-stream' } });
-    if (!response.ok) await this.throwHttp(response);
-    if (response.body === null) throw new Error('WebUI event stream response has no body.');
-    const parser = new SseParser({
-      onDone: handlers.onDone,
-      onMessage: (message) => {
-        if (message.retry !== null) handlers.onRetryAfter?.(message.retry);
-        if (message.data.length > 0) handlers.onEvent(validateUiEvent(parseJson(message.data)));
-      },
-    });
-    const reader = response.body.getReader();
+  async events(handlers: EventStreamHandlers, signal?: AbortSignal, lastEventId?: EventId | null): Promise<void> {
+    const headers = new Headers({ Accept: 'text/event-stream' });
+    if (lastEventId !== undefined && lastEventId !== null) headers.set('Last-Event-ID', lastEventId);
+    const fetched = await this.fetchWithAuth(apiPath(this.apiBase, '/ui-api/v1/events'), { method: 'GET', signal, headers });
     try {
-      for (;;) {
-        const read = await reader.read();
-        if (read.done) break;
-        parser.push(read.value);
+      const response = fetched.response;
+      if (!response.ok) await this.throwHttp(response);
+      if (response.body === null) throw new Error('WebUI event stream response has no body.');
+      const parser = new SseParser({
+        onDone: handlers.onDone,
+        onMessage: (message) => {
+          if (message.retry !== null) handlers.onRetryAfter?.(message.retry);
+          if (message.data.length > 0) handlers.onEvent(validateUiEvent(parseJson(message.data)));
+        },
+      });
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          const read = await reader.read();
+          if (read.done) break;
+          parser.push(read.value);
+        }
+        parser.close();
+        if (!parser.done && signal?.aborted !== true) throw new Error('WebUI event stream ended before a DONE frame.');
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
+      } finally {
+        reader.releaseLock();
       }
-      parser.close();
     } finally {
-      reader.releaseLock();
+      this.controllers.delete(fetched.controller);
     }
   }
 
   private async request<T>(path: string, validate: (value: unknown) => T, options: RequestOptions): Promise<T> {
-    const response = await this.fetchWithAuth(apiPath(this.apiBase, path, options.query), options);
-    if (!response.ok) await this.throwHttp(response);
-    return validate(parseJson(await response.text()));
+    const fetched = await this.fetchWithAuth(apiPath(this.apiBase, path, options.query), options);
+    try {
+      if (!fetched.response.ok) await this.throwHttp(fetched.response);
+      return validate(parseJson(await fetched.response.text()));
+    } finally {
+      this.controllers.delete(fetched.controller);
+    }
   }
 
-  private async fetchWithAuth(url: string, options: RequestOptions): Promise<Response> {
+  private async fetchWithAuth(url: string, options: RequestOptions): Promise<FetchedResponse> {
     const controller = new AbortController();
     const signal = options.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, options.signal]);
     this.controllers.add(controller);
@@ -136,23 +155,25 @@ export class WebUiApiClient {
     headers.set('Accept', headers.get('Accept') ?? 'application/json');
     if (this.bearerToken !== null) headers.set('Authorization', `Bearer ${this.bearerToken}`);
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
-    try {
-      return await this.fetchImpl(url, { method: options.method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal, credentials: 'same-origin', cache: 'no-store' });
-    } finally {
-      this.controllers.delete(controller);
-    }
+    const response = await this.fetchImpl(url, { method: options.method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal, credentials: 'same-origin', cache: 'no-store' });
+    return { response, controller };
   }
 
   private async throwHttp(response: Response): Promise<never> {
-    const text = await response.text();
-    let envelope: ReturnType<typeof validateErrorEnvelope> | null = null;
-    if (text.length > 0) envelope = validateErrorEnvelope(parseJson(text));
     if (response.status === 401) {
       this.bearerToken = null;
       this.abortAll();
+      this.onUnauthorized?.();
     }
+    const text = await response.text().catch(() => '');
+    const envelope = text.length > 0 ? validateErrorEnvelope(parseJson(text)) : null;
     throw new WebUiHttpError(response.status, envelope);
   }
+}
+
+interface FetchedResponse {
+  readonly response: Response;
+  readonly controller: AbortController;
 }
 
 interface RequestOptions {

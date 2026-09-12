@@ -39,6 +39,7 @@ export interface SyncOptions {
 const visiblePollMs = 2_000;
 const hiddenPollMs = 30_000;
 const maxBackoffMs = 30_000;
+const reconciliationTtlMs = 60_000;
 
 export class WebUiSynchronizer {
   private readonly client: WebUiApiClient;
@@ -68,7 +69,6 @@ export class WebUiSynchronizer {
     if (!this.stopped) return;
     this.stopped = false;
     this.reschedule(0);
-    this.startEvents();
   }
 
   stop(): void {
@@ -92,15 +92,22 @@ export class WebUiSynchronizer {
     this.inflight = controller;
     const now = this.clock.now();
     try {
+      if (this.getSnapshot().auth.status === 'signed-out') return;
       const bootstrap = await this.client.bootstrap(controller.signal);
+      if (this.getSnapshot().auth.status === 'signed-out') return;
       this.dispatch({ type: 'login-success', bootstrap, now });
       const catalog = await this.client.catalog({}, controller.signal);
       this.dispatch({ type: 'catalog', response: catalog, now });
-      const operations = await this.client.operations(controller.signal);
-      for (const operation of operations) this.dispatch({ type: 'operation', operation, sequence: catalog.snapshot_sequence, now });
-      for (const pending of this.getSnapshot().pendingReconciliations.values()) this.dispatch({ type: 'reconciled', idempotencyKey: pending.idempotencyKey });
+      const operationsPage = await this.client.operationsPage(controller.signal);
+      if (operationsPage.server_instance_id !== catalog.server_instance_id) {
+        this.dispatch({ type: 'connection', connection: 'stale', error: { code: 'snapshot_mismatch', message: 'Operation and catalog snapshots came from different server instances.', retryable: true }, now });
+        return;
+      }
+      for (const operation of operationsPage.items) this.dispatch({ type: 'operation', operation, sequence: operationsPage.snapshot_sequence, now });
+      const unresolvedExpired = this.reconcilePending(operationsPage.items, now);
       this.failures = 0;
-      this.dispatch({ type: 'connection', connection: 'ready', now });
+      if (!unresolvedExpired) this.dispatch({ type: 'connection', connection: 'ready', now });
+      if (this.eventAbort === null) this.startEvents();
     } catch (error) {
       if (!controller.signal.aborted) {
         this.failures += 1;
@@ -121,12 +128,31 @@ export class WebUiSynchronizer {
     this.eventAbort?.abort();
     const controller = new AbortController();
     this.eventAbort = controller;
-    this.client.events({ onEvent: (event) => this.dispatch({ type: 'event', event, now: this.clock.now() }), onRetryAfter: (ms) => this.reschedule(ms) }, controller.signal).catch((error: unknown) => {
+    void this.client.events({ onEvent: (event) => this.dispatch({ type: 'event', event, now: this.clock.now() }), onRetryAfter: (ms) => this.reschedule(ms) }, controller.signal, this.getSnapshot().lastEventId).then(() => {
+      if (this.eventAbort === controller) this.eventAbort = null;
+      if (!controller.signal.aborted && !this.stopped) this.reschedule(this.backoffDelay());
+    }).catch((error: unknown) => {
       if (controller.signal.aborted || this.stopped) return;
       this.failures += 1;
+      this.eventAbort = null;
       this.dispatch({ type: 'connection', connection: classifyConnectionError(error), error: safeClientError(error), now: this.clock.now() });
       this.reschedule(this.backoffDelay());
     });
+  }
+
+  private reconcilePending(operations: ReadonlyArray<{ readonly operation_id: string }>, now: number): boolean {
+    let unresolvedExpired = false;
+    const operationIds = new Set(operations.map((operation) => operation.operation_id));
+    for (const pending of this.getSnapshot().pendingReconciliations.values()) {
+      if (pending.operationId !== null && operationIds.has(pending.operationId)) {
+        this.dispatch({ type: 'reconciled', idempotencyKey: pending.idempotencyKey });
+      } else if (now - pending.createdAt >= reconciliationTtlMs) {
+        this.dispatch({ type: 'reconciled', idempotencyKey: pending.idempotencyKey });
+        this.dispatch({ type: 'connection', connection: 'stale', error: { code: 'unknown_post_unresolved', message: 'A previous control request could not be matched to an operation after reconciliation.', retryable: true }, now });
+        unresolvedExpired = true;
+      }
+    }
+    return unresolvedExpired;
   }
 
   private reschedule(milliseconds: number): void {

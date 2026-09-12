@@ -99,7 +99,12 @@ function validateString(schema: JsonObject, value: string, path: string): void {
   if (schema.minLength !== undefined && value.length < numberSchema(schema.minLength, `${path}#schema.minLength`)) throw new ValidationError(path, 'string shorter than minimum');
   if (schema.maxLength !== undefined && value.length > numberSchema(schema.maxLength, `${path}#schema.maxLength`)) throw new ValidationError(path, 'string longer than maximum');
   if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern, 'u').test(value)) throw new ValidationError(path, 'string does not match pattern');
-  if (schema.format === 'date-time' && Number.isNaN(Date.parse(value))) throw new ValidationError(path, 'invalid RFC3339 date-time');
+  if (schema.format === 'date-time' && !isRfc3339DateTime(value)) throw new ValidationError(path, 'invalid RFC3339 date-time');
+}
+
+function isRfc3339DateTime(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
+  return !Number.isNaN(Date.parse(value));
 }
 
 function validateNumber(schema: JsonObject, value: number, path: string): void {

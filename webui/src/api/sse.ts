@@ -40,6 +40,10 @@ export class SseParser {
   private frameBytes = 0;
   private ended = false;
 
+  get done(): boolean {
+    return this.ended;
+  }
+
   constructor(options: SseParserOptions) {
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     this.onMessage = options.onMessage;

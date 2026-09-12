@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { parseJson, validateAgainstSchema, ValidationError } from './jsonSchema';
-import type { BootstrapResponse, CatalogListResponse, ErrorEnvelope, Operation, OperationAccepted, RuntimeSnapshot, UiEvent } from './types';
+import type { BootstrapResponse, CatalogEntry, CatalogListResponse, ErrorEnvelope, Operation, OperationAccepted, OperationsListResponse, RuntimeSnapshot, UiEvent } from './types';
 
 export { parseJson, ValidationError };
 
@@ -30,8 +30,16 @@ export function validateBootstrap(value: unknown, path = '$'): BootstrapResponse
   return checked('BootstrapResponse', value, path);
 }
 
+export function validateCatalogEntry(value: unknown, path = '$'): CatalogEntry {
+  return checked('CatalogEntry', value, path);
+}
+
 export function validateCatalogList(value: unknown, path = '$'): CatalogListResponse {
   return checked('CatalogListResponse', value, path);
+}
+
+export function validateOperationsList(value: unknown, path = '$'): OperationsListResponse {
+  return checked('OperationsListResponse', value, path);
 }
 
 export function validateOperation(value: unknown, path = '$'): Operation {

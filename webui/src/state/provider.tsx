@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import React from 'react';
-import { WebUiApiClient } from '../api/client';
+import { WebUiApiClient, WebUiHttpError } from '../api/client';
 import type { DownloadRequest, ModelActionRequest, ModelId, RemovalRequest, RuntimeSnapshot, WebUiSnapshot } from '../api/types';
 import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
 import { WebUiSynchronizer } from './sync';
@@ -34,6 +34,8 @@ export interface WebUiActions {
   readonly downloadModel: (request: DownloadRequest) => Promise<void>;
   readonly removeModel: (request: RemovalRequest) => Promise<void>;
   readonly refreshRuntime: (modelId: ModelId) => Promise<RuntimeSnapshot>;
+  readonly refreshCatalog: (idempotencyKey: string) => Promise<void>;
+  readonly cancelOperation: (operationId: string) => Promise<void>;
 }
 
 const SnapshotContext = React.createContext<WebUiSnapshot | null>(null);
@@ -43,8 +45,13 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
   const [snapshot, dispatch] = React.useReducer(reduceWebUiSnapshot, undefined, initialSnapshot);
   const snapshotRef = React.useRef(snapshot);
   snapshotRef.current = snapshot;
-  const client = React.useMemo(() => new WebUiApiClient({ apiBase, fetchImpl }), [apiBase, fetchImpl]);
+  const sessionRef = React.useRef(0);
   const syncRef = React.useRef<WebUiSynchronizer | null>(null);
+  const client = React.useMemo(() => new WebUiApiClient({ apiBase, fetchImpl, onUnauthorized: () => {
+    sessionRef.current += 1;
+    syncRef.current?.stop();
+    dispatch({ type: 'logout', now: Date.now() });
+  } }), [apiBase, fetchImpl]);
 
   React.useEffect(() => {
     const sync = new WebUiSynchronizer({ client, dispatch, getSnapshot: () => snapshotRef.current });
@@ -58,21 +65,27 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
 
   const actions = React.useMemo<WebUiActions>(() => ({
     login: async (token: string) => {
+      sessionRef.current += 1;
+      const session = sessionRef.current;
       client.abortAll();
       client.setBearerToken(token);
       dispatch({ type: 'login-start' });
       try {
         const bootstrap = await client.bootstrap();
+        if (sessionRef.current !== session) return;
         dispatch({ type: 'login-success', bootstrap, now: Date.now() });
         syncRef.current?.start();
       } catch (error) {
-        client.setBearerToken(null);
-        client.abortAll();
-        dispatch({ type: 'logout', now: Date.now() });
+        if (sessionRef.current === session) {
+          client.setBearerToken(null);
+          client.abortAll();
+          dispatch({ type: 'logout', now: Date.now() });
+        }
         throw error;
       }
     },
     logout: () => {
+      sessionRef.current += 1;
       syncRef.current?.stop();
       client.setBearerToken(null);
       client.abortAll();
@@ -99,14 +112,23 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       await submitOperation('removal', request.idempotency_key, request.model_id, () => client.removeModel(request));
     },
     refreshRuntime: async (modelId: ModelId) => client.runtime(modelId),
+    refreshCatalog: async (idempotencyKey: string) => {
+      await submitOperation('catalog-refresh', idempotencyKey, undefined, () => client.refreshCatalog(idempotencyKey));
+    },
+    cancelOperation: async (operationId: string) => {
+      await client.cancelOperation(operationId);
+      await syncRef.current?.refresh();
+    },
   }), [client]);
 
-  async function submitOperation(kind: 'model-action' | 'download' | 'removal', idempotencyKey: string, modelId: ModelId | undefined, submit: () => Promise<{ readonly operation_id: string }>): Promise<void> {
+  async function submitOperation(kind: 'model-action' | 'download' | 'removal' | 'catalog-refresh', idempotencyKey: string, modelId: ModelId | undefined, submit: () => Promise<{ readonly operation_id: string }>): Promise<void> {
     try {
       const accepted = await submit();
       syncRef.current?.noteUnknownPost({ kind, idempotencyKey, operationId: accepted.operation_id, modelId, createdAt: Date.now() });
     } catch (error) {
-      syncRef.current?.noteUnknownPost({ kind, idempotencyKey, operationId: null, modelId, createdAt: Date.now() });
+      if (!(error instanceof WebUiHttpError)) {
+        syncRef.current?.noteUnknownPost({ kind, idempotencyKey, operationId: null, modelId, createdAt: Date.now() });
+      }
       throw error;
     }
   }
