@@ -1,4 +1,4 @@
-# 이슈 #1839 — 라우터 라이프사이클 코디네이터와 워커 종료 게이트
+# PR #1860 / 이슈 #1839 — 라우터 라이프사이클 코디네이터와 워커 종료 게이트
 
 ## 요약
 
@@ -16,8 +16,8 @@ Unload는 새 admission을 멈추고, 활성 request lease drain을 기다리고
 
 기존 `/models`, `/models/load`, `/models/unload`, `/models/sse`, 라우터 dispatch 동작은 b10621 호환 형태를 유지한다. 기존 cache removal은 여전히 라우터 deletion 경로이며, reserved entry를 삭제 전에 멈춰야 할 때 lifecycle 보호를 받는다. WebUI 전용 removal operation은 이 이슈의 claim이 아니며 model-action/operation/event adapter와 별도 범위로 남아 있다.
 
-이슈 worktree에서 검증한 명령은 `cargo check --profile test-fast --features metal,accelerate --bin mlxcel-server`, `cargo test --profile test-fast --features metal,accelerate router_ -- --nocapture`, `/tmp/mlxcel-webui-contract/bin/python scripts/ci/check_webui_contract.py`이다. 집중 테스트는 contract identity vector, DTO fixture round-trip, busy/capacity 축 분리, event broadcast 순서, ring gap replay, operations list/get/cancel, revision 변경 후 idempotency replay, UI load terminal failure, explicit eviction refusal, rescan/delete reservation barrier, response-body lease drop, bounded shutdown report, WebUI HTTP action/operation/SSE adapter를 포함한다.
+이슈 worktree에서 검증한 명령은 `cargo check --profile test-fast --features metal,accelerate --bin mlxcel-server`, `cargo test --profile test-fast --features metal,accelerate router_ -- --nocapture`, `python scripts/ci/check_webui_contract.py` (using the local validator environment)이다. 집중 테스트는 contract identity vector, DTO fixture round-trip, busy/capacity 축 분리, event broadcast 순서, ring gap replay, operations list/get/cancel, revision 변경 후 idempotency replay, UI load terminal failure, explicit eviction refusal, rescan/delete reservation barrier, response-body lease drop, bounded shutdown report, WebUI HTTP action/operation/SSE adapter를 포함한다.
 
 ## 실제 체크포인트 수용 테스트
 
-GPU 체크포인트 harness는 `/tmp/epic-1834-run-5tpfu3lc/issue-1839-real-lifecycle-harness.sh`에 준비되어 있다. Harness는 모델 A를 로드하고 긴 streaming request를 시작한 뒤 response body가 살아 있는 동안 A unload를 요청하고, draining 중 새 admission이 거절되는지 확인하고, stream을 drop하고, worker-exit observation 로그를 확인한 뒤 `--models-max 1` 아래에서 모델 B를 로드한다. 또한 load/unload/load 전후 scoped process RSS 스냅샷을 기록하지만, RSS는 정보성 측정치이며 0 메모리 보장을 의미하지 않는다.
+Root가 조율하는 GPU 체크포인트 harness가 maintainer 실행용으로 준비되어 있다. Harness는 모델 A를 로드하고 긴 streaming request를 시작한 뒤 response body가 살아 있는 동안 A unload를 요청하고, draining 중 새 admission이 거절되는지 확인하고, stream을 drop하고, worker-exit observation 로그를 확인한 뒤 `--models-max 1` 아래에서 모델 B를 로드한다. 또한 load/unload/load 전후 scoped process RSS 스냅샷을 기록하지만, RSS는 정보성 측정치이며 0 메모리 보장을 의미하지 않는다.

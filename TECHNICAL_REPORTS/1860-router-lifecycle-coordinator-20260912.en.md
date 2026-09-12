@@ -1,4 +1,4 @@
-# Issue #1839 — Router lifecycle coordinator and worker-exit gating
+# PR #1860 / Issue #1839 — Router lifecycle coordinator and worker-exit gating
 
 ## Summary
 
@@ -16,8 +16,8 @@ Unload now stops new admission, waits for active request leases to drain, sends 
 
 Legacy `/models`, `/models/load`, `/models/unload`, `/models/sse`, and router dispatch behavior remain b10621-compatible; legacy cache removal remains the existing router deletion path, with lifecycle protection when a reserved entry must be stopped before deletion. The WebUI-specific removal operation is not claimed here and remains separate from this issue's model-action/operation/event adapters.
 
-Validation run in the issue worktree: `cargo check --profile test-fast --features metal,accelerate --bin mlxcel-server`; `cargo test --profile test-fast --features metal,accelerate router_ -- --nocapture`; `/tmp/mlxcel-webui-contract/bin/python scripts/ci/check_webui_contract.py`. The focused tests cover contract identity vectors, DTO fixture round-trips, busy-vs-capacity axes, ordered event broadcast, ring gap replay, operations list/get/cancel, idempotency replay after revision change, UI load terminal failure, explicit eviction refusal, rescan/delete reservation barriers, response-body lease drop, bounded shutdown reporting, and WebUI HTTP action/operation/SSE adapters.
+Validation run in the issue worktree: `cargo check --profile test-fast --features metal,accelerate --bin mlxcel-server`; `cargo test --profile test-fast --features metal,accelerate router_ -- --nocapture`; `python scripts/ci/check_webui_contract.py` (using the local validator environment). The focused tests cover contract identity vectors, DTO fixture round-trips, busy-vs-capacity axes, ordered event broadcast, ring gap replay, operations list/get/cancel, idempotency replay after revision change, UI load terminal failure, explicit eviction refusal, rescan/delete reservation barriers, response-body lease drop, bounded shutdown reporting, and WebUI HTTP action/operation/SSE adapters.
 
 ## Real checkpoint acceptance
 
-A GPU checkpoint harness was prepared at `/tmp/epic-1834-run-5tpfu3lc/issue-1839-real-lifecycle-harness.sh`. It loads model A, starts a long streaming request, unloads A while the response body is live, verifies new admission is refused while draining, drops the stream, checks the worker-exit observation log, then loads model B under `--models-max 1`. The harness also records scoped process RSS snapshots before/after load/unload/load; RSS is informational and not treated as a zero-memory promise.
+A root-coordinated GPU checkpoint harness was prepared for maintainer execution. It loads model A, starts a long streaming request, unloads A while the response body is live, verifies new admission is refused while draining, drops the stream, checks the worker-exit observation log, then loads model B under `--models-max 1`. The harness also records scoped process RSS snapshots before/after load/unload/load; RSS is informational and not treated as a zero-memory promise.
