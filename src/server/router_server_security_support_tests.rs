@@ -176,14 +176,30 @@ fn normalize_bootstrap_fixture(value: &mut serde_json::Value, expected: &serde_j
     );
 }
 
-#[tokio::test]
-async fn mounted_bootstrap_matches_full_model_free_fixture() {
+struct NoBootstrapDownload;
+
+impl crate::server::router_cache::RouterDownloader for NoBootstrapDownload {
+    fn validate(&self, _: &str) -> anyhow::Result<()> {
+        panic!("bootstrap must not probe the network");
+    }
+
+    fn download(
+        &self,
+        _: &str,
+        _: &Path,
+        _: crate::downloader::DownloadHooks,
+    ) -> anyhow::Result<()> {
+        panic!("bootstrap must not download a model");
+    }
+}
+
+async fn assert_mounted_bootstrap_fixture(with_cache: bool) {
     use axum::body::to_bytes;
     use axum::http::StatusCode;
 
-    let cache_root = temp_models_dir("bootstrap-fixture-cache");
+    let cache_root = tempfile::tempdir().expect("bootstrap fixture cache");
     let mut startup = ServerStartupConfig {
-        model_store_root: Some(cache_root),
+        model_store_root: Some(cache_root.path().to_path_buf()),
         ..Default::default()
     };
     startup.webui_enabled = true;
@@ -194,7 +210,12 @@ async fn mounted_bootstrap_matches_full_model_free_fixture() {
     let state = router_state_with_startup(
         RouterSources {
             models_dir: None,
-            cache: None,
+            cache: with_cache.then(|| {
+                crate::server::router_cache::CacheSource::new(
+                    cache_root.path().to_path_buf(),
+                    Arc::new(NoBootstrapDownload),
+                )
+            }),
             presets: Default::default(),
         },
         config,
@@ -214,15 +235,35 @@ async fn mounted_bootstrap_matches_full_model_free_fixture() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 32 * 1024).await.unwrap();
     let mut actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let expected: serde_json::Value = serde_json::from_str(include_str!(
+    let mut expected: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/webui/examples/bootstrap.model-free.json"
     ))
     .unwrap();
+    if !with_cache {
+        // The no-cache case intentionally keeps a startup hint, but its pool
+        // has no cache source. Change only expected cache-dependent fields;
+        // compare every producer field without normalizing away this state.
+        expected["roots"] = serde_json::json!([]);
+        for action in ["download", "cache_delete"] {
+            expected["actions"][action]["reason"] =
+                serde_json::json!("no writable managed cache route is available in this mode");
+        }
+    }
     normalize_bootstrap_fixture(&mut actual, &expected);
     assert_eq!(
         actual, expected,
         "mounted bootstrap producer drifted from the schema-validated fixture"
     );
+}
+
+#[tokio::test]
+async fn mounted_bootstrap_matches_full_model_free_fixture() {
+    assert_mounted_bootstrap_fixture(true).await;
+}
+
+#[tokio::test]
+async fn mounted_bootstrap_without_pool_cache_ignores_startup_cache_hint() {
+    assert_mounted_bootstrap_fixture(false).await;
 }
 
 fn secured_router_app(control_limit: usize, sse_limit: usize, control_rate_limit: usize) -> Router {
