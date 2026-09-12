@@ -266,7 +266,11 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
-pub(crate) use detection::is_sequence_classification_architecture;
+pub(crate) use detection::{
+    ModelDetectionProbes, config_has_embedding_architecture, detect_model_type_with_probes,
+    embedding_variant_for_model_type, is_encoder_only_model_type,
+    is_sequence_classification_architecture, modules_json_value_has_pooling,
+};
 pub use detection::{get_model_type, model_type_has_native_video, model_type_is_vision_capable};
 pub use diffusion_gemma::DiffusionGemmaModel;
 pub use dots1::Dots1Model;

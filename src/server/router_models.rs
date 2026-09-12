@@ -258,6 +258,30 @@ impl RouterModelEntry {
     }
 }
 
+/// Provider-confirmed capability facts projected only after an entry has a loaded provider.
+#[derive(Debug, Clone, Copy)]
+pub struct RouterCatalogProviderCapabilities {
+    pub image_input: bool,
+    pub audio_input: bool,
+}
+
+/// Read-only model data projected to WebUI catalog adapters.
+#[derive(Debug, Clone)]
+pub struct RouterCatalogModel {
+    pub name: String,
+    pub path: PathBuf,
+    pub source: RouterModelSource,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    pub ui_model_id: String,
+    pub source_key_hash: String,
+    pub hidden: bool,
+    pub lifecycle: LifecycleSnapshot,
+    pub revision: u64,
+    pub generation: u64,
+    pub provider_capabilities: Option<RouterCatalogProviderCapabilities>,
+}
+
 /// A status snapshot for `GET /models` and the SSE stream.
 #[derive(Debug, Clone)]
 pub struct RouterModelSnapshot {
@@ -826,6 +850,42 @@ impl RouterPool {
                         .preset
                         .as_ref()
                         .map(|section| section.to_ini(&entry.name)),
+                }
+            })
+            .collect()
+    }
+
+    pub fn catalog_snapshot(&self) -> Vec<RouterCatalogModel> {
+        let entries = match self.entries.read() {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(),
+        };
+        entries
+            .values()
+            .map(|entry| {
+                let provider_capabilities = entry.state.lock().ok().and_then(|guard| {
+                    guard.app.as_ref().and_then(|app| {
+                        app.state.model_provider.is_loaded().then_some(
+                            RouterCatalogProviderCapabilities {
+                                image_input: app.state.media_support.image,
+                                audio_input: app.state.media_support.audio,
+                            },
+                        )
+                    })
+                });
+                RouterCatalogModel {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    source: entry.source,
+                    aliases: entry.aliases.clone(),
+                    tags: entry.tags.clone(),
+                    ui_model_id: entry.ui_model_id.clone(),
+                    source_key_hash: entry.source_key_hash.clone(),
+                    hidden: entry.hidden,
+                    lifecycle: entry.lifecycle_snapshot(),
+                    revision: entry.lifecycle_revision(),
+                    generation: entry.lifecycle.generation(),
+                    provider_capabilities,
                 }
             })
             .collect()

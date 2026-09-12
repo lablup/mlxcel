@@ -58,6 +58,17 @@ fn add_fake_model(root: &std::path::Path, name: &str) {
     std::fs::write(dir.join("config.json"), "{}").expect("config.json");
 }
 
+fn add_catalog_model(root: &std::path::Path, name: &str, model_type: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).expect("model dir");
+    std::fs::write(
+        dir.join("config.json"),
+        format!(r#"{{"model_type":"{model_type}","quantization_config":{{"bits":4}}}}"#),
+    )
+    .expect("config.json");
+    std::fs::write(dir.join("model.safetensors"), b"weights").expect("weights");
+}
+
 /// Instant local "downloader" for route tests: materializes the snapshot and
 /// reports one terminal progress tick.
 struct InstantDownloader;
@@ -535,6 +546,80 @@ async fn base_router_does_not_mount_webui_adapters() {
     assert_eq!(
         body["error"]["message"],
         "model name is missing from the request"
+    );
+}
+
+#[tokio::test]
+async fn authenticated_webui_catalog_lists_reads_and_refreshes_router_pool() {
+    let root = temp_models_dir("ui-catalog");
+    add_catalog_model(&root, "alpha", "qwen3");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let status = status_only(app.clone(), Method::GET, "/ui-api/v1/catalog", "", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = send(
+        app.clone(),
+        Method::GET,
+        "/ui-api/v1/catalog?limit=1&q=alpha",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], "webui.ui-api.v1");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["identity"]["inference_id"], "alpha");
+    assert_eq!(body["items"][0]["metadata"]["model_type"], "qwen3");
+    assert_eq!(body["items"][0]["removal"]["eligible"], false);
+
+    let id = body["items"][0]["identity"]["id"].as_str().unwrap();
+    let (status, one) = send(
+        app.clone(),
+        Method::GET,
+        &format!("/ui-api/v1/catalog/{id}"),
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(one["identity"]["id"], id);
+
+    let (status, invalid) = send(
+        app.clone(),
+        Method::GET,
+        "/ui-api/v1/catalog?lifecycle=started",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid["error"]["field_errors"][0]["field"], "lifecycle");
+
+    let (status, accepted) = send(
+        app,
+        Method::POST,
+        "/ui-api/v1/catalog/refresh",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(accepted["state"], "queued");
+    assert!(
+        accepted["operation_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("op_catalog_refresh_")
     );
 }
 
@@ -1107,4 +1192,87 @@ async fn ui_events_emit_snapshot_and_gap_reset_with_sse_ids() {
     assert!(gap.contains("event: gap"), "{gap}");
     assert!(gap.contains("\"reason\":\"gap\""), "{gap}");
     contract::assert_gap_event(&gap, &server_instance);
+}
+
+#[tokio::test]
+async fn catalog_refresh_singleflights_and_reports_same_size_changes() {
+    use std::sync::{Mutex, mpsc};
+
+    let root = temp_models_dir("ui-refresh-singleflight");
+    add_catalog_model(&root, "alpha", "qwen3");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root.clone()),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state.clone());
+
+    std::fs::remove_dir_all(root.join("alpha")).expect("remove alpha");
+    add_catalog_model(&root, "beta", "qwen3");
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    state.pool.set_rescan_after_snapshot_hook(Some(Arc::new({
+        let release_rx = release_rx.clone();
+        move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.lock().expect("release lock").recv();
+        }
+    })));
+
+    let (status, first) = send(
+        app.clone(),
+        Method::POST,
+        "/ui-api/v1/catalog/refresh",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let op = first["operation_id"].as_str().unwrap().to_string();
+    tokio::task::spawn_blocking(move || started_rx.recv())
+        .await
+        .expect("started join")
+        .expect("refresh started");
+
+    let (status, replay) = send(
+        app.clone(),
+        Method::POST,
+        "/ui-api/v1/catalog/refresh",
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(replay["operation_id"], op);
+    assert_eq!(replay["idempotent_replay"], true);
+
+    release_tx.send(()).expect("release refresh");
+    state.pool.set_rescan_after_snapshot_hook(None);
+
+    let mut terminal = None;
+    for _ in 0..50 {
+        let (status, body) = send(
+            app.clone(),
+            Method::GET,
+            &format!("/ui-api/v1/operations/{op}"),
+            "",
+            Some(ROUTER_KEY),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        if body["state"] == "succeeded" {
+            terminal = Some(body);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let body = terminal.expect("refresh terminal");
+    assert_eq!(body["result"]["scanned_entries"], 1);
+    assert_eq!(body["result"]["changed_entries"], 2);
 }
