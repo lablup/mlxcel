@@ -185,7 +185,11 @@ CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 `MLX_CUDA_ARCHITECTURES`; see [Installation](installation.md#linux-with-cuda).
 ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
 `MLX_ROCM_ARCHITECTURES` (the `gfx` targets, default detected with `rocminfo`); see
-[Installation](installation.md#linux-with-amd-rocm-experimental).
+[Installation](installation.md#linux-with-amd-rocm-experimental). At runtime they
+also read `MLX_ROCM_FFT_CACHE_SIZE` (default 8), the number of hipFFT plans kept
+alive. The default is low on purpose: past roughly a dozen live plans, creating
+the next one blocks inside hipFFT with the GPU idle (lablup/mlxcel#1825). Raise
+it only while measuring that limit.
 
 ## OpenXLA / StableHLO backend variables
 

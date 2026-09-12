@@ -548,7 +548,14 @@ fn link_rocm(out_dir: &std::path::Path) {
     // The shared libraries the backend's CMake links (target_link_libraries
     // in mlx/backend/rocm/CMakeLists.txt).
     println!("cargo:rustc-link-search=native={}", rocm_lib.display());
-    for lib in ["amdhip64", "rocblas", "hiprand", "hiprtc", "hipblaslt"] {
+    for lib in [
+        "amdhip64",
+        "rocblas",
+        "hiprand",
+        "hiprtc",
+        "hipblaslt",
+        "hipfft",
+    ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 
