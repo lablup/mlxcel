@@ -137,6 +137,7 @@ fn pool_error_response(err: RouterPoolError) -> Response {
         }
         RouterPoolError::NotLoaded => llama_invalid_request("model is not loaded"),
         RouterPoolError::LoadFailed(message) => llama_server_error(&message),
+        RouterPoolError::LoadFailedWithEviction { message, .. } => llama_server_error(&message),
         RouterPoolError::Capacity(message) => llama_error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable_error",
@@ -153,6 +154,63 @@ fn pool_error_response(err: RouterPoolError) -> Response {
         RouterPoolError::OperationRejected(error) => {
             llama_error_response(StatusCode::CONFLICT, &error.code, &error.message)
         }
+    }
+}
+
+fn webui_pool_error_response(err: RouterPoolError) -> Response {
+    match err {
+        RouterPoolError::OperationRejected(error) => (
+            StatusCode::CONFLICT,
+            Json(ErrorEnvelope {
+                error,
+                request_id: request_id(),
+            }),
+        )
+            .into_response(),
+        RouterPoolError::NotFound(_) => webui_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "model was not found; refresh the catalog before retrying",
+            true,
+        ),
+        RouterPoolError::NotLoaded => webui_error(
+            StatusCode::CONFLICT,
+            "conflict",
+            "model is not loaded",
+            true,
+        ),
+        RouterPoolError::Capacity(_) => webui_error(
+            StatusCode::CONFLICT,
+            "conflict",
+            "model lifecycle capacity is unavailable; refresh and retry",
+            true,
+        ),
+        RouterPoolError::LoadFailed(_) | RouterPoolError::LoadFailedWithEviction { .. } => {
+            webui_error(
+                StatusCode::CONFLICT,
+                "conflict",
+                "model load failed; see server logs",
+                true,
+            )
+        }
+        RouterPoolError::MissingName => webui_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "model name is required",
+            true,
+        ),
+        RouterPoolError::NotRemovable(_) => webui_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported",
+            "model is not removable",
+            false,
+        ),
+        RouterPoolError::AlreadyExists(_) => webui_error(
+            StatusCode::CONFLICT,
+            "conflict",
+            "model already exists",
+            true,
+        ),
     }
 }
 
@@ -594,30 +652,10 @@ async fn ui_model_actions(
         request.eviction_target_id.as_deref(),
     ) {
         Ok(accepted) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
-        Err(RouterPoolError::NotFound(message)) => {
-            webui_error(StatusCode::NOT_FOUND, "not_found", message, true)
+        Err(err) => {
+            tracing::warn!(error = ?err, "router: rejected WebUI model action request");
+            webui_pool_error_response(err)
         }
-        Err(RouterPoolError::Capacity(message)) => {
-            webui_error(StatusCode::CONFLICT, "conflict", message, true)
-        }
-        Err(RouterPoolError::OperationRejected(error)) => (
-            StatusCode::CONFLICT,
-            Json(ErrorEnvelope {
-                error,
-                request_id: request_id(),
-            }),
-        )
-            .into_response(),
-        Err(RouterPoolError::LoadFailed(message)) => {
-            webui_error(StatusCode::CONFLICT, "conflict", message, true)
-        }
-        Err(RouterPoolError::NotLoaded) => webui_error(
-            StatusCode::CONFLICT,
-            "conflict",
-            "model is not loaded",
-            true,
-        ),
-        Err(err) => webui_error(StatusCode::CONFLICT, "conflict", format!("{err:?}"), true),
     }
 }
 
@@ -799,7 +837,7 @@ async fn ui_events(State(state): State<RouterServerState>, headers: HeaderMap) -
                         return Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let event = coordinator.publish_reset("gap", ResetEventKind::Gap);
+                        let event = coordinator.local_reset_event("gap", ResetEventKind::Gap);
                         return Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
@@ -1019,6 +1057,23 @@ async fn router_api_key_auth(
     }
 }
 
+/// UI management routes are never implicitly public: the explicit WebUI
+/// router accessor must be paired with a configured API key until #1837/#1838
+/// define the production mount and browser auth story.
+async fn router_ui_api_key_auth(
+    State(state): State<RouterServerState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if state.config.api_keys.is_empty() {
+        return super::auth::unauthorized_response();
+    }
+    match super::auth::presented_credential(request.headers()) {
+        Some(presented) if state.config.api_keys.accepts(presented) => next.run(request).await,
+        _ => super::auth::unauthorized_response(),
+    }
+}
+
 async fn router_cors_middleware(
     State(state): State<RouterServerState>,
     request: Request<Body>,
@@ -1027,8 +1082,7 @@ async fn router_cors_middleware(
     super::cors::apply_cors_policy(&state.config.cors_policy, request, next).await
 }
 
-/// Assemble the router-mode application.
-pub fn create_router_app(state: RouterServerState) -> axum::Router {
+fn router_base_routes() -> axum::Router<RouterServerState> {
     axum::Router::new()
         .route("/health", get(router_health))
         .route("/v1/health", get(router_health))
@@ -1044,6 +1098,10 @@ pub fn create_router_app(state: RouterServerState) -> axum::Router {
         .route("/models/load", post(router_models_load))
         .route("/models/unload", post(router_models_unload))
         .route("/models/sse", get(router_models_sse))
+}
+
+fn router_ui_routes(state: RouterServerState) -> axum::Router<RouterServerState> {
+    axum::Router::new()
         .route("/ui-api/v1/model-actions", post(ui_model_actions))
         .route("/ui-api/v1/operations", get(ui_operations_list))
         .route("/ui-api/v1/operations/:id", get(ui_operation_get))
@@ -1052,6 +1110,17 @@ pub fn create_router_app(state: RouterServerState) -> axum::Router {
             post(ui_operation_cancel),
         )
         .route("/ui-api/v1/events", get(ui_events))
+        .layer(middleware::from_fn_with_state(
+            state,
+            router_ui_api_key_auth,
+        ))
+}
+
+fn finish_router_app(
+    routes: axum::Router<RouterServerState>,
+    state: RouterServerState,
+) -> axum::Router {
+    routes
         .fallback(dispatch_fallback)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1063,6 +1132,21 @@ pub fn create_router_app(state: RouterServerState) -> axum::Router {
         ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Assemble the router-mode llama-compatible application. WebUI management
+/// routes stay unmounted here until #1838 wires startup-time opt-in and #1837
+/// wires browser-safe authentication.
+pub fn create_router_app(state: RouterServerState) -> axum::Router {
+    finish_router_app(router_base_routes(), state)
+}
+
+/// Assemble the router app with the issue #1839 WebUI adapters mounted behind
+/// mandatory API-key authentication for internal handler tests and the future
+/// secure startup mount.
+pub fn create_router_app_with_authenticated_ui(state: RouterServerState) -> axum::Router {
+    let routes = router_base_routes().merge(router_ui_routes(state.clone()));
+    finish_router_app(routes, state)
 }
 
 #[cfg(test)]

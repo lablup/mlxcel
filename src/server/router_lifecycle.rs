@@ -19,6 +19,7 @@
 //! authority so legacy load/unload, autoload and WebUI actions cannot race a
 //! second registry.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -80,11 +81,11 @@ pub enum DownloadState {
 
 #[allow(unused_imports)]
 pub use super::router_lifecycle_dto::{
-    CancelError, ErrorBody, ErrorEnvelope, FieldError, MeasuredValue, Operation, OperationAccepted,
-    OperationError, OperationKind, OperationResult, OperationState, OperationTarget,
-    OperationsListResponse, Pagination, ProgressBytes, ReplayError, RuntimePayload,
-    RuntimeSettingValue, RuntimeSettingsReport, RuntimeSnapshot, SettingsPayload, UiEvent,
-    UiEventPayload,
+    CancelError, ErrorBody, ErrorEnvelope, FieldError, MeasuredValue, ModelEvictionOutcome,
+    ModelEvictionReport, Operation, OperationAccepted, OperationError, OperationKind,
+    OperationResult, OperationState, OperationTarget, OperationsListResponse, Pagination,
+    ProgressBytes, ReplayError, RuntimePayload, RuntimeSettingValue, RuntimeSettingsReport,
+    RuntimeSnapshot, SettingsPayload, UiEvent, UiEventPayload,
 };
 pub use super::router_lifecycle_ops::{EVENT_RING_LIMIT, LifecycleCoordinator, ResetEventKind};
 
@@ -116,23 +117,45 @@ pub struct ModelLifecycle {
     inner: Mutex<LifecycleInner>,
     notify: tokio::sync::Notify,
     operation_lock: tokio::sync::Mutex<()>,
+    revision_authority: Option<Arc<AtomicU64>>,
 }
 
 impl ModelLifecycle {
     pub fn new(download: DownloadState) -> Self {
+        Self::new_with_revision(download, 1)
+    }
+
+    pub fn new_with_revision(download: DownloadState, revision: u64) -> Self {
+        Self::new_inner(download, revision.max(1), None)
+    }
+
+    pub fn new_with_revision_authority(
+        download: DownloadState,
+        revision_authority: Arc<AtomicU64>,
+    ) -> Self {
+        let revision = revision_authority.fetch_add(1, Ordering::SeqCst).max(1);
+        Self::new_inner(download, revision, Some(revision_authority))
+    }
+
+    fn new_inner(
+        download: DownloadState,
+        revision: u64,
+        revision_authority: Option<Arc<AtomicU64>>,
+    ) -> Self {
         Self {
             inner: Mutex::new(LifecycleInner {
                 state: ModelLifecycleState::Unloaded,
                 download,
                 active_requests: 0,
-                revision: 1,
-                generation: 1,
+                revision,
+                generation: revision,
                 admission_stopped: false,
                 worker_exit_observed: true,
                 last_error: None,
             }),
             notify: tokio::sync::Notify::new(),
             operation_lock: tokio::sync::Mutex::new(()),
+            revision_authority,
         }
     }
 
@@ -216,14 +239,14 @@ impl ModelLifecycle {
     pub fn mark_downloading(&self) {
         self.mutate(|g| {
             g.download = DownloadState::Downloading;
-            g.revision += 1;
+            g.revision = self.next_revision_after(g.revision);
         });
     }
 
     pub fn mark_download_terminal(&self, state: DownloadState) {
         self.mutate(|g| {
             g.download = state;
-            g.revision += 1;
+            g.revision = self.next_revision_after(g.revision);
         });
     }
 
@@ -233,15 +256,15 @@ impl ModelLifecycle {
             g.admission_stopped = true;
             g.worker_exit_observed = false;
             g.last_error = None;
-            g.revision += 1;
-            g.generation += 1;
+            g.revision = self.next_revision_after(g.revision);
+            g.generation = g.revision;
         });
     }
 
     pub fn mark_ready(&self) {
         self.mutate(|g| {
             if g.state != ModelLifecycleState::Ready {
-                g.revision += 1;
+                g.revision = self.next_revision_after(g.revision);
             }
             g.state = ModelLifecycleState::Ready;
             g.admission_stopped = false;
@@ -256,7 +279,7 @@ impl ModelLifecycle {
             g.admission_stopped = true;
             g.worker_exit_observed = worker_exit_observed;
             g.last_error = Some(error.into());
-            g.revision += 1;
+            g.revision = self.next_revision_after(g.revision);
         });
     }
 
@@ -265,7 +288,7 @@ impl ModelLifecycle {
             if g.state == ModelLifecycleState::Loading {
                 g.admission_stopped = true;
                 g.last_error = Some(error.into());
-                g.revision += 1;
+                g.revision = self.next_revision_after(g.revision);
             }
         });
     }
@@ -279,7 +302,7 @@ impl ModelLifecycle {
             ) {
                 g.state = ModelLifecycleState::Draining;
                 g.admission_stopped = true;
-                g.revision += 1;
+                g.revision = self.next_revision_after(g.revision);
                 changed = true;
             }
         });
@@ -290,7 +313,7 @@ impl ModelLifecycle {
         self.mutate(|g| {
             g.state = ModelLifecycleState::Unloading;
             g.admission_stopped = true;
-            g.revision += 1;
+            g.revision = self.next_revision_after(g.revision);
         });
     }
 
@@ -300,7 +323,7 @@ impl ModelLifecycle {
             g.admission_stopped = false;
             g.worker_exit_observed = true;
             g.last_error = None;
-            g.revision += 1;
+            g.revision = self.next_revision_after(g.revision);
         });
     }
 
@@ -309,7 +332,7 @@ impl ModelLifecycle {
             g.state = ModelLifecycleState::Draining;
             g.admission_stopped = true;
             g.last_error = Some(error.into());
-            g.revision += 1;
+            g.revision = self.next_revision_after(g.revision);
         });
     }
 
@@ -317,7 +340,7 @@ impl ModelLifecycle {
         self.mutate(|g| {
             if !g.worker_exit_observed {
                 g.worker_exit_observed = true;
-                g.revision += 1;
+                g.revision = self.next_revision_after(g.revision);
             }
         });
     }
@@ -359,6 +382,18 @@ impl ModelLifecycle {
             .is_err()
             {
                 return false;
+            }
+        }
+    }
+
+    fn next_revision_after(&self, current: u64) -> u64 {
+        let Some(authority) = &self.revision_authority else {
+            return current.saturating_add(1);
+        };
+        loop {
+            let revision = authority.fetch_add(1, Ordering::SeqCst);
+            if revision > current {
+                return revision;
             }
         }
     }

@@ -78,6 +78,8 @@ pub enum OperationTarget {
     Model {
         model_id: String,
         requested_revision: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eviction_target_id: Option<String>,
     },
     Catalog {
         scope: String,
@@ -96,7 +98,12 @@ pub enum OperationTarget {
 impl OperationTarget {
     pub(crate) fn matches_token(&self, token: &str) -> bool {
         match self {
-            Self::Model { model_id, .. } | Self::Settings { model_id, .. } => model_id == token,
+            Self::Model {
+                model_id,
+                eviction_target_id,
+                ..
+            } => model_id == token || eviction_target_id.as_ref().is_some_and(|id| id == token),
+            Self::Settings { model_id, .. } => model_id == token,
             Self::Catalog { scope, model_id } => {
                 scope == token || model_id.as_ref().is_some_and(|id| id == token)
             }
@@ -105,6 +112,22 @@ impl OperationTarget {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvictionOutcome {
+    NotNeeded,
+    Displaced,
+    FailedAfterDisplacement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEvictionReport {
+    pub requested_target_id: Option<String>,
+    pub displaced_model_id: Option<String>,
+    pub outcome: ModelEvictionOutcome,
+    pub rollbackable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,16 +203,22 @@ pub enum OperationResult {
         model_id: String,
         revision: u64,
         lifecycle: LifecycleSnapshot,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eviction: Option<ModelEvictionReport>,
     },
     ModelUnload {
         model_id: String,
         revision: u64,
         lifecycle: LifecycleSnapshot,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eviction: Option<ModelEvictionReport>,
     },
     ModelRemoval {
         model_id: String,
         revision: u64,
         lifecycle: LifecycleSnapshot,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eviction: Option<ModelEvictionReport>,
     },
     Download {
         repo_id: String,

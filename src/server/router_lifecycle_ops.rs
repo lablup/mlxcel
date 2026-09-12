@@ -346,6 +346,31 @@ impl LifecycleCoordinator {
         }
     }
 
+    pub fn local_reset_event(&self, reason: &str, event_kind: ResetEventKind) -> UiEvent {
+        let inner = self.inner.lock().expect("lifecycle coordinator poisoned");
+        let payload = ResetPayload {
+            reason: reason.to_string(),
+            resnapshot: true,
+        };
+        match event_kind {
+            ResetEventKind::Reset => self.ephemeral_event_locked(
+                inner.next_sequence,
+                "reset",
+                UiEventPayload::Reset(payload),
+            ),
+            ResetEventKind::Gap => self.ephemeral_event_locked(
+                inner.next_sequence,
+                "gap",
+                UiEventPayload::Gap(payload),
+            ),
+            ResetEventKind::ServerRestart => self.ephemeral_event_locked(
+                inner.next_sequence,
+                "server_restart",
+                UiEventPayload::ServerRestart(payload),
+            ),
+        }
+    }
+
     pub fn publish_payload(&self, payload: UiEventPayload) -> UiEvent {
         let mut inner = self.inner.lock().expect("lifecycle coordinator poisoned");
         self.append_and_broadcast_locked(&mut inner, payload)

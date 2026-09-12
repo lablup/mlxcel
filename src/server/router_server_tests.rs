@@ -27,7 +27,8 @@ use futures::StreamExt;
 use tower::ServiceExt;
 
 use super::{
-    RouterServerState, buffer_dispatch_body, create_router_app, dispatch_model_name, parse_query,
+    RouterServerState, buffer_dispatch_body, create_router_app,
+    create_router_app_with_authenticated_ui, dispatch_model_name, parse_query,
 };
 use crate::downloader::DownloadHooks;
 use crate::server::ServerStartupConfig;
@@ -35,6 +36,8 @@ use crate::server::config::ServerConfig;
 use crate::server::router_cache::{CacheSource, RouterDownloader};
 use crate::server::router_models::{RouterPool, RouterSources};
 use crate::server::router_presets::PresetCliOverrides;
+
+const ROUTER_KEY: &str = "router-key";
 
 fn temp_models_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -99,6 +102,13 @@ fn router_state_from(
     RouterServerState {
         pool,
         config: Arc::new(config),
+    }
+}
+
+fn keyed_config() -> ServerConfig {
+    ServerConfig {
+        api_keys: crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys"),
+        ..Default::default()
     }
 }
 
@@ -167,6 +177,123 @@ async fn send(
         .expect("body");
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+fn assert_schema_token(value: &str, max_len: usize, context: &str) {
+    assert!(
+        !value.is_empty() && value.len() <= max_len,
+        "{context} length must match schema: {value}"
+    );
+    assert!(
+        value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '~' | '-')),
+        "{context} must be a printable schema token: {value}"
+    );
+}
+
+fn assert_model_id_schema(value: &str, context: &str) {
+    assert!(
+        value.starts_with("mdl_"),
+        "{context} must start with mdl_: {value}"
+    );
+    assert_eq!(
+        value.len(),
+        47,
+        "{context} must be mdl_ plus 43 URL-safe base64 characters: {value}"
+    );
+    assert!(
+        value[4..]
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')),
+        "{context} must match the ModelId character set: {value}"
+    );
+}
+
+fn assert_rfc3339_timestamp(value: &str, context: &str) {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .unwrap_or_else(|err| panic!("{context} must be RFC3339 date-time: {value}: {err}"));
+}
+
+fn assert_actual_operation_matches_schema_fixture(
+    operation: &serde_json::Value,
+    target_model_id: &str,
+    eviction_target_id: &str,
+) {
+    let dto: crate::server::router_lifecycle::Operation =
+        serde_json::from_value(operation.clone()).expect("actual producer Operation DTO");
+    assert_eq!(
+        serde_json::to_value(dto).expect("Operation serialize"),
+        *operation,
+        "actual producer output must round-trip through the strict Rust DTO without extra keys"
+    );
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/webui/examples/operation.succeeded.json"
+    ))
+    .expect("operation fixture");
+    assert_eq!(operation["kind"], fixture["kind"]);
+    assert_eq!(operation["state"], fixture["state"]);
+    assert_eq!(operation["idempotency_scope"], fixture["idempotency_scope"]);
+    assert_eq!(
+        operation["target"]["target_kind"],
+        fixture["target"]["target_kind"]
+    );
+    assert_eq!(
+        operation["result"]["result_kind"],
+        fixture["result"]["result_kind"]
+    );
+    assert_eq!(
+        operation["result"]["eviction"]["outcome"],
+        fixture["result"]["eviction"]["outcome"]
+    );
+    assert_eq!(operation["result"]["eviction"]["rollbackable"], false);
+    assert_eq!(
+        operation["progress"]["total_bytes"],
+        serde_json::Value::Null
+    );
+    assert_eq!(operation["progress"]["indeterminate"], true);
+    assert_eq!(operation["error"], serde_json::Value::Null);
+    assert_eq!(operation["cancel_reason"], serde_json::Value::Null);
+
+    let operation_id = operation["operation_id"]
+        .as_str()
+        .expect("operation_id string");
+    assert_schema_token(operation_id, 128, "operation_id");
+    assert_rfc3339_timestamp(
+        operation["created_at"].as_str().expect("created_at string"),
+        "created_at",
+    );
+    assert_rfc3339_timestamp(
+        operation["updated_at"].as_str().expect("updated_at string"),
+        "updated_at",
+    );
+    assert_eq!(
+        operation["target"]["model_id"].as_str(),
+        Some(target_model_id)
+    );
+    assert_eq!(
+        operation["target"]["eviction_target_id"].as_str(),
+        Some(eviction_target_id)
+    );
+    assert_eq!(
+        operation["result"]["model_id"].as_str(),
+        Some(target_model_id)
+    );
+    assert_eq!(
+        operation["result"]["eviction"]["requested_target_id"].as_str(),
+        Some(eviction_target_id)
+    );
+    assert_eq!(
+        operation["result"]["eviction"]["displaced_model_id"].as_str(),
+        Some(eviction_target_id)
+    );
+    for (context, value) in [
+        ("target.model_id", target_model_id),
+        ("target.eviction_target_id", eviction_target_id),
+    ] {
+        assert_model_id_schema(value, context);
+    }
 }
 
 #[tokio::test]
@@ -407,7 +534,7 @@ async fn dispatch_get_patch_api_key_guards_query_selected_models() {
     let root = temp_models_dir("dispatch-auth");
     add_fake_model(&root, "alpha");
     let config = ServerConfig {
-        api_keys: crate::server::resolve_api_keys(&["router-key".to_string()], &[]).expect("keys"),
+        api_keys: crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys"),
         ..Default::default()
     };
     let app = router_app_with(root, config, false);
@@ -423,14 +550,8 @@ async fn dispatch_get_patch_api_key_guards_query_selected_models() {
         let (status, _) = send(app.clone(), method.clone(), path, payload, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
 
-        let (status, body) = send(
-            app.clone(),
-            method.clone(),
-            path,
-            payload,
-            Some("router-key"),
-        )
-        .await;
+        let (status, body) =
+            send(app.clone(), method.clone(), path, payload, Some(ROUTER_KEY)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {body}");
         assert_eq!(
             body["error"]["message"], "model is not loaded",
@@ -482,7 +603,7 @@ async fn health_is_public_and_management_routes_are_keyed() {
     let root = temp_models_dir("auth");
     add_fake_model(&root, "alpha");
     let config = ServerConfig {
-        api_keys: crate::server::resolve_api_keys(&["router-key".to_string()], &[]).expect("keys"),
+        api_keys: crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys"),
         ..Default::default()
     };
     let app = router_app_with(root, config, true);
@@ -501,8 +622,6 @@ async fn health_is_public_and_management_routes_are_keyed() {
         (Method::POST, "/models", r#"{"model":"x"}"#),
         (Method::DELETE, "/models?model=alpha", ""),
         (Method::POST, "/v1/chat/completions", r#"{"model":"alpha"}"#),
-        (Method::GET, "/ui-api/v1/operations", ""),
-        (Method::GET, "/ui-api/v1/events", ""),
     ] {
         let status = status_only(app.clone(), method.clone(), path, payload, None).await;
         assert_eq!(
@@ -510,20 +629,45 @@ async fn health_is_public_and_management_routes_are_keyed() {
             StatusCode::UNAUTHORIZED,
             "{method} {path} must require a key"
         );
-        let status = status_only(
-            app.clone(),
-            method.clone(),
-            path,
-            payload,
-            Some("router-key"),
-        )
-        .await;
+        let status =
+            status_only(app.clone(), method.clone(), path, payload, Some(ROUTER_KEY)).await;
         assert_ne!(
             status,
             StatusCode::UNAUTHORIZED,
             "{method} {path} must accept the configured key"
         );
     }
+}
+
+#[tokio::test]
+async fn base_router_does_not_mount_webui_adapters() {
+    let root = temp_models_dir("ui-off");
+    add_fake_model(&root, "alpha");
+    let app = router_app_with(root, ServerConfig::default(), true);
+    let (status, body) = send(app, Method::GET, "/ui-api/v1/operations", "", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"]["message"],
+        "model name is missing from the request"
+    );
+}
+
+#[tokio::test]
+async fn explicit_webui_router_requires_configured_api_key() {
+    let root = temp_models_dir("ui-auth-required");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        ServerConfig::default(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    let status = status_only(app, Method::GET, "/ui-api/v1/operations", "", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 /// A request cannot smuggle a filesystem path through the model field: names
@@ -720,7 +864,8 @@ async fn first_sse_chunk(app: Router, last_event_id: Option<&str>) -> String {
     let mut builder = Request::builder()
         .method(Method::GET)
         .uri("/ui-api/v1/events")
-        .header(header::ACCEPT, "text/event-stream");
+        .header(header::ACCEPT, "text/event-stream")
+        .header(header::AUTHORIZATION, format!("Bearer {ROUTER_KEY}"));
     if let Some(event_id) = last_event_id {
         builder = builder.header("Last-Event-ID", event_id);
     }
@@ -748,7 +893,7 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
             cache: None,
             presets: Default::default(),
         },
-        ServerConfig::default(),
+        keyed_config(),
         true,
     );
     let entry = state.pool.get("alpha").expect("entry");
@@ -760,43 +905,85 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
             crate::server::router_lifecycle::OperationTarget::Model {
                 model_id: entry.ui_model_id.clone(),
                 requested_revision: Some(entry.lifecycle_revision()),
+                eviction_target_id: Some(entry.ui_model_id.clone()),
             },
             Some("route-ops-0001"),
             "route:ops:1".to_string(),
         )
         .expect("operation");
-    let app = create_router_app(state);
+    state.pool.lifecycle_coordinator().update_operation(
+        &accepted.operation_id,
+        crate::server::router_lifecycle::OperationState::Succeeded,
+        Some(
+            crate::server::router_lifecycle::OperationResult::ModelLoad {
+                model_id: entry.ui_model_id.clone(),
+                revision: entry.lifecycle_revision(),
+                lifecycle: entry.lifecycle_snapshot(),
+                eviction: Some(crate::server::router_lifecycle::ModelEvictionReport {
+                    requested_target_id: Some(entry.ui_model_id.clone()),
+                    displaced_model_id: Some(entry.ui_model_id.clone()),
+                    outcome: crate::server::router_lifecycle::ModelEvictionOutcome::Displaced,
+                    rollbackable: false,
+                }),
+            },
+        ),
+        None,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
 
     let (status, body) = send(
         app.clone(),
         Method::GET,
         "/ui-api/v1/operations?kind=model_load&limit=10",
         "",
-        None,
+        Some(ROUTER_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let list_dto: crate::server::router_lifecycle::OperationsListResponse =
+        serde_json::from_value(body.clone()).expect("actual producer OperationsListResponse DTO");
+    assert_eq!(
+        serde_json::to_value(list_dto).expect("OperationsListResponse serialize"),
+        body,
+        "actual operations list must round-trip through the strict producer DTO"
+    );
+    assert_schema_token(
+        body["server_instance_id"]
+            .as_str()
+            .expect("server_instance_id string"),
+        128,
+        "server_instance_id",
+    );
+    assert_eq!(body["pagination"]["limit"], 10);
+    assert_eq!(body["pagination"]["next_cursor"], serde_json::Value::Null);
+    assert_eq!(body["pagination"]["total_known"], 1);
+    assert!(body["snapshot_sequence"].as_u64().is_some());
     assert_eq!(body["items"].as_array().unwrap().len(), 1);
     assert_eq!(body["items"][0]["operation_id"], accepted.operation_id);
-    assert_eq!(body["items"][0]["result"], serde_json::Value::Null);
+    assert_actual_operation_matches_schema_fixture(
+        &body["items"][0],
+        &entry.ui_model_id,
+        &entry.ui_model_id,
+    );
 
     let (status, body) = send(
         app.clone(),
         Method::GET,
         &format!("/ui-api/v1/operations/{}", accepted.operation_id),
         "",
-        None,
+        Some(ROUTER_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["operation_id"], accepted.operation_id);
+    assert_actual_operation_matches_schema_fixture(&body, &entry.ui_model_id, &entry.ui_model_id);
 
     let (status, body) = send(
         app,
         Method::POST,
         &format!("/ui-api/v1/operations/{}/cancel", accepted.operation_id),
         "",
-        None,
+        Some(ROUTER_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -814,11 +1001,11 @@ async fn ui_model_action_route_validates_profile_fields_and_idempotency() {
             cache: None,
             presets: Default::default(),
         },
-        ServerConfig::default(),
+        keyed_config(),
         true,
     );
     let entry = state.pool.get("alpha").expect("entry");
-    let app = create_router_app(state);
+    let app = create_router_app_with_authenticated_ui(state);
     let body = serde_json::json!({
         "model_id": entry.ui_model_id,
         "action": "load",
@@ -836,7 +1023,7 @@ async fn ui_model_action_route_validates_profile_fields_and_idempotency() {
         Method::POST,
         "/ui-api/v1/model-actions",
         &body.to_string(),
-        None,
+        Some(ROUTER_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
@@ -856,13 +1043,13 @@ async fn ui_model_action_route_rejects_contract_invalid_fields() {
             cache: None,
             presets: Default::default(),
         },
-        ServerConfig::default(),
+        keyed_config(),
         true,
     );
     let entry = state.pool.get("alpha").expect("entry");
     let model_id = entry.ui_model_id.clone();
     let revision = entry.lifecycle_revision();
-    let app = create_router_app(state);
+    let app = create_router_app_with_authenticated_ui(state);
 
     let cases = vec![
         (
@@ -958,7 +1145,7 @@ async fn ui_model_action_route_rejects_contract_invalid_fields() {
             Method::POST,
             "/ui-api/v1/model-actions",
             &body.to_string(),
-            None,
+            Some(ROUTER_KEY),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {response}");
@@ -971,7 +1158,16 @@ async fn ui_model_action_route_rejects_contract_invalid_fields() {
 async fn ui_operations_routes_reject_invalid_filters_and_ids() {
     let root = temp_models_dir("ui-ops-contract-invalid");
     add_fake_model(&root, "alpha");
-    let app = router_app_with(root, ServerConfig::default(), true);
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
 
     let list_cases = vec![
         ("/ui-api/v1/operations?state=unknown", "state"),
@@ -981,7 +1177,7 @@ async fn ui_operations_routes_reject_invalid_filters_and_ids() {
         ("/ui-api/v1/operations?target=bad/path", "target"),
     ];
     for (uri, field) in list_cases {
-        let (status, response) = send(app.clone(), Method::GET, uri, "", None).await;
+        let (status, response) = send(app.clone(), Method::GET, uri, "", Some(ROUTER_KEY)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {response}");
         assert_eq!(response["error"]["field_errors"][0]["field"], field);
     }
@@ -991,7 +1187,7 @@ async fn ui_operations_routes_reject_invalid_filters_and_ids() {
         Method::GET,
         "/ui-api/v1/operations/bad%20id",
         "",
-        None,
+        Some(ROUTER_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
@@ -1002,7 +1198,7 @@ async fn ui_operations_routes_reject_invalid_filters_and_ids() {
         Method::POST,
         "/ui-api/v1/operations/bad%20id/cancel",
         "",
-        None,
+        Some(ROUTER_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
@@ -1019,7 +1215,7 @@ async fn ui_events_emit_snapshot_and_gap_reset_with_sse_ids() {
             cache: None,
             presets: Default::default(),
         },
-        ServerConfig::default(),
+        keyed_config(),
         true,
     );
     let server_instance = state
@@ -1027,7 +1223,7 @@ async fn ui_events_emit_snapshot_and_gap_reset_with_sse_ids() {
         .lifecycle_coordinator()
         .server_instance_id()
         .to_string();
-    let app = create_router_app(state);
+    let app = create_router_app_with_authenticated_ui(state);
 
     let snapshot = first_sse_chunk(app.clone(), None).await;
     assert!(snapshot.contains("event: snapshot"), "{snapshot}");

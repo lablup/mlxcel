@@ -40,7 +40,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::body::Body;
@@ -49,9 +49,9 @@ use futures::StreamExt;
 use super::model_provider::WorkerExitObserver;
 use super::router_cache::CacheSource;
 use super::router_lifecycle::{
-    DownloadState, ErrorBody, LifecycleCoordinator, LifecycleSnapshot, ModelLifecycle,
-    ModelLifecycleState, OperationError, OperationKind, OperationResult, OperationState,
-    OperationTarget, stable_model_identity,
+    DownloadState, ErrorBody, LifecycleCoordinator, LifecycleSnapshot, ModelEvictionOutcome,
+    ModelEvictionReport, ModelLifecycle, ModelLifecycleState, OperationError, OperationKind,
+    OperationResult, OperationState, OperationTarget, stable_model_identity,
 };
 use super::router_presets::{PresetCliOverrides, PresetSection, RouterPresets};
 use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig};
@@ -63,6 +63,8 @@ pub const ROUTER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 
 #[cfg(test)]
 type RescanAfterSnapshotHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+type ModelActionBeforeExecuteHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// b10621 `server_model_status` (the subset an in-process pool reaches;
 /// `downloaded` is upstream's "erase on next reload" marker, which the
@@ -295,11 +297,14 @@ pub struct RouterPool {
     pub autoload_default: bool,
     events: tokio::sync::broadcast::Sender<serde_json::Value>,
     lifecycle: Arc<LifecycleCoordinator>,
+    revision_authority: Arc<AtomicU64>,
     /// Serializes model loads so two concurrent autoloads cannot race the
     /// capacity check or contend the accelerator during weight upload.
     load_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
     rescan_after_snapshot_hook: Mutex<Option<RescanAfterSnapshotHook>>,
+    #[cfg(test)]
+    model_action_before_execute_hook: Mutex<Option<ModelActionBeforeExecuteHook>>,
 }
 
 /// Why a name failed to resolve, load, download, or be removed.
@@ -316,6 +321,10 @@ pub enum RouterPoolError {
     AlreadyExists(String),
     /// A WebUI operation was recorded but rejected before background execution.
     OperationRejected(ErrorBody),
+    LoadFailedWithEviction {
+        message: String,
+        eviction: ModelEvictionReport,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +339,30 @@ pub struct RouterShutdownReport {
     pub completed: Vec<String>,
     pub remaining: Vec<String>,
     pub timed_out: bool,
+}
+
+#[derive(Clone)]
+struct LoadStartOutcome {
+    entry: Arc<RouterModelEntry>,
+    eviction: Option<ModelEvictionReport>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadEntryExpectation {
+    model_id: String,
+    revision: u64,
+}
+
+#[derive(Clone)]
+struct EvictionTarget {
+    entry: Arc<RouterModelEntry>,
+    expectation: LoadEntryExpectation,
+}
+
+impl EvictionTarget {
+    fn model_id(&self) -> &str {
+        &self.expectation.model_id
+    }
 }
 
 impl RouterPool {
@@ -352,9 +385,12 @@ impl RouterPool {
             autoload_default,
             events,
             lifecycle: Arc::new(LifecycleCoordinator::new()),
+            revision_authority: Arc::new(AtomicU64::new(1)),
             load_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             rescan_after_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            model_action_before_execute_hook: Mutex::new(None),
         };
         pool.rescan()?;
         Ok(pool)
@@ -366,6 +402,17 @@ impl RouterPool {
             .rescan_after_snapshot_hook
             .lock()
             .expect("rescan hook mutex poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_model_action_before_execute_hook(
+        &self,
+        hook: Option<ModelActionBeforeExecuteHook>,
+    ) {
+        *self
+            .model_action_before_execute_hook
+            .lock()
+            .expect("model action hook mutex poisoned") = hook;
     }
 
     /// Build the per-model [`super::config::ServerConfig`] by overlaying the
@@ -400,6 +447,13 @@ impl RouterPool {
             RouterModelSource::Preset => (format!("preset:{name}"), 2),
         };
         stable_model_identity(source.as_str(), rank, &source_key, name)
+    }
+
+    fn fresh_lifecycle(&self, download: DownloadState) -> Arc<ModelLifecycle> {
+        Arc::new(ModelLifecycle::new_with_revision_authority(
+            download,
+            self.revision_authority.clone(),
+        ))
     }
 
     /// Scan every source and reconcile the registry (b10621 `load_models`):
@@ -517,7 +571,7 @@ impl RouterPool {
                     preset: self.sources.presets.models.get(name).cloned(),
                     config,
                     state: Mutex::new(EntryState::default()),
-                    lifecycle: Arc::new(ModelLifecycle::new(DownloadState::Complete)),
+                    lifecycle: self.fresh_lifecycle(DownloadState::Complete),
                     last_used: AtomicI64::new(0),
                 }),
             );
@@ -620,6 +674,38 @@ impl RouterPool {
             .cloned()
     }
 
+    fn ensure_entry_is_current(
+        &self,
+        entry: &Arc<RouterModelEntry>,
+        expectation: Option<&LoadEntryExpectation>,
+    ) -> Result<(), RouterPoolError> {
+        let current = self
+            .entries
+            .read()
+            .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?
+            .get(&entry.name)
+            .cloned();
+        if !current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, entry))
+        {
+            return Err(RouterPoolError::OperationRejected(stale_catalog_error(
+                expectation.map(|e| e.revision),
+                entry.lifecycle.revision(),
+            )));
+        }
+        if let Some(expectation) = expectation {
+            if entry.ui_model_id != expectation.model_id {
+                return Err(RouterPoolError::OperationRejected(stale_catalog_error(
+                    Some(expectation.revision),
+                    entry.lifecycle.revision(),
+                )));
+            }
+            reject_stale_revision(entry, Some(expectation.revision))?;
+        }
+        Ok(())
+    }
+
     /// Name-or-alias lookup (request routing).
     pub fn lookup(&self, name: &str) -> Option<Arc<RouterModelEntry>> {
         let entries = self.entries.read().ok()?;
@@ -718,19 +804,64 @@ impl RouterPool {
         allow_lru_eviction: bool,
         expected_revision: Option<u64>,
     ) -> Result<Arc<RouterModelEntry>, RouterPoolError> {
+        let _permit = self.load_lock.lock().await;
         let entry = self
             .get(name)
             .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
+        let expectation = expected_revision.map(|revision| LoadEntryExpectation {
+            model_id: entry.ui_model_id.clone(),
+            revision,
+        });
+        let eviction_target = match eviction_target {
+            Some(name) => {
+                let target = self
+                    .get(name)
+                    .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
+                Some(EvictionTarget {
+                    expectation: LoadEntryExpectation {
+                        model_id: target.ui_model_id.clone(),
+                        revision: target.lifecycle.revision(),
+                    },
+                    entry: target,
+                })
+            }
+            None => None,
+        };
+        self.begin_load_entry_locked(
+            entry,
+            eviction_target.as_ref(),
+            allow_lru_eviction,
+            expectation.as_ref(),
+        )
+        .await
+        .map(|outcome| outcome.entry)
+    }
+
+    async fn begin_load_entry_locked(
+        &self,
+        entry: Arc<RouterModelEntry>,
+        eviction_target: Option<&EvictionTarget>,
+        allow_lru_eviction: bool,
+        expectation: Option<&LoadEntryExpectation>,
+    ) -> Result<LoadStartOutcome, RouterPoolError> {
+        let name = entry.name.clone();
+        let _entry_permit = entry.lifecycle.operation_guard().await;
+        self.ensure_entry_is_current(&entry, expectation)?;
         if entry.is_downloading() {
             return Err(RouterPoolError::LoadFailed(format!(
                 "model '{name}' is still downloading"
             )));
         }
-        let _permit = self.load_lock.lock().await;
-        let _entry_permit = entry.lifecycle.operation_guard().await;
-        reject_stale_revision(&entry, expected_revision)?;
         if entry.is_running() {
-            return Ok(entry.clone());
+            return Ok(LoadStartOutcome {
+                entry: entry.clone(),
+                eviction: eviction_target.map(|target| ModelEvictionReport {
+                    requested_target_id: Some(target.model_id().to_string()),
+                    displaced_model_id: None,
+                    outcome: ModelEvictionOutcome::NotNeeded,
+                    rollbackable: true,
+                }),
+            });
         }
         if entry.reserves_capacity() {
             return Err(RouterPoolError::Capacity(format!(
@@ -738,16 +869,22 @@ impl RouterPool {
             )));
         }
 
+        let mut eviction_report = eviction_target.map(|target| ModelEvictionReport {
+            requested_target_id: Some(target.model_id().to_string()),
+            displaced_model_id: None,
+            outcome: ModelEvictionOutcome::NotNeeded,
+            rollbackable: true,
+        });
+
         // Capacity: evict least-recently-used loaded entries until a slot
         // frees. A pool whose running entries are all still loading cannot be
         // evicted from and refuses the new load instead of thrashing.
         if self.models_max > 0 {
-            let mut explicit_victim = eviction_target.map(ToString::to_string);
+            let mut explicit_victim = eviction_target.cloned();
             while self.running_count() >= self.models_max {
-                let victim = if let Some(target_name) = explicit_victim.take() {
-                    let victim = self
-                        .get(&target_name)
-                        .ok_or_else(|| RouterPoolError::NotFound(target_name.clone()))?;
+                let (victim, victim_expectation) = if let Some(target) = explicit_victim.take() {
+                    self.ensure_entry_is_current(&target.entry, Some(&target.expectation))?;
+                    let victim = target.entry.clone();
                     if victim.name == entry.name {
                         return Err(RouterPoolError::Capacity(
                             "eviction target cannot be the model being loaded".to_string(),
@@ -761,28 +898,31 @@ impl RouterPool {
                             victim.name
                         )));
                     }
-                    victim
+                    (victim, Some(target.expectation.clone()))
                 } else if allow_lru_eviction {
-                    self.entries
-                        .read()
-                        .ok()
-                        .and_then(|entries| {
-                            entries
-                                .values()
-                                .filter(|e| {
-                                    e.status() == RouterModelStatus::Loaded
-                                        && e.lifecycle_snapshot().active_requests == 0
-                                        && e.lifecycle.state() == ModelLifecycleState::Ready
-                                })
-                                .min_by_key(|e| e.last_used.load(Ordering::Relaxed))
-                                .cloned()
-                        })
-                        .ok_or_else(|| {
-                            RouterPoolError::Capacity(format!(
-                                "models_max ({}) reached and every loaded model is busy",
-                                self.models_max
-                            ))
-                        })?
+                    (
+                        self.entries
+                            .read()
+                            .ok()
+                            .and_then(|entries| {
+                                entries
+                                    .values()
+                                    .filter(|e| {
+                                        e.status() == RouterModelStatus::Loaded
+                                            && e.lifecycle_snapshot().active_requests == 0
+                                            && e.lifecycle.state() == ModelLifecycleState::Ready
+                                    })
+                                    .min_by_key(|e| e.last_used.load(Ordering::Relaxed))
+                                    .cloned()
+                            })
+                            .ok_or_else(|| {
+                                RouterPoolError::Capacity(format!(
+                                    "models_max ({}) reached and every loaded model is busy",
+                                    self.models_max
+                                ))
+                            })?,
+                        None,
+                    )
                 } else {
                     return Err(RouterPoolError::Capacity(format!(
                         "models_max ({}) reached; provide an explicit eviction target",
@@ -795,10 +935,17 @@ impl RouterPool {
                     name,
                     self.models_max
                 );
-                self.unload_entry(&victim).await?;
+                self.unload_entry_arc_with_expected(victim.clone(), victim_expectation.as_ref())
+                    .await?;
+                if let Some(report) = eviction_report.as_mut() {
+                    report.displaced_model_id = Some(victim.ui_model_id.clone());
+                    report.outcome = ModelEvictionOutcome::Displaced;
+                    report.rollbackable = false;
+                }
             }
         }
 
+        self.ensure_entry_is_current(&entry, expectation)?;
         entry.lifecycle.mark_loading();
         self.notify_lifecycle(&entry);
 
@@ -829,16 +976,37 @@ impl RouterPool {
                     serde_json::json!({ "status": entry.status().as_str() }),
                 );
                 self.spawn_ready_monitor(entry.clone());
-                Ok(entry.clone())
+                Ok(LoadStartOutcome {
+                    entry: entry.clone(),
+                    eviction: eviction_report,
+                })
             }
             Err(err) => {
+                tracing::warn!(
+                    model = %entry.name,
+                    ui_model_id = %entry.ui_model_id,
+                    error = %format_args!("{err:#}"),
+                    "router: failed to construct model app"
+                );
                 if let Ok(mut guard) = entry.state.lock() {
                     guard.app = None;
                     guard.failed = true;
                 }
-                entry.lifecycle.mark_failed(err.to_string(), true);
+                entry
+                    .lifecycle
+                    .mark_failed("model failed to initialize; see server logs", true);
                 self.notify_lifecycle(&entry);
                 self.notify_status(&entry);
+                if let Some(mut eviction) = eviction_report
+                    && eviction.displaced_model_id.is_some()
+                {
+                    eviction.outcome = ModelEvictionOutcome::FailedAfterDisplacement;
+                    eviction.rollbackable = false;
+                    return Err(RouterPoolError::LoadFailedWithEviction {
+                        message: err.to_string(),
+                        eviction,
+                    });
+                }
                 Err(RouterPoolError::LoadFailed(err.to_string()))
             }
         }
@@ -1055,6 +1223,7 @@ impl RouterPool {
                 OperationTarget::Model {
                     model_id: model_id.to_string(),
                     requested_revision: Some(expected_revision),
+                    eviction_target_id: eviction_target_id.map(ToString::to_string),
                 },
                 Some(idempotency_key),
                 fingerprint,
@@ -1072,59 +1241,63 @@ impl RouterPool {
         }
 
         let Some(entry) = self.get_by_model_id(model_id) else {
-            self.lifecycle.update_operation(
-                &accepted.operation_id,
-                OperationState::Failed,
-                None,
-                Some(ErrorBody {
-                    code: "not_found".to_string(),
-                    message: format!("model id '{model_id}' not found"),
-                    retryable: true,
-                    field_errors: None,
-                    operation_id: Some(accepted.operation_id.clone()),
-                }),
-            );
-            return Err(RouterPoolError::NotFound(model_id.to_string()));
-        };
-        if entry.lifecycle.revision() != expected_revision {
             let error = ErrorBody {
-                code: "stale_revision".to_string(),
-                message: "catalog entry revision changed; refresh before retrying".to_string(),
+                code: "not_found".to_string(),
+                message: "model was not found; refresh the catalog before retrying".to_string(),
                 retryable: true,
-                field_errors: Some(vec![super::router_lifecycle::FieldError {
-                    field: "expected_revision".to_string(),
-                    code: "stale".to_string(),
-                    message: format!(
-                        "expected {expected_revision} but current revision is {}",
-                        entry.lifecycle.revision()
-                    ),
-                }]),
+                field_errors: None,
                 operation_id: Some(accepted.operation_id.clone()),
             };
             self.lifecycle.update_operation(
                 &accepted.operation_id,
                 OperationState::Failed,
                 None,
+                Some(error),
+            );
+            return Err(RouterPoolError::NotFound(model_id.to_string()));
+        };
+        let expectation = LoadEntryExpectation {
+            model_id: model_id.to_string(),
+            revision: expected_revision,
+        };
+        if let Err(err) = self.ensure_entry_is_current(&entry, Some(&expectation)) {
+            let error = operation_error_for_router_error(&err, accepted.operation_id.clone());
+            self.lifecycle.update_operation(
+                &accepted.operation_id,
+                OperationState::Failed,
+                None,
                 Some(error.clone()),
             );
-            return Err(RouterPoolError::OperationRejected(error));
+            return Err(match err {
+                RouterPoolError::OperationRejected(_) => RouterPoolError::OperationRejected(error),
+                other => other,
+            });
         }
 
-        let eviction_target_name = match eviction_target_id {
+        let eviction_target = match eviction_target_id {
             Some(target_id) => match self.get_by_model_id(target_id) {
-                Some(target) => Some(target.name.clone()),
+                Some(target) => Some(EvictionTarget {
+                    expectation: LoadEntryExpectation {
+                        model_id: target.ui_model_id.clone(),
+                        revision: target.lifecycle.revision(),
+                    },
+                    entry: target,
+                }),
                 None => {
+                    let error = ErrorBody {
+                        code: "not_found".to_string(),
+                        message:
+                            "eviction target was not found; refresh the catalog before retrying"
+                                .to_string(),
+                        retryable: true,
+                        field_errors: None,
+                        operation_id: Some(accepted.operation_id.clone()),
+                    };
                     self.lifecycle.update_operation(
                         &accepted.operation_id,
                         OperationState::Failed,
                         None,
-                        Some(ErrorBody {
-                            code: "not_found".to_string(),
-                            message: format!("eviction target id '{target_id}' not found"),
-                            retryable: true,
-                            field_errors: None,
-                            operation_id: Some(accepted.operation_id.clone()),
-                        }),
+                        Some(error),
                     );
                     return Err(RouterPoolError::NotFound(target_id.to_string()));
                 }
@@ -1132,89 +1305,111 @@ impl RouterPool {
             None => None,
         };
 
-        if let Some((err, code, message)) = match action {
-            RouterModelAction::Load if entry.is_running() => Some((
-                RouterPoolError::LoadFailed(format!("model '{}' is already running", entry.name)),
-                "conflict",
+        if let Some(err) = match action {
+            RouterModelAction::Load if entry.is_running() => Some(RouterPoolError::LoadFailed(
                 format!("model '{}' is already running", entry.name),
             )),
-            RouterModelAction::Load if entry.reserves_capacity() => Some((
-                RouterPoolError::Capacity(format!(
+            RouterModelAction::Load if entry.reserves_capacity() => {
+                Some(RouterPoolError::Capacity(format!(
                     "model '{}' still owns resources; worker exit has not been observed",
                     entry.name
-                )),
-                "conflict",
-                format!("model '{}' still owns resources", entry.name),
-            )),
+                )))
+            }
             RouterModelAction::Unload if !entry.reserves_capacity() && !entry.is_downloading() => {
-                Some((
-                    RouterPoolError::NotLoaded,
-                    "invalid_request",
-                    format!("model '{}' is not loaded", entry.name),
-                ))
+                Some(RouterPoolError::NotLoaded)
             }
             _ => None,
         } {
+            let error = operation_error_for_router_error(&err, accepted.operation_id.clone());
             self.lifecycle.update_operation(
                 &accepted.operation_id,
                 OperationState::Failed,
                 None,
-                Some(ErrorBody {
-                    code: code.to_string(),
-                    message,
-                    retryable: true,
-                    field_errors: None,
-                    operation_id: Some(accepted.operation_id.clone()),
-                }),
+                Some(error),
             );
             return Err(err);
         }
+
         let pool = self.clone();
         let operation_id = accepted.operation_id.clone();
-        let model_name = entry.name.clone();
+        let requested_model_id = model_id.to_string();
         tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(hook) = pool
+                .model_action_before_execute_hook
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                hook();
+            }
+
             pool.lifecycle
                 .update_operation(&operation_id, OperationState::Running, None, None);
+            let expectation = LoadEntryExpectation {
+                model_id: requested_model_id.clone(),
+                revision: expected_revision,
+            };
+            let mut eviction: Option<ModelEvictionReport> = None;
             let result = match action {
-                RouterModelAction::Load => match pool
-                    .begin_load_with_policy(
-                        &model_name,
-                        eviction_target_name.as_deref(),
-                        false,
-                        Some(expected_revision),
-                    )
-                    .await
-                {
-                    Ok(entry) => pool
-                        .wait_for_ready_entry(entry, &model_name, ROUTER_LOAD_READY_TIMEOUT)
+                RouterModelAction::Load => {
+                    let start = {
+                        let _permit = pool.load_lock.lock().await;
+                        pool.begin_load_entry_locked(
+                            entry.clone(),
+                            eviction_target.as_ref(),
+                            false,
+                            Some(&expectation),
+                        )
                         .await
-                        .map(|_| ()),
-                    Err(err) => Err(err),
-                },
+                    };
+                    match start {
+                        Ok(outcome) => {
+                            eviction = outcome.eviction.clone();
+                            pool.wait_for_ready_entry(
+                                outcome.entry.clone(),
+                                &outcome.entry.name,
+                                ROUTER_LOAD_READY_TIMEOUT,
+                            )
+                            .await
+                            .map(|_| ())
+                        }
+                        Err(RouterPoolError::LoadFailedWithEviction {
+                            message,
+                            eviction: report,
+                        }) => {
+                            eviction = Some(report);
+                            Err(RouterPoolError::LoadFailed(message))
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
                 RouterModelAction::Unload => {
-                    pool.unload_with_expected(&model_name, Some(expected_revision))
-                        .await
+                    if entry.is_downloading() {
+                        pool.unload_with_expected(&entry.name, Some(expected_revision))
+                            .await
+                    } else {
+                        pool.unload_entry_arc_with_expected(entry.clone(), Some(&expectation))
+                            .await
+                    }
                 }
             };
-            let entry = pool.get(&model_name);
-            let lifecycle = entry.as_ref().map(|entry| entry.lifecycle_snapshot());
-            match (result, lifecycle) {
-                (Ok(()), Some(lifecycle)) => {
-                    let model_id = entry
-                        .as_ref()
-                        .map(|e| e.ui_model_id.clone())
-                        .unwrap_or(model_name.clone());
-                    let revision = entry.as_ref().map(|e| e.lifecycle.revision()).unwrap_or(1);
+            let lifecycle = entry.lifecycle_snapshot();
+            match result {
+                Ok(()) => {
+                    let revision = entry.lifecycle.revision();
                     let result = match action {
                         RouterModelAction::Load => OperationResult::ModelLoad {
-                            model_id,
+                            model_id: requested_model_id.clone(),
                             revision,
                             lifecycle,
+                            eviction,
                         },
                         RouterModelAction::Unload => OperationResult::ModelUnload {
-                            model_id,
+                            model_id: requested_model_id.clone(),
                             revision,
                             lifecycle,
+                            eviction: None,
                         },
                     };
                     pool.lifecycle.update_operation(
@@ -1224,43 +1419,25 @@ impl RouterPool {
                         None,
                     );
                 }
-                (Err(RouterPoolError::OperationRejected(mut error)), _) => {
-                    if error.operation_id.is_none() {
-                        error.operation_id = Some(operation_id.clone());
-                    }
+                Err(err) => {
+                    tracing::warn!(
+                        operation_id = %operation_id,
+                        model_id = %requested_model_id,
+                        error = ?err,
+                        "router: WebUI model action failed"
+                    );
+                    let result = eviction.map(|eviction| OperationResult::ModelLoad {
+                        model_id: requested_model_id.clone(),
+                        revision: entry.lifecycle.revision(),
+                        lifecycle,
+                        eviction: Some(eviction),
+                    });
+                    let error = operation_error_for_router_error(&err, operation_id.clone());
                     pool.lifecycle.update_operation(
                         &operation_id,
                         OperationState::Failed,
-                        None,
+                        result,
                         Some(error),
-                    );
-                }
-                (Err(err), _) => {
-                    pool.lifecycle.update_operation(
-                        &operation_id,
-                        OperationState::Failed,
-                        None,
-                        Some(ErrorBody {
-                            code: "conflict".to_string(),
-                            message: format!("{err:?}"),
-                            retryable: true,
-                            field_errors: None,
-                            operation_id: Some(operation_id.clone()),
-                        }),
-                    );
-                }
-                (Ok(()), None) => {
-                    pool.lifecycle.update_operation(
-                        &operation_id,
-                        OperationState::Failed,
-                        None,
-                        Some(ErrorBody {
-                            code: "not_found".to_string(),
-                            message: "model disappeared before operation finished".to_string(),
-                            retryable: true,
-                            field_errors: None,
-                            operation_id: Some(operation_id.clone()),
-                        }),
                     );
                 }
             }
@@ -1268,24 +1445,25 @@ impl RouterPool {
         Ok(accepted)
     }
 
-    async fn unload_entry(&self, entry: &RouterModelEntry) -> Result<(), RouterPoolError> {
-        self.unload_entry_with_expected(entry, None).await
+    async fn unload_entry(&self, entry: &Arc<RouterModelEntry>) -> Result<(), RouterPoolError> {
+        self.unload_entry_arc_with_expected(entry.clone(), None)
+            .await
     }
 
-    async fn unload_entry_with_expected(
+    async fn unload_entry_arc_with_expected(
         &self,
-        entry: &RouterModelEntry,
-        expected_revision: Option<u64>,
+        entry: Arc<RouterModelEntry>,
+        expectation: Option<&LoadEntryExpectation>,
     ) -> Result<(), RouterPoolError> {
         let _entry_permit = entry.lifecycle.operation_guard().await;
-        reject_stale_revision(entry, expected_revision)?;
+        self.ensure_entry_is_current(&entry, expectation)?;
         let app = entry.state.lock().ok().and_then(|guard| guard.app.clone());
         let Some(app) = app else {
             return Err(RouterPoolError::NotLoaded);
         };
         entry.lifecycle.begin_drain();
-        self.notify_lifecycle(entry);
-        self.notify_status(entry);
+        self.notify_lifecycle(&entry);
+        self.notify_status(&entry);
         if !entry
             .lifecycle
             .wait_for_zero_active(ROUTER_DRAIN_TIMEOUT)
@@ -1296,15 +1474,16 @@ impl RouterPool {
                 entry.name,
                 ROUTER_DRAIN_TIMEOUT.as_secs()
             ));
-            self.notify_lifecycle(entry);
+            self.notify_lifecycle(&entry);
             return Err(RouterPoolError::Capacity(format!(
                 "model '{}' is still draining active requests",
                 entry.name
             )));
         }
 
+        self.ensure_entry_is_current(&entry, expectation)?;
         entry.lifecycle.mark_unloading();
-        self.notify_lifecycle(entry);
+        self.notify_lifecycle(&entry);
         let observer = app.state.model_provider.worker_exit_observer();
         let _ = app.state.model_provider.shutdown_worker();
         let observed =
@@ -1323,7 +1502,7 @@ impl RouterPool {
                 entry.name,
                 ROUTER_WORKER_EXIT_TIMEOUT.as_secs()
             ));
-            self.notify_lifecycle(entry);
+            self.notify_lifecycle(&entry);
             return Err(RouterPoolError::Capacity(format!(
                 "model '{}' worker exit is still pending",
                 entry.name
@@ -1340,8 +1519,8 @@ impl RouterPool {
         }
         drop(app);
         entry.lifecycle.mark_unloaded();
-        self.notify_lifecycle(entry);
-        self.notify_status(entry);
+        self.notify_lifecycle(&entry);
+        self.notify_status(&entry);
         Ok(())
     }
 
@@ -1360,7 +1539,11 @@ impl RouterPool {
         let entry = self
             .get(name)
             .ok_or_else(|| RouterPoolError::NotFound(name.to_string()))?;
-        reject_stale_revision(&entry, expected_revision)?;
+        let expectation = expected_revision.map(|revision| LoadEntryExpectation {
+            model_id: entry.ui_model_id.clone(),
+            revision,
+        });
+        self.ensure_entry_is_current(&entry, expectation.as_ref())?;
         let cancel_download = entry
             .state
             .lock()
@@ -1372,12 +1555,14 @@ impl RouterPool {
             })
             .is_some();
         if cancel_download {
-            return self.wait_for_download_stop(&entry).await;
+            let result = self.wait_for_download_stop(&entry).await;
+            self.ensure_entry_is_current(&entry, expectation.as_ref())?;
+            return result;
         }
         if !entry.reserves_capacity() {
             return Err(RouterPoolError::NotLoaded);
         }
-        self.unload_entry_with_expected(&entry, expected_revision)
+        self.unload_entry_arc_with_expected(entry, expectation.as_ref())
             .await
     }
 
@@ -1426,6 +1611,24 @@ impl RouterPool {
     }
 }
 
+fn stale_catalog_error(expected_revision: Option<u64>, current_revision: u64) -> ErrorBody {
+    ErrorBody {
+        code: "stale_revision".to_string(),
+        message: "catalog entry changed; refresh before retrying".to_string(),
+        retryable: true,
+        field_errors: expected_revision.map(|expected_revision| {
+            vec![super::router_lifecycle::FieldError {
+                field: "expected_revision".to_string(),
+                code: "stale".to_string(),
+                message: format!(
+                    "expected {expected_revision} but current revision is {current_revision}"
+                ),
+            }]
+        }),
+        operation_id: None,
+    }
+}
+
 fn stale_revision_error(entry: &RouterModelEntry, expected_revision: u64) -> ErrorBody {
     ErrorBody {
         code: "stale_revision".to_string(),
@@ -1456,6 +1659,69 @@ fn reject_stale_revision(
         )));
     }
     Ok(())
+}
+
+fn operation_error_for_router_error(err: &RouterPoolError, operation_id: String) -> ErrorBody {
+    match err {
+        RouterPoolError::OperationRejected(error) => {
+            let mut error = error.clone();
+            if error.operation_id.is_none() {
+                error.operation_id = Some(operation_id);
+            }
+            error
+        }
+        RouterPoolError::NotFound(_) => ErrorBody {
+            code: "not_found".to_string(),
+            message: "model was not found; refresh the catalog before retrying".to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: Some(operation_id),
+        },
+        RouterPoolError::NotLoaded => ErrorBody {
+            code: "invalid_request".to_string(),
+            message: "model is not loaded".to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: Some(operation_id),
+        },
+        RouterPoolError::Capacity(_) => ErrorBody {
+            code: "conflict".to_string(),
+            message: "model lifecycle capacity is unavailable; refresh and retry".to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: Some(operation_id),
+        },
+        RouterPoolError::LoadFailed(_) | RouterPoolError::LoadFailedWithEviction { .. } => {
+            ErrorBody {
+                code: "conflict".to_string(),
+                message: "model load failed; see server logs".to_string(),
+                retryable: true,
+                field_errors: None,
+                operation_id: Some(operation_id),
+            }
+        }
+        RouterPoolError::MissingName => ErrorBody {
+            code: "invalid_request".to_string(),
+            message: "model name is required".to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: Some(operation_id),
+        },
+        RouterPoolError::NotRemovable(_) => ErrorBody {
+            code: "unsupported".to_string(),
+            message: "model is not removable".to_string(),
+            retryable: false,
+            field_errors: None,
+            operation_id: Some(operation_id),
+        },
+        RouterPoolError::AlreadyExists(_) => ErrorBody {
+            code: "conflict".to_string(),
+            message: "model already exists".to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: Some(operation_id),
+        },
+    }
 }
 
 fn response_with_lease(
@@ -1576,7 +1842,7 @@ impl RouterPool {
                     progress: serde_json::json!({ "progress": {} }),
                 }),
             }),
-            lifecycle: Arc::new(ModelLifecycle::new(DownloadState::Downloading)),
+            lifecycle: self.fresh_lifecycle(DownloadState::Downloading),
             last_used: AtomicI64::new(0),
         });
         {
@@ -1707,6 +1973,7 @@ impl RouterPool {
         let Some(cache) = &self.sources.cache else {
             return Err(RouterPoolError::NotRemovable(name.to_string()));
         };
+        self.ensure_entry_is_current(&entry, None)?;
 
         if let Ok(guard) = entry.state.lock()
             && let Some(download) = &guard.download
@@ -1715,7 +1982,8 @@ impl RouterPool {
             download.cancel.store(true, Ordering::Relaxed);
         }
         // Wait for the download worker to acknowledge the cancel (it clears
-        // the download state in its completion block).
+        // the download state in its completion block). The method does not
+        // report success until the worker-visible state has actually stopped.
         let waited = std::time::Instant::now();
         while entry.is_downloading() {
             if waited.elapsed() > std::time::Duration::from_secs(120) {
@@ -1725,17 +1993,56 @@ impl RouterPool {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        if entry.reserves_capacity() {
+        let still_registered = {
+            let entries = self
+                .entries
+                .read()
+                .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?;
+            match entries.get(name) {
+                Some(current) if Arc::ptr_eq(current, &entry) => true,
+                Some(_) => {
+                    return Err(RouterPoolError::OperationRejected(stale_catalog_error(
+                        None,
+                        entry.lifecycle.revision(),
+                    )));
+                }
+                None => false,
+            }
+        };
+        if still_registered && entry.reserves_capacity() {
             tracing::info!("router: stopping model instance '{name}' before removal");
             self.unload_entry(&entry).await?;
         }
 
+        let _entry_permit = entry.lifecycle.operation_guard().await;
+        {
+            let mut entries = self
+                .entries
+                .write()
+                .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?;
+            match entries.get(name) {
+                Some(current) if Arc::ptr_eq(current, &entry) => {
+                    if entry.reserves_capacity() || entry.is_downloading() {
+                        return Err(RouterPoolError::NotLoaded);
+                    }
+                    entries.remove(name);
+                }
+                Some(_) => {
+                    return Err(RouterPoolError::OperationRejected(stale_catalog_error(
+                        None,
+                        entry.lifecycle.revision(),
+                    )));
+                }
+                None => {
+                    if entry.reserves_capacity() || entry.is_downloading() {
+                        return Err(RouterPoolError::NotLoaded);
+                    }
+                }
+            }
+        }
         cache
             .remove(name)
             .map_err(|err| RouterPoolError::LoadFailed(err.to_string()))?;
-        if let Ok(mut entries) = self.entries.write() {
-            entries.remove(name);
-        }
         self.notify("model_remove", name, serde_json::Value::Null);
         Ok(())
     }

@@ -1,3 +1,17 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,6 +88,7 @@ fn lifecycle_coordinator_replays_idempotent_operations() {
     let target = OperationTarget::Model {
         model_id: "mdl_test".to_string(),
         requested_revision: Some(7),
+        eviction_target_id: None,
     };
 
     let accepted = coordinator
@@ -120,6 +135,7 @@ fn lifecycle_coordinator_replays_idempotent_operations() {
             OperationTarget::Model {
                 model_id: "mdl_test".to_string(),
                 requested_revision: Some(7),
+                eviction_target_id: None,
             },
             Some("idem-1"),
             "load:mdl_test:7".to_string(),
@@ -140,6 +156,7 @@ fn lifecycle_coordinator_prunes_idempotency_with_terminal_history() {
                 OperationTarget::Model {
                     model_id: format!("mdl_{idx}"),
                     requested_revision: Some(idx),
+                    eviction_target_id: None,
                 },
                 Some(&format!("key-{idx}")),
                 format!("load:{idx}"),
@@ -159,6 +176,7 @@ fn lifecycle_coordinator_prunes_idempotency_with_terminal_history() {
             OperationTarget::Model {
                 model_id: "mdl_0".to_string(),
                 requested_revision: Some(0),
+                eviction_target_id: None,
             },
             Some("key-0"),
             "load:0".to_string(),
@@ -263,6 +281,7 @@ fn lifecycle_coordinator_lists_gets_and_reports_cancel_unsupported() {
             OperationTarget::Model {
                 model_id: "mdl_test".to_string(),
                 requested_revision: Some(3),
+                eviction_target_id: None,
             },
             Some("ops-list-key"),
             "load:mdl_test:3".to_string(),
