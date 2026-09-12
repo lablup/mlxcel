@@ -52,7 +52,7 @@ use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, lo
 const MODEL_DIR: &str = "deepseek-v4-flash-4bit";
 
 #[test]
-#[ignore]
+#[ignore = "real-model heavy (~151 GB checkpoint on disk; needs a high-memory Apple Silicon host)"]
 fn deepseek_v4_real_model_loads_and_generates_coherently() {
     let model_dir = repo_model_dir(MODEL_DIR);
     if !model_dir.join("config.json").exists() {
@@ -108,7 +108,7 @@ fn deepseek_v4_real_model_loads_and_generates_coherently() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "real-model heavy (~151 GB checkpoint on disk; needs a high-memory Apple Silicon host)"]
 fn deepseek_v4_real_model_decode_crosses_pooling_windows() {
     // A longer decode than one compress window (ratio 4) plus one full
     // simple window boundary region, so decode-mode pooling emission and the
@@ -142,7 +142,7 @@ fn deepseek_v4_real_model_decode_crosses_pooling_windows() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "real-model heavy (~151 GB checkpoint on disk; needs a high-memory Apple Silicon host)"]
 fn deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths() {
     // The sparse split-softmax and the batched/decode HiSA selection only
     // run once a ratio-4 layer's pooled count exceeds index_topk (512), i.e.
@@ -233,7 +233,7 @@ fn deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths() {
 /// world knowledge. Making the answer purely synthetic would test retrieval
 /// harder and be far less stable on a base checkpoint at this length.
 #[test]
-#[ignore]
+#[ignore = "real-model heavy (~151 GB checkpoint on disk; needs a high-memory Apple Silicon host)"]
 fn deepseek_v4_real_model_long_context_engages_hisa_hierarchy() {
     let model_dir = repo_model_dir(MODEL_DIR);
     if !model_dir.join("config.json").exists() {
@@ -359,7 +359,7 @@ fn deepseek_v4_real_model_long_context_engages_hisa_hierarchy() {
 /// crash or a degenerate output in any band shows up.
 ///
 #[test]
-#[ignore]
+#[ignore = "real-model heavy (~151 GB checkpoint on disk; needs a high-memory Apple Silicon host)"]
 fn deepseek_v4_real_model_hisa_decode_cost_scaling() {
     let model_dir = repo_model_dir(MODEL_DIR);
     if !model_dir.join("config.json").exists() {
