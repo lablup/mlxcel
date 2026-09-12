@@ -95,6 +95,20 @@ async fn the_data_entry_carries_the_b10621_key_set() {
 }
 
 #[tokio::test]
+async fn ctx_size_zero_reports_the_effective_context_in_model_meta() {
+    let body = get_models(
+        app_with(ServerConfig {
+            context_size: 0,
+            ..Default::default()
+        }),
+        "/v1/models",
+    )
+    .await;
+
+    assert_eq!(body["data"][0]["meta"]["n_ctx"], 4096);
+}
+
+#[tokio::test]
 async fn the_ollama_block_mirrors_b10621() {
     let body = get_models(app_with(ServerConfig::default()), "/models").await;
     let entry = &body["models"][0];

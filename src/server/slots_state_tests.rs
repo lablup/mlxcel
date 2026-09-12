@@ -108,7 +108,7 @@ fn task_counters_survive_release_like_task_prev() {
     let slot = &slots[0];
     assert_eq!(slot["id"], 0);
     assert_eq!(slot["is_processing"], false);
-    assert_eq!(slot["n_prompt_tokens"], 10);
+    assert_eq!(slot["n_prompt_tokens"], 12);
     assert_eq!(slot["n_prompt_tokens_cache"], 3);
     assert_eq!(slot["n_prompt_tokens_processed"], 7);
     let next = &slot["next_token"][0];
@@ -116,6 +116,48 @@ fn task_counters_survive_release_like_task_prev() {
     assert_eq!(next["has_new_line"], true);
     assert_eq!(next["n_decoded"], 2);
     assert_eq!(next["n_remain"], 2);
+}
+
+#[test]
+fn prefill_progress_binds_and_reports_b10621_counters_live() {
+    let reg = registry(1, false);
+    let handle = reg.begin("long prompt", serde_json::json!({}), Some(8));
+
+    handle.on_prefill_progress(12, 4, 4);
+    assert_eq!(handle.id_slot(), 0);
+    let slots = reg.slots_json(2048, false, false);
+    assert_eq!(slots[0]["is_processing"], true);
+    assert_eq!(slots[0]["n_prompt_tokens"], 4);
+    assert_eq!(slots[0]["n_prompt_tokens_cache"], 4);
+    assert_eq!(slots[0]["n_prompt_tokens_processed"], 0);
+
+    handle.on_prefill_progress(12, 4, 9);
+    let slots = reg.slots_json(2048, false, false);
+    assert_eq!(slots[0]["n_prompt_tokens"], 9);
+    assert_eq!(slots[0]["n_prompt_tokens_processed"], 5);
+
+    handle.on_prefill_progress(12, 4, 12);
+    handle.on_token("a");
+    handle.on_token("b");
+    let slots = reg.slots_json(2048, false, false);
+    assert_eq!(slots[0]["n_prompt_tokens"], 14);
+    assert_eq!(slots[0]["next_token"][0]["n_decoded"], 2);
+}
+
+#[test]
+fn queued_request_behind_prefilling_request_stays_unbound() {
+    let reg = registry(1, false);
+    let prefilling = reg.begin("served first", serde_json::json!({}), None);
+    let queued = reg.begin("still queued", serde_json::json!({}), None);
+
+    prefilling.on_prefill_progress(32, 0, 8);
+    assert_eq!(prefilling.id_slot(), 0);
+    assert_eq!(queued.id_slot(), -1);
+
+    let slots = reg.slots_json(4096, false, false);
+    assert_eq!(slots[0]["is_processing"], true);
+    assert_eq!(slots[0]["n_prompt_tokens_processed"], 8);
+    assert_eq!(slots[0]["n_prompt_tokens"], 8);
 }
 
 #[test]

@@ -141,9 +141,11 @@ pub async fn slots(
     }
 
     let speculative = state.config.draft_model_path.is_some();
-    let body = state
-        .slots
-        .slots_json(state.config.context_size, speculative, state.slots_debug);
+    let body = state.slots.slots_json(
+        state.effective_context_size(),
+        speculative,
+        state.slots_debug,
+    );
     Json(body).into_response()
 }
 

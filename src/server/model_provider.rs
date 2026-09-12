@@ -1399,12 +1399,26 @@ impl ModelProvider {
     }
 
     /// Generate using runtime defaults captured by the admitting HTTP request.
+    #[allow(dead_code)]
     pub(crate) fn generate_with_live(
         &self,
         prompt: String,
         options: ServerGenerateOptions,
         live: &crate::server::LiveSettings,
     ) -> Result<GenerationResult> {
+        self.generate_with_live_with_prefill(prompt, options, live, |_| {})
+    }
+
+    pub(crate) fn generate_with_live_with_prefill<P>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        live: &crate::server::LiveSettings,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        P: FnMut(PrefillStats),
+    {
         self.generate_with_media_and_videos_declared_runtime(
             prompt,
             options,
@@ -1413,6 +1427,7 @@ impl ModelProvider {
             Vec::new(),
             MediaRequestMetadata::default(),
             Some(RequestRuntimeDefaults::from_live(live)),
+            on_prefill,
         )
     }
 
@@ -1473,11 +1488,19 @@ impl ModelProvider {
         media: MediaRequestMetadata,
     ) -> Result<GenerationResult> {
         self.generate_with_media_and_videos_declared_runtime(
-            prompt, options, images, audio, videos, media, None,
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            None,
+            |_| {},
         )
     }
 
     /// Prepared HTTP generation with one captured live-settings snapshot.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_with_media_and_videos_declared_live(
         &self,
@@ -1497,11 +1520,41 @@ impl ModelProvider {
             videos,
             media,
             Some(RequestRuntimeDefaults::from_live(live)),
+            |_| {},
+        )
+    }
+
+    /// Prepared HTTP generation with one captured live-settings snapshot and
+    /// a prefill-progress observer for `/slots` accounting.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_with_media_and_videos_declared_live_with_prefill<P>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        live: &crate::server::LiveSettings,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        P: FnMut(PrefillStats),
+    {
+        self.generate_with_media_and_videos_declared_runtime(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            Some(RequestRuntimeDefaults::from_live(live)),
+            on_prefill,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn generate_with_media_and_videos_declared_runtime(
+    fn generate_with_media_and_videos_declared_runtime<P>(
         &self,
         prompt: String,
         options: ServerGenerateOptions,
@@ -1510,7 +1563,11 @@ impl ModelProvider {
         videos: Vec<ResolvedVideo>,
         media: MediaRequestMetadata,
         runtime: Option<RequestRuntimeDefaults>,
-    ) -> Result<GenerationResult> {
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        P: FnMut(PrefillStats),
+    {
         let timeout = runtime
             .as_ref()
             .map_or(self.decode_hang_timeout, |runtime| runtime.decode_timeout);
@@ -1525,7 +1582,7 @@ impl ModelProvider {
             runtime,
             QueueReservationMode::Auto,
         )?;
-        drain_generation_events(response_rx, timeout, |_| {})
+        drain_generation_events_observing_prefill(response_rx, timeout, |_| {}, on_prefill)
     }
 
     /// Generate text with streaming callback
@@ -1719,11 +1776,50 @@ impl ModelProvider {
             queue_reservation,
             cancelled,
             None,
+            |_| {},
+            callback,
+        )
+    }
+
+    /// Reserved streaming generation with a prefill-progress observer.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_with_prefill<
+        F,
+        P,
+    >(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        callback: F,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+        P: FnMut(PrefillStats),
+    {
+        self.generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            queue_reservation,
+            cancelled,
+            None,
+            on_prefill,
             callback,
         )
     }
 
     /// Reserved streaming generation with one captured live-settings snapshot.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live<F>(
         &self,
@@ -1751,12 +1847,52 @@ impl ModelProvider {
             queue_reservation,
             cancelled,
             Some(RequestRuntimeDefaults::from_live(live)),
+            |_| {},
+            callback,
+        )
+    }
+
+    /// Reserved streaming generation with a prefill-progress observer for
+    /// `/slots` accounting.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live_with_prefill<
+        F,
+        P,
+    >(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        live: &crate::server::LiveSettings,
+        callback: F,
+        on_prefill: P,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+        P: FnMut(PrefillStats),
+    {
+        self.generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            queue_reservation,
+            cancelled,
+            Some(RequestRuntimeDefaults::from_live(live)),
+            on_prefill,
             callback,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime<F>(
+    fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved_runtime<F, P>(
         &self,
         prompt: String,
         options: ServerGenerateOptions,
@@ -1767,10 +1903,12 @@ impl ModelProvider {
         queue_reservation: Option<SingleStreamQueueReservation>,
         cancelled: Arc<AtomicBool>,
         runtime: Option<RequestRuntimeDefaults>,
+        on_prefill: P,
         callback: F,
     ) -> Result<GenerationResult>
     where
         F: FnMut(String, Option<TokenLogprobData>),
+        P: FnMut(PrefillStats),
     {
         let timeout = runtime
             .as_ref()
@@ -1786,7 +1924,12 @@ impl ModelProvider {
             runtime,
             QueueReservationMode::PreReserved(queue_reservation),
         )?;
-        drain_generation_events_with_logprobs(response_rx, timeout, callback)
+        drain_generation_events_with_logprobs_observing_prefill(
+            response_rx,
+            timeout,
+            callback,
+            on_prefill,
+        )
     }
 
     /// Streaming entry for the native `llama-server` `/completion` route
@@ -2259,6 +2402,50 @@ where
     Ok(result)
 }
 
+/// Like [`drain_generation_events`] but also forwards every prefill progress
+/// observation to `on_prefill`.
+pub(super) fn drain_generation_events_observing_prefill<F, P>(
+    response_rx: mpsc::Receiver<GenerateEvent>,
+    decode_hang_timeout: Duration,
+    mut on_token: F,
+    mut on_prefill: P,
+) -> Result<GenerationResult>
+where
+    F: FnMut(String),
+    P: FnMut(PrefillStats),
+{
+    let mut accumulated_logprobs: Vec<TokenLogprobData> = Vec::new();
+
+    let mut result =
+        drain_generation_events_impl(&response_rx, decode_hang_timeout, |event| match event {
+            GenerateEvent::Token(token, _) => {
+                if !token.is_empty() {
+                    on_token(token);
+                }
+                Ok(None)
+            }
+            GenerateEvent::TokenWithLogprobs(token, _, lp) => {
+                accumulated_logprobs.push(lp);
+                if !token.is_empty() {
+                    on_token(token);
+                }
+                Ok(None)
+            }
+            GenerateEvent::Prefill(stats) => {
+                on_prefill(stats);
+                Ok(None)
+            }
+            GenerateEvent::Done(result) => Ok(Some(result)),
+            GenerateEvent::Error(err) => Err(anyhow::anyhow!(err)),
+        })?;
+
+    if !accumulated_logprobs.is_empty() {
+        result.logprobs = Some(accumulated_logprobs);
+    }
+
+    Ok(result)
+}
+
 /// Like [`drain_generation_events`] but exposes per-token logprob data to the
 /// callback. `decode_hang_timeout` follows the same contract.
 pub(super) fn drain_generation_events_with_logprobs<F>(
@@ -2285,6 +2472,40 @@ where
             Ok(None)
         }
         GenerateEvent::Prefill(_) => Ok(None),
+        GenerateEvent::Done(result) => Ok(Some(result)),
+        GenerateEvent::Error(err) => Err(anyhow::anyhow!(err)),
+    })
+}
+
+/// Like [`drain_generation_events_with_logprobs`] but also forwards every
+/// prefill progress observation to `on_prefill`.
+pub(super) fn drain_generation_events_with_logprobs_observing_prefill<F, P>(
+    response_rx: mpsc::Receiver<GenerateEvent>,
+    decode_hang_timeout: Duration,
+    mut on_token: F,
+    mut on_prefill: P,
+) -> Result<GenerationResult>
+where
+    F: FnMut(String, Option<TokenLogprobData>),
+    P: FnMut(PrefillStats),
+{
+    drain_generation_events_impl(&response_rx, decode_hang_timeout, |event| match event {
+        GenerateEvent::Token(token, _) => {
+            if !token.is_empty() {
+                on_token(token, None);
+            }
+            Ok(None)
+        }
+        GenerateEvent::TokenWithLogprobs(token, _, lp) => {
+            if !token.is_empty() {
+                on_token(token, Some(lp));
+            }
+            Ok(None)
+        }
+        GenerateEvent::Prefill(stats) => {
+            on_prefill(stats);
+            Ok(None)
+        }
         GenerateEvent::Done(result) => Ok(Some(result)),
         GenerateEvent::Error(err) => Err(anyhow::anyhow!(err)),
     })

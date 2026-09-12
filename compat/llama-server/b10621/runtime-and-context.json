@@ -406,7 +406,7 @@
       "state": "supported",
       "issue": 1450,
       "test": "src/server/routes/props_tests.rs",
-      "notes": "Same semantics: 0 = derive from the model, and the total is shared across slots (ctx_size / slots) exactly as llama-server splits n_ctx across n_parallel. The resolved per-slot window is now reported as `n_ctx` in /props and logged at startup.",
+      "notes": "Same semantics: 0 = derive from the model, and the total is shared across slots (ctx_size / slots) exactly as llama-server splits n_ctx across n_parallel. The resolved positive per-slot window is reported as `n_ctx` in /slots, /props, and /v1/models, and logged at startup.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {

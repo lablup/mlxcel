@@ -100,6 +100,19 @@ async fn get_slots_reports_the_b10621_slot_shape() {
 }
 
 #[tokio::test]
+async fn get_slots_resolves_ctx_size_zero_to_effective_context() {
+    let state = state_with(ServerConfig {
+        n_parallel: 1,
+        context_size: 0,
+        ..Default::default()
+    });
+    let (status, body) = send(create_app(state), Method::GET, "/slots", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let slots = body.as_array().expect("array of slots");
+    assert_eq!(slots[0]["n_ctx"], 4096);
+}
+
+#[tokio::test]
 async fn disabled_slots_endpoint_answers_the_b10621_diagnostic_not_404() {
     let state = state_with(ServerConfig {
         enable_slots_endpoint: false,

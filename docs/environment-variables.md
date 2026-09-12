@@ -163,8 +163,9 @@ window per slot) is not divided. Non-batching families (SSM / hybrid) run a
 single decode slot regardless of `--parallel`.
 
 Startup fails when the effective per-slot context window is below 512 tokens.
-The `/slots` endpoint and `/health.context_size` report the effective per-slot
-window, not the total `--ctx-size` budget. The `--estimate-memory` preflight uses
+The `/slots`, `/props`, and `/v1/models` metadata surfaces report the effective
+per-slot window, not the total `--ctx-size` budget; `/health.context_size` does
+the same on the native health payload. The `--estimate-memory` preflight uses
 the same per-slot window and active-sequence count so increasing `--parallel`
 does not multiply KV memory for a fixed explicit `--ctx-size`.
 

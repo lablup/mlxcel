@@ -68,9 +68,8 @@ fn b10621_model_info(state: &AppState, created: i64) -> serde_json::Value {
         "meta": {
             "vocab_type": facts.vocab_type,
             "n_vocab": facts.n_vocab,
-            // The per-slot window a request is actually bounded by; 0 means
-            // the checkpoint's own trained context applies unclamped.
-            "n_ctx": state.config.context_size,
+            // The effective per-slot window a request is actually bounded by.
+            "n_ctx": state.effective_context_size(),
             "n_ctx_train": facts.n_ctx_train,
             "n_embd": facts.n_embd,
             "n_params": facts.n_params,

@@ -743,7 +743,7 @@ pub(crate) async fn non_stream_chat_completion(
         .flatten();
     let mut result = state
         .model_provider
-        .generate_with_media_and_videos_declared_live(
+        .generate_with_media_and_videos_declared_live_with_prefill(
             prepared.prompt,
             options,
             prepared.image_data,
@@ -751,6 +751,9 @@ pub(crate) async fn non_stream_chat_completion(
             prepared.videos,
             prepared.media,
             &live,
+            |stats| {
+                slot.on_prefill_progress(stats.prompt_tokens, stats.cached_tokens, stats.processed);
+            },
         )
         .map_err(generation_error_to_response)?;
 
@@ -1289,7 +1292,7 @@ pub(crate) async fn stream_asr_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_with_prefill(
                 prepared.prompt,
                 options,
                 prepared.image_data,
@@ -1316,6 +1319,13 @@ pub(crate) async fn stream_asr_completion(
                     if let Some(text) = piece {
                         emit(&text);
                     }
+                },
+                |stats| {
+                    slot.on_prefill_progress(
+                        stats.prompt_tokens,
+                        stats.cached_tokens,
+                        stats.processed,
+                    );
                 },
             );
 
@@ -1646,7 +1656,7 @@ async fn stream_chat_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live_with_prefill(
                 prepared.prompt,
                 options,
                 prepared.image_data,
@@ -1849,6 +1859,13 @@ async fn stream_chat_completion(
                     for chunk in &pending {
                         let _ = token_events.json(chunk);
                     }
+                },
+                |stats| {
+                    slot.on_prefill_progress(
+                        stats.prompt_tokens,
+                        stats.cached_tokens,
+                        stats.processed,
+                    );
                 },
             );
 

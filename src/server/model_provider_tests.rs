@@ -22,8 +22,9 @@ use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
     ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
-    ModelRequest, QueueReservationMode, RequestRuntimeDefaults, SingleStreamQueueReservation,
-    StopKind, TokenMeta, drain_generation_events, send_shutdown_signal,
+    ModelRequest, PrefillStats, QueueReservationMode, RequestRuntimeDefaults,
+    SingleStreamQueueReservation, StopKind, TokenMeta, drain_generation_events,
+    drain_generation_events_with_logprobs_observing_prefill, send_shutdown_signal,
     tokenize_prompt_for_generation, tokenize_prompt_for_generation_with_ordered_media,
     validated_decode_hang_timeout,
 };
@@ -141,6 +142,44 @@ fn drain_generation_events_accumulates_logprobs_from_token_with_logprobs() {
     assert_eq!(lp_data.len(), 1);
     assert_eq!(lp_data[0].token_id, 42);
     assert!((lp_data[0].logprob - (-0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn logprobs_drain_forwards_every_prefill_observation() {
+    let (tx, rx) = mpsc::channel();
+    tx.send(GenerateEvent::Prefill(PrefillStats {
+        prompt_tokens: 10,
+        cached_tokens: 3,
+        processed: 3,
+        prompt_ms: 1,
+        first_token: false,
+    }))
+    .unwrap();
+    tx.send(GenerateEvent::Prefill(PrefillStats {
+        prompt_tokens: 10,
+        cached_tokens: 3,
+        processed: 8,
+        prompt_ms: 2,
+        first_token: false,
+    }))
+    .unwrap();
+    tx.send(GenerateEvent::Token("A".to_string(), TokenMeta::default()))
+        .unwrap();
+    tx.send(GenerateEvent::Done(sample_result())).unwrap();
+
+    let mut observed = Vec::new();
+    let mut streamed = Vec::new();
+    let result = drain_generation_events_with_logprobs_observing_prefill(
+        rx,
+        DECODE_HANG_TIMEOUT,
+        |token, _| streamed.push(token),
+        |stats| observed.push((stats.prompt_tokens, stats.cached_tokens, stats.processed)),
+    )
+    .unwrap();
+
+    assert_eq!(streamed, vec!["A".to_string()]);
+    assert_eq!(result.text, "hello");
+    assert_eq!(observed, vec![(10, 3, 3), (10, 3, 8)]);
 }
 
 #[test]
