@@ -65,11 +65,14 @@
 //! ```text
 //! cargo test --test paged_scheduler_parity --release \
 //!     --features metal,accelerate -- --ignored --nocapture --test-threads=1
-//! MLX_ENABLE_TF32=0 cargo test --test paged_scheduler_parity --release \
+//! MLXCEL_REQUIRE_MODELS=1 MLX_ENABLE_TF32=0 cargo test --test paged_scheduler_parity --release \
 //!     --features cuda -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! Each case soft-skips when its model directory is absent. Fetch with:
+//! Set `MLXCEL_REQUIRE_MODELS=1` for evidence runs that must prove the
+//! checkpoint was present; leave it unset only for CI or exploratory runs that
+//! intentionally accept soft-skips. Each case soft-skips when its model
+//! directory is absent and the require flag is unset. Fetch with:
 //!
 //! ```text
 //! ./target/release/mlxcel download mlx-community/Qwen3-0.6B-4bit
@@ -148,19 +151,33 @@ fn relative_rms(actual: &[f32], reference: &[f32]) -> f64 {
         reference.len(),
         "logit rows must have matching widths"
     );
+    assert!(!actual.is_empty(), "logit rows must not be empty");
+
     let mut diff_sq = 0.0f64;
     let mut ref_sq = 0.0f64;
-    for (&actual, &reference) in actual.iter().zip(reference.iter()) {
+    for (idx, (&actual, &reference)) in actual.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            actual.is_finite(),
+            "actual logit at vocab index {idx} must be finite, got {actual}"
+        );
+        assert!(
+            reference.is_finite(),
+            "reference logit at vocab index {idx} must be finite, got {reference}"
+        );
         let actual = f64::from(actual);
         let reference = f64::from(reference);
         let diff = actual - reference;
         diff_sq += diff * diff;
         ref_sq += reference * reference;
     }
-    if ref_sq == 0.0 {
-        diff_sq.sqrt()
+
+    let n = actual.len() as f64;
+    let diff_rms = (diff_sq / n).sqrt();
+    let ref_rms = (ref_sq / n).sqrt();
+    if ref_rms == 0.0 {
+        diff_rms
     } else {
-        (diff_sq / ref_sq).sqrt()
+        diff_rms / ref_rms
     }
 }
 
