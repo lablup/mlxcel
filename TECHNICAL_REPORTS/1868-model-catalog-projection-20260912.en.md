@@ -91,3 +91,11 @@ A read-only observer needs its own restricted evidence-acquisition boundary, not
 Downstream integration must preserve null/reason semantics, use catalog IDs for control and inference IDs for requests, recheck mutating operations at their authority boundary, and validate production startup/security rather than extrapolating from authenticated handler tests.
 
 See [catalog integration](../docs/webui/catalog.md), [API contract](../docs/webui/api.yaml), and [architecture](../docs/webui/architecture.md).
+
+## Final verification and startup handoff (2026-09-13)
+
+The full-workspace and real-model gate ran at `fafc5cf5`: 11,187 passed, 0 failed, 361 ignored; workspace clippy passed; Llama streamed 572 content characters, drain admission returned HTTP 400, worker exit was observed after stream drop, Granite returned Affirmative., and SIGINT completed 1/1 worker shutdowns. This is not a claim that the whole workspace was rerun at the final revision.
+
+The final combined gate ran at `808994e353fdab5563966e751ca2c71515d08595`: catalog 32 library + 1 CLI, security 26 and discovery 2 passed; workspace all-target clippy, 40 contract fixtures, structural checks, fmt and diff checks passed. The shared detection/loader path remained unchanged. Both independent reviewers cleared the complete router and single-model cache boundaries at this revision.
+
+`single_model_entry_from_state_with_cache` is synchronous. The #1838 startup owner must retain one per-application `Arc<CatalogProjectionCache>` and invoke this helper inside `tokio::task::spawn_blocking`. Never create a cache per poll or call the uncached convenience accessor in an HTTP handler. Cached-helper/provider transitions are tested here; production single-model route offload and responsiveness are #1838 responsibilities. Router HTTP adapters already offload metadata acquisition.

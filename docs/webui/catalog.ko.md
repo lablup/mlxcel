@@ -47,3 +47,7 @@ Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 �
 ## 회귀 테스트 범위
 
 집중 테스트는 스키마로 검증된 fixture와 실제 producer 전체 JSON의 비교, 원본 model_type·declared_architectures 제한, unknown 메타데이터, cache epoch 무효화, HTTP 캐시 적중의 메타데이터 획득 0회, 명시적 새로고침 후 동일 크기 config/index 편집 반영, 최신 lifecycle/provider 투영, 동시 1,000개 항목 카탈로그에서 라우터별 캐시 격리, 공유 감지, symlink 증거, 캐시된 기존 단일 provider 접근, HTTP 새로고침 전후 1,000개 항목의 전체 순회를 검증합니다. 공유 감지 변경 후의 추론 회귀 검사나 향후 프로덕션·브라우저 보안 수용 검증을 대신하지는 않습니다. 검증 기록과 환경 예외는 [PR #1868](https://github.com/lablup/mlxcel/pull/1868)을 확인하십시오.
+
+최종 통합 게이트는 `808994e353fdab5563966e751ca2c71515d08595`에서 실행했습니다. 카탈로그 library 32개 + CLI 1개, 보안 26개, discovery 2개와 workspace all-target clippy, 계약 fixture 40개, 구조 검사, fmt·diff 검사가 통과했습니다. 공유 detection/loader 경로는 그대로입니다. 두 독립 리뷰어는 이 revision의 라우터·단일 모델 캐시 경계 전체를 승인했습니다.
+
+`single_model_entry_from_state_with_cache`는 동기 helper입니다. #1838 시작 경로는 앱별 `Arc<CatalogProjectionCache>` 하나를 계속 유지하고 `tokio::task::spawn_blocking` 안에서 호출해야 합니다. 폴링마다 캐시를 새로 만들거나 HTTP handler에서 캐시 없는 편의 accessor를 호출하면 안 됩니다. 캐시 helper·provider 전환은 이 이슈에서 검증하며, 단일 모델 프로덕션 route의 offload·응답성 검증은 #1838 범위입니다. 라우터 HTTP adapter는 이미 메타데이터 획득을 offload합니다.

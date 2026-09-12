@@ -91,3 +91,11 @@ Config·sidecar는 256 KiB, index JSON은 512 KiB로 읽기를 제한합니다. 
 후속 통합은 null·사유 의미를 유지하고 제어에는 카탈로그 ID, 추론에는 inference ID를 사용하며 변경 작업의 권한 경계에서 다시 검사해야 합니다. 인증된 handler 테스트만으로 추정하지 말고 프로덕션 시작·보안을 검증해야 합니다.
 
 [카탈로그 통합](../docs/webui/catalog.ko.md), [API 계약](../docs/webui/api.yaml), [아키텍처](../docs/webui/architecture.md)를 참고하십시오.
+
+## 최종 검증과 시작 경로 인계 (2026-09-13)
+
+전체 workspace·실모델 게이트는 `fafc5cf5`에서 실행했습니다. 11,187개 통과, 실패 0개, 무시 361개이며 workspace clippy도 통과했습니다. Llama content 572자 스트리밍, drain 중 새 요청 HTTP 400 거절, stream drop 후 worker exit 관찰, Granite Affirmative. 응답, SIGINT worker 종료 1/1을 확인했습니다. 최종 revision에서 전체 workspace를 다시 실행했다는 뜻은 아닙니다.
+
+최종 통합 게이트는 `808994e353fdab5563966e751ca2c71515d08595`에서 실행했습니다. 카탈로그 library 32개 + CLI 1개, 보안 26개, discovery 2개와 workspace all-target clippy, 계약 fixture 40개, 구조 검사, fmt·diff 검사가 통과했습니다. 공유 detection/loader 경로는 그대로입니다. 두 독립 리뷰어는 이 revision의 라우터·단일 모델 캐시 경계 전체를 승인했습니다.
+
+`single_model_entry_from_state_with_cache`는 동기 helper입니다. #1838 시작 경로는 앱별 `Arc<CatalogProjectionCache>` 하나를 계속 유지하고 `tokio::task::spawn_blocking` 안에서 호출해야 합니다. 폴링마다 캐시를 새로 만들거나 HTTP handler에서 캐시 없는 편의 accessor를 호출하면 안 됩니다. 캐시 helper·provider 전환은 이 이슈에서 검증하며, 단일 모델 프로덕션 route의 offload·응답성 검증은 #1838 범위입니다. 라우터 HTTP adapter는 이미 메타데이터 획득을 offload합니다.
