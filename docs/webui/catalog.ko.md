@@ -20,7 +20,7 @@
 
 목록은 `limit`(기본 50, 최대 200), 반환받은 `cursor`, `q`(최대 128바이트), `source`, `task`, `lifecycle`, `support`, `completeness`를 받습니다. 커서는 최대 512바이트이며 투영 대상은 1,000개 항목으로 제한됩니다. 페이지 순서는 인벤토리가 변하지 않을 때 결정적이며 동시 새로고침을 가로지르는 트랜잭션 스냅샷은 아닙니다. `server_instance_id`와 `snapshot_sequence`를 보관하고 상태 변경 시 [architecture.md](architecture.md)의 재스냅샷 규칙을 따릅니다.
 
-카탈로그 작업과 선택에는 `identity.id`, 추론 요청에는 `identity.inference_id`를 사용합니다. 표시 이름은 어느 쪽의 식별자도 아닙니다. 콘텐츠 fingerprint는 파일시스템 메타데이터 변경을 나타내며 가중치 내용의 암호학적 검증값이 아닙니다. revision과 lifecycle은 브라우저가 관리하는 별도 상태 머신이 아니라 풀에서 가져옵니다.
+카탈로그 작업과 선택에는 `identity.id`, 추론 요청에는 `identity.inference_id`를 사용합니다. 표시 이름은 어느 쪽의 식별자도 아닙니다. 콘텐츠 fingerprint는 메타데이터를 처음 투영하거나 명시적으로 새로고침할 때 관찰한 제한된 파일시스템 메타데이터를 나타내며, 가중치 내용의 암호학적 검증값도 아니고 매 polling마다 다시 계산하는 값도 아닙니다. revision과 lifecycle은 브라우저가 관리하는 별도 상태 머신이 아니라 풀에서 가져옵니다.
 
 다음 사실을 하나의 “작동함” 배지로 합치지 마십시오.
 
@@ -30,7 +30,7 @@
 - `tested_checkpoint`는 현재 명시적인 사유와 함께 false입니다. 카탈로그에는 체크포인트별 검증 증거 데이터베이스가 없습니다.
 - `lifecycle.state`는 현재 provider 수명주기를 나타냅니다. 로드 전 capability가 있다고 `ready`인 것은 아닙니다.
 
-`metadata.model_type`과 `metadata.architecture`는 감지·레지스트리에서 해석한 식별자이며 검증하지 않은 `architectures[0]` 복사본이 아닙니다. 카탈로그는 로더와 동일한 dispatch 판단을 사용하되 제한된 probe를 제공합니다. 변형 구분에 가중치 헤더가 필요하고 제한된 sidecar 증거가 없으면 사유와 함께 unknown으로 남깁니다. 관련 Gemma 4, Inkling, Kimi K3 변형을 임의로 텍스트 모델이라고 추정하지 않는 것도 이 원칙에 포함됩니다.
+`metadata.model_type`은 `config.json`의 원본 문자열을 제한 안에서 그대로 보존한 값이며 대소문자를 유지합니다. 값이 없거나 문자열이 아니거나 너무 길거나 읽을 수 없으면 잘라내지 않고 사유가 있는 `null`을 반환합니다. `metadata.declared_architectures`도 같은 무절단 규칙을 적용한 원본 `architectures` 배열입니다. `metadata.architecture`는 이 원본 필드의 단순 복사본이 아니라 공유 로더 감지 권한이 해석한 mlxcel 레지스트리 식별자입니다. 카탈로그는 그 권한에 제한된 probe를 제공합니다. 변형 구분에 가중치 헤더가 필요하고 제한된 sidecar 증거가 없으면 사유와 함께 unknown으로 남깁니다. 관련 Gemma 4, Inkling, Kimi K3 변형을 임의로 텍스트 모델이라고 추정하지 않는 것도 이 원칙에 포함됩니다.
 
 Capability에는 적용 단계와 사용할 수 없는 사유가 있습니다. 이미지 입력은 준비된 기존 provider에서 확인하며 메타데이터만으로 이미지 전송을 활성화하지 않습니다. 비채팅 출력 task는 채팅과 구분합니다. 알 수 없는 파라미터 수와 메모리 추정값은 0이 아니라 사유가 있는 `null`입니다. 디스크 바이트는 파일 크기이며 프로세스 RSS나 allocator 메모리가 아닙니다.
 
@@ -38,7 +38,7 @@ Capability에는 적용 단계와 사용할 수 없는 사유가 있습니다. �
 
 Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 제한을 적용합니다. 카탈로그 probe는 SafeTensors 헤더나 payload를 읽지 않습니다. 디스크 계산은 방문·대기 항목 최대 4,096개와 깊이 8을 적용하고 symlink를 건너뛰며 제한 안에서 완료할 수 없으면 사유와 함께 `null`을 반환합니다. 중첩된 `1_Pooling/config.json`은 부모 구성요소가 symlink가 아닌 실제 디렉터리일 때만 증거로 인정합니다.
 
-메타데이터 투영은 blocking worker에서 실행합니다. 크기가 제한된 캐시는 일반 polling마다 재귀 디스크 계산을 반복하지 않도록 합니다. 파일시스템 fingerprint는 관련 메타데이터를 계속 확인하고 lifecycle, revision, 제거 가능 여부는 현재 풀 상태로 갱신합니다. 캐시 적중 시 파일시스템 호출이 전혀 없다는 뜻은 아닙니다. 명시적인 새로고침은 캐시를 비우고 기존 라우터 재탐색을 실행합니다.
+메타데이터 투영은 blocking worker에서 실행합니다. 크기가 제한된 캐시는 일반 polling의 캐시 적중에서 재귀 디스크 계산, config 파싱, 콘텐츠 fingerprint 계산을 반복하지 않도록 합니다. 다만 lifecycle, revision, provider가 확인한 capability, 제거 가능 여부는 현재 풀 상태로 갱신합니다. 최초 캐시 채우기와 명시적 새로고침은 제한된 파일시스템 검사를 수행합니다. 명시적인 새로고침은 캐시를 비우고 기존 라우터 재탐색을 실행하며, 레거시 라우터 reload도 카탈로그 epoch를 전진시켜 캐시된 메타데이터가 영구히 stale로 남지 않게 합니다.
 
 작업이 활성 상태인 동안 서버 인스턴스마다 하나의 새로고침만 실행권을 가집니다. 동시 요청은 별도 재탐색을 시작하지 않고 같은 작업을 재사용하며 완료 후의 요청은 새 작업을 시작할 수 있습니다. `changed_entries`는 항목 signature를 비교하여 개수가 같아도 추가·삭제·감지된 변경을 포함합니다. 클라이언트에 전달하는 새로고침 오류는 경로를 숨기고 진단 상세는 서버 로그에 남깁니다.
 
@@ -46,4 +46,4 @@ Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 �
 
 ## 회귀 테스트 범위
 
-집중 테스트는 스키마로 검증된 fixture와 실제 producer 전체 JSON의 비교, unknown 메타데이터, 캐시 무효화와 최신 lifecycle 투영, 공유 감지, symlink 증거, 기존 단일 provider 접근, HTTP 새로고침 전후 1,000개 항목의 전체 순회를 검증합니다. 공유 감지 변경 후의 추론 회귀 검사나 향후 프로덕션·브라우저 보안 수용 검증을 대신하지는 않습니다. 검증 기록과 환경 예외는 [PR #1868](https://github.com/lablup/mlxcel/pull/1868)을 확인하십시오.
+집중 테스트는 스키마로 검증된 fixture와 실제 producer 전체 JSON의 비교, 원본 model_type·declared_architectures 제한, unknown 메타데이터, cache epoch 무효화, HTTP 캐시 적중의 heavy probe 0회, 명시적 새로고침 후 동일 크기 config/index 편집 반영, 최신 lifecycle/provider 투영, 공유 감지, symlink 증거, 기존 단일 provider 접근, HTTP 새로고침 전후 1,000개 항목의 전체 순회를 검증합니다. 공유 감지 변경 후의 추론 회귀 검사나 향후 프로덕션·브라우저 보안 수용 검증을 대신하지는 않습니다. 검증 기록과 환경 예외는 [PR #1868](https://github.com/lablup/mlxcel/pull/1868)을 확인하십시오.

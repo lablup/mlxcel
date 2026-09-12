@@ -30,6 +30,9 @@ use super::catalog_detection::BoundedCatalogDetectionProbes;
 use super::catalog_fs::{
     completeness, content_fingerprint, disk_size, format_for, read_json_bounded,
 };
+use super::catalog_metadata_config::{
+    declared_architectures_from_config, declared_model_type_from_config,
+};
 
 use super::catalog_types::{
     Capability, CatalogEntry, CatalogMetadata, CatalogMetadataUnknownReasons, CatalogSourceKind,
@@ -66,13 +69,12 @@ pub(super) fn catalog_entry(model: RouterCatalogModel) -> CatalogEntry {
     entry
 }
 
-pub(super) fn catalog_cache_fingerprint(path: &Path) -> Option<String> {
+pub(super) fn catalog_content_signature(path: &Path) -> Option<String> {
     content_fingerprint(path)
 }
 
 pub(super) fn apply_runtime_fields(entry: &mut CatalogEntry, model: &RouterCatalogModel) {
     entry.identity.revision = model.revision;
-    entry.identity.content_fingerprint = content_fingerprint(&model.path);
     entry.identity.generation = model.generation;
     entry.lifecycle = model.lifecycle.clone();
     let removal = removal_status(model.source, &model.lifecycle);
@@ -171,11 +173,10 @@ fn single_model_entry_with_provider(
 fn metadata_for(path: &Path) -> CatalogMetadata {
     let mut reasons = CatalogMetadataUnknownReasons::default();
     let (config, config_error) = read_json_bounded(&path.join("config.json"), MAX_CONFIG_BYTES);
-    let declared_model_type = config
-        .as_ref()
-        .and_then(|value| value.get("model_type"))
-        .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase());
+    let declared_model_type =
+        declared_model_type_from_config(config.as_ref(), config_error.as_deref(), &mut reasons);
+    let declared_architectures =
+        declared_architectures_from_config(config.as_ref(), config_error.as_deref(), &mut reasons);
     let detected_model_type = config.as_ref().map_or_else(
         || Err("config.json is unavailable in bounded metadata".to_string()),
         |config| {
@@ -184,19 +185,6 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
                 .map_err(|err| sanitize_detection_error(path, &err.to_string()))
         },
     );
-    let model_type = detected_model_type.as_ref().ok().cloned();
-    if model_type.is_none() {
-        reasons.model_type = Some(
-            config_error
-                .or_else(|| detected_model_type.as_ref().err().cloned())
-                .unwrap_or_else(|| {
-                    declared_model_type
-                        .as_ref()
-                        .map(|value| format!("declared model_type '{value}' is not recognized"))
-                        .unwrap_or_else(|| "config.json has no string model_type".to_string())
-                }),
-        );
-    }
     let family = detected_model_type
         .as_ref()
         .ok()
@@ -218,9 +206,11 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
     if quantization.is_none() {
         reasons.quantization = Some("quantization is not declared in bounded metadata".to_string());
     }
-    let format = format_for(path);
+    let (format, format_reason) = format_for(path);
     if format.is_none() {
-        reasons.format = Some("no SafeTensors metadata file was found".to_string());
+        reasons.format = Some(
+            format_reason.unwrap_or_else(|| "no SafeTensors metadata file was found".to_string()),
+        );
     }
     reasons.parameter_count =
         Some("parameter count is not measured during metadata-only catalog scans".to_string());
@@ -251,6 +241,7 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
         .unwrap_or_else(|| (Vec::new(), Vec::new()));
     CatalogMetadata {
         architecture: family.as_ref().map(|family| family.id.to_string()),
+        declared_architectures,
         input_tasks,
         output_tasks,
         quantization,
@@ -259,7 +250,7 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
         disk_bytes,
         memory_estimate_bytes: None,
         support,
-        model_type,
+        model_type: declared_model_type,
         unknown_reasons: reasons,
     }
 }

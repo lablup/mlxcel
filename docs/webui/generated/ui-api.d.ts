@@ -368,6 +368,7 @@ export interface SupportStatus {
 
 export interface CatalogMetadata {
   readonly architecture: string | null;
+  readonly declared_architectures: ReadonlyArray<string> | null;
   readonly input_tasks: ReadonlyArray<TaskKind>;
   readonly output_tasks: ReadonlyArray<TaskKind>;
   readonly quantization: string | null;
@@ -566,6 +567,7 @@ export interface RemovalStatus {
 
 export interface CatalogMetadataUnknownReasons {
   readonly architecture?: string | null;
+  readonly declared_architectures?: string | null;
   readonly model_type?: string | null;
   readonly quantization?: string | null;
   readonly format?: string | null;

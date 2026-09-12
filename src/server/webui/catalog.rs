@@ -24,6 +24,8 @@ mod catalog_detection;
 mod catalog_fs;
 #[path = "catalog_metadata.rs"]
 mod catalog_metadata;
+#[path = "catalog_metadata_config.rs"]
+mod catalog_metadata_config;
 #[path = "catalog_types.rs"]
 mod catalog_types;
 
@@ -41,6 +43,16 @@ use catalog_metadata::{apply_runtime_fields, catalog_entry};
 
 static CATALOG_CACHE: OnceLock<Mutex<BTreeMap<String, (String, CatalogEntry)>>> = OnceLock::new();
 
+#[cfg(test)]
+pub fn reset_heavy_metadata_probe_count() {
+    catalog_fs::reset_heavy_metadata_probe_count();
+}
+
+#[cfg(test)]
+pub fn heavy_metadata_probe_count() -> usize {
+    catalog_fs::heavy_metadata_probe_count()
+}
+
 pub fn clear_catalog_cache() {
     if let Some(cache) = CATALOG_CACHE.get()
         && let Ok(mut cache) = cache.lock()
@@ -55,7 +67,7 @@ pub fn catalog_change_signatures(models: Vec<RouterCatalogModel>) -> BTreeMap<St
         .take(MAX_INVENTORY)
         .filter(|model| !model.hidden)
         .map(|model| {
-            let fingerprint = catalog_metadata::catalog_cache_fingerprint(&model.path)
+            let fingerprint = catalog_metadata::catalog_content_signature(&model.path)
                 .unwrap_or_else(|| "missing-config".to_string());
             let signature = format!(
                 "{}:{}:{}:{}:{}",
@@ -90,18 +102,12 @@ pub fn count_changed_entries(
 
 fn cached_catalog_entry(model: RouterCatalogModel) -> CatalogEntry {
     let id = model.ui_model_id.clone();
-    let fingerprint = catalog_metadata::catalog_cache_fingerprint(&model.path)
-        .unwrap_or_else(|| "missing-config".to_string());
-    let provider_key = model
-        .provider_capabilities
-        .map(|cap| format!("provider:{}:{}", cap.image_input, cap.audio_input))
-        .unwrap_or_else(|| "provider:none".to_string());
     let key = format!(
         "{}:{}:{}:{}",
         model.source.as_str(),
-        model.path.display(),
-        fingerprint,
-        provider_key
+        id.as_str(),
+        model.catalog_epoch,
+        model.generation
     );
     let cache = CATALOG_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Ok(cache) = cache.lock()

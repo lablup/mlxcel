@@ -279,6 +279,7 @@ pub struct RouterCatalogModel {
     pub lifecycle: LifecycleSnapshot,
     pub revision: u64,
     pub generation: u64,
+    pub catalog_epoch: u64,
     pub provider_capabilities: Option<RouterCatalogProviderCapabilities>,
 }
 
@@ -326,6 +327,7 @@ pub struct RouterPool {
     events: tokio::sync::broadcast::Sender<serde_json::Value>,
     lifecycle: Arc<LifecycleCoordinator>,
     revision_authority: Arc<AtomicU64>,
+    catalog_epoch: AtomicU64,
     /// Serializes model loads so two concurrent autoloads cannot race the
     /// capacity check or contend the accelerator during weight upload.
     load_lock: tokio::sync::Mutex<()>,
@@ -419,6 +421,7 @@ impl RouterPool {
             events,
             lifecycle: Arc::new(LifecycleCoordinator::new()),
             revision_authority: Arc::new(AtomicU64::new(1)),
+            catalog_epoch: AtomicU64::new(0),
             load_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             rescan_after_snapshot_hook: Mutex::new(None),
@@ -652,6 +655,7 @@ impl RouterPool {
         }
         *entries = rebuilt;
         drop(entries);
+        self.catalog_epoch.fetch_add(1, Ordering::SeqCst);
         self.notify("models_reload", "*", serde_json::Value::Null);
         Ok(())
     }
@@ -860,6 +864,7 @@ impl RouterPool {
             Ok(entries) => entries,
             Err(_) => return Vec::new(),
         };
+        let catalog_epoch = self.catalog_epoch.load(Ordering::SeqCst).max(1);
         entries
             .values()
             .map(|entry| {
@@ -885,6 +890,7 @@ impl RouterPool {
                     lifecycle: entry.lifecycle_snapshot(),
                     revision: entry.lifecycle_revision(),
                     generation: entry.lifecycle.generation(),
+                    catalog_epoch,
                     provider_capabilities,
                 }
             })

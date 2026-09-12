@@ -2630,6 +2630,7 @@
         "additionalProperties": false,
         "required": [
           "architecture",
+          "declared_architectures",
           "input_tasks",
           "output_tasks",
           "quantization",
@@ -2648,6 +2649,18 @@
               "null"
             ],
             "maxLength": 128
+          },
+          "declared_architectures": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "maxItems": 16,
+            "description": "Raw config.json architectures array when readable and bounded."
           },
           "input_tasks": {
             "type": "array",
@@ -3438,6 +3451,13 @@
         "description": "Reasons for metadata fields that are null or deliberately unmeasured.",
         "properties": {
           "architecture": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "declared_architectures": {
             "type": [
               "string",
               "null"

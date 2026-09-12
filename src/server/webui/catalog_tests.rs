@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use crate::server::router_lifecycle::{
     DownloadState, LifecycleSnapshot, ModelLifecycleState, stable_model_identity,
 };
-use crate::server::router_models::{RouterCatalogModel, RouterModelSource};
+use crate::server::router_models::{
+    RouterCatalogModel, RouterCatalogProviderCapabilities, RouterModelSource,
+};
 
 use super::*;
 
@@ -99,6 +101,7 @@ fn model_with_lifecycle(
         lifecycle,
         revision,
         generation: 1,
+        catalog_epoch: 1,
         provider_capabilities: None,
     }
 }
@@ -174,14 +177,16 @@ fn incomplete_index_and_unsupported_dense_variant_stay_inspectable() {
         .iter()
         .find(|entry| entry.identity.inference_id == "arcee")
         .unwrap();
-    assert!(arcee.metadata.model_type.is_none());
-    assert!(arcee.metadata.unknown_reasons.model_type.is_some());
+    assert_eq!(arcee.metadata.model_type.as_deref(), Some("arcee"));
+    assert!(arcee.metadata.unknown_reasons.model_type.is_none());
+    assert!(arcee.metadata.architecture.is_none());
+    assert!(arcee.metadata.unknown_reasons.architecture.is_some());
     assert!(!arcee.metadata.support.architecturally_supported);
     assert!(!arcee.supported);
 }
 
 #[test]
-fn detection_authority_overrides_declared_model_type_for_embedding_layouts() {
+fn architecture_uses_detection_authority_for_embedding_layouts() {
     let root = temp_dir("embedding-detection");
     let path = write_model(&root, "embed", "qwen3");
     std::fs::create_dir_all(path.join("1_Pooling")).expect("pooling dir");
@@ -192,10 +197,7 @@ fn detection_authority_overrides_declared_model_type_for_embedding_layouts() {
     .expect("pooling config");
 
     let entry = catalog_entry(model("embed", path, RouterModelSource::ModelsDir));
-    assert_eq!(
-        entry.metadata.model_type.as_deref(),
-        Some("qwen3_embedding")
-    );
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("qwen3"));
     assert_eq!(
         entry.metadata.architecture.as_deref(),
         Some("qwen3_embedding")
@@ -205,33 +207,55 @@ fn detection_authority_overrides_declared_model_type_for_embedding_layouts() {
 }
 
 #[test]
-fn catalog_cache_invalidates_when_shard_metadata_changes() {
+fn catalog_cache_uses_epoch_and_projects_fresh_provider_lifecycle() {
     clear_catalog_cache();
-    let root = temp_dir("shard-cache");
-
-    let direct = write_model(&root, "direct", "qwen3");
-    let direct_id = stable_model_identity("models_dir", 1, "test-root", "direct").0;
-    assert!(
-        get_catalog_entry(
-            vec![model(
-                "direct",
-                direct.clone(),
-                RouterModelSource::ModelsDir
-            )],
-            &direct_id,
-        )
-        .unwrap()
-        .complete
-    );
-    std::fs::remove_file(direct.join("model.safetensors")).expect("remove direct shard");
-    let direct_after = get_catalog_entry(
-        vec![model("direct", direct, RouterModelSource::ModelsDir)],
-        &direct_id,
+    let root = temp_dir("epoch-cache");
+    let path = write_model(&root, "vision", "qwen2_vl");
+    let id = stable_model_identity("models_dir", 1, "test-root", "vision").0;
+    let first = get_catalog_entry(
+        vec![model("vision", path.clone(), RouterModelSource::ModelsDir)],
+        &id,
     )
     .unwrap();
-    assert!(!direct_after.complete);
+    assert!(first.complete);
     assert!(
-        direct_after
+        first
+            .capabilities
+            .iter()
+            .any(|capability| capability.task == TaskKind::VisionInput && !capability.available)
+    );
+
+    std::fs::remove_file(path.join("model.safetensors")).expect("remove shard");
+    reset_heavy_metadata_probe_count();
+    let mut same_epoch = model_with_lifecycle(
+        "vision",
+        path.clone(),
+        RouterModelSource::ModelsDir,
+        lifecycle_with(ModelLifecycleState::Ready, true, 3),
+        9,
+    );
+    same_epoch.provider_capabilities = Some(RouterCatalogProviderCapabilities {
+        image_input: true,
+        audio_input: false,
+    });
+    let cached = get_catalog_entry(vec![same_epoch], &id).unwrap();
+    assert!(cached.complete, "same epoch must reuse cached metadata");
+    assert_eq!(cached.identity.revision, 9);
+    assert_eq!(cached.lifecycle.active_requests, 3);
+    assert_eq!(heavy_metadata_probe_count(), 0);
+    assert!(
+        cached
+            .capabilities
+            .iter()
+            .any(|capability| capability.task == TaskKind::VisionInput && capability.available)
+    );
+
+    let mut next_epoch = model("vision", path, RouterModelSource::ModelsDir);
+    next_epoch.catalog_epoch = 2;
+    let refreshed = get_catalog_entry(vec![next_epoch], &id).unwrap();
+    assert!(!refreshed.complete);
+    assert!(
+        refreshed
             .metadata
             .support
             .complete_reason
@@ -239,48 +263,149 @@ fn catalog_cache_invalidates_when_shard_metadata_changes() {
             .unwrap()
             .contains("no non-empty SafeTensors")
     );
+}
 
-    let indexed = root.join("indexed");
-    std::fs::create_dir_all(&indexed).expect("indexed dir");
+#[test]
+fn raw_model_type_and_declared_architectures_preserve_bounded_config_strings() {
+    let root = temp_dir("raw-config-fields");
+    let dir = root.join("mixed-case");
+    std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        indexed.join("config.json"),
-        r#"{"model_type":"qwen3","quantization_config":{"bits":4}}"#,
+        dir.join("config.json"),
+        r#"{"model_type":"QwEn3","architectures":["Qwen3ForCausalLM","Vendor.Custom-1"],"quantization_config":{"bits":4}}"#,
     )
     .unwrap();
-    std::fs::write(
-        indexed.join("model.safetensors.index.json"),
-        r#"{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}"#,
-    )
-    .unwrap();
-    std::fs::write(indexed.join("model-00001-of-00001.safetensors"), b"weights").unwrap();
-    let indexed_id = stable_model_identity("models_dir", 1, "test-root", "indexed").0;
-    assert!(
-        get_catalog_entry(
-            vec![model(
-                "indexed",
-                indexed.clone(),
-                RouterModelSource::ModelsDir,
-            )],
-            &indexed_id,
+    std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+
+    let entry = catalog_entry(model("mixed-case", dir, RouterModelSource::ModelsDir));
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("QwEn3"));
+    assert_eq!(entry.metadata.architecture.as_deref(), Some("qwen3"));
+    assert_eq!(
+        entry.metadata.declared_architectures.as_deref(),
+        Some(
+            &[
+                "Qwen3ForCausalLM".to_string(),
+                "Vendor.Custom-1".to_string()
+            ][..]
         )
-        .unwrap()
-        .complete
     );
-    std::fs::write(indexed.join("model-00001-of-00001.safetensors"), b"").unwrap();
-    let indexed_after = get_catalog_entry(
-        vec![model("indexed", indexed, RouterModelSource::ModelsDir)],
-        &indexed_id,
-    )
-    .unwrap();
-    assert!(!indexed_after.complete);
+    assert!(entry.metadata.unknown_reasons.model_type.is_none());
     assert!(
-        indexed_after
+        entry
+            .metadata
+            .unknown_reasons
+            .declared_architectures
+            .is_none()
+    );
+}
+
+#[test]
+fn invalid_raw_config_strings_are_null_with_reasons() {
+    let root = temp_dir("invalid-raw-config-fields");
+    let too_long_model_type = "x".repeat(MAX_MODEL_TYPE_BYTES + 1);
+    let too_many_architectures = (0..=MAX_DECLARED_ARCHITECTURES)
+        .map(|idx| format!(r#""Arch{idx}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let too_long_architecture = "A".repeat(MAX_DECLARED_ARCHITECTURE_BYTES + 1);
+    let cases = [
+        (
+            "non-string-model-type",
+            r#"{"model_type":3,"architectures":["Arch"],"quantization_config":{"bits":4}}"#
+                .to_string(),
+            "model_type",
+            "model_type must be a string",
+        ),
+        (
+            "too-long-model-type",
+            format!(
+                r#"{{"model_type":"{too_long_model_type}","architectures":["Arch"],"quantization_config":{{"bits":4}}}}"#
+            ),
+            "model_type",
+            "model_type exceeds 128 bytes",
+        ),
+        (
+            "non-array-architectures",
+            r#"{"model_type":"qwen3","architectures":"Arch","quantization_config":{"bits":4}}"#
+                .to_string(),
+            "architectures",
+            "architectures must be an array of strings",
+        ),
+        (
+            "too-many-architectures",
+            format!(
+                r#"{{"model_type":"qwen3","architectures":[{too_many_architectures}],"quantization_config":{{"bits":4}}}}"#
+            ),
+            "architectures",
+            "architectures has more than 16 entries",
+        ),
+        (
+            "too-long-architecture",
+            format!(
+                r#"{{"model_type":"qwen3","architectures":["{too_long_architecture}"],"quantization_config":{{"bits":4}}}}"#
+            ),
+            "architectures",
+            "architectures entry exceeds 128 bytes",
+        ),
+    ];
+    for (name, config, field, reason) in cases {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+        let entry = catalog_entry(model(name, dir, RouterModelSource::ModelsDir));
+        match field {
+            "model_type" => {
+                assert!(entry.metadata.model_type.is_none(), "{name}");
+                assert_eq!(
+                    entry.metadata.unknown_reasons.model_type.as_deref(),
+                    Some(reason),
+                    "{name}"
+                );
+            }
+            "architectures" => {
+                assert!(entry.metadata.declared_architectures.is_none(), "{name}");
+                assert_eq!(
+                    entry
+                        .metadata
+                        .unknown_reasons
+                        .declared_architectures
+                        .as_deref(),
+                    Some(reason),
+                    "{name}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn directory_entry_bounds_count_junk_before_filtering() {
+    let root = temp_dir("entry-bound");
+    let path = write_model(&root, "junk", "qwen3");
+    for idx in 0..MAX_DISK_FILES {
+        std::fs::write(path.join(format!("junk-{idx:04}.txt")), b"x").unwrap();
+    }
+    let entry = catalog_entry(model("junk", path, RouterModelSource::ModelsDir));
+    assert!(!entry.complete);
+    assert!(
+        entry
             .metadata
             .support
             .complete_reason
             .as_deref()
             .unwrap()
-            .contains("missing or empty")
+            .contains("directory entry count exceeded")
+    );
+    assert!(
+        entry
+            .metadata
+            .unknown_reasons
+            .format
+            .as_deref()
+            .unwrap()
+            .contains("directory entry count exceeded")
     );
 }
 

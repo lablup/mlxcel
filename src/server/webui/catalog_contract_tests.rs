@@ -115,12 +115,12 @@ fn bounded_detection_rejects_dflash_without_reading_weights() {
     .expect("config");
 
     let entry = catalog_entry(model("draft", path, RouterModelSource::ModelsDir));
-    assert!(entry.metadata.model_type.is_none());
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("qwen3"));
     assert!(!entry.metadata.support.architecturally_supported);
     let reason = entry
         .metadata
         .unknown_reasons
-        .model_type
+        .architecture
         .as_deref()
         .unwrap();
     assert!(reason.contains("DFlash"));
@@ -142,11 +142,11 @@ fn shared_detection_errors_do_not_leak_absolute_catalog_paths() {
         path,
         RouterModelSource::ModelsDir,
     ));
-    assert!(entry.metadata.model_type.is_none());
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("arcee"));
     let reason = entry
         .metadata
         .unknown_reasons
-        .model_type
+        .architecture
         .as_deref()
         .unwrap();
     assert!(reason.contains("model directory is an embedding checkpoint"));
@@ -323,12 +323,12 @@ fn bounded_catalog_detection_reports_unknown_when_weight_index_is_required() {
     std::fs::remove_file(path.join("model.safetensors")).expect("remove direct shard");
 
     let entry = catalog_entry(model("kimi", path, RouterModelSource::ModelsDir));
-    assert!(entry.metadata.model_type.is_none());
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("kimi_k3"));
     assert!(
         entry
             .metadata
             .unknown_reasons
-            .model_type
+            .architecture
             .as_deref()
             .unwrap()
             .contains("does not read SafeTensors headers")
@@ -342,12 +342,12 @@ fn gemma4_without_bounded_variant_evidence_is_unknown_not_text() {
     let path = write_model(&root, "gemma4", "gemma4");
 
     let entry = catalog_entry(model("gemma4", path, RouterModelSource::ModelsDir));
-    assert!(entry.metadata.model_type.is_none());
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("gemma4"));
     assert!(
         entry
             .metadata
             .unknown_reasons
-            .model_type
+            .architecture
             .as_deref()
             .unwrap()
             .contains("Gemma 4 text-vs-vision classification requires")
@@ -365,12 +365,12 @@ fn gemma4_processor_config_symlink_is_not_variant_evidence() {
     std::os::unix::fs::symlink(&outside, path.join("processor_config.json")).unwrap();
 
     let entry = catalog_entry(model("gemma4", path, RouterModelSource::ModelsDir));
-    assert!(entry.metadata.model_type.is_none());
+    assert_eq!(entry.metadata.model_type.as_deref(), Some("gemma4"));
     assert!(
         entry
             .metadata
             .unknown_reasons
-            .model_type
+            .architecture
             .as_deref()
             .unwrap()
             .contains("Gemma 4 text-vs-vision classification requires")

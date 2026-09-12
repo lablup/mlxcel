@@ -23,6 +23,9 @@ pub(super) const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 pub(super) const MAX_INDEX_BYTES: u64 = 512 * 1024;
 pub(super) const MAX_DISK_FILES: usize = 4_096;
 pub(super) const MAX_DISK_DEPTH: usize = 8;
+pub(super) const MAX_MODEL_TYPE_BYTES: usize = 128;
+pub(super) const MAX_DECLARED_ARCHITECTURES: usize = 16;
+pub(super) const MAX_DECLARED_ARCHITECTURE_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +92,7 @@ pub struct SupportStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogMetadataUnknownReasons {
     pub architecture: Option<String>,
+    pub declared_architectures: Option<String>,
     pub model_type: Option<String>,
     pub quantization: Option<String>,
     pub format: Option<String>,
@@ -100,6 +104,7 @@ pub struct CatalogMetadataUnknownReasons {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogMetadata {
     pub architecture: Option<String>,
+    pub declared_architectures: Option<Vec<String>>,
     pub input_tasks: Vec<TaskKind>,
     pub output_tasks: Vec<TaskKind>,
     pub quantization: Option<String>,

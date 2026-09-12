@@ -20,7 +20,29 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::catalog_types::{MAX_DISK_DEPTH, MAX_DISK_FILES, MAX_INDEX_BYTES};
+use super::catalog_types::{MAX_CONFIG_BYTES, MAX_DISK_DEPTH, MAX_DISK_FILES, MAX_INDEX_BYTES};
+
+#[cfg(test)]
+static HEAVY_METADATA_PROBES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_heavy_metadata_probe_count() {
+    HEAVY_METADATA_PROBES.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn heavy_metadata_probe_count() -> usize {
+    HEAVY_METADATA_PROBES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn record_heavy_metadata_probe() {
+    HEAVY_METADATA_PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(not(test))]
+fn record_heavy_metadata_probe() {}
 
 pub(super) struct Completeness {
     pub(super) ok: bool,
@@ -38,18 +60,15 @@ pub(super) fn completeness(path: &Path) -> Completeness {
     if index.is_file() {
         return indexed_completeness(path, &index);
     }
-    let has_shard = fs::read_dir(path)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "safetensors")
-                && regular_nonzero_file(&entry.path())
-        });
+    let entries = match bounded_read_dir_paths(path) {
+        Ok(entries) => entries,
+        Err(reason) => {
+            return Completeness { ok: false, reason };
+        }
+    };
+    let has_shard = entries.iter().any(|entry| {
+        entry.extension().is_some_and(|ext| ext == "safetensors") && regular_nonzero_file(entry)
+    });
     if has_shard {
         Completeness {
             ok: true,
@@ -171,18 +190,21 @@ pub(super) fn read_json_bounded(path: &Path, max_bytes: u64) -> (Option<Value>, 
     }
 }
 
-pub(super) fn format_for(path: &Path) -> Option<String> {
-    (path.join("model.safetensors.index.json").is_file()
-        || fs::read_dir(path)
-            .ok()?
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|ext| ext == "safetensors")
-            }))
-    .then(|| "safetensors".to_string())
+pub(super) fn format_for(path: &Path) -> (Option<String>, Option<String>) {
+    if path.join("model.safetensors.index.json").is_file() {
+        return (Some("safetensors".to_string()), None);
+    }
+    let entries = match bounded_read_dir_paths(path) {
+        Ok(entries) => entries,
+        Err(reason) => return (None, Some(reason)),
+    };
+    (
+        entries
+            .iter()
+            .any(|entry| entry.extension().is_some_and(|ext| ext == "safetensors"))
+            .then(|| "safetensors".to_string()),
+        None,
+    )
 }
 
 pub(super) fn disk_size(path: &Path) -> (Option<u64>, Option<String>) {
@@ -248,11 +270,17 @@ fn regular_nonzero_file(path: &Path) -> bool {
 }
 
 pub(super) fn content_fingerprint(path: &Path) -> Option<String> {
+    record_heavy_metadata_probe();
     let mut facts = Vec::new();
-    push_required_metadata_fact(&mut facts, "config", &path.join("config.json"))?;
+    push_required_metadata_fact(
+        &mut facts,
+        "config",
+        &path.join("config.json"),
+        MAX_CONFIG_BYTES,
+    )?;
     let index = path.join("model.safetensors.index.json");
     if index.exists() {
-        push_required_metadata_fact(&mut facts, "index", &index)?;
+        push_required_metadata_fact(&mut facts, "index", &index, MAX_INDEX_BYTES)?;
         push_index_shard_facts(&mut facts, path, &index);
     } else {
         push_direct_shard_facts(&mut facts, path);
@@ -261,26 +289,28 @@ pub(super) fn content_fingerprint(path: &Path) -> Option<String> {
     Some(format!("sha256:{}", hex_digest(&digest)))
 }
 
-fn push_required_metadata_fact(facts: &mut Vec<String>, label: &str, path: &Path) -> Option<()> {
-    push_path_state(facts, label, path).then_some(())
+fn push_required_metadata_fact(
+    facts: &mut Vec<String>,
+    label: &str,
+    path: &Path,
+    max_bytes: u64,
+) -> Option<()> {
+    push_bounded_file_state(facts, label, path, max_bytes).then_some(())
 }
 
 fn push_direct_shard_facts(facts: &mut Vec<String>, path: &Path) {
-    let Ok(entries) = fs::read_dir(path) else {
-        facts.push("direct:unreadable".to_string());
-        return;
+    let entries = match bounded_read_dir_paths(path) {
+        Ok(entries) => entries,
+        Err(reason) => {
+            facts.push(format!("direct:bounded:{reason}"));
+            return;
+        }
     };
     let mut shards: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .into_iter()
         .filter(|entry| entry.extension().is_some_and(|ext| ext == "safetensors"))
-        .take(MAX_DISK_FILES + 1)
         .collect();
     shards.sort();
-    if shards.len() > MAX_DISK_FILES {
-        facts.push("direct:overflow".to_string());
-        shards.truncate(MAX_DISK_FILES);
-    }
     for (idx, shard) in shards.iter().enumerate() {
         push_path_state(facts, &format!("direct:{idx}"), shard);
     }
@@ -340,6 +370,71 @@ fn push_path_state(facts: &mut Vec<String>, label: &str, path: &Path) -> bool {
         .unwrap_or(0);
     facts.push(format!("{label}:{kind}:{}:{mtime}", meta.len()));
     true
+}
+
+fn push_bounded_file_state(
+    facts: &mut Vec<String>,
+    label: &str,
+    path: &Path,
+    max_bytes: u64,
+) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        facts.push(format!("{label}:missing"));
+        return false;
+    };
+    if !meta.file_type().is_file() {
+        push_path_state(facts, label, path);
+        return false;
+    }
+    if meta.len() > max_bytes {
+        facts.push(format!("{label}:file:{}:too-large", meta.len()));
+        return false;
+    }
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => {
+            facts.push(format!("{label}:file:{}:unreadable", meta.len()));
+            return false;
+        }
+    };
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    if file
+        .by_ref()
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        facts.push(format!("{label}:file:{}:read-error", meta.len()));
+        return false;
+    }
+    let digest = Sha256::digest(&bytes);
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    facts.push(format!(
+        "{label}:file:{}:{mtime}:sha256:{}",
+        meta.len(),
+        hex_digest(&digest)
+    ));
+    true
+}
+
+fn bounded_read_dir_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(path)
+        .map_err(|err| format!("{} is unreadable: {err}", safe_path_label(path)))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| format!("{} is unreadable: {err}", safe_path_label(path)))?;
+        if paths.len() >= MAX_DISK_FILES {
+            return Err("directory entry count exceeded the catalog bound".to_string());
+        }
+        paths.push(entry.path());
+    }
+    Ok(paths)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

@@ -47,6 +47,7 @@
       "removable": true,
       "metadata": {
         "architecture": "qwen3",
+        "declared_architectures": null,
         "input_tasks": [
           "chat"
         ],
@@ -74,6 +75,7 @@
         "model_type": "qwen3",
         "unknown_reasons": {
           "architecture": null,
+          "declared_architectures": "config.json has no architectures array",
           "model_type": null,
           "quantization": null,
           "format": null,
@@ -133,6 +135,7 @@
       "removable": false,
       "metadata": {
         "architecture": "qwen3",
+        "declared_architectures": null,
         "input_tasks": [
           "chat"
         ],
@@ -160,6 +163,7 @@
         "model_type": "qwen3",
         "unknown_reasons": {
           "architecture": null,
+          "declared_architectures": "config.json has no architectures array",
           "model_type": null,
           "quantization": null,
           "format": null,
