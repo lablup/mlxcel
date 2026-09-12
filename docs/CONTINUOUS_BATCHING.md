@@ -61,6 +61,22 @@ Escape hatches restore the previous single-client behavior: `--parallel 1`
 (single decode slot), `--no-batch` (legacy sequential worker, no scheduler),
 `--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.
 
+### Token-exactness against `mlxcel generate`
+
+The shipped continuous-batching defaults are a serving-throughput contract, not
+a token-exactness contract against `mlxcel generate` for every model at
+`temperature 0`. Front-end prompt rendering is shared, but the server can still
+use scheduler-owned cache allocation, paged storage, prompt-cache adoption,
+chunked prefill, and batched decode paths that the CLI loop does not use. If a
+reproduction or oracle comparison needs the CLI-shaped single-request path, use
+`--no-batch` for the legacy worker or `--max-batch-size 1` to keep the scheduler
+while making `--decode-storage-backend auto` resolve to dense storage. These are
+diagnostic/oracle controls that narrow the server path toward the CLI; they do
+not turn every model family into an unmeasured token-exactness guarantee. To
+isolate only the decode storage backend while preserving the default admission
+width, prefer `--decode-storage-backend dense`; that is the first bisect knob
+when a `--max-batch-size 1` run matches the CLI but the default server does not.
+
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to
 > per-row qmv, re-reading the weights once per sequence (aggregate flat at
@@ -256,9 +272,12 @@ simultaneous borrowers, and Automatic Prefix Caching (on by default, disable
 with `--apc-enabled=false`) lets requests that diverge after a shared prefix
 reuse the common part. The mechanism, the measured memory and prefill-token
 savings, the decode throughput, and `--kv-cache-budget` are documented in
-[turbo-kv-cache.md](turbo-kv-cache.md#unified-paged-kv-cache). Paged decode is
-byte-identical to the dense backend; it is the storage backend the disaggregated
-roles below build on.
+[turbo-kv-cache.md](turbo-kv-cache.md#unified-paged-kv-cache). The paged backend
+is covered by `tests/paged_scheduler_parity.rs` for the scheduler-shaped
+qwen3/llama3 Fp16 dense-natural-cache path at B=1/B=2, and by a CUDA qwen3 arm
+that requires greedy-token equality with bounded logit RMS when TF32 is
+disabled. Do not generalize that evidence to VLM front ends, model-owned caches,
+Turbo/quantized-KV modes, or all CUDA reduction geometries.
 
 #### The fused decode kernel
 
@@ -273,7 +292,7 @@ single sequence at 16K and 32K
 (`docs/benchmark_results/paged-decode-v2-m1ultra-2026-07-31.md`).
 
 What it does *not* serve falls back to the previous gather-then-SDPA path, per
-launch, with identical output:
+launch, under the same parity limits described above:
 
 | case | why |
 |---|---|

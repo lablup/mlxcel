@@ -52,10 +52,11 @@
 //!   writes to and gathers from the pool.
 //! * [`assert_batched_decode_parity`] — the **batched** decode wiring (`B == 2`)
 //!   via `forward_batched_with_context_and_ids` + a paged [`DecodeBatchContext`],
-//!   exactly as `execute_batched_decode` dispatches it. This exercises the
-//!   per-model `is_paged_backed()` decode guard that routes pool-backed caches
-//!   through the per-sequence `update_and_fetch` loop instead of the
-//!   dense-pointer native kernel.
+//!   exactly as `execute_batched_decode` dispatches it. For pool-backed caches
+//!   this reaches the #899 whole-batch pooled decode helper, including its
+//!   gather fallback below the fused dispatch floor; if that helper declines,
+//!   the model's `is_paged_backed()` guard still keeps the dense-pointer native
+//!   kernel away from placeholder dense buffers.
 //!
 //! # Running
 //!
@@ -64,9 +65,14 @@
 //! ```text
 //! cargo test --test paged_scheduler_parity --release \
 //!     --features metal,accelerate -- --ignored --nocapture --test-threads=1
+//! MLXCEL_REQUIRE_MODELS=1 MLX_ENABLE_TF32=0 cargo test --test paged_scheduler_parity --release \
+//!     --features cuda -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! Each case soft-skips when its model directory is absent. Fetch with:
+//! Set `MLXCEL_REQUIRE_MODELS=1` for evidence runs that must prove the
+//! checkpoint was present; leave it unset only for CI or exploratory runs that
+//! intentionally accept soft-skips. Each case soft-skips when its model
+//! directory is absent and the require flag is unset. Fetch with:
 //!
 //! ```text
 //! ./target/release/mlxcel download mlx-community/Qwen3-0.6B-4bit
@@ -91,6 +97,22 @@ const BLOCK_SIZE: usize = 32;
 /// Number of greedy decode steps to compare after prefill.
 const DECODE_STEPS: usize = 16;
 
+/// Paged-vs-dense single-sequence logit tolerance for the backend contract.
+///
+/// The #1773 server/CLI reproducer is a near-tie VLM continuation and must not
+/// be turned into a Japanese-token fixture here. The backend contract this test
+/// pins is narrower: qwen3 and llama3's scheduler-shaped paged path and dense
+/// path must choose the same greedy tokens while each compared logit row stays
+/// within this relative-RMS envelope. CUDA validation must run with TF32
+/// disabled so TF32's 10-bit mantissa does not define the tolerance.
+const PAGED_DENSE_MAX_RELATIVE_RMS: f64 = 5e-5;
+
+#[derive(Debug)]
+struct DecodeStepTrace {
+    token: i32,
+    selector_logits: Vec<f32>,
+}
+
 /// Fixed prompt token ids (deterministic; no tokenizer needed). Identical bytes
 /// feed every run so the comparison is purely about the cache backend. All ids
 /// are < 128k, valid for both the qwen3 (~151k) and llama3 (128k) vocabularies.
@@ -109,6 +131,80 @@ fn greedy_token(logits: &mlxcel_core::MlxArray, row: i32, pos: i32) -> i32 {
     mlxcel_core::item_i32(&mlxcel_core::argmax_last_axis(&flat))
 }
 
+/// The `[1, vocab]` logit row at sequence position `pos`, as host f32 values.
+fn logit_row(logits: &mlxcel_core::MlxArray, row: i32, pos: i32) -> Vec<f32> {
+    let shape = mlxcel_core::array_shape(logits);
+    let vocab = shape[2];
+    let row = mlxcel_core::slice(logits, &[row, pos, 0], &[row + 1, pos + 1, vocab]);
+    let row = mlxcel_core::astype(&row, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&row);
+    mlxcel_core::array_to_raw_bytes(&row)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// RMS of `actual - reference` divided by the RMS of `reference`.
+fn relative_rms(actual: &[f32], reference: &[f32]) -> f64 {
+    assert_eq!(
+        actual.len(),
+        reference.len(),
+        "logit rows must have matching widths"
+    );
+    assert!(!actual.is_empty(), "logit rows must not be empty");
+
+    let mut diff_sq = 0.0f64;
+    let mut ref_sq = 0.0f64;
+    for (idx, (&actual, &reference)) in actual.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            actual.is_finite(),
+            "actual logit at vocab index {idx} must be finite, got {actual}"
+        );
+        assert!(
+            reference.is_finite(),
+            "reference logit at vocab index {idx} must be finite, got {reference}"
+        );
+        let actual = f64::from(actual);
+        let reference = f64::from(reference);
+        let diff = actual - reference;
+        diff_sq += diff * diff;
+        ref_sq += reference * reference;
+    }
+
+    let n = actual.len() as f64;
+    let diff_rms = (diff_sq / n).sqrt();
+    let ref_rms = (ref_sq / n).sqrt();
+    if ref_rms == 0.0 {
+        diff_rms
+    } else {
+        diff_rms / ref_rms
+    }
+}
+
+fn tokens(trace: &[DecodeStepTrace]) -> Vec<i32> {
+    trace.iter().map(|step| step.token).collect()
+}
+
+fn assert_trace_within_relative_rms(
+    actual: &[DecodeStepTrace],
+    reference: &[DecodeStepTrace],
+    max_relative_rms: f64,
+    label: &str,
+) {
+    assert_eq!(
+        tokens(actual),
+        tokens(reference),
+        "{label}: greedy tokens differ between paged and dense backends"
+    );
+    for (idx, (actual, reference)) in actual.iter().zip(reference.iter()).enumerate() {
+        let rms = relative_rms(&actual.selector_logits, &reference.selector_logits);
+        assert!(
+            rms <= max_relative_rms,
+            "{label}: decode step {idx} relative RMS {rms:e} exceeded {max_relative_rms:e}"
+        );
+    }
+}
+
 /// The paged sequence-state layout the scheduler builds for the default Fp16 KV
 /// mode (`BatchScheduler::sequence_state_layout_override` → the non-Turbo
 /// `PagedKvLayout::uniform` branch with `DEFAULT_PAGED_BLOCK_SIZE`).
@@ -120,11 +216,13 @@ fn scheduler_paged_layout(num_layers: usize) -> SequenceStateLayout {
 
 /// Run prefill + `DECODE_STEPS` greedy decode steps via single-sequence
 /// `model.forward` (the scheduler's `execute_full_prefill` + `decode_single_step`
-/// path), returning the decoded token sequence.
-fn run_single_sequence(
+/// path), returning each emitted token with the logit row that selected it. The
+/// first trace row therefore compares the prefill terminal logits, and later
+/// rows compare the decode logits from the preceding step.
+fn run_single_sequence_trace(
     model: &mlxcel::LoadedModel,
     caches: &mut [mlxcel_core::cache::KVCache],
-) -> Vec<i32> {
+) -> Vec<DecodeStepTrace> {
     let prompt_len = PROMPT_TOKENS.len() as i32;
 
     let prompt = mlxcel_core::from_slice_i32(PROMPT_TOKENS, &[1, prompt_len]);
@@ -132,14 +230,19 @@ fn run_single_sequence(
     let prefill_logits = model.forward(&prompt, caches, Some(&mask));
     mlxcel_core::eval(&prefill_logits);
 
+    let mut selector_logits = logit_row(&prefill_logits, 0, prompt_len - 1);
     let mut next = greedy_token(&prefill_logits, 0, prompt_len - 1);
 
     let mut decoded = Vec::with_capacity(DECODE_STEPS);
     for _ in 0..DECODE_STEPS {
-        decoded.push(next);
+        decoded.push(DecodeStepTrace {
+            token: next,
+            selector_logits,
+        });
         let step_input = mlxcel_core::from_slice_i32(&[next], &[1, 1]);
         let logits = model.forward(&step_input, caches, None);
         mlxcel_core::eval(&logits);
+        selector_logits = logit_row(&logits, 0, 0);
         next = greedy_token(&logits, 0, 0);
     }
     decoded
@@ -180,7 +283,9 @@ fn assert_single_sequence_parity(model: &mlxcel::LoadedModel, label: &str) {
         !dense_pool.get_caches_mut(dense_id).unwrap()[0].is_paged_backed(),
         "dense backend must not pool-back caches"
     );
-    let dense_tokens = run_single_sequence(model, dense_pool.get_caches_mut(dense_id).unwrap());
+    let dense_trace =
+        run_single_sequence_trace(model, dense_pool.get_caches_mut(dense_id).unwrap());
+    let dense_tokens = tokens(&dense_trace);
     eprintln!("dense  decoded: {dense_tokens:?}");
 
     // Paged backend: scheduler `decode_storage_backend == Paged` +
@@ -198,16 +303,19 @@ fn assert_single_sequence_parity(model: &mlxcel::LoadedModel, label: &str) {
             .all(|c| c.is_paged_backed()),
         "paged backend must pool-back every layer cache for a dense-natural Fp16 model"
     );
-    let paged_tokens = run_single_sequence(model, paged_pool.get_caches_mut(paged_id).unwrap());
+    let paged_trace =
+        run_single_sequence_trace(model, paged_pool.get_caches_mut(paged_id).unwrap());
+    let paged_tokens = tokens(&paged_trace);
     eprintln!("paged  decoded: {paged_tokens:?}");
 
-    assert_eq!(
-        paged_tokens, dense_tokens,
-        "scheduler paged single-sequence path produced different greedy tokens than dense\n\
-         dense: {dense_tokens:?}\npaged: {paged_tokens:?}"
+    assert_trace_within_relative_rms(
+        &paged_trace,
+        &dense_trace,
+        PAGED_DENSE_MAX_RELATIVE_RMS,
+        label,
     );
     eprintln!(
-        "OK: {DECODE_STEPS} single-sequence decode steps identical between paged and dense backends."
+        "OK: {DECODE_STEPS} single-sequence decode steps identical between paged and dense backends within relative RMS {PAGED_DENSE_MAX_RELATIVE_RMS:e}."
     );
 }
 
@@ -230,7 +338,9 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
     // Dense single-sequence reference.
     let mut dense_pool = CachePool::new(4);
     let dense_id = dense_pool.allocate(model).expect("dense allocate");
-    let dense_tokens = run_single_sequence(model, dense_pool.get_caches_mut(dense_id).unwrap());
+    let dense_trace =
+        run_single_sequence_trace(model, dense_pool.get_caches_mut(dense_id).unwrap());
+    let dense_tokens = tokens(&dense_trace);
     eprintln!("dense  decoded: {dense_tokens:?}");
 
     // Two pool-backed paged sequences fed the identical prompt.
@@ -247,19 +357,19 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
     let prompt = mlxcel_core::from_slice_i32(PROMPT_TOKENS, &[1, prompt_len]);
     let mask = mlxcel_core::utils::create_causal_mask(prompt_len, 0);
     let mut next = [0i32; 2];
+    let mut selector_logits = [Vec::new(), Vec::new()];
     for (slot, id) in [id0, id1].into_iter().enumerate() {
         let caches = paged_pool.get_caches_mut(id).unwrap();
         let logits = model.forward(&prompt, caches, Some(&mask));
         mlxcel_core::eval(&logits);
+        selector_logits[slot] = logit_row(&logits, 0, prompt_len - 1);
         next[slot] = greedy_token(&logits, 0, prompt_len - 1);
     }
 
     // Batched greedy decode through the paged batched path.
     let context = DecodeBatchContext::paged_with_native(BLOCK_SIZE as i32, true);
-    let mut batched: [Vec<i32>; 2] = [Vec::new(), Vec::new()];
+    let mut batched: [Vec<DecodeStepTrace>; 2] = [Vec::new(), Vec::new()];
     for _ in 0..DECODE_STEPS {
-        batched[0].push(next[0]);
-        batched[1].push(next[1]);
         let input = mlxcel_core::from_slice_i32(&[next[0], next[1]], &[2, 1]);
         let logits = {
             let mut batch_caches = paged_pool
@@ -274,18 +384,30 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
             )
         };
         mlxcel_core::eval(&logits);
+        batched[0].push(DecodeStepTrace {
+            token: next[0],
+            selector_logits: std::mem::take(&mut selector_logits[0]),
+        });
+        batched[1].push(DecodeStepTrace {
+            token: next[1],
+            selector_logits: std::mem::take(&mut selector_logits[1]),
+        });
+        selector_logits[0] = logit_row(&logits, 0, 0);
+        selector_logits[1] = logit_row(&logits, 1, 0);
         next[0] = greedy_token(&logits, 0, 0);
         next[1] = greedy_token(&logits, 1, 0);
     }
-    eprintln!("paged0 decoded: {:?}", batched[0]);
-    eprintln!("paged1 decoded: {:?}", batched[1]);
+    eprintln!("paged0 decoded: {:?}", tokens(&batched[0]));
+    eprintln!("paged1 decoded: {:?}", tokens(&batched[1]));
 
     assert_eq!(
-        batched[0], dense_tokens,
+        tokens(&batched[0]),
+        dense_tokens,
         "batched paged row 0 diverged from dense reference"
     );
     assert_eq!(
-        batched[1], dense_tokens,
+        tokens(&batched[1]),
+        dense_tokens,
         "batched paged row 1 diverged from dense reference"
     );
     eprintln!(
@@ -311,6 +433,42 @@ fn paged_scheduler_batched_decode_matches_dense_qwen3() {
         return;
     };
     assert_batched_decode_parity(&model, QWEN3_DIR);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "loads qwen3-0.6b-4bit and runs the CUDA paged/dense logit contract"]
+fn cuda_paged_scheduler_qwen3_matches_dense_within_logit_contract() {
+    let _runtime = initialize_runtime();
+    if !mlxcel_core::cuda_is_available() {
+        eprintln!("Skipping CUDA paged scheduler contract: CUDA backend is not available");
+        return;
+    }
+    let Some(model) = load_or_skip(QWEN3_DIR, "mlx-community/Qwen3-0.6B-4bit") else {
+        return;
+    };
+
+    let num_layers = model.num_layers();
+    let mut dense_pool = CachePool::new(2);
+    let dense_id = dense_pool.allocate(&model).expect("dense allocate");
+    let dense_trace =
+        run_single_sequence_trace(&model, dense_pool.get_caches_mut(dense_id).unwrap());
+
+    let mut paged_pool = CachePool::new(2);
+    let paged_id = paged_pool
+        .allocate_with_layout(&model, Some(scheduler_paged_layout(num_layers)))
+        .expect("paged allocate");
+    let paged_trace =
+        run_single_sequence_trace(&model, paged_pool.get_caches_mut(paged_id).unwrap());
+
+    eprintln!("dense decoded: {:?}", tokens(&dense_trace));
+    eprintln!("paged decoded: {:?}", tokens(&paged_trace));
+    assert_trace_within_relative_rms(
+        &paged_trace,
+        &dense_trace,
+        PAGED_DENSE_MAX_RELATIVE_RMS,
+        "CUDA qwen3 paged-vs-dense scheduler contract",
+    );
 }
 
 #[test]
