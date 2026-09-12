@@ -399,6 +399,10 @@ pub(crate) fn detect_hunyuan_model_type(config: &serde_json::Value) -> ModelType
 /// embedder with its MLM head dropped.
 const ENCODER_ONLY_MODEL_TYPES: &[&str] = &["bert", "xlm-roberta", "modernbert", "siglip"];
 
+pub(crate) fn is_encoder_only_model_type(model_type: &str) -> bool {
+    ENCODER_ONLY_MODEL_TYPES.contains(&model_type)
+}
+
 /// `architectures[0]` values that mark an embedding export outright.
 const EMBEDDING_ARCHITECTURES: &[&str] = &[
     "BertModel",
@@ -462,7 +466,7 @@ pub(crate) fn is_sequence_classifier_checkpoint(config: &Value) -> Option<ModelT
 /// `config.architectures[0]` names an embedding export (including the two
 /// flag-gated decoders: `Gemma3TextModel` with `use_bidirectional_attention`
 /// and `Ministral3Model` with `is_causal: false`).
-fn has_embedding_architecture(config: &Value) -> bool {
+pub(crate) fn config_has_embedding_architecture(config: &Value) -> bool {
     let Some(arch) = first_architecture(config) else {
         return false;
     };
@@ -487,21 +491,22 @@ fn modules_json_has_pooling(model_path: &Path) -> bool {
     let Ok(modules) = serde_json::from_str::<Value>(&raw) else {
         return false;
     };
-    modules
-        .as_array()
-        .map(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|ty| ty.ends_with(".Pooling"))
-            })
+    modules_json_value_has_pooling(&modules)
+}
+
+pub(crate) fn modules_json_value_has_pooling(modules: &Value) -> bool {
+    modules.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|ty| ty.ends_with(".Pooling"))
         })
-        .unwrap_or(false)
+    })
 }
 
 /// Map the `model_type` of a detected embedding layout to its family.
-fn embedding_variant_for_model_type(model_type: &str) -> Option<ModelType> {
+pub(crate) fn embedding_variant_for_model_type(model_type: &str) -> Option<ModelType> {
     Some(match model_type {
         "bert" => ModelType::Bert,
         "xlm-roberta" | "xlm_roberta" => ModelType::XlmRoberta,
@@ -544,9 +549,9 @@ pub(crate) fn is_embedding_checkpoint(
         return Ok(None);
     }
 
-    let encoder_only = ENCODER_ONLY_MODEL_TYPES.contains(&model_type.as_str());
+    let encoder_only = is_encoder_only_model_type(&model_type);
     let layout_says_embedding = encoder_only
-        || has_embedding_architecture(config)
+        || config_has_embedding_architecture(config)
         || modules_json_has_pooling(model_path)
         || model_path.join("1_Pooling").join("config.json").exists();
     if !layout_says_embedding {
@@ -603,13 +608,59 @@ pub fn model_type_is_vision_capable(model_type: ModelType) -> bool {
     crate::model_metadata::is_vlm_model_type(model_type)
 }
 
-/// Detect model type from config.json
-pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
-    let config_path = model_path.join("config.json");
-    let config_str = std::fs::read_to_string(config_path)?;
-    let config_str = sanitize_config_json(&config_str);
-    let v: serde_json::Value = serde_json::from_str(&config_str)?;
+pub(crate) trait ModelDetectionProbes {
+    fn is_kokoro_checkpoint(&self, model_path: &Path, config: &Value) -> Result<bool>;
+    fn is_embedding_checkpoint(
+        &self,
+        model_path: &Path,
+        config: &Value,
+    ) -> Result<Option<ModelType>>;
+    fn gemma4_has_vision_weights(&self, model_path: &Path, config: &Value) -> Result<bool>;
+    fn inkling_dir_is_mtp_only(&self, model_path: &Path, config: &Value) -> Result<bool>;
+    fn inkling_has_vision_weights(&self, model_path: &Path, config: &Value) -> Result<bool>;
+    fn kimi_k3_has_vision_weights(&self, model_path: &Path, config: &Value) -> Result<bool>;
+}
 
+struct FullFilesystemDetectionProbes;
+
+impl ModelDetectionProbes for FullFilesystemDetectionProbes {
+    fn is_kokoro_checkpoint(&self, model_path: &Path, config: &Value) -> Result<bool> {
+        Ok(super::kokoro::is_kokoro_checkpoint(model_path, config))
+    }
+
+    fn is_embedding_checkpoint(
+        &self,
+        model_path: &Path,
+        config: &Value,
+    ) -> Result<Option<ModelType>> {
+        is_embedding_checkpoint(model_path, config)
+    }
+
+    fn gemma4_has_vision_weights(&self, model_path: &Path, _config: &Value) -> Result<bool> {
+        Ok(gemma4_has_vision_weights(model_path))
+    }
+
+    fn inkling_dir_is_mtp_only(&self, model_path: &Path, _config: &Value) -> Result<bool> {
+        Ok(inkling_dir_is_mtp_only(model_path))
+    }
+
+    fn inkling_has_vision_weights(&self, model_path: &Path, _config: &Value) -> Result<bool> {
+        Ok(inkling_has_vision_weights(model_path))
+    }
+
+    fn kimi_k3_has_vision_weights(&self, model_path: &Path, _config: &Value) -> Result<bool> {
+        Ok(kimi_k3_has_vision_weights(model_path))
+    }
+}
+
+/// Detect a model type from an already parsed config using caller-supplied filesystem probes.
+///
+/// The loader passes probes that may inspect SafeTensors indexes or headers, while metadata-only callers can pass bounded probes that fail closed when a decision would require reading weight headers. Keeping the dispatch here prevents UI catalog support from drifting into a second handwritten model list.
+pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
+    model_path: &Path,
+    v: &Value,
+    probes: &P,
+) -> Result<ModelType> {
     // A DFlash speculative drafter is structurally not a standalone model, but
     // it declares an ordinary `"model_type": "qwen3"`, so it would otherwise
     // fall through to the Qwen 3 arm below (#1168). Reject it before any
@@ -618,14 +669,14 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     // than the resolved `DrafterKind`, because `DEFAULT_DRAFTER_KIND` is
     // `Dflash`: keying on the resolved kind would also reject an ordinary small
     // full model used as a classic drafter, which loads and runs fine.
-    if is_dflash_drafter_config(&v) {
+    if is_dflash_drafter_config(v) {
         return Err(dflash_drafter_not_standalone_error(model_path));
     }
 
     // Kokoro TTS checkpoints carry no top-level `model_type`, so detect them by
     // architecture signal (the `istftnet` config block or the canonical weight
     // filename) before the `model_type`-based dispatch below would error.
-    if super::kokoro::is_kokoro_checkpoint(model_path, &v) {
+    if probes.is_kokoro_checkpoint(model_path, v)? {
         return Ok(ModelType::Kokoro);
     }
 
@@ -634,14 +685,14 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     // claim, so the classifier check runs first (#1356). `is_embedding_checkpoint`
     // refuses every `ForSequenceClassification` export for the same reason: a
     // reranker scores a pair, it does not produce a vector.
-    if let Some(reranker) = is_sequence_classifier_checkpoint(&v) {
+    if let Some(reranker) = is_sequence_classifier_checkpoint(v) {
         return Ok(reranker);
     }
 
     // Embedding exports reuse generator `model_type`s (`qwen3` for
     // Qwen3-Embedding, `gemma3_text` for EmbeddingGemma), so the layout and
     // architecture rules must run before the `model_type` match below.
-    if let Some(embedding) = is_embedding_checkpoint(model_path, &v)? {
+    if let Some(embedding) = probes.is_embedding_checkpoint(model_path, v)? {
         return Ok(embedding);
     }
 
@@ -654,7 +705,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     let model_type = model_type_raw.to_ascii_lowercase();
 
     if matches!(model_type.as_str(), "inkling_mm_model" | "inkling")
-        && inkling_dir_is_mtp_only(model_path)
+        && probes.inkling_dir_is_mtp_only(model_path, v)?
     {
         return Err(anyhow::anyhow!(
             "{} is an isolated Inkling MTP drafter checkpoint, not a standalone target model. Pass the full Inkling checkpoint to -m and this directory to --draft-model with --draft-kind mtp.",
@@ -674,15 +725,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // below, which routes to the shared Llama decoder and would run the
         // stack once instead of twice, never reading a `gate_projections`
         // tensor. That output is fluent, so it has to be refused here.
-        _ if declares_iquest_loop_coder_architecture(&v) => iquest_loop_coder_model_type(&v),
-        "llama" | "mistral" if declares_iquest_coder_architecture(&v) => {
-            iquest_coder_model_type(&v)
-        }
+        _ if declares_iquest_loop_coder_architecture(v) => iquest_loop_coder_model_type(v),
+        "llama" | "mistral" if declares_iquest_coder_architecture(v) => iquest_coder_model_type(v),
         "llama" | "mistral" => Ok(ModelType::Llama),
-        "iquestcoder" => iquest_coder_model_type(&v),
-        "iquestloopcoder" => iquest_loop_coder_model_type(&v),
+        "iquestcoder" => iquest_coder_model_type(v),
+        "iquestloopcoder" => iquest_loop_coder_model_type(v),
         "llama4" => Ok(detect_text_or_vlm(
-            &v,
+            v,
             ModelType::Llama4,
             ModelType::Llama4VLM,
         )),
@@ -694,12 +743,12 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "qwen3_moe" => Ok(ModelType::Qwen3Moe),
         "qwen3_next" | "qwen3next" => Ok(ModelType::Qwen3Next),
         "qwen3_5" => Ok(detect_text_or_vlm(
-            &v,
+            v,
             ModelType::Qwen35,
             ModelType::Qwen35VLM,
         )),
         "qwen3_5_moe" => Ok(detect_text_or_vlm(
-            &v,
+            v,
             ModelType::Qwen35Moe,
             ModelType::Qwen35MoeVLM,
         )),
@@ -707,11 +756,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "gemma" => Ok(ModelType::Gemma),
         "gemma2" => Ok(ModelType::Gemma2),
         "gemma3" | "gemma3_text" => Ok(detect_text_or_vlm(
-            &v,
+            v,
             ModelType::Gemma3,
             ModelType::Gemma3VLM,
         )),
-        "gemma4" | "gemma4_text" => Ok(if gemma4_has_vision_weights(model_path) {
+        "gemma4" | "gemma4_text" => Ok(if probes.gemma4_has_vision_weights(model_path, v)? {
             ModelType::Gemma4VLM
         } else {
             ModelType::Gemma4
@@ -731,11 +780,11 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // model_type alone and never misrouted to Gemma4VLM.
         "gemma4_unified" => Ok(ModelType::Gemma4Unified),
         "gemma3n" | "gemma3n_text" => Ok(detect_text_or_vlm(
-            &v,
+            v,
             ModelType::Gemma3n,
             ModelType::Gemma3nVLM,
         )),
-        "phi" | "phi-msft" => Ok(detect_phi_model_type(&v)),
+        "phi" | "phi-msft" => Ok(detect_phi_model_type(v)),
         "phi3" => Ok(ModelType::Phi3),
         "phi4mm" => Ok(ModelType::Phi4MMVLM),
         "phi4-siglip" => Ok(ModelType::Phi4SigLipVLM),
@@ -785,7 +834,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "ernie4_5_moe_vl" | "ernie4.5_moe_vl" => Ok(ModelType::Ernie45MoeVLM),
         "hunyuan_v1_dense" | "hunyuan_dense" => Ok(ModelType::HunyuanV1Dense),
         "hunyuan_vl" => Ok(ModelType::HunyuanVLM),
-        "hunyuan" => Ok(detect_hunyuan_model_type(&v)),
+        "hunyuan" => Ok(detect_hunyuan_model_type(v)),
         "mimo" => Ok(ModelType::MiMo),
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
@@ -821,7 +870,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "smollm3" => Ok(ModelType::SmolLM3),
         "ministral3" => Ok(ModelType::Ministral3),
         "mistral3" => Ok(detect_text_or_vlm(
-            &v,
+            v,
             ModelType::Mistral3,
             ModelType::Mistral3VLM,
         )),
@@ -835,7 +884,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "lfm2_vl" | "lfm2-vl" => Ok(ModelType::Lfm2VL),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
         "inkling_mm_model" | "inkling" => {
-            if has_vision_config(&v) && inkling_has_vision_weights(model_path) {
+            if has_vision_config(v) && probes.inkling_has_vision_weights(model_path, v)? {
                 Ok(ModelType::InklingVLM)
             } else {
                 Ok(ModelType::Inkling)
@@ -855,7 +904,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         // without either is the text backbone, whose sanitizer drops any
         // stray vision keys.
         "kimi_k3" => {
-            if has_vision_config(&v) && kimi_k3_has_vision_weights(model_path) {
+            if has_vision_config(v) && probes.kimi_k3_has_vision_weights(model_path, v)? {
                 Ok(ModelType::KimiK3VLM)
             } else {
                 Ok(ModelType::KimiK3)
@@ -950,4 +999,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
             model_type_raw
         )),
     }
+}
+
+/// Detect model type from config.json
+pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
+    let config_path = model_path.join("config.json");
+    let config_str = std::fs::read_to_string(config_path)?;
+    let config_str = sanitize_config_json(&config_str);
+    let v: serde_json::Value = serde_json::from_str(&config_str)?;
+    detect_model_type_with_probes(model_path, &v, &FullFilesystemDetectionProbes)
 }

@@ -24,8 +24,12 @@
 //! this level; the dispatched sub-apps run without a CORS layer so the
 //! response carries each header exactly once.
 
+#[cfg(feature = "webui")]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "webui")]
+use std::sync::{Mutex, OnceLock};
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -38,8 +42,8 @@ use axum::routing::{get, post};
 
 use super::config::ServerConfig;
 use super::router_lifecycle::{
-    CancelError, ErrorBody, ErrorEnvelope, FieldError, OperationKind, OperationState,
-    ResetEventKind, UiEvent,
+    CancelError, ErrorBody, ErrorEnvelope, FieldError, OperationError, OperationKind,
+    OperationResult, OperationState, OperationTarget, ResetEventKind, UiEvent,
 };
 use super::router_models::{
     ROUTER_SHUTDOWN_TIMEOUT, RouterModelAction, RouterPool, RouterPoolError,
@@ -56,11 +60,71 @@ const AUTOLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 /// headroom.
 const DISPATCH_BODY_CAP: usize = 64 * 1024 * 1024;
 
+#[cfg(feature = "webui")]
+static CATALOG_REFRESH_OWNERS: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+
+#[cfg(feature = "webui")]
+fn catalog_refresh_owners() -> &'static Mutex<BTreeMap<String, String>> {
+    CATALOG_REFRESH_OWNERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(feature = "webui")]
+fn begin_catalog_refresh_operation(
+    coordinator: &super::router_lifecycle::LifecycleCoordinator,
+) -> Result<(super::router_lifecycle::OperationAccepted, bool), OperationError> {
+    let server_id = coordinator.server_instance_id().to_string();
+    let mut owners = catalog_refresh_owners()
+        .lock()
+        .map_err(|_| OperationError::TooManyActive)?;
+    if let Some(operation_id) = owners.get(&server_id).cloned() {
+        if let Some(operation) = coordinator.get_operation(&operation_id)
+            && matches!(
+                operation.state,
+                OperationState::Queued | OperationState::Running | OperationState::Cancelling
+            )
+        {
+            return Ok((
+                super::router_lifecycle::OperationAccepted {
+                    operation_id,
+                    state: operation.state,
+                    idempotent_replay: true,
+                },
+                false,
+            ));
+        }
+        owners.remove(&server_id);
+    }
+    let accepted = coordinator.begin_operation(
+        OperationKind::CatalogRefresh,
+        OperationTarget::Catalog {
+            scope: "full".to_string(),
+            model_id: None,
+        },
+        None,
+        "catalog_refresh:full".to_string(),
+    )?;
+    owners.insert(server_id, accepted.operation_id.clone());
+    Ok((accepted, true))
+}
+
+#[cfg(feature = "webui")]
+fn finish_catalog_refresh_operation(server_id: &str, operation_id: &str) {
+    if let Ok(mut owners) = catalog_refresh_owners().lock()
+        && owners
+            .get(server_id)
+            .is_some_and(|owned| owned == operation_id)
+    {
+        owners.remove(server_id);
+    }
+}
+
 /// Shared state of the router-mode top level.
 #[derive(Clone)]
 pub struct RouterServerState {
     pub pool: Arc<RouterPool>,
     pub config: Arc<ServerConfig>,
+    #[cfg(feature = "webui")]
+    pub catalog_cache: Arc<super::webui::catalog::CatalogProjectionCache>,
 }
 
 fn llama_server_error(message: &str) -> Response {
@@ -573,6 +637,226 @@ fn validate_load_profile(profile: &UiLoadProfile) -> Option<Response> {
     None
 }
 
+#[cfg(feature = "webui")]
+async fn ui_catalog_list(
+    State(state): State<RouterServerState>,
+    Query(query): Query<super::webui::catalog::CatalogQuery>,
+) -> Response {
+    let coordinator = state.pool.lifecycle_coordinator();
+    let models = state.pool.catalog_snapshot();
+    let server_instance_id = coordinator.server_instance_id().to_string();
+    let snapshot_sequence = coordinator.snapshot_sequence();
+    let catalog_cache = state.catalog_cache.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        super::webui::catalog::list_catalog_with_cache(
+            &catalog_cache,
+            models,
+            &query,
+            server_instance_id,
+            snapshot_sequence,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(err)) => catalog_error_response(err),
+        Err(err) => webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("catalog projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+async fn ui_catalog_get(
+    State(state): State<RouterServerState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Some(response) = validate_model_id(&id, "id") {
+        return response;
+    }
+    let models = state.pool.catalog_snapshot();
+    let catalog_cache = state.catalog_cache.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        super::webui::catalog::get_catalog_entry_with_cache(&catalog_cache, models, &id)
+    })
+    .await;
+    match result {
+        Ok(Ok(entry)) => Json(entry).into_response(),
+        Ok(Err(err)) => catalog_error_response(err),
+        Err(err) => webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("catalog projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+async fn catalog_change_signatures_blocking(
+    pool: Arc<RouterPool>,
+    catalog_cache: Arc<super::webui::catalog::CatalogProjectionCache>,
+) -> Result<BTreeMap<String, String>, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        catalog_cache.catalog_change_signatures(pool.catalog_snapshot())
+    })
+    .await
+}
+
+#[cfg(feature = "webui")]
+fn update_catalog_refresh_failure(
+    coordinator: &super::router_lifecycle::LifecycleCoordinator,
+    operation_id: &str,
+    message: &str,
+) {
+    coordinator.update_operation(
+        operation_id,
+        OperationState::Failed,
+        None,
+        Some(ErrorBody {
+            code: "unavailable".to_string(),
+            message: message.to_string(),
+            retryable: true,
+            field_errors: None,
+            operation_id: Some(operation_id.to_string()),
+        }),
+    );
+}
+
+#[cfg(feature = "webui")]
+async fn ui_catalog_refresh(State(state): State<RouterServerState>) -> Response {
+    let coordinator = state.pool.lifecycle_coordinator();
+    let (accepted, owner) = match begin_catalog_refresh_operation(&coordinator) {
+        Ok(accepted) => accepted,
+        Err(err) => return operation_begin_error_response(err),
+    };
+    if !owner {
+        return (StatusCode::ACCEPTED, Json(accepted)).into_response();
+    }
+    let pool = state.pool.clone();
+    let catalog_cache = state.catalog_cache.clone();
+    let coordinator = coordinator.clone();
+    let operation_id = accepted.operation_id.clone();
+    let server_id = coordinator.server_instance_id().to_string();
+    tokio::spawn(async move {
+        coordinator.update_operation(&operation_id, OperationState::Running, None, None);
+        let before = match catalog_change_signatures_blocking(pool.clone(), catalog_cache.clone())
+            .await
+        {
+            Ok(signatures) => signatures,
+            Err(err) => {
+                update_catalog_refresh_failure(
+                    &coordinator,
+                    &operation_id,
+                    "catalog refresh task failed",
+                );
+                tracing::warn!(error = %err, operation_id = %operation_id, "catalog refresh signature task failed");
+                finish_catalog_refresh_operation(&server_id, &operation_id);
+                return;
+            }
+        };
+        catalog_cache.clear();
+        let pool_for_rescan = pool.clone();
+        let result = tokio::task::spawn_blocking(move || pool_for_rescan.rescan()).await;
+        match result {
+            Ok(Ok(())) => {
+                let after = match catalog_change_signatures_blocking(
+                    pool.clone(),
+                    catalog_cache.clone(),
+                )
+                .await
+                {
+                    Ok(signatures) => signatures,
+                    Err(err) => {
+                        update_catalog_refresh_failure(
+                            &coordinator,
+                            &operation_id,
+                            "catalog refresh task failed",
+                        );
+                        tracing::warn!(error = %err, operation_id = %operation_id, "catalog refresh signature task failed");
+                        finish_catalog_refresh_operation(&server_id, &operation_id);
+                        return;
+                    }
+                };
+                let changed = super::webui::catalog::count_changed_entries(&before, &after);
+                let sequence = coordinator.snapshot_sequence();
+                coordinator.update_operation(
+                    &operation_id,
+                    OperationState::Succeeded,
+                    Some(OperationResult::CatalogRefresh {
+                        scanned_entries: after.len() as u64,
+                        changed_entries: changed,
+                        snapshot_sequence: sequence,
+                    }),
+                    None,
+                );
+            }
+            Ok(Err(err)) => {
+                update_catalog_refresh_failure(
+                    &coordinator,
+                    &operation_id,
+                    "catalog refresh failed",
+                );
+                tracing::warn!(error = %err, operation_id = %operation_id, "catalog refresh failed");
+            }
+            Err(err) => {
+                update_catalog_refresh_failure(
+                    &coordinator,
+                    &operation_id,
+                    "catalog refresh task failed",
+                );
+                tracing::warn!(error = %err, operation_id = %operation_id, "catalog refresh task failed");
+            }
+        }
+        finish_catalog_refresh_operation(&server_id, &operation_id);
+    });
+    (StatusCode::ACCEPTED, Json(accepted)).into_response()
+}
+
+#[cfg(feature = "webui")]
+fn catalog_error_response(err: super::webui::catalog::CatalogError) -> Response {
+    match err {
+        super::webui::catalog::CatalogError::InvalidField { field, message } => {
+            invalid_webui_field(field, "invalid_request", &message)
+        }
+        super::webui::catalog::CatalogError::NotFound => webui_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "catalog entry not found",
+            true,
+        ),
+    }
+}
+
+fn operation_begin_error_response(err: OperationError) -> Response {
+    match err {
+        OperationError::Conflict { operation_id } => (
+            StatusCode::CONFLICT,
+            Json(ErrorEnvelope {
+                error: ErrorBody {
+                    code: "conflict".to_string(),
+                    message: "operation idempotency key conflicts with another active operation"
+                        .to_string(),
+                    retryable: true,
+                    field_errors: None,
+                    operation_id,
+                },
+                request_id: request_id(),
+            }),
+        )
+            .into_response(),
+        OperationError::TooManyActive => webui_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many active operations",
+            true,
+        ),
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UiModelActionRequest {
@@ -1056,6 +1340,7 @@ async fn router_api_key_auth(
 /// UI management routes are never implicitly public: the explicit WebUI
 /// router accessor must be paired with a configured API key until #1837/#1838
 /// define the production mount and browser auth story.
+#[cfg(feature = "webui")]
 async fn router_ui_api_key_auth(
     State(state): State<RouterServerState>,
     request: Request<Body>,
@@ -1096,8 +1381,12 @@ fn router_base_routes() -> axum::Router<RouterServerState> {
         .route("/models/sse", get(router_models_sse))
 }
 
+#[cfg(feature = "webui")]
 fn router_ui_routes(state: RouterServerState) -> axum::Router<RouterServerState> {
     axum::Router::new()
+        .route("/ui-api/v1/catalog", get(ui_catalog_list))
+        .route("/ui-api/v1/catalog/refresh", post(ui_catalog_refresh))
+        .route("/ui-api/v1/catalog/:id", get(ui_catalog_get))
         .route("/ui-api/v1/model-actions", post(ui_model_actions))
         .route("/ui-api/v1/operations", get(ui_operations_list))
         .route("/ui-api/v1/operations/:id", get(ui_operation_get))
@@ -1161,9 +1450,15 @@ pub fn create_router_app(state: RouterServerState) -> axum::Router {
 /// Assemble the router app with the issue #1839 WebUI adapters mounted behind
 /// mandatory API-key authentication for internal handler tests and the future
 /// secure startup mount.
+#[cfg(feature = "webui")]
 pub fn create_router_app_with_authenticated_ui(state: RouterServerState) -> axum::Router {
     let routes = router_base_routes().merge(router_ui_routes(state.clone()));
     finish_router_app(routes, state)
+}
+
+#[cfg(not(feature = "webui"))]
+pub fn create_router_app_with_authenticated_ui(state: RouterServerState) -> axum::Router {
+    create_router_app(state)
 }
 
 /// Assemble the WebUI-enabled router with the browser security policy outside Trace/CORS/auth.
@@ -1181,15 +1476,15 @@ pub(crate) fn create_router_app_with_secured_ui(
 #[path = "router_server_tests.rs"]
 mod router_server_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "webui"))]
 #[path = "router_server_security_support_tests.rs"]
 mod router_server_security_support_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "webui"))]
 #[path = "router_server_security_prefix_tests.rs"]
 mod router_server_security_prefix_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "webui"))]
 #[path = "router_server_security_tests.rs"]
 mod router_server_security_tests;
 
@@ -1258,6 +1553,8 @@ pub async fn run_router_server(
     let state = RouterServerState {
         pool,
         config: Arc::new(base_config),
+        #[cfg(feature = "webui")]
+        catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
     };
     let app = create_router_app(state);
     tokio::select! {

@@ -5,13 +5,13 @@
     {
       "identity": {
         "id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
-        "inference_id": "mlx-community/Qwen3-4B-4bit",
-        "display_name": "Qwen3 4B 4-bit",
+        "inference_id": "alpha",
+        "display_name": "alpha",
         "source": "cache",
         "source_key_hash": "4f2c4c3046647722cfc55a225ea614494cf5f289d267e454c7970d70cfa43f07",
         "generation": 1,
-        "revision": 7,
-        "content_fingerprint": "sha256:weights-v1"
+        "revision": 1,
+        "content_fingerprint": "fixture-content-fingerprint"
       },
       "capabilities": [
         {
@@ -21,10 +21,16 @@
           "reason": null
         },
         {
-          "task": "vision_input",
-          "phase": "provider_ready",
+          "task": "rerank",
+          "phase": "pre_load",
           "available": true,
-          "reason": "processor availability is confirmed after load"
+          "reason": null
+        },
+        {
+          "task": "completion",
+          "phase": "pre_load",
+          "available": true,
+          "reason": null
         }
       ],
       "lifecycle": {
@@ -41,36 +47,59 @@
       "removable": true,
       "metadata": {
         "architecture": "qwen3",
+        "declared_architectures": null,
         "input_tasks": [
-          "chat",
-          "vision_input"
+          "chat"
         ],
         "output_tasks": [
-          "chat"
+          "chat",
+          "rerank",
+          "completion"
         ],
         "quantization": "4bit",
         "format": "safetensors",
-        "parameter_count": 4000000000,
-        "disk_bytes": 2700000000,
-        "memory_estimate_bytes": 5600000000,
+        "parameter_count": null,
+        "disk_bytes": 12345,
+        "memory_estimate_bytes": null,
         "support": {
           "architecturally_supported": true,
           "runnable_on_backend": true,
           "complete": true,
-          "reason": null
+          "reason": null,
+          "architecturally_supported_reason": null,
+          "runnable_on_backend_reason": null,
+          "complete_reason": null,
+          "tested_checkpoint": false,
+          "tested_checkpoint_reason": "No catalog-specific tested-checkpoint evidence is available."
+        },
+        "model_type": "qwen3",
+        "unknown_reasons": {
+          "architecture": null,
+          "declared_architectures": "config.json has no architectures array",
+          "model_type": null,
+          "quantization": null,
+          "format": null,
+          "parameter_count": "parameter count is not measured during metadata-only catalog scans",
+          "disk_bytes": null,
+          "memory_estimate_bytes": "memory estimate requires backend/provider measurement after load"
         }
+      },
+      "removal": {
+        "eligible": true,
+        "reason": null,
+        "instructions": null
       }
     },
     {
       "identity": {
         "id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
-        "inference_id": "mlx-community/Qwen3-4B-4bit",
-        "display_name": "Qwen3 4B 4-bit (models-dir)",
+        "inference_id": "alpha",
+        "display_name": "alpha models dir",
         "source": "models_dir",
         "source_key_hash": "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
         "generation": 1,
-        "revision": 7,
-        "content_fingerprint": "sha256:weights-v1"
+        "revision": 1,
+        "content_fingerprint": "fixture-content-fingerprint"
       },
       "capabilities": [
         {
@@ -80,10 +109,16 @@
           "reason": null
         },
         {
-          "task": "vision_input",
-          "phase": "provider_ready",
+          "task": "rerank",
+          "phase": "pre_load",
           "available": true,
-          "reason": "processor availability is confirmed after load"
+          "reason": null
+        },
+        {
+          "task": "completion",
+          "phase": "pre_load",
+          "available": true,
+          "reason": null
         }
       ],
       "lifecycle": {
@@ -97,27 +132,50 @@
       },
       "complete": true,
       "supported": true,
-      "removable": true,
+      "removable": false,
       "metadata": {
         "architecture": "qwen3",
+        "declared_architectures": null,
         "input_tasks": [
-          "chat",
-          "vision_input"
+          "chat"
         ],
         "output_tasks": [
-          "chat"
+          "chat",
+          "rerank",
+          "completion"
         ],
         "quantization": "4bit",
         "format": "safetensors",
-        "parameter_count": 4000000000,
-        "disk_bytes": 2700000000,
-        "memory_estimate_bytes": 5600000000,
+        "parameter_count": null,
+        "disk_bytes": 12345,
+        "memory_estimate_bytes": null,
         "support": {
           "architecturally_supported": true,
           "runnable_on_backend": true,
           "complete": true,
-          "reason": null
+          "reason": null,
+          "architecturally_supported_reason": null,
+          "runnable_on_backend_reason": null,
+          "complete_reason": null,
+          "tested_checkpoint": false,
+          "tested_checkpoint_reason": "No catalog-specific tested-checkpoint evidence is available."
+        },
+        "model_type": "qwen3",
+        "unknown_reasons": {
+          "architecture": null,
+          "declared_architectures": "config.json has no architectures array",
+          "model_type": null,
+          "quantization": null,
+          "format": null,
+          "parameter_count": "parameter count is not measured during metadata-only catalog scans",
+          "disk_bytes": null,
+          "memory_estimate_bytes": "memory estimate requires backend/provider measurement after load"
         }
+      },
+      "removal": {
+        "eligible": false,
+        "reason": "only managed cache entries can be removed",
+        "instructions": "Use model-free mode with the managed cache to delete downloaded snapshots."
       }
     }
   ],
@@ -126,6 +184,6 @@
     "next_cursor": null,
     "total_known": 2
   },
-  "server_instance_id": "srv_20260912_a",
-  "snapshot_sequence": 46
+  "server_instance_id": "srv_fixture",
+  "snapshot_sequence": 8
 }

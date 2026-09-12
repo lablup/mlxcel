@@ -95,6 +95,8 @@ fn router_state_from(
     RouterServerState {
         pool,
         config: Arc::new(config),
+        #[cfg(feature = "webui")]
+        catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
     }
 }
 

@@ -1623,7 +1623,8 @@
           "complete",
           "supported",
           "removable",
-          "metadata"
+          "metadata",
+          "removal"
         ],
         "properties": {
           "identity": {
@@ -1650,6 +1651,9 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/CatalogMetadata"
+          },
+          "removal": {
+            "$ref": "#/components/schemas/RemovalStatus"
           }
         }
       },
@@ -2563,7 +2567,12 @@
           "architecturally_supported",
           "runnable_on_backend",
           "complete",
-          "reason"
+          "reason",
+          "architecturally_supported_reason",
+          "runnable_on_backend_reason",
+          "complete_reason",
+          "tested_checkpoint",
+          "tested_checkpoint_reason"
         ],
         "properties": {
           "architecturally_supported": {
@@ -2581,6 +2590,38 @@
               "null"
             ],
             "maxLength": 512
+          },
+          "architecturally_supported_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "runnable_on_backend_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "complete_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "tested_checkpoint": {
+            "type": "boolean",
+            "description": "True only when the catalog has explicit compatibility evidence for this checkpoint; static registry support alone does not set this."
+          },
+          "tested_checkpoint_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
           }
         }
       },
@@ -2589,6 +2630,7 @@
         "additionalProperties": false,
         "required": [
           "architecture",
+          "declared_architectures",
           "input_tasks",
           "output_tasks",
           "quantization",
@@ -2596,7 +2638,9 @@
           "parameter_count",
           "disk_bytes",
           "memory_estimate_bytes",
-          "support"
+          "support",
+          "model_type",
+          "unknown_reasons"
         ],
         "properties": {
           "architecture": {
@@ -2605,6 +2649,18 @@
               "null"
             ],
             "maxLength": 128
+          },
+          "declared_architectures": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "maxItems": 16,
+            "description": "Raw config.json architectures array when readable and bounded."
           },
           "input_tasks": {
             "type": "array",
@@ -2657,6 +2713,17 @@
           },
           "support": {
             "$ref": "#/components/schemas/SupportStatus"
+          },
+          "model_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "description": "Raw config.json model_type when readable; architecture is the resolved mlxcel registry id."
+          },
+          "unknown_reasons": {
+            "$ref": "#/components/schemas/CatalogMetadataUnknownReasons"
           }
         }
       },
@@ -3346,6 +3413,98 @@
             "items": {
               "$ref": "#/components/schemas/IdentityVector"
             }
+          }
+        }
+      },
+      "RemovalStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eligible",
+          "reason",
+          "instructions"
+        ],
+        "properties": {
+          "eligible": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          }
+        }
+      },
+      "CatalogMetadataUnknownReasons": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "description": "Reasons for metadata fields that are null or deliberately unmeasured.",
+        "properties": {
+          "architecture": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "declared_architectures": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "model_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "quantization": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "parameter_count": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "disk_bytes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "memory_estimate_bytes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
           }
         }
       }

@@ -258,6 +258,31 @@ impl RouterModelEntry {
     }
 }
 
+/// Provider-confirmed capability facts projected only after an entry has a loaded provider.
+#[derive(Debug, Clone, Copy)]
+pub struct RouterCatalogProviderCapabilities {
+    pub image_input: bool,
+    pub audio_input: bool,
+}
+
+/// Read-only model data projected to WebUI catalog adapters.
+#[derive(Debug, Clone)]
+pub struct RouterCatalogModel {
+    pub name: String,
+    pub path: PathBuf,
+    pub source: RouterModelSource,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    pub ui_model_id: String,
+    pub source_key_hash: String,
+    pub hidden: bool,
+    pub lifecycle: LifecycleSnapshot,
+    pub revision: u64,
+    pub generation: u64,
+    pub catalog_epoch: u64,
+    pub provider_capabilities: Option<RouterCatalogProviderCapabilities>,
+}
+
 /// A status snapshot for `GET /models` and the SSE stream.
 #[derive(Debug, Clone)]
 pub struct RouterModelSnapshot {
@@ -302,6 +327,7 @@ pub struct RouterPool {
     events: tokio::sync::broadcast::Sender<serde_json::Value>,
     lifecycle: Arc<LifecycleCoordinator>,
     revision_authority: Arc<AtomicU64>,
+    catalog_epoch: AtomicU64,
     /// Serializes model loads so two concurrent autoloads cannot race the
     /// capacity check or contend the accelerator during weight upload.
     load_lock: tokio::sync::Mutex<()>,
@@ -395,6 +421,7 @@ impl RouterPool {
             events,
             lifecycle: Arc::new(LifecycleCoordinator::new()),
             revision_authority: Arc::new(AtomicU64::new(1)),
+            catalog_epoch: AtomicU64::new(0),
             load_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             rescan_after_snapshot_hook: Mutex::new(None),
@@ -510,7 +537,13 @@ impl RouterPool {
         }
         for (name, section) in &self.sources.presets.models {
             if let Some(path) = &section.model_path {
-                discovered.insert(name.clone(), (path.clone(), RouterModelSource::Preset));
+                if regular_file_exists(&path.join("config.json")) {
+                    discovered.insert(name.clone(), (path.clone(), RouterModelSource::Preset));
+                } else {
+                    tracing::warn!(
+                        "router: preset '[{name}]' names a checkpoint without a regular config.json; skipping"
+                    );
+                }
             } else if let Some(repo) = &section.hf_repo {
                 let Some(cache) = &self.sources.cache else {
                     tracing::warn!(
@@ -520,7 +553,7 @@ impl RouterPool {
                     continue;
                 };
                 let path = cache.snapshot_dir(repo);
-                if path.join("config.json").is_file() {
+                if regular_file_exists(&path.join("config.json")) {
                     discovered.insert(name.clone(), (path, RouterModelSource::Preset));
                 } else {
                     tracing::warn!(
@@ -628,6 +661,7 @@ impl RouterPool {
         }
         *entries = rebuilt;
         drop(entries);
+        self.catalog_epoch.fetch_add(1, Ordering::SeqCst);
         self.notify("models_reload", "*", serde_json::Value::Null);
         Ok(())
     }
@@ -826,6 +860,44 @@ impl RouterPool {
                         .preset
                         .as_ref()
                         .map(|section| section.to_ini(&entry.name)),
+                }
+            })
+            .collect()
+    }
+
+    pub fn catalog_snapshot(&self) -> Vec<RouterCatalogModel> {
+        let entries = match self.entries.read() {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(),
+        };
+        let catalog_epoch = self.catalog_epoch.load(Ordering::SeqCst).max(1);
+        entries
+            .values()
+            .map(|entry| {
+                let provider_capabilities = entry.state.lock().ok().and_then(|guard| {
+                    guard.app.as_ref().and_then(|app| {
+                        app.state.model_provider.is_loaded().then_some(
+                            RouterCatalogProviderCapabilities {
+                                image_input: app.state.media_support.image,
+                                audio_input: app.state.media_support.audio,
+                            },
+                        )
+                    })
+                });
+                RouterCatalogModel {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    source: entry.source,
+                    aliases: entry.aliases.clone(),
+                    tags: entry.tags.clone(),
+                    ui_model_id: entry.ui_model_id.clone(),
+                    source_key_hash: entry.source_key_hash.clone(),
+                    hidden: entry.hidden,
+                    lifecycle: entry.lifecycle_snapshot(),
+                    revision: entry.lifecycle_revision(),
+                    generation: entry.lifecycle.generation(),
+                    catalog_epoch,
+                    provider_capabilities,
                 }
             })
             .collect()
@@ -2188,7 +2260,7 @@ pub fn discover_models(models_dir: &Path) -> anyhow::Result<BTreeMap<String, Pat
             );
             continue;
         }
-        if !canonical.is_dir() || !canonical.join("config.json").is_file() {
+        if !canonical.is_dir() || !regular_file_exists(&canonical.join("config.json")) {
             continue;
         }
         found.insert(name, canonical);
@@ -2196,6 +2268,16 @@ pub fn discover_models(models_dir: &Path) -> anyhow::Result<BTreeMap<String, Pat
     Ok(found)
 }
 
+fn regular_file_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 #[path = "router_models_tests.rs"]
 mod router_models_tests;
+
+#[cfg(test)]
+#[path = "router_models_discovery_tests.rs"]
+mod router_models_discovery_tests;

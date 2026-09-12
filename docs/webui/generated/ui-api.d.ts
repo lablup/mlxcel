@@ -167,6 +167,7 @@ export interface CatalogEntry {
   readonly supported: boolean;
   readonly removable: boolean;
   readonly metadata: CatalogMetadata;
+  readonly removal: RemovalStatus;
 }
 
 export interface Pagination {
@@ -358,10 +359,16 @@ export interface SupportStatus {
   readonly runnable_on_backend: boolean;
   readonly complete: boolean;
   readonly reason: string | null;
+  readonly architecturally_supported_reason: string | null;
+  readonly runnable_on_backend_reason: string | null;
+  readonly complete_reason: string | null;
+  readonly tested_checkpoint: boolean;
+  readonly tested_checkpoint_reason: string | null;
 }
 
 export interface CatalogMetadata {
   readonly architecture: string | null;
+  readonly declared_architectures: ReadonlyArray<string> | null;
   readonly input_tasks: ReadonlyArray<TaskKind>;
   readonly output_tasks: ReadonlyArray<TaskKind>;
   readonly quantization: string | null;
@@ -370,6 +377,8 @@ export interface CatalogMetadata {
   readonly disk_bytes: number | null;
   readonly memory_estimate_bytes: number | null;
   readonly support: SupportStatus;
+  readonly model_type: string | null;
+  readonly unknown_reasons: CatalogMetadataUnknownReasons;
 }
 
 export interface SnapshotPayload {
@@ -548,4 +557,21 @@ export interface IdentityVector {
 
 export interface IdentityVectors {
   readonly identity_vectors: ReadonlyArray<IdentityVector>;
+}
+
+export interface RemovalStatus {
+  readonly eligible: boolean;
+  readonly reason: string | null;
+  readonly instructions: string | null;
+}
+
+export interface CatalogMetadataUnknownReasons {
+  readonly architecture?: string | null;
+  readonly declared_architectures?: string | null;
+  readonly model_type?: string | null;
+  readonly quantization?: string | null;
+  readonly format?: string | null;
+  readonly parameter_count?: string | null;
+  readonly disk_bytes?: string | null;
+  readonly memory_estimate_bytes?: string | null;
 }
