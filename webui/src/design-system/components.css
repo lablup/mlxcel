@@ -2,7 +2,7 @@
 .material-glass { background: var(--material-glass-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-chrome); backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); -webkit-backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { .material-glass { background: var(--color-bg-elevated); } }
 .ds-button, .ds-icon-button, input, select, textarea { font: inherit; }
-.ds-button, .ds-icon-button { min-width: 32px; min-height: 32px; border: 1px solid var(--color-separator); color: var(--color-text); border-radius: 999px; background: var(--color-bg-elevated); transition: background var(--motion-fast), transform var(--motion-fast), border-color var(--motion-fast); }
+.ds-button, .ds-icon-button { min-width: 32px; min-height: 32px; border: 1px solid var(--color-separator); color: var(--color-text); border-radius: 999px; background: var(--material-control-bg); transition: background var(--motion-fast), transform var(--motion-fast), border-color var(--motion-fast); }
 .ds-button { min-width: 32px; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); padding: 7px 14px; font-weight: 650; white-space: normal; overflow-wrap: anywhere; }
 .ds-icon-button { display: inline-grid; place-items: center; padding: 0 9px; }
 .ds-icon { width: 18px; height: 18px; flex: none; }
@@ -15,8 +15,8 @@
 .ds-button-ghost { background: transparent; }
 .ds-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin var(--motion-slow) linear infinite; }
 .ds-field { display: grid; gap: var(--space-2); color: var(--color-muted); }
-.ds-field > span { font-size: 0.9rem; font-weight: 650; }
-.ds-field input, .ds-field select, textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--color-separator); color: var(--color-text); background: var(--color-bg-elevated); }
+.ds-field > span { color: var(--color-text); font-size: 0.9rem; font-weight: 650; }
+.ds-field input, .ds-field select, textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--color-separator); color: var(--color-text); background: var(--color-bg-elevated); overflow-wrap: anywhere; }
 .ds-field small[data-tone="error"] { color: var(--color-error); }
 .ds-field small[data-tone="hint"] { color: var(--color-muted); }
 .ds-status { display: inline-flex; align-items: center; min-height: 24px; gap: var(--space-1); padding: 3px 9px; border-radius: 999px; font-size: 0.82rem; font-weight: 700; border: 1px solid var(--color-separator); }
@@ -42,12 +42,12 @@
 .ds-dialog h2 { margin: 0; font-size: 1.1rem; }
 .ds-dialog > div { padding: var(--space-5); }
 .ds-sheet[data-position="left"] { width: min(320px, calc(100vw - 32px)); min-height: calc(100vh - 24px); margin: 12px auto 12px 12px; }
-.ds-tooltip-wrap { position: relative; display: inline-flex; }
+.ds-tooltip-wrap { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
 .ds-tooltip { position: absolute; z-index: 10; inset: auto auto calc(100% + 8px) 0; opacity: 0; pointer-events: none; width: max-content; max-width: 240px; padding: 6px 9px; border-radius: var(--radius-sm); color: var(--color-bg-elevated); background: var(--color-text); transition: opacity var(--motion-fast); }
 .ds-tooltip-wrap:focus-within .ds-tooltip, .ds-tooltip-wrap:hover .ds-tooltip { opacity: 1; }
 .ds-tabs { display: grid; gap: var(--space-4); }
-.ds-tabs [role="tablist"] { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-1); border: 1px solid var(--color-separator); border-radius: 999px; background: var(--color-bg-neutral); width: fit-content; max-width: 100%; overflow: visible; }
-.ds-tabs [role="tab"] { min-width: 0; min-height: 32px; border: 0; border-radius: 999px; padding: 6px 12px; color: var(--color-muted); background: transparent; font: inherit; font-weight: 650; white-space: normal; overflow-wrap: anywhere; }
+.ds-tabs [role="tablist"] { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-1); border: 1px solid var(--color-separator); border-radius: var(--radius-lg); background: var(--color-bg-neutral); width: 100%; max-width: 100%; overflow: visible; }
+.ds-tabs [role="tab"] { flex: 1 1 8rem; min-width: 0; min-height: 32px; border: 0; border-radius: 999px; padding: 6px 12px; color: var(--color-muted); background: transparent; font: inherit; font-weight: 650; white-space: normal; overflow-wrap: anywhere; }
 .ds-tabs [aria-selected="true"] { color: var(--color-text); background: var(--color-bg-elevated); box-shadow: inset 0 0 0 1px var(--color-separator); }
 .ds-inspector { align-self: start; padding: var(--space-5); min-width: 0; }
 .ds-inspector h2 { margin-top: 0; font-size: 1rem; }
@@ -62,11 +62,6 @@
 .ds-list { display: grid; gap: var(--space-2); list-style: none; padding: var(--space-4); margin: 0; }
 .ds-login { display: grid; gap: var(--space-3); padding: var(--space-4); }
 .ds-login h2, .ds-login p { margin: 0; }
-:root[data-test-text-scale="200"] .ds-tabs [role="tablist"] { width: 100%; border-radius: var(--radius-lg); }
-:root[data-test-text-scale="200"] .ds-tabs [role="tab"] { flex: 1 1 8rem; }
-:root[data-test-text-scale="200"] .ds-button { flex: 1 1 8rem; }
-:root[data-test-text-scale="200"] .ds-tooltip-wrap { min-width: 0; max-width: 100%; flex: 1 1 8rem; }
-:root[data-test-text-scale="200"] .ds-tooltip-wrap .ds-button { width: 100%; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { to { opacity: 0.45; } }
 @keyframes slide { from { transform: translateX(-60%); } to { transform: translateX(120%); } }

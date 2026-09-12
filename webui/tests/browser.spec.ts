@@ -230,6 +230,23 @@ async function expectNoOverflowOrInlineStyles(page: Page): Promise<void> {
   expect(result.smallTargets).toEqual([]);
 }
 
+
+async function expectCompactToolbarHitTargets(page: Page): Promise<void> {
+  const targets = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.app-toolbar .ds-icon-button')).filter((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  }).map((element) => {
+    const rect = element.getBoundingClientRect();
+    return { label: element.getAttribute('aria-label') ?? element.textContent?.trim() ?? element.tagName, width: rect.width, height: rect.height };
+  }));
+  expect(targets.length).toBeGreaterThanOrEqual(3);
+  for (const target of targets) {
+    expect(target.width, target.label).toBeGreaterThanOrEqual(44);
+    expect(target.height, target.label).toBeGreaterThanOrEqual(44);
+  }
+}
+
 async function expectTextScalePanelsReflow(page: Page): Promise<void> {
   const selectors = [
     '.app-main',
@@ -314,6 +331,7 @@ test.describe('design system gallery and shell', () => {
       await expectAxeClean(page);
       await expectNoOverflowOrInlineStyles(page);
       if (variant.width > 960) await expect(page.getByTestId('toolbar-menu')).toBeHidden();
+      if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
       if (variant.tab === 'data' && variant.width >= 1024) await expectDataTableColumnsVisible(page);
       if (variant.textScale === '200') {
         const fontSize = await page.evaluate(() => Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize));
@@ -335,6 +353,7 @@ test.describe('design system gallery and shell', () => {
       await expectNoOverflowOrInlineStyles(page);
       if (variant.signedIn) await loginWithMockApi(page);
       else await expect(page.getByTestId('auth-login')).toBeVisible();
+      if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
       await settleAnimationFrame(page);
       await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });
     });
@@ -404,6 +423,22 @@ test.describe('design system gallery and shell', () => {
     await expect(page.locator('body')).toContainText('UI schema mismatch');
     await Promise.all([page.waitForLoadState('domcontentloaded'), page.getByRole('button', { name: /Reload|새로고침/i }).click()]);
     await expect(page.getByTestId('auth-login')).toBeVisible();
+  });
+
+
+  test('keeps compact reflow on production selectors without masking overflow', async ({ page }) => {
+    const productionCss = [
+      readFileSync(fileURLToPath(new URL('../src/styles.css', import.meta.url)), 'utf8'),
+      readFileSync(fileURLToPath(new URL('../src/design-system/components.css', import.meta.url)), 'utf8'),
+    ].join('\n');
+    expect(productionCss).not.toContain('data-test-text-scale');
+    await bootGallery(page, { name: '390-production-compact-gallery-controls', width: 390, height: 844, tab: 'controls', appearance: { theme: 'dark', material: 'opaque', reduceTransparency: true, reduceMotion: true, locale: 'ko', glassIntensity: 100, highContrast: 'off' } });
+    await expectNoOverflowOrInlineStyles(page);
+    await expectTextScalePanelsReflow(page);
+    const primary = page.getByRole('button', { name: /기본/i });
+    await primary.focus();
+    await expectLocatorWithinViewportX(primary);
+    await expectCompactToolbarHitTargets(page);
   });
 
   test('keeps production routes honest while gallery stays a direct artifact route', async ({ page }) => {
