@@ -3875,6 +3875,77 @@ fn test_wht_matches_h4_reference() {
     );
 }
 
+/// `wht_scaled` with the orthonormal factor must reproduce `wht` exactly, which
+/// is what pins the claim that MLX's default is `1/sqrt(N)` rather than
+/// something that merely looks like it at one size.
+#[test]
+fn test_wht_scaled_orthonormal_matches_default() {
+    for &n in &[4_i32, 64, 128, 256] {
+        let values: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin() * 3.0).collect();
+        let x = from_slice_f32(&values, &[n]);
+
+        // MLX computes the default as `1.0f / std::sqrt(n)` with `n` an int, so
+        // the square root is taken in double and narrowed once. Computing it in
+        // f32 here can land one ulp away when log2(N) is odd, head_dim 128
+        // included, which is the size this whole issue is about.
+        let orthonormal = (1.0_f64 / (n as f64).sqrt()) as f32;
+
+        let default = crate::wht(&x);
+        let explicit = crate::wht_scaled(&x, orthonormal);
+        eval(&default);
+        eval(&explicit);
+
+        let close = allclose(&default, &explicit, 1e-6, 1e-6);
+        eval(&close);
+        assert!(
+            item_bool(&close),
+            "wht_scaled(x, 1/sqrt({n})) must match wht(x)"
+        );
+    }
+}
+
+/// A non-finite scale reaches MLX without throwing and fills the output with
+/// NaN, which shape and dtype checks cannot see, so the guard is in Rust.
+#[test]
+#[should_panic(expected = "wht_scaled: scale must be finite")]
+fn test_wht_scaled_rejects_nan_scale() {
+    let x = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[4]);
+    let _ = crate::wht_scaled(&x, f32::NAN);
+}
+
+#[test]
+#[should_panic(expected = "wht_scaled: last axis must be a non-zero power of 2")]
+fn test_wht_scaled_rejects_non_power_of_two() {
+    let x = from_slice_f32(&[1.0, 2.0, 3.0], &[3]);
+    let _ = crate::wht_scaled(&x, 1.0);
+}
+
+/// An explicit scale reaches MLX rather than being dropped on the way. The
+/// unscaled transform grows the L2 norm by `sqrt(N)`, which is the signal a
+/// backend port gets wrong when it hardcodes a scale: the round trip alone
+/// cannot see it, because neither scaling is an involution the other way.
+#[test]
+fn test_wht_scaled_unscaled_grows_norm_by_sqrt_n() {
+    for &n in &[64_i32, 128, 256] {
+        let values: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
+        let x = from_slice_f32(&values, &[n]);
+
+        let orthonormal = crate::wht(&x);
+        let unscaled = crate::wht_scaled(&x, 1.0);
+        eval(&orthonormal);
+        eval(&unscaled);
+
+        let scaled_back = multiply_scalar(&unscaled, 1.0 / (n as f32).sqrt());
+        eval(&scaled_back);
+        let close = allclose(&orthonormal, &scaled_back, 1e-5, 1e-5);
+        eval(&close);
+        assert!(
+            item_bool(&close),
+            "wht_scaled(x, 1.0) must be sqrt({n}) times the orthonormal transform"
+        );
+    }
+}
+
 /// FP16 precision sanity: the MLX op preserves dtype when given an FP16
 /// input. Round-trip max-error must stay within the issue's acceptance
 /// tolerance of 1e-3 in fp16. (TurboQuant always quantizes the *post-WHT*

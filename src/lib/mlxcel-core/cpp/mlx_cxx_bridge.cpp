@@ -6635,6 +6635,14 @@ std::unique_ptr<MlxArray> hadamard_transform(const MlxArray& a) {
     return std::make_unique<MlxArray>(mlx::core::hadamard_transform(a.inner));
 }
 
+// MLX takes the scale as `std::optional<float>` and defaults it to 1/sqrt(N),
+// which the orthonormal entry point above keeps. cxx cannot carry an optional
+// across the bridge, so an explicit scale is a second function rather than a
+// nullable argument.
+std::unique_ptr<MlxArray> hadamard_transform_scaled(const MlxArray& a, float scale) {
+    return std::make_unique<MlxArray>(mlx::core::hadamard_transform(a.inner, scale));
+}
+
 std::unique_ptr<MlxArray> number_of_elements(const MlxArray& a, rust::Slice<const int32_t> axes, bool inverted, int32_t dtype) {
     std::vector<int> axes_vec(axes.begin(), axes.end());
     return std::make_unique<MlxArray>(mlx::core::number_of_elements(a.inner, axes_vec, inverted, to_dtype(dtype)));

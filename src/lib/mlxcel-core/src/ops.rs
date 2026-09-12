@@ -135,3 +135,57 @@ pub fn wht(x: &ffi::MlxArray) -> UniquePtr<ffi::MlxArray> {
     );
     ffi::hadamard_transform(x)
 }
+
+/// Walsh–Hadamard Transform along the last axis with an explicit scale.
+///
+/// [`wht`] leaves the scale to MLX, which applies `1/sqrt(N)` and makes the
+/// transform orthonormal and an involution. That is the right choice when the
+/// rotated values are quantized by a codebook computed on the rotated
+/// distribution, which is what the TurboQuant KV cache does today, and callers
+/// who want it should keep using [`wht`].
+///
+/// An explicit scale exists for the case the orthonormal factor cannot be
+/// carried for free. Block-scaled low-precision formats store one scale per
+/// block, and what that scale can represent decides where the factor belongs:
+///
+/// - `mxfp8` and `mxfp4` scales are `E8M0`, powers of two. `1/sqrt(N)` is a
+///   power of two only when `log2(N)` is even, so head_dim 64 (`1/8`) and 256
+///   (`1/16`) fold exactly while 128 (`2^-3.5`) does not, and applying it to the
+///   data there costs a rounding step the block scale could have absorbed.
+/// - `nvfp4` carries an `FP8` block scale and an `FP32` per-tensor global scale,
+///   so a non-power-of-two factor can be absorbed by the global scale at the
+///   cost of range.
+/// - `fp8` `E4M3` saturates at 448. An unscaled transform (`scale = 1.0`) grows
+///   magnitudes by up to `sqrt(N)`, 11.3x at head_dim 128, so the scale and the
+///   saturation check have to be chosen together.
+///
+/// The scale is passed through to MLX unchanged; this function adds only the
+/// same power-of-two guard as [`wht`]. Note that `wht_scaled(x, s)` is an
+/// involution only for `s = 1/sqrt(N)`.
+///
+/// To reproduce the default exactly, compute the factor the way MLX does:
+/// `(1.0f64 / (n as f64).sqrt()) as f32`. MLX takes `std::sqrt` on an `int`,
+/// which resolves to the `double` overload and narrows once at the end, so an
+/// `f32` square root can land one ulp away when `log2(N)` is odd, head_dim 128
+/// included.
+///
+/// # Panics
+///
+/// Panics if the last axis size is 0 or not a power of 2, and if `scale` is not
+/// finite. Both are for the reason given on [`wht`]: the cxx extern is
+/// `noexcept`, so an MLX throw would abort the process instead of unwinding. A
+/// NaN scale does not throw at all, it silently fills the output with NaN,
+/// which a shape or dtype check cannot see.
+pub fn wht_scaled(x: &ffi::MlxArray, scale: f32) -> UniquePtr<ffi::MlxArray> {
+    let shape = ffi::array_shape(x);
+    let last = shape.last().copied().unwrap_or(0);
+    assert!(
+        last > 0 && (last as u32).is_power_of_two(),
+        "wht_scaled: last axis must be a non-zero power of 2; got shape={shape:?}"
+    );
+    assert!(
+        scale.is_finite(),
+        "wht_scaled: scale must be finite; got {scale}"
+    );
+    ffi::hadamard_transform_scaled(x, scale)
+}

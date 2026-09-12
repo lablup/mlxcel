@@ -1591,6 +1591,7 @@ std::unique_ptr<MlxArray> segmented_mm(const MlxArray& a, const MlxArray& b, con
 
 // Hadamard
 std::unique_ptr<MlxArray> hadamard_transform(const MlxArray& a);
+std::unique_ptr<MlxArray> hadamard_transform_scaled(const MlxArray& a, float scale);
 
 // Number of elements
 std::unique_ptr<MlxArray> number_of_elements(const MlxArray& a, rust::Slice<const int32_t> axes, bool inverted, int32_t dtype);

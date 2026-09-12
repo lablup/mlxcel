@@ -28,7 +28,7 @@
 use mlxcel_core::{
     self, MlxArray, UniquePtr, allclose, array_dtype, array_shape, astype, dtype, eval,
     from_slice_f32, item_bool, item_f32, mean_all, multiply, random_key, random_normal, square,
-    subtract, sum_all, wht,
+    subtract, sum_all, wht, wht_scaled,
 };
 
 /// Shape `[B, H, T, head_dim]` is what the cache-compression call site will
@@ -56,6 +56,43 @@ fn wht_is_publicly_exported_and_runs() {
     eval(&y);
     assert_eq!(array_shape(&y), vec![1, 4]);
     assert_eq!(array_dtype(&y), dtype::FLOAT32);
+}
+
+/// `wht_scaled` is reachable the same way, and the scale survives the trip. The
+/// energy ratio is what separates an applied scale from a dropped one: the
+/// round trip cannot, because neither scaling is an involution the other way.
+#[test]
+fn wht_scaled_is_publicly_exported_and_applies_the_scale() {
+    for &head_dim in &[64_i32, 128, 256] {
+        let shape = [1_i32, 4, 1, head_dim];
+        let x = make_random_normal(&shape, 0x5CA1_E000 ^ head_dim as u64);
+        eval(&x);
+
+        let orthonormal = wht(&x);
+        let unscaled = wht_scaled(&x, 1.0);
+        eval(&orthonormal);
+        eval(&unscaled);
+
+        let nx = sum_all(&square(&x));
+        let n_ortho = sum_all(&square(&orthonormal));
+        let n_unscaled = sum_all(&square(&unscaled));
+        eval(&nx);
+        eval(&n_ortho);
+        eval(&n_unscaled);
+
+        let ratio_ortho = (item_f32(&n_ortho) / item_f32(&nx)).sqrt();
+        let ratio_unscaled = (item_f32(&n_unscaled) / item_f32(&nx)).sqrt();
+        let expected = (head_dim as f32).sqrt();
+
+        assert!(
+            (ratio_ortho - 1.0).abs() < 1e-4,
+            "head_dim {head_dim}: wht must preserve the norm, read {ratio_ortho}"
+        );
+        assert!(
+            (ratio_unscaled - expected).abs() / expected < 1e-4,
+            "head_dim {head_dim}: wht_scaled(x, 1.0) must grow the norm by sqrt(N) = {expected}, read {ratio_unscaled}"
+        );
+    }
 }
 
 /// Round-trip on the power-of-2 head_dims listed in the issue.

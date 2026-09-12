@@ -2449,8 +2449,11 @@ mod ffi {
         /// Segmented matrix multiply
         fn segmented_mm(a: &MlxArray, b: &MlxArray, segments: &MlxArray) -> UniquePtr<MlxArray>;
 
-        /// Hadamard transform
+        /// Hadamard transform, orthonormal: MLX scales by 1/sqrt(N)
         fn hadamard_transform(a: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Hadamard transform with an explicit scale instead of MLX's default
+        fn hadamard_transform_scaled(a: &MlxArray, scale: f32) -> UniquePtr<MlxArray>;
 
         /// Number of elements along axes as scalar array
         fn number_of_elements(
@@ -2998,6 +3001,7 @@ pub fn is_gpu_available() -> bool {
 pub use cxx::UniquePtr;
 pub use ops::{
     concatenate, concatenate_many, divide_scalar, multiply_scalar, stack, stack_owned, wht,
+    wht_scaled,
 };
 
 // Re-export sampling primitives needed by generation-loop wiring (B8) and server layers.
