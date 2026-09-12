@@ -1318,6 +1318,10 @@ bool gpu_backend_available();
 // only says a GPU exists.
 bool custom_kernels_available();
 
+// True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm
+// (issues #1803, #1862).
+bool bitlinear_kernel_available();
+
 // Fused sampling: top-k + top-p + min-p on the untempered distribution, then
 // one temperature scaling, then the categorical draw, in a single function
 // call to minimize FFI round-trips (chain order per issue #1379).

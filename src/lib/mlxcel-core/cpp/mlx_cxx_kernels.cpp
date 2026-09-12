@@ -144,6 +144,97 @@ namespace {
         return holder;
     }
 
+    // ROCm port (issue #1862). The body is the CUDA one with two changes.
+    //
+    // `__shfl_down_sync` exists in HIP only as a compatibility shim whose mask
+    // argument is ignored, so the native `__shfl_down(var, delta, width)` is
+    // used instead and the width is stated rather than implied.
+    //
+    // The width is 32 because that is the wavefront this backend is built for:
+    // `WARP_SIZE` in mlx/backend/rocm/kernel_utils.hpp is 32 and gfx1151 reports
+    // warp=32 at device bind. A wave64 target (gfx9) would need the reduction to
+    // start at 32, not 16, so the launch below pins the block to 32 lanes and
+    // this constant travels with it.
+    static const char* BITLINEAR_HIP_SOURCE = R"(
+        // The fold below starts at 16, which is correct only for a 32-lane
+        // wavefront. On a wave64 target (CDNA: gfx90a, gfx942) it would fold
+        // half the lanes and the missing half would not be visible: the result
+        // stays finite and plausible, just wrong. Fail to compile instead.
+        //
+        // Checked with the preprocessor, not `static_assert(warpSize == 32)`:
+        // HIP's `warpSize` is an object with an `operator int()`, so that form
+        // does not compile ("non-constexpr function cannot be used in a
+        // constant expression"). Both macro spellings are accepted because the
+        // trailing-underscore one is the older name.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "bitlinear_matmul_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "bitlinear_matmul_hip assumes a 32-lane wavefront"
+        #endif
+        constexpr int Mc = 4;
+        uint32_t tid       = blockIdx.y;     // batch * out/4
+        uint32_t in_offset = threadIdx.x;    // lane 0..31
+
+        uint32_t batch_idx = tid / (out_features / 4);
+        uint32_t row_idx   = tid % (out_features / 4);
+
+        float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (uint32_t i = in_offset * Mc; i < (uint32_t)in_features; i += 32u * Mc) {
+            float v[Mc];
+            for (int j = 0; j < Mc; j++) {
+                v[j] = (float)x[batch_idx * in_features + i + j];
+            }
+            for (int j = 0; j < Mc; j++) {
+                uint32_t w = packed_weights[row_idx * in_features + i + j];
+                sum[0] += v[j] * ((float)(w & 3u) - 1.0f);
+                sum[1] += v[j] * ((float)((w >> 2) & 3u) - 1.0f);
+                sum[2] += v[j] * ((float)((w >> 4) & 3u) - 1.0f);
+                sum[3] += v[j] * ((float)((w >> 6) & 3u) - 1.0f);
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            sum[0] += __shfl_down(sum[0], o, 32);
+            sum[1] += __shfl_down(sum[1], o, 32);
+            sum[2] += __shfl_down(sum[2], o, 32);
+            sum[3] += __shfl_down(sum[3], o, 32);
+        }
+        if (in_offset == 0u) {
+            float scale = invert_weight_scales ? 1.0f / (float)weight_scale[0]
+                                               : (float)weight_scale[0];
+            for (int i = 0; i < 4; i++) {
+                out[batch_idx * out_features + row_idx + i * (out_features / 4)] =
+                    (T)(sum[i] * scale);
+            }
+        }
+    )";
+
+    struct BitlinearKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "bitlinear_matmul_hip",
+                    {"x", "packed_weights", "weight_scale"},
+                    {"out"},
+                    BITLINEAR_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[bitlinear_matmul] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static BitlinearKernelHolderHip& get_bitlinear_kernel_hip() {
+        static BitlinearKernelHolderHip holder;
+        return holder;
+    }
+
 }
 
 std::unique_ptr<MlxArray> bitlinear_matmul(
@@ -165,11 +256,10 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
 
     // mx.fast.metal_kernel throws on CUDA, so dispatch the cuda_kernel port
     // there. metal::is_available() is false on a CUDA-only build.
-    // Named backends rather than a negation of Metal (issue #1803). Backends
-    // with no port throw here, and the bridge declares this function `Result`,
-    // so that reaches the caller as an error instead of ending the process:
-    // this op is the one fused kernel with no graph fallback, so before this a
-    // CPU-only build and a ROCm build both terminated on a BitNet checkpoint.
+    // Three real ports now (issues #1803, #1862), so the choice names the
+    // backend rather than negating Metal. `None` is the only value left with no
+    // kernel, and the bridge declares this function `Result`, so its throw
+    // reaches the caller as an error instead of ending the process.
     auto& kernel = [&]() -> mlx::core::fast::CustomKernelFunction& {
         switch (mlxcel::gpu_kernel_backend()) {
             case mlxcel::GpuKernelBackend::Metal:
@@ -177,12 +267,13 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
             case mlxcel::GpuKernelBackend::Cuda:
                 return get_bitlinear_kernel_cuda().get();
             case mlxcel::GpuKernelBackend::Rocm:
+                return get_bitlinear_kernel_hip().get();
             case mlxcel::GpuKernelBackend::None:
                 break;
         }
         throw std::runtime_error(
             "[bitlinear_matmul] no BitLinear kernel port for this GPU backend; "
-            "BitNet needs Metal or CUDA (ROCm port: lablup/mlxcel#1862)");
+            "BitNet needs Metal, CUDA or ROCm");
     }();
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
