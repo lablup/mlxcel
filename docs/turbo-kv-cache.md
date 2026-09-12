@@ -420,15 +420,20 @@ higher because donated entries are now retained for future reuse; that
 retention is real memory governed by `--prompt-cache-capacity-bytes` and is
 released by LRU eviction at the cap.
 
-**Decode throughput.** Paged decode is byte-identical to the dense backend
-(`tests/paged_scheduler_parity.rs`, RMS 0). The live batched path uses the native
-block-table decode kernel (`DecodeBatchContext::use_native_paged_kernel`, set by
-the scheduler); a gather-then-SDPA path is kept as a correctness reference. At
-batch 4 the native kernel runs at 276 tok/s for a 512-token prompt and 84 tok/s
-for a 4096-token prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x
-and 10.9x). The gather reference degrades sharply with context because it
-re-materializes the visible window every step, which is why the live path uses
-the native kernel. The separate fused split-K kernel (Metal, and since #634
+**Decode throughput.** The parity evidence for paged decode is intentionally
+scoped: `tests/paged_scheduler_parity.rs` covers scheduler-shaped qwen3 and
+llama3 Fp16 dense-natural-cache allocations at B=1/B=2, plus a CUDA qwen3 arm
+that requires greedy-token equality and bounded logit RMS with TF32 disabled.
+That evidence does not claim byte identity for VLM front ends, model-owned
+caches, Turbo/quantized-KV modes, or every CUDA reduction geometry. The live
+batched path uses the native block-table decode kernel
+(`DecodeBatchContext::use_native_paged_kernel`, set by the scheduler); a
+gather-then-SDPA path is kept as a correctness reference. At batch 4 the native
+kernel runs at 276 tok/s for a 512-token prompt and 84 tok/s for a 4096-token
+prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x and 10.9x). The
+gather reference degrades sharply with context because it re-materializes the
+visible window every step, which is why the live path uses the native kernel.
+The separate fused split-K kernel (Metal, and since #634
 also CUDA via `mx.fast.cuda_kernel`)
 (`MLXCEL_PAGED_ATTENTION_NATIVE`, feeding `paged_decode_attention_pooled`) is a
 different code path from the block-table kernel above. Since #331 it is no
