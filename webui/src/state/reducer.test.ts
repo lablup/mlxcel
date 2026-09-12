@@ -57,6 +57,21 @@ describe('WebUI reducer', () => {
     expect(state.lastSuccessfulAt).toBe(12);
   });
 
+  it('does not refresh freshness for unapplied settings or download notifications', () => {
+    let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'catalog', response: catalog(10), now: 10 });
+    const base = { schema_version: 'webui.ui-api.v1', server_instance_id: 'srv', sequence: 9, event_id: 'evt_9', emitted_at: '2026-09-12T00:00:00Z' } as const;
+    const notifications: UiEvent[] = [
+      { ...base, type: 'download_progress', payload: { operation_id: 'op_1', progress: { completed_bytes: 1, total_bytes: null, indeterminate: true } } },
+      { ...base, type: 'settings', payload: { model_id: 'mdl_a', settings: { scope: 'loaded_model_live', effective: {}, overridden_by_cli: [], partial_errors: [] } } },
+    ];
+    for (const notification of notifications) {
+      for (const now of [20, 30]) {
+        state = reduceWebUiSnapshot(state, { type: 'event', event: notification, now });
+        expect(state.lastSuccessfulAt).toBe(10);
+      }
+    }
+  });
+
   it('uses per-resource sequence fences rather than one global maximum', () => {
     let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'catalog', response: catalog(100), now: 1 });
     state = reduceWebUiSnapshot(state, { type: 'event', event: { ...event(101, 6), event_id: 'evt_101' }, now: 2 });

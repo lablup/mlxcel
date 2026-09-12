@@ -108,7 +108,8 @@ function applyEvent(state: WebUiSnapshot, event: UiEvent, now: number): WebUiSna
     const resourceFences = { ...state.resourceFences, catalog: event.payload.catalog_changed ? event.sequence : state.resourceFences.catalog };
     return { ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', lastUpdatedAt: now, resourceFences };
   }
-  return markSuccessful({ ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, connection: 'streaming' }, now);
+  // Notifications without an applied data projection do not prove data freshness.
+  return { ...state, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, connection: 'streaming', lastUpdatedAt: now };
 }
 
 function applyModelRevision(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'model_revision' }>, now: number): WebUiSnapshot {
