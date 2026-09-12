@@ -2,6 +2,8 @@
 
 This document is the implementation contract for the first WebUI gate in epic #1834. It freezes the shared boundaries that backend, frontend, bundle and integration owners must use; it does not implement runtime routes or pages.
 
+The implemented static-bundle boundary and contributor commands are documented in [Developing the bundled WebUI](bundling.md) ([한국어](bundling.ko.md)); production startup and control adapters remain assigned to downstream issues.
+
 ## Ownership and change rule
 
 - The canonical machine contract is `docs/webui/api.yaml`, the generated strict DTO surface is `docs/webui/generated/ui-api.d.ts`, and executable examples live under `tests/fixtures/webui/`.
