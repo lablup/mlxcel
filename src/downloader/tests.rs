@@ -544,7 +544,7 @@ async fn stream_file_cleans_up_tempfile_on_error() {
 // Integration test that hits the real Hugging Face Hub. Marked `#[ignore]`
 // per the issue acceptance criteria so CI does not depend on network access.
 #[test]
-#[ignore]
+#[ignore = "hits the real Hugging Face Hub; CI must not depend on network access"]
 fn live_download_smoke_test() {
     // Use a tiny repo so the test stays cheap when explicitly requested with
     // `cargo test -- --ignored`.

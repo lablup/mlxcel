@@ -78,7 +78,7 @@ fn resolve_checkpoint() -> Option<std::path::PathBuf> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs a GOT-OCR 2.0 checkpoint on disk"]
 fn got_prompt_ids_match_the_reference_tokenizer() {
     let Some(model_dir) = resolve_checkpoint() else {
         eprintln!(
@@ -137,7 +137,7 @@ fn got_prompt_ids_match_the_reference_tokenizer() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs a GOT-OCR 2.0 checkpoint on disk"]
 fn got_format_mode_prompt_ids_match_the_reference_tokenizer() {
     let Some(model_dir) = resolve_checkpoint() else {
         eprintln!("Skipping: no GOT-OCR 2.0 checkpoint found.");
@@ -164,7 +164,7 @@ fn got_format_mode_prompt_ids_match_the_reference_tokenizer() {
 /// id. The render is the builtin GOT template's output, which is what
 /// `ChatTemplateProcessor` hands the runtime for a chat request.
 #[test]
-#[ignore]
+#[ignore = "needs a GOT-OCR 2.0 checkpoint on disk"]
 fn server_render_and_cli_instruction_tokenize_identically() {
     let Some(model_dir) = resolve_checkpoint() else {
         eprintln!("Skipping: no GOT-OCR 2.0 checkpoint found.");
