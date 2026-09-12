@@ -30,7 +30,7 @@ Every user-facing string has a typed key in `webui/src/i18n/catalog.ts` and a sy
 
 ## Screenshots and verification
 
-The component gallery is available at `#gallery`. `pnpm --dir webui run browser` compares committed screenshots in `webui/tests/screenshots/` for 390, 1024 and 1440 px widths across light, dark, tinted, opaque, high-contrast, reduced-motion and CJK scenarios. The `390-dark-opaque-textscale200` case uses a test-only root text-scale attribute to exercise reflow with 200% text metrics and verify that layout and hit targets still pass; it is not claimed as native browser zoom. These screenshots are implementation baselines for downstream page work and still require human screenshot approval before page-specific styling proceeds.
+The component gallery is available at `#gallery`. `pnpm --dir webui run browser` compares committed viewport screenshots in `webui/tests/screenshots/` for 390, 1024 and 1440 px widths across light, dark, tinted, opaque, high-contrast, reduced-motion and CJK scenarios. The `390-dark-opaque-textscale200` case uses a test-only root text-scale attribute to exercise reflow with 200% text metrics and verify that layout and hit targets still pass; it is not claimed as native browser zoom. These screenshots are implementation baselines for downstream page work and still require human screenshot approval before page-specific styling proceeds.
 
 ## Manual Safari and VoiceOver checklist
 
