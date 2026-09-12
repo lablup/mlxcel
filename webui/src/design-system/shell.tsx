@@ -92,7 +92,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
 
 const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string; connectionLabel: string; connectionState: ConnectionPhase }>((props, ref) => (
   <aside className={props.className} aria-label={t(props.locale, 'nav.primary')} onKeyDown={props.onKeyDown} ref={ref} tabIndex={-1}>
-    <a className="brand-mark" href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onRouteChange('models'); }}>mx</a>
+    <a className="brand-mark" href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onRouteChange('models'); }}><span className="brand-symbol" aria-hidden="true">mx</span><span className="brand-name">mlxcel</span></a>
     <nav className="app-nav">
       {navItems.map((item) => (
         <a key={item.id} href={`#${item.id}`} aria-label={t(props.locale, item.key)} aria-current={props.route === item.id ? 'page' : undefined} data-testid={testId(item.key)} onClick={(event) => { event.preventDefault(); props.onRouteChange(item.id); }}>
