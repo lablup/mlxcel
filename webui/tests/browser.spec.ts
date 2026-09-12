@@ -1,8 +1,22 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { AxeBuilder } from '@axe-core/playwright';
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 
 type GalleryTab = 'controls' | 'states' | 'data';
 type Variant = { name: string; width: number; height: number; appearance: Record<string, unknown>; tab: GalleryTab; openDrawer?: boolean; textScale?: '200' };
+type ProductVariant = { name: string; width: number; height: number; appearance: Record<string, unknown>; signedIn: boolean };
+type MockMode = 'happy' | 'bad-key' | 'malformed-bootstrap' | 'sync-401' | 'slow-catalog';
+interface ApiCall { readonly url: string; readonly method: string; readonly auth: string; readonly body: string }
+
+
+const bootstrapFixture = loadFixture<typeof import('../../tests/fixtures/webui/examples/bootstrap.model-free.json')>('../../tests/fixtures/webui/examples/bootstrap.model-free.json');
+const catalogFixture = loadFixture<typeof import('../../tests/fixtures/webui/examples/catalog.page.json')>('../../tests/fixtures/webui/examples/catalog.page.json');
+const operationsFixture = loadFixture<typeof import('../../tests/fixtures/webui/examples/operations.list.json')>('../../tests/fixtures/webui/examples/operations.list.json');
+
+function loadFixture<T>(relativePath: string): T {
+  return JSON.parse(readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), 'utf8')) as T;
+}
 
 const variants: Variant[] = [
   { name: '1440-light-gallery-controls', width: 1440, height: 900, tab: 'controls', appearance: { theme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'system' } },
@@ -15,6 +29,118 @@ const variants: Variant[] = [
   { name: '390-dark-opaque-textscale200-gallery-controls', width: 390, height: 844, tab: 'controls', appearance: { theme: 'dark', material: 'opaque', reduceTransparency: true, reduceMotion: true, locale: 'ko', glassIntensity: 100, highContrast: 'off' }, textScale: '200' },
 ];
 
+const productVariants: ProductVariant[] = [
+  { name: '1440-light-product-login', width: 1440, height: 900, signedIn: false, appearance: { theme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'system' } },
+  { name: '1440-light-product-signed-in', width: 1440, height: 900, signedIn: true, appearance: { theme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'system' } },
+  { name: '390-dark-product-login', width: 390, height: 844, signedIn: false, appearance: { theme: 'dark', material: 'glass', reduceTransparency: false, reduceMotion: true, locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
+  { name: '390-dark-product-signed-in', width: 390, height: 844, signedIn: true, appearance: { theme: 'dark', material: 'glass', reduceTransparency: false, reduceMotion: true, locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
+];
+
+function withoutSchemaName<T>(value: T): T {
+  const copy = structuredClone(value);
+  if (typeof copy === 'object' && copy !== null && '$schemaName' in copy) delete (copy as Record<string, unknown>).$schemaName;
+  return copy;
+}
+
+function makeBootstrap(): typeof bootstrapFixture {
+  return withoutSchemaName(bootstrapFixture);
+}
+
+function makeCatalog(): typeof catalogFixture {
+  const page = withoutSchemaName(catalogFixture);
+  page.server_instance_id = bootstrapFixture.server.server_instance_id;
+  return page;
+}
+
+function makeOperations(): typeof operationsFixture {
+  const page = withoutSchemaName(operationsFixture);
+  page.server_instance_id = bootstrapFixture.server.server_instance_id;
+  return page;
+}
+
+async function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
+  await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+}
+
+async function installAbortRecorder(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const target = window as Window & { __webuiAbortLog?: string[] };
+    target.__webuiAbortLog = [];
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
+      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      if (url.includes('/ui-api/v1/') && signal) signal.addEventListener('abort', () => target.__webuiAbortLog?.push(url), { once: true });
+      return originalFetch(input, init);
+    }) as typeof window.fetch;
+  });
+}
+
+async function readAbortLog(page: Page): Promise<string[]> {
+  return page.evaluate(() => (window as Window & { __webuiAbortLog?: string[] }).__webuiAbortLog ?? []);
+}
+
+async function browserStorageDump(page: Page): Promise<string> {
+  return page.evaluate(() => JSON.stringify({
+    localStorage: Object.fromEntries(Array.from({ length: localStorage.length }, (_, index) => {
+      const key = localStorage.key(index) ?? '';
+      return [key, localStorage.getItem(key)];
+    })),
+    sessionStorage: Object.fromEntries(Array.from({ length: sessionStorage.length }, (_, index) => {
+      const key = sessionStorage.key(index) ?? '';
+      return [key, sessionStorage.getItem(key)];
+    })),
+  }));
+}
+
+async function installMockApi(page: Page, mode: MockMode = 'happy'): Promise<{ calls: ApiCall[]; releaseCatalog: () => void; catalogFulfillFailures: string[] }> {
+  const calls: ApiCall[] = [];
+  const catalogFulfillFailures: string[] = [];
+  let releaseCatalog = (): void => undefined;
+  let slowCatalogReleased = false;
+  const slowCatalog = new Promise<void>((resolve) => { releaseCatalog = () => { slowCatalogReleased = true; resolve(); }; });
+  await page.route('**/*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    if (!path.startsWith('/ui-api/v1/') && path !== '/v1/chat/completions' && path !== '/v1/responses') {
+      await route.continue();
+      return;
+    }
+    calls.push({ url: `${path}${url.search}`, method: request.method(), auth: request.headers().authorization ?? '', body: request.postData() ?? '' });
+    if (path === '/v1/chat/completions' || path === '/v1/responses') {
+      await fulfillJson(route, { error: { code: 'unexpected_inference', message: 'Inference endpoints must not be called while browsing.', retryable: false }, request_id: 'req_unexpected_inference' }, 500);
+      return;
+    }
+    if (path === '/ui-api/v1/bootstrap') {
+      if (mode === 'bad-key') await fulfillJson(route, { error: { code: 'unauthorized', message: 'bad key', retryable: false }, request_id: 'req_bad_key' }, 401);
+      else if (mode === 'malformed-bootstrap') await fulfillJson(route, { schema_version: 'wrong', server: { server_instance_id: 'srv_bad' } });
+      else await fulfillJson(route, makeBootstrap());
+      return;
+    }
+    if (path === '/ui-api/v1/catalog') {
+      if (mode === 'slow-catalog' && !slowCatalogReleased) await slowCatalog;
+      try {
+        await fulfillJson(route, makeCatalog());
+      } catch (error) {
+        catalogFulfillFailures.push(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    if (path === '/ui-api/v1/operations') {
+      if (mode === 'sync-401') await fulfillJson(route, { error: { code: 'unauthorized', message: 'stale session', retryable: false }, request_id: 'req_sync_401' }, 401);
+      else await fulfillJson(route, makeOperations());
+      return;
+    }
+    if (path === '/ui-api/v1/events') {
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: [DONE]\n\n' });
+      return;
+    }
+    await fulfillJson(route, { error: { code: 'not_found', message: `Unexpected ${path}`, retryable: false }, request_id: 'req_unexpected' }, 404);
+  });
+  return { calls, releaseCatalog, catalogFulfillFailures };
+}
+
 async function bootGallery(page: Page, variant: Variant): Promise<void> {
   await page.setViewportSize({ width: variant.width, height: variant.height });
   await page.addInitScript((appearance) => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify(appearance)), variant.appearance);
@@ -24,6 +150,31 @@ async function bootGallery(page: Page, variant: Variant): Promise<void> {
   if (variant.textScale) await page.evaluate((scale) => { document.documentElement.dataset.testTextScale = scale; }, variant.textScale);
   await selectGalleryTab(page, variant.tab);
   if (variant.openDrawer) await page.getByRole('button', { name: /navigation|내비게이션/i }).click();
+}
+
+
+async function bootProduct(page: Page, variant: ProductVariant): Promise<void> {
+  await page.setViewportSize({ width: variant.width, height: variant.height });
+  await page.addInitScript((appearance) => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify(appearance)), variant.appearance);
+  await page.goto('/#models');
+  await expect(page.getByTestId('app-title')).toBeVisible();
+  if (typeof variant.appearance.theme === 'string') await expect(page.locator('html')).toHaveAttribute('data-theme', variant.appearance.theme);
+}
+
+async function submitSessionKey(page: Page, token: string): Promise<void> {
+  await page.getByLabel(/Session key|세션 키/i).fill(token);
+  await page.getByRole('button', { name: /Connect|연결/i }).click();
+}
+
+async function loginWithMockApi(page: Page, token = 'good-key'): Promise<void> {
+  await submitSessionKey(page, token);
+  await expect(page.getByTestId('connection-authenticated-detail')).toContainText(/catalog 1|카탈로그 1/i);
+  await expect(page.getByTestId('connection-authenticated-detail')).toContainText(/operations 1|작업 1/i);
+}
+
+async function gotoGalleryWithoutReload(page: Page): Promise<void> {
+  await page.evaluate(() => { window.history.replaceState(null, '', '#gallery'); window.dispatchEvent(new HashChangeEvent('hashchange')); });
+  await expect(page.getByTestId('gallery-title')).toBeVisible();
 }
 
 async function selectGalleryTab(page: Page, tab: GalleryTab): Promise<void> {
@@ -174,6 +325,86 @@ test.describe('design system gallery and shell', () => {
       await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });
     });
   }
+
+
+  for (const variant of productVariants) {
+    test(`renders and compares ${variant.name}`, async ({ page }) => {
+      await installMockApi(page, 'happy');
+      await bootProduct(page, variant);
+      await expectAxeClean(page);
+      await expectNoOverflowOrInlineStyles(page);
+      if (variant.signedIn) await loginWithMockApi(page);
+      else await expect(page.getByTestId('auth-login')).toBeVisible();
+      await settleAnimationFrame(page);
+      await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });
+    });
+  }
+
+  test('covers product login, provider routing, all-route logout, and token containment', async ({ page }) => {
+    const mock = await installMockApi(page, 'happy');
+    await bootProduct(page, productVariants[0]);
+    expect(mock.calls).toEqual([]);
+    await expect(page.getByTestId('auth-login')).toBeVisible();
+    await loginWithMockApi(page, 'good-key');
+    await expect.poll(() => mock.calls.some((call) => call.url.startsWith('/ui-api/v1/events'))).toBe(true);
+    const snapshotCalls = mock.calls.filter((call) => call.url.startsWith('/ui-api/v1/bootstrap') || call.url.startsWith('/ui-api/v1/catalog') || call.url.startsWith('/ui-api/v1/operations') || call.url.startsWith('/ui-api/v1/events'));
+    expect(snapshotCalls.map((call) => call.auth)).toEqual(snapshotCalls.map(() => 'Bearer good-key'));
+    const routedPaths = snapshotCalls.map((call) => call.url);
+    expect(routedPaths.every((url) => url.startsWith('/ui-api/v1/'))).toBe(true);
+    expect(routedPaths.join('\n')).toContain('/ui-api/v1/bootstrap');
+    expect(routedPaths.join('\n')).toContain('/ui-api/v1/catalog');
+    expect(routedPaths.join('\n')).toContain('/ui-api/v1/operations');
+    expect(routedPaths.join('\n')).toContain('/ui-api/v1/events');
+    expect(routedPaths.join(' ')).not.toContain('good-key');
+    expect(snapshotCalls.map((call) => call.body).join(' ')).not.toContain('good-key');
+    await expect(page.locator('body')).not.toContainText('good-key');
+    expect(await browserStorageDump(page)).not.toContain('good-key');
+    await expect(page.getByTestId('toolbar-logout')).toBeVisible();
+    await page.getByRole('link', { name: 'Settings' }).first().click();
+    await expect(page.getByTestId('toolbar-logout')).toBeVisible();
+    await gotoGalleryWithoutReload(page);
+    await expect(page.getByTestId('toolbar-logout')).toBeVisible();
+    await page.getByTestId('toolbar-logout').click();
+    await expect(page.getByTestId('toolbar-logout')).toHaveCount(0);
+  });
+
+  test('covers bad-key, 401 purge, inflight abort, and schema-mismatch reload', async ({ page }) => {
+    const badKey = await installMockApi(page, 'bad-key');
+    await bootProduct(page, productVariants[0]);
+    await submitSessionKey(page, 'bad-key-token');
+    await expect(page.locator('body')).toContainText('The session key was rejected');
+    expect(badKey.calls.map((call) => call.url).join(' ')).not.toContain('bad-key-token');
+    expect(badKey.calls.map((call) => call.body).join(' ')).not.toContain('bad-key-token');
+    expect(await browserStorageDump(page)).not.toContain('bad-key-token');
+    await expect(page.locator('body')).not.toContainText('bad-key-token');
+
+    await page.unroute('**/*');
+    const unauthorized = await installMockApi(page, 'sync-401');
+    await page.reload();
+    await submitSessionKey(page, 'good-key');
+    await expect.poll(() => unauthorized.calls.some((call) => call.url.startsWith('/ui-api/v1/operations') && call.auth === 'Bearer good-key')).toBe(true);
+    await expect(page.getByTestId('auth-login')).toBeVisible();
+    await expect(page.getByTestId('connection-ready').first()).toHaveText('Shell loaded; local API not connected');
+
+    await page.unroute('**/*');
+    await installAbortRecorder(page);
+    const slow = await installMockApi(page, 'slow-catalog');
+    await page.reload();
+    await submitSessionKey(page, 'good-key');
+    await expect(page.getByTestId('connection-authenticated-detail')).toContainText('catalog pending');
+    await page.getByTestId('toolbar-logout').click();
+    slow.releaseCatalog();
+    await expect(page.getByTestId('auth-login')).toBeVisible();
+    await expect.poll(async () => (await readAbortLog(page)).some((url) => url.includes('/ui-api/v1/catalog'))).toBe(true);
+
+    await page.unroute('**/*');
+    await installMockApi(page, 'malformed-bootstrap');
+    await page.reload();
+    await submitSessionKey(page, 'good-key');
+    await expect(page.locator('body')).toContainText('UI schema mismatch');
+    await Promise.all([page.waitForLoadState('domcontentloaded'), page.getByRole('button', { name: /Reload|새로고침/i }).click()]);
+    await expect(page.getByTestId('auth-login')).toBeVisible();
+  });
 
   test('keeps production routes honest while gallery stays a direct artifact route', async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify({ theme: 'light', material: 'glass', locale: 'en', highContrast: 'system' })));

@@ -67,6 +67,12 @@
       "test_id": "toolbar-help"
     },
     {
+      "key": "toolbar.logout",
+      "en": "Clear WebUI session",
+      "ko": "WebUI 세션 지우기",
+      "test_id": "toolbar-logout"
+    },
+    {
       "key": "toolbar.menu",
       "en": "Open navigation",
       "ko": "내비게이션 열기",

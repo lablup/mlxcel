@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { WebUiSnapshot } from './api/types';
 import { AppShell, type RouteId } from './design-system/shell';
 import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ContrastPreference } from './design-system/preferences';
-import { Button, Dialog, ErrorBanner, Field, Select } from './design-system/primitives';
+import { Button, Dialog, ErrorBanner, Field, IconButton, Select } from './design-system/primitives';
 import { DesignGallery } from './gallery';
 import { classifyAuthFailure, connectionFooterLabel, ProductConnectionSurface, selectedModelLabel, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
@@ -24,6 +24,11 @@ export function App(): React.JSX.Element {
   const [appearance, setAppearance] = useState<AppearancePreferences>(loadAppearance);
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [authFailure, setAuthFailure] = useState<AuthFailure | null>(null);
+  const authAttemptRef = useRef(0);
+
+  useEffect(() => {
+    return () => { authAttemptRef.current += 1; };
+  }, []);
 
   useEffect(() => {
     const handleHash = (): void => setRoute(routeFromHash());
@@ -51,10 +56,17 @@ export function App(): React.JSX.Element {
     window.history.replaceState(null, '', `#${next}`);
   };
   const login = (token: string): void => {
+    const attempt = authAttemptRef.current + 1;
+    authAttemptRef.current = attempt;
     setAuthFailure(null);
-    void actions.login(token).catch((error: unknown) => setAuthFailure(classifyAuthFailure(error)));
+    void actions.login(token).catch((error: unknown) => {
+      if (authAttemptRef.current !== attempt) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      setAuthFailure(classifyAuthFailure(error));
+    });
   };
   const logout = (): void => {
+    authAttemptRef.current += 1;
     setAuthFailure(null);
     actions.logout();
   };
@@ -69,7 +81,7 @@ export function App(): React.JSX.Element {
   const body = renderRoute(route, appearance, setAppearance, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
     <>
-      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={selectedModelLabel(appearance.locale, snapshot)} connectionLabel={connectionFooterLabel(appearance.locale, snapshot)} connectionState={snapshot.connection} inspector={null}>
+      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={selectedModelLabel(appearance.locale, snapshot)} connectionLabel={connectionFooterLabel(appearance.locale, snapshot)} connectionState={snapshot.connection} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
         {body}
       </AppShell>
       <CommandPalette open={overlay === 'command'} locale={appearance.locale} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} />

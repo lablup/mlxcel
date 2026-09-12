@@ -16,7 +16,7 @@ export const navItems: NavItem[] = [
   { id: 'settings', key: 'nav.settings', icon: 'settings' },
 ];
 
-export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onCommand: () => void; onHelp: () => void; children: React.ReactNode; inspector?: React.ReactNode; selectedModel: string; connectionLabel: string; connectionState: ConnectionPhase }): React.JSX.Element {
+export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onCommand: () => void; onHelp: () => void; children: React.ReactNode; inspector?: React.ReactNode; selectedModel: string; connectionLabel: string; connectionState: ConnectionPhase; sessionAction?: React.ReactNode }): React.JSX.Element {
   const sidebarRef = useRef<HTMLElement>(null);
   const onCommandRef = useRef(props.onCommand);
   const onHelpRef = useRef(props.onHelp);
@@ -76,6 +76,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
           </div>
           <div className="selected-model" title={props.selectedModel}>{props.selectedModel}</div>
           <div className="toolbar-actions">
+            {props.sessionAction}
             <IconButton label={t(props.locale, 'toolbar.command')} icon="command" onClick={props.onCommand} data-testid={testId('toolbar.command')} />
             <IconButton label={t(props.locale, 'toolbar.help')} icon="help" onClick={props.onHelp} data-testid={testId('toolbar.help')} />
           </div>

@@ -12,6 +12,7 @@ export type StringKey =
   | 'nav.home'
   | 'toolbar.command'
   | 'toolbar.help'
+  | 'toolbar.logout'
   | 'connection.ready'
   | 'connection.offline'
   | 'models.title'
@@ -181,6 +182,7 @@ export const entries: Entry[] = [
   { key: 'nav.home', en: 'mlxcel home', ko: 'mlxcel 홈', test_id: 'nav-home' },
   { key: 'toolbar.command', en: 'Command', ko: '명령', test_id: 'toolbar-command' },
   { key: 'toolbar.help', en: 'Keyboard help', ko: '키보드 도움말', test_id: 'toolbar-help' },
+  { key: 'toolbar.logout', en: 'Clear WebUI session', ko: 'WebUI 세션 지우기', test_id: 'toolbar-logout' },
   { key: 'toolbar.menu', en: 'Open navigation', ko: '내비게이션 열기', test_id: 'toolbar-menu' },
   { key: 'connection.ready', en: 'Shell loaded; local API not connected', ko: '셸 로드됨; 로컬 API 미연결', test_id: 'connection-ready' },
   { key: 'connection.offline', en: 'Server connection is offline', ko: '서버 연결이 오프라인입니다', test_id: 'connection-offline' },
