@@ -408,7 +408,22 @@ jobs:
         run: pnpm --dir webui run unit
       - name: Install browser runtime
         run: pnpm --dir webui exec playwright install --with-deps chromium
+      - name: Log WebUI browser font environment
+        run: |
+          uname -a
+          cat /etc/os-release
+          node --version
+          pnpm --version
+          pnpm --dir webui exec playwright --version
+          pnpm --dir webui exec playwright install --dry-run chromium
+          fc-match sans-serif || true
+          fc-match system-ui || true
+          fc-match 'system-ui:weight=bold' || true
+          fc-match Arial || true
+          fc-list | wc -l
       - name: Run WebUI browser scaffold
+        env:
+          MLXCEL_WEBUI_FONT_DIAGNOSTICS: '1'
         run: pnpm --dir webui run browser
       - name: Upload WebUI browser screenshots on failure
         if: failure()

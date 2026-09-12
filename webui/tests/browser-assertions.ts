@@ -135,3 +135,29 @@ export async function expectTextScaleLabelsReachable(page: Page): Promise<void> 
   ];
   for (const locator of reachable) await expectLocatorWithinViewportX(locator);
 }
+
+export async function reportFontDiagnostics(page: Page, label: string): Promise<void> {
+  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.screen-heading h1', '.screen-heading p:last-child', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send('DOM.enable');
+    await client.send('CSS.enable');
+    const { root } = await client.send('DOM.getDocument');
+    const diagnostics: Array<{ selector: string; text: string; computed: { fontFamily: string; fontSize: string; fontWeight: string }; platformFonts: unknown[] }> = [];
+    for (const selector of selectors) {
+      const { nodeId } = await client.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+      if (!nodeId) continue;
+      const computed = await page.locator(selector).first().evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return { fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight };
+      });
+      const text = await page.locator(selector).first().evaluate((element) => element.textContent?.trim().slice(0, 80) ?? '');
+      const { fonts } = await client.send('CSS.getPlatformFontsForNode', { nodeId });
+      diagnostics.push({ selector, text, computed, platformFonts: fonts as unknown[] });
+    }
+    const browser = await page.evaluate(() => ({ userAgent: navigator.userAgent, language: navigator.language, devicePixelRatio: window.devicePixelRatio }));
+    console.log(`WEBUI_FONT_DIAGNOSTICS ${JSON.stringify({ label, browser, diagnostics })}`);
+  } finally {
+    await client.detach();
+  }
+}
