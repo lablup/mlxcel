@@ -1,6 +1,6 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 224754,
+    "embedded_asset_bytes": 227718,
     "embedded_asset_limit_bytes": 5242880,
     "initial_js_gzip_bytes": 68364,
     "initial_js_gzip_limit_bytes": 204800,
@@ -25,6 +25,12 @@
       "gzip_bytes": 288,
       "path": "index.html",
       "sha256": "a5342854553d9927384eb78704fcdaf0da9cade7aedbe145a408b50eebfe7025"
+    },
+    {
+      "bytes": 1336,
+      "gzip_bytes": 807,
+      "path": "third-party-licenses.txt",
+      "sha256": "2012717fe75dbab3697e3aca9517561572ac2ec45c859d8e5746d3cbb007ce27"
     }
   ],
   "node_version": "v26.5.1",
@@ -47,5 +53,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "0001a486d01b198f596f8fea08e859806fb45b3cdd9d62e9f16f7fa9eb976fa2"
+  "source_digest_sha256": "92204ff706baa32313980b0d57f5aef51ae2e47b018696c27bfd6d697afad342"
 }

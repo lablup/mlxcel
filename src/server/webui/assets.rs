@@ -17,13 +17,16 @@
 use axum::{
     Router,
     body::Body,
-    extract::{OriginalUri, Path},
+    extract::OriginalUri,
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::any,
 };
 use rust_embed::RustEmbed;
 use sha2::{Digest, Sha256};
+
+const INDEX_HTML_SENTINEL: &str = include_str!("../../webui/assets/index.html");
+const LICENSE_SENTINEL: &str = include_str!("../../webui/assets/third-party-licenses.txt");
 
 pub const WEBUI_PREFIX: &str = "/webui";
 const INDEX_PATH: &str = "index.html";
@@ -39,17 +42,21 @@ pub fn router<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
+    let _ = (INDEX_HTML_SENTINEL, LICENSE_SENTINEL);
     Router::new()
-        .route(WEBUI_PREFIX, get(redirect_to_trailing_slash))
-        .route(&format!("{WEBUI_PREFIX}/"), get(serve_index))
-        .route(&format!("{WEBUI_PREFIX}/*path"), get(serve_asset))
+        .route(WEBUI_PREFIX, any(redirect_to_trailing_slash))
+        .route(&format!("{WEBUI_PREFIX}/"), any(serve_index))
+        .route(&format!("{WEBUI_PREFIX}/*path"), any(serve_asset))
 }
 
 pub fn manifest_json() -> &'static str {
     WEBUI_ASSET_MANIFEST
 }
 
-async fn redirect_to_trailing_slash(OriginalUri(uri): OriginalUri) -> Response {
+async fn redirect_to_trailing_slash(method: Method, OriginalUri(uri): OriginalUri) -> Response {
+    if !is_read_method(&method) {
+        return method_not_allowed();
+    }
     let location = format_uri_with_trailing_slash(&uri);
     response_builder(StatusCode::PERMANENT_REDIRECT)
         .header(header::LOCATION, location)
@@ -58,19 +65,30 @@ async fn redirect_to_trailing_slash(OriginalUri(uri): OriginalUri) -> Response {
 }
 
 async fn serve_index(method: Method, uri: Uri, headers: HeaderMap) -> Response {
+    if !is_read_method(&method) {
+        return method_not_allowed();
+    }
     serve_embedded_path(INDEX_PATH, &method, &uri, &headers)
 }
 
 async fn serve_asset(
     method: Method,
-    uri: Uri,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    Path(path): Path<String>,
 ) -> Response {
-    if reject_raw_path(uri.path()) || reject_decoded_path(&path) {
+    if !is_read_method(&method) {
+        return method_not_allowed();
+    }
+    if reject_raw_path(uri.path()) {
         return empty_response(StatusCode::BAD_REQUEST);
     }
-    serve_embedded_path(&path, &method, &uri, &headers)
+    let Some(path) = asset_path_from_uri(&uri) else {
+        return empty_response(StatusCode::NOT_FOUND);
+    };
+    if reject_decoded_path(path) {
+        return empty_response(StatusCode::BAD_REQUEST);
+    }
+    serve_embedded_path(path, &method, &uri, &headers)
 }
 
 fn serve_embedded_path(path: &str, method: &Method, uri: &Uri, headers: &HeaderMap) -> Response {
@@ -81,6 +99,9 @@ fn serve_embedded_path(path: &str, method: &Method, uri: &Uri, headers: &HeaderM
         return empty_response(StatusCode::NOT_FOUND);
     };
     let bytes = asset.data.into_owned();
+    if path == INDEX_PATH && !index_html_is_bootable(&bytes) {
+        return empty_response(StatusCode::INTERNAL_SERVER_ERROR);
+    }
     let etag = etag_for(&bytes);
     let cache_control = cache_control_for(path);
     if request_matches_etag(headers, &etag) {
@@ -104,11 +125,45 @@ fn serve_embedded_path(path: &str, method: &Method, uri: &Uri, headers: &HeaderM
         .unwrap_or_else(internal_error)
 }
 
+fn is_read_method(method: &Method) -> bool {
+    method == Method::GET || method == Method::HEAD
+}
+
+fn method_not_allowed() -> Response {
+    response_builder(StatusCode::METHOD_NOT_ALLOWED)
+        .header(header::ALLOW, "GET, HEAD")
+        .body(Body::empty())
+        .unwrap_or_else(internal_error)
+}
+
+fn asset_path_from_uri(uri: &Uri) -> Option<&str> {
+    uri.path()
+        .rsplit_once(&format!("{WEBUI_PREFIX}/"))
+        .map(|(_, path)| path)
+}
+
+fn index_html_is_bootable(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|html| {
+        html.contains("id=\"root\"")
+            && html.contains("type=\"module\"")
+            && html.contains("./assets/")
+    })
+}
+
 fn request_matches_etag(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == etag || value == "*")
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*"
+                    || candidate == etag
+                    || candidate
+                        .strip_prefix("W/")
+                        .is_some_and(|weak| weak == etag)
+            })
+        })
 }
 
 fn response_builder(status: StatusCode) -> axum::http::response::Builder {

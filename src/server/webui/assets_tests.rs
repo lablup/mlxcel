@@ -19,6 +19,7 @@ use axum::{
     routing::get,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 async fn request(path: &str, method: Method) -> axum::response::Response {
@@ -41,6 +42,11 @@ fn embedded_manifest_is_valid_and_budgeted() {
     assert_eq!(manifest["package_manager"], "pnpm@11.18.0");
     let files = manifest["files"].as_array().expect("files list");
     assert!(files.iter().any(|file| file["path"] == "index.html"));
+    assert!(
+        files
+            .iter()
+            .any(|file| file["path"] == "third-party-licenses.txt")
+    );
     let budgets = manifest["budgets"].as_object().expect("budgets object");
     assert!(budgets["initial_js_gzip_bytes"].as_u64().unwrap() <= 200 * 1024);
     assert!(budgets["total_js_gzip_bytes"].as_u64().unwrap() <= 700 * 1024);
@@ -75,13 +81,16 @@ async fn head_uses_the_same_metadata_without_a_body() {
 #[tokio::test]
 async fn conditional_get_returns_304_with_security_headers() {
     let first = request("/webui/", Method::GET).await;
-    let etag = first.headers()[header::ETAG].clone();
+    let etag = first.headers()[header::ETAG]
+        .to_str()
+        .expect("etag is text")
+        .to_string();
     let response = router::<()>()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
                 .uri("/webui/")
-                .header(header::IF_NONE_MATCH, etag)
+                .header(header::IF_NONE_MATCH, format!("W/{etag}, \"other\""))
                 .body(Body::empty())
                 .expect("request builds"),
         )
@@ -130,17 +139,19 @@ async fn static_assets_use_immutable_cache_and_correct_mime() {
 
 #[tokio::test]
 async fn missing_assets_and_unsupported_methods_do_not_fall_back_to_shell() {
+    let missing = request("/webui/assets/missing.js", Method::GET).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     assert_eq!(
-        request("/webui/assets/missing.js", Method::GET)
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
+        missing.headers()[header::CONTENT_SECURITY_POLICY],
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
     );
+
+    let disallowed = request("/webui/assets/missing.js", Method::POST).await;
+    assert_eq!(disallowed.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(disallowed.headers()[header::ALLOW], "GET, HEAD");
     assert_eq!(
-        request("/webui/assets/missing.js", Method::POST)
-            .await
-            .status(),
-        StatusCode::METHOD_NOT_ALLOWED
+        disallowed.headers()[header::CONTENT_SECURITY_POLICY],
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
     );
 }
 
@@ -151,6 +162,7 @@ async fn path_attacks_are_rejected() {
         "/webui/assets/%2e%2e/index.html",
         "/webui/assets/%00.js",
         "/webui/assets/%5cindex.js",
+        "/webui/assets/%zz.js",
         "/webui/assets\\index.js",
     ] {
         assert_eq!(
@@ -176,6 +188,30 @@ async fn trailing_slash_redirect_preserves_nested_api_prefix() {
         .expect("router answers");
     assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
     assert_eq!(response.headers()[header::LOCATION], "/private/webui/");
+}
+
+#[tokio::test]
+async fn nested_api_prefix_serves_assets() {
+    let manifest: Value = serde_json::from_str(manifest_json()).expect("manifest is valid JSON");
+    let asset_path = manifest["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .filter_map(|file| file["path"].as_str())
+        .find(|path| path.ends_with(".css"))
+        .expect("css asset");
+    let app = axum::Router::new().nest("/private", router::<()>());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/private/webui/{asset_path}"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -217,4 +253,18 @@ async fn webui_router_does_not_swallow_root_or_api_routes() {
         .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn manifest_hashes_match_embedded_assets() {
+    let manifest: Value = serde_json::from_str(manifest_json()).expect("manifest is valid JSON");
+    for file in manifest["files"].as_array().expect("files") {
+        let path = file["path"].as_str().expect("path");
+        let asset =
+            WebUiAssets::get(path).unwrap_or_else(|| panic!("missing embedded asset {path}"));
+        let data = asset.data.as_ref();
+        let digest = format!("{:x}", Sha256::digest(data));
+        assert_eq!(file["sha256"], digest, "{path}");
+        assert_eq!(file["bytes"], data.len(), "{path}");
+    }
 }
