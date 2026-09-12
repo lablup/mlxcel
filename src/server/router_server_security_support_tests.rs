@@ -304,3 +304,112 @@ async fn every_admin_family_enforces_rate_capacity_and_body_limits() {
         }
     }
 }
+
+async fn assembled_router_boundary(ui_enabled: bool) {
+    use axum::body::{Bytes, to_bytes};
+    use axum::http::StatusCode;
+    let contract: serde_json::Value =
+        serde_json::from_str(include_str!("../../docs/webui/api.yaml")).unwrap();
+    let limit = contract
+        .pointer("/components/schemas/LimitSummary/properties/json_body_bytes/const")
+        .unwrap()
+        .as_u64()
+        .unwrap() as usize;
+    assert_eq!(limit, 2_097_152);
+    let (app, path, value) = if ui_enabled {
+        (
+            secured_router_app_with_limits(32, 16),
+            "/ui-api/v1/model-actions",
+            serde_json::json!({
+                "model_id": format!("mdl_{}", "a".repeat(43)), "action": "load",
+                "expected_revision": 1, "idempotency_key": "boundary-action"
+            }),
+        )
+    } else {
+        let state = router_state_from(
+            RouterSources {
+                models_dir: None,
+                cache: None,
+                presets: Default::default(),
+            },
+            keyed_config(),
+            false,
+        );
+        (
+            super::create_router_app(state),
+            "/models/load",
+            serde_json::json!({"model":"missing-boundary-model"}),
+        )
+    };
+    for declared in [true, false] {
+        for (size, expected) in [
+            (limit, StatusCode::NOT_FOUND),
+            (limit + 1, StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let mut value = value.clone();
+            if ui_enabled {
+                // Each probe must reach admission, not replay a previous
+                // missing-model operation through its idempotency key.
+                value["idempotency_key"] = serde_json::json!(format!("boundary-{declared}-{size}"));
+            }
+            let mut payload = serde_json::to_vec(&value).unwrap();
+            payload.resize(size, b' ');
+            assert_eq!(payload.len(), size);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+                value
+            );
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::HOST, "127.0.0.1:18037")
+                .header(header::AUTHORIZATION, format!("Bearer {ROUTER_KEY}"))
+                .header(header::CONTENT_TYPE, "application/json");
+            let body = if declared {
+                request = request.header(header::CONTENT_LENGTH, size.to_string());
+                Body::from(payload)
+            } else {
+                request = request.header(header::TRANSFER_ENCODING, "chunked");
+                let chunks: Vec<Result<Bytes, std::io::Error>> = payload
+                    .chunks(65_536)
+                    .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+                    .collect();
+                Body::from_stream(futures::stream::iter(chunks))
+            };
+            let response = app
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "ui={ui_enabled}, declared={declared}, size={size}"
+            );
+            if size == limit {
+                let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if ui_enabled {
+                    assert_eq!(actual["error"]["code"], "not_found");
+                    assert_eq!(
+                        actual["error"]["message"],
+                        "model was not found; refresh the catalog before retrying"
+                    );
+                } else {
+                    assert_eq!(actual["error"]["type"], "not_found_error");
+                    assert_eq!(actual["error"]["message"], "model is not found");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn assembled_ui_router_body_boundary_reaches_actual_action_handler() {
+    assembled_router_boundary(true).await;
+}
+
+#[tokio::test]
+async fn assembled_ui_off_router_body_boundary_preserves_legacy_load_handler() {
+    assembled_router_boundary(false).await;
+}
