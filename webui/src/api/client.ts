@@ -101,8 +101,11 @@ export class WebUiApiClient {
   async operations(signal?: AbortSignal): Promise<ReadonlyArray<Operation>> {
     const items: Operation[] = [];
     let cursor: string | undefined;
+    let serverInstanceId: string | null = null;
     for (;;) {
       const page = await this.operationsPage(cursor === undefined ? {} : { cursor }, signal);
+      if (serverInstanceId === null) serverInstanceId = page.server_instance_id;
+      else if (page.server_instance_id !== serverInstanceId) throw new Error('Operations pagination crossed a server restart; refresh the authoritative snapshot.');
       items.push(...page.items);
       if (page.pagination.next_cursor === null) return items;
       cursor = page.pagination.next_cursor;
@@ -118,7 +121,9 @@ export class WebUiApiClient {
   }
 
   async runtime(modelId: ModelId, signal?: AbortSignal): Promise<RuntimeSnapshot> {
-    return this.request('/ui-api/v1/runtime', validateRuntime, { method: 'GET', query: { model_id: modelId, autoload: false }, signal });
+    const runtime = await this.request('/ui-api/v1/runtime', validateRuntime, { method: 'GET', query: { model_id: modelId, autoload: false }, signal });
+    if (runtime.model_id !== modelId) throw new Error('Runtime response model_id did not match the requested model.');
+    return runtime;
   }
 
   async events(handlers: EventStreamHandlers, signal?: AbortSignal, cursor?: EventReplayCursor): Promise<void> {
@@ -135,21 +140,22 @@ export class WebUiApiClient {
     });
   }
 
-  async chatCompletions(body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<void> {
-    await this.sse(apiPath(this.apiBase, '/v1/chat/completions'), { method: 'POST', body, signal, headers: { Accept: 'text/event-stream' } }, handlers);
+  async chatCompletions(inferenceModelId: string, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<void> {
+    await this.sse(apiPath(this.apiBase, '/v1/chat/completions', { autoload: false }), { method: 'POST', body: withInferenceModel(body, inferenceModelId), signal, headers: { Accept: 'text/event-stream' } }, handlers);
   }
 
-  async responses(body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<void> {
-    await this.sse(apiPath(this.apiBase, '/v1/responses'), { method: 'POST', body, signal, headers: { Accept: 'text/event-stream' } }, handlers);
+  async responses(inferenceModelId: string, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<void> {
+    await this.sse(apiPath(this.apiBase, '/v1/responses', { autoload: false }), { method: 'POST', body: withInferenceModel(body, inferenceModelId), signal, headers: { Accept: 'text/event-stream' } }, handlers);
   }
 
   private async request<T>(path: string, validate: (value: unknown) => T, options: RequestOptions): Promise<T> {
     const fetched = await this.fetchWithAuth(apiPath(this.apiBase, path, options.query), options);
     try {
-      if (!fetched.response.ok) await this.throwHttp(fetched.response);
-      return validate(parseJson(await this.readBody(fetched.response)));
+      if (!fetched.response.ok) await this.throwHttp(fetched.response, fetched.signal);
+      return validate(parseJson(await this.readBody(fetched.response, fetched.signal)));
     } finally {
       this.controllers.delete(fetched.controller);
+      fetched.cleanup();
     }
   }
 
@@ -157,18 +163,18 @@ export class WebUiApiClient {
     const fetched = await this.fetchWithAuth(url, options);
     try {
       const response = fetched.response;
-      if (!response.ok) await this.throwHttp(response);
+      if (!response.ok) await this.throwHttp(response, fetched.signal);
       if (response.body === null) throw new Error('WebUI event stream response has no body.');
       const parser = new SseParser({ onDone: handlers.onDone, onMessage: handlers.onFrame });
       const reader = response.body.getReader();
       try {
         for (;;) {
-          const read = await reader.read();
+          const read = await readWithAbort(reader, fetched.signal);
           if (read.done) break;
           parser.push(read.value);
         }
         parser.close();
-        if (!parser.done && options.signal?.aborted !== true) throw new Error('WebUI event stream ended before a DONE frame.');
+        if (!parser.done && fetched.signal.aborted !== true) throw new Error('WebUI event stream ended before a DONE frame.');
       } catch (error) {
         await reader.cancel().catch(() => undefined);
         throw error;
@@ -177,22 +183,29 @@ export class WebUiApiClient {
       }
     } finally {
       this.controllers.delete(fetched.controller);
+      fetched.cleanup();
     }
   }
 
   private async fetchWithAuth(url: string, options: RequestOptions): Promise<FetchedResponse> {
     const controller = new AbortController();
-    const signal = options.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, options.signal]);
+    const { signal, cleanup } = combineSignals(controller, options.signal);
     this.controllers.add(controller);
     const headers = new Headers(options.headers);
     headers.set('Accept', headers.get('Accept') ?? 'application/json');
     if (this.bearerToken !== null) headers.set('Authorization', `Bearer ${this.bearerToken}`);
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
-    const response = await this.fetchImpl(url, { method: options.method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
-    return { response, controller };
+    try {
+      const response = await this.fetchImpl(url, { method: options.method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body), signal, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
+      return { response, controller, signal, cleanup };
+    } catch (error) {
+      this.controllers.delete(controller);
+      cleanup();
+      throw error;
+    }
   }
 
-  private async throwHttp(response: Response): Promise<never> {
+  private async throwHttp(response: Response, signal: AbortSignal): Promise<never> {
     const tokenForRedaction = this.bearerToken;
     if (response.status === 401) {
       this.bearerToken = null;
@@ -201,7 +214,7 @@ export class WebUiApiClient {
     }
     let envelope: ReturnType<typeof validateErrorEnvelope> | null = null;
     try {
-      const text = await this.readBody(response);
+      const text = await this.readBody(response, signal);
       if (text.length > 0) envelope = validateErrorEnvelope(parseJson(text));
     } catch {
       envelope = null;
@@ -209,14 +222,14 @@ export class WebUiApiClient {
     throw new WebUiHttpError(response.status, redactEnvelope(envelope, tokenForRedaction), redactMessage(envelope?.error.message ?? `WebUI request failed with HTTP ${response.status}`, tokenForRedaction));
   }
 
-  private async readBody(response: Response): Promise<string> {
+  private async readBody(response: Response, signal: AbortSignal): Promise<string> {
     if (response.body === null) return '';
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
     try {
       for (;;) {
-        const read = await reader.read();
+        const read = await readWithAbort(reader, signal);
         if (read.done) break;
         total += read.value.byteLength;
         if (total > maxJsonBytes) throw new Error('WebUI JSON response exceeded the configured byte limit.');
@@ -249,9 +262,51 @@ function redactMessage(message: string, token: string | null): string {
   return redacted;
 }
 
+function withInferenceModel(body: unknown, inferenceModelId: string): unknown {
+  if (inferenceModelId.length === 0) throw new Error('Inference model id is required for streaming inference.');
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new Error('Streaming inference bodies must be JSON objects.');
+  return { ...(body as Record<string, unknown>), model: inferenceModelId, stream: true };
+}
+
+async function readWithAbort<T>(reader: ReadableStreamDefaultReader<T>, signal: AbortSignal): Promise<ReadableStreamReadResult<T>> {
+  if (signal.aborted) {
+    await reader.cancel().catch(() => undefined);
+    throw abortError();
+  }
+  let onAbort: (() => void) | null = null;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<ReadableStreamReadResult<T>>((_, reject) => {
+        onAbort = () => {
+          void reader.cancel().catch(() => undefined);
+          reject(abortError());
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort !== null) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function combineSignals(controller: AbortController, upstream: AbortSignal | undefined): { readonly signal: AbortSignal; readonly cleanup: () => void } {
+  if (upstream === undefined) return { signal: controller.signal, cleanup: () => undefined };
+  const onAbort = () => controller.abort(upstream.reason);
+  if (upstream.aborted) onAbort();
+  else upstream.addEventListener('abort', onAbort, { once: true });
+  return { signal: controller.signal, cleanup: () => upstream.removeEventListener('abort', onAbort) };
+}
+
+function abortError(): Error {
+  return typeof DOMException === 'function' ? new DOMException('The WebUI request was aborted.', 'AbortError') : new Error('The WebUI request was aborted.');
+}
+
 interface FetchedResponse {
   readonly response: Response;
   readonly controller: AbortController;
+  readonly signal: AbortSignal;
+  readonly cleanup: () => void;
 }
 
 interface RequestOptions {

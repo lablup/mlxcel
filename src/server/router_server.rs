@@ -1097,10 +1097,31 @@ fn event_to_sse(event: UiEvent) -> Event {
     Event::default().id(id).event(name).data(data)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct UiEventCursorError {
+    field: &'static str,
+    code: &'static str,
+    message: &'static str,
+}
+
+impl UiEventCursorError {
+    const fn new(field: &'static str, code: &'static str, message: &'static str) -> Self {
+        Self {
+            field,
+            code,
+            message,
+        }
+    }
+
+    fn into_response(self) -> Response {
+        invalid_webui_field(self.field, self.code, self.message)
+    }
+}
+
 fn parse_ui_event_cursor(
     query: Option<&str>,
     last_event_id: Option<&str>,
-) -> Result<UiReplayCursor, Response> {
+) -> Result<UiReplayCursor, UiEventCursorError> {
     let Some(query) = query.filter(|query| !query.is_empty()) else {
         return Ok(match last_event_id {
             Some(value) => UiReplayCursor::LastEventId(value.to_string()),
@@ -1111,7 +1132,7 @@ fn parse_ui_event_cursor(
     let mut after_sequence: Option<u64> = None;
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
-            return Err(invalid_webui_field(
+            return Err(UiEventCursorError::new(
                 "events_query",
                 "malformed",
                 "event replay query parameters must be key=value pairs",
@@ -1120,14 +1141,14 @@ fn parse_ui_event_cursor(
         match key {
             "server_instance_id" => {
                 if server_instance_id.is_some() {
-                    return Err(invalid_webui_field(
+                    return Err(UiEventCursorError::new(
                         "server_instance_id",
                         "duplicate",
                         "server_instance_id may appear at most once",
                     ));
                 }
                 if !is_webui_token(value, 1, 128) {
-                    return Err(invalid_webui_field(
+                    return Err(UiEventCursorError::new(
                         "server_instance_id",
                         "invalid_format",
                         "server_instance_id must be a printable token",
@@ -1137,28 +1158,28 @@ fn parse_ui_event_cursor(
             }
             "after_sequence" => {
                 if after_sequence.is_some() {
-                    return Err(invalid_webui_field(
+                    return Err(UiEventCursorError::new(
                         "after_sequence",
                         "duplicate",
                         "after_sequence may appear at most once",
                     ));
                 }
                 if value.is_empty() || !value.as_bytes().iter().all(|byte| byte.is_ascii_digit()) {
-                    return Err(invalid_webui_field(
+                    return Err(UiEventCursorError::new(
                         "after_sequence",
                         "invalid_format",
                         "after_sequence must be a base-10 integer",
                     ));
                 }
                 let parsed = value.parse::<u64>().map_err(|_| {
-                    invalid_webui_field(
+                    UiEventCursorError::new(
                         "after_sequence",
                         "invalid_format",
                         "after_sequence must be a base-10 integer",
                     )
                 })?;
                 if parsed > MAX_SAFE_EVENT_SEQUENCE {
-                    return Err(invalid_webui_field(
+                    return Err(UiEventCursorError::new(
                         "after_sequence",
                         "out_of_range",
                         "after_sequence must be a JavaScript-safe integer",
@@ -1167,7 +1188,7 @@ fn parse_ui_event_cursor(
                 after_sequence = Some(parsed);
             }
             _ => {
-                return Err(invalid_webui_field(
+                return Err(UiEventCursorError::new(
                     "events_query",
                     "unknown_parameter",
                     "only server_instance_id and after_sequence are accepted",
@@ -1176,7 +1197,7 @@ fn parse_ui_event_cursor(
         }
     }
     if last_event_id.is_some() {
-        return Err(invalid_webui_field(
+        return Err(UiEventCursorError::new(
             "Last-Event-ID",
             "conflict",
             "Last-Event-ID cannot be combined with paired replay query parameters",
@@ -1187,12 +1208,12 @@ fn parse_ui_event_cursor(
             server_instance_id,
             after_sequence,
         }),
-        (Some(_), None) => Err(invalid_webui_field(
+        (Some(_), None) => Err(UiEventCursorError::new(
             "after_sequence",
             "required",
             "after_sequence is required when server_instance_id is supplied",
         )),
-        (None, Some(_)) => Err(invalid_webui_field(
+        (None, Some(_)) => Err(UiEventCursorError::new(
             "server_instance_id",
             "required",
             "server_instance_id is required when after_sequence is supplied",
@@ -1214,7 +1235,7 @@ async fn ui_events(
         .filter(|value| !value.is_empty());
     let cursor = match parse_ui_event_cursor(uri.query(), last_event_id) {
         Ok(cursor) => cursor,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     let (receiver, replay) =
         match coordinator.subscribe_for_ui(cursor, state.pool.runtime_model_ids()) {

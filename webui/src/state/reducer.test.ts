@@ -47,10 +47,15 @@ describe('WebUI reducer', () => {
   });
 
   it('clears stale instance data when login succeeds against a new server instance', () => {
-    let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'catalog', response: catalog(10), now: 1 });
+    const pending: PendingReconciliation = { kind: 'model-action', idempotencyKey: 'idem-1', operationId: null, modelId: 'mdl_a', createdAt: 1 };
+    let state = reduceWebUiSnapshot(initialSnapshot(), { type: 'select-model', modelId: 'mdl_a' });
+    state = reduceWebUiSnapshot(state, { type: 'pending', item: pending });
+    state = reduceWebUiSnapshot(state, { type: 'catalog', response: catalog(10), now: 1 });
     state = reduceWebUiSnapshot(state, { type: 'login-success', bootstrap: { ...bootstrap, server: { ...bootstrap.server, server_instance_id: 'srv2' } }, now: 2 });
     expect(state.serverInstanceId).toBe('srv2');
     expect(state.catalog).toEqual([]);
+    expect(state.selectedModelId).toBeNull();
+    expect(state.pendingReconciliations.size).toBe(0);
     expect(state.resourceFences.catalog).toBeNull();
   });
 

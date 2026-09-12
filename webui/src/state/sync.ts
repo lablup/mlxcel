@@ -14,7 +14,7 @@
 
 import type { EventReplayCursor, WebUiApiClient } from '../api/client';
 import type { CatalogListResponse, OperationsListResponse, PendingReconciliation, UiEvent, WebUiSnapshot } from '../api/types';
-import type { WebUiAction } from './reducer';
+import { minReplaySequence, type WebUiAction } from './reducer';
 
 export interface SyncClock {
   readonly setTimeout: (callback: () => void, milliseconds: number) => ReturnType<typeof globalThis.setTimeout>;
@@ -53,6 +53,7 @@ export class WebUiSynchronizer {
   private eventAbort: AbortController | null = null;
   private stopped = true;
   private failures = 0;
+  private generation = 0;
   private readonly unsubscribe: () => void;
 
   constructor(options: SyncOptions) {
@@ -68,10 +69,12 @@ export class WebUiSynchronizer {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.generation += 1;
     this.reschedule(0);
   }
 
   stop(): void {
+    this.generation += 1;
     this.stopped = true;
     if (this.timer !== null) this.clock.clearTimeout(this.timer);
     this.timer = null;
@@ -90,38 +93,42 @@ export class WebUiSynchronizer {
     if (this.inflight !== null) return;
     const controller = new AbortController();
     this.inflight = controller;
+    const generation = this.generation;
     const now = this.clock.now();
     try {
       if (this.getSnapshot().auth.status === 'signed-out') return;
       const bootstrap = await this.client.bootstrap(controller.signal);
-      if (this.getSnapshot().auth.status === 'signed-out') return;
+      if (!this.isCurrent(controller, generation) || this.getSnapshot().auth.status === 'signed-out') return;
       this.dispatch({ type: 'login-success', bootstrap, now });
       const catalogPages = await this.catalogSnapshot(controller.signal);
+      if (!this.isCurrent(controller, generation)) return;
       for (const page of catalogPages) this.dispatch({ type: 'catalog', response: page, now });
-      const catalog = catalogPages.at(-1);
       const operationPages = await this.operationSnapshot(controller.signal);
-      const firstOperationPage = operationPages[0];
-      if (catalog !== undefined && firstOperationPage !== undefined && firstOperationPage.server_instance_id !== catalog.server_instance_id) {
+      if (!this.isCurrent(controller, generation)) return;
+      const catalog = catalogPages.at(-1);
+      const operationsSnapshot = operationPages[0];
+      if (catalog !== undefined && operationsSnapshot !== undefined && operationsSnapshot.server_instance_id !== catalog.server_instance_id) {
         this.dispatch({ type: 'connection', connection: 'stale', error: { code: 'snapshot_mismatch', message: 'Operation and catalog snapshots came from different server instances.', retryable: true }, now });
         return;
       }
       const operations = operationPages.flatMap((page) => {
-        for (const operation of page.items) this.dispatch({ type: 'operation', operation, sequence: page.snapshot_sequence, now });
+        this.dispatch({ type: 'operations-snapshot', response: page, now });
         return page.items;
       });
-      await this.refreshSelectedRuntime(controller.signal, now);
+      await this.refreshSelectedRuntime(controller.signal, now, generation);
+      if (!this.isCurrent(controller, generation)) return;
       const unresolvedExpired = this.reconcilePending(operations, now);
       this.failures = 0;
       if (!unresolvedExpired) this.dispatch({ type: 'connection', connection: 'ready', now });
       if (this.eventAbort === null) this.startEvents();
     } catch (error) {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && this.generation === generation) {
         this.failures += 1;
         this.dispatch({ type: 'connection', connection: classifyConnectionError(error), error: safeClientError(error), now: this.clock.now() });
       }
     } finally {
       if (this.inflight === controller) this.inflight = null;
-      if (!this.stopped) this.reschedule(this.pollDelay());
+      if (!this.stopped && this.generation === generation) this.reschedule(this.pollDelay());
     }
   }
 
@@ -134,12 +141,18 @@ export class WebUiSynchronizer {
     this.eventAbort?.abort();
     const controller = new AbortController();
     this.eventAbort = controller;
+    const generation = this.generation;
     const cursor = replayCursor(this.getSnapshot());
-    void this.client.events({ onEvent: (event) => this.handleEvent(event), onRetryAfter: (ms) => this.reschedule(ms) }, controller.signal, cursor).then(() => {
+    void this.client.events({ onEvent: (event) => {
+      if (this.generation === generation && !controller.signal.aborted && !this.stopped) this.handleEvent(event);
+    }, onRetryAfter: (ms) => {
+      if (this.generation === generation && !controller.signal.aborted && !this.stopped) this.reschedule(ms);
+    } }, controller.signal, cursor).then(() => {
+      if (this.generation !== generation) return;
       if (this.eventAbort === controller) this.eventAbort = null;
       if (!controller.signal.aborted && !this.stopped) this.reschedule(this.backoffDelay());
     }).catch((error: unknown) => {
-      if (controller.signal.aborted || this.stopped) return;
+      if (controller.signal.aborted || this.stopped || this.generation !== generation) return;
       this.failures += 1;
       this.eventAbort = null;
       this.dispatch({ type: 'connection', connection: classifyConnectionError(error), error: safeClientError(error), now: this.clock.now() });
@@ -159,8 +172,11 @@ export class WebUiSynchronizer {
   private async catalogSnapshot(signal: AbortSignal): Promise<ReadonlyArray<CatalogListResponse>> {
     const pages: CatalogListResponse[] = [];
     let cursor: string | undefined;
+    let first: CatalogListResponse | null = null;
     for (;;) {
       const page = await this.client.catalog(cursor === undefined ? {} : { cursor }, signal);
+      if (first === null) first = page;
+      else assertSameSnapshotPage('catalog', first, page);
       pages.push(page);
       if (page.pagination.next_cursor === null) return pages;
       cursor = page.pagination.next_cursor;
@@ -170,19 +186,24 @@ export class WebUiSynchronizer {
   private async operationSnapshot(signal: AbortSignal): Promise<ReadonlyArray<OperationsListResponse>> {
     const pages: OperationsListResponse[] = [];
     let cursor: string | undefined;
+    let first: OperationsListResponse | null = null;
     for (;;) {
       const page = await this.client.operationsPage(cursor === undefined ? {} : { cursor }, signal);
+      if (first === null) first = page;
+      else assertSameSnapshotPage('operations', first, page);
       pages.push(page);
       if (page.pagination.next_cursor === null) return pages;
       cursor = page.pagination.next_cursor;
     }
   }
 
-  private async refreshSelectedRuntime(signal: AbortSignal, now: number): Promise<void> {
+  private async refreshSelectedRuntime(signal: AbortSignal, now: number, generation: number): Promise<void> {
     const modelId = this.getSnapshot().selectedModelId;
     if (modelId === null) return;
     const runtime = await this.client.runtime(modelId, signal);
-    this.dispatch({ type: 'runtime', runtime, sequence: null, now });
+    if (signal.aborted || this.generation !== generation) return;
+    if (this.getSnapshot().selectedModelId !== modelId) return;
+    this.dispatch({ type: 'runtime', runtime, sequence: runtime.snapshot_sequence, now });
   }
 
   private reconcilePending(operations: ReadonlyArray<{ readonly operation_id: string }>, now: number): boolean {
@@ -217,17 +238,23 @@ export class WebUiSynchronizer {
     const base = Math.min(maxBackoffMs, 500 * 2 ** Math.min(6, this.failures));
     return Math.round(base / 2 + this.random() * (base / 2));
   }
+
+  private isCurrent(controller: AbortController, generation: number): boolean {
+    return this.inflight === controller && this.generation === generation && !controller.signal.aborted;
+  }
 }
 
 function replayCursor(snapshot: WebUiSnapshot): EventReplayCursor | undefined {
-  if (snapshot.serverInstanceId !== null && snapshot.lastSequence !== null) {
-    return { lastEventId: null, serverInstanceId: snapshot.serverInstanceId, afterSequence: snapshot.lastSequence };
+  const afterSequence = minReplaySequence(snapshot.resourceFences);
+  if (snapshot.serverInstanceId !== null && afterSequence !== null) {
+    return { lastEventId: null, serverInstanceId: snapshot.serverInstanceId, afterSequence };
   }
   if (snapshot.lastEventId !== null) return { lastEventId: snapshot.lastEventId, serverInstanceId: null, afterSequence: null };
   return undefined;
 }
 
 function classifyConnectionError(error: unknown): WebUiSnapshot['connection'] {
+  if (error instanceof SnapshotConsistencyError) return 'stale';
   const status = typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number' ? error.status : null;
   if (status === 401 || (error instanceof Error && /401|unauthorized/i.test(error.message))) return 'unauthorized';
   if (status === 403 || (error instanceof Error && /403|forbidden/i.test(error.message))) return 'forbidden';
@@ -236,8 +263,27 @@ function classifyConnectionError(error: unknown): WebUiSnapshot['connection'] {
 }
 
 function safeClientError(error: unknown) {
+  if (error instanceof SnapshotConsistencyError) return { code: error.code, message: error.message, retryable: true };
   const message = error instanceof Error ? error.message.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]') : 'Unknown WebUI client error';
   return { code: 'sync_error', message, retryable: true };
+}
+
+interface SnapshotPage {
+  readonly server_instance_id: string;
+  readonly snapshot_sequence: number;
+}
+
+class SnapshotConsistencyError extends Error {
+  readonly code = 'snapshot_mismatch';
+  constructor(message: string) {
+    super(message);
+    this.name = 'SnapshotConsistencyError';
+  }
+}
+
+function assertSameSnapshotPage(kind: 'catalog' | 'operations', first: SnapshotPage, page: SnapshotPage): void {
+  if (page.server_instance_id !== first.server_instance_id) throw new SnapshotConsistencyError(`${kind} pagination crossed a server restart; refresh the authoritative snapshot.`);
+  if (page.snapshot_sequence !== first.snapshot_sequence) throw new SnapshotConsistencyError(`${kind} pagination crossed snapshot sequence boundaries; refresh the authoritative snapshot.`);
 }
 
 const browserClock: SyncClock = {

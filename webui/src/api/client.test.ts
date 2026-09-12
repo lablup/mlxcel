@@ -40,16 +40,19 @@ describe('WebUI API client', () => {
     expect(urls[0]).toBe(`/ui-api/v1/runtime?model_id=${runtimeFixture.model_id}&autoload=false`);
   });
 
-  it('allows only approved inference stream paths outside the UI API namespace', async () => {
+  it('allows only approved inference stream paths, real inference ids, and autoload=false outside the UI API namespace', async () => {
     const urls: string[] = [];
-    const fetchImpl: typeof fetch = async (input) => {
+    const bodies: unknown[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
       urls.push(String(input));
+      bodies.push(JSON.parse(String(init?.body)));
       return new Response('data: [DONE]\n\n', { status: 200 });
     };
     const client = new WebUiApiClient({ fetchImpl });
-    await client.chatCompletions({ model: 'm', messages: [] }, { onFrame: () => undefined });
-    await client.responses({ model: 'm', input: [] }, { onFrame: () => undefined });
-    expect(urls).toEqual(['/v1/chat/completions', '/v1/responses']);
+    await client.chatCompletions('mlx-community/Qwen3-4B-4bit', { messages: [] }, { onFrame: () => undefined });
+    await client.responses('mlx-community/Qwen3-4B-4bit', { input: [] }, { onFrame: () => undefined });
+    expect(urls).toEqual(['/v1/chat/completions?autoload=false', '/v1/responses?autoload=false']);
+    expect(bodies).toEqual([{ messages: [], model: 'mlx-community/Qwen3-4B-4bit', stream: true }, { input: [], model: 'mlx-community/Qwen3-4B-4bit', stream: true }]);
   });
 
   it('exposes shared SSE frames for chat content, reasoning, tool calls and usage', async () => {
@@ -66,7 +69,7 @@ describe('WebUI API client', () => {
       },
     }), { status: 200 });
     const frames: unknown[] = [];
-    await new WebUiApiClient({ fetchImpl }).chatCompletions({ stream: true }, { onFrame: (message) => { frames.push(JSON.parse(message.data)); } });
+    await new WebUiApiClient({ fetchImpl }).chatCompletions('mlx-community/Qwen3-4B-4bit', {}, { onFrame: (message) => { frames.push(JSON.parse(message.data)); } });
     expect(frames).toHaveLength(2);
     expect(frames[0]).toMatchObject({ choices: [{ delta: { content: 'Hello', reasoning_content: 'Because', tool_calls: [{ function: { name: 'lookup' } }] } }] });
     expect(frames[1]).toMatchObject({ usage: { total_tokens: 3 } });
@@ -139,5 +142,35 @@ describe('WebUI API client security edges', () => {
     const fetchImpl: typeof fetch = async () => new Response('x'.repeat(2 * 1024 * 1024 + 1), { status: 403 });
     const client = new WebUiApiClient({ fetchImpl });
     await expect(client.bootstrap()).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('cancels pending JSON readers when a custom fetch ignores AbortSignal', async () => {
+    let cancelled = false;
+    const fetchImpl: typeof fetch = async () => new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    }), { status: 200 });
+    const controller = new AbortController();
+    const request = new WebUiApiClient({ fetchImpl }).bootstrap(controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    expect(cancelled).toBe(true);
+  });
+
+  it('cancels pending SSE readers when a custom fetch ignores AbortSignal', async () => {
+    let cancelled = false;
+    const fetchImpl: typeof fetch = async () => new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    }), { status: 200 });
+    const controller = new AbortController();
+    const request = new WebUiApiClient({ fetchImpl }).chatCompletions('mlx-community/Qwen3-4B-4bit', {}, { onFrame: () => undefined }, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    expect(cancelled).toBe(true);
   });
 });

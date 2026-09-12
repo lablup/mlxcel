@@ -36,8 +36,8 @@ export interface WebUiActions {
   readonly refreshRuntime: (modelId: ModelId) => Promise<RuntimeSnapshot>;
   readonly refreshCatalog: (idempotencyKey: string) => Promise<void>;
   readonly cancelOperation: (operationId: string) => Promise<void>;
-  readonly streamChatCompletions: (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => Promise<void>;
-  readonly streamResponses: (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => Promise<void>;
+  readonly streamChatCompletions: (modelId: ModelId, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => Promise<void>;
+  readonly streamResponses: (modelId: ModelId, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => Promise<void>;
 }
 
 const SnapshotContext = React.createContext<WebUiSnapshot | null>(null);
@@ -114,8 +114,9 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       await submitOperation('removal', request.idempotency_key, request.model_id, () => client.removeModel(request));
     },
     refreshRuntime: async (modelId: ModelId) => {
+      const session = sessionRef.current;
       const runtime = await client.runtime(modelId);
-      dispatch({ type: 'runtime', runtime, sequence: null, now: Date.now() });
+      if (sessionRef.current === session) dispatch({ type: 'runtime', runtime, sequence: runtime.snapshot_sequence, now: Date.now() });
       return runtime;
     },
     refreshCatalog: async (idempotencyKey: string) => {
@@ -125,11 +126,11 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       await client.cancelOperation(operationId);
       await syncRef.current?.refresh();
     },
-    streamChatCompletions: async (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
-      await client.chatCompletions(body, handlers, signal);
+    streamChatCompletions: async (modelId: ModelId, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
+      await client.chatCompletions(resolveInferenceModelId(modelId), body, handlers, signal);
     },
-    streamResponses: async (body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
-      await client.responses(body, handlers, signal);
+    streamResponses: async (modelId: ModelId, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
+      await client.responses(resolveInferenceModelId(modelId), body, handlers, signal);
     },
   }), [client]);
 
@@ -143,6 +144,13 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       }
       throw error;
     }
+  }
+
+  function resolveInferenceModelId(modelId: ModelId): string {
+    const entry = snapshotRef.current.catalog.find((item) => item.identity.id === modelId);
+    if (entry === undefined) throw new Error('Selected model is not present in the catalog snapshot.');
+    if (entry.identity.inference_id.length === 0) throw new Error('Selected model does not expose an inference model id.');
+    return entry.identity.inference_id;
   }
 
   return <ActionsContext.Provider value={actions}><SnapshotContext.Provider value={snapshot}>{children}</SnapshotContext.Provider></ActionsContext.Provider>;

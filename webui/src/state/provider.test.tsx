@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { describe, expect, it } from 'vitest';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
+import runtimeFixture from '../../../tests/fixtures/webui/examples/runtime.snapshot.json';
 import { WebUiHttpError } from '../api/client';
 import type { WebUiSnapshot } from '../api/types';
 import { WebUiProvider, useWebUi, useWebUiActions, type WebUiActions } from './provider';
@@ -39,7 +40,7 @@ describe('WebUiProvider auth races', () => {
     const login = mounted.latest().actions.login('token');
     act(() => mounted.latest().actions.logout());
     release();
-    await expect(login).resolves.toBeUndefined();
+    await expect(login).rejects.toMatchObject({ name: 'AbortError' });
     await act(async () => Promise.resolve());
     expect(mounted.latest().snapshot.auth.status).toBe('signed-out');
     act(() => mounted.root.unmount());
@@ -57,6 +58,26 @@ describe('WebUiProvider auth races', () => {
     await act(async () => Promise.resolve());
     expect(mounted.latest().snapshot.auth.status).toBe('signed-out');
     expect(mounted.latest().snapshot.pendingReconciliations.size).toBe(0);
+    act(() => mounted.root.unmount());
+    mounted.element.remove();
+  });
+
+  it('does not dispatch a runtime snapshot that resolves after logout', async () => {
+    let release: () => void = () => undefined;
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrapFixture), { status: 200 });
+      await new Promise<void>((resolve) => { release = resolve; });
+      return new Response(JSON.stringify(runtimeFixture), { status: 200 });
+    };
+    const mounted = mount(fetchImpl);
+    await act(async () => mounted.latest().actions.login('token'));
+    const runtime = mounted.latest().actions.refreshRuntime(runtimeFixture.model_id);
+    act(() => mounted.latest().actions.logout());
+    release();
+    await expect(runtime).rejects.toMatchObject({ name: 'AbortError' });
+    await act(async () => Promise.resolve());
+    expect(mounted.latest().snapshot.auth.status).toBe('signed-out');
+    expect(mounted.latest().snapshot.runtimes.size).toBe(0);
     act(() => mounted.root.unmount());
     mounted.element.remove();
   });

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { WEBUI_SCHEMA_VERSION } from '../api/types';
-import type { BootstrapResponse, CatalogEntry, CatalogListResponse, ModelId, Operation, PendingReconciliation, RuntimeSnapshot, UiClientError, UiEvent, WebUiSnapshot } from '../api/types';
+import type { BootstrapResponse, CatalogEntry, CatalogListResponse, ModelId, Operation, OperationId, OperationsListResponse, PendingReconciliation, RuntimeSnapshot, UiClientError, UiEvent, WebUiSnapshot } from '../api/types';
 
 export type WebUiAction =
   | { readonly type: 'login-start' }
@@ -21,6 +21,7 @@ export type WebUiAction =
   | { readonly type: 'logout'; readonly now: number }
   | { readonly type: 'select-model'; readonly modelId: ModelId | null }
   | { readonly type: 'catalog'; readonly response: CatalogListResponse; readonly now: number }
+  | { readonly type: 'operations-snapshot'; readonly response: OperationsListResponse; readonly now: number }
   | { readonly type: 'operation'; readonly operation: Operation; readonly sequence: number | null; readonly now: number }
   | { readonly type: 'runtime'; readonly runtime: RuntimeSnapshot; readonly sequence: number | null; readonly now: number }
   | { readonly type: 'event'; readonly event: UiEvent; readonly now: number }
@@ -29,7 +30,7 @@ export type WebUiAction =
   | { readonly type: 'connection'; readonly connection: WebUiSnapshot['connection']; readonly error?: UiClientError | null; readonly now: number };
 
 export function initialSnapshot(): WebUiSnapshot {
-  return { schemaVersion: WEBUI_SCHEMA_VERSION, auth: { status: 'signed-out', tokenPresent: false }, connection: 'idle', bootstrap: null, catalog: [], catalogSequence: null, operations: new Map(), runtimes: new Map(), selectedModelId: null, serverInstanceId: null, lastEventId: null, lastSequence: null, lastUpdatedAt: null, error: null, pendingReconciliations: new Map(), resourceFences: { catalog: null, operations: new Map(), models: new Map(), runtimes: new Map() } };
+  return { schemaVersion: WEBUI_SCHEMA_VERSION, auth: { status: 'signed-out', tokenPresent: false }, connection: 'idle', bootstrap: null, catalog: [], catalogSequence: null, operations: new Map(), runtimes: new Map(), selectedModelId: null, serverInstanceId: null, lastEventId: null, lastSequence: null, lastUpdatedAt: null, error: null, pendingReconciliations: new Map(), resourceFences: { catalog: null, operationsSnapshot: null, operations: new Map(), models: new Map(), runtimes: new Map() } };
 }
 
 export function reduceWebUiSnapshot(state: WebUiSnapshot, action: WebUiAction): WebUiSnapshot {
@@ -38,6 +39,7 @@ export function reduceWebUiSnapshot(state: WebUiSnapshot, action: WebUiAction): 
   if (action.type === 'logout') return { ...initialSnapshot(), lastUpdatedAt: action.now };
   if (action.type === 'select-model') return { ...state, selectedModelId: action.modelId };
   if (action.type === 'catalog') return applyCatalog(state, action.response, action.now);
+  if (action.type === 'operations-snapshot') return applyOperationsSnapshot(state, action.response, action.now);
   if (action.type === 'operation') return applyOperation(state, action.operation, action.sequence, action.now);
   if (action.type === 'runtime') return applyRuntimeSnapshot(state, action.runtime, action.sequence, action.now);
   if (action.type === 'event') return applyEvent(state, action.event, action.now);
@@ -49,7 +51,7 @@ export function reduceWebUiSnapshot(state: WebUiSnapshot, action: WebUiAction): 
 function loginSuccess(state: WebUiSnapshot, bootstrap: BootstrapResponse, now: number): WebUiSnapshot {
   const serverInstanceId = bootstrap.server.server_instance_id;
   if (state.serverInstanceId !== null && state.serverInstanceId !== serverInstanceId) {
-    return { ...initialSnapshot(), auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap, serverInstanceId, selectedModelId: state.selectedModelId, pendingReconciliations: state.pendingReconciliations, lastUpdatedAt: now };
+    return { ...initialSnapshot(), auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap, serverInstanceId, lastUpdatedAt: now };
   }
   return { ...state, auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap, serverInstanceId, lastUpdatedAt: now, error: null };
 }
@@ -61,7 +63,22 @@ function applyCatalog(state: WebUiSnapshot, response: CatalogListResponse, now: 
   return { ...state, connection: state.connection === 'bootstrapping' ? 'ready' : state.connection, catalog: mergeCatalogPage(shouldMerge ? state.catalog : [], response), catalogSequence: response.snapshot_sequence, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence({ ...state.resourceFences, catalog: response.snapshot_sequence }), lastUpdatedAt: now, error: null, resourceFences: { ...state.resourceFences, catalog: response.snapshot_sequence } };
 }
 
+function applyOperationsSnapshot(state: WebUiSnapshot, response: OperationsListResponse, now: number): WebUiSnapshot {
+  if (state.serverInstanceId !== null && response.server_instance_id !== state.serverInstanceId) return restart(state, response.server_instance_id, now);
+  if (state.resourceFences.operationsSnapshot !== null && response.snapshot_sequence < state.resourceFences.operationsSnapshot) return state;
+  const shouldMerge = state.resourceFences.operationsSnapshot === response.snapshot_sequence;
+  const operations: Map<OperationId, Operation> = shouldMerge ? new Map(state.operations) : new Map();
+  const operationFences: Map<OperationId, number> = shouldMerge ? new Map(state.resourceFences.operations) : new Map();
+  for (const operation of response.items) {
+    operations.set(operation.operation_id, operation);
+    operationFences.set(operation.operation_id, response.snapshot_sequence);
+  }
+  const resourceFences = { ...state.resourceFences, operationsSnapshot: response.snapshot_sequence, operations: operationFences };
+  return { ...state, operations, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
+}
+
 function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: number | null, now: number): WebUiSnapshot {
+  if (sequence !== null && state.resourceFences.operationsSnapshot !== null && sequence <= state.resourceFences.operationsSnapshot) return state;
   const previousFence = state.resourceFences.operations.get(operation.operation_id);
   if (sequence !== null && previousFence !== undefined && sequence <= previousFence) return state;
   const operations = mapSet(state.operations, operation.operation_id, operation);
@@ -71,11 +88,12 @@ function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: nu
 }
 
 function applyRuntimeSnapshot(state: WebUiSnapshot, runtime: RuntimeSnapshot, sequence: number | null, now: number): WebUiSnapshot {
+  if (state.serverInstanceId !== null && runtime.server_instance_id !== state.serverInstanceId) return restart(state, runtime.server_instance_id, now);
   const previousFence = state.resourceFences.runtimes.get(runtime.model_id);
   if (sequence !== null && previousFence !== undefined && sequence <= previousFence) return state;
   const fences = sequence === null ? state.resourceFences.runtimes : mapSet(state.resourceFences.runtimes, runtime.model_id, sequence);
   const resourceFences = { ...state.resourceFences, runtimes: fences };
-  return { ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
+  return { ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: runtime.server_instance_id, lastSequence: minReplaySequence(resourceFences), lastUpdatedAt: now, error: null, resourceFences };
 }
 
 function applyEvent(state: WebUiSnapshot, event: UiEvent, now: number): WebUiSnapshot {
@@ -127,8 +145,8 @@ function mergeCatalogPage(current: ReadonlyArray<CatalogEntry>, response: Catalo
   return response.items;
 }
 
-function minReplaySequence(fences: WebUiSnapshot['resourceFences']): number | null {
-  const values = [fences.catalog, ...fences.operations.values(), ...fences.models.values(), ...fences.runtimes.values()].filter((value): value is number => value !== null);
+export function minReplaySequence(fences: WebUiSnapshot['resourceFences']): number | null {
+  const values = [fences.catalog, fences.operationsSnapshot, ...fences.operations.values(), ...fences.models.values(), ...fences.runtimes.values()].filter((value): value is number => value !== null);
   return values.length === 0 ? null : Math.min(...values);
 }
 

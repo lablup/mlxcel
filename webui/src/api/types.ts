@@ -87,6 +87,7 @@ export interface WebUiSnapshot {
 
 export interface ResourceFences {
   readonly catalog: number | null;
+  readonly operationsSnapshot: number | null;
   readonly operations: ReadonlyMap<OperationId, number>;
   readonly models: ReadonlyMap<ModelId, number>;
   readonly runtimes: ReadonlyMap<ModelId, number>;

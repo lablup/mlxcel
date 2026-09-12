@@ -157,6 +157,53 @@ describe('WebUI synchronizer', () => {
     sync.dispose();
   });
 
+  it('includes empty operation snapshots in the minimum replay fence', async () => {
+    const methods: string[] = [];
+    const emptyOperations = { ...structuredClone(operations), items: [], snapshot_sequence: 41 };
+    const fetchImpl: typeof fetch = async (input, init) => {
+      methods.push(`${init?.method ?? 'GET'} ${String(input)}`);
+      const url = String(input);
+      if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
+      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
+      if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
+      return new Response(JSON.stringify(emptyOperations));
+    };
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(methods).toContain('GET /ui-api/v1/events?server_instance_id=srv_20260912_a&after_sequence=41');
+    sync.dispose();
+  });
+
+  it('records selected runtime snapshot sequence as a resource fence', async () => {
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    snapshot = reduceWebUiSnapshot(snapshot, { type: 'select-model', modelId: runtimeFixture.model_id });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch() }), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(snapshot.resourceFences.runtimes.get(runtimeFixture.model_id)).toBe(runtimeFixture.snapshot_sequence);
+    sync.dispose();
+  });
+
+  it('rejects operation pagination that crosses a server restart', async () => {
+    const firstOperations = { ...structuredClone(operations), pagination: { limit: 50, next_cursor: 'ops_1', total_known: 2 } };
+    const secondOperations = { ...structuredClone(operations), server_instance_id: 'srv_after_restart' };
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
+      if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
+      if (url === '/ui-api/v1/operations') return new Response(JSON.stringify(firstOperations));
+      if (url === '/ui-api/v1/operations?cursor=ops_1') return new Response(JSON.stringify(secondOperations));
+      if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
+      return new Response(JSON.stringify(runtimeFixture));
+    };
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(snapshot.connection).toBe('stale');
+    expect(snapshot.error?.code).toBe('snapshot_mismatch');
+    sync.dispose();
+  });
+
   it('keeps catalog pages and operation pages until their final cursor', async () => {
     const secondCatalog = structuredClone(catalogFixture);
     secondCatalog.items[0].identity.id = 'mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUV';
