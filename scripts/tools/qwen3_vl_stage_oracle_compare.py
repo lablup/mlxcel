@@ -20,6 +20,7 @@ import math
 import os
 import pathlib
 import shutil
+import stat
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,8 @@ from transformers.vision_utils import (
 )
 
 TRANSFORMERS_GIT_FOR_ISSUE_1738 = "df04b012229d50d2b6dfba32c61c3057c3a40ea1"
+FLOAT32_ITEMSIZE = np.dtype("<f4").itemsize
+MAX_STAGE_DUMP_BYTES = 1 << 30
 
 
 def _transformers_provenance() -> dict[str, Any]:
@@ -76,15 +79,74 @@ def _transformers_provenance() -> dict[str, Any]:
     }
 
 
+def _regular_file_size_no_follow(path: pathlib.Path) -> int:
+    try:
+        info = path.stat(follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(path) from error
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{path} is not a regular file")
+    return info.st_size
+
+
 def _load_manifest(rust_dump: pathlib.Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    _regular_file_size_no_follow(rust_dump / "manifest.json")
     manifest = json.loads((rust_dump / "manifest.json").read_text())
     return manifest, {stage["stage"]: stage for stage in manifest["stages"]}
 
 
+def _checked_stage_file(rust_dump: pathlib.Path, meta: dict[str, Any], stage: str) -> pathlib.Path:
+    name = meta.get("file")
+    if not isinstance(name, str):
+        raise ValueError(f"stage {stage} has no string file entry")
+    path = pathlib.PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"stage {stage} file must be relative to the Rust dump directory: {name!r}")
+    candidate = rust_dump / name
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(rust_dump)
+    except ValueError as error:
+        raise ValueError(f"stage {stage} escapes the Rust dump directory: {name!r}") from error
+    return candidate
+
+
+def _checked_stage_shape(meta: dict[str, Any], stage: str) -> tuple[int, ...]:
+    shape = meta.get("shape")
+    if (
+        not isinstance(shape, list)
+        or not shape
+        or any(not isinstance(dim, int) or dim <= 0 for dim in shape)
+    ):
+        raise ValueError(f"stage {stage} has an invalid positive integer shape: {shape!r}")
+    return tuple(shape)
+
+
 def _read_rust_stage(rust_dump: pathlib.Path, stages: dict[str, Any], stage: str) -> np.ndarray:
     meta = stages[stage]
-    arr = np.fromfile(rust_dump / meta["file"], dtype="<f4")
-    return arr.reshape(tuple(meta["shape"]))
+    if meta.get("dtype") != "float32":
+        raise ValueError(f"stage {stage} has unsupported dtype {meta.get('dtype')!r}")
+    shape = _checked_stage_shape(meta, stage)
+    expected_values = math.prod(shape)
+    expected_bytes = expected_values * FLOAT32_ITEMSIZE
+    if expected_bytes > MAX_STAGE_DUMP_BYTES:
+        raise ValueError(f"stage {stage} is too large to read safely: {expected_bytes} bytes")
+    filename = _checked_stage_file(rust_dump, meta, stage)
+    actual_bytes = _regular_file_size_no_follow(filename)
+    if actual_bytes != expected_bytes:
+        raise ValueError(
+            f"stage {stage} byte size mismatch: manifest expects {expected_bytes}, file has {actual_bytes}"
+        )
+    arr = np.fromfile(filename, dtype="<f4")
+    return arr.reshape(shape)
+
+
+def _from_pretrained_kwargs(model_dir: pathlib.Path) -> dict[str, Any]:
+    return {
+        "pretrained_model_name_or_path": model_dir,
+        "local_files_only": True,
+        "trust_remote_code": False,
+    }
 
 
 def _diff_record(stage: str, got: np.ndarray, ref: np.ndarray, **extra: Any) -> dict[str, Any]:
@@ -120,10 +182,12 @@ def _dtype_from_arg(name: str) -> torch.dtype:
 
 
 def _load_vision(model_dir: pathlib.Path, model_dtype: torch.dtype) -> CohereCompassVisionModel:
-    cfg = AutoConfig.from_pretrained(model_dir)
+    cfg = AutoConfig.from_pretrained(**_from_pretrained_kwargs(model_dir))
     vision = CohereCompassVisionModel(cfg.vision_config).to(model_dtype)
     state: dict[str, torch.Tensor] = {}
-    with safe_open(model_dir / "model.safetensors", framework="pt", device="cpu") as handle:
+    model_file = model_dir / "model.safetensors"
+    _regular_file_size_no_follow(model_file)
+    with safe_open(model_file, framework="pt", device="cpu") as handle:
         for key in handle.keys():
             if not key.startswith("vision_tower."):
                 continue
@@ -145,11 +209,11 @@ def compare(args: argparse.Namespace) -> None:
     rust_dump = args.rust_dump.resolve()
     transformers_provenance = _transformers_provenance()
     manifest, stages = _load_manifest(rust_dump)
-    cfg = AutoConfig.from_pretrained(model_dir)
+    cfg = AutoConfig.from_pretrained(**_from_pretrained_kwargs(model_dir))
     model_dtype = _dtype_from_arg(args.model_dtype)
     input_dtype = _dtype_from_arg(args.input_dtype)
     vision = _load_vision(model_dir, model_dtype)
-    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(**_from_pretrained_kwargs(model_dir))
 
     image_path = pathlib.Path(manifest["image"])
     if not image_path.is_absolute():
@@ -257,17 +321,20 @@ def copy_f32(args: argparse.Namespace) -> None:
     dest = args.dest.resolve()
     if dest.exists():
         raise FileExistsError(dest)
+    model_file = source / "model.safetensors"
+    _regular_file_size_no_follow(model_file)
     dest.mkdir(parents=True)
     try:
         for path in source.iterdir():
             if path.name == "model.safetensors" or path.is_dir():
                 continue
+            _regular_file_size_no_follow(path)
             try:
-                os.link(path, dest / path.name)
+                os.link(path, dest / path.name, follow_symlinks=False)
             except OSError:
-                shutil.copy2(path, dest / path.name)
+                shutil.copy2(path, dest / path.name, follow_symlinks=False)
         state: dict[str, torch.Tensor] = {}
-        with safe_open(source / "model.safetensors", framework="pt", device="cpu") as handle:
+        with safe_open(model_file, framework="pt", device="cpu") as handle:
             for key in handle.keys():
                 tensor = handle.get_tensor(key)
                 if tensor.dtype == torch.bfloat16:
