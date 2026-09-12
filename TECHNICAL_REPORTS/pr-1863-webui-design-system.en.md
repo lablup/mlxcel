@@ -1,32 +1,28 @@
-# PR #1863 WebUI design system report
+# PR #1863 WebUI design system and provider integration report
 
-**Date**: 2026-09-12
-**Status**: Partial — components staged; provider integration and manual acceptance pending
+**Date**: 2026-09-13
+**Status**: Provider-backed shell implemented; manual Safari/VoiceOver/style acceptance and unavailable GB10 CI remain outside local validation
 **Risk Level**: Medium
 
 ## Executive summary
 
-PR #1863 implements the shared WebUI design-system layer for epic #1834. It provides semantic CSS tokens, a restrained macOS 27-inspired shell, typed English/Korean strings, reusable primitives, appearance persistence and a component gallery at `#gallery`. The implementation reserves glass for decorative chrome, keeps content on neutral surfaces, uses project-authored SVG icons rather than Apple assets, and records the official Apple references that informed each layout and material decision.
+PR #1863 now connects the WebUI design shell to the shared #1842 provider instead of presenting static placeholders or a second authentication cache. The production routes use the provider snapshot and actions for login, logout, connection state, selected catalog identity, lifecycle labels, catalog/operation freshness and safe schema-mismatch recovery. The direct `#gallery` artifact route stays isolated for deterministic visual baselines and does not contact the local API before an explicit login.
 
-## Problem statement
+## Change summary
 
-Downstream pages need one shared material, spacing, localization and keyboard contract rather than independently styled controls or duplicate authentication state. A component gallery can validate those primitives before the shared client is available, but cannot establish production authentication or native browser accessibility acceptance.
-
-## Change summary and review hardening
-
-The fix cycles replaced false production placeholders with one neutral connection prompt, removed Gallery from primary navigation while keeping it as a direct artifact route, removed empty inspector chrome from production routes, tightened the desktop grid, added controlled LoginView and SchemaMismatchView contracts, and expanded browser tests from visual smoke coverage into behavior coverage. The production screens remain truthful placeholders until the shared #1842 provider is integrated after that PR merges; this PR does not copy or cache #1842 provider state.
+The implementation wraps the app in `WebUiProvider`, routes LoginView submissions through `actions.login`, routes logout through `actions.logout`, and keeps the session key in provider/client memory only. Auth failures are reduced to localized presentation codes so raw tokens or server messages are not reflected in the DOM. Models, Chat and Activity remain honest staged routes: when signed out they show the provider-backed login surface, and when authenticated they report backend mode, build version, provider state, catalog count, operation count and snapshot sequence without loading a model or starting inference. The toolbar selected-model pill is derived only from a selected catalog entry and lifecycle state; otherwise it stays “No model selected.”
 
 ## Validation status
 
-Final local validation covers `pnpm --dir webui run typecheck`, `pnpm --dir webui run lint`, `pnpm --dir webui run unit` with 10 passing Vitest tests, `pnpm --dir webui run browser` with 12 passing Playwright tests, deterministic bundle verification with digest `44b731231da59d5454c3d2956bc50fe22c6fddecffa306d0134f93d06c804ece`, `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python`, and `make verify-llama-compat verify-versions verify-kernel-dtype-keys`. Actual Safari on macOS 27, VoiceOver and native browser 200% zoom verification were not executed in this environment; `docs/webui/design-system.md` records the exact checklist and local preview URL for that downstream/manual gate. CUDA/GB10 validation is not claimed because the required runner is down and the agreed path is local CI plus skip of unavailable required GB10 jobs.
+Final local validation at this stage:
 
+- `pnpm --dir webui run typecheck` passed.
+- `pnpm --dir webui run lint` passed.
+- `pnpm --dir webui run unit` passed: 8 files, 60 Vitest tests.
+- `pnpm --dir webui run browser` passed: 12 Playwright tests, including the strict Darwin gallery baselines and behavior/a11y checks.
+- `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` passed: 41 WebUI contract fixtures plus DTO drift and schema strictness checks.
+- `make verify-webui-bundle` passed and verified deterministic checked-in assets with bundle digest `cd7c54baf8b191aee79e80beb5ff4711ff91596adbb80fa52ea76edccf74f7dc`.
 
 ## Acceptance boundaries
 
-The 12 browser tests include 8 screenshot cases with separate Darwin/Linux baselines at 390, 1024 and 1440 CSS-pixel widths, plus interaction and appearance checks. Screenshot review by the integration owner establishes implementation baselines, not user approval. Final visual approval remains outstanding. The root preview shown for manual feedback is immutable snapshot `b3f0cd04`, older than the final 200% text-scale reflow correction, and is not evidence for the final source.
-
-LoginView requests `autocomplete="off"` on its form and password field and clears its local field on submission or its logout action. These hints cannot guarantee that a browser or password-manager extension will not save credentials. The shared #1842 provider must own session state and perform authentication; its integration is still required before #1843 can complete or merge.
-
-The staged finalization reran typecheck, lint, all 10 unit tests and shared static checks at `b202f221`, including 32 contract fixtures. The 12 browser tests and platform baseline review were established by the preceding review/CI cycle and were not rerun for this documentation-only update. Actual Safari, VoiceOver, native 200% browser zoom and user screenshot approval remain required and are not waived by the GB10 exception.
-
-The [Linux WebUI bundle job](https://github.com/lablup/mlxcel/actions/runs/34695797255/job/103558967545) at `b202f221` executed and passed typecheck, lint, unit, browser and generated-bundle verification steps. Its two unavailable GB10 jobs remain queued, not passed. The asset-tree digest above differs intentionally from manifest `source_digest_sha256`, which is `e5d0a9c8274fe0893d287339ea29f2598b01e493695337f7653b3ba7ecbd939e`; both were independently recomputed during staged finalization.
+The new provider/mock HTTP tests cover no initial requests before submit, Bearer-prefixed bootstrap/catalog/operations/events calls, 401 session purge, malformed bootstrap schema fail-closed recovery, wrong-key/offline localized errors, no token DOM/storage/URL reflection and no autoload or inference endpoint calls while browsing authenticated routes. Actual Safari on macOS 27, VoiceOver, native browser 200% zoom and final user style approval were not executed in this environment and remain manual follow-up gates. CUDA/GB10 validation is not claimed because the required runner is down and the agreed path is local CI plus skipping unavailable required GB10 jobs.
