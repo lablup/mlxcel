@@ -108,7 +108,7 @@ impl OperationTarget {
                 scope == token || model_id.as_ref().is_some_and(|id| id == token)
             }
             Self::Download { repo_id, revision } => {
-                repo_id == token || revision.as_ref().is_some_and(|rev| rev == token)
+                repo_id == token || revision.as_deref() == Some(token)
             }
         }
     }

@@ -222,6 +222,8 @@ fn lifecycle_response_dtos_round_trip_contract_fixtures() {
     for path in [
         "tests/fixtures/webui/examples/operation.running.json",
         "tests/fixtures/webui/examples/operation.succeeded.json",
+        "tests/fixtures/webui/examples/operation.download-running.json",
+        "tests/fixtures/webui/examples/operation.download-succeeded.json",
     ] {
         let value = fixture_value(path);
         let dto: Operation = serde_json::from_value(value.clone()).unwrap_or_else(|err| {

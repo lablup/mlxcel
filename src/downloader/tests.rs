@@ -386,6 +386,215 @@ fn token_resolution_explicit_wins() {
 }
 
 #[test]
+fn token_resolution_anonymous_mode_ignores_explicit_and_env_tokens() {
+    let _env_guard = env_lock();
+    let prev_hf = std::env::var("HF_TOKEN").ok();
+    let prev_alt = std::env::var("HUGGING_FACE_HUB_TOKEN").ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var("HF_TOKEN", "tok-hf");
+        std::env::set_var("HUGGING_FACE_HUB_TOKEN", "tok-alt");
+    }
+    assert_eq!(
+        resolve_token_with_mode(Some("explicit"), TokenMode::Anonymous),
+        None
+    );
+    assert_eq!(resolve_token_with_mode(None, TokenMode::Anonymous), None);
+    restore_env("HF_TOKEN", prev_hf);
+    restore_env("HUGGING_FACE_HUB_TOKEN", prev_alt);
+}
+
+#[test]
+fn anonymous_probe_clears_saved_hf_cache_token() {
+    let _env_guard = env_lock();
+    let prev_home = std::env::var("HF_HOME").ok();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    let prev_hf = std::env::var("HF_TOKEN").ok();
+    let prev_alt = std::env::var("HUGGING_FACE_HUB_TOKEN").ok();
+    let home = tempfile::tempdir().expect("hf home");
+    std::fs::write(home.path().join("token"), "hf_saved_token").expect("token file");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let endpoint = format!("http://{addr}");
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_for_thread = captured.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).expect("read request");
+        *captured_for_thread.lock().expect("captured") =
+            String::from_utf8_lossy(&buf[..n]).into_owned();
+        let body = r#"{"siblings":[],"sha":"0123456789abcdef0123456789abcdef01234567"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{}",
+            body.len(),
+            body
+        )
+        .expect("write response");
+    });
+
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var("HF_HOME", home.path());
+        std::env::set_var("HF_ENDPOINT", &endpoint);
+        std::env::remove_var("HF_TOKEN");
+        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
+    }
+
+    let result = probe_repo_with_token_mode("owner/model", None, TokenMode::Anonymous);
+
+    restore_env("HF_HOME", prev_home);
+    restore_env("HF_ENDPOINT", prev_endpoint);
+    restore_env("HF_TOKEN", prev_hf);
+    restore_env("HUGGING_FACE_HUB_TOKEN", prev_alt);
+    server.join().expect("server thread");
+
+    result.expect("anonymous probe should use the local fake endpoint");
+    let request = captured.lock().expect("captured").clone();
+    assert!(
+        !request.to_ascii_lowercase().contains("authorization:"),
+        "anonymous WebUI probe must not send saved Hub credentials; request was {request:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let _env_guard = env_lock();
+    let prev_home = std::env::var("HF_HOME").ok();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    let prev_hf = std::env::var("HF_TOKEN").ok();
+    let prev_alt = std::env::var("HUGGING_FACE_HUB_TOKEN").ok();
+    let home = tempfile::tempdir().expect("hf home");
+    std::fs::write(home.path().join("token"), "hf_saved_token").expect("token file");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let endpoint = format!("http://{addr}");
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let captured_for_thread = captured.clone();
+    let server = std::thread::spawn(move || {
+        for _ in 0..5 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            captured_for_thread
+                .lock()
+                .expect("captured")
+                .push(request.clone());
+            let first = request.lines().next().unwrap_or_default();
+            let mut parts = first.split_whitespace();
+            let method = parts.next().unwrap_or_default();
+            let path = parts.next().unwrap_or_default();
+            if path.starts_with("/api/models/owner/model/revision/main") {
+                let body = r#"{"siblings":[{"rfilename":"config.json"},{"rfilename":"model.safetensors"}],"sha":"0123456789abcdef0123456789abcdef01234567"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("metadata response");
+            } else if path.ends_with("/config.json") {
+                let body = b"{}";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("config header");
+                if method != "HEAD" {
+                    stream.write_all(body).expect("config body");
+                }
+            } else if path.ends_with("/model.safetensors") {
+                let body = b"data";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("weights header");
+                if method != "HEAD" {
+                    stream.write_all(body).expect("weights body");
+                }
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("not found response");
+            }
+        }
+    });
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    let progress_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress_for_hook = progress_seen.clone();
+    let hooks = DownloadHooks {
+        progress: Some(std::sync::Arc::new(move |_, _, _| {
+            progress_for_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })),
+        ..DownloadHooks::default()
+    };
+
+    unsafe {
+        std::env::set_var("HF_HOME", home.path());
+        std::env::set_var("HF_ENDPOINT", &endpoint);
+        std::env::set_var("HF_TOKEN", "hf_env_token");
+        std::env::set_var("HUGGING_FACE_HUB_TOKEN", "hf_alt_token");
+    }
+    let result = download_repo_to_existing_dir_fd(
+        "owner/model",
+        None,
+        root_dir.as_raw_fd(),
+        root.path().to_path_buf(),
+        hooks,
+    );
+
+    restore_env("HF_HOME", prev_home);
+    restore_env("HF_ENDPOINT", prev_endpoint);
+    restore_env("HF_TOKEN", prev_hf);
+    restore_env("HUGGING_FACE_HUB_TOKEN", prev_alt);
+    if result.is_err() {
+        for _ in 0..5 {
+            let _ = std::net::TcpStream::connect(addr);
+        }
+    }
+    server.join().expect("server thread");
+
+    result.expect("anonymous fd download should use the local fake endpoint");
+    assert!(root.path().join("config.json").is_file());
+    assert!(root.path().join("model.safetensors").is_file());
+    assert!(
+        progress_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "progress hook should force HEAD sizing and observe GET progress"
+    );
+    let requests = captured.lock().expect("captured");
+    assert_eq!(
+        requests.len(),
+        5,
+        "expected metadata, two HEADs and two GETs"
+    );
+    for request in requests.iter() {
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "anonymous WebUI metadata/HEAD/GET must not send ambient Hub credentials; request was {request:?}"
+        );
+    }
+}
+
+#[test]
 fn token_resolution_hf_token_env() {
     let _env_guard = env_lock();
     let prev_hf = std::env::var("HF_TOKEN").ok();
@@ -482,6 +691,28 @@ fn snapshot_complete_rejects_zero_byte_files() {
     assert!(!snapshot_complete(dir.path(), &wanted));
 }
 
+#[cfg(unix)]
+#[test]
+fn fd_relative_download_parent_refuses_symlink_component() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("root");
+    let victim = tempfile::tempdir().expect("victim");
+    symlink(victim.path(), root.path().join("vision")).expect("symlink");
+    let root_dir = std::fs::File::open(root.path()).expect("open root");
+
+    let err = open_parent_dir_fd(root_dir.as_raw_fd(), "vision/config.json")
+        .expect_err("fd-relative helper must not follow symlinked directories");
+
+    assert!(
+        err.to_string().contains("failed to open directory")
+            || err.to_string().contains("Too many levels"),
+        "unexpected error: {err:#}"
+    );
+    assert!(!victim.path().join("config.json").exists());
+}
+
 /// Verify that `stream_file` removes the partial tempfile on error.
 ///
 /// A server that immediately drops the TCP connection after accept triggers a
@@ -541,6 +772,63 @@ async fn stream_file_cleans_up_tempfile_on_error() {
     );
 }
 
+#[tokio::test]
+async fn stream_file_rejects_known_size_mismatch_before_publish() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("model.safetensors");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).await.expect("request");
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK
+Content-Length: 2
+Connection: close
+
+xy",
+            )
+            .await
+            .expect("response");
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/x");
+    let mp = indicatif::MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+    let file_pb = mp.add(indicatif::ProgressBar::hidden());
+    let agg_pb = mp.add(indicatif::ProgressBar::hidden());
+
+    let err = stream_file(
+        &client,
+        &url,
+        &dest,
+        "model.safetensors",
+        &file_pb,
+        &agg_pb,
+        4,
+        &DownloadHooks::default(),
+    )
+    .await
+    .expect_err("known HEAD size mismatch must fail");
+
+    assert!(err.to_string().contains("size mismatch"), "{err:#}");
+    assert!(!dest.exists(), "mismatched file must not be published");
+}
+
+#[test]
+fn manifest_bounds_reject_oversized_names_and_file_lists() {
+    assert!(validate_manifest_filename("owner/model", "config.json").is_ok());
+    let long_name = format!("{}.json", "x".repeat(MAX_REPO_FILENAME_BYTES));
+    assert!(validate_manifest_filename("owner/model", &long_name).is_err());
+    assert!(validate_manifest_bounds("owner/model", MAX_HF_SIBLINGS + 1, 0).is_err());
+    assert!(validate_manifest_bounds("owner/model", 10, MAX_SELECTED_DOWNLOAD_FILES + 1).is_err());
+}
+
 // Integration test that hits the real Hugging Face Hub. Marked `#[ignore]`
 // per the issue acceptance criteria so CI does not depend on network access.
 #[test]
@@ -555,6 +843,7 @@ fn live_download_smoke_test() {
         models_dir: None,
         revision: None,
         token: None,
+        token_mode: TokenMode::Environment,
         include: Vec::new(),
         force: true,
     };
@@ -1135,6 +1424,7 @@ async fn download_repo_inside_runtime_errors_instead_of_aborting() {
         models_dir: None,
         revision: None,
         token: None,
+        token_mode: TokenMode::Environment,
         include: Vec::new(),
         force: true,
     };

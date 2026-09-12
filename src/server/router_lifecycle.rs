@@ -88,8 +88,8 @@ pub use super::router_lifecycle_dto::{
     RuntimeSnapshot, SettingsPayload, UiEvent, UiEventPayload,
 };
 pub use super::router_lifecycle_ops::{
-    EVENT_RING_LIMIT, LifecycleCoordinator, MAX_SAFE_EVENT_SEQUENCE, ReplaySubscribeError,
-    ResetEventKind, UiReplayCursor,
+    EVENT_RING_LIMIT, LifecycleCoordinator, MAX_ACTIVE_DOWNLOAD_OPERATIONS,
+    MAX_SAFE_EVENT_SEQUENCE, ReplaySubscribeError, ResetEventKind, UiReplayCursor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +112,7 @@ struct LifecycleInner {
     generation: u64,
     admission_stopped: bool,
     worker_exit_observed: bool,
+    operation_busy: bool,
     last_error: Option<String>,
 }
 
@@ -154,6 +155,7 @@ impl ModelLifecycle {
                 generation: revision,
                 admission_stopped: false,
                 worker_exit_observed: true,
+                operation_busy: false,
                 last_error: None,
             }),
             notify: tokio::sync::Notify::new(),
@@ -200,7 +202,8 @@ impl ModelLifecycle {
                 | ModelLifecycleState::Unloading
         ) || (guard.state == ModelLifecycleState::Ready && guard.active_requests > 0)
             || (guard.state == ModelLifecycleState::Failed && !guard.worker_exit_observed)
-            || guard.download == DownloadState::Downloading;
+            || guard.download == DownloadState::Downloading
+            || guard.operation_busy;
         let draining_requests = if guard.admission_stopped {
             guard.active_requests
         } else {
@@ -228,6 +231,7 @@ impl ModelLifecycle {
                         | ModelLifecycleState::Draining
                         | ModelLifecycleState::Unloading
                 ) || (guard.state == ModelLifecycleState::Failed && !guard.worker_exit_observed)
+                    || guard.operation_busy
             })
             .unwrap_or(true)
     }
@@ -250,6 +254,24 @@ impl ModelLifecycle {
         self.mutate(|g| {
             g.download = state;
             g.revision = self.next_revision_after(g.revision);
+        });
+    }
+
+    pub fn mark_operation_busy(&self) {
+        self.mutate(|g| {
+            if !g.operation_busy {
+                g.operation_busy = true;
+                g.revision = self.next_revision_after(g.revision);
+            }
+        });
+    }
+
+    pub fn mark_operation_idle(&self) {
+        self.mutate(|g| {
+            if g.operation_busy {
+                g.operation_busy = false;
+                g.revision = self.next_revision_after(g.revision);
+            }
         });
     }
 
