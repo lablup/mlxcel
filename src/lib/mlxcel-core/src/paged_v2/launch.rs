@@ -134,7 +134,8 @@ impl<'a> V2Context<'a> {
             self.scale,
             &mut partial_v,
             &mut lse,
-        );
+        )
+        .map_err(|e| format!("paged decode v2: partial launch failed: {e}"))?;
 
         let batch = i32::try_from(plan.batch)
             .map_err(|_| format!("paged decode v2: batch {} overflows i32", plan.batch))?;
@@ -154,7 +155,8 @@ impl<'a> V2Context<'a> {
             &o_indptr,
             &mut merged_v,
             &mut merged_lse,
-        );
+        )
+        .map_err(|e| format!("paged decode v2: merge launch failed: {e}"))?;
         Ok((merged_v, merged_lse))
     }
 }

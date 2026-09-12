@@ -29,7 +29,7 @@ namespace mlx::core {
 // Note: GatherQMM is now implemented in quantized/qmm.hip
 
 NO_GPU(BlockMaskedMM)
-NO_GPU(FFT)
+// FFT is implemented in fft.hip (mlxcelverse, lablup/mlxcel#1825).
 // Hadamard is implemented in hadamard.hip (mlxcelverse, lablup/mlxcel#1825).
 NO_GPU_MULTI(LUF)
 NO_GPU_MULTI(QRF)

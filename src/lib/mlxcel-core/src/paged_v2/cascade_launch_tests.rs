@@ -442,7 +442,8 @@ fn run_cascade_variant(
     let o_indptr = ffi::from_slice_i32(&plan.o_indptr, &[b + 1]);
     let mut merged_v = UniquePtr::null();
     let mut merged_lse = UniquePtr::null();
-    ffi::paged_attention_merge_states(&v_in, &lse_in, &o_indptr, &mut merged_v, &mut merged_lse);
+    ffi::paged_attention_merge_states(&v_in, &lse_in, &o_indptr, &mut merged_v, &mut merged_lse)
+        .expect("merge_states");
     to_vec_f32(&merged_v)
 }
 

@@ -4,6 +4,7 @@
 // mlx_cxx_bridge.cpp; see mlx_cxx_internal.h for the shared helpers.
 
 #include "mlx_cxx_internal.h"
+#include "../../mlx-cpp/turbo/gpu_backend.h"
 
 // CUDA backend availability probe for the fused-kernel gates (#631). The
 // header is backend-agnostic: builds without CUDA link the no_cuda stub.
@@ -142,6 +143,7 @@ namespace {
         static BitlinearKernelHolderCuda holder;
         return holder;
     }
+
 }
 
 std::unique_ptr<MlxArray> bitlinear_matmul(
@@ -163,9 +165,25 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
 
     // mx.fast.metal_kernel throws on CUDA, so dispatch the cuda_kernel port
     // there. metal::is_available() is false on a CUDA-only build.
-    const bool use_cuda = !mlx::core::metal::is_available();
-    auto& kernel = use_cuda ? get_bitlinear_kernel_cuda().get()
-                            : get_bitlinear_kernel().get();
+    // Named backends rather than a negation of Metal (issue #1803). Backends
+    // with no port throw here, and the bridge declares this function `Result`,
+    // so that reaches the caller as an error instead of ending the process:
+    // this op is the one fused kernel with no graph fallback, so before this a
+    // CPU-only build and a ROCm build both terminated on a BitNet checkpoint.
+    auto& kernel = [&]() -> mlx::core::fast::CustomKernelFunction& {
+        switch (mlxcel::gpu_kernel_backend()) {
+            case mlxcel::GpuKernelBackend::Metal:
+                return get_bitlinear_kernel().get();
+            case mlxcel::GpuKernelBackend::Cuda:
+                return get_bitlinear_kernel_cuda().get();
+            case mlxcel::GpuKernelBackend::Rocm:
+            case mlxcel::GpuKernelBackend::None:
+                break;
+        }
+        throw std::runtime_error(
+            "[bitlinear_matmul] no BitLinear kernel port for this GPU backend; "
+            "BitNet needs Metal or CUDA (ROCm port: lablup/mlxcel#1862)");
+    }();
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
         {"in_features", in_features},
@@ -1480,7 +1498,8 @@ void ssm_update_kernel(
 
     // Metal kernel on Apple, CUDA port elsewhere (mx.fast.metal_kernel throws
     // "[metal_kernel] No Metal back-end" on the CUDA backend), cf. #631.
-    const bool use_cuda = !mlx::core::metal::is_available();
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = use_cuda ? get_ssm_kernel_cuda().get() : get_ssm_kernel().get();
 
     // CustomKernelFunction signature:
@@ -1988,7 +2007,8 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
 
     // mx.fast.metal_kernel throws on CUDA ("No Metal back-end"), so dispatch the
     // cuda_kernel port there. metal::is_available() is false on a CUDA-only build.
-    const bool use_cuda = !mlx::core::metal::is_available();
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
 
     // A) gate/up + activation -> act_g[K, Dff] (f32 for the down GEMV).
     auto& kA = use_cuda ? get_moe_gateup_kernel_cuda().get()

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "paged_attention_v2.h"
+#include <stdexcept>
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -597,7 +599,20 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
     int dims_per_thread = (dim + PAGED_V2_SIMD_WIDTH - 1) / PAGED_V2_SIMD_WIDTH;
     int num_warps = paged_attention_v2_num_warps(dim, q_heads);
 
-    const bool use_cuda = !mlx::core::metal::is_available();
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's Rust callers
+    // gate on `custom_kernels_available()` and take a graph fallback, so
+    // reaching this means a direct call; the bridge declares this function
+    // `Result`, so the throw becomes an `Err` instead of ending the process
+    // (issue #1803).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[paged_attention_decode_v2_partial] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = get_partial_kernel(use_cuda).get();
 
     // `QType`/`KVType` are load-bearing even though the body never names them:

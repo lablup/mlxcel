@@ -1336,6 +1336,13 @@ mod ffi {
         /// ceiling, which is exactly the pre-#906 behavior; out-of-range values
         /// clamp back to the ceiling, so a stale cached tactic can never
         /// produce an infeasible launch.
+        /// Paged-attention decode launcher.
+        ///
+        /// Returns `Err` instead of ending the process when the GPU backend has
+        /// no custom kernel port (issue #1803): the C++ launcher throws and cxx
+        /// turns that into an `Err` here, which a `noexcept` extern could not
+        /// do. mlxcel's own callers gate on `custom_kernels_available()` and
+        /// never reach it.
         fn paged_attention_decode(
             q: &MlxArray,
             k_pool: &MlxArray,
@@ -1346,7 +1353,7 @@ mod ffi {
             visible_lens: &MlxArray,
             scale: f32,
             num_splits_override: i32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Largest feasible `NumSplits` for a head dimension (issue #906).
         ///
@@ -1383,7 +1390,7 @@ mod ffi {
             scale: f32,
             partial_v_out: &mut UniquePtr<MlxArray>,
             lse_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Variable-length attention-state merge kernel (issue #898).
         ///
@@ -1392,13 +1399,20 @@ mod ffi {
         /// into `[M, H, D]` / `[M, H]`, where output row `o` covers partial
         /// rows `[o_indptr[o], o_indptr[o + 1])`. Deliberately paging-agnostic:
         /// the cascade-attention issue #903 reuses it unchanged.
+        /// Merge partial paged-attention states.
+        ///
+        /// Returns `Err` instead of ending the process when the GPU backend has
+        /// no custom kernel port (issue #1803): the C++ launcher throws and cxx
+        /// turns that into an `Err` here, which a `noexcept` extern could not
+        /// do. mlxcel's own callers gate on `custom_kernels_available()` and
+        /// never reach it.
         fn paged_attention_merge_states(
             v_in: &MlxArray,
             lse_in: &MlxArray,
             o_indptr: &MlxArray,
             v_out: &mut UniquePtr<MlxArray>,
             lse_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Query heads one v2 CTA processes together (issue #898). Always
         /// divides `n_rep`, so the plan's CTA count and the launcher's grid
@@ -1780,6 +1794,13 @@ mod ffi {
         /// [out_features/4, in_features] uint8 (2-bit ternary, 4 rows/byte),
         /// scaled by `weight_scale[0]` (inverted unless linear_class is
         /// autobitlinear).
+        /// BitLinear ternary matmul, with Metal and CUDA kernel ports.
+        ///
+        /// Returns `Err` on a backend with neither, which today means ROCm and
+        /// CPU-only builds, instead of ending the process: the op has no graph
+        /// fallback, so before issue #1803 the `fast::*_kernel` throw crossed a
+        /// `noexcept` extern and terminated. Callers that want to refuse early
+        /// should ask [`custom_kernels_available`].
         fn bitlinear_matmul(
             x: &MlxArray,
             packed_weights: &MlxArray,
@@ -1787,7 +1808,7 @@ mod ffi {
             in_features: i32,
             out_features: i32,
             invert_weight_scales: bool,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Fused gated-delta single-token decode step.
         /// Combines: decay → kv_mem → delta → state_update → output into one C++ call.
@@ -2076,6 +2097,15 @@ mod ffi {
         /// Never moves the default device or creates a stream, so it is safe
         /// before `initialize_runtime` finishes.
         fn gpu_backend_available() -> bool;
+
+        /// True when the resolved GPU backend has mlxcel's fused kernel ports,
+        /// that is Metal or CUDA (issue #1803). ROCm has a GPU but no ports
+        /// yet, so it answers `false` and callers take the MLX graph fallback
+        /// their family already has. This is deliberately narrower than
+        /// `gpu_backend_available`, which only says a GPU exists: conflating
+        /// the two is what sent ROCm into `fast::cuda_kernel` and aborted the
+        /// process.
+        fn custom_kernels_available() -> bool;
 
         /// True when the MLX Metal backend is available at runtime (macOS
         /// Apple Silicon). False on CUDA-only and CPU-only builds. Mirrors the

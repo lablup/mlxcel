@@ -87,6 +87,12 @@ pub fn fused_moe_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
         .get_or_init(|| fused_moe_enabled_from(std::env::var("MLXCEL_FUSED_MOE").ok().as_deref()))
+        // The fused MoE launcher has Metal and CUDA ports only, and its bridge
+        // function does not return `Result`, so on a backend without a port the
+        // `fast::cuda_kernel` throw ends the process rather than failing the
+        // call. Answering false here selects the same SwitchGLU path
+        // `MLXCEL_FUSED_MOE=0` selects (issue #1803).
+        && mlxcel_core::custom_kernels_available()
 }
 
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested
