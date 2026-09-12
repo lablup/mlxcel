@@ -52,10 +52,11 @@
 //!   writes to and gathers from the pool.
 //! * [`assert_batched_decode_parity`] — the **batched** decode wiring (`B == 2`)
 //!   via `forward_batched_with_context_and_ids` + a paged [`DecodeBatchContext`],
-//!   exactly as `execute_batched_decode` dispatches it. This exercises the
-//!   per-model `is_paged_backed()` decode guard that routes pool-backed caches
-//!   through the per-sequence `update_and_fetch` loop instead of the
-//!   dense-pointer native kernel.
+//!   exactly as `execute_batched_decode` dispatches it. For pool-backed caches
+//!   this reaches the #899 whole-batch pooled decode helper, including its
+//!   gather fallback below the fused dispatch floor; if that helper declines,
+//!   the model's `is_paged_backed()` guard still keeps the dense-pointer native
+//!   kernel away from placeholder dense buffers.
 //!
 //! # Running
 //!
@@ -106,7 +107,7 @@ const PAGED_DENSE_MAX_RELATIVE_RMS: f64 = 5e-5;
 #[derive(Debug)]
 struct DecodeStepTrace {
     token: i32,
-    next_logits: Vec<f32>,
+    selector_logits: Vec<f32>,
 }
 
 /// Fixed prompt token ids (deterministic; no tokenizer needed). Identical bytes
@@ -179,7 +180,7 @@ fn assert_trace_within_relative_rms(
         "{label}: greedy tokens differ between paged and dense backends"
     );
     for (idx, (actual, reference)) in actual.iter().zip(reference.iter()).enumerate() {
-        let rms = relative_rms(&actual.next_logits, &reference.next_logits);
+        let rms = relative_rms(&actual.selector_logits, &reference.selector_logits);
         assert!(
             rms <= max_relative_rms,
             "{label}: decode step {idx} relative RMS {rms:e} exceeded {max_relative_rms:e}"
@@ -198,8 +199,9 @@ fn scheduler_paged_layout(num_layers: usize) -> SequenceStateLayout {
 
 /// Run prefill + `DECODE_STEPS` greedy decode steps via single-sequence
 /// `model.forward` (the scheduler's `execute_full_prefill` + `decode_single_step`
-/// path), returning each emitted token with the next-step logit row produced
-/// after appending it.
+/// path), returning each emitted token with the logit row that selected it. The
+/// first trace row therefore compares the prefill terminal logits, and later
+/// rows compare the decode logits from the preceding step.
 fn run_single_sequence_trace(
     model: &mlxcel::LoadedModel,
     caches: &mut [mlxcel_core::cache::KVCache],
@@ -211,17 +213,19 @@ fn run_single_sequence_trace(
     let prefill_logits = model.forward(&prompt, caches, Some(&mask));
     mlxcel_core::eval(&prefill_logits);
 
+    let mut selector_logits = logit_row(&prefill_logits, 0, prompt_len - 1);
     let mut next = greedy_token(&prefill_logits, 0, prompt_len - 1);
 
     let mut decoded = Vec::with_capacity(DECODE_STEPS);
     for _ in 0..DECODE_STEPS {
+        decoded.push(DecodeStepTrace {
+            token: next,
+            selector_logits,
+        });
         let step_input = mlxcel_core::from_slice_i32(&[next], &[1, 1]);
         let logits = model.forward(&step_input, caches, None);
         mlxcel_core::eval(&logits);
-        decoded.push(DecodeStepTrace {
-            token: next,
-            next_logits: logit_row(&logits, 0, 0),
-        });
+        selector_logits = logit_row(&logits, 0, 0);
         next = greedy_token(&logits, 0, 0);
     }
     decoded
@@ -336,10 +340,12 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
     let prompt = mlxcel_core::from_slice_i32(PROMPT_TOKENS, &[1, prompt_len]);
     let mask = mlxcel_core::utils::create_causal_mask(prompt_len, 0);
     let mut next = [0i32; 2];
+    let mut selector_logits = [Vec::new(), Vec::new()];
     for (slot, id) in [id0, id1].into_iter().enumerate() {
         let caches = paged_pool.get_caches_mut(id).unwrap();
         let logits = model.forward(&prompt, caches, Some(&mask));
         mlxcel_core::eval(&logits);
+        selector_logits[slot] = logit_row(&logits, 0, prompt_len - 1);
         next[slot] = greedy_token(&logits, 0, prompt_len - 1);
     }
 
@@ -363,12 +369,14 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
         mlxcel_core::eval(&logits);
         batched[0].push(DecodeStepTrace {
             token: next[0],
-            next_logits: logit_row(&logits, 0, 0),
+            selector_logits: std::mem::take(&mut selector_logits[0]),
         });
         batched[1].push(DecodeStepTrace {
             token: next[1],
-            next_logits: logit_row(&logits, 1, 0),
+            selector_logits: std::mem::take(&mut selector_logits[1]),
         });
+        selector_logits[0] = logit_row(&logits, 0, 0);
+        selector_logits[1] = logit_row(&logits, 1, 0);
         next[0] = greedy_token(&logits, 0, 0);
         next[1] = greedy_token(&logits, 1, 0);
     }

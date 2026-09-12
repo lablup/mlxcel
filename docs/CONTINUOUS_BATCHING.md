@@ -70,10 +70,12 @@ use scheduler-owned cache allocation, paged storage, prompt-cache adoption,
 chunked prefill, and batched decode paths that the CLI loop does not use. If a
 reproduction or oracle comparison needs the CLI-shaped single-request path, use
 `--no-batch` for the legacy worker or `--max-batch-size 1` to keep the scheduler
-while making `--decode-storage-backend auto` resolve to dense storage. To isolate
-only the decode storage backend while preserving the default admission width,
-prefer `--decode-storage-backend dense`; that is the first bisect knob when a
-`--max-batch-size 1` run matches the CLI but the default server does not.
+while making `--decode-storage-backend auto` resolve to dense storage. These are
+diagnostic/oracle controls that narrow the server path toward the CLI; they do
+not turn every model family into an unmeasured token-exactness guarantee. To
+isolate only the decode storage backend while preserving the default admission
+width, prefer `--decode-storage-backend dense`; that is the first bisect knob
+when a `--max-batch-size 1` run matches the CLI but the default server does not.
 
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to
