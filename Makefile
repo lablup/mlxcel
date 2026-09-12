@@ -7,6 +7,7 @@
 
 CARGO := cargo
 RUSTFLAGS := RUSTFLAGS="-C target-cpu=native"
+WEBUI_CONTRACT_PY ?= python3
 
 # ----------------------------------------------------------------------------
 # Release accelerator features (platform-aware)
@@ -752,6 +753,11 @@ verify-llama-compat: ## Assert the llama-server b10621 compatibility manifest is
 	@echo "$(CYAN)[verify] llama-server b10621 compatibility manifest...$(RESET)"
 	@python3 scripts/ci/check_llama_compat_manifest.py
 	@bash scripts/ci/check_llama_compat_manifest_test.sh
+
+.PHONY: verify-webui-contract
+verify-webui-contract: ## Assert the WebUI API schema, DTOs, and fixtures stay in sync (issue #1835)
+	@echo "$(CYAN)[verify] WebUI contract schema/DTO/fixtures...$(RESET)"
+	@$(WEBUI_CONTRACT_PY) scripts/ci/check_webui_contract.py --self-test
 
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)

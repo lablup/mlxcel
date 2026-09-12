@@ -1,0 +1,29 @@
+{
+  "scenario": "server_restart",
+  "description": "Changed server instance invalidates idempotency replay and event cursors.",
+  "given": {
+    "old_server_instance_id": "srv_old",
+    "new_server_instance_id": "srv_new"
+  },
+  "steps": [
+    {
+      "from": "ready",
+      "action": "reconnect_after_restart",
+      "to": "ready",
+      "http_status": 409,
+      "event": "reset",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "server_restarted",
+          "message": "server instance changed; resnapshot before retrying actions",
+          "retryable": true
+        },
+        "request_id": "req_restart"
+      }
+    }
+  ],
+  "expected": {
+    "do_not_repost_actions": true
+  }
+}

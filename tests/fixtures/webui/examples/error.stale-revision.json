@@ -1,0 +1,16 @@
+{
+  "error": {
+    "code": "stale_revision",
+    "message": "catalog entry revision changed; refresh before retrying",
+    "retryable": true,
+    "field_errors": [
+      {
+        "field": "expected_revision",
+        "code": "stale",
+        "message": "expected 7 but current revision is 8"
+      }
+    ],
+    "operation_id": "op_load_001"
+  },
+  "request_id": "req_123"
+}

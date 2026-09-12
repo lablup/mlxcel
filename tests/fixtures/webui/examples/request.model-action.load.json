@@ -1,0 +1,13 @@
+{
+  "$schemaName": "ModelActionRequest",
+  "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+  "action": "load",
+  "expected_revision": 7,
+  "idempotency_key": "load-qwen3-0001",
+  "load_profile": {
+    "ctx_size": 8192,
+    "n_parallel": 4,
+    "kv_cache_mode": "fp16+turbo4"
+  },
+  "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
+}

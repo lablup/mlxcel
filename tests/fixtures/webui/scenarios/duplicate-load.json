@@ -1,0 +1,38 @@
+{
+  "scenario": "duplicate_load",
+  "description": "Second load for an already loading model is rejected unless it is the same idempotency key.",
+  "given": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "revision": 7
+  },
+  "steps": [
+    {
+      "from": "unloaded",
+      "action": "load",
+      "to": "loading",
+      "http_status": 202,
+      "event": "operation",
+      "allowed": true,
+      "error": null
+    },
+    {
+      "from": "loading",
+      "action": "load_with_new_key",
+      "to": "loading",
+      "http_status": 409,
+      "event": "operation",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "conflict",
+          "message": "conflicting model action",
+          "retryable": true
+        },
+        "request_id": "req_conflict"
+      }
+    }
+  ],
+  "expected": {
+    "single_operation": true
+  }
+}

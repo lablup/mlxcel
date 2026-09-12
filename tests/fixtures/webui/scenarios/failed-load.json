@@ -1,0 +1,30 @@
+{
+  "scenario": "failed_load",
+  "description": "Failed load records model error but load retry requires no old worker owner.",
+  "given": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU"
+  },
+  "steps": [
+    {
+      "from": "loading",
+      "action": "loader_error",
+      "to": "failed",
+      "http_status": 503,
+      "event": "model_revision",
+      "allowed": true,
+      "error": null
+    },
+    {
+      "from": "failed",
+      "action": "retry_after_worker_absent",
+      "to": "loading",
+      "http_status": 202,
+      "event": "operation",
+      "allowed": true,
+      "error": null
+    }
+  ],
+  "expected": {
+    "resource_owner_absent_precondition": true
+  }
+}

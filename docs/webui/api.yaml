@@ -1,0 +1,3291 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "mlxcel WebUI local control API",
+    "version": "1.0.0",
+    "description": "Contract gate for epic #1834. This file is JSON-compatible YAML by policy so the validator has no external dependency."
+  },
+  "servers": [
+    {
+      "url": "{api_prefix}",
+      "variables": {
+        "api_prefix": {
+          "default": "",
+          "description": "Validated server API prefix; paths below include /ui-api/v1 and the prefix is never derived from browser input."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/ui-api/v1/bootstrap": {
+      "get": {
+        "summary": "Return server identity, enabled features, redacted roots and hard limits without model initialization.",
+        "responses": {
+          "200": {
+            "description": "Bootstrap response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootstrapResponse"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/bootstrap.model-free.json"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/catalog": {
+      "get": {
+        "summary": "List the deterministic model inventory. Query: limit 1..200 default 50, cursor, q, source, task, lifecycle, support, completeness. No downloads or loads.",
+        "responses": {
+          "200": {
+            "description": "Catalog page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogListResponse"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/catalog.page.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
+            "description": "Page size. Values above 200 are rejected rather than clamped."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CursorToken"
+            },
+            "description": "Opaque cursor returned by the previous page."
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "description": "Case-insensitive display/inference-id substring filter."
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CatalogSourceKind"
+            },
+            "description": "Filter by source kind."
+          },
+          {
+            "name": "task",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TaskKind"
+            },
+            "description": "Filter by declared task capability."
+          },
+          {
+            "name": "lifecycle",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ModelLifecycleState"
+            },
+            "description": "Filter by inference lifecycle state."
+          },
+          {
+            "name": "support",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "true keeps supported+runnable entries, false keeps unsupported entries."
+          },
+          {
+            "name": "completeness",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "true keeps complete checkpoints, false keeps incomplete entries."
+          }
+        ]
+      }
+    },
+    "/ui-api/v1/catalog/{id}": {
+      "get": {
+        "summary": "Read one catalog entry by opaque model id.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ModelId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalog entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogEntry"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/catalog/refresh": {
+      "post": {
+        "summary": "Start a bounded background rescan; GET never mutates.",
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Operation limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/model-actions": {
+      "post": {
+        "summary": "Load or unload through the shared lifecycle coordinator. Duplicate idempotency keys replay the original operation inside this server instance.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelActionRequest"
+              },
+              "examples": {
+                "fixture": {
+                  "externalValue": "../../tests/fixtures/webui/examples/request.model-action.load.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/operation.accepted.json"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale revision or conflicting action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported action/profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds the WebUI contract limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/downloads": {
+      "post": {
+        "summary": "Download a public HuggingFace repository into the configured cache after explicit consent.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DownloadRequest"
+              },
+              "examples": {
+                "fixture": {
+                  "externalValue": "../../tests/fixtures/webui/examples/request.download.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/operation.accepted.json"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid or unsupported repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds the WebUI contract limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/model-removals": {
+      "post": {
+        "summary": "Remove a cache-owned model only after server checks and UI confirmation.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemovalRequest"
+              },
+              "examples": {
+                "fixture": {
+                  "externalValue": "../../tests/fixtures/webui/examples/request.removal.json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/operation.accepted.json"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Busy/loading/downloading/draining model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Non-cache model cannot be removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "JSON request body exceeds the WebUI contract limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/operations": {
+      "get": {
+        "summary": "List active operations plus the bounded terminal history. Query: limit default 50 max 200, cursor, state, kind, target.",
+        "responses": {
+          "200": {
+            "description": "Operations page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationsListResponse"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/operations.list.json"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
+            "description": "Page size for active plus terminal operation records."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CursorToken"
+            },
+            "description": "Opaque cursor returned by the previous page."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/OperationState"
+            },
+            "description": "Filter by operation state."
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/OperationKind"
+            },
+            "description": "Filter by operation kind."
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~-]{1,128}(?![\\s\\S])"
+            },
+            "description": "Opaque model id or operation target token; never a filesystem path."
+          }
+        ]
+      }
+    },
+    "/ui-api/v1/operations/{id}": {
+      "get": {
+        "summary": "Read one operation by id.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/OperationId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/operation.running.json"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/operations/{id}/cancel": {
+      "post": {
+        "summary": "Request cancellation; completion is reported only after the worker stops or cancellation is rejected.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/OperationId"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Cancellation unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui-api/v1/events": {
+      "get": {
+        "summary": "Authenticated SSE stream. Last-Event-ID is the last applied opaque event id on reconnect; first subscription omits the header after snapshot fencing. Ring gaps or changed server_instance_id produce a reset event and full resnapshot.",
+        "responses": {
+          "200": {
+            "description": "SSE event stream carrying UiEvent JSON payloads"
+          },
+          "409": {
+            "description": "Replay gap or server restart",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EventId"
+            },
+            "description": "Opaque event id from the last applied SSE event. Initial snapshot-to-stream fencing starts without this header; reconnect uses it only inside the same server instance and retained ring."
+          }
+        ]
+      }
+    },
+    "/ui-api/v1/runtime": {
+      "get": {
+        "summary": "Model-scoped observation snapshot from existing settings/slot/cache/worker counters. Query: model_id required. No autoload and no sampling work.",
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ModelId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Runtime snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSnapshot"
+                },
+                "examples": {
+                  "fixture": {
+                    "externalValue": "../../tests/fixtures/webui/examples/runtime.snapshot.json"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown model id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden by browser security checks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "SchemaVersion": {
+        "type": "string",
+        "const": "webui.ui-api.v1"
+      },
+      "ServerMode": {
+        "type": "string",
+        "enum": [
+          "model_free",
+          "single_model",
+          "router_pool"
+        ]
+      },
+      "FeatureFlag": {
+        "type": "string",
+        "enum": [
+          "webui",
+          "catalog",
+          "download",
+          "cache_delete",
+          "load",
+          "unload",
+          "chat",
+          "runtime",
+          "settings",
+          "local_history",
+          "image_input"
+        ]
+      },
+      "CapabilityPhase": {
+        "type": "string",
+        "enum": [
+          "pre_load",
+          "provider_ready"
+        ]
+      },
+      "ActionState": {
+        "type": "string",
+        "enum": [
+          "enabled",
+          "disabled",
+          "read_only"
+        ]
+      },
+      "ModelLifecycleState": {
+        "type": "string",
+        "enum": [
+          "unloaded",
+          "loading",
+          "ready",
+          "draining",
+          "unloading",
+          "failed"
+        ]
+      },
+      "DownloadState": {
+        "type": "string",
+        "enum": [
+          "absent",
+          "downloading",
+          "complete",
+          "incomplete",
+          "failed"
+        ]
+      },
+      "OperationState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "cancelling",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "OperationKind": {
+        "type": "string",
+        "enum": [
+          "catalog_refresh",
+          "model_load",
+          "model_unload",
+          "download",
+          "model_removal",
+          "settings_patch"
+        ]
+      },
+      "CatalogSourceKind": {
+        "type": "string",
+        "enum": [
+          "cache",
+          "models_dir",
+          "preset",
+          "single_model"
+        ]
+      },
+      "TaskKind": {
+        "type": "string",
+        "enum": [
+          "chat",
+          "completion",
+          "embedding",
+          "rerank",
+          "audio_transcription",
+          "audio_speech",
+          "vision_input",
+          "image_generation"
+        ]
+      },
+      "UiEventType": {
+        "type": "string",
+        "enum": [
+          "snapshot",
+          "model_revision",
+          "operation",
+          "download_progress",
+          "runtime",
+          "settings",
+          "reset",
+          "gap",
+          "server_restart",
+          "heartbeat"
+        ]
+      },
+      "ServerInstanceId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._~-]{1,128}(?![\\s\\S])",
+        "description": "Opaque per-process server instance id; never carries a path or credential."
+      },
+      "ModelId": {
+        "type": "string",
+        "pattern": "^mdl_[A-Za-z0-9_-]{43}(?![\\s\\S])",
+        "description": "Opaque stable UI model id."
+      },
+      "OperationId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._~-]{1,128}(?![\\s\\S])",
+        "description": "Opaque operation id; printable token only."
+      },
+      "EventId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160,
+        "pattern": "^evt_[A-Za-z0-9._~-]{1,160}(?![\\s\\S])",
+        "description": "Opaque SSE event id; also sent as the SSE id field."
+      },
+      "CursorToken": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^[A-Za-z0-9._~-]{1,512}(?![\\s\\S])",
+        "description": "Opaque pagination cursor. Control characters, slashes and backslashes are forbidden."
+      },
+      "IdempotencyKey": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._~-]{8,128}(?![\\s\\S])",
+        "description": "Client-supplied idempotency token scoped to one server instance; printable token only."
+      },
+      "HuggingFaceRepoId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 193,
+        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}(?![\\s\\S])",
+        "description": "Public HuggingFace owner/name id. Dot-only path segments and URL/path syntax are rejected."
+      },
+      "RevisionRef": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~+/-]+(?![\\s\\S])",
+        "description": "Repository revision ref resolved and pinned before writing weights. Dot-only path segments and control characters are rejected."
+      },
+      "ApiBase": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 128,
+        "pattern": "^(?![\\s\\S])|^/(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?($|/))[A-Za-z0-9._~!$&'()*+,;=:@%/-]*(?![\\s\\S])",
+        "description": "Validated same-origin relative API prefix. Protocol-relative URLs, query strings, fragments, dot segments and doubled slashes are rejected."
+      },
+      "KvCacheModeName": {
+        "type": "string",
+        "enum": [
+          "fp16",
+          "float16",
+          "int8",
+          "i8",
+          "turbo4-asym",
+          "fp16+turbo4",
+          "turbo3-asym",
+          "fp16+turbo3",
+          "turbo3",
+          "turbo4",
+          "turbo4-sym",
+          "turbo4-delegated",
+          "fp16+turbo4-delegated"
+        ],
+        "description": "Accepted by KVCacheMode::from_str / --kv-cache-mode; GGML-only cache spellings such as q8_0 are intentionally absent."
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "invalid_request",
+          "unauthorized",
+          "forbidden",
+          "not_found",
+          "stale_revision",
+          "conflict",
+          "unsupported",
+          "rate_limited",
+          "unavailable",
+          "payload_too_large",
+          "server_restarted",
+          "event_gap",
+          "partial_success"
+        ]
+      },
+      "FieldError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.:-]+(?![\\s\\S])"
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.:-]+(?![\\s\\S])"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "field_errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            },
+            "maxItems": 16
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "request_id"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/OperationId"
+          }
+        }
+      },
+      "ActionAvailability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "reason"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/ActionState"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          }
+        }
+      },
+      "BuildInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "git_commit",
+          "target",
+          "features"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "git_commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": "string"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeatureFlag"
+            }
+          }
+        }
+      },
+      "BackendIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "server_instance_id",
+          "mode",
+          "api_base",
+          "auth_required",
+          "build"
+        ],
+        "properties": {
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ServerMode"
+          },
+          "api_base": {
+            "$ref": "#/components/schemas/ApiBase"
+          },
+          "auth_required": {
+            "type": "boolean"
+          },
+          "build": {
+            "$ref": "#/components/schemas/BuildInfo"
+          }
+        }
+      },
+      "RootSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "display_name",
+          "redacted"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "cache",
+              "models_dir",
+              "preset_file",
+              "single_model"
+            ]
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "redacted": {
+            "type": "boolean"
+          },
+          "writable": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          }
+        }
+      },
+      "LimitSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog_default_page_size",
+          "catalog_max_page_size",
+          "json_body_bytes",
+          "metadata_bytes_per_entry",
+          "events_ring_size",
+          "events_retention_seconds",
+          "terminal_operations_retained",
+          "terminal_operations_retention_seconds",
+          "max_active_operations",
+          "max_concurrent_loads",
+          "max_concurrent_downloads",
+          "next_load_ctx_size_max",
+          "next_load_n_parallel_max",
+          "cursor_bytes",
+          "settings_fields_max",
+          "measurements_max"
+        ],
+        "properties": {
+          "catalog_default_page_size": {
+            "type": "integer",
+            "const": 50
+          },
+          "catalog_max_page_size": {
+            "type": "integer",
+            "const": 200
+          },
+          "json_body_bytes": {
+            "type": "integer",
+            "const": 2097152
+          },
+          "metadata_bytes_per_entry": {
+            "type": "integer",
+            "const": 16384
+          },
+          "events_ring_size": {
+            "type": "integer",
+            "const": 1024
+          },
+          "events_retention_seconds": {
+            "type": "integer",
+            "const": 600
+          },
+          "terminal_operations_retained": {
+            "type": "integer",
+            "const": 200
+          },
+          "terminal_operations_retention_seconds": {
+            "type": "integer",
+            "const": 3600
+          },
+          "max_active_operations": {
+            "type": "integer",
+            "const": 64
+          },
+          "max_concurrent_loads": {
+            "type": "integer",
+            "const": 1
+          },
+          "max_concurrent_downloads": {
+            "type": "integer",
+            "const": 1
+          },
+          "next_load_ctx_size_max": {
+            "type": "integer",
+            "const": 262144
+          },
+          "next_load_n_parallel_max": {
+            "type": "integer",
+            "const": 32
+          },
+          "cursor_bytes": {
+            "type": "integer",
+            "const": 512
+          },
+          "settings_fields_max": {
+            "type": "integer",
+            "const": 64
+          },
+          "measurements_max": {
+            "type": "integer",
+            "const": 64
+          }
+        }
+      },
+      "BootstrapResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server",
+          "features",
+          "actions",
+          "roots",
+          "limits"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server": {
+            "$ref": "#/components/schemas/BackendIdentity"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeatureFlag"
+            },
+            "maxItems": 16
+          },
+          "actions": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ActionAvailability"
+            },
+            "maxProperties": 32
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RootSummary"
+            },
+            "maxItems": 8
+          },
+          "limits": {
+            "$ref": "#/components/schemas/LimitSummary"
+          }
+        }
+      },
+      "ModelIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "inference_id",
+          "display_name",
+          "source",
+          "source_key_hash",
+          "generation",
+          "revision",
+          "content_fingerprint"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "inference_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "source": {
+            "$ref": "#/components/schemas/CatalogSourceKind"
+          },
+          "source_key_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])",
+            "description": "SHA-256 of the redacted canonical source key; used for collision tests without exposing paths."
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "content_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Fingerprint of currently observed checkpoint content when known; affects generation/revision, not stable ID.",
+            "maxLength": 128
+          }
+        }
+      },
+      "MeasuredValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value",
+          "unit",
+          "scope",
+          "measured_at",
+          "reason"
+        ],
+        "properties": {
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "model",
+              "slot",
+              "pool",
+              "server",
+              "unknown"
+            ]
+          },
+          "measured_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          }
+        }
+      },
+      "Capability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "phase",
+          "available",
+          "reason"
+        ],
+        "properties": {
+          "task": {
+            "$ref": "#/components/schemas/TaskKind"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/CapabilityPhase"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          }
+        }
+      },
+      "LifecycleSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "download",
+          "busy",
+          "active_requests",
+          "draining_requests",
+          "worker_exit_observed",
+          "last_error"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/ModelLifecycleState"
+          },
+          "download": {
+            "$ref": "#/components/schemas/DownloadState"
+          },
+          "busy": {
+            "type": "boolean"
+          },
+          "active_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "draining_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "worker_exit_observed": {
+            "type": "boolean"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          }
+        }
+      },
+      "CatalogEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity",
+          "capabilities",
+          "lifecycle",
+          "complete",
+          "supported",
+          "removable",
+          "metadata"
+        ],
+        "properties": {
+          "identity": {
+            "$ref": "#/components/schemas/ModelIdentity"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "maxItems": 16
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/LifecycleSnapshot"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "supported": {
+            "type": "boolean"
+          },
+          "removable": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/CatalogMetadata"
+          }
+        }
+      },
+      "Pagination": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "limit",
+          "next_cursor",
+          "total_known"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9._~-]{1,512}(?![\\s\\S])"
+          },
+          "total_known": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      },
+      "CatalogListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "items",
+          "pagination",
+          "server_instance_id",
+          "snapshot_sequence"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogEntry"
+            },
+            "maxItems": 200
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "snapshot_sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Single global event sequence after which this snapshot is authoritative."
+          }
+        }
+      },
+      "LoadProfile": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "description": "Next-load profile override. Contract gate #1835 intentionally exposes only #1846-approved fields backed by existing server startup validators.",
+        "properties": {
+          "ctx_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 262144,
+            "description": "Maps to existing --ctx-size; WebUI rejects larger values rather than attempting a new runtime mode."
+          },
+          "n_parallel": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 32,
+            "description": "Maps to existing --parallel/--n-parallel slot count."
+          },
+          "kv_cache_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KvCacheModeName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ModelActionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "action",
+          "expected_revision",
+          "idempotency_key"
+        ],
+        "properties": {
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "load",
+              "unload"
+            ]
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          },
+          "load_profile": {
+            "$ref": "#/components/schemas/LoadProfile"
+          },
+          "eviction_target_id": {
+            "$ref": "#/components/schemas/ModelId"
+          }
+        }
+      },
+      "DownloadRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repo_id",
+          "idempotency_key"
+        ],
+        "properties": {
+          "repo_id": {
+            "$ref": "#/components/schemas/HuggingFaceRepoId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RevisionRef"
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          }
+        }
+      },
+      "RemovalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "expected_revision",
+          "idempotency_key"
+        ],
+        "properties": {
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey"
+          }
+        }
+      },
+      "CatalogOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "scope"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "catalog"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "full",
+              "roots",
+              "entry"
+            ]
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ModelOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "model_id",
+          "requested_revision"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "model"
+          },
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "requested_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        }
+      },
+      "DownloadOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "repo_id",
+          "revision"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "download"
+          },
+          "repo_id": {
+            "$ref": "#/components/schemas/HuggingFaceRepoId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RevisionRef"
+          }
+        }
+      },
+      "SettingsOperationTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_kind",
+          "model_id",
+          "scope"
+        ],
+        "properties": {
+          "target_kind": {
+            "const": "settings"
+          },
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "next_load_profile",
+              "loaded_model_live",
+              "request_only"
+            ]
+          }
+        }
+      },
+      "OperationTarget": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CatalogOperationTarget"
+          },
+          {
+            "$ref": "#/components/schemas/ModelOperationTarget"
+          },
+          {
+            "$ref": "#/components/schemas/DownloadOperationTarget"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsOperationTarget"
+          }
+        ]
+      },
+      "CatalogRefreshResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "scanned_entries",
+          "changed_entries",
+          "snapshot_sequence"
+        ],
+        "properties": {
+          "result_kind": {
+            "const": "catalog_refresh"
+          },
+          "scanned_entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "changed_entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "snapshot_sequence": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ModelActionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "model_id",
+          "revision",
+          "lifecycle"
+        ],
+        "properties": {
+          "result_kind": {
+            "type": "string",
+            "enum": [
+              "model_load",
+              "model_unload",
+              "model_removal"
+            ]
+          },
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/LifecycleSnapshot"
+          }
+        }
+      },
+      "DownloadResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "repo_id",
+          "revision",
+          "download"
+        ],
+        "properties": {
+          "result_kind": {
+            "const": "download"
+          },
+          "repo_id": {
+            "$ref": "#/components/schemas/HuggingFaceRepoId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RevisionRef"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "download": {
+            "$ref": "#/components/schemas/DownloadState"
+          }
+        }
+      },
+      "SettingsPatchResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result_kind",
+          "model_id",
+          "settings"
+        ],
+        "properties": {
+          "result_kind": {
+            "const": "settings_patch"
+          },
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/RuntimeSettingsReport"
+          }
+        }
+      },
+      "OperationResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CatalogRefreshResult"
+          },
+          {
+            "$ref": "#/components/schemas/ModelActionResult"
+          },
+          {
+            "$ref": "#/components/schemas/DownloadResult"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsPatchResult"
+          }
+        ]
+      },
+      "OperationAccepted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation_id",
+          "state",
+          "idempotent_replay"
+        ],
+        "properties": {
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "idempotent_replay": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProgressBytes": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "completed_bytes",
+          "total_bytes",
+          "indeterminate"
+        ],
+        "properties": {
+          "completed_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "indeterminate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Operation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation_id",
+          "kind",
+          "state",
+          "created_at",
+          "updated_at",
+          "idempotency_scope",
+          "target",
+          "progress",
+          "result",
+          "error",
+          "cancellable",
+          "cancel_reason"
+        ],
+        "properties": {
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OperationKind"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC timestamp with offset, e.g. 2026-09-12T03:04:05Z."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC timestamp with offset, e.g. 2026-09-12T03:04:05Z."
+          },
+          "idempotency_scope": {
+            "type": "string",
+            "const": "server_instance"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OperationTarget"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ProgressBytes"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cancellable": {
+            "type": "boolean"
+          },
+          "cancel_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          }
+        }
+      },
+      "OperationsListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "pagination",
+          "server_instance_id",
+          "snapshot_sequence"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Operation"
+            },
+            "maxItems": 200
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "snapshot_sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Single global event sequence after which this snapshot is authoritative."
+          }
+        }
+      },
+      "RuntimeSettingsReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "effective",
+          "overridden_by_cli",
+          "partial_errors"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "server_startup",
+              "per_model_preset",
+              "next_load_profile",
+              "request_only",
+              "loaded_model_live"
+            ]
+          },
+          "effective": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
+            "maxProperties": 64
+          },
+          "overridden_by_cli": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64
+          },
+          "partial_errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            },
+            "maxItems": 16
+          }
+        }
+      },
+      "RuntimeSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "model_id",
+          "revision",
+          "snapshot_sequence",
+          "measurements",
+          "settings"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "measurements": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MeasuredValue"
+            },
+            "maxProperties": 64
+          },
+          "settings": {
+            "$ref": "#/components/schemas/RuntimeSettingsReport"
+          },
+          "snapshot_sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Single global event sequence after which this snapshot is authoritative."
+          }
+        }
+      },
+      "UiEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SnapshotEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ModelRevisionEvent"
+          },
+          {
+            "$ref": "#/components/schemas/OperationEvent"
+          },
+          {
+            "$ref": "#/components/schemas/DownloadProgressEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RuntimeEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ResetEvent"
+          },
+          {
+            "$ref": "#/components/schemas/GapEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ServerRestartEvent"
+          },
+          {
+            "$ref": "#/components/schemas/HeartbeatEvent"
+          }
+        ]
+      },
+      "StringContract": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "en",
+          "ko",
+          "test_id"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[a-z0-9_.-]+(?![\\s\\S])",
+            "maxLength": 128
+          },
+          "en": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "ko": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "test_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+(?![\\s\\S])",
+            "maxLength": 128
+          }
+        }
+      },
+      "TransitionStep": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "action",
+          "to",
+          "http_status",
+          "event",
+          "allowed"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/ModelLifecycleState"
+          },
+          "action": {
+            "type": "string",
+            "minLength": 1
+          },
+          "to": {
+            "$ref": "#/components/schemas/ModelLifecycleState"
+          },
+          "http_status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "event": {
+            "$ref": "#/components/schemas/UiEventType"
+          },
+          "allowed": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorEnvelope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "WebUiContractFixture": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scenario",
+          "description",
+          "given",
+          "steps",
+          "expected"
+        ],
+        "properties": {
+          "scenario": {
+            "type": "string",
+            "enum": [
+              "duplicate_load",
+              "load_unload_race",
+              "busy_eviction",
+              "stale_revision",
+              "failed_load",
+              "download_cancel",
+              "deletion_refusal",
+              "sse_gap",
+              "server_restart",
+              "unknown_null_partial_error"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "given": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null",
+                "array",
+                "object"
+              ]
+            }
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransitionStep"
+            },
+            "minItems": 1
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null",
+                "array",
+                "object"
+              ]
+            }
+          }
+        }
+      },
+      "SupportStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "architecturally_supported",
+          "runnable_on_backend",
+          "complete",
+          "reason"
+        ],
+        "properties": {
+          "architecturally_supported": {
+            "type": "boolean"
+          },
+          "runnable_on_backend": {
+            "type": "boolean"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          }
+        }
+      },
+      "CatalogMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "architecture",
+          "input_tasks",
+          "output_tasks",
+          "quantization",
+          "format",
+          "parameter_count",
+          "disk_bytes",
+          "memory_estimate_bytes",
+          "support"
+        ],
+        "properties": {
+          "architecture": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "input_tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskKind"
+            },
+            "maxItems": 16
+          },
+          "output_tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskKind"
+            },
+            "maxItems": 16
+          },
+          "quantization": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "parameter_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "disk_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "memory_estimate_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "support": {
+            "$ref": "#/components/schemas/SupportStatus"
+          }
+        }
+      },
+      "SnapshotPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_sequence",
+          "catalog_changed",
+          "operations_changed",
+          "runtime_model_ids"
+        ],
+        "properties": {
+          "snapshot_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "catalog_changed": {
+            "type": "boolean"
+          },
+          "operations_changed": {
+            "type": "boolean"
+          },
+          "runtime_model_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelId"
+            },
+            "maxItems": 200
+          }
+        }
+      },
+      "ModelRevisionPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "revision",
+          "lifecycle"
+        ],
+        "properties": {
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/LifecycleSnapshot"
+          }
+        }
+      },
+      "OperationPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation"
+        ],
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          }
+        }
+      },
+      "DownloadProgressPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation_id",
+          "progress"
+        ],
+        "properties": {
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ProgressBytes"
+          }
+        }
+      },
+      "RuntimePayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "runtime"
+        ],
+        "properties": {
+          "runtime": {
+            "$ref": "#/components/schemas/RuntimeSnapshot"
+          }
+        }
+      },
+      "SettingsPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_id",
+          "settings"
+        ],
+        "properties": {
+          "model_id": {
+            "$ref": "#/components/schemas/ModelId"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/RuntimeSettingsReport"
+          }
+        }
+      },
+      "ResetPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "resnapshot"
+        ],
+        "properties": {
+          "reason": {
+            "enum": [
+              "gap",
+              "server_restart",
+              "retention_expired",
+              "manual_reset"
+            ]
+          },
+          "resnapshot": {
+            "type": "boolean"
+          }
+        }
+      },
+      "HeartbeatPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "server_time"
+        ],
+        "properties": {
+          "server_time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RequirementMapEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "epic_requirement",
+          "child",
+          "contract_artifact",
+          "test_fixture"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "epic_requirement": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "child": {
+            "type": "string",
+            "pattern": "^#[0-9]+(?![\\s\\S])"
+          },
+          "contract_artifact": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "test_fixture": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "RequirementMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requirements"
+        ],
+        "properties": {
+          "requirements": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/RequirementMapEntry"
+            },
+            "maxItems": 64
+          }
+        }
+      },
+      "StringCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strings"
+        ],
+        "properties": {
+          "strings": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/StringContract"
+            },
+            "maxItems": 256
+          }
+        }
+      },
+      "SnapshotEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "snapshot"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SnapshotPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "ModelRevisionEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "model_revision"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ModelRevisionPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "OperationEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "operation"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OperationPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "DownloadProgressEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "download_progress"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/DownloadProgressPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "RuntimeEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "runtime"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RuntimePayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "SettingsEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "settings"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SettingsPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "ResetEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "reset"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ResetPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "GapEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "gap"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ResetPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "ServerRestartEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "server_restart"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ResetPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "HeartbeatEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "server_instance_id",
+          "sequence",
+          "type",
+          "payload",
+          "event_id",
+          "emitted_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "server_instance_id": {
+            "$ref": "#/components/schemas/ServerInstanceId"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type": {
+            "const": "heartbeat"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HeartbeatPayload"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "emitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 UTC time at which the event was appended to the server ring."
+          }
+        }
+      },
+      "CanonicalIdentityInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "source",
+          "source_rank",
+          "namespace_hash",
+          "entry_key"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1
+          },
+          "source": {
+            "$ref": "#/components/schemas/CatalogSourceKind"
+          },
+          "source_rank": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "namespace_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+          },
+          "entry_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "IdentityVector": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "source_rank",
+          "redacted_source_key",
+          "entry_key",
+          "source_key_hash",
+          "canonical_identity",
+          "expected_id"
+        ],
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/CatalogSourceKind"
+          },
+          "source_rank": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "redacted_source_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "entry_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_key_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+          },
+          "canonical_identity": {
+            "$ref": "#/components/schemas/CanonicalIdentityInput"
+          },
+          "expected_id": {
+            "type": "string",
+            "pattern": "^mdl_[A-Za-z0-9_-]{43}(?![\\s\\S])"
+          }
+        }
+      },
+      "IdentityVectors": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity_vectors"
+        ],
+        "properties": {
+          "identity_vectors": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "$ref": "#/components/schemas/IdentityVector"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "scenario": "download_cancel",
+  "description": "Cancellation completes only after downloader stops and incomplete bytes are not shown as 100 percent.",
+  "given": {
+    "operation_id": "op_dl_001",
+    "progress": {
+      "completed_bytes": 1048576,
+      "total_bytes": null,
+      "indeterminate": true
+    }
+  },
+  "steps": [
+    {
+      "from": "unloaded",
+      "action": "download",
+      "to": "unloaded",
+      "http_status": 202,
+      "event": "download_progress",
+      "allowed": true,
+      "error": null
+    },
+    {
+      "from": "unloaded",
+      "action": "cancel_download",
+      "to": "unloaded",
+      "http_status": 202,
+      "event": "operation",
+      "allowed": true,
+      "error": null
+    },
+    {
+      "from": "unloaded",
+      "action": "downloader_stopped",
+      "to": "unloaded",
+      "http_status": 200,
+      "event": "operation",
+      "allowed": true,
+      "error": null
+    }
+  ],
+  "expected": {
+    "final_state": "cancelled",
+    "indeterminate_not_percent": true
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "strings": [
+    {
+      "key": "models.delete.confirm.title",
+      "en": "Delete model from cache?",
+      "ko": "캐시에서 모델을 삭제할까요?",
+      "test_id": "dialog-delete-model-title"
+    },
+    {
+      "key": "models.delete.confirm.body",
+      "en": "Delete {model} from the managed cache. Loaded or non-cache models cannot be deleted.",
+      "ko": "관리 캐시에서 {model} 모델을 삭제합니다. 로드 중이거나 캐시 모델이 아니면 삭제할 수 없습니다.",
+      "test_id": "dialog-delete-model-body"
+    },
+    {
+      "key": "activity.progress.indeterminate",
+      "en": "Downloaded {bytes}; total size is not known yet.",
+      "ko": "{bytes} 다운로드됨; 전체 크기는 아직 알 수 없습니다.",
+      "test_id": "activity-progress-indeterminate"
+    },
+    {
+      "key": "settings.partial_success",
+      "en": "Some settings changed; fields controlled by CLI or the loaded worker were left unchanged.",
+      "ko": "일부 설정만 변경되었습니다. CLI 또는 로드된 워커가 제어하는 필드는 변경되지 않았습니다.",
+      "test_id": "settings-partial-success"
+    }
+  ]
+}

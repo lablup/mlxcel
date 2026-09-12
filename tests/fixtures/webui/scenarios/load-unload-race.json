@@ -1,0 +1,56 @@
+{
+  "scenario": "load_unload_race",
+  "description": "Unload during loading serializes through the coordinator and cannot mark memory free before worker exit.",
+  "given": {
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "revision": 8
+  },
+  "steps": [
+    {
+      "from": "loading",
+      "action": "unload",
+      "to": "draining",
+      "http_status": 202,
+      "event": "operation",
+      "allowed": true,
+      "error": null
+    },
+    {
+      "from": "draining",
+      "action": "load",
+      "to": "draining",
+      "http_status": 409,
+      "event": "operation",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "conflict",
+          "message": "conflicting model action",
+          "retryable": true
+        },
+        "request_id": "req_conflict"
+      }
+    },
+    {
+      "from": "draining",
+      "action": "requests_complete",
+      "to": "unloading",
+      "http_status": 200,
+      "event": "model_revision",
+      "allowed": true
+    },
+    {
+      "from": "unloading",
+      "action": "worker_exit_observed",
+      "to": "unloaded",
+      "http_status": 200,
+      "event": "model_revision",
+      "allowed": true,
+      "error": null
+    }
+  ],
+  "expected": {
+    "worker_exit_required": true,
+    "continuous": true
+  }
+}

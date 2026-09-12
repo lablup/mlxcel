@@ -1,0 +1,131 @@
+{
+  "$schemaName": "CatalogListResponse",
+  "schema_version": "webui.ui-api.v1",
+  "items": [
+    {
+      "identity": {
+        "id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+        "inference_id": "mlx-community/Qwen3-4B-4bit",
+        "display_name": "Qwen3 4B 4-bit",
+        "source": "cache",
+        "source_key_hash": "4f2c4c3046647722cfc55a225ea614494cf5f289d267e454c7970d70cfa43f07",
+        "generation": 1,
+        "revision": 7,
+        "content_fingerprint": "sha256:weights-v1"
+      },
+      "capabilities": [
+        {
+          "task": "chat",
+          "phase": "pre_load",
+          "available": true,
+          "reason": null
+        },
+        {
+          "task": "vision_input",
+          "phase": "provider_ready",
+          "available": true,
+          "reason": "processor availability is confirmed after load"
+        }
+      ],
+      "lifecycle": {
+        "state": "unloaded",
+        "download": "complete",
+        "busy": false,
+        "active_requests": 0,
+        "draining_requests": 0,
+        "worker_exit_observed": true,
+        "last_error": null
+      },
+      "complete": true,
+      "supported": true,
+      "removable": true,
+      "metadata": {
+        "architecture": "qwen3",
+        "input_tasks": [
+          "chat",
+          "vision_input"
+        ],
+        "output_tasks": [
+          "chat"
+        ],
+        "quantization": "4bit",
+        "format": "safetensors",
+        "parameter_count": 4000000000,
+        "disk_bytes": 2700000000,
+        "memory_estimate_bytes": 5600000000,
+        "support": {
+          "architecturally_supported": true,
+          "runnable_on_backend": true,
+          "complete": true,
+          "reason": null
+        }
+      }
+    },
+    {
+      "identity": {
+        "id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
+        "inference_id": "mlx-community/Qwen3-4B-4bit",
+        "display_name": "Qwen3 4B 4-bit (models-dir)",
+        "source": "models_dir",
+        "source_key_hash": "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
+        "generation": 1,
+        "revision": 7,
+        "content_fingerprint": "sha256:weights-v1"
+      },
+      "capabilities": [
+        {
+          "task": "chat",
+          "phase": "pre_load",
+          "available": true,
+          "reason": null
+        },
+        {
+          "task": "vision_input",
+          "phase": "provider_ready",
+          "available": true,
+          "reason": "processor availability is confirmed after load"
+        }
+      ],
+      "lifecycle": {
+        "state": "unloaded",
+        "download": "complete",
+        "busy": false,
+        "active_requests": 0,
+        "draining_requests": 0,
+        "worker_exit_observed": true,
+        "last_error": null
+      },
+      "complete": true,
+      "supported": true,
+      "removable": true,
+      "metadata": {
+        "architecture": "qwen3",
+        "input_tasks": [
+          "chat",
+          "vision_input"
+        ],
+        "output_tasks": [
+          "chat"
+        ],
+        "quantization": "4bit",
+        "format": "safetensors",
+        "parameter_count": 4000000000,
+        "disk_bytes": 2700000000,
+        "memory_estimate_bytes": 5600000000,
+        "support": {
+          "architecturally_supported": true,
+          "runnable_on_backend": true,
+          "complete": true,
+          "reason": null
+        }
+      }
+    }
+  ],
+  "pagination": {
+    "limit": 50,
+    "next_cursor": null,
+    "total_known": 2
+  },
+  "server_instance_id": "srv_20260912_a",
+  "snapshot_sequence": 46
+}

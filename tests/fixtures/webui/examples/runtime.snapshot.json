@@ -1,0 +1,40 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server_instance_id": "srv_20260912_a",
+  "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+  "revision": 8,
+  "snapshot_sequence": 43,
+  "measurements": {
+    "ttft": {
+      "value": 124.5,
+      "unit": "ms",
+      "scope": "model",
+      "measured_at": "2026-09-12T03:04:05Z",
+      "reason": null
+    },
+    "gpu_utilization": {
+      "value": null,
+      "unit": "percent",
+      "scope": "unknown",
+      "measured_at": null,
+      "reason": "not measured by mlxcel"
+    }
+  },
+  "settings": {
+    "scope": "loaded_model_live",
+    "effective": {
+      "temperature": 0.7,
+      "top_p": 0.95
+    },
+    "overridden_by_cli": [
+      "ctx_size"
+    ],
+    "partial_errors": [
+      {
+        "field": "ctx_size",
+        "code": "cli_override",
+        "message": "explicit CLI value remains authoritative"
+      }
+    ]
+  }
+}

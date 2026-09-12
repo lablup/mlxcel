@@ -1,0 +1,42 @@
+{
+  "scenario": "unknown_null_partial_error",
+  "description": "Null metrics, unknown totals and partial settings errors stay typed.",
+  "given": {
+    "settings_patch": "partial",
+    "download_total": null
+  },
+  "steps": [
+    {
+      "from": "ready",
+      "action": "patch_settings_partial",
+      "to": "ready",
+      "http_status": 200,
+      "event": "settings",
+      "allowed": true,
+      "error": null
+    },
+    {
+      "from": "ready",
+      "action": "download_progress_unknown_total",
+      "to": "ready",
+      "http_status": 200,
+      "event": "download_progress",
+      "allowed": true,
+      "error": null
+    }
+  ],
+  "expected": {
+    "partial_errors": [
+      {
+        "field": "ctx_size",
+        "code": "cli_override",
+        "message": "explicit CLI value remains authoritative"
+      }
+    ],
+    "progress": {
+      "completed_bytes": 1048576,
+      "total_bytes": null,
+      "indeterminate": true
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server": {
+    "server_instance_id": "srv_20260912_a",
+    "mode": "model_free",
+    "api_base": "",
+    "auth_required": true,
+    "build": {
+      "version": "0.7.0",
+      "git_commit": "603418738c24d55a13b7a36f51fa2dad6cec30be",
+      "target": "aarch64-apple-darwin",
+      "features": [
+        "webui",
+        "catalog",
+        "load",
+        "unload",
+        "runtime",
+        "settings"
+      ]
+    }
+  },
+  "features": [
+    "webui",
+    "catalog",
+    "download",
+    "cache_delete",
+    "load",
+    "unload",
+    "chat",
+    "runtime",
+    "settings"
+  ],
+  "actions": {
+    "load": {
+      "state": "enabled",
+      "reason": null,
+      "instructions": null
+    },
+    "download": {
+      "state": "enabled",
+      "reason": null,
+      "instructions": null
+    },
+    "cache_delete": {
+      "state": "enabled",
+      "reason": null,
+      "instructions": null
+    }
+  },
+  "roots": [
+    {
+      "kind": "cache",
+      "display_name": "mlxcel managed cache",
+      "redacted": true,
+      "writable": true,
+      "error": null
+    }
+  ],
+  "limits": {
+    "catalog_default_page_size": 50,
+    "catalog_max_page_size": 200,
+    "json_body_bytes": 2097152,
+    "metadata_bytes_per_entry": 16384,
+    "events_ring_size": 1024,
+    "events_retention_seconds": 600,
+    "terminal_operations_retained": 200,
+    "terminal_operations_retention_seconds": 3600,
+    "max_active_operations": 64,
+    "max_concurrent_loads": 1,
+    "max_concurrent_downloads": 1,
+    "next_load_ctx_size_max": 262144,
+    "next_load_n_parallel_max": 32,
+    "cursor_bytes": 512,
+    "settings_fields_max": 64,
+    "measurements_max": 64
+  }
+}

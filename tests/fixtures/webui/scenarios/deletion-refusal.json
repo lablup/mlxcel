@@ -1,0 +1,45 @@
+{
+  "scenario": "deletion_refusal",
+  "description": "Non-cache or busy entries refuse deletion with typed errors.",
+  "given": {
+    "model_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
+    "source": "models_dir"
+  },
+  "steps": [
+    {
+      "from": "ready",
+      "action": "delete_non_cache",
+      "to": "ready",
+      "http_status": 422,
+      "event": "operation",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "unsupported",
+          "message": "only managed cache entries can be deleted",
+          "retryable": false
+        },
+        "request_id": "req_unsup"
+      }
+    },
+    {
+      "from": "draining",
+      "action": "delete_busy_cache",
+      "to": "draining",
+      "http_status": 409,
+      "event": "operation",
+      "allowed": false,
+      "error": {
+        "error": {
+          "code": "conflict",
+          "message": "conflicting model action",
+          "retryable": true
+        },
+        "request_id": "req_conflict"
+      }
+    }
+  ],
+  "expected": {
+    "requires_cache_and_not_busy": true
+  }
+}
