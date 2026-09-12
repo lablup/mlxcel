@@ -1192,6 +1192,10 @@ pub(crate) fn create_router_app_with_secured_ui(
 mod router_server_tests;
 
 #[cfg(test)]
+#[path = "router_server_security_support_tests.rs"]
+mod router_server_security_support_tests;
+
+#[cfg(test)]
 #[path = "router_server_security_tests.rs"]
 mod router_server_security_tests;
 

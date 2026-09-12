@@ -110,6 +110,14 @@ pub(crate) async fn webui_security_middleware(
             true,
         );
     }
+    if decision.control && !security.policy.try_record_control_request() {
+        return webui_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "WebUI administrative request rate is exhausted",
+            true,
+        );
+    }
     let request = if decision.control {
         match buffer_limited_control_body(request).await {
             Ok(request) => request,

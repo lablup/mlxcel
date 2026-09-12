@@ -15,13 +15,14 @@
 //! Adversarial tests for the secured WebUI router mount.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
+use super::router_server_security_support_tests::SharedBufWriter;
 use super::{RouterServerState, create_router_app_with_secured_ui};
 use crate::server::ServerStartupConfig;
 use crate::server::config::ServerConfig;
@@ -31,14 +32,8 @@ use crate::server::router_presets::PresetCliOverrides;
 const ROUTER_KEY: &str = "router-key";
 
 fn temp_models_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "mlxcel-router-app-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("mlxcel-router-app-{tag}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create models dir");
     dir
 }
@@ -78,7 +73,7 @@ fn router_state_from(
     }
 }
 
-fn secured_router_app_with_limits(control_limit: usize, sse_limit: usize) -> Router {
+fn secured_router_app(control_limit: usize, sse_limit: usize, control_rate_limit: usize) -> Router {
     let root = temp_models_dir("secured-webui");
     add_fake_model(&root, "alpha");
     let sources = RouterSources {
@@ -87,16 +82,26 @@ fn secured_router_app_with_limits(control_limit: usize, sse_limit: usize) -> Rou
         presets: Default::default(),
     };
     let state = router_state_from(sources, keyed_config(), true);
-    let policy = crate::server::webui::security::WebUiSecurityPolicy::with_prefixes_and_limits(
-        vec!["127.0.0.1:18037".to_string()],
-        vec![HeaderValue::from_static("http://127.0.0.1:18037")],
-        "/webui",
-        "/ui-api/v1",
-        control_limit,
-        sse_limit,
-    )
-    .expect("security policy");
+    let policy =
+        crate::server::webui::security::WebUiSecurityPolicy::with_prefixes_limits_and_rate(
+            vec!["127.0.0.1:18037".to_string()],
+            vec![HeaderValue::from_static("http://127.0.0.1:18037")],
+            "/webui",
+            "/ui-api/v1",
+            control_limit,
+            sse_limit,
+            control_rate_limit,
+        )
+        .expect("security policy");
     create_router_app_with_secured_ui(state, policy)
+}
+
+fn secured_router_app_with_limits(control_limit: usize, sse_limit: usize) -> Router {
+    secured_router_app(control_limit, sse_limit, 120)
+}
+
+fn secured_router_app_with_rate_limit(control_rate_limit: usize) -> Router {
+    secured_router_app(32, 16, control_rate_limit)
 }
 
 async fn secured_request(
@@ -203,7 +208,10 @@ async fn secured_webui_keeps_health_public_and_private_routes_keyed() {
     let ui_body = axum::body::to_bytes(ui_missing.into_body(), 4096)
         .await
         .expect("ui auth body");
-    assert!(String::from_utf8_lossy(&ui_body).contains("\"code\":\"authentication\""));
+    let ui_json: serde_json::Value = serde_json::from_slice(&ui_body).expect("ui auth json");
+    assert_eq!(ui_json["error"]["code"], "authentication");
+    assert_eq!(ui_json["error"]["retryable"], false);
+    assert!(ui_json["request_id"].as_str().is_some());
     let invalid = secured_request(
         app.clone(),
         Method::GET,
@@ -273,6 +281,13 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
     .await;
     assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
 
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(SharedBufWriter(logs.clone()))
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
     let query_key = secured_request(
         app.clone(),
         Method::GET,
@@ -283,11 +298,18 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
         Body::empty(),
     )
     .await;
+    drop(guard);
     assert_eq!(query_key.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(query_key.into_body(), 4096)
         .await
         .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("query error json");
+    assert_eq!(json["error"]["code"], "invalid_request");
+    assert_eq!(json["error"]["retryable"], false);
     assert!(!String::from_utf8_lossy(&body).contains("seeded-secret"));
+    let captured_logs =
+        String::from_utf8(logs.lock().expect("log buffer lock").clone()).expect("logs utf8");
+    assert!(!captured_logs.contains("seeded-secret"), "{captured_logs}");
 
     let bad_host = app
         .oneshot(
@@ -388,6 +410,40 @@ async fn secured_webui_bounds_sse_connections_until_response_drop() {
     )
     .await;
     assert_eq!(third.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn secured_webui_rate_limits_sequential_control_requests() {
+    let app = secured_router_app_with_rate_limit(1);
+    let first = secured_request(
+        app.clone(),
+        Method::POST,
+        "/ui-api/v1/model-actions",
+        Some(ROUTER_KEY),
+        None,
+        None,
+        Body::from("{}"),
+    )
+    .await;
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let second = secured_request(
+        app,
+        Method::POST,
+        "/ui-api/v1/model-actions",
+        Some(ROUTER_KEY),
+        None,
+        None,
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = axum::body::to_bytes(second.into_body(), 4096)
+        .await
+        .expect("rate body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("rate json");
+    assert_eq!(json["error"]["code"], "rate_limited");
+    assert_eq!(json["error"]["retryable"], true);
 }
 
 #[tokio::test]

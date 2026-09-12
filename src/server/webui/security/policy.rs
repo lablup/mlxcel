@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use axum::http::{HeaderMap, HeaderValue, Uri, header};
@@ -29,6 +31,8 @@ const DEFAULT_WEBUI_PREFIX: &str = "/webui";
 const DEFAULT_WEBUI_API_PREFIX: &str = "/ui-api/v1";
 const DEFAULT_CONTROL_PERMITS: usize = 32;
 const DEFAULT_SSE_PERMITS: usize = 16;
+const DEFAULT_CONTROL_RATE_LIMIT: usize = 120;
+const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(crate) struct WebUiSecurityPolicy {
@@ -38,6 +42,7 @@ pub(crate) struct WebUiSecurityPolicy {
     pub(super) private_api_prefix: Arc<str>,
     pub(super) control_permits: Arc<Semaphore>,
     pub(super) sse_permits: Arc<Semaphore>,
+    control_rate: Arc<ControlRateLimit>,
 }
 
 impl fmt::Debug for WebUiSecurityPolicy {
@@ -49,6 +54,7 @@ impl fmt::Debug for WebUiSecurityPolicy {
             .field("private_api_prefix", &self.private_api_prefix)
             .field("control_permits", &self.control_permits.available_permits())
             .field("sse_permits", &self.sse_permits.available_permits())
+            .field("control_rate_limit", &self.control_rate.max_requests)
             .finish()
     }
 }
@@ -76,6 +82,26 @@ impl WebUiSecurityPolicy {
         control_limit: usize,
         sse_limit: usize,
     ) -> Result<Self> {
+        Self::with_prefixes_limits_and_rate(
+            allowed_hosts,
+            allowed_origins,
+            public_webui_prefix,
+            private_api_prefix,
+            control_limit,
+            sse_limit,
+            DEFAULT_CONTROL_RATE_LIMIT,
+        )
+    }
+
+    pub(crate) fn with_prefixes_limits_and_rate(
+        allowed_hosts: Vec<String>,
+        allowed_origins: Vec<HeaderValue>,
+        public_webui_prefix: &str,
+        private_api_prefix: &str,
+        control_limit: usize,
+        sse_limit: usize,
+        control_rate_limit: usize,
+    ) -> Result<Self> {
         let hosts = allowed_hosts
             .into_iter()
             .map(|host| {
@@ -101,7 +127,50 @@ impl WebUiSecurityPolicy {
             private_api_prefix: normalize_prefix(private_api_prefix, "WebUI API prefix")?.into(),
             control_permits: Arc::new(Semaphore::new(control_limit)),
             sse_permits: Arc::new(Semaphore::new(sse_limit)),
+            control_rate: Arc::new(ControlRateLimit::new(
+                control_rate_limit,
+                CONTROL_RATE_WINDOW,
+            )),
         })
+    }
+
+    pub(super) fn try_record_control_request(&self) -> bool {
+        self.control_rate.try_record()
+    }
+}
+
+struct ControlRateLimit {
+    max_requests: usize,
+    window: Duration,
+    hits: Mutex<VecDeque<Instant>>,
+}
+
+impl ControlRateLimit {
+    fn new(max_requests: usize, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            hits: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn try_record(&self) -> bool {
+        if self.max_requests == 0 {
+            return false;
+        }
+        let now = Instant::now();
+        let mut hits = self.hits.lock().expect("control rate lock");
+        while hits
+            .front()
+            .is_some_and(|hit| now.duration_since(*hit) >= self.window)
+        {
+            hits.pop_front();
+        }
+        if hits.len() >= self.max_requests {
+            return false;
+        }
+        hits.push_back(now);
+        true
     }
 }
 
