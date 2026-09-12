@@ -22,6 +22,9 @@ license = "Apache-2.0"
 build = "build.rs"
 
 [features]
+# Present so `--workspace --features rocm` reaches this crate's build script,
+# which emits the ROCm rpath its own test binaries need (issue #1802).
+rocm = ["mlxcel-core/rocm"]
 # Real IREE execution. Off by default so `--features xla-backend` stays buildable
 # in CI (no IREE dist). When on, build.rs compiles csrc/xla_iree.c and links the
 # prebuilt IREE runtime (IREE_DIST must point at the extracted dist).

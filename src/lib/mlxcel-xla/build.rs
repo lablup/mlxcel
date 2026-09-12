@@ -34,6 +34,9 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "../mlxcel-core/build_support/rocm_rpath.rs"]
+mod rocm_rpath;
+
 fn cuda_nvcc() -> PathBuf {
     if let Some(path) = env::var_os("NVCC") {
         return PathBuf::from(path);
@@ -89,6 +92,10 @@ fn add_iree_shim_sources(build: &mut cc::Build) {
 }
 
 fn main() {
+    // This crate's own test binaries link mlxcel-core, so they need the ROCm
+    // rpath that a dependency's link args cannot give them (#1802).
+    rocm_rpath::emit();
+
     println!("cargo:rerun-if-changed=csrc/xla_iree.c");
     println!("cargo:rerun-if-changed=csrc/xla_aux.c");
     println!("cargo:rerun-if-changed=csrc/xla_diagnostic_flags.c");
