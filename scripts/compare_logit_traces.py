@@ -186,7 +186,16 @@ def main() -> int:
     print()
     if dis_all == 0:
         print("verdict: byte-identical in effect, every position agrees")
-    elif decided and dis_decided == 0:
+    elif not decided:
+        # With no decided position the gating metric has nothing to measure,
+        # so neither "rounding class" nor "differs on decided positions" is
+        # supported by the data; say so instead of falling through to the
+        # latter.
+        print(
+            "verdict: inconclusive, the reference has no decided position at "
+            "this threshold; read the gap and rank tables, or lower --decided"
+        )
+    elif dis_decided == 0:
         print(
             "verdict: the arms differ only where the reference was undecided, "
             "which is the rounding class rather than a behaviour change"

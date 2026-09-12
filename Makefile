@@ -290,6 +290,12 @@ test-fast-cuda: ## Run tests under the fast dev-iteration profile with CUDA (Lin
 	$(CARGO) test --profile test-fast --features cuda $(FILTER) -- --test-threads=1
 	@echo "$(GREEN)All tests passed!$(RESET)"
 
+.PHONY: test-fast-rocm
+test-fast-rocm: ## Run tests under the fast dev-iteration profile with ROCm (Linux/AMD, experimental; set FILTER=<path>)
+	@echo "$(CYAN)Running tests (test-fast profile, ROCm)...$(RESET)"
+	$(CARGO) test --profile test-fast --features rocm $(FILTER) -- --test-threads=1
+	@echo "$(GREEN)All tests passed!$(RESET)"
+
 .PHONY: check-fast
 check-fast: ## Check all targets under the fast dev-iteration profile (issue #809)
 	@echo "$(CYAN)Checking code (test-fast profile)...$(RESET)"
@@ -714,6 +720,11 @@ verify-test-video: ## Video gate: run the ffmpeg-backed video tests for real (ne
 verify-test-cuda: ## CUDA gate: cargo test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1 (issue #1048)
 	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=cuda, single threaded)...$(RESET)"
 	$(CARGO) test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1
+
+.PHONY: verify-test-rocm
+verify-test-rocm: ## ROCm gate (experimental): cargo test --workspace --profile test-fast --features rocm --no-fail-fast -- --test-threads=1 (issue #1809)
+	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=rocm, single threaded)...$(RESET)"
+	$(CARGO) test --workspace --profile test-fast --features rocm --no-fail-fast -- --test-threads=1
 
 .PHONY: verify-versions
 verify-versions: ## Assert every version-tracking workspace crate carries the root `mlxcel` version

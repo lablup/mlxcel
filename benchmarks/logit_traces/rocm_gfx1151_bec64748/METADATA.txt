@@ -1,0 +1,13 @@
+host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5, 40 CUs), 96 GiB VRAM carve-out, 31 GiB host RAM
+os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
+rocm: 10.0.0 packages (HIP 7.15.26333, AMD clang 23), ROCM_PATH=/opt/rocm
+mlxcel_commit: bec64748a5a1ac8112cbaebded0252d4d04fbb24, built with --features rocm, MLX_ROCM_ARCHITECTURES from rocminfo (gfx1151)
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+logit_trace_sha256: 78f8f29a74d3cf8ee6302cc1a9b1fd1949f151b5d56a5399a4b798cbab6a2b5a (qwen3-0.6b, llama-3.1-8b-instruct, qwen3-30b-a3b)
+logit_trace_sha256_mixtral: b253216c66f739ecdc4d86143746f0f64b6c3fc2aeff2c2cdab1709e5f477bc9 (bec64748 plus only the f16 gather_qmm dispatch change from lablup/mlxcel#1822 in src/lib/mlx-cpp/patches-rocm; no mlxcel Rust or bridge change)
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+args: w1='1 128 8 0' w8='8 80 8 512' w256='256 2 8 0' (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+checkpoints: Qwen3-0.6B-4bit@73e3e38d, Meta-Llama-3.1-8B-Instruct-4bit@241a666d, Qwen3-30B-A3B-4bit@d388dead, Mixtral-8x7B-Instruct-v0.1-4bit@4e8f7045 (same revisions as the Metal traces)
+env: LD_LIBRARY_PATH unset; MLXCEL_KEEP_BF16 unset
+tags: 'default' = MLXCEL_FUSED_MOE unset (dense models only); 'fused0' = MLXCEL_FUSED_MOE=0 (gather_qmm path; the fused MoE kernel aborts on ROCm until lablup/mlxcel#1803)
+gpu: no other GPU process during the runs
