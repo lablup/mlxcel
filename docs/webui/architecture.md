@@ -2,7 +2,7 @@
 
 This document is the implementation contract for the first WebUI gate in epic #1834. It freezes the shared boundaries that backend, frontend, bundle and integration owners must use; it does not implement runtime routes or pages.
 
-The implemented static-bundle boundary and contributor commands are documented in [Developing the bundled WebUI](bundling.md) ([한국어](bundling.ko.md)); production startup and control adapters remain assigned to downstream issues.
+The implemented static-bundle boundary, production startup entry points, and contributor commands are documented in [Developing the bundled WebUI](bundling.md) ([한국어](bundling.ko.md)); page-level controls, chat, downloads, and rich metrics continue in downstream issues.
 
 ## Ownership and change rule
 
@@ -18,7 +18,7 @@ Do not add a second registry, a child-process supervisor, arbitrary path APIs, s
 
 ## URL and authentication model
 
-The shell is served at `{api_prefix}/webui/` by later bundle/startup issues. Redirect only the missing trailing slash and preserve `/`, `/health`, `/v1/health`, and every existing API path. `api_prefix` comes from the validated server config, never from browser input.
+The shell is served at `{api_prefix}/webui/` when the WebUI flag is enabled. Redirect only the missing trailing slash and preserve `/`, `/health`, `/v1/health`, and every existing API path. `api_prefix` comes from the validated server config, never from browser input.
 
 Every `/ui-api/v1` endpoint requires bearer authentication. In WebUI mode, shell/assets may be public but bootstrap, catalog, control, settings, runtime and events are administrator APIs. Loopback without a configured key may use a strong session-only terminal-presented key; non-loopback requires an explicit key and TLS or a documented loopback reverse proxy. No key goes in URLs, HTML, structured logs, diagnostics, IndexedDB, or SSE payloads.
 
@@ -84,7 +84,7 @@ The verifier registers an explicit date-time checker and refuses schema formats 
 
 ## Catalog implementation boundary
 
-The metadata-only catalog adapter and its current integration limits are documented in [catalog.md](catalog.md) ([한국어](catalog.ko.md)). It projects the existing router/provider authority; production startup mounting remains a separate integration step.
+The metadata-only catalog adapter and its integration limits are documented in [catalog.md](catalog.md) ([한국어](catalog.ko.md)). It projects the existing router/provider authority, and production WebUI startup mounts the router and single-model adapters behind the shared security wrapper.
 
 ## Shared typed client and state authority
 

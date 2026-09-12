@@ -4,13 +4,13 @@
 
 ## 범위와 책임
 
-이슈 #1840은 기존 `RouterPool`의 메타데이터 전용 카탈로그 투영과 목록·상세·새로고침 어댑터를 추가합니다. 별도 모델 레지스트리를 만들거나 새 provider를 시작하지 않습니다. `create_router_app_with_authenticated_ui`는 통합 테스트와 향후 안전한 시작 경로를 위해 필수 API 키 인증 뒤에 어댑터를 노출합니다. 일반 `create_router_app`에는 아직 마운트하지 않습니다. 프로덕션 `--webui` 시작과 브라우저 보안 통합은 각각 #1838과 #1837의 범위이며, 아래 API 경로가 프로덕션 플래그의 제공을 뜻하지는 않습니다.
+이슈 #1840은 기존 `RouterPool`의 메타데이터 전용 카탈로그 투영과 목록·상세·새로고침 어댑터를 추가합니다. 별도 모델 레지스트리를 만들거나 새 provider를 시작하지 않습니다. `create_router_app_with_authenticated_ui`는 통합 테스트를 위해 필수 API 키 인증 뒤에 어댑터를 노출하며, #1838은 같은 typed API를 WebUI 보안 래퍼 뒤의 프로덕션 `--webui` 시작 경로에 마운트합니다. 일반 `create_router_app`은 WebUI가 꺼져 있을 때 관리 UI 라우트를 계속 마운트하지 않습니다.
 
 탐색의 소유자는 여전히 라우터입니다. 관리형 캐시, 명시적인 `--models-dir`, 프리셋은 기존 충돌 우선순위(캐시 < 모델 디렉터리 < 프리셋), 별칭, 숨김 정책을 유지합니다. 저장소의 모델은 `--models-dir models/mlx`로 명시적으로 선택합니다. 카탈로그는 현재 작업 디렉터리에 따라 달라지는 기본값이나 파일시스템 선택기를 추가하지 않습니다. 목록 조회는 발견된 항목을 투영하며 체크포인트 다운로드, tokenizer 열기, provider 생성, 가중치 로드를 하지 않습니다.
 
 ## 투영 데이터 사용
 
-아래 어댑터 경로는 향후 검증된 서버 API 접두사를 기준으로 합니다. 전체 DTO는 [API 스키마](api.yaml)와 [생성된 TypeScript 선언](generated/ui-api.d.ts)을 확인하십시오.
+아래 어댑터 경로는 검증된 서버 API 접두사를 기준으로 합니다. 전체 DTO는 [API 스키마](api.yaml)와 [생성된 TypeScript 선언](generated/ui-api.d.ts)을 확인하십시오.
 
 | 요청 | 동작 |
 |---|---|
@@ -42,7 +42,7 @@ Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 �
 
 작업이 활성 상태인 동안 서버 인스턴스마다 하나의 새로고침만 실행권을 가집니다. 동시 요청은 별도 재탐색을 시작하지 않고 같은 작업을 재사용하며 완료 후의 요청은 새 작업을 시작할 수 있습니다. `changed_entries`는 항목 signature를 비교하여 개수가 같아도 추가·삭제·감지된 변경을 포함합니다. 클라이언트에 전달하는 새로고침 오류는 경로를 숨기고 진단 상세는 서버 로그에 남깁니다.
 
-제거 가능 여부는 안내 정보이지 파일 삭제 권한이 아닙니다. 관리형 캐시만 제거 대상이 될 수 있으며 busy 항목은 사용할 수 없습니다. 실제 제거와 작업 경계의 검사는 #1841 범위입니다. 단일 모델 모드는 cache-aware `single_model_entry_from_state_with_cache(&CatalogProjectionCache, &AppState)` handoff로 기존 provider와 실제 추론 ID를 설명하고 별도 provider를 등록하지 않으며, 캐시된 정적 메타데이터 위에 최신 provider/lifecycle 상태를 투영하고 읽기 전용 제거 사유를 반환합니다. 프로덕션에서 이 accessor를 연결하는 작업은 #1838 범위입니다.
+제거 가능 여부는 안내 정보이지 파일 삭제 권한이 아닙니다. 관리형 캐시만 제거 대상이 될 수 있으며 busy 항목은 사용할 수 없습니다. 실제 제거와 작업 경계의 검사는 #1841 범위입니다. 단일 모델 모드는 cache-aware `single_model_entry_from_state_with_cache(&CatalogProjectionCache, &AppState)` handoff로 기존 provider와 실제 추론 ID를 설명하고 별도 provider를 등록하지 않으며, 캐시된 정적 메타데이터 위에 최신 provider/lifecycle 상태를 투영하고 읽기 전용 제거 사유를 반환합니다. #1838은 앱별 캐시와 blocking offload를 통해 이 accessor를 프로덕션에 마운트합니다.
 
 ## 회귀 테스트 범위
 
@@ -50,4 +50,4 @@ Config와 분류 sidecar는 256 KiB, SafeTensors index JSON은 512 KiB 읽기 �
 
 최종 통합 게이트는 `808994e353fdab5563966e751ca2c71515d08595`에서 실행했습니다. 카탈로그 library 32개 + CLI 1개, 보안 26개, discovery 2개와 workspace all-target clippy, 계약 fixture 40개, 구조 검사, fmt·diff 검사가 통과했습니다. 공유 detection/loader 경로는 그대로입니다. 두 독립 리뷰어는 이 revision의 라우터·단일 모델 캐시 경계 전체를 승인했습니다.
 
-`single_model_entry_from_state_with_cache`는 동기 helper입니다. #1838 시작 경로는 앱별 `Arc<CatalogProjectionCache>` 하나를 계속 유지하고 `tokio::task::spawn_blocking` 안에서 호출해야 합니다. 폴링마다 캐시를 새로 만들거나 HTTP handler에서 캐시 없는 편의 accessor를 호출하면 안 됩니다. 캐시 helper·provider 전환은 이 이슈에서 검증하며, 단일 모델 프로덕션 route의 offload·응답성 검증은 #1838 범위입니다. 라우터 HTTP adapter는 이미 메타데이터 획득을 offload합니다.
+`single_model_entry_from_state_with_cache`는 동기 helper입니다. 프로덕션 단일 모델 WebUI 라우트는 앱별 `Arc<CatalogProjectionCache>` 하나를 유지하고 `tokio::task::spawn_blocking` 안에서 이 helper를 호출합니다. 폴링마다 캐시를 새로 만들거나 HTTP handler에서 캐시 없는 편의 accessor를 호출하면 안 됩니다. 캐시 helper·provider 전환은 이 이슈에서 검증하며, #1838은 프로덕션 offload 경로의 실제 마운트 라우트 테스트를 추가합니다. 라우터 HTTP adapter는 이미 메타데이터 획득을 offload합니다.

@@ -27,6 +27,7 @@
 #[cfg(feature = "webui")]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "webui")]
 use std::sync::{Mutex, OnceLock};
@@ -42,9 +43,8 @@ use axum::routing::{get, post};
 
 use super::config::ServerConfig;
 use super::router_lifecycle::{
-    CancelError, ErrorBody, ErrorEnvelope, FieldError, MAX_SAFE_EVENT_SEQUENCE, OperationError,
-    OperationKind, OperationResult, OperationState, OperationTarget, ReplaySubscribeError,
-    ResetEventKind, UiEvent, UiReplayCursor,
+    CancelError, ErrorBody, ErrorEnvelope, FieldError, OperationError, OperationKind,
+    OperationResult, OperationState, OperationTarget,
 };
 use super::router_models::{
     ROUTER_SHUTDOWN_TIMEOUT, RouterModelAction, RouterPool, RouterPoolError,
@@ -754,13 +754,21 @@ async fn ui_runtime(
     .await;
     match result {
         Ok(Ok(entry)) => {
+            let Some(config) = state.pool.config_for_visible_model_id(&model_id) else {
+                return webui_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "runtime configuration for the selected model is unavailable",
+                    true,
+                );
+            };
             let coordinator = state.pool.lifecycle_coordinator();
             Json(super::webui::api::runtime_snapshot(
                 coordinator.server_instance_id().to_string(),
                 model_id,
                 entry.identity.revision,
                 coordinator.snapshot_sequence(),
-                &state.config,
+                &config,
             ))
             .into_response()
         }
@@ -1171,187 +1179,18 @@ async fn ui_operation_cancel(
     }
 }
 
-fn event_to_sse(event: UiEvent) -> Event {
-    let id = event.event_id.clone();
-    let name = event.event_type.clone();
-    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
-    Event::default().id(id).event(name).data(data)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct UiEventCursorError {
-    field: &'static str,
-    code: &'static str,
-    message: &'static str,
-}
-
-impl UiEventCursorError {
-    const fn new(field: &'static str, code: &'static str, message: &'static str) -> Self {
-        Self {
-            field,
-            code,
-            message,
-        }
-    }
-
-    fn into_response(self) -> Response {
-        invalid_webui_field(self.field, self.code, self.message)
-    }
-}
-
-fn parse_ui_event_cursor(
-    query: Option<&str>,
-    last_event_id: Option<&str>,
-) -> Result<UiReplayCursor, UiEventCursorError> {
-    let Some(query) = query.filter(|query| !query.is_empty()) else {
-        return Ok(match last_event_id {
-            Some(value) => UiReplayCursor::LastEventId(value.to_string()),
-            None => UiReplayCursor::Snapshot,
-        });
-    };
-    let mut server_instance_id: Option<String> = None;
-    let mut after_sequence: Option<u64> = None;
-    for pair in query.split('&') {
-        let Some((key, value)) = pair.split_once('=') else {
-            return Err(UiEventCursorError::new(
-                "events_query",
-                "malformed",
-                "event replay query parameters must be key=value pairs",
-            ));
-        };
-        match key {
-            "server_instance_id" => {
-                if server_instance_id.is_some() {
-                    return Err(UiEventCursorError::new(
-                        "server_instance_id",
-                        "duplicate",
-                        "server_instance_id may appear at most once",
-                    ));
-                }
-                if !is_webui_token(value, 1, 128) {
-                    return Err(UiEventCursorError::new(
-                        "server_instance_id",
-                        "invalid_format",
-                        "server_instance_id must be a printable token",
-                    ));
-                }
-                server_instance_id = Some(value.to_string());
-            }
-            "after_sequence" => {
-                if after_sequence.is_some() {
-                    return Err(UiEventCursorError::new(
-                        "after_sequence",
-                        "duplicate",
-                        "after_sequence may appear at most once",
-                    ));
-                }
-                if value.is_empty() || !value.as_bytes().iter().all(|byte| byte.is_ascii_digit()) {
-                    return Err(UiEventCursorError::new(
-                        "after_sequence",
-                        "invalid_format",
-                        "after_sequence must be a base-10 integer",
-                    ));
-                }
-                let parsed = value.parse::<u64>().map_err(|_| {
-                    UiEventCursorError::new(
-                        "after_sequence",
-                        "invalid_format",
-                        "after_sequence must be a base-10 integer",
-                    )
-                })?;
-                if parsed > MAX_SAFE_EVENT_SEQUENCE {
-                    return Err(UiEventCursorError::new(
-                        "after_sequence",
-                        "out_of_range",
-                        "after_sequence must be a JavaScript-safe integer",
-                    ));
-                }
-                after_sequence = Some(parsed);
-            }
-            _ => {
-                return Err(UiEventCursorError::new(
-                    "events_query",
-                    "unknown_parameter",
-                    "only server_instance_id and after_sequence are accepted",
-                ));
-            }
-        }
-    }
-    if last_event_id.is_some() {
-        return Err(UiEventCursorError::new(
-            "Last-Event-ID",
-            "conflict",
-            "Last-Event-ID cannot be combined with paired replay query parameters",
-        ));
-    }
-    match (server_instance_id, after_sequence) {
-        (Some(server_instance_id), Some(after_sequence)) => Ok(UiReplayCursor::Sequence {
-            server_instance_id,
-            after_sequence,
-        }),
-        (Some(_), None) => Err(UiEventCursorError::new(
-            "after_sequence",
-            "required",
-            "after_sequence is required when server_instance_id is supplied",
-        )),
-        (None, Some(_)) => Err(UiEventCursorError::new(
-            "server_instance_id",
-            "required",
-            "server_instance_id is required when after_sequence is supplied",
-        )),
-        (None, None) => Ok(UiReplayCursor::Snapshot),
-    }
-}
-
+#[cfg(feature = "webui")]
 async fn ui_events(
     State(state): State<RouterServerState>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let coordinator = state.pool.lifecycle_coordinator();
-    let last_event_id = headers
-        .get("last-event-id")
-        .or_else(|| headers.get("Last-Event-ID"))
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty());
-    let cursor = match parse_ui_event_cursor(uri.query(), last_event_id) {
-        Ok(cursor) => cursor,
-        Err(error) => return error.into_response(),
-    };
-    let (receiver, replay) =
-        match coordinator.subscribe_for_ui(cursor, state.pool.runtime_model_ids()) {
-            Ok(subscription) => subscription,
-            Err(ReplaySubscribeError::FutureSequence) => {
-                return invalid_webui_field(
-                    "after_sequence",
-                    "future_sequence",
-                    "after_sequence cannot be newer than the current server sequence",
-                );
-            }
-        };
-    let stream = futures::stream::unfold(
-        (replay.into_iter(), receiver, coordinator),
-        |state| async move {
-            let (mut replay, mut receiver, coordinator) = state;
-            if let Some(event) = replay.next() {
-                return Some((
-                    Ok::<Event, std::convert::Infallible>(event_to_sse(event)),
-                    (replay, receiver, coordinator),
-                ));
-            }
-            match receiver.recv().await {
-                Ok(event) => Some((Ok(event_to_sse(event)), (replay, receiver, coordinator))),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let event = coordinator.local_reset_event("gap", ResetEventKind::Gap);
-                    Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)))
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
-            }
-        },
-    );
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    super::webui::events::ui_events_response(
+        state.pool.lifecycle_coordinator(),
+        state.pool.runtime_model_ids(),
+        headers,
+        uri,
+    )
 }
 
 /// POST /models (b10621 `post_router_models`): validate the name as a
@@ -1722,6 +1561,28 @@ mod router_server_security_prefix_tests;
 #[path = "router_server_security_tests.rs"]
 mod router_server_security_tests;
 
+fn validate_readable_model_store_root(path: &Path, source: &str) -> anyhow::Result<()> {
+    std::fs::read_dir(path).map(|_| ()).map_err(|err| {
+        anyhow::anyhow!(
+            "{source} {}: explicit WebUI/router cache root must be a readable directory: {err}",
+            path.display()
+        )
+    })
+}
+
+fn validate_explicit_model_store_root(startup: &super::ServerStartupConfig) -> anyhow::Result<()> {
+    if let Some(root) = startup.model_store_root.as_ref() {
+        return validate_readable_model_store_root(root, "--model-store-root");
+    }
+    if let Ok(raw) = std::env::var("MLXCEL_MODELS_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return validate_readable_model_store_root(Path::new(trimmed), "MLXCEL_MODELS_DIR");
+        }
+    }
+    Ok(())
+}
+
 /// Run the router server: discover models (cache, `--models-dir`, presets),
 /// build the pool, and serve the b10621 router surface (issue #1438).
 /// Reached from [`super::startup::start_server`] when `--models-dir` or
@@ -1743,14 +1604,7 @@ pub(crate) async fn run_router_server(
 
     // The router's model cache is the mlxcel model store (the b10621 cache
     // equivalent): removable entries, POST /models downloads into it.
-    if let Some(root) = startup.model_store_root.as_ref()
-        && !root.is_dir()
-    {
-        anyhow::bail!(
-            "--model-store-root {}: explicit WebUI/router cache root must be an existing directory",
-            root.display()
-        );
-    }
+    validate_explicit_model_store_root(&startup)?;
     let cache = crate::downloader::models_root(startup.model_store_root.as_deref()).map(|root| {
         super::router_cache::CacheSource::new(
             root,

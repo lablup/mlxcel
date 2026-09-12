@@ -152,7 +152,7 @@ pub(super) fn assert_operation_list(list: &Value, target: &str, eviction_target:
     assert_operation(&list["items"][0], target, eviction_target);
 }
 
-pub(super) fn assert_gap_event(chunk: &str, server_instance: &str) {
+fn sse_json_and_id(chunk: &str) -> (Value, &str) {
     let data = chunk
         .lines()
         .find_map(|line| line.strip_prefix("data: "))
@@ -162,6 +162,31 @@ pub(super) fn assert_gap_event(chunk: &str, server_instance: &str) {
         .lines()
         .find_map(|line| line.strip_prefix("id: "))
         .expect("SSE id");
+    (actual, event_id)
+}
+
+pub(super) fn assert_model_revision_event(chunk: &str, server_instance: &str, model_id: &str) {
+    let (actual, event_id) = sse_json_and_id(chunk);
+    assert_eq!(actual["server_instance_id"], server_instance);
+    assert_eq!(actual["type"], "model_revision");
+    assert_eq!(actual["payload"]["model_id"], model_id);
+    assert_eq!(actual["event_id"], event_id);
+    let expected = fixture(include_str!(
+        "../../tests/fixtures/webui/examples/event.1.json"
+    ));
+    let dynamic = [
+        ("/server_instance_id".into(), Dynamic::Token),
+        ("/event_id".into(), Dynamic::EventId),
+        ("/sequence".into(), Dynamic::Sequence),
+        ("/emitted_at".into(), Dynamic::Timestamp),
+        ("/payload/model_id".into(), Dynamic::ModelId),
+        ("/payload/revision".into(), Dynamic::Revision),
+    ];
+    matches_fixture(&actual, &expected, &dynamic).unwrap_or_else(|error| panic!("{error}"));
+}
+
+pub(super) fn assert_gap_event(chunk: &str, server_instance: &str) {
+    let (actual, event_id) = sse_json_and_id(chunk);
     assert_eq!(actual["server_instance_id"], server_instance);
     let sequence = actual["sequence"].as_u64().expect("event sequence");
     assert_eq!(event_id, format!("evt_{server_instance}_gap_{sequence:08}"));

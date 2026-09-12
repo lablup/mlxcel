@@ -18,7 +18,7 @@
 //! chat-template resolution, model warmup, and socket binding out of
 //! `server/mod.rs` so the server root can focus on shared types and state.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2040,8 +2040,7 @@ fn webui_origin(scheme: &str, authority: &str) -> Result<axum::http::HeaderValue
 
 #[cfg(feature = "webui")]
 fn is_loopback_webui_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
+    is_loopback_bind_host(host)
 }
 
 #[cfg(feature = "webui")]

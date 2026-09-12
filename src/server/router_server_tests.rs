@@ -17,6 +17,7 @@
 //! contract (missing / unknown / not-loaded model), the router `/props`
 //! block, and authorization on the management routes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1200,6 +1201,72 @@ async fn ui_operations_routes_reject_invalid_filters_and_ids() {
 }
 
 #[tokio::test]
+async fn ui_runtime_uses_selected_entry_effective_config() {
+    let root = temp_models_dir("ui-runtime-entry-config");
+    add_fake_model(&root, "alpha");
+    add_fake_model(&root, "beta");
+    let presets = crate::server::router_presets::RouterPresets {
+        models: BTreeMap::from([
+            (
+                "alpha".to_string(),
+                crate::server::router_presets::PresetSection {
+                    ctx_size: Some(1024),
+                    n_parallel: Some(1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "beta".to_string(),
+                crate::server::router_presets::PresetSection {
+                    ctx_size: Some(8192),
+                    n_parallel: Some(4),
+                    ..Default::default()
+                },
+            ),
+        ]),
+        ..Default::default()
+    };
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets,
+        },
+        keyed_config(),
+        true,
+    );
+    let alpha_id = state.pool.get("alpha").expect("alpha").ui_model_id.clone();
+    let beta_id = state.pool.get("beta").expect("beta").ui_model_id.clone();
+    let app = create_router_app_with_authenticated_ui(state);
+
+    let (status, alpha) = send(
+        app.clone(),
+        Method::GET,
+        &format!("/ui-api/v1/runtime?model_id={alpha_id}&autoload=false"),
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{alpha}");
+    let (status, beta) = send(
+        app,
+        Method::GET,
+        &format!("/ui-api/v1/runtime?model_id={beta_id}&autoload=false"),
+        "",
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{beta}");
+
+    assert_eq!(alpha["settings"]["scope"], "server_startup");
+    assert_eq!(beta["settings"]["scope"], "server_startup");
+    assert_eq!(alpha["settings"]["effective"]["ctx_size"], 1024.0);
+    assert_eq!(alpha["settings"]["effective"]["n_parallel"], 1.0);
+    assert_eq!(beta["settings"]["effective"]["ctx_size"], 2048.0);
+    assert_eq!(beta["settings"]["effective"]["n_parallel"], 4.0);
+}
+
+#[tokio::test]
 async fn ui_events_emit_snapshot_and_gap_reset_with_sse_ids() {
     let root = temp_models_dir("ui-events");
     add_fake_model(&root, "alpha");
@@ -1329,8 +1396,10 @@ async fn ui_events_replay_from_paired_sequence_cursor() {
     );
     let coordinator = state.pool.lifecycle_coordinator();
     let server_instance = coordinator.server_instance_id().to_string();
-    let lifecycle = ModelLifecycle::new(DownloadState::Complete).snapshot();
-    coordinator.publish_model_revision("mdl_route_sequence", 1, lifecycle);
+    let model_id = state.pool.get("alpha").expect("alpha").ui_model_id.clone();
+    let lifecycle = ModelLifecycle::new(DownloadState::Complete);
+    lifecycle.mark_loading();
+    coordinator.publish_model_revision(&model_id, 1, lifecycle.snapshot());
     let app = create_router_app_with_authenticated_ui(state);
 
     let replay = first_sse_chunk_uri(
@@ -1340,7 +1409,7 @@ async fn ui_events_replay_from_paired_sequence_cursor() {
     )
     .await;
     assert!(replay.contains("event: model_revision"), "{replay}");
-    assert!(replay.contains("\"sequence\":1"), "{replay}");
+    contract::assert_model_revision_event(&replay, &server_instance, &model_id);
 }
 
 #[tokio::test]
@@ -1391,5 +1460,56 @@ async fn ui_events_reject_invalid_paired_replay_cursors() {
             response["error"]["field_errors"][0]["code"], field_code,
             "{uri}: {response}"
         );
+    }
+}
+
+#[test]
+fn explicit_model_store_root_requires_readable_directory_but_default_absent_is_ok() {
+    let _guard = crate::test_support::env_lock::env_lock();
+    // SAFETY: serialized through the crate-wide env lock.
+    unsafe {
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+    }
+    super::validate_explicit_model_store_root(&ServerStartupConfig::default())
+        .expect("default absent model store root should not create or require a cache directory");
+
+    let missing = temp_models_dir("missing-root-parent").join("missing");
+    let err = super::validate_explicit_model_store_root(&ServerStartupConfig {
+        model_store_root: Some(missing.clone()),
+        ..Default::default()
+    })
+    .expect_err("explicit missing CLI root must fail");
+    assert!(err.to_string().contains("--model-store-root"));
+    assert!(err.to_string().contains("readable directory"));
+
+    let file_parent = temp_models_dir("file-root-parent");
+    let file = file_parent.join("not-dir");
+    std::fs::write(&file, b"not a directory").unwrap();
+    let err = super::validate_explicit_model_store_root(&ServerStartupConfig {
+        model_store_root: Some(file.clone()),
+        ..Default::default()
+    })
+    .expect_err("explicit file CLI root must fail");
+    assert!(err.to_string().contains("--model-store-root"));
+    assert!(err.to_string().contains("readable directory"));
+
+    // SAFETY: serialized through the crate-wide env lock.
+    unsafe {
+        std::env::set_var("MLXCEL_MODELS_DIR", &file);
+    }
+    let err = super::validate_explicit_model_store_root(&ServerStartupConfig::default())
+        .expect_err("explicit env file root must fail");
+    assert!(err.to_string().contains("MLXCEL_MODELS_DIR"));
+
+    let good_cli = temp_models_dir("good-cli-root");
+    super::validate_explicit_model_store_root(&ServerStartupConfig {
+        model_store_root: Some(good_cli),
+        ..Default::default()
+    })
+    .expect("CLI root should override bad MLXCEL_MODELS_DIR and pass when readable");
+
+    // SAFETY: serialized through the crate-wide env lock.
+    unsafe {
+        std::env::remove_var("MLXCEL_MODELS_DIR");
     }
 }
