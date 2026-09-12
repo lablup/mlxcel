@@ -1,5 +1,5 @@
 import { AxeBuilder } from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 type GalleryTab = 'controls' | 'states' | 'data';
 type Variant = { name: string; width: number; height: number; appearance: Record<string, unknown>; tab: GalleryTab; openDrawer?: boolean; textScale?: '200' };
@@ -79,6 +79,83 @@ async function expectNoOverflowOrInlineStyles(page: Page): Promise<void> {
   expect(result.smallTargets).toEqual([]);
 }
 
+async function expectTextScalePanelsReflow(page: Page): Promise<void> {
+  const selectors = [
+    '.app-main',
+    '.app-toolbar',
+    '.app-content-grid',
+    '.app-content',
+    '.screen-stack',
+    '.screen-heading',
+    '.screen-heading h1',
+    '.screen-heading p',
+    '.ds-tabs',
+    '.ds-tabs [role="tablist"]',
+    '.ds-tabs [role="tab"]',
+    '.gallery-grid',
+    '.surface-card',
+    '.surface-card h2',
+    '.surface-card p',
+    '.control-row',
+    '.ds-button',
+    '.ds-field',
+    '.ds-field > span',
+    '.ds-field small',
+  ];
+  const result = await page.evaluate((panelSelectors) => {
+    const visible = (element: HTMLElement): boolean => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const failures: string[] = [];
+    for (const selector of panelSelectors) {
+      for (const element of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
+        if (!visible(element)) continue;
+        const delta = Math.ceil(element.scrollWidth - element.clientWidth);
+        if (delta > 1) failures.push(`${selector} overflow=${delta} text=${element.textContent?.trim().slice(0, 80) ?? ''}`);
+      }
+    }
+    return {
+      documentOverflow: Math.ceil(document.documentElement.scrollWidth - document.documentElement.clientWidth),
+      bodyOverflow: Math.ceil(document.body.scrollWidth - document.body.clientWidth),
+      failures,
+    };
+  }, selectors);
+  expect(result.documentOverflow, JSON.stringify(result.failures)).toBeLessThanOrEqual(1);
+  expect(result.bodyOverflow, JSON.stringify(result.failures)).toBeLessThanOrEqual(1);
+  expect(result.failures).toEqual([]);
+}
+
+async function expectLocatorWithinViewportX(locator: Locator): Promise<void> {
+  await locator.scrollIntoViewIfNeeded();
+  await expect(locator).toBeVisible();
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) return;
+  const viewport = locator.page().viewportSize();
+  expect(viewport).not.toBeNull();
+  if (!viewport) return;
+  expect(Math.floor(box.x)).toBeGreaterThanOrEqual(0);
+  expect(Math.ceil(box.x + box.width)).toBeLessThanOrEqual(viewport.width + 1);
+}
+
+async function expectTextScaleLabelsReachable(page: Page): Promise<void> {
+  await expectTextScalePanelsReflow(page);
+  const reachable = [
+    page.getByRole('tab', { name: /컨트롤/i }),
+    page.getByRole('tab', { name: /상태/i }),
+    page.getByRole('tab', { name: /데이터 표시/i }),
+    page.getByRole('button', { name: /기본/i }),
+    page.getByRole('button', { name: /보조/i }),
+    page.getByRole('button', { name: /위험/i }),
+    page.getByText('저장소 ID', { exact: true }),
+    page.getByText('네이티브 select 콤보박스', { exact: true }),
+    page.getByRole('combobox', { name: /네이티브 select 콤보박스/i }),
+  ];
+  for (const locator of reachable) await expectLocatorWithinViewportX(locator);
+}
+
 test.describe('design system gallery and shell', () => {
   for (const variant of variants) {
     test(`renders and compares ${variant.name}`, async ({ page }) => {
@@ -90,6 +167,9 @@ test.describe('design system gallery and shell', () => {
       if (variant.textScale === '200') {
         const fontSize = await page.evaluate(() => Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize));
         expect(fontSize).toBeGreaterThanOrEqual(32);
+        await expectTextScaleLabelsReachable(page);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await settleAnimationFrame(page);
       }
       await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });
     });
