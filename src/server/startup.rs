@@ -107,6 +107,9 @@ pub struct ServerStartupConfig {
 
     // Limits
     pub n_parallel: usize,
+    /// b10621 `--kv-unified`: every slot sees the whole context window while
+    /// the scheduler enforces one shared live-token budget across all slots.
+    pub kv_unified: bool,
     pub ctx_size: usize,
     pub n_predict: i32, // -1 = unlimited
 
@@ -597,6 +600,7 @@ impl Default for ServerStartupConfig {
             api_key_files: Vec::new(),
             // Serving-throughput default: 4 concurrent decode slots (#628).
             n_parallel: 4,
+            kv_unified: false,
             ctx_size: 0,
             n_predict: -1,
             http_timeout: crate::server::transport::DEFAULT_HTTP_TIMEOUT_SECS,
@@ -781,8 +785,9 @@ pub fn effective_parallel_context_slots(
     n_parallel: usize,
     max_batch_size: Option<usize>,
     no_batch: bool,
+    kv_unified: bool,
 ) -> usize {
-    if no_batch {
+    if no_batch || kv_unified {
         1
     } else {
         max_batch_size.unwrap_or(n_parallel).max(1)
@@ -795,12 +800,13 @@ pub fn resolve_parallel_context_size(
     n_parallel: usize,
     max_batch_size: Option<usize>,
     no_batch: bool,
+    kv_unified: bool,
 ) -> usize {
     if ctx_size == 0 {
         return 0;
     }
 
-    let slots = effective_parallel_context_slots(n_parallel, max_batch_size, no_batch);
+    let slots = effective_parallel_context_slots(n_parallel, max_batch_size, no_batch, kv_unified);
     ctx_size / slots
 }
 
@@ -827,12 +833,14 @@ fn validate_parallel_context_startup(startup: &ServerStartupConfig) -> Result<()
         startup.n_parallel,
         startup.max_batch_size,
         startup.no_batch,
+        startup.kv_unified,
     );
     let per_slot_context_size = resolve_parallel_context_size(
         startup.ctx_size,
         startup.n_parallel,
         startup.max_batch_size,
         startup.no_batch,
+        startup.kv_unified,
     );
 
     anyhow::ensure!(
@@ -1508,6 +1516,7 @@ pub(super) fn build_server_config(
         startup.n_parallel,
         startup.max_batch_size,
         startup.no_batch,
+        startup.kv_unified,
     );
     let max_kv_size = resolve_context_kv_cap(context_size, startup.max_kv_size);
     let sampling_defaults = resolve_generation_sampling_defaults(startup);
@@ -1551,6 +1560,9 @@ pub(super) fn build_server_config(
         model_alias: startup.model_alias.clone(),
         model_aliases: startup.model_aliases.clone(),
         context_size,
+        context_size_total: startup.ctx_size,
+        explicit_max_kv_size: startup.max_kv_size,
+        kv_unified: startup.kv_unified,
         n_parallel: startup.n_parallel,
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
@@ -2609,17 +2621,20 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             startup.n_parallel,
             startup.max_batch_size,
             startup.no_batch,
+            startup.kv_unified,
         );
         let per_slot = resolve_parallel_context_size(
             startup.ctx_size,
             startup.n_parallel,
             startup.max_batch_size,
             startup.no_batch,
+            startup.kv_unified,
         );
         tracing::info!(
             ctx_size = startup.ctx_size,
             ctx_size_per_slot = per_slot,
             context_slots = slots,
+            kv_unified = startup.kv_unified,
             n_parallel = startup.n_parallel,
             prefill_chunk_size = startup.prefill_chunk_size,
             max_kv_size = ?startup.max_kv_size,

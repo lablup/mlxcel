@@ -408,7 +408,7 @@ struct ServerArgs {
     #[arg(long, env = "LLAMA_ARG_PORT", default_value_t = 8080)]
     port: u16,
 
-    /// Total context budget shared across parallel slots (0 = use model default)
+    /// Total context budget (split across explicit slots, whole-window under auto unified; 0 = model default)
     #[arg(
         short = 'c',
         long = "ctx-size",
@@ -427,10 +427,14 @@ struct ServerArgs {
     )]
     predict: i32,
 
-    /// Number of parallel request slots that share --ctx-size (default: -1, -1 = auto)
+    /// Number of parallel request slots (default: -1, -1 = auto)
     ///
     /// b10621's `-1` (the default) lets the server choose; the automatic
     /// count resolves to 4 slots, which is also what upstream's auto picks.
+    /// Auto also enables unified context budgeting by default: every slot can
+    /// use the whole --ctx-size window, while all live sequences share that
+    /// total token budget. An explicit --parallel N keeps split windows unless
+    /// --kv-unified is also set.
     /// Sets the maximum concurrent decode batch for multi-client serving:
     /// batched decode amortizes the per-step weight reads across the batch,
     /// raising aggregate throughput and keeping time-to-first-token low under
@@ -673,7 +677,7 @@ struct ServerArgs {
     )]
     draft: usize,
 
-    /// Maximum concurrent decode sequences; explicit value shares --ctx-size
+    /// Maximum concurrent decode sequences; explicit value keeps split --ctx-size windows
     #[arg(long = "max-batch-size", value_name = "N")]
     max_batch_size: Option<usize>,
 
@@ -2475,6 +2479,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         api_key_files: args.api_key_file,
         n_parallel: mlxcel::server::resolve_n_parallel(args.parallel)
             .map_err(|message| anyhow::anyhow!("{message}"))?,
+        parallel_auto: args.parallel == -1,
         ctx_size: args.ctx_size,
         n_predict: args.predict,
         // HTTP transport (#1432). `timeout` is now the socket read/write

@@ -49,6 +49,7 @@ fn sample_input() -> ServerStartupInput {
         api_keys: vec!["secret".to_string()],
         api_key_files: vec![PathBuf::from("api.key")],
         n_parallel: 2,
+        parallel_auto: false,
         ctx_size: 4096,
         n_predict: 256,
         timeout: 3600,
@@ -323,6 +324,52 @@ fn settings_cli_startup_config_defaults_off_and_propagates_enablement() {
         enabled.enable_settings,
         "the startup config must retain settings enablement"
     );
+}
+
+#[test]
+fn kv_unified_defaults_on_only_for_auto_parallel_without_explicit_batch_size() {
+    let mut input = sample_input();
+    input.parallel_auto = true;
+    input.max_batch_size = None;
+    let startup = input.into_startup_config().expect("auto startup config");
+    assert!(startup.kv_unified);
+
+    let mut explicit_parallel = sample_input();
+    explicit_parallel.parallel_auto = false;
+    explicit_parallel.max_batch_size = None;
+    let startup = explicit_parallel
+        .into_startup_config()
+        .expect("explicit parallel startup config");
+    assert!(!startup.kv_unified);
+
+    let mut explicit_batch = sample_input();
+    explicit_batch.parallel_auto = true;
+    explicit_batch.max_batch_size = Some(4);
+    let startup = explicit_batch
+        .into_startup_config()
+        .expect("explicit max batch startup config");
+    assert!(!startup.kv_unified);
+}
+
+#[test]
+fn kv_unified_startup_flags_override_the_auto_default() {
+    let mut explicit_on = sample_input();
+    explicit_on.parallel_auto = false;
+    explicit_on.max_batch_size = Some(4);
+    explicit_on.slot_compat.kv_unified = Some(true);
+    let startup = explicit_on
+        .into_startup_config()
+        .expect("explicit unified startup config");
+    assert!(startup.kv_unified);
+
+    let mut explicit_off = sample_input();
+    explicit_off.parallel_auto = true;
+    explicit_off.max_batch_size = None;
+    explicit_off.slot_compat.no_kv_unified = true;
+    let startup = explicit_off
+        .into_startup_config()
+        .expect("explicit split startup config");
+    assert!(!startup.kv_unified);
 }
 
 /// The #1438 migration guard, recorded as a `by_design` divergence on the

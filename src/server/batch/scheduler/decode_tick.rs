@@ -715,6 +715,10 @@ impl BatchScheduler {
             // the caller (`execute_decode_step`) via its own length guard.
             return;
         }
+        if !self.shared_budget_has_decode_room(seq_ids.len()) {
+            self.finish_all_for_shared_kv_budget();
+            return;
+        }
 
         let b = seq_ids.len();
 
@@ -1270,6 +1274,11 @@ impl BatchScheduler {
     }
 
     pub(super) fn decode_single_step(&mut self, seq_id: SequenceId) {
+        if !self.shared_budget_has_decode_room(1) {
+            self.finish_all_for_shared_kv_budget();
+            return;
+        }
+
         let last_token = {
             let seq = match self.active_batch.get_mut(seq_id) {
                 Some(s) => s,

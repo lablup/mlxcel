@@ -17,9 +17,11 @@
 //! One canonical clap definition of the five b10621 options that configure
 //! per-slot retained prompts and the per-slot context-checkpoint ring, so both
 //! server binaries declare them identically. mlxcel has neither structure, so
-//! every one of them is `not_applicable`: the inert value is accepted, and a
+//! most of them are `not_applicable`: the inert value is accepted, and a
 //! request for the behavior is refused at startup with a diagnostic that names
-//! what is missing rather than an unknown-argument error from clap.
+//! what is missing rather than an unknown-argument error from clap. `--kv-unified`
+//! is implemented as shared logical context-budget policy over mlxcel's existing
+//! per-sequence KV allocation.
 //!
 //! The upstream definitions are in
 //! [`common/arg.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp)
@@ -34,10 +36,10 @@
 //! of which sequence last held the tokens, so there is no per-slot retained
 //! prompt for `--cache-idle-slots` to save or for
 //! `--slot-prompt-similarity` to compare against. KV is allocated per
-//! sequence through the scheduler's cache pool, so there is no unified buffer
-//! for `--kv-unified` to switch to. And `capture_history_boundary_snapshot`
-//! takes at most one snapshot per sequence, at the prompt/generation boundary,
-//! so there is no ring for `--ctx-checkpoints` to size or for
+//! sequence through the scheduler's cache pool, so `--kv-unified` is a shared
+//! logical budget rather than a physical KV layout switch. And
+//! `capture_history_boundary_snapshot` takes at most one snapshot per sequence,
+//! at the prompt/generation boundary, so there is no ring for `--ctx-checkpoints` to size or for
 //! `--checkpoint-min-step` to space.
 //!
 //! Used by: mlxcel serve, mlxcel-server.
@@ -75,7 +77,8 @@ pub struct SlotCompatArgs {
     #[arg(long = "slot-prompt-similarity", value_name = "SIM")]
     pub slot_prompt_similarity: Option<f32>,
 
-    /// Use one KV buffer shared by every slot (refused: KV is per sequence).
+    /// Give every slot the whole context window and enforce one shared live
+    /// token budget across all slots.
     #[arg(
         long = "kv-unified",
         env = "LLAMA_ARG_KV_UNIFIED",
@@ -88,8 +91,7 @@ pub struct SlotCompatArgs {
     )]
     pub kv_unified: Option<bool>,
 
-    /// Keep KV per sequence (llama-server `--no-kv-unified`, mlxcel's only
-    /// layout).
+    /// Keep split per-slot context windows (llama-server `--no-kv-unified`).
     #[arg(
         long = "no-kv-unified",
         overrides_with = "kv_unified",
@@ -153,17 +155,6 @@ impl SlotCompatArgs {
             ));
         }
 
-        if self.kv_unified == Some(true) && !self.no_kv_unified {
-            return Err(
-                "--kv-unified asks for one KV buffer shared by every slot, so a single request \
-                 can use the whole context. mlxcel allocates KV per sequence through the \
-                 scheduler's cache pool and divides --ctx-size into per-slot shares; there is no \
-                 unified buffer to switch to. Run with --parallel 1 to give one request the \
-                 whole context, pass --no-kv-unified, or drop the flag."
-                    .to_string(),
-            );
-        }
-
         if let Some(checkpoints) = self.ctx_checkpoints
             && checkpoints != 0
         {
@@ -188,6 +179,26 @@ impl SlotCompatArgs {
         }
 
         Ok(())
+    }
+
+    /// Resolve llama-server b10621's unified context-budget default.
+    ///
+    /// Upstream enables `kv_unified` when `--parallel` is left on auto. mlxcel
+    /// matches the visible contract by giving each slot the whole context
+    /// window and enforcing a shared live-token budget in the scheduler. An
+    /// explicit `--parallel N` keeps split windows unless `--kv-unified` is
+    /// also explicit. An explicit `--max-batch-size` keeps split windows too,
+    /// because it is an operator-supplied concurrency divisor.
+    pub fn resolve_kv_unified(&self, parallel_auto: bool, max_batch_size_was_set: bool) -> bool {
+        if self.no_kv_unified {
+            return false;
+        }
+
+        if let Some(kv_unified) = self.kv_unified {
+            return kv_unified;
+        }
+
+        parallel_auto && !max_batch_size_was_set
     }
 }
 

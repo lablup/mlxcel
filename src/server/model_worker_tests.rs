@@ -20,7 +20,8 @@ use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
     decode_request_images_with_limits, encode_ordered_media_prompt,
     materialize_phi4mm_ordered_prompt, merge_config_stop_tokens, preprocess_server_audio,
-    require_single_server_audio_clip, resolve_end_of_turn_token_id, resolve_xtc_newline_token_ids,
+    require_single_server_audio_clip, resolve_end_of_turn_token_id,
+    resolve_worker_effective_max_kv_size, resolve_xtc_newline_token_ids,
     tokenize_inkling_ordered_media_prompt,
 };
 use crate::SamplingConfig;
@@ -67,6 +68,30 @@ fn encode_test_text(text: &str, add_special: bool) -> anyhow::Result<Vec<i32>> {
     }
     tokens.extend(text.bytes().map(i32::from));
     Ok(tokens)
+}
+
+#[test]
+fn non_batching_clamp_restores_split_context_cap_to_total_window() {
+    assert_eq!(
+        resolve_worker_effective_max_kv_size(Some(5120), 20_480, None, 4, 1, false),
+        Some(20_480)
+    );
+}
+
+#[test]
+fn non_batching_clamp_preserves_explicit_lower_max_kv_size() {
+    assert_eq!(
+        resolve_worker_effective_max_kv_size(Some(4096), 20_480, Some(4096), 4, 1, false),
+        Some(4096)
+    );
+}
+
+#[test]
+fn unified_context_keeps_startup_cap_after_worker_clamp() {
+    assert_eq!(
+        resolve_worker_effective_max_kv_size(Some(20_480), 20_480, None, 4, 1, true),
+        Some(20_480)
+    );
 }
 
 #[test]

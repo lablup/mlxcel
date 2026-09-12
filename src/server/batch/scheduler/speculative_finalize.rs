@@ -16,6 +16,10 @@ use super::*;
 
 impl BatchScheduler {
     pub(super) fn try_speculative_burst(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
+        if self.shared_kv_budget().is_some() {
+            return Some(seq);
+        }
+
         // Fast path: speculative dispatch off, or the head fails the
         // per-sequence gate (multimodal payload / VLM embeddings /
         // structured output / adopted cache prefix). History-dependent

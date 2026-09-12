@@ -376,6 +376,8 @@ fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
             mlxcel::server::resolve_n_parallel(args.n_parallel).unwrap_or(4),
             args.max_batch_size,
             args.no_batch,
+            args.slot_compat
+                .resolve_kv_unified(args.n_parallel == -1, args.max_batch_size.is_some()),
         ) as u64
     } else {
         mlxcel::memory_estimate::DEFAULT_CTX_LEN
@@ -564,6 +566,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         api_key_files: args.api_key_file,
         n_parallel: mlxcel::server::resolve_n_parallel(args.n_parallel)
             .map_err(|message| anyhow::anyhow!("{message}"))?,
+        parallel_auto: args.n_parallel == -1,
         ctx_size: args.ctx_size,
         n_predict: args.n_predict,
         // HTTP transport (#1432). `timeout` is now the socket read/write

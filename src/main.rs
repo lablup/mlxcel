@@ -1284,10 +1284,14 @@ pub(crate) struct ServeArgs {
     #[arg(long = "api-key-file", value_name = "FNAME")]
     api_key_file: Vec<PathBuf>,
 
-    /// Number of parallel request slots that share --ctx-size (default: -1, -1 = auto)
+    /// Number of parallel request slots (default: -1, -1 = auto)
     ///
     /// b10621's `-1` (the default) lets the server choose; the automatic
     /// count resolves to 4 slots, which is also what upstream's auto picks.
+    /// Auto also enables unified context budgeting by default: every slot can
+    /// use the whole --ctx-size window, while all live sequences share that
+    /// total token budget. An explicit --parallel N keeps split windows unless
+    /// --kv-unified is also set.
     /// Sets the maximum concurrent decode batch for multi-client serving:
     /// batched decode amortizes the per-step weight reads across the batch,
     /// raising aggregate throughput and keeping time-to-first-token low under
@@ -1307,7 +1311,7 @@ pub(crate) struct ServeArgs {
     )]
     n_parallel: i64,
 
-    /// Total context budget shared across parallel slots (0 = use model default)
+    /// Total context budget (split across explicit slots, whole-window under auto unified; 0 = model default)
     #[arg(long, env = "LLAMA_ARG_CTX_SIZE", default_value_t = 0)]
     ctx_size: usize,
 
@@ -1358,7 +1362,7 @@ pub(crate) struct ServeArgs {
     )]
     draft_max: usize,
 
-    /// Maximum concurrent decode sequences; explicit value shares --ctx-size
+    /// Maximum concurrent decode sequences; explicit value keeps split --ctx-size windows
     #[arg(long, value_name = "N")]
     max_batch_size: Option<usize>,
 

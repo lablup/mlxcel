@@ -492,6 +492,12 @@ pub struct BatchScheduler {
     /// when the legacy `--kv-cache-mode` flag is left at FP16.
     max_kv_size: Option<usize>,
 
+    /// Unified logical live-token budget shared by every slot. When `Some(N)`,
+    /// each sequence may still use up to `max_kv_size` tokens, but the sum of
+    /// live prompt+generated tokens across active/parked sequences may never
+    /// exceed `N`.
+    shared_kv_budget: Option<usize>,
+
     /// Context-retention policy at the KV bound (#1472, b10621
     /// `--context-shift` / `--keep`). With `context_shift` off (the default),
     /// [`Self::enforce_max_kv_size_for`] never trims: an over-long prompt is
@@ -931,6 +937,7 @@ mod paged_layout;
 mod prefill;
 mod prompt_cache;
 mod run_loop;
+mod shared_budget;
 mod speculative_finalize;
 
 #[cfg(test)]

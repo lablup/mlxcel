@@ -14,7 +14,7 @@
 
 //! Unit tests for the b10621 slot-state and checkpoint flag group (#1473).
 //!
-//! These are the diagnostic tests the manifest's five `not_applicable`
+//! These are the diagnostic tests the manifest's slot-state compatibility
 //! entries name: each asserts that the inert value is accepted and that a
 //! request for the behavior is refused with a message that names the missing
 //! structure rather than with clap's unknown-argument error.
@@ -67,21 +67,6 @@ fn slot_prompt_similarity_refuses_upstreams_own_default() {
 }
 
 #[test]
-fn kv_unified_is_refused_and_its_negation_is_inert() {
-    let mut on = args();
-    on.kv_unified = Some(true);
-    let message = on
-        .resolve()
-        .expect_err("a unified KV buffer must be refused");
-    assert!(message.contains("--kv-unified"));
-    assert!(message.contains("per sequence"));
-
-    let mut off = args();
-    off.kv_unified = Some(false);
-    assert!(off.resolve().is_ok());
-}
-
-#[test]
 fn ctx_checkpoints_refuses_a_ring_and_accepts_zero() {
     let mut ring = args();
     ring.ctx_checkpoints = Some(32);
@@ -94,6 +79,44 @@ fn ctx_checkpoints_refuses_a_ring_and_accepts_zero() {
     let mut none = args();
     none.ctx_checkpoints = Some(0);
     assert!(none.resolve().is_ok());
+}
+
+#[test]
+fn kv_unified_resolves_to_b10621_auto_default() {
+    assert!(
+        args().resolve_kv_unified(true, false),
+        "auto --parallel enables unified shared-budget context by default"
+    );
+    assert!(
+        !args().resolve_kv_unified(false, false),
+        "explicit --parallel keeps split context windows by default"
+    );
+    assert!(
+        !args().resolve_kv_unified(true, true),
+        "explicit --max-batch-size keeps split context windows by default"
+    );
+}
+
+#[test]
+fn kv_unified_explicit_flags_override_the_auto_default() {
+    let mut explicit_on = args();
+    explicit_on.kv_unified = Some(true);
+    assert!(explicit_on.resolve().is_ok());
+    assert!(explicit_on.resolve_kv_unified(false, true));
+
+    let mut explicit_off = args();
+    explicit_off.kv_unified = Some(false);
+    assert!(explicit_off.resolve().is_ok());
+    assert!(!explicit_off.resolve_kv_unified(true, false));
+
+    let mut negated = args();
+    negated.kv_unified = Some(true);
+    negated.no_kv_unified = true;
+    assert!(negated.resolve().is_ok());
+    assert!(
+        !negated.resolve_kv_unified(true, false),
+        "--no-kv-unified must beat an environment-supplied true"
+    );
 }
 
 #[test]

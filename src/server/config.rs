@@ -593,11 +593,20 @@ pub struct ServerConfig {
     pub model_aliases: Vec<String>,
     /// Effective per-slot context window in tokens (`0` = model default).
     ///
-    /// Startup lowers `--ctx-size C --parallel N` to `C / N` for continuous
-    /// batching, matching llama.cpp server semantics. An explicit
-    /// `--max-batch-size` override becomes the divisor because it controls the
-    /// maximum number of concurrent decode sequences.
+    /// In split mode, startup lowers `--ctx-size C --parallel N` to `C / N`
+    /// for continuous batching. In unified mode, every slot sees the whole
+    /// configured window and the scheduler enforces the shared live-token
+    /// budget separately.
     pub context_size: usize,
+    /// Original configured server-wide context budget before split-mode
+    /// per-slot lowering (`0` = model default).
+    pub context_size_total: usize,
+    /// Operator-supplied `--max-kv-size` before startup clamps it to the
+    /// effective per-slot window. Needed when a non-batching family clamps
+    /// the worker width to one after model load.
+    pub explicit_max_kv_size: Option<usize>,
+    /// Whether unified shared-budget context is active.
+    pub kv_unified: bool,
     pub n_parallel: usize,
     pub enable_slots_endpoint: bool,
     pub enable_props_endpoint: bool,
@@ -1048,6 +1057,9 @@ impl Default for ServerConfig {
             model_alias: None,
             model_aliases: Vec::new(),
             context_size: 0,
+            context_size_total: 0,
+            explicit_max_kv_size: None,
+            kv_unified: false,
             // Serving-throughput default: admit up to 4 concurrent decode
             // sequences so weight reads amortize across the batch (#628). The
             // worker clamps this to 1 for non-batching model families.

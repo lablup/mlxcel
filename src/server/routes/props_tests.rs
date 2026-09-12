@@ -199,6 +199,7 @@ fn geometry_block_reports_batch_and_kv_bounds() {
         prefill_chunk_size: 512,
         max_batch_size: 4,
         max_kv_size: Some(4096),
+        kv_unified: true,
         ..Default::default()
     };
     let block = geometry_block(&config);
@@ -206,6 +207,7 @@ fn geometry_block_reports_batch_and_kv_bounds() {
     assert_eq!(block["n_ubatch"], 512);
     assert_eq!(block["n_batch_decode"], 4);
     assert_eq!(block["n_kv_max"], 4096);
+    assert_eq!(block["kv_unified"], true);
 }
 
 /// `--batch-size` (b10621's `n_batch` spelling) is `aliased` rather than
@@ -274,6 +276,8 @@ async fn get_props_carries_the_b10621_key_set() {
     // b10621 shape details a schema-driven client depends on.
     assert_eq!(body["total_slots"], 3);
     assert_eq!(body["default_generation_settings"]["n_ctx"], 2048);
+    assert_eq!(body["kv_unified"], false);
+    assert_eq!(body["geometry"]["kv_unified"], false);
     assert!(body["default_generation_settings"]["params"].is_object());
     let modalities = body["modalities"].as_object().expect("modalities object");
     let mut modality_keys: Vec<&str> = modalities.keys().map(String::as_str).collect();
