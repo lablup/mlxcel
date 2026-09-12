@@ -156,37 +156,151 @@ pub(super) async fn secured_request(
         .expect("router answers")
 }
 
-pub(super) fn assert_webui_error_schema(json: &serde_json::Value, code: &str, retryable: bool) {
-    const ALLOWED: &[&str] = &[
-        "invalid_request",
-        "unauthorized",
-        "forbidden",
-        "not_found",
-        "stale_revision",
-        "conflict",
-        "unsupported",
-        "rate_limited",
-        "unavailable",
-        "payload_too_large",
-        "server_restarted",
-        "event_gap",
-        "partial_success",
+// Each expected value is independently validated by verify-webui-contract.
+// Normalize ONLY the dynamic request ID after validating its complete format.
+fn matches_error_fixture(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    let mut normalized = actual.clone();
+    let Some(request_id) = normalized.get_mut("request_id") else {
+        return false;
+    };
+    if !request_id.as_str().is_some_and(|id| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'~' | b'-'))
+    }) {
+        return false;
+    }
+    *request_id = expected["request_id"].clone();
+    normalized == *expected
+}
+
+pub(super) fn assert_webui_error_fixture(json: &serde_json::Value, fixture: &str) {
+    let expected: serde_json::Value = serde_json::from_str(fixture).expect("canonical fixture");
+    assert!(
+        matches_error_fixture(json, &expected),
+        "whole error contract mismatch: {json}, expected: {expected}"
+    );
+}
+
+#[test]
+fn error_fixture_comparison_rejects_missing_extra_static_and_dynamic_drift() {
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/webui/examples/error.security-unauthorized.json"
+    ))
+    .unwrap();
+    assert!(matches_error_fixture(&expected, &expected));
+    for (parent, key) in [
+        ("", "error"),
+        ("", "request_id"),
+        ("/error", "code"),
+        ("/error", "message"),
+        ("/error", "retryable"),
+    ] {
+        let mut changed = expected.clone();
+        changed
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        assert!(
+            !matches_error_fixture(&changed, &expected),
+            "accepted missing {parent}/{key}"
+        );
+    }
+    for (parent, key) in [
+        ("", "unexpected"),
+        ("/error", "unexpected"),
+        ("/error", "field_errors"),
+        ("/error", "operation_id"),
+    ] {
+        let mut changed = expected.clone();
+        changed
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(key.into(), serde_json::Value::Null);
+        assert!(
+            !matches_error_fixture(&changed, &expected),
+            "accepted extra/null {parent}/{key}"
+        );
+    }
+    for (path, invalid) in [
+        ("/error/code", serde_json::json!("invented_error")),
+        ("/error/message", serde_json::json!("different message")),
+        ("/error/retryable", serde_json::json!(true)),
+        ("/request_id", serde_json::json!("")),
+        ("/request_id", serde_json::json!("x".repeat(129))),
+        ("/request_id", serde_json::json!("token\n")),
+        ("/request_id", serde_json::json!("bad/token")),
+        ("/request_id", serde_json::Value::Null),
+    ] {
+        let mut changed = expected.clone();
+        *changed.pointer_mut(path).unwrap() = invalid;
+        assert!(
+            !matches_error_fixture(&changed, &expected),
+            "accepted invalid {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_admin_family_enforces_rate_capacity_and_body_limits() {
+    use axum::http::StatusCode;
+    let paths = [
+        (Method::POST, "/props"),
+        (Method::PATCH, "/v1/settings"),
+        (Method::POST, "/slots/0?action=save"),
+        (Method::POST, "/lora-adapters"),
+        (Method::POST, "/v1/cache/reset"),
+        (Method::POST, "/ui-api/v1/catalog/refresh"),
+        (Method::POST, "/ui-api/v1/downloads"),
+        (Method::DELETE, "/ui-api/v1/model-removals"),
+        (Method::PATCH, "/ui-api/v1/future-admin-action"),
     ];
-    assert!(
-        ALLOWED.contains(&code),
-        "test expected invalid schema code {code}"
-    );
-    let envelope: crate::server::router_lifecycle::ErrorEnvelope =
-        serde_json::from_value(json.clone()).expect("producer error envelope DTO");
-    assert_eq!(serde_json::to_value(&envelope).expect("serialize"), *json);
-    assert!(
-        ALLOWED.contains(&envelope.error.code.as_str()),
-        "producer emitted invalid schema code {}",
-        envelope.error.code
-    );
-    assert_eq!(envelope.error.code, code);
-    assert_eq!(envelope.error.retryable, retryable);
-    assert!(!envelope.error.message.is_empty());
-    assert!(envelope.error.message.len() <= 512);
-    assert!(!envelope.request_id.is_empty());
+    for (method, path) in paths {
+        for (app, body, status, fixture) in [
+            (
+                secured_router_app_with_rate_limit(0),
+                Body::empty(),
+                StatusCode::TOO_MANY_REQUESTS,
+                include_str!("../../tests/fixtures/webui/examples/error.security-rate.json"),
+            ),
+            (
+                secured_router_app_with_limits(0, 16),
+                Body::empty(),
+                StatusCode::TOO_MANY_REQUESTS,
+                include_str!("../../tests/fixtures/webui/examples/error.security-capacity.json"),
+            ),
+            (
+                secured_router_app_with_limits(32, 16),
+                Body::from(vec![
+                    b'x';
+                    crate::server::webui::security::WEBUI_CONTROL_BODY_LIMIT_BYTES
+                        + 1
+                ]),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                include_str!("../../tests/fixtures/webui/examples/error.security-body.json"),
+            ),
+        ] {
+            let response = secured_request(
+                app,
+                method.clone(),
+                path,
+                Some(ROUTER_KEY),
+                None,
+                None,
+                body,
+            )
+            .await;
+            assert_eq!(response.status(), status, "{method} {path}");
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_webui_error_fixture(&serde_json::from_slice(&bytes).unwrap(), fixture);
+        }
+    }
 }

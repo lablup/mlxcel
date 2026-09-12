@@ -20,7 +20,7 @@ use axum::http::{HeaderValue, Method, StatusCode};
 use axum::routing::get;
 
 use super::router_server_security_support_tests::{
-    ROUTER_KEY, assert_webui_error_schema, secured_request,
+    ROUTER_KEY, assert_webui_error_fixture, secured_request,
 };
 
 #[tokio::test]
@@ -66,7 +66,10 @@ async fn generic_security_wrapper_handles_prefixed_legacy_sse_typed_auth_and_enc
         .await
         .expect("typed auth body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("typed auth json");
-    assert_webui_error_schema(&json, "unauthorized", false);
+    assert_webui_error_fixture(
+        &json,
+        include_str!("../../tests/fixtures/webui/examples/error.security-unauthorized.json"),
+    );
 
     let first_sse = secured_request(
         app.clone(),

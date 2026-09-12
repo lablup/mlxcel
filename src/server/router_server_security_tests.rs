@@ -21,7 +21,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
 use super::router_server_security_support_tests::{
-    ROUTER_KEY, SharedBufWriter, assert_webui_error_schema, secured_request,
+    ROUTER_KEY, SharedBufWriter, assert_webui_error_fixture, secured_request,
     secured_router_app_with_limits, secured_router_app_with_rate_limit,
 };
 
@@ -69,6 +69,13 @@ async fn secured_webui_keeps_health_public_and_private_routes_keyed() {
     )
     .await;
     assert_eq!(public_query_key.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(public_query_key.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-query-credential.json"),
+    );
 
     let missing = secured_request(
         app.clone(),
@@ -103,7 +110,10 @@ async fn secured_webui_keeps_health_public_and_private_routes_keyed() {
         .await
         .expect("ui auth body");
     let ui_json: serde_json::Value = serde_json::from_slice(&ui_body).expect("ui auth json");
-    assert_webui_error_schema(&ui_json, "unauthorized", false);
+    assert_webui_error_fixture(
+        &ui_json,
+        include_str!("../../tests/fixtures/webui/examples/error.security-unauthorized.json"),
+    );
     assert_eq!(ui_json["error"]["retryable"], false);
     assert!(ui_json["request_id"].as_str().is_some());
     let invalid = secured_request(
@@ -150,6 +160,13 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .is_none()
     );
+    let bytes = axum::body::to_bytes(hostile_origin.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-forbidden-origin.json"),
+    );
 
     let null_origin = secured_request(
         app.clone(),
@@ -162,6 +179,13 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
     )
     .await;
     assert_eq!(null_origin.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(null_origin.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-forbidden-origin.json"),
+    );
 
     let cross_site = secured_request(
         app.clone(),
@@ -174,6 +198,13 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
     )
     .await;
     assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(cross_site.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-forbidden-fetch.json"),
+    );
 
     let logs = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
@@ -198,7 +229,10 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
         .await
         .expect("body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("query error json");
-    assert_webui_error_schema(&json, "invalid_request", false);
+    assert_webui_error_fixture(
+        &json,
+        include_str!("../../tests/fixtures/webui/examples/error.security-query-credential.json"),
+    );
     assert!(!String::from_utf8_lossy(&body).contains("seeded-secret"));
     let captured_logs =
         String::from_utf8(logs.lock().expect("log buffer lock").clone()).expect("logs utf8");
@@ -217,6 +251,13 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
         .await
         .expect("router answers");
     assert_eq!(bad_host.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(bad_host.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-forbidden-host.json"),
+    );
 }
 
 #[tokio::test]
@@ -325,6 +366,13 @@ async fn secured_webui_bounds_sse_connections_until_response_drop() {
     )
     .await;
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let bytes = axum::body::to_bytes(second.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-capacity.json"),
+    );
     drop(first);
     let third = secured_request(
         app,
@@ -369,7 +417,10 @@ async fn secured_webui_rate_limits_sequential_control_requests() {
         .await
         .expect("rate body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("rate json");
-    assert_webui_error_schema(&json, "rate_limited", true);
+    assert_webui_error_fixture(
+        &json,
+        include_str!("../../tests/fixtures/webui/examples/error.security-rate.json"),
+    );
 }
 
 #[tokio::test]
@@ -386,6 +437,13 @@ async fn secured_webui_bounds_control_capacity_and_declared_body_size() {
     )
     .await;
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let bytes = axum::body::to_bytes(limited.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_webui_error_fixture(
+        &serde_json::from_slice(&bytes).unwrap(),
+        include_str!("../../tests/fixtures/webui/examples/error.security-capacity.json"),
+    );
 
     let app = secured_router_app_with_limits(32, 16);
     let oversized = app
@@ -411,7 +469,10 @@ async fn secured_webui_bounds_control_capacity_and_declared_body_size() {
         .await
         .expect("oversized body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("oversized json");
-    assert_webui_error_schema(&json, "payload_too_large", true);
+    assert_webui_error_fixture(
+        &json,
+        include_str!("../../tests/fixtures/webui/examples/error.security-body.json"),
+    );
 
     let chunked = secured_request(
         app,
@@ -432,5 +493,8 @@ async fn secured_webui_bounds_control_capacity_and_declared_body_size() {
         .await
         .expect("chunked body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("chunked json");
-    assert_webui_error_schema(&json, "payload_too_large", true);
+    assert_webui_error_fixture(
+        &json,
+        include_str!("../../tests/fixtures/webui/examples/error.security-body.json"),
+    );
 }

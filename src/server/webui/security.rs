@@ -18,7 +18,7 @@
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -33,6 +33,8 @@ use crate::server::router_lifecycle::{ErrorBody, ErrorEnvelope};
 const QUERY_CREDENTIAL_NAMES: &[&str] = &["api_key", "key", "token", "access_token", "auth"];
 
 mod policy;
+mod request;
+use request::{Decision, RequestKind, classify_request};
 pub(crate) mod startup;
 
 pub(crate) use policy::{
@@ -130,56 +132,6 @@ pub(crate) async fn webui_security_middleware(
         response = hold_permit_until_body_drop(response, permit);
     }
     response
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Decision {
-    kind: RequestKind,
-    control: bool,
-    sse: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestKind {
-    Public,
-    Private,
-    PrivatePreflight,
-}
-
-fn classify_request(policy: &WebUiSecurityPolicy, method: &Method, uri: &Uri) -> Decision {
-    let path = uri.path();
-    let relative = api_relative_path(policy, path);
-    let public_static = matches!(*method, Method::GET | Method::HEAD)
-        && path_matches_prefix(path, &policy.public_webui_prefix);
-    let public_health = matches!(*method, Method::GET | Method::HEAD)
-        && matches!(relative, Some("/" | "/health" | "/v1/health"));
-    let preflight = *method == Method::OPTIONS;
-    let legacy_reload = *method == Method::GET
-        && matches!(relative, Some("/models"))
-        && query_has_parameter(uri.query(), "reload");
-    let sse = matches!(relative, Some("/models/sse" | "/ui-api/v1/events"));
-    let control = !sse
-        && (legacy_reload
-            || matches!(relative, Some("/models"))
-                && (*method == Method::POST || *method == Method::DELETE)
-            || *method == Method::POST
-                && matches!(
-                    relative,
-                    Some("/models/load" | "/models/unload" | "/ui-api/v1/model-actions")
-                )
-            || matches!(relative, Some(path) if *method == Method::POST && path.starts_with("/ui-api/v1/operations/") && path.ends_with("/cancel"))
-            || matches!(relative, Some("/settings") if !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)));
-    Decision {
-        kind: if public_static || public_health {
-            RequestKind::Public
-        } else if preflight {
-            RequestKind::PrivatePreflight
-        } else {
-            RequestKind::Private
-        },
-        control,
-        sse,
-    }
 }
 
 fn validate_browser_metadata(

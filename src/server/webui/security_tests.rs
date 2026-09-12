@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::http::HeaderValue;
+use axum::http::{HeaderValue, Method};
 
 use super::startup::{WebUiListenKind, WebUiSecurityConfig, resolve_webui_security};
 use super::*;
@@ -153,4 +153,54 @@ fn allowed_origins_are_strict_origins() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("path or query"));
+}
+
+#[test]
+fn all_admin_mutations_are_control_limited_without_capping_data_plane() {
+    for prefix in ["", "/admin"] {
+        let policy = WebUiSecurityPolicy::with_prefixes_and_limits(
+            vec!["127.0.0.1:18037".into()],
+            vec![origin("http://127.0.0.1:18037")],
+            &format!("{prefix}/webui"),
+            if prefix.is_empty() { "/" } else { prefix },
+            1,
+            1,
+        )
+        .unwrap();
+        for (method, path) in [
+            (Method::POST, "/props"),
+            (Method::POST, "/slots/0?action=save"),
+            (Method::POST, "/lora-adapters"),
+            (Method::POST, "/v1/cache/reset"),
+            (Method::PATCH, "/v1/settings"),
+            (Method::POST, "/ui-api/v1/catalog/refresh"),
+            (Method::POST, "/ui-api/v1/downloads"),
+            (Method::POST, "/ui-api/v1/events"),
+            (Method::DELETE, "/ui-api/v1/model-removals"),
+            (Method::PATCH, "/ui-api/v1/future-admin-action"),
+        ] {
+            let uri = format!("{prefix}{path}").parse().unwrap();
+            assert!(
+                classify_request(&policy, &method, &uri).control,
+                "{method} {uri}"
+            );
+        }
+        for (method, path) in [
+            (Method::POST, "/v1/chat/completions"),
+            (Method::POST, "/v1/responses"),
+            (Method::POST, "/v1/chat/completions/control"),
+            (Method::POST, "/v1/responses/abc/cancel"),
+            (Method::POST, "/ui-api/v10/future-action"),
+            (Method::GET, "/props"),
+            (Method::HEAD, "/v1/settings"),
+            (Method::OPTIONS, "/ui-api/v1/downloads"),
+            (Method::GET, "/ui-api/v1/catalog"),
+        ] {
+            let uri = format!("{prefix}{path}").parse().unwrap();
+            assert!(
+                !classify_request(&policy, &method, &uri).control,
+                "{method} {uri}"
+            );
+        }
+    }
 }
