@@ -4839,6 +4839,13 @@ bool custom_kernels_available() {
     return mlxcel::custom_kernels_available();
 }
 
+// True when this backend has a BitLinear kernel port. Metal, CUDA and, since
+// issue #1862, ROCm. Kept apart from `custom_kernels_available` because kernels
+// are ported one at a time: ROCm has this one and not the rest.
+bool bitlinear_kernel_available() {
+    return mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::None;
+}
+
 // Top-p (nucleus) filtering.
 // Not compiled: MLX v0.31.x Scan primitive (cumsum) lacks output_shapes,
 // which causes "CumSum cannot infer output shapes" when used inside

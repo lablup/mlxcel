@@ -1794,13 +1794,13 @@ mod ffi {
         /// [out_features/4, in_features] uint8 (2-bit ternary, 4 rows/byte),
         /// scaled by `weight_scale[0]` (inverted unless linear_class is
         /// autobitlinear).
-        /// BitLinear ternary matmul, with Metal and CUDA kernel ports.
+        /// BitLinear ternary matmul, with Metal, CUDA and ROCm kernel ports.
         ///
-        /// Returns `Err` on a backend with neither, which today means ROCm and
-        /// CPU-only builds, instead of ending the process: the op has no graph
+        /// Returns `Err` on a backend with none of them, which today means a
+        /// CPU-only build, instead of ending the process: the op has no graph
         /// fallback, so before issue #1803 the `fast::*_kernel` throw crossed a
         /// `noexcept` extern and terminated. Callers that want to refuse early
-        /// should ask [`custom_kernels_available`].
+        /// should ask [`bitlinear_kernel_available`].
         fn bitlinear_matmul(
             x: &MlxArray,
             packed_weights: &MlxArray,
@@ -2106,6 +2106,14 @@ mod ffi {
         /// the two is what sent ROCm into `fast::cuda_kernel` and aborted the
         /// process.
         fn custom_kernels_available() -> bool;
+
+        /// True when this backend has a BitLinear kernel port, that is Metal,
+        /// CUDA or ROCm (issues #1803, #1862). Separate from
+        /// `custom_kernels_available` on purpose: kernels are ported one at a
+        /// time, so "this backend has fused kernels" and "this backend has
+        /// *this* kernel" stopped being the same question the moment ROCm got
+        /// its first port.
+        fn bitlinear_kernel_available() -> bool;
 
         /// True when the MLX Metal backend is available at runtime (macOS
         /// Apple Silicon). False on CUDA-only and CPU-only builds. Mirrors the
