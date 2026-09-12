@@ -1,0 +1,57 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+.material-glass { background: var(--material-glass-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-chrome); backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { .material-glass { background: var(--color-bg-elevated); } }
+.ds-button, .ds-icon-button, input, select, textarea { font: inherit; }
+.ds-button, .ds-icon-button { min-width: 32px; min-height: 32px; border: 1px solid var(--color-separator); color: var(--color-text); border-radius: 999px; background: var(--color-bg-elevated); transition: background var(--motion-fast), transform var(--motion-fast), border-color var(--motion-fast); }
+.ds-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); padding: 7px 14px; font-weight: 650; }
+.ds-icon-button { display: inline-grid; place-items: center; padding: 0 9px; }
+.ds-button:hover, .ds-icon-button:hover { background: var(--color-selection); }
+.ds-button:active, .ds-icon-button:active { transform: scale(0.985); }
+.ds-button:focus-visible, .ds-icon-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ds-button:disabled, .ds-icon-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.ds-button-primary { color: white; background: #2f6cff; border-color: #2f6cff; }
+.ds-button-danger { color: white; background: #c6352b; border-color: #c6352b; }
+.ds-button-ghost { background: transparent; }
+.ds-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin var(--motion-slow) linear infinite; }
+.ds-field { display: grid; gap: var(--space-2); color: var(--color-muted); }
+.ds-field > span { font-size: 0.9rem; font-weight: 650; }
+.ds-field input, .ds-field select, textarea { width: 100%; min-height: 36px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--color-separator); color: var(--color-text); background: var(--color-bg-elevated); }
+.ds-field small { color: var(--color-error); }
+.ds-status { display: inline-flex; align-items: center; min-height: 24px; gap: var(--space-1); padding: 3px 9px; border-radius: 999px; font-size: 0.82rem; font-weight: 700; border: 1px solid var(--color-separator); }
+.ds-status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--color-muted); }
+.ds-status[data-state="ready"] { color: var(--color-success); background: var(--color-success-bg); }
+.ds-status[data-state="failed"] { color: var(--color-error); background: var(--color-error-bg); }
+.ds-status[data-state="loading"]::before { animation: pulse var(--motion-slow) ease-in-out infinite alternate; }
+.ds-progress { display: grid; gap: var(--space-2); }
+.ds-progress [role="progressbar"] { height: 10px; overflow: hidden; border-radius: 999px; background: var(--color-bg-neutral); border: 1px solid var(--color-separator); }
+.ds-progress span { display: block; height: 100%; width: 48%; background: linear-gradient(90deg, #2f6cff, #7b61ff); border-radius: inherit; }
+.ds-progress span[data-progress="indeterminate"] { animation: slide var(--motion-slow) ease-in-out infinite alternate; }
+.ds-empty, .surface-card, .ds-inspector, .ds-banner, .ds-table { background: var(--material-content-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-card); border-radius: var(--radius-lg); }
+.ds-empty { display: grid; place-items: center; text-align: center; gap: var(--space-2); padding: var(--space-8); }
+.ds-empty div { width: 52px; height: 52px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-selection); color: var(--color-focus); font-size: 1.6rem; }
+.ds-empty h2, .ds-empty p, .ds-banner p { margin: 0; }
+.ds-banner { display: grid; gap: var(--space-2); padding: var(--space-4); color: var(--color-error); background: var(--color-error-bg); }
+.ds-banner[data-tone="warning"] { color: var(--color-warning); background: var(--color-warning-bg); }
+.ds-banner[data-tone="info"] { color: var(--color-text); background: var(--color-selection); }
+.ds-dialog { width: min(560px, calc(100vw - 32px)); color: var(--color-text); background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-xl); box-shadow: 0 30px 120px rgba(0,0,0,0.32); padding: 0; }
+.ds-dialog::backdrop { background: rgba(8, 10, 14, 0.42); }
+.ds-dialog header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
+.ds-dialog h2 { margin: 0; font-size: 1.1rem; }
+.ds-dialog > div { padding: var(--space-5); }
+.ds-tooltip-wrap { position: relative; display: inline-flex; }
+.ds-tooltip { position: absolute; z-index: 10; inset: auto auto calc(100% + 8px) 0; opacity: 0; pointer-events: none; width: max-content; max-width: 240px; padding: 6px 9px; border-radius: var(--radius-sm); color: var(--color-bg-elevated); background: var(--color-text); transition: opacity var(--motion-fast); }
+.ds-tooltip-wrap:focus-within .ds-tooltip, .ds-tooltip-wrap:hover .ds-tooltip { opacity: 1; }
+.ds-tabs { display: grid; gap: var(--space-4); }
+.ds-tabs [role="tablist"] { display: inline-flex; gap: var(--space-1); padding: var(--space-1); border: 1px solid var(--color-separator); border-radius: 999px; background: var(--color-bg-neutral); width: max-content; max-width: 100%; overflow: auto; }
+.ds-tabs [role="tab"] { min-height: 32px; border: 0; border-radius: 999px; padding: 6px 12px; color: var(--color-muted); background: transparent; font: inherit; font-weight: 650; }
+.ds-tabs [aria-selected="true"] { color: var(--color-text); background: var(--color-bg-elevated); box-shadow: inset 0 0 0 1px var(--color-separator); }
+.ds-inspector { align-self: start; padding: var(--space-5); min-width: 0; }
+.ds-inspector h2 { margin-top: 0; font-size: 1rem; }
+.ds-table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
+.ds-table th, .ds-table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--color-separator); }
+.ds-table tr:last-child td { border-bottom: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { to { opacity: 0.45; } }
+@keyframes slide { from { transform: translateX(-60%); } to { transform: translateX(120%); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition-duration: 1ms !important; } }
+:root[data-reduce-motion="true"] *, :root[data-reduce-motion="true"] *::before, :root[data-reduce-motion="true"] *::after { animation: none !important; transition-duration: 1ms !important; }
