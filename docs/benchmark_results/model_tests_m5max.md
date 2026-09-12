@@ -9,7 +9,7 @@ Compatibility and performance testing for mlxcel models on **MacBook Pro M5 Max 
 | **Hardware** | MacBook Pro M5 Max, 128GB RAM |
 | **OS** | macOS 26.6.2 (build 25G83) |
 | **mlxcel version** | 0.7.0-beta.1 (`mlxcel_version`) |
-| **Source revision** | `a50ff440` (`mlxcel_commit`) for the 2026-09-06 sweep and `0accedd9` for the 2026-09-09 rows; MLX pin `9a795735` (`mlx_commit`) throughout. The VLM pass and two re-checked text rows record `a50ff440-dirty`. That working tree is exactly `a50ff440` plus the diff committed as `34455e42`, so those rows are reproducible from `34455e42` and the rest from `a50ff440`. |
+| **Source revision** | `a50ff440` (`mlxcel_commit`) for the 2026-09-06 sweep and `0accedd9` for the 2026-09-09 rows; MLX pin `9a795735` (`mlx_commit`) throughout. The VLM pass and two re-checked text rows record `a50ff440-dirty`. That working tree is exactly `a50ff440` plus the diff committed as `34455e42`, so those rows are reproducible from `34455e42` and the rest from `a50ff440`. Eighteen rows are dated 2026-09-08 and were re-taken after two correctness fixes, so they carry their own revisions rather than `a50ff440`: seven record `3576d734`, and the remaining eleven `395fc3ba` (4), `bb29d17b` (3), `897a50f7` (2) and `f900a655` (2). The `3576d734` seven are the #1709 activation dtype set plus the #1710 pair, `phi-2-hf-4bit-mlx` and `stablelm-2-1_6b-chat-4bit`, which were re-measured once the f32 attention guard landed and are the reason both sit below their 2026-09-06 figures. |
 | **MLX version** | upstream main (via mlxcel-core; pinned commit `9a795735`) |
 | **mlx-lm baseline** | 0.31.3 (dev checkout https://github.com/ml-explore/mlx-lm, commit `ed1fca4`); not re-run for the 0.6.0 sweep, see note below |
 | **mlx-vlm baseline** | 0.6.17, re-run on 2026-09-07 (`benchmarks/pylm_m5max_vlm_2026-09-07.csv`), matching the version M1 Ultra recorded the same day. The harness resolves its interpreter to the repo-local `.venv-mlxlm` rather than the system Python, so `import mlx_vlm` in a bare shell can report a different and irrelevant version; read `baseline_version` from the CSV instead |
@@ -76,6 +76,12 @@ batched harnesses now agree on the condition.
 
 Nothing about those models changed. The old rows were latency samples wearing a
 throughput label.
+
+`phi-2-4bit`'s 2026-09-06 figure above is superseded as a current reading. The
+#1710 f32 attention guard landed two days later and moved it to 173.07, which is
+what the Phi Family table carries. The 181.80 is kept *here* because this table
+compares two measurement conditions against each other, and substituting a
+post-guard number would blend a condition change with a correctness fix.
 
 **Prefill is not comparable at all.** The prompt went from 6 tokens to 512, and
 `prefill_tok_s` at the longer length amortizes fixed per-call overhead over far
@@ -227,7 +233,7 @@ it.
 
 | Model | Test Model | Status | Prefill | Decode | vs M1 Ultra | Notes |
 |-------|------------|--------|---------|--------|-------------|-------|
-| phi-2 | phi-2-hf-4bit-mlx | ⚠️ | 5975.28 | 181.80 | **1.41x** | 1 token; (likely EOS) |
+| phi-2 | phi-2-hf-4bit-mlx | ✅ | 6802.24 | 173.07 | **1.34x** | f32 attention guard (#1710) |
 | phi-3-mini | Phi-3-mini-4k-instruct-4bit | ✅ | 6837.66 | 195.47 | **1.29x** |  |
 | phi-3.5-mini | Phi-3.5-mini-instruct-4bit | ✅ | 6829.00 | 191.42 | **1.31x** |  |
 | phi-3.5-moe | Phi-3.5-MoE-instruct-4bit | ✅ | 1955.69 | 112.54 | **1.50x** |  |
@@ -308,7 +314,7 @@ it.
 | internvl3 | internvl3-1b | ✅ | 41046.88 | 629.06 | **1.90x** |  |
 | smollm-135m | SmolLM-135M-Instruct-4bit | ✅ | 95618.27 | 812.22 | **2.19x** |  |
 | smollm3-3b | SmolLM3-3B-4bit | ✅ | 7475.02 | 226.48 | **1.76x** |  |
-| stablelm-1.6b | stablelm-2-1_6b-chat-4bit | ✅ | 16343.71 | 394.89 | **1.61x** |  |
+| stablelm-1.6b | stablelm-2-1_6b-chat-4bit | ✅ | 15864.14 | 283.30 | **1.34x** | f32 attention guard (#1710) |
 | starcoder2-3b | starcoder2-3b-4bit | ✅ | 7834.05 | 208.94 | **1.32x** |  |
 | pixtral-12b | pixtral-12b-4bit | ✅ | 2241.66 | 74.66 | **1.10x** | text-only |
 | paligemma2-3b | paligemma2-3b (6-bit) | ✅ | 7499.35 | 161.72 | **1.24x** | text-only |
@@ -623,18 +629,29 @@ text sweep on mlxcel 0.7.0-beta.1, with `BENCH_MEM_OVERHEAD_FACTOR=1.209`
 
 | Status | Count |
 |--------|-------|
-| ✅ Pass (measured decode) | 144 |
-| ⚠️ Partial (loads; slow path or no text output) | 6 |
+| ✅ Pass (measured decode) | 145 |
+| ⚠️ Partial (loads; slow path or no text output) | 5 |
 | ❌ Fail / OOM-skip | 4 |
 
-The ⚠️ set carries over from 2026-09-03 and was **not** re-derived this round.
-Three of the six were flagged for early EOS (`phi-2-4bit`,
-`falcon-mamba-7b-4bit`, `granite-4.1-8b-4bit`), and `--ignore-eos` makes early
-EOS unobservable by construction: every model now runs the full 128 tokens
-whether or not it wanted to stop. The remaining three are unaffected by the
-condition (`gemma-4-31b-it-nvfp4` and `llama-3.1-8b-bf16` have no fast kernel;
-`dots.ocr-4bit` loads and prefills but emits no text on a text-only prompt).
-Re-deriving the early-EOS flags needs a separate pass with EOS live.
+The ⚠️ set carries over from 2026-09-03 and was **not** re-derived at the
+2026-09-06 sweep. Three of the original six were flagged for early EOS
+(`phi-2-4bit`, `falcon-mamba-7b-4bit`, `granite-4.1-8b-4bit`), and
+`--ignore-eos` makes early EOS unobservable by construction: every model now
+runs the full 128 tokens whether or not it wanted to stop. The remaining three
+are unaffected by the condition (`gemma-4-31b-it-nvfp4` and `llama-3.1-8b-bf16`
+have no fast kernel; `dots.ocr-4bit` loads and prefills but emits no text on a
+text-only prompt).
+
+One of the three early-EOS flags has since been re-derived. `phi-2-4bit` was
+re-run on 2026-09-12 with EOS live (`bench_decode.sh --no-ignore-eos`) at
+`39c597b0`, and it does not reproduce: the checkpoint generates 14 tokens on the
+old 7-token chat prompt, runs the full 128 on the pp512 prompt, and its text is
+coherent rather than the `!` run a NaN row decodes to. The flag dated from
+before the #1710 f32 attention guard, when this model went NaN at layer 29 of
+32, so a single token was the visible end of a broken forward pass and not an
+EOS-handling defect. That is why it now reads ✅, and why these counts are 145/5
+rather than 144/6. `falcon-mamba-7b-4bit` and `granite-4.1-8b-4bit` are still
+underived and still need a pass with EOS live.
 
 **How 154 table rows reconcile with 176 enumerated directories.** The sweep walks
 every directory in `models/`, but the tables above deliberately do not carry a row
@@ -1098,7 +1115,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 | qwen3-0.6b-4bit | Full-budget raw prompt stays at ~93% of mlx-lm; sub-95% decode gap | Medium |
 | gemma-4-31b-it-nvfp4 | Now decodes at ~15.6 tok/s via the native NVFP4 Metal path (was ~7 tok/s at 0.2.1); still about half the 4-bit rate, so flagged ⚠️ | Low |
 | falcon-mamba-7b-4bit | Generic chat prompt exits after `<\|im_end\|>`; use a non-chat code prompt for perf checks | Low |
-| phi-2-4bit | Generates only 1 token — likely EOS handling | Low |
+| phi-2-4bit | Resolved, do not re-file. The "generates only 1 token" reading predates the #1710 f32 attention guard: without it the model went NaN at layer 29 of 32 and every later token was the argmax of a NaN row. Re-checked on 2026-09-12 at `39c597b0` with EOS live, it generates 14 tokens on the old 7-token chat prompt and the full 128 on the pp512 prompt, with coherent text. Not an EOS-handling defect | Resolved |
 | llama-3.1-8b-bf16 | bf16 → f16 conversion path is functional but slow | Low |
 
 ## Notes
@@ -1107,6 +1124,7 @@ increase and 96% of mlx-lm's 555.43 tok/s on the same prompt.
 - Performance measured with `mlxcel-bench-decode` (model load, warmup, and
   measured pass in one process).
 - vs M1 Ultra ratios are M5 Max decode divided by the 2026-07-12 `benchmarks/metal_m1ultra_2026-07-12.csv` decode (same mlxcel 0.4.0-rc.1 / MLX pin `57c66cac` / cooldown-30 conditions). Rows show `-` where the M1 Ultra sweep did not measure the model.
+- The two #1710 rows are the exception, because the guard moved both hosts and a ratio against an M1 Ultra number taken before it would be meaningless. `phi-2` 1.34x is 173.07 over 128.76 and `stablelm-1.6b` 1.34x is 283.30 over 211.05, with the divisors from `benchmarks/metal_m1ultra_2026-09-08_single_phi-2-4bit.csv` and `benchmarks/metal_m1ultra_2026-09-08_single_stablelm-1.6b-4bit.csv`. Both are pp512/tg128 at `3576d734-dirty` with MLX pin `9a795735`, so numerator and denominator share the condition, the guard and the pin. Note that issue #1710's body quotes 129.93 and 209.32 for these M1 Ultra rows; the committed CSVs read 128.76 and 211.05, and the M1 Ultra document uses the committed values, so these ratios do too.
 - The 2026-07-11/12 sweep used `--cooldown 30 --big-cooldown 30`. Without cooldowns, heat accumulated over the larger 0.4.0-rc.1 model set thermally throttles the mid-sweep Qwen block (see Test Environment). Re-run full sweeps on this host with cooldowns.
 - Prefill and decode tok/s reported separately.
 - Current per-model values are the 2026-06-15 full sweep on mlxcel 0.2.1 (MLX pin `a6ec7123`): 151 text models (`bench_decode.sh all`) + 150 VLM-mode (`all --vlm`), bare run (pre-warm on, no cooldown). Source CSVs: `benchmarks/metal_m5max_2026-06-15.csv` and `benchmarks/metal_m5max_vlm_2026-06-15.csv`.
