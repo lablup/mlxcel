@@ -201,6 +201,30 @@ power-of-two head dimension for the production path. Models with unsupported
 head dimensions must either reject TurboQuant for that cache path or use a
 family-specific fallback; do not silently pad without a quality test.
 
+## WHT scaling, and which scale a quantization target wants
+
+`mlxcel_core::wht` leaves the scale to MLX, which applies `1/sqrt(N)`. That makes
+the transform orthonormal and an involution, so `wht(wht(x))` returns `x` and a
+codebook fitted on the rotated values sees the same magnitudes the unrotated
+ones had. Every current caller wants exactly this, and a backend port that
+hardcodes a different scale is wrong: measure the forward norm ratio, which is 1
+for `1/sqrt(N)` and `sqrt(N)` for an unscaled matrix, rather than the round trip,
+which cannot tell the two apart. `examples/wht_numeric_probe` reports both.
+
+`mlxcel_core::wht_scaled` exists for the case where the orthonormal factor cannot
+be carried for free, which is rotation feeding a block-scaled low-precision
+format. What the format's scale can represent decides where the factor belongs:
+
+| Target | Scale storage | Where `1/sqrt(N)` goes |
+|---|---|---|
+| `mxfp8`, `mxfp4` | `E8M0` block scale, powers of two | Folds exactly only when `log2(N)` is even: head_dim 64 (`1/8`) and 256 (`1/16`) yes, 128 (`2^-3.5`) no |
+| `nvfp4` | `FP8` block scale plus an `FP32` per-tensor global scale | Absorbed by the global scale, at the cost of range |
+| `fp8` `E4M3` | Saturates at 448 | Scale and saturation check are one decision: an unscaled transform grows magnitudes by up to `sqrt(N)`, 11.3x at head_dim 128 |
+
+The failure this table prevents is the one lablup/mlxcel#1769 and the pin bump in
+lablup/mlxcel#1772 already cost once: `E8M0` rounding saturated block maxima by up
+to 29 percent, and nothing downstream said so.
+
 ## MLA latent caches are FP16 only
 
 `glm4_moe_lite`, `deepseek_v3`, `deepseek_v32` (also spelled `deepseek_v3.2`),
