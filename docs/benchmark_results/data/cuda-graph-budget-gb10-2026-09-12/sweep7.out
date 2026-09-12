@@ -1,0 +1,44 @@
+acquired GB10 GPU lock for 1798
+IDLE load=0.41 1.89 2.39 1/922 94905 2026-09-12T10:16:52+09:00
+PHASE_START ab 2026-09-12T10:16:52+09:00 load=0.41 1.89 2.39 1/921 94908 nvrm=0
+[warmup 0] default dec=35.43 rc=0
+[round 0] default dec=37.22 pre=282.49 ptok=112 peak=22.04 load1=0.90 rc=0
+[round 0] restore dec=32.31 pre=252.29 ptok=112 peak=21.66 load1=0.86 rc=0
+[round 0] both dec=37.63 pre=264.48 ptok=112 peak=22.03 load1=0.83 rc=0
+[round 1] restore dec=31.88 pre=254.7 ptok=112 peak=21.66 load1=1.02 rc=0
+[round 1] both dec=37.64 pre=278.26 ptok=112 peak=22.03 load1=1.00 rc=0
+[round 1] default dec=37.71 pre=269.28 ptok=112 peak=22.03 load1=1.05 rc=0
+[round 2] both dec=37.24 pre=271.19 ptok=112 peak=22.03 load1=1.13 rc=0
+[round 2] default dec=37.33 pre=274.53 ptok=112 peak=22.03 load1=1.09 rc=0
+[round 2] restore dec=31.09 pre=252.97 ptok=112 peak=21.66 load1=1.00 rc=0
+[warmup 0] default dec=66.28 rc=0
+[round 0] default dec=66.85 pre=1052.82 ptok=111 peak=2.84 load1=0.91 rc=0
+[round 0] restore dec=65.58 pre=1020.83 ptok=111 peak=2.87 load1=0.85 rc=0
+[round 1] restore dec=66.46 pre=1079.21 ptok=111 peak=2.82 load1=0.72 rc=0
+[round 1] default dec=66.7 pre=1071.14 ptok=111 peak=2.84 load1=0.61 rc=0
+[round 2] default dec=66.9 pre=1071.67 ptok=111 peak=2.87 load1=0.61 rc=0
+[round 2] restore dec=67.04 pre=1039.31 ptok=111 peak=2.85 load1=0.67 rc=0
+PHASE_END ab 2026-09-12T10:24:02+09:00 load=0.69 1.11 1.83 1/887 99648 nvrm=0
+IDLE load=0.35 0.97 1.75 1/887 99768 2026-09-12T10:24:42+09:00
+PHASE_START startup 2026-09-12T10:24:42+09:00 load=0.35 0.97 1.75 1/886 99771 nvrm=0
+== generate laguna-xs-2.1-nvfp4 (no env)
+CUDA compute capability 12.1 (sm_121); compiled for [121a] (cubin)
+CUDA graph budget: MLX_MAX_OPS_PER_BUFFER=100 MLX_MAX_MB_PER_BUFFER=1000 applied for model_type laguna on sm_121 (#1798); an operator-set value wins per variable
+[Generated 4 tokens in 0.21s = 18.89 tok/s]
+== generate laguna-xs-2.1-nvfp4 (operator MLX_MAX_OPS_PER_BUFFER=20 only)
+CUDA graph budget: MLX_MAX_MB_PER_BUFFER=1000 applied for model_type laguna on sm_121 (#1798); an operator-set value wins per variable
+== generate laguna-xs-2.1-nvfp4 (operator both restored)
+0
+== generate qwen3.5-4b-4bit (no env)
+CUDA compute capability 12.1 (sm_121); compiled for [121a] (cubin)
+[Generated 4 tokens in 0.19s = 21.08 tok/s]
+== generate qwen3.5-4b-4bit (operator MLX_MAX_OPS_PER_BUFFER=20 only)
+== generate qwen3.5-4b-4bit (operator both restored)
+0
+== server laguna (no env)
+2026-09-12T01:25:27.769438Z  INFO mlxcel::server::startup: CUDA graph budget: MLX_MAX_OPS_PER_BUFFER=100 MLX_MAX_MB_PER_BUFFER=1000 applied for model_type laguna on sm_121 (#1798); an operator-set value wins per variable budget=Some(AppliedCudaGraphBudget { budget: CudaGraphBudget { max_ops: 100, max_mb: 1000 }, model_type: "laguna", set: [("MLX_MAX_OPS_PER_BUFFER", 100), ("MLX_MAX_MB_PER_BUFFER", 1000)] })
+== server qwen3.5-4b (no env)
+0
+PHASE_END startup 2026-09-12T10:25:48+09:00 load=0.82 1.00 1.71 2/881 100316 nvrm=0
+SWEEP7_DONE
+released GB10 GPU lock

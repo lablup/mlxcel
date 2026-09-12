@@ -164,6 +164,50 @@ Under `both` at block 4 the drafter's host build falls from 12.9 to 7.6 ms per r
 
 Graphs off is faster still on this arm (41.28 tok/s, drafter host build 7.7 ms, device sync 45.7 ms), as #1799 found at block 8: the multi-row verify gains nothing from capture. That is a property of the speculative path and is out of scope here. On the classic arm, which this issue is about, graphs off also beats Laguna's default (+11% here, the #1799 finding) but not `both` (32.57 against 33.80 through the CLI, 33.79 against 37.60 through `mlxcel-bench-decode`), and it costs 3 to 15% of classic decode on every other model measured (gpt-oss -3%, qwen3-30b-a3b -5%, Llama -6%, Qwen 3.5 4B -10%, gemma-4-26b-a4b -11%, qwen3.5-35b-a3b -15%), so it is not a default candidate either.
 
+## Does the shipped default actually reach the raised budget? (idle host, n = 3, same binary)
+
+Every table above was taken with the policy module compiled but not called, so every arm was MLX's own behaviour plus environment variables. That measures the knob, not the product. This section measures the product: the same binaries as the tables above, but with `apply_cuda_graph_budget_default` wired into `main` (`src/main.rs`, `src/bin/mlx_server.rs`, `src/bin/bench_decode.rs`, `src/bin/speculative_bench.rs`), run after a reboot on an idle host with the GPU held, three arms that differ only in what the operator sets:
+
+- **`default`**: no `MLX_MAX_*` variable set at all, which is how a user runs it. If the policy works, this lands on 100 / 1000.
+- **`restore`**: `MLX_MAX_OPS_PER_BUFFER=20 MLX_MAX_MB_PER_BUFFER=25`, the operator putting MLX's own cc-12.1 table values back. This is the stock-MLX control, and it also tests the env-wins contract in the direction that matters, an operator turning the default off.
+- **`both`**: `MLX_MAX_OPS_PER_BUFFER=100 MLX_MAX_MB_PER_BUFFER=1000` set explicitly, the arm every table above calls `both`.
+
+`laguna-xs-2.1-nvfp4` is in the allowlist; `qwen3.5-4b-4bit` (dense, `model_type` `qwen3_5`) is not and is the negative control: for it all three arms must be the same run.
+
+### `laguna-xs-2.1-nvfp4` (allowlisted), `mlxcel-bench-decode`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 112 | 37.42 (37.22 to 37.71) |  | 5345 | 406.8 (396.5 to 415.9) |  | 275 | 22.03 (22.03 to 22.04) | 0.90 to 1.09 | 1 of 3 |
+| restore | 3 | 112 | 31.76 (31.09 to 32.31) | -15.1% | 6299 | 442.1 (439.7 to 443.9) | +8.7% | 253 | 21.66 (21.66 to 21.66) | 0.86 to 1.02 | 0 of 3 |
+| both | 3 | 112 | 37.50 (37.24 to 37.64) | +0.2% | 5333 | 413.0 (402.5 to 423.5) | +1.5% | 271 | 22.03 (22.03 to 22.03) | 0.83 to 1.13 | 0 of 3 |
+
+`default` and `both` overlap across their whole ranges (37.22 to 37.71 against 37.24 to 37.64) and both are disjoint from `restore` (31.09 to 32.31), which is +17.8% for the shipped default over stock MLX. The MLX peak column is an independent fingerprint of which budget was in force and does not depend on timing at all: 22.03 GB on `default` and `both`, 21.66 GB on `restore`, with no overlap in either direction. `restore` also reproduces the pre-wiring `default` row of the first table (31.76 against 32.02, 21.66 GB against 21.66 GB), which is the other half of the check: the operator can put the old behaviour back exactly.
+
+### `qwen3.5-4b-4bit` (not allowlisted), `mlxcel-bench-decode`
+
+| config | n | prompt tok | decode tok/s mean (min to max) | vs default | decode ms/200 tok | prefill ms mean (min to max) | vs default | prefill tok/s | MLX peak GB (min to max) | load1 (min to max) | CI job during run |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 3 | 111 | 66.82 (66.70 to 66.90) |  | 2993 | 104.2 (103.6 to 105.4) |  | 1065 | 2.85 (2.84 to 2.87) | 0.61 to 0.91 | 0 of 3 |
+| restore | 3 | 111 | 66.36 (65.58 to 67.04) | -0.7% | 3014 | 106.1 (102.8 to 108.7) | +1.8% | 1046 | 2.85 (2.82 to 2.87) | 0.67 to 0.85 | 0 of 3 |
+
+Overlapping ranges, identical peak memory, and both rows sit on the pre-wiring `default` row (67.38) rather than its `both` row (70.03). On the same device, in the same binary, one checkpoint moves and the other does not: what fires the default is the allowlist, not sm_121.
+
+### The applied budget at startup
+
+The same three arms through `mlxcel generate` and `mlxcel-server`, reading the startup lines rather than the clock (full transcript in `data/.../sweep7.out`):
+
+| binary | checkpoint | operator sets | startup line |
+|---|---|---|---|
+| `mlxcel generate` | laguna | nothing | `CUDA graph budget: MLX_MAX_OPS_PER_BUFFER=100 MLX_MAX_MB_PER_BUFFER=1000 applied for model_type laguna on sm_121 (#1798); an operator-set value wins per variable` |
+| `mlxcel generate` | laguna | `MLX_MAX_OPS_PER_BUFFER=20` | `CUDA graph budget: MLX_MAX_MB_PER_BUFFER=1000 applied for model_type laguna on sm_121 (#1798); ...` |
+| `mlxcel generate` | laguna | both | none |
+| `mlxcel generate` | qwen3.5-4b | nothing, ops only, both | none in any of the three |
+| `mlxcel-server` | laguna | nothing | `INFO mlxcel::server::startup: CUDA graph budget: MLX_MAX_OPS_PER_BUFFER=100 MLX_MAX_MB_PER_BUFFER=1000 applied for model_type laguna on sm_121 (#1798); ...` with the `AppliedCudaGraphBudget` record attached |
+| `mlxcel-server` | qwen3.5-4b | nothing | none |
+
+The second row is the per-variable half of the env-wins contract: with only the op budget set by hand, the policy fills in the byte budget and leaves the op budget alone. The third and fourth rows are the whole-variable half, and the last two are the same allowlist gate on the serving path.
+
 ## Batched serving (`mlxcel-server --max-batch-size 8`, concurrency 1, 4, 8; idle host, same binary)
 
 One server per (arm, round); the concurrency-1 level is also the server's warm-up. Laguna's `supports_batching()` returns false (`src/models/laguna.rs:650`, its mixed full and sliding caches are not per-sequence isolated), so on Laguna the scheduler serializes concurrent requests: its aggregate stays at the single-stream rate at every level and TTFT grows with the queue (11 s at 4, 26 s at 8). Those rows are therefore a serialized single-stream workload through the server, not a B > 1 measurement; the B > 1 rows are qwen3-30b-a3b, which does batch (per-request decode 79 to 21 to 9 tok/s as the batch fills while the aggregate rises). **The qwen3-30b-a3b arms are partial** (default n = 1, `both` n = 2, `nograph` n = 1): the sweep was stopped by the host-protection halt described below, mid round 1, before its third round.
