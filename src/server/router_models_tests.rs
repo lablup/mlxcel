@@ -882,6 +882,87 @@ fn rescan_preserves_entry_that_becomes_reserved_after_snapshot_clone() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn begin_load_reservation_is_atomic_with_current_registry_entry() {
+    let cache_root = temp_models_dir("load-current-reservation");
+    add_fake_model(&cache_root.join("mlx-community"), "atomic");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root, FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        4,
+        true,
+    ));
+    let entry = pool.get("mlx-community/atomic").expect("entry");
+
+    let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+    let (release_checked_tx, release_checked_rx) = std::sync::mpsc::channel();
+    let release_checked_rx = Arc::new(std::sync::Mutex::new(release_checked_rx));
+    pool.set_load_current_check_before_reservation_hook(Some(Arc::new(move || {
+        checked_tx.send(()).expect("notify current check");
+        release_checked_rx
+            .lock()
+            .expect("release current-check mutex")
+            .recv()
+            .expect("release current-check hook");
+    })));
+
+    let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+    let (release_reserved_tx, release_reserved_rx) = std::sync::mpsc::channel();
+    let release_reserved_rx = Arc::new(std::sync::Mutex::new(release_reserved_rx));
+    pool.set_load_after_reservation_hook(Some(Arc::new(move || {
+        reserved_tx.send(()).expect("notify reservation");
+        release_reserved_rx
+            .lock()
+            .expect("release reservation mutex")
+            .recv()
+            .expect("release reservation hook");
+    })));
+
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    pool.set_rescan_after_snapshot_hook(Some(Arc::new(move || {
+        snapshot_tx.send(()).expect("notify stale snapshot clone");
+    })));
+
+    let load_pool = pool.clone();
+    let load_task = tokio::spawn(async move { load_pool.begin_load("mlx-community/atomic").await });
+    checked_rx
+        .recv()
+        .expect("begin_load reached current-check/reservation boundary");
+
+    let rescan_pool = pool.clone();
+    let rescan_thread = std::thread::spawn(move || rescan_pool.rescan());
+    snapshot_rx.recv().expect("rescan cloned stale snapshot");
+    release_checked_tx
+        .send(())
+        .expect("release current-check hook");
+    reserved_rx.recv().expect("load marked reservation");
+    rescan_thread
+        .join()
+        .expect("rescan thread")
+        .expect("rescan succeeds");
+
+    let current = pool.get("mlx-community/atomic").expect("current entry");
+    assert!(
+        Arc::ptr_eq(&entry, &current),
+        "rescan must not replace the entry between the final current check and the load reservation"
+    );
+    assert!(
+        current.reserves_capacity(),
+        "entry must be reserved before rescan is allowed to publish its rebuilt registry"
+    );
+
+    pool.set_rescan_after_snapshot_hook(None);
+    pool.set_load_current_check_before_reservation_hook(None);
+    pool.set_load_after_reservation_hook(None);
+    release_reserved_tx
+        .send(())
+        .expect("release reservation hook");
+    let _ = load_task.await.expect("load task");
+}
+
 #[test]
 fn recreated_cache_entry_keeps_model_id_but_gets_fresh_revision() {
     let cache_root = temp_models_dir("aba-revision");

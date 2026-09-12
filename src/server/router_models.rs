@@ -65,6 +65,10 @@ pub const ROUTER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 type RescanAfterSnapshotHook = Arc<dyn Fn() + Send + Sync + 'static>;
 #[cfg(test)]
 type ModelActionBeforeExecuteHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+type LoadCurrentCheckBeforeReservationHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+type LoadAfterReservationHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// b10621 `server_model_status` (the subset an in-process pool reaches;
 /// `downloaded` is upstream's "erase on next reload" marker, which the
@@ -305,6 +309,11 @@ pub struct RouterPool {
     rescan_after_snapshot_hook: Mutex<Option<RescanAfterSnapshotHook>>,
     #[cfg(test)]
     model_action_before_execute_hook: Mutex<Option<ModelActionBeforeExecuteHook>>,
+    #[cfg(test)]
+    load_current_check_before_reservation_hook:
+        Mutex<Option<LoadCurrentCheckBeforeReservationHook>>,
+    #[cfg(test)]
+    load_after_reservation_hook: Mutex<Option<LoadAfterReservationHook>>,
 }
 
 /// Why a name failed to resolve, load, download, or be removed.
@@ -391,6 +400,10 @@ impl RouterPool {
             rescan_after_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
             model_action_before_execute_hook: Mutex::new(None),
+            #[cfg(test)]
+            load_current_check_before_reservation_hook: Mutex::new(None),
+            #[cfg(test)]
+            load_after_reservation_hook: Mutex::new(None),
         };
         pool.rescan()?;
         Ok(pool)
@@ -413,6 +426,25 @@ impl RouterPool {
             .model_action_before_execute_hook
             .lock()
             .expect("model action hook mutex poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_load_current_check_before_reservation_hook(
+        &self,
+        hook: Option<LoadCurrentCheckBeforeReservationHook>,
+    ) {
+        *self
+            .load_current_check_before_reservation_hook
+            .lock()
+            .expect("load current-check hook mutex poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_load_after_reservation_hook(&self, hook: Option<LoadAfterReservationHook>) {
+        *self
+            .load_after_reservation_hook
+            .lock()
+            .expect("load after-reservation hook mutex poisoned") = hook;
     }
 
     /// Build the per-model [`super::config::ServerConfig`] by overlaying the
@@ -679,16 +711,20 @@ impl RouterPool {
         entry: &Arc<RouterModelEntry>,
         expectation: Option<&LoadEntryExpectation>,
     ) -> Result<(), RouterPoolError> {
-        let current = self
+        let entries = self
             .entries
             .read()
-            .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?
-            .get(&entry.name)
-            .cloned();
-        if !current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, entry))
-        {
+            .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?;
+        Self::ensure_entry_is_current_in_registry(&entries, entry, expectation)
+    }
+
+    fn ensure_entry_is_current_in_registry(
+        entries: &BTreeMap<String, Arc<RouterModelEntry>>,
+        entry: &Arc<RouterModelEntry>,
+        expectation: Option<&LoadEntryExpectation>,
+    ) -> Result<(), RouterPoolError> {
+        let current = entries.get(&entry.name);
+        if !current.is_some_and(|current| Arc::ptr_eq(current, entry)) {
             return Err(RouterPoolError::OperationRejected(stale_catalog_error(
                 expectation.map(|e| e.revision),
                 entry.lifecycle.revision(),
@@ -703,6 +739,29 @@ impl RouterPool {
             }
             reject_stale_revision(entry, Some(expectation.revision))?;
         }
+        Ok(())
+    }
+
+    fn mark_loading_if_current(
+        &self,
+        entry: &Arc<RouterModelEntry>,
+        expectation: Option<&LoadEntryExpectation>,
+    ) -> Result<(), RouterPoolError> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| RouterPoolError::LoadFailed("router pool poisoned".into()))?;
+        Self::ensure_entry_is_current_in_registry(&entries, entry, expectation)?;
+        #[cfg(test)]
+        if let Some(hook) = self
+            .load_current_check_before_reservation_hook
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+        {
+            hook();
+        }
+        entry.lifecycle.mark_loading();
         Ok(())
     }
 
@@ -945,9 +1004,17 @@ impl RouterPool {
             }
         }
 
-        self.ensure_entry_is_current(&entry, expectation)?;
-        entry.lifecycle.mark_loading();
+        self.mark_loading_if_current(&entry, expectation)?;
         self.notify_lifecycle(&entry);
+        #[cfg(test)]
+        if let Some(hook) = self
+            .load_after_reservation_hook
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+        {
+            hook();
+        }
 
         // Construct the sub-app. The provider constructor returns fast (the
         // weights load on the worker thread), which is what makes `loading`
