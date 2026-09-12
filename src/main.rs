@@ -2825,7 +2825,11 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Tune(args) => args.model.as_deref(),
         Commands::Inspect(args) => Some(args.model.as_path()),
         Commands::Detect(args) => Some(args.model.as_path()),
-        Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
+        Commands::List(_)
+        | Commands::Arch(_)
+        | Commands::Download(_)
+        | Commands::Rm(_)
+        | Commands::SplitMtp(_) => None,
     }
 }
 
