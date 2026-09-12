@@ -831,17 +831,13 @@ async fn ui_events(State(state): State<RouterServerState>, headers: HeaderMap) -
                     (replay, receiver, coordinator),
                 ));
             }
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        return Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let event = coordinator.local_reset_event("gap", ResetEventKind::Gap);
-                        return Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)));
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            match receiver.recv().await {
+                Ok(event) => Some((Ok(event_to_sse(event)), (replay, receiver, coordinator))),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let event = coordinator.local_reset_event("gap", ResetEventKind::Gap);
+                    Some((Ok(event_to_sse(event)), (replay, receiver, coordinator)))
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             }
         },
     );
