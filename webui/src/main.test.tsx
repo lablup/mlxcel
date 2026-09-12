@@ -4,15 +4,15 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import stringsFixture from '../../tests/fixtures/webui/strings.json';
 import { App } from './app';
-import { applyAppearance, DEFAULT_APPEARANCE } from './design-system/preferences';
+import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, saveAppearance } from './design-system/preferences';
 import { entries } from './i18n/catalog';
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
 beforeEach(() => {
-  HTMLDialogElement.prototype.showModal = vi.fn(function showModal(this: HTMLDialogElement) { this.open = true; });
-  HTMLDialogElement.prototype.close = vi.fn(function close(this: HTMLDialogElement) { this.open = false; this.dispatchEvent(new Event('close')); });
+  HTMLDialogElement.prototype.showModal = vi.fn(function showModal(this: HTMLDialogElement) { this.setAttribute('open', ''); });
+  HTMLDialogElement.prototype.close = vi.fn(function close(this: HTMLDialogElement) { this.removeAttribute('open'); this.dispatchEvent(new Event('close')); });
   localStorage.clear();
   window.history.replaceState(null, '', '/webui/#models');
   host = document.createElement('div');
@@ -22,8 +22,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   act(() => root?.unmount());
   host?.remove();
+  document.documentElement.removeAttribute('style');
+  document.documentElement.dataset.theme = '';
   root = null;
   host = null;
 });
@@ -33,7 +36,8 @@ function renderApp(): void {
 }
 
 function keydown(key: string, init: KeyboardEventInit = {}): void {
-  window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }));
+  const target = document.activeElement instanceof HTMLElement ? document.activeElement : window;
+  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }));
 }
 
 describe('mlxcel WebUI shell', () => {
@@ -43,42 +47,78 @@ describe('mlxcel WebUI shell', () => {
     expect(url.hash).toBe('#models');
   });
 
-  it('opens the command palette with Cmd/Ctrl+K and restores focus on Escape', () => {
+  it('opens the command palette with Cmd/Ctrl+K and restores focus on Escape', async () => {
     renderApp();
     const command = document.querySelector<HTMLButtonElement>('[data-testid="toolbar-command"]');
     command?.focus();
     act(() => keydown('k', { metaKey: true }));
     expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(true);
-    act(() => document.querySelector<HTMLButtonElement>('[data-testid="dialog-close"]')?.click());
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="command-dialog"] [data-testid="dialog-close"]')?.click());
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
     expect(document.activeElement).toBe(command);
+  });
+
+  it('keeps overlays mutually exclusive and suppresses shortcuts inside modals', async () => {
+    renderApp();
+    act(() => keydown('k', { metaKey: true }));
+    expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    act(() => keydown('?'));
+    expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(true);
+    expect(document.querySelector('[data-testid="help-dialog"]')?.hasAttribute('open')).toBe(false);
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="command-dialog"] [data-testid="dialog-close"]')?.click());
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    document.body.focus();
+    act(() => keydown('?'));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(document.querySelector('[data-testid="help-dialog"]')?.hasAttribute('open')).toBe(true);
+    act(() => keydown('k', { metaKey: true }));
+    expect(document.querySelector('[data-testid="help-dialog"]')?.hasAttribute('open')).toBe(true);
+    expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(false);
   });
 
   it('moves navigation with brackets only when the sidebar owns focus', () => {
     renderApp();
     const navModels = document.querySelector<HTMLAnchorElement>('[data-testid="nav-models"]');
     navModels?.focus();
-    navModels?.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true }));
+    act(() => navModels?.dispatchEvent(new KeyboardEvent('keydown', { key: ']', bubbles: true })));
     expect(window.location.hash).toBe('#chat');
+    document.querySelector<HTMLButtonElement>('[data-testid="toolbar-command"]')?.focus();
     act(() => keydown(']'));
     expect(window.location.hash).toBe('#chat');
   });
 
-  it('does not open global overlays from editable fields or IME composition', () => {
+  it('does not open global overlays from editable fields, IME composition, or Alt chords', () => {
     renderApp();
-    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-chat"]')?.click());
-    const textarea = document.querySelector('textarea');
-    textarea?.focus();
-    textarea?.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }));
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-gallery"]')?.click());
+    const input = document.querySelector<HTMLInputElement>('[data-testid="gallery-field"]');
+    input?.focus();
+    act(() => keydown('k', { metaKey: true }));
     expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(false);
     act(() => keydown('?', { isComposing: true }));
+    act(() => keydown('?', { altKey: true }));
     expect(document.querySelector('[data-testid="help-dialog"]')?.hasAttribute('open')).toBe(false);
   });
 
   it('applies appearance through data attributes without inline style', () => {
-    applyAppearance(document.documentElement, { ...DEFAULT_APPEARANCE, glassIntensity: 71, reduceTransparency: true, highContrast: true });
+    applyAppearance(document.documentElement, { ...DEFAULT_APPEARANCE, glassIntensity: 71, reduceTransparency: true, highContrast: 'on' });
     expect(document.documentElement.dataset.glassIntensity).toBe('71');
     expect(document.documentElement.dataset.material).toBe('opaque');
+    expect(document.documentElement.dataset.highContrast).toBe('on');
     expect(document.documentElement.getAttribute('style')).toBeNull();
+  });
+
+  it('keeps appearance usable when storage is invalid or unavailable', () => {
+    localStorage.setItem('mlxcel.webui.appearance', '[]');
+    expect(loadAppearance()).toEqual(DEFAULT_APPEARANCE);
+    localStorage.setItem('mlxcel.webui.appearance', '{');
+    expect(loadAppearance()).toEqual(DEFAULT_APPEARANCE);
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new DOMException('blocked', 'SecurityError'); });
+    expect(loadAppearance()).toEqual(DEFAULT_APPEARANCE);
+    vi.restoreAllMocks();
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError'); });
+    expect(() => saveAppearance(DEFAULT_APPEARANCE)).not.toThrow();
   });
 
   it('keeps the checked string fixture synchronized with typed keys', () => {

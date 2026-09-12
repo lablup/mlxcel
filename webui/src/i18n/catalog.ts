@@ -113,6 +113,22 @@ export type StringKey =
   | 'gallery.issue'
   | 'gallery.hover_focus'
   | 'gallery.download'
+  | 'toolbar.menu'
+  | 'models.status.loading'
+  | 'models.status.draining'
+  | 'models.status.unloading'
+  | 'settings.browser_only'
+  | 'settings.browser_only.body'
+  | 'settings.high_contrast.system'
+  | 'settings.high_contrast.on'
+  | 'settings.high_contrast.off'
+  | 'state.schema_mismatch.title'
+  | 'state.schema_mismatch.body'
+  | 'common.reload'
+  | 'gallery.field.repo_hint'
+  | 'gallery.lifecycle.samples'
+  | 'gallery.sample.caption'
+  | 'gallery.sample.label'
   | 'gallery.delete_token'
 ;
 
@@ -130,7 +146,8 @@ export const entries: Entry[] = [
   { key: 'nav.home', en: 'mlxcel home', ko: 'mlxcel 홈', test_id: 'nav-home' },
   { key: 'toolbar.command', en: 'Command', ko: '명령', test_id: 'toolbar-command' },
   { key: 'toolbar.help', en: 'Keyboard help', ko: '키보드 도움말', test_id: 'toolbar-help' },
-  { key: 'connection.ready', en: 'Local shell ready; adapters pending', ko: '로컬 셸 준비됨; 어댑터 대기 중', test_id: 'connection-ready' },
+  { key: 'toolbar.menu', en: 'Open navigation', ko: '내비게이션 열기', test_id: 'toolbar-menu' },
+  { key: 'connection.ready', en: 'Shell loaded; local API not connected', ko: '셸 로드됨; 로컬 API 미연결', test_id: 'connection-ready' },
   { key: 'connection.offline', en: 'Server connection is offline', ko: '서버 연결이 오프라인입니다', test_id: 'connection-offline' },
   { key: 'models.title', en: 'Model library', ko: '모델 라이브러리', test_id: 'models-title' },
   { key: 'models.empty.title', en: 'No local models yet', ko: '아직 로컬 모델이 없습니다', test_id: 'models-empty-title' },
@@ -142,6 +159,9 @@ export const entries: Entry[] = [
   { key: 'models.status.ready', en: 'Ready', ko: '준비됨', test_id: 'models-status-ready' },
   { key: 'models.status.unloaded', en: 'Unloaded', ko: '언로드됨', test_id: 'models-status-unloaded' },
   { key: 'models.status.failed', en: 'Failed', ko: '실패', test_id: 'models-status-failed' },
+  { key: 'models.status.loading', en: 'Loading', ko: '로드 중', test_id: 'models-status-loading' },
+  { key: 'models.status.draining', en: 'Draining', ko: 'drain 중', test_id: 'models-status-draining' },
+  { key: 'models.status.unloading', en: 'Unloading', ko: '언로드 중', test_id: 'models-status-unloading' },
   { key: 'models.delete.confirm.title', en: 'Delete model from cache?', ko: '캐시에서 모델을 삭제할까요?', test_id: 'dialog-delete-model-title' },
   { key: 'models.delete.confirm.body', en: 'Delete {model} from the managed cache. Loaded or non-cache models cannot be deleted.', ko: '관리 캐시에서 {model} 모델을 삭제합니다. 로드 중이거나 캐시 모델이 아니면 삭제할 수 없습니다.', test_id: 'dialog-delete-model-body' },
   { key: 'models.delete.confirm.token_label', en: 'Type DELETE to confirm', ko: '확인하려면 DELETE를 입력하세요', test_id: 'dialog-delete-model-token' },
@@ -165,11 +185,15 @@ export const entries: Entry[] = [
   { key: 'settings.high_contrast', en: 'High contrast', ko: '고대비', test_id: 'settings-high-contrast' },
   { key: 'settings.locale', en: 'Language', ko: '언어', test_id: 'settings-locale' },
   { key: 'settings.partial_success', en: 'Some settings changed; fields controlled by CLI or the loaded worker were left unchanged.', ko: '일부 설정만 변경되었습니다. CLI 또는 로드된 워커가 제어하는 필드는 변경되지 않았습니다.', test_id: 'settings-partial-success' },
+  { key: 'settings.browser_only', en: 'Browser appearance only', ko: '브라우저 표시 설정 전용', test_id: 'settings-browser-only' },
+  { key: 'settings.browser_only.body', en: 'These preferences stay in this browser and do not claim server or worker settings changed.', ko: '이 설정은 이 브라우저에만 남으며 서버나 워커 설정 변경을 의미하지 않습니다.', test_id: 'settings-browser-only-body' },
   { key: 'settings.clear_history.confirm.body', en: 'Clear only the explicit local browser history store; API keys are never persisted there.', ko: '명시적으로 켠 로컬 브라우저 기록 저장소만 지웁니다. API 키는 그곳에 저장하지 않습니다.', test_id: 'dialog-clear-history-body' },
   { key: 'state.unauthorized.title', en: 'Authentication required', ko: '인증이 필요합니다', test_id: 'state-unauthorized-title' },
   { key: 'state.unauthorized.body', en: 'Enter the session key printed by the local server terminal.', ko: '로컬 서버 터미널에 한 번 표시된 세션 키를 입력하세요.', test_id: 'state-unauthorized-body' },
   { key: 'state.offline.title', en: 'Server offline', ko: '서버 오프라인', test_id: 'state-offline-title' },
   { key: 'state.offline.body', en: 'The shell is available, but model data waits for the local API.', ko: '셸은 사용할 수 있지만 모델 데이터는 로컬 API를 기다립니다.', test_id: 'state-offline-body' },
+  { key: 'state.schema_mismatch.title', en: 'UI schema mismatch', ko: 'UI 스키마 불일치', test_id: 'state-schema-mismatch-title' },
+  { key: 'state.schema_mismatch.body', en: 'The shell loaded, but the server reports a different UI API schema version; refresh after updating the bundle or server.', ko: '셸은 로드되었지만 서버가 다른 UI API 스키마 버전을 보고했습니다. 번들이나 서버를 업데이트한 뒤 새로고침하세요.', test_id: 'state-schema-mismatch-body' },
   { key: 'command.title', en: 'Command palette', ko: '명령 팔레트', test_id: 'command-title' },
   { key: 'command.search', en: 'Search commands', ko: '명령 검색', test_id: 'command-search' },
   { key: 'command.no_results', en: 'No commands match this search.', ko: '검색과 일치하는 명령이 없습니다.', test_id: 'command-no-results' },
@@ -184,6 +208,7 @@ export const entries: Entry[] = [
   { key: 'common.cancel', en: 'Cancel', ko: '취소', test_id: 'common-cancel' },
   { key: 'common.delete', en: 'Delete', ko: '삭제', test_id: 'common-delete' },
   { key: 'common.retry', en: 'Retry', ko: '다시 시도', test_id: 'common-retry' },
+  { key: 'common.reload', en: 'Reload', ko: '새로고침', test_id: 'common-reload' },
   { key: 'common.enter_key', en: 'Enter key', ko: '키 입력', test_id: 'common-enter-key' },
   { key: 'common.add_model', en: 'Add model', ko: '모델 추가', test_id: 'common-add-model' },
   { key: 'common.send', en: 'Send', ko: '보내기', test_id: 'common-send' },
@@ -191,7 +216,7 @@ export const entries: Entry[] = [
   { key: 'routes.chat.eyebrow', en: 'Conversation', ko: '대화', test_id: 'routes-chat-eyebrow' },
   { key: 'routes.activity.eyebrow', en: 'Operations', ko: '작업', test_id: 'routes-activity-eyebrow' },
   { key: 'routes.settings.eyebrow', en: 'Browser only', ko: '브라우저 전용', test_id: 'routes-settings-eyebrow' },
-  { key: 'adapters.pending.title', en: 'Server adapters are not connected yet', ko: '서버 어댑터가 아직 연결되지 않았습니다', test_id: 'adapters-pending-title' },
+  { key: 'adapters.pending.title', en: 'Local API is not connected yet', ko: '로컬 API가 아직 연결되지 않았습니다', test_id: 'adapters-pending-title' },
   { key: 'adapters.pending.body', en: 'This route shows the production shell only. Catalog, lifecycle, and runtime data will come from the shared typed client in the integration wave.', ko: '이 경로는 프로덕션 셸만 보여줍니다. 카탈로그, 수명주기, 런타임 데이터는 통합 웨이브의 공유 typed client에서 제공됩니다.', test_id: 'adapters-pending-body' },
   { key: 'chat.pending.body', en: 'Chat controls stay disabled until an authenticated ready model is selected by the shared state provider.', ko: '공유 상태 provider가 인증된 준비 모델을 선택하기 전까지 대화 컨트롤은 비활성화됩니다.', test_id: 'chat-pending-body' },
   { key: 'activity.empty.title', en: 'No active operations', ko: '활성 작업 없음', test_id: 'activity-empty-title' },
@@ -207,6 +232,7 @@ export const entries: Entry[] = [
   { key: 'gallery.controls.busy', en: 'Busy', ko: '진행 중', test_id: 'gallery-controls-busy' },
   { key: 'gallery.field.repo', en: 'Repository ID', ko: '저장소 ID', test_id: 'gallery-field-repo' },
   { key: 'gallery.field.repo_error', en: 'Use owner/name without a URL.', ko: 'URL 없이 owner/name 형식을 사용하세요.', test_id: 'gallery-field-repo-error' },
+  { key: 'gallery.field.repo_hint', en: 'Sample only; downloads require the later lifecycle adapter.', ko: '샘플 전용입니다. 다운로드는 후속 수명주기 어댑터가 필요합니다.', test_id: 'gallery-field-repo-hint' },
   { key: 'gallery.select.native', en: 'Native select combobox', ko: '네이티브 select 콤보박스', test_id: 'gallery-select-native' },
   { key: 'gallery.overlays.title', en: 'Overlays', ko: '오버레이', test_id: 'gallery-overlays-title' },
   { key: 'gallery.tooltip', en: 'Tooltips are descriptive only', ko: '툴팁은 설명 전용입니다', test_id: 'gallery-tooltip' },
@@ -230,9 +256,15 @@ export const entries: Entry[] = [
   { key: 'settings.material.opaque', en: 'Opaque', ko: '불투명', test_id: 'settings-material-opaque' },
   { key: 'settings.locale.en', en: 'English', ko: '영어', test_id: 'settings-locale-en' },
   { key: 'settings.locale.ko', en: 'Korean', ko: '한국어', test_id: 'settings-locale-ko' },
+  { key: 'settings.high_contrast.system', en: 'Follow system', ko: '시스템 따르기', test_id: 'settings-high-contrast-system' },
+  { key: 'settings.high_contrast.on', en: 'On', ko: '켬', test_id: 'settings-high-contrast-on' },
+  { key: 'settings.high_contrast.off', en: 'Off', ko: '끔', test_id: 'settings-high-contrast-off' },
   { key: 'gallery.issue', en: 'Issue #1843', ko: '이슈 #1843', test_id: 'gallery-issue' },
   { key: 'gallery.hover_focus', en: 'Hover or focus', ko: '호버 또는 포커스', test_id: 'gallery-hover-focus' },
   { key: 'gallery.download', en: 'Download', ko: '다운로드', test_id: 'gallery-download' },
+  { key: 'gallery.lifecycle.samples', en: 'Lifecycle sample badges', ko: '수명주기 샘플 배지', test_id: 'gallery-lifecycle-samples' },
+  { key: 'gallery.sample.caption', en: 'Sample model table', ko: '샘플 모델 표', test_id: 'gallery-sample-caption' },
+  { key: 'gallery.sample.label', en: 'Sample fixture', ko: '샘플 픽스처', test_id: 'gallery-sample-label' },
   { key: 'gallery.delete_token', en: 'DELETE', ko: 'DELETE', test_id: 'gallery-delete-token' },
 ];
 

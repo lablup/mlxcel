@@ -67,9 +67,15 @@
       "test_id": "toolbar-help"
     },
     {
+      "key": "toolbar.menu",
+      "en": "Open navigation",
+      "ko": "내비게이션 열기",
+      "test_id": "toolbar-menu"
+    },
+    {
       "key": "connection.ready",
-      "en": "Local shell ready; adapters pending",
-      "ko": "로컬 셸 준비됨; 어댑터 대기 중",
+      "en": "Shell loaded; local API not connected",
+      "ko": "셸 로드됨; 로컬 API 미연결",
       "test_id": "connection-ready"
     },
     {
@@ -137,6 +143,24 @@
       "en": "Failed",
       "ko": "실패",
       "test_id": "models-status-failed"
+    },
+    {
+      "key": "models.status.loading",
+      "en": "Loading",
+      "ko": "로드 중",
+      "test_id": "models-status-loading"
+    },
+    {
+      "key": "models.status.draining",
+      "en": "Draining",
+      "ko": "drain 중",
+      "test_id": "models-status-draining"
+    },
+    {
+      "key": "models.status.unloading",
+      "en": "Unloading",
+      "ko": "언로드 중",
+      "test_id": "models-status-unloading"
     },
     {
       "key": "models.delete.confirm.title",
@@ -277,6 +301,18 @@
       "test_id": "settings-partial-success"
     },
     {
+      "key": "settings.browser_only",
+      "en": "Browser appearance only",
+      "ko": "브라우저 표시 설정 전용",
+      "test_id": "settings-browser-only"
+    },
+    {
+      "key": "settings.browser_only.body",
+      "en": "These preferences stay in this browser and do not claim server or worker settings changed.",
+      "ko": "이 설정은 이 브라우저에만 남으며 서버나 워커 설정 변경을 의미하지 않습니다.",
+      "test_id": "settings-browser-only-body"
+    },
+    {
       "key": "settings.clear_history.confirm.body",
       "en": "Clear only the explicit local browser history store; API keys are never persisted there.",
       "ko": "명시적으로 켠 로컬 브라우저 기록 저장소만 지웁니다. API 키는 그곳에 저장하지 않습니다.",
@@ -305,6 +341,18 @@
       "en": "The shell is available, but model data waits for the local API.",
       "ko": "셸은 사용할 수 있지만 모델 데이터는 로컬 API를 기다립니다.",
       "test_id": "state-offline-body"
+    },
+    {
+      "key": "state.schema_mismatch.title",
+      "en": "UI schema mismatch",
+      "ko": "UI 스키마 불일치",
+      "test_id": "state-schema-mismatch-title"
+    },
+    {
+      "key": "state.schema_mismatch.body",
+      "en": "The shell loaded, but the server reports a different UI API schema version; refresh after updating the bundle or server.",
+      "ko": "셸은 로드되었지만 서버가 다른 UI API 스키마 버전을 보고했습니다. 번들이나 서버를 업데이트한 뒤 새로고침하세요.",
+      "test_id": "state-schema-mismatch-body"
     },
     {
       "key": "command.title",
@@ -385,6 +433,12 @@
       "test_id": "common-retry"
     },
     {
+      "key": "common.reload",
+      "en": "Reload",
+      "ko": "새로고침",
+      "test_id": "common-reload"
+    },
+    {
       "key": "common.enter_key",
       "en": "Enter key",
       "ko": "키 입력",
@@ -428,8 +482,8 @@
     },
     {
       "key": "adapters.pending.title",
-      "en": "Server adapters are not connected yet",
-      "ko": "서버 어댑터가 아직 연결되지 않았습니다",
+      "en": "Local API is not connected yet",
+      "ko": "로컬 API가 아직 연결되지 않았습니다",
       "test_id": "adapters-pending-title"
     },
     {
@@ -521,6 +575,12 @@
       "en": "Use owner/name without a URL.",
       "ko": "URL 없이 owner/name 형식을 사용하세요.",
       "test_id": "gallery-field-repo-error"
+    },
+    {
+      "key": "gallery.field.repo_hint",
+      "en": "Sample only; downloads require the later lifecycle adapter.",
+      "ko": "샘플 전용입니다. 다운로드는 후속 수명주기 어댑터가 필요합니다.",
+      "test_id": "gallery-field-repo-hint"
     },
     {
       "key": "gallery.select.native",
@@ -655,6 +715,24 @@
       "test_id": "settings-locale-ko"
     },
     {
+      "key": "settings.high_contrast.system",
+      "en": "Follow system",
+      "ko": "시스템 따르기",
+      "test_id": "settings-high-contrast-system"
+    },
+    {
+      "key": "settings.high_contrast.on",
+      "en": "On",
+      "ko": "켬",
+      "test_id": "settings-high-contrast-on"
+    },
+    {
+      "key": "settings.high_contrast.off",
+      "en": "Off",
+      "ko": "끔",
+      "test_id": "settings-high-contrast-off"
+    },
+    {
       "key": "gallery.issue",
       "en": "Issue #1843",
       "ko": "이슈 #1843",
@@ -671,6 +749,24 @@
       "en": "Download",
       "ko": "다운로드",
       "test_id": "gallery-download"
+    },
+    {
+      "key": "gallery.lifecycle.samples",
+      "en": "Lifecycle sample badges",
+      "ko": "수명주기 샘플 배지",
+      "test_id": "gallery-lifecycle-samples"
+    },
+    {
+      "key": "gallery.sample.caption",
+      "en": "Sample model table",
+      "ko": "샘플 모델 표",
+      "test_id": "gallery-sample-caption"
+    },
+    {
+      "key": "gallery.sample.label",
+      "en": "Sample fixture",
+      "ko": "샘플 픽스처",
+      "test_id": "gallery-sample-label"
     },
     {
       "key": "gallery.delete_token",
