@@ -9,7 +9,7 @@ The answer for the twelve model x width pairs measured here is yes. The two back
 | Field | ROCm side | Metal reference |
 |---|---|---|
 | Hardware | AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5, 40 CUs), 96 GiB VRAM carve-out, 31 GiB host RAM | Apple M1 Ultra, 128 GB unified memory |
-| OS | Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64 | macOS |
+| OS | Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64 | macOS 27.0 (26A428) |
 | Backend | ROCm 10.0.0 (HIP 7.15.26333, AMD clang 23), `--features rocm` | Metal, `--features metal,accelerate` |
 | mlxcel | `bec64748` | `bec64748` |
 | MLX pin | `81ba1c6a` | `81ba1c6a` |
@@ -62,6 +62,8 @@ For eleven of the twelve pairs the threshold changes nothing: zero at 0.5, zero 
 The honest way to state the bound is without a threshold at all: across all twelve pairs, the largest reference gap at which the two backends disagree is 1.125 logits, in `qwen3-30b-a3b` `w8`, where the Metal token is ROCm's rank 2. The next-largest is 0.75 in `qwen3-30b-a3b` `w1`, the one rank-8 case. Every other disagreement sits under a 0.5 gap. So 2.0 clears the observed maximum by a comfortable margin, and any threshold at or above 1.2 gives the same all-zero result.
 
 `qwen3-30b-a3b` being the only model to show this is consistent with it being the 128-expert MoE in the set: expert routing is a discrete decision taken on small score differences, so a numerical difference there moves more than the same difference in a dense model.
+
+A same-backend control says the same thing. The Metal trace set includes both `default` (fused MoE) and `fused0` (`gather_qmm`) runs for the two MoE models, which is a kernel swap with no hardware change. Five of those six pairs agree at every position; the one that moves is `qwen3-30b-a3b` at `w1`, with one top-1 disagreement out of 128 and zero on its 74 decided positions. The model that reacts to a kernel change within Metal is the same model that reacts to a backend change, which is what you would expect if routing, not arithmetic, is the sensitive part.
 
 ## Results
 
@@ -136,7 +138,11 @@ MLXCEL_FUSED_MOE=0 ./target/release/examples/logit_trace models/mlx/Qwen3-30B-A3
 python3 scripts/compare_logit_traces.py benchmarks/logit_traces/metal_m1u_bec64748/metal_m1u_bec64748_qwen3-30b-a3b_fused0_w8.tsv rocm_w8.tsv --decided 2.0
 ```
 
+The checkpoint directory name is host-local: this host holds `models/mlx/Qwen3-30B-A3B-4bit` and the Metal host `models/mlx/qwen3-30b-a3b-4bit`, which is why the two trace headers disagree on it. What has to match is the Hugging Face revision, which `METADATA.txt` records on both sides.
+
 `METADATA.txt` in each trace directory records the host, versions, checkpoint revisions and binary hashes; `RUNS.txt` records the exit status and row count of every run; `SHA256SUMS` covers every trace file.
+
+`compare_logit_traces.py` prints the largest reference gap at a disagreement on every run, so the 1.125 figure above is reproducible from any pair without a separate script.
 
 ## Known gaps at the time of this run
 

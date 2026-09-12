@@ -14,6 +14,8 @@ Four affine 4-bit checkpoints: `qwen3-0.6b-4bit`, `meta-llama-3.1-8b-instruct-4b
 
 `default` leaves `MLXCEL_FUSED_MOE` unset, so the two MoE checkpoints run the fused MoE kernel where it applies. `fused0` sets `MLXCEL_FUSED_MOE=0` and takes the `gather_qmm` path. Pick the variant that matches the path the ROCm build takes. Mixtral (top-k 2, 8 experts) sorts its expert indices only when `n_tokens * top_k >= 64` (`src/models/switch_layers.rs`), so its `w256` trace is the one that passes through the sorted `gather_qmm` path.
 
+The `default` traces of the two MoE checkpoints (six files) are not used by the gfx1151 matrix in `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`, because the fused MoE kernel has no ROCm port and the ROCm side had to run `fused0`. They are kept for two uses: as the same-backend control that isolates a kernel swap from a hardware change, and as the reference to compare against once lablup/mlxcel#1803 gives ROCm a fused MoE kernel.
+
 Absolute local paths in the trace headers were rewritten to repository-relative ones. `scripts/compare_logit_traces.py` reads only the position count and the target token of each row, so the rewrite does not affect a comparison.
 
 ## Comparing
