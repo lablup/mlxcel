@@ -557,10 +557,42 @@ fn single_webui_api_routes() -> Router<AppState> {
     Router::new()
         .route("/ui-api/v1/bootstrap", get(single_ui_bootstrap))
         .route("/ui-api/v1/catalog", get(single_ui_catalog_list))
+        .route("/ui-api/v1/catalog/refresh", post(single_ui_read_only))
+        .route("/ui-api/v1/model-actions", post(single_ui_read_only))
+        .route("/ui-api/v1/downloads", post(single_ui_read_only))
+        .route("/ui-api/v1/model-removals", post(single_ui_read_only))
         .route("/ui-api/v1/catalog/:id", get(single_ui_catalog_get))
         .route("/ui-api/v1/runtime", get(single_ui_runtime))
         .route("/ui-api/v1/operations", get(single_ui_operations_list))
+        .route("/ui-api/v1/operations/:id", get(single_ui_operation_get))
+        .route(
+            "/ui-api/v1/operations/:id/cancel",
+            post(single_ui_read_only),
+        )
         .route("/ui-api/v1/events", get(single_ui_events))
+}
+
+// Explicit -m mode does not run administrative lifecycle operations. Refuse known
+// controls before extracting request DTOs and never touch the model provider.
+// The shared outer security middleware still authenticates and bounds bodies.
+#[cfg(feature = "webui")]
+async fn single_ui_read_only() -> Response {
+    single_webui_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "unsupported",
+        "single-model mode is read-only; restart without -m to manage models",
+        false,
+    )
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_operation_get() -> Response {
+    single_webui_error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "operation not found",
+        false,
+    )
 }
 
 #[cfg(feature = "webui")]
@@ -801,6 +833,10 @@ async fn single_ui_events(State(state): State<AppState>, headers: HeaderMap, uri
         uri,
     )
 }
+
+#[cfg(all(test, feature = "webui"))]
+#[path = "app_single_webui_control_tests.rs"]
+mod single_webui_control_tests;
 
 #[cfg(test)]
 #[path = "api_prefix_tests.rs"]
