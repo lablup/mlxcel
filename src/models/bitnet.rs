@@ -42,13 +42,12 @@ use std::path::Path;
 /// this refuses only where no kernel exists at all, and it refuses at load
 /// rather than mid-request.
 fn reject_without_bitlinear_kernel() -> Result<(), String> {
-    if mlxcel_core::custom_kernels_available() {
+    if mlxcel_core::bitlinear_kernel_available() {
         return Ok(());
     }
     Err(
-        "BitNet checkpoints need the bitlinear_matmul kernel, which has Metal and CUDA ports only. \
-         This backend has neither and the op has no graph fallback, so the model cannot run here. \
-         The ROCm port is tracked as lablup/mlxcel#1862."
+        "BitNet checkpoints need the bitlinear_matmul kernel, which has Metal, CUDA and ROCm ports. \
+         This build has no GPU backend, and the op has no graph fallback, so the model cannot run here."
             .to_string(),
     )
 }
@@ -534,13 +533,90 @@ mod tests {
     /// packed[0, col] bits {row0,row1,row2,row3} -> bytes [134, 137, 100, 97].
     /// x = [1, 2, 3, 4], scale = 2.0 (not inverted) =>
     ///   y = (x @ W^T) * 2 = [-4, -4, 8, 6].
+    /// Exercises the cross-lane reduction, which the known-case test above does
+    /// not reach.
+    ///
+    /// The kernel walks `in_features` with lane `L` starting at `L * 4` and
+    /// striding by `32 * 4 = 128`, then folds the 32 lanes with `simd_sum` on
+    /// Metal and `__shfl_down` on CUDA and ROCm. At `in_features = 4` only lane
+    /// 0 ever enters that loop, so the fold adds one real value to 31 zeros and
+    /// a wrong fold width produces the right answer anyway. 256 gives every lane
+    /// two iterations, so the width, the stride and the 2-bit unpacking all have
+    /// to be right at once.
+    ///
+    /// The reference is computed here rather than written down: a hand-computed
+    /// expectation over 256 inputs is easier to get wrong than the kernel, and a
+    /// wrong expectation that passes is worse than no test.
+    #[test]
+    fn bitlinear_matmul_folds_every_lane() {
+        if !mlxcel_core::bitlinear_kernel_available() {
+            eprintln!(
+                "skipped bitlinear_matmul_folds_every_lane: this backend has no BitLinear kernel port"
+            );
+            return;
+        }
+        const IN: usize = 256;
+        const OUT: usize = 8;
+        const ROWS: usize = OUT / 4;
+        const BATCH: usize = 2;
+        let scale_value = 0.5f32;
+
+        let mut state = 0x1234_5678u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state >> 8
+        };
+
+        let xs: Vec<f32> = (0..BATCH * IN).map(|_| (next() % 9) as f32 - 4.0).collect();
+        let packed: Vec<u8> = (0..ROWS * IN).map(|_| (next() % 256) as u8).collect();
+
+        // out[b][row + q * ROWS] = scale * sum_k x[b][k] * (((packed[row][k] >> 2q) & 3) - 1)
+        let mut expected = vec![0.0f32; BATCH * OUT];
+        for b in 0..BATCH {
+            for row in 0..ROWS {
+                for q in 0..4 {
+                    let mut acc = 0.0f32;
+                    for k in 0..IN {
+                        let w = packed[row * IN + k];
+                        let t = ((w >> (2 * q)) & 3) as f32 - 1.0;
+                        acc += xs[b * IN + k] * t;
+                    }
+                    expected[b * OUT + row + q * ROWS] = acc * scale_value;
+                }
+            }
+        }
+
+        let x = mlxcel_core::from_slice_f32(&xs, &[BATCH as i32, IN as i32]);
+        let packed_arr = mlxcel_core::from_bytes(
+            &packed,
+            &[ROWS as i32, IN as i32],
+            mlxcel_core::dtype::UINT8,
+        );
+        let scale = mlxcel_core::from_slice_f32(&[scale_value], &[1]);
+        let y =
+            mlxcel_core::bitlinear_matmul(&x, &packed_arr, &scale, IN as i32, OUT as i32, false)
+                .expect("bitlinear_matmul");
+        let want = mlxcel_core::from_slice_f32(&expected, &[BATCH as i32, OUT as i32]);
+        let diff = mlxcel_core::abs(&mlxcel_core::subtract(&y, &want));
+        let max_abs = mlxcel_core::item_f32(&mlxcel_core::max_axis(
+            &mlxcel_core::reshape(&diff, &[-1]),
+            -1,
+            false,
+        ));
+        assert!(
+            max_abs < 1e-3,
+            "bitlinear_matmul disagrees with the host reference by {max_abs}; \
+             a fold narrower than 32 lanes shows up here and not in the 4-input case"
+        );
+    }
+
     #[test]
     fn bitlinear_matmul_known_ternary_case() {
         let x = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);
         let packed =
             mlxcel_core::from_bytes(&[134u8, 137, 100, 97], &[1, 4], mlxcel_core::dtype::UINT8);
         let scale = mlxcel_core::from_slice_f32(&[2.0], &[1]);
-        if !mlxcel_core::custom_kernels_available() {
+        if !mlxcel_core::bitlinear_kernel_available() {
             // No BitLinear port on this backend, so there is nothing to check.
             // Printed rather than silent: a gate run that skips this should say
             // so, not look like it passed (issue #1803).
