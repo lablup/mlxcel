@@ -790,6 +790,153 @@ fn anonymous_fd_download_rejects_disconnect_truncation_before_publish() {
 
 #[cfg(unix)]
 #[test]
+fn fd_stream_timeout_keeps_partial_private_and_unpublished() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).expect("read request");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write headers");
+        stream.flush().expect("flush headers");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    let client = reqwest::Client::builder()
+        .read_timeout(std::time::Duration::from_millis(50))
+        .build()
+        .expect("client");
+    let url = format!("http://{addr}/model.safetensors");
+    let err = tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(stream_file_to_dir_fd(
+            &client,
+            &url,
+            root_dir.as_raw_fd(),
+            "model.safetensors",
+            Some(4),
+            None,
+            &DownloadHooks::default(),
+        ))
+        .expect_err("stalled body must time out");
+    server.join().expect("server thread");
+
+    assert!(
+        err.chain().any(|cause| cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)),
+        "error chain should preserve reqwest timeout category: {err:#}"
+    );
+    assert!(
+        !root.path().join("model.safetensors").exists(),
+        "timeout must not publish final file"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(root.path())
+        .expect("root list")
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "partial files must be cleaned: {leftovers:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fd_stream_enospc_writer_cleans_partial_without_publishing() {
+    use std::os::fd::AsRawFd;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct EnospcWriter {
+        _file: std::fs::File,
+    }
+
+    impl tokio::io::AsyncWrite for EnospcWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::from_raw_os_error(libc::ENOSPC)))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).expect("read request");
+        let body = b"data";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write headers");
+        stream.write_all(body).expect("write body");
+    });
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    let client = reqwest::Client::builder().build().expect("client");
+    let url = format!("http://{addr}/model.safetensors");
+    let err = tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(stream_file_to_dir_fd_with_writer_factory(
+            &client,
+            &url,
+            root_dir.as_raw_fd(),
+            "model.safetensors",
+            Some(4),
+            None,
+            &DownloadHooks::default(),
+            |file| EnospcWriter { _file: file },
+        ))
+        .expect_err("simulated ENOSPC must fail");
+    server.join().expect("server thread");
+
+    assert!(
+        err.chain().any(|cause| cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.raw_os_error() == Some(libc::ENOSPC))),
+        "error chain should preserve simulated ENOSPC: {err:#}"
+    );
+    assert!(
+        !root.path().join("model.safetensors").exists(),
+        "simulated ENOSPC must not publish final file"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(root.path())
+        .expect("root list")
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "partial files must be cleaned: {leftovers:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer() {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
