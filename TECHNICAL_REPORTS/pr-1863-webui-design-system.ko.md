@@ -31,7 +31,7 @@ PR #1863은 이제 정적 placeholder나 두 번째 인증 cache 대신 공유 #
 
 ## 수용 검증 경계
 
-provider/mock HTTP 테스트는 submit 전 초기 요청 없음, Bearer가 붙은 bootstrap/catalog/operations/events 호출, 모든 route에서 접근 가능한 logout, 401 세션 purge, malformed bootstrap schema fail-closed recovery, wrong-key/offline localized error, stale auth-failure fencing, token의 DOM/storage/URL 미반사, authenticated route 탐색 중 autoload 및 inference endpoint 미호출을 검증합니다. browser screenshot은 명시적으로 mock API 기반 product shell 증거이며 실제 backend session 증명은 아닙니다. 유지보수자는 2026-09-13에 source digest `c4df0326df35998f03e315ab1382867150bb20b3ad516aebe184e722cbf20748`의 [수정된 4185 디자인을 승인](https://github.com/lablup/mlxcel/issues/1843#issuecomment-5648012196)했으므로 디자인 승인은 완료되었습니다. 실제 macOS 27 Safari, VoiceOver, native browser 200% zoom에서 변경된 layout과 focus 동작의 표적 재확인은 아직 대기 중이며, 디자인 승인이 해당 검사 통과를 의미하지는 않습니다. 이전 수동 Safari/VoiceOver/native-zoom 피드백은 더 오래된 cb489/4184 preview에만 적용됩니다. 필수 GB10 runner가 down 상태이므로 CUDA/GB10 검증은 통과로 주장하지 않고, 합의된 진행 방식은 unavailable required GB10 job skip 및 local CI 통과입니다.
+provider/mock HTTP 테스트는 submit 전 초기 요청 없음, Bearer가 붙은 bootstrap/catalog/operations/events 호출, 모든 route에서 접근 가능한 logout, 401 세션 purge, malformed bootstrap schema fail-closed recovery, wrong-key/offline localized error, stale auth-failure fencing, token의 DOM/storage/URL 미반사, authenticated route 탐색 중 autoload 및 inference endpoint 미호출을 검증합니다. browser screenshot은 명시적으로 mock API 기반 product shell 증거이며 실제 backend session 증명은 아닙니다. 유지보수자는 2026-09-13에 source digest `c4df0326df35998f03e315ab1382867150bb20b3ad516aebe184e722cbf20748`의 [수정된 4185 디자인을 승인](https://github.com/lablup/mlxcel/issues/1843#issuecomment-5648012196)했으므로 디자인 승인은 완료되었습니다. 유지보수자는 이후 이 디자인을 다시 확정했고, 별도 질문에 직접 답하여 Safari/VoiceOver의 툴바·compact 메뉴, Cmd+K Tab/Escape 포커스 및 native browser 200% zoom 표적 재검사를 수용했습니다. [수용 기록](https://github.com/lablup/mlxcel/issues/1843#issuecomment-5653425099)은 immutable 4185에 대한 사용자 보고 PASS이며, 독립적인 브라우저 관찰이나 이후 레이아웃 변경의 수용은 아닙니다. 이 결과는 이전 cb489/4184 수동 보고를 보완합니다. 필수 GB10 runner가 down 상태이므로 CUDA/GB10 검증은 통과로 주장하지 않고, 합의된 진행 방식은 unavailable required GB10 job skip 및 local CI 통과입니다.
 
 이번 문서 전용 마감 검증은 `50caf9a9`에서 typecheck·lint·unit 62개와 공유 contract/compatibility/version/kernel-key 검사를 다시 통과했고, 소스나 asset을 변경하지 않고 위 두 digest를 각각 다시 계산했습니다. Darwin 및 Docker Linux 브라우저 결과는 앞선 구현 검증의 증거이며, 이번 문서 수정에서는 브라우저 suite를 동시에 실행하지 않았습니다.
 
@@ -41,4 +41,8 @@ Hosted Chromium CDP로 Latin 문자에 DejaVu Sans regular/bold, 한국어 fallb
 
 고정 font를 사용한 native arm64 재현은 Chromium CDP의 hosted font와 일치했고 20개 테스트를 모두 통과했습니다. QEMU 기반 로컬 amd64 시도는 렌더링 전에 Chromium GPU process가 충돌했으므로 통과가 아닙니다. 이전 stock-image 결과로 이 교정된 renderer 증거를 대체해서는 안 됩니다.
 
-`b3c5326491230cddf77d68ce3d90815ff237f7b9`의 [canonical hosted WebUI job](https://github.com/lablup/mlxcel/actions/runs/34723713520/job/103634069494)이 Ubuntu 24.04 amd64, Node 26.5.1, pnpm 11.18.0 및 고정 font로 통과했습니다. Typecheck, lint, unit 62개, browser 20개 전체, deterministic bundle verification 단계가 실제 실행되어 성공했습니다. 이 결과가 불충분했던 stock-container 증거를 대신하는 hosted 검증이며, 사용 불가 GB10 job이나 대기 중인 수동 검사 통과를 주장하지는 않습니다.
+`b3c5326491230cddf77d68ce3d90815ff237f7b9`의 [canonical hosted WebUI job](https://github.com/lablup/mlxcel/actions/runs/34723713520/job/103634069494)이 Ubuntu 24.04 amd64, Node 26.5.1, pnpm 11.18.0 및 고정 font로 통과했습니다. Typecheck, lint, unit 62개, browser 20개 전체, deterministic bundle verification 단계가 실제 실행되어 성공했습니다. 이 결과가 불충분했던 stock-container 증거를 대신하는 hosted 검증이며, 사용 불가 GB10 job 통과나 사용자 보고 수동 결과의 독립적 입증을 주장하지는 않습니다.
+
+## 수동 수용 문서 마감
+
+표적 수동 게이트는 사용자 보고 PASS로 수용했지만, #1838 → #1841 → #1843 순서의 중앙 통합은 아직 대기 중이므로 이슈와 PR은 review 상태를 유지합니다. 이번 문서 전용 변경은 소스·스타일·asset·테스트를 수정하지 않으며 로컬 GPU·브라우저·런타임 테스트를 실행하지 않습니다. 호스트 GPU firmware 장애 복구는 확인되지 않았으며, 사용 불가 GB10 면제는 로컬 호스트 복구나 다른 통합 게이트의 면제가 아닙니다.
