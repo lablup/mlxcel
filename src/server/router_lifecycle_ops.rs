@@ -41,6 +41,7 @@ struct CoordinatorInner {
     active: BTreeMap<String, Operation>,
     terminal: VecDeque<(Instant, Operation)>,
     idempotency: BTreeMap<String, IdempotencyRecord>,
+    download_aliases: BTreeMap<String, String>,
     cancellations: BTreeMap<String, Arc<AtomicBool>>,
     events: VecDeque<(Instant, UiEvent)>,
     next_operation: u64,
@@ -263,6 +264,15 @@ impl LifecycleCoordinator {
                 },
             );
         }
+        if let OperationTarget::Download {
+            repo_id,
+            revision: Some(revision),
+        } = &operation.target
+        {
+            inner
+                .download_aliases
+                .insert(download_alias_key(repo_id, revision), operation_id.clone());
+        }
         inner.active.insert(operation_id.clone(), operation.clone());
         self.append_and_broadcast_locked(
             inner,
@@ -314,8 +324,22 @@ impl LifecycleCoordinator {
         )
     }
 
+    pub fn idempotency_conflict(&self, key: &str, fingerprint: &str) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        inner.idempotency.get(key).and_then(|record| {
+            (record.fingerprint != fingerprint).then(|| record.operation_id.clone())
+        })
+    }
+
     pub fn find_active_download(&self, repo_id: &str, revision: &str) -> Option<Operation> {
         let inner = self.inner.lock().ok()?;
+        if let Some(operation_id) = inner
+            .download_aliases
+            .get(&download_alias_key(repo_id, revision))
+            && let Some(operation) = inner.active.get(operation_id)
+        {
+            return Some(operation.clone());
+        }
         inner
             .active
             .values()
@@ -328,6 +352,29 @@ impl LifecycleCoordinator {
                 }
                 _ => None,
             })
+    }
+
+    pub fn register_download_revision_alias(
+        &self,
+        operation_id: &str,
+        repo_id: &str,
+        revision: &str,
+    ) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        if !inner
+            .active
+            .get(operation_id)
+            .is_some_and(|operation| operation.kind == OperationKind::Download)
+        {
+            return false;
+        }
+        inner.download_aliases.insert(
+            download_alias_key(repo_id, revision),
+            operation_id.to_string(),
+        );
+        true
     }
 
     pub fn register_cancellation(&self, operation_id: &str, cancel: Arc<AtomicBool>) {
@@ -410,6 +457,7 @@ impl LifecycleCoordinator {
             operation.cancellable = false;
             operation.cancel_reason = None;
             inner.cancellations.remove(operation_id);
+            inner.download_aliases.retain(|_, id| id != operation_id);
             inner
                 .terminal
                 .push_back((Instant::now(), operation.clone()));
@@ -679,6 +727,13 @@ fn prune_idempotency(inner: &mut CoordinatorInner) {
     inner
         .idempotency
         .retain(|_, record| retained_operations.contains(&record.operation_id));
+    inner
+        .download_aliases
+        .retain(|_, operation_id| inner.active.contains_key(operation_id));
+}
+
+fn download_alias_key(repo_id: &str, revision: &str) -> String {
+    format!("{repo_id}::{revision}")
 }
 
 fn prune_events(inner: &mut CoordinatorInner) {

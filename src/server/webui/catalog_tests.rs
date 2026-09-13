@@ -96,6 +96,7 @@ fn model_with_lifecycle(
         ui_model_id,
         source_key_hash,
         hidden: false,
+        removal_blocked_reason: None,
         lifecycle,
         revision,
         generation: 1,

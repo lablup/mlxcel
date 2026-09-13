@@ -168,6 +168,12 @@ impl ModelLifecycle {
         self.operation_lock.lock().await
     }
 
+    pub fn try_operation_guard(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, tokio::sync::TryLockError> {
+        self.operation_lock.try_lock()
+    }
+
     pub fn revision(&self) -> u64 {
         self.inner.lock().map(|g| g.revision).unwrap_or(1)
     }

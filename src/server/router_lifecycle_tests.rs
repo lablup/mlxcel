@@ -15,7 +15,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::super::router_lifecycle_dto::DownloadProgressPayload;
 use super::*;
+
+#[allow(clippy::duplicate_mod)]
+#[path = "router_contract_test_support.rs"]
+mod contract;
 
 #[derive(serde::Deserialize)]
 struct IdentityVectors {
@@ -272,6 +277,88 @@ fn lifecycle_response_dtos_round_trip_contract_fixtures() {
         let dto: ErrorEnvelope = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(dto).unwrap(), value, "{path}");
     }
+}
+
+#[test]
+fn lifecycle_download_operation_producers_match_contract_fixtures() {
+    const REPO_ID: &str = "mlx-community/SmolLM-135M-Instruct-4bit";
+    const RESOLVED_REVISION: &str = "642e06afe3fab57fd6cc518637c471af0a569e1e";
+    const TOTAL_BYTES: u64 = 75_789_919;
+
+    let coordinator = LifecycleCoordinator::new();
+    let accepted = coordinator
+        .begin_download_operation(
+            OperationTarget::Download {
+                repo_id: REPO_ID.to_string(),
+                revision: Some("main".to_string()),
+            },
+            Some("download-fixture-key"),
+            format!("download:{REPO_ID}:main"),
+        )
+        .expect("download operation accepted");
+    coordinator.register_cancellation(
+        &accepted.operation_id,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    coordinator.update_operation_progress(
+        &accepted.operation_id,
+        ProgressBytes {
+            completed_bytes: 1_048_576,
+            total_bytes: Some(TOTAL_BYTES),
+            indeterminate: false,
+        },
+    );
+    coordinator.update_operation(&accepted.operation_id, OperationState::Running, None, None);
+    let running = serde_json::to_value(
+        coordinator
+            .get_operation(&accepted.operation_id)
+            .expect("running operation present"),
+    )
+    .expect("operation json");
+    contract::assert_download_operation_running(&running);
+
+    coordinator.update_operation_progress(
+        &accepted.operation_id,
+        ProgressBytes {
+            completed_bytes: TOTAL_BYTES,
+            total_bytes: Some(TOTAL_BYTES),
+            indeterminate: false,
+        },
+    );
+    coordinator.update_operation(
+        &accepted.operation_id,
+        OperationState::Succeeded,
+        Some(OperationResult::Download {
+            repo_id: REPO_ID.to_string(),
+            revision: Some(RESOLVED_REVISION.to_string()),
+            model_id: Some("mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU".to_string()),
+            download: DownloadState::Complete,
+        }),
+        None,
+    );
+    let succeeded = serde_json::to_value(
+        coordinator
+            .get_operation(&accepted.operation_id)
+            .expect("terminal operation present"),
+    )
+    .expect("operation json");
+    contract::assert_download_operation_succeeded(&succeeded);
+}
+
+#[test]
+fn lifecycle_download_progress_event_matches_contract_fixture() {
+    let coordinator = LifecycleCoordinator::new();
+    let event =
+        coordinator.publish_payload(UiEventPayload::DownloadProgress(DownloadProgressPayload {
+            operation_id: "op_dl_001".to_string(),
+            progress: ProgressBytes {
+                completed_bytes: 1_048_576,
+                total_bytes: None,
+                indeterminate: true,
+            },
+        }));
+    let value = serde_json::to_value(event).expect("event json");
+    contract::assert_download_progress_event(&value);
 }
 
 #[test]
