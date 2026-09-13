@@ -1,10 +1,10 @@
 # Technical Report: PR #1872 — Safe WebUI model library operations
 
 **Date**: 2026-09-13
-**Status**: Open PR; focused CPU/fake validation complete; root real-model and broad workspace gates pending
+**Status**: Open PR; repair-cycle 2 CPU/fake validation complete; root real-model, restart/rebase, and broad workspace gates pending
 **Languages**: Rust, JSON/OpenAPI fixtures
 **Risk Level**: High
-**Implementation snapshot**: source repair checkpoint `b7555005`; original implementation checkpoint `466c6071`
+**Implementation snapshot**: latest source repair checkpoint `d688ea4f`; prior repair checkpoint `b7555005`; original implementation checkpoint `466c6071`
 
 ## Executive Summary
 
@@ -51,7 +51,7 @@ Parent pre-review found and the implementation addressed these high-risk items b
 - Cancellation after the last transfer chunk but before publish is now linearized by `begin_publish_operation`, with a deterministic regression that late cancellation is refused and the operation succeeds.
 - Metadata now requests `?blobs=true`; safetensors without LFS SHA-256 are rejected, streams are hashed before fd-relative rename, known metadata/HEAD sizes are checked against actual bytes, and metadata/file counts/names are bounded before selected downloads are admitted.
 - Anonymous WebUI metadata no longer constructs `hf-hub` API builders that read saved token files; tests seed token files and env vars and assert no Authorization header on metadata, HEAD, or GET fake requests.
-- Removal now reserves lifecycle state with `operation_busy`, rechecks after acquiring the per-entry operation guard, and rejects physical aliases from configured models-dir or preset entries so cache deletion cannot remove a user/preset-owned loaded snapshot.
+- Removal now reserves lifecycle state with `operation_busy`, rechecks after acquiring the per-entry operation guard, and rejects equality plus ancestor/descendant overlaps from configured models-dir or preset/non-cache entries so cache deletion cannot remove a user/preset-owned nested snapshot.
 - Parent-swap and nested stat/open deletion races have deterministic tests and fail without deleting the wrong tree.
 - New hand-written modules are below the 500-line cap after extracting `anchored_delete.rs` and adjacent test modules.
 
@@ -62,8 +62,8 @@ Parent pre-review found and the implementation addressed these high-risk items b
 | `cargo test --profile test-fast --features metal,accelerate anchored_remove -- --nocapture` | Passed: managed-cache quarantine deletion and parent/final-unlink swap regressions |
 | `cargo test --profile test-fast --features metal,accelerate anchored_publish -- --nocapture` | Passed: no-replace publish, owner/staging identity, symlink cleanup regressions |
 | `cargo test --profile test-fast --features metal,accelerate anchored_delete -- --nocapture` | Passed: nested directory stat/open swap regression |
-| `cargo test --lib --profile test-fast --features metal,accelerate downloader::tests:: -- --nocapture` | Passed: 69 passed, 1 ignored; fake anonymous metadata/HEAD/GET, saved-token negative, `?blobs=true`, metadata status, offline, disconnect truncation, checksum, no-weight completeness, path filtering, size mismatch, and token-mode tests |
-| `cargo test --lib --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` | Passed: 47 passed; shared download queue/idempotency/revision-alias/progress/cancellation, managed removal reservation, physical alias blocks, in-flight compatibility removal, and rescan guard |
+| `cargo test --lib --profile test-fast --features metal,accelerate downloader::tests:: -- --nocapture` | Passed: 71 passed, 1 ignored; fake anonymous metadata/HEAD/GET, saved-token negative, `?blobs=true`, metadata status, offline, loopback read timeout, simulated ENOSPC writer cleanup, disconnect truncation, checksum, no-weight completeness, path filtering, size mismatch, and token-mode tests |
+| `cargo test --lib --profile test-fast --features metal,accelerate server::router_models::router_models_tests:: -- --nocapture` | Passed: 50 passed; shared download queue/idempotency/revision-alias/progress/cancellation, retry-after-failure, managed removal reservation, equality and descendant physical-overlap blocks, in-flight compatibility removal, and rescan guard |
 | `cargo test --lib --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` | Passed: 16 passed; whole producer comparisons for download operation/event fixtures plus lifecycle coordinator regressions |
 | `cargo test --lib --profile test-fast --features metal,accelerate router_cache:: -- --nocapture` | Passed: 11 passed; descriptor-anchored publish/remove/delete race regressions |
 | Focused route filters | Passed: `ui_download_route_replays_same_idempotency_key` and `ui_model_removal_route_matches_operation_accepted_fixture` |
@@ -87,7 +87,7 @@ The local evidence is deliberately CPU/fake-network scoped. It does not establis
 | Contracts | Added full producer fixtures for running and succeeded download operations while preserving nullable `RevisionRef` compatibility |
 | Tests | Added fake HTTP/token, filesystem race, lifecycle idempotency, cancellation, bounded queue, case alias, no-mkdir, and deletion race regressions |
 
-Statistics after repair checkpoint `b7555005`: the repair commit changes 13 files with 1,617 insertions and 153 deletions on top of the original implementation. Original implementation commit: `466c6071 feat: add safe WebUI model library operations`; repair commit: `b7555005 fix: harden WebUI model library edge cases`.
+Statistics after repair checkpoint `d688ea4f`: the latest cycle-2 source commit changes 4 files with 437 insertions and 12 deletions on top of the prior repair/docs head. Original implementation commit: `466c6071 feat: add safe WebUI model library operations`; repair commits: `b7555005 fix: harden WebUI model library edge cases` and `d688ea4f fix: close WebUI library edge-case acceptance gaps`.
 
 
 ## 6. Fake Acceptance Matrix at Source Repair Checkpoint
@@ -97,12 +97,12 @@ Statistics after repair checkpoint `b7555005`: the repair commit changes 13 file
 | Public valid download | `a_download_emits_the_b10621_event_sequence_and_lands_in_the_cache`; `anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get` | Covered with fake downloader and fake HTTP/fd path |
 | Bad repo / invalid revision / gated or private / 404 | `anonymous_fd_download_maps_metadata_status_without_publishing` covers 403 guidance and 404 missing repo/revision behavior | Covered for metadata-status handling |
 | Offline | `anonymous_fd_download_offline_rejects_before_metadata_request` | Covered before metadata request |
-| Timeout | No deterministic true read-timeout test was added because the production client timeout is 30 seconds; generic worker failure remains covered by `a_failed_download_emits_download_failed_and_drops_the_entry` | Missing exact timeout case |
+| Timeout | `fd_stream_timeout_keeps_partial_private_and_unpublished` uses a loopback server that sends headers then stalls under a short client read timeout and verifies no final file or partial debris is left | Covered with loopback fake transport |
 | Disconnect / truncation | `anonymous_fd_download_rejects_disconnect_truncation_before_publish`; `stream_file_rejects_known_size_mismatch_before_publish` | Covered |
-| Disk full | No deterministic ENOSPC/disk-full fake is present; generic write/open failures and cleanup are exercised but not an ENOSPC-specific path | Missing exact disk-full case |
+| Disk full | `fd_stream_enospc_writer_cleans_partial_without_publishing` injects `ENOSPC` through a test-only writer factory around the production fd stream cleanup path | Covered as simulated ENOSPC; physical disk exhaustion was not run |
 | Checksum and completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | Covered for the anonymous WebUI fd path |
-| Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay tests cover cancel and replay, but no explicit successful retry-after-failure test is present | Cancel covered; retry-after-failure missing |
-| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup tests and `cache_source_list_does_not_create_absent_store_root` cover staging isolation/no startup mkdir; no full process-restart reconciliation test is present | Partially covered |
+| Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay tests; `failed_download_can_retry_same_repo_with_new_idempotency_key` verifies a failed first operation can be retried successfully with a new operation id and one catalog entry | Covered for cancel, replay, and retry-after-failure |
+| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup tests and `cache_source_list_does_not_create_absent_store_root` cover staging isolation/no startup mkdir; no full process-restart reconciliation test is present because #1838 integration/rebase remains root-owned | Partially covered; full restart still pending |
 | Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | Covered |
 | Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | Covered |
 
