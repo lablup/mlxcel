@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "paged_attention.h"
+#include <stdexcept>
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -464,7 +466,20 @@ mlx::core::array paged_attention_decode(
     // `cuda_kernel` port there; `metal::is_available()` is false on a CUDA-only
     // build (#634). Both kernels share the template args, grid, and buffer
     // contract below, so only the JIT-compiled body differs.
-    const bool use_cuda = !mlx::core::metal::is_available();
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's Rust callers
+    // gate on `custom_kernels_available()` and take a graph fallback, so
+    // reaching this means a direct call; the bridge declares this function
+    // `Result`, so the throw becomes an `Err` instead of ending the process
+    // (issue #1803).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[paged_attention_decode] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = use_cuda ? get_paged_attention_kernel_cuda().get()
                             : get_paged_attention_kernel().get();
 

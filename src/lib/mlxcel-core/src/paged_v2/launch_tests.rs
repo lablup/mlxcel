@@ -522,7 +522,8 @@ fn merge_kernel_matches_the_closed_form() {
     let indptr_arr = ffi::from_slice_i32(&indptr, &[indptr.len() as i32]);
     let mut out_v = UniquePtr::null();
     let mut out_lse = UniquePtr::null();
-    ffi::paged_attention_merge_states(&v_arr, &lse_arr, &indptr_arr, &mut out_v, &mut out_lse);
+    ffi::paged_attention_merge_states(&v_arr, &lse_arr, &indptr_arr, &mut out_v, &mut out_lse)
+        .expect("merge_states");
     let got_v = to_vec_f32(&out_v);
     let got_lse = to_vec_f32(&out_lse);
 
@@ -580,7 +581,8 @@ fn merge_kernel_returns_zeros_for_an_all_empty_row() {
     let indptr_arr = ffi::from_slice_i32(&indptr, &[2]);
     let mut out_v = UniquePtr::null();
     let mut out_lse = UniquePtr::null();
-    ffi::paged_attention_merge_states(&v_arr, &lse_arr, &indptr_arr, &mut out_v, &mut out_lse);
+    ffi::paged_attention_merge_states(&v_arr, &lse_arr, &indptr_arr, &mut out_v, &mut out_lse)
+        .expect("merge_states");
     assert!(to_vec_f32(&out_v).iter().all(|&x| x == 0.0));
     assert!(
         to_vec_f32(&out_lse)
@@ -606,7 +608,8 @@ fn merge_is_associative_across_regroupings() {
         let arr = ffi::from_slice_i32(ptr, &[ptr.len() as i32]);
         let mut ov = UniquePtr::null();
         let mut ol = UniquePtr::null();
-        ffi::paged_attention_merge_states(v_in, lse_in, &arr, &mut ov, &mut ol);
+        ffi::paged_attention_merge_states(v_in, lse_in, &arr, &mut ov, &mut ol)
+            .expect("merge_states");
         (ov, ol)
     };
 

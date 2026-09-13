@@ -21,6 +21,8 @@
 // the full contract, including the log2 LSE units.
 
 #include "paged_attention_v2.h"
+#include <stdexcept>
+#include "gpu_backend.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -200,7 +202,20 @@ std::vector<mlx::core::array> paged_attention_merge_states(
         num_outputs = 0;
     }
 
-    const bool use_cuda = !mlx::core::metal::is_available();
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's Rust callers
+    // gate on `custom_kernels_available()` and take a graph fallback, so
+    // reaching this means a direct call; the bridge declares this function
+    // `Result`, so the throw becomes an `Err` instead of ending the process
+    // (issue #1803).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[paged_attention_merge_states] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    const bool use_cuda =
+        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = get_merge_kernel(use_cuda).get();
 
     // `VType`/`LseType` key the JIT cache on the input dtypes; see the longer

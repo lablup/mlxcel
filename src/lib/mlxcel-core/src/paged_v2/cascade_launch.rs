@@ -247,7 +247,8 @@ pub fn run_cascade_decode(
 
     let mut merged_v = UniquePtr::null();
     let mut merged_lse = UniquePtr::null();
-    ffi::paged_attention_merge_states(&v_in, &lse_in, &o_indptr, &mut merged_v, &mut merged_lse);
+    ffi::paged_attention_merge_states(&v_in, &lse_in, &o_indptr, &mut merged_v, &mut merged_lse)
+        .map_err(|e| format!("cascade merge launch failed: {e}"))?;
 
     let stats = CascadeLaunchStats {
         prefix_chunks: prefix_plan.num_chunks,

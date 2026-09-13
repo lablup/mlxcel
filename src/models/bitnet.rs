@@ -32,6 +32,27 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
+/// Refuse a BitNet checkpoint on a backend with no `bitlinear_matmul` port.
+///
+/// Every other fused kernel in mlxcel has an MLX graph fallback; this one does
+/// not, so before issue #1803 the launcher reached `fast::cuda_kernel` on any
+/// non-Metal backend and its throw crossed the cxx bridge into a `noexcept`
+/// extern, ending the process. That was never ROCm-only: a CPU-only build took
+/// the same path. Metal, CUDA and ROCm all have ports now (issue #1862), so
+/// this refuses only where no kernel exists at all, and it refuses at load
+/// rather than mid-request.
+fn reject_without_bitlinear_kernel() -> Result<(), String> {
+    if mlxcel_core::custom_kernels_available() {
+        return Ok(());
+    }
+    Err(
+        "BitNet checkpoints need the bitlinear_matmul kernel, which has Metal and CUDA ports only. \
+         This backend has neither and the op has no graph fallback, so the model cannot run here. \
+         The ROCm port is tracked as lablup/mlxcel#1862."
+            .to_string(),
+    )
+}
+
 // Config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitNetConfig {
@@ -133,7 +154,12 @@ impl BitLinear {
             self.in_features,
             self.out_features,
             self.invert_weight_scales,
-        );
+        )
+        // `reject_without_bitlinear_kernel` refuses the checkpoint at load on a
+        // backend with no port, so reaching here means one exists. A panic
+        // unwinds and fails the request; the pre-#1803 behaviour was a C++
+        // throw across a `noexcept` extern, which ended the process.
+        .expect("bitlinear_matmul: no kernel port, which load should have refused");
         match &self.bias {
             Some(b) => mlxcel_core::add(&y, b),
             None => y,
@@ -417,6 +443,7 @@ impl BitNetModel {
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, BitNetConfig), String> {
+        reject_without_bitlinear_kernel()?;
         let model_dir = model_dir.as_ref();
         let config_str = std::fs::read_to_string(model_dir.join("config.json"))
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
@@ -428,6 +455,7 @@ impl BitNetModel {
     }
 
     pub fn from_weights(weights: &WeightMap, config: &BitNetConfig) -> Result<Self, String> {
+        reject_without_bitlinear_kernel()?;
         // Embedding / lm_head are full precision (not BitLinear); group_size/bits
         // only matter for the affine-quantized -4/6/8bit variants.
         let embed_tokens = UnifiedEmbedding::from_weights(weights, "model.embed_tokens", 64, 4)?;
@@ -512,7 +540,17 @@ mod tests {
         let packed =
             mlxcel_core::from_bytes(&[134u8, 137, 100, 97], &[1, 4], mlxcel_core::dtype::UINT8);
         let scale = mlxcel_core::from_slice_f32(&[2.0], &[1]);
-        let y = mlxcel_core::bitlinear_matmul(&x, &packed, &scale, 4, 4, false);
+        if !mlxcel_core::custom_kernels_available() {
+            // No BitLinear port on this backend, so there is nothing to check.
+            // Printed rather than silent: a gate run that skips this should say
+            // so, not look like it passed (issue #1803).
+            eprintln!(
+                "skipped bitlinear_matmul_known_ternary_case: this backend has no BitLinear kernel port"
+            );
+            return;
+        }
+        let y = mlxcel_core::bitlinear_matmul(&x, &packed, &scale, 4, 4, false)
+            .expect("bitlinear_matmul");
         let expected = mlxcel_core::from_slice_f32(&[-4.0, -4.0, 8.0, 6.0], &[1, 4]);
         let diff = mlxcel_core::abs(&mlxcel_core::subtract(&y, &expected));
         let max_abs = mlxcel_core::item_f32(&mlxcel_core::max_axis(
