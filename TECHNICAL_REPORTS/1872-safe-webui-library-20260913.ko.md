@@ -1,10 +1,10 @@
 # 기술 리포트: PR #1872 — 안전한 WebUI 모델 라이브러리 작업
 
 **작성일**: 2026-09-13
-**상태**: 열린 PR; 집중 CPU·fake 검증 완료, 루트 실모델·전체 workspace 게이트 대기
+**상태**: 열린 PR; repair cycle 2 CPU·fake 검증 완료, 루트 실모델·restart/rebase·전체 workspace 게이트 대기
 **언어**: Rust, JSON/OpenAPI fixture
 **위험도**: 높음
-**구현 스냅샷**: 소스 보완 체크포인트 `b7555005`; 최초 구현 체크포인트 `466c6071`
+**구현 스냅샷**: 최신 소스 보완 체크포인트 `d688ea4f`; 이전 보완 체크포인트 `b7555005`; 최초 구현 체크포인트 `466c6071`
 
 ## 요약
 
@@ -51,7 +51,7 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 - 마지막 전송 chunk 이후 publish 전 취소 race를 `begin_publish_operation`으로 linearize했고, 늦은 취소가 거절되며 operation이 성공하는 결정적 회귀 테스트를 추가했습니다.
 - Metadata 요청은 `?blobs=true`를 사용하고, LFS SHA-256이 없는 safetensors는 거절하며, stream을 fd-relative rename 전에 hash하고, 알려진 metadata/HEAD 크기를 실제 byte 수와 비교하며, metadata와 선택 파일 수·파일명 길이를 제한한 뒤 다운로드를 진행합니다.
 - 익명 WebUI metadata는 더 이상 저장된 token file을 읽는 `hf-hub` API builder를 생성하지 않으며, 테스트는 token file과 env var를 심고 metadata·HEAD·GET fake 요청에 Authorization header가 없음을 확인합니다.
-- 제거 작업은 `operation_busy`로 lifecycle을 예약하고, per-entry operation guard 획득 후 다시 검사하며, 설정된 models-dir 또는 preset entry와 같은 물리 snapshot alias를 거절하여 cache 삭제가 user/preset 소유 loaded snapshot을 지우지 못하게 했습니다.
+- 제거 작업은 `operation_busy`로 lifecycle을 예약하고, per-entry operation guard 획득 후 다시 검사하며, 설정된 models-dir 또는 preset/non-cache entry와의 동일 경로 및 ancestor/descendant overlap을 거절하여 cache 삭제가 user/preset 소유 중첩 snapshot을 지우지 못하게 했습니다.
 - Parent swap 및 중첩 stat/open 삭제 race는 결정적 테스트를 갖고 잘못된 tree를 삭제하지 않고 실패합니다.
 - `anchored_delete.rs`와 인접 테스트 모듈로 분리하여 새 handwritten module을 500줄 이하로 유지했습니다.
 
@@ -62,8 +62,8 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 | `cargo test --profile test-fast --features metal,accelerate anchored_remove -- --nocapture` | 통과: 관리 캐시 quarantine 삭제 및 parent/final-unlink swap 회귀 |
 | `cargo test --profile test-fast --features metal,accelerate anchored_publish -- --nocapture` | 통과: no-replace publish, owner/staging identity, symlink cleanup 회귀 |
 | `cargo test --profile test-fast --features metal,accelerate anchored_delete -- --nocapture` | 통과: 중첩 디렉터리 stat/open swap 회귀 |
-| `cargo test --lib --profile test-fast --features metal,accelerate downloader::tests:: -- --nocapture` | 통과: 69 passed, 1 ignored; fake anonymous metadata/HEAD/GET, saved-token 음성, `?blobs=true`, metadata status, offline, disconnect truncation, checksum, weight 없음 완전성, path filtering, size mismatch, token-mode 테스트 |
-| `cargo test --lib --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` | 통과: 47 passed; 공유 download queue/idempotency/revision-alias/progress/cancellation, 관리 removal reservation, physical alias 차단, in-flight compatibility removal, rescan guard |
+| `cargo test --lib --profile test-fast --features metal,accelerate downloader::tests:: -- --nocapture` | 통과: 71 passed, 1 ignored; fake anonymous metadata/HEAD/GET, saved-token 음성, `?blobs=true`, metadata status, offline, loopback read timeout, simulated ENOSPC writer cleanup, disconnect truncation, checksum, weight 없음 완전성, path filtering, size mismatch, token-mode 테스트 |
+| `cargo test --lib --profile test-fast --features metal,accelerate server::router_models::router_models_tests:: -- --nocapture` | 통과: 50 passed; 공유 download queue/idempotency/revision-alias/progress/cancellation, 실패 후 재시도, 관리 removal reservation, 동일 경로 및 descendant physical-overlap 차단, in-flight compatibility removal, rescan guard |
 | `cargo test --lib --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` | 통과: 16 passed; download operation/event fixture 전체 producer 비교 및 lifecycle coordinator 회귀 |
 | `cargo test --lib --profile test-fast --features metal,accelerate router_cache:: -- --nocapture` | 통과: 11 passed; descriptor-anchored publish/remove/delete race 회귀 |
 | 집중 route 필터 | 통과: `ui_download_route_replays_same_idempotency_key`, `ui_model_removal_route_matches_operation_accepted_fixture` |
@@ -87,7 +87,7 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 | 계약 | nullable `RevisionRef` 호환성을 유지하면서 running/succeeded download operation 전체 producer fixture 추가 |
 | 테스트 | fake HTTP/token, 파일시스템 race, lifecycle idempotency, cancellation, 제한 queue, case alias, no-mkdir, deletion race 회귀 추가 |
 
-보완 체크포인트 `b7555005` 이후 통계는 최초 구현 위에 repair commit 13개 파일 변경, 1,617줄 추가, 153줄 삭제입니다. 최초 구현 커밋은 `466c6071 feat: add safe WebUI model library operations`이고, 보완 커밋은 `b7555005 fix: harden WebUI model library edge cases`입니다.
+보완 체크포인트 `d688ea4f` 이후 통계는 이전 보완/docs head 위에 최신 cycle-2 source commit 4개 파일 변경, 437줄 추가, 12줄 삭제입니다. 최초 구현 커밋은 `466c6071 feat: add safe WebUI model library operations`이고, 보완 커밋은 `b7555005 fix: harden WebUI model library edge cases` 및 `d688ea4f fix: close WebUI library edge-case acceptance gaps`입니다.
 
 
 ## 6. 소스 보완 체크포인트의 Fake Acceptance Matrix
@@ -97,12 +97,12 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 | 공개 valid download | `a_download_emits_the_b10621_event_sequence_and_lands_in_the_cache`; `anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get` | fake downloader 및 fake HTTP/fd 경로로 커버 |
 | Bad repo / invalid revision / gated·private / 404 | `anonymous_fd_download_maps_metadata_status_without_publishing`이 403 안내와 404 repo/revision 없음 동작을 커버 | metadata status 처리 커버 |
 | Offline | `anonymous_fd_download_offline_rejects_before_metadata_request` | metadata 요청 전 커버 |
-| Timeout | Production client timeout이 30초라 결정적 true read-timeout 테스트는 추가하지 않았습니다; generic worker failure는 `a_failed_download_emits_download_failed_and_drops_the_entry`로 커버됩니다 | 정확한 timeout case 미구현 |
+| Timeout | `fd_stream_timeout_keeps_partial_private_and_unpublished`가 header를 보낸 뒤 body를 지연하는 loopback 서버와 짧은 client read timeout으로 최종 파일 및 partial debris가 남지 않음을 확인합니다 | loopback fake transport로 커버 |
 | Disconnect / truncation | `anonymous_fd_download_rejects_disconnect_truncation_before_publish`; `stream_file_rejects_known_size_mismatch_before_publish` | 커버 |
-| Disk full | 결정적 ENOSPC/disk-full fake는 없습니다; generic write/open failure와 cleanup은 테스트되지만 ENOSPC 전용 경로는 아닙니다 | 정확한 disk-full case 미구현 |
+| Disk full | `fd_stream_enospc_writer_cleans_partial_without_publishing`가 production fd stream cleanup 경로 주위의 test-only writer factory로 `ENOSPC`를 주입합니다 | simulated ENOSPC로 커버; 실제 물리 disk exhaustion은 실행하지 않음 |
 | Checksum 및 completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | 익명 WebUI fd 경로 커버 |
-| Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay 테스트가 cancel과 replay를 커버하지만 실패 후 성공 retry 테스트는 없습니다 | cancel 커버; retry-after-failure 미구현 |
-| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup 테스트와 `cache_source_list_does_not_create_absent_store_root`가 staging 격리와 startup no-mkdir를 커버하지만 전체 process restart reconciliation 테스트는 없습니다 | 부분 커버 |
+| Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay 테스트; `failed_download_can_retry_same_repo_with_new_idempotency_key`가 첫 실패 후 새 operation id로 재시도 성공 및 catalog entry 1개를 확인합니다 | cancel, replay, retry-after-failure 커버 |
+| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup 테스트와 `cache_source_list_does_not_create_absent_store_root`가 staging 격리와 startup no-mkdir를 커버하지만 #1838 integration/rebase는 root 소유이므로 전체 process restart reconciliation 테스트는 없습니다 | 부분 커버; full restart는 여전히 pending |
 | Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | 커버 |
 | Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | 커버 |
 
