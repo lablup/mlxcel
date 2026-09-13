@@ -4,7 +4,7 @@
 **Status**: Open PR; focused CPU/fake validation complete; root real-model and broad workspace gates pending
 **Languages**: Rust, JSON/OpenAPI fixtures
 **Risk Level**: High
-**Implementation snapshot**: `466c6071` before report-only commit
+**Implementation snapshot**: source repair checkpoint `b7555005`; original implementation checkpoint `466c6071`
 
 ## Executive Summary
 
@@ -36,7 +36,7 @@ The worker resolves metadata once, pins transfers to the resolved SHA, bounds ma
 
 On Unix, router-managed downloads write into a unique private `.mlxcel-staging` directory opened by fd. Remote paths are created relative to directory descriptors with no symlink traversal, and publication uses atomic no-replace rename after the coordinator's `begin_publish` hook seals cancellation. Cancellation accepted before writer exit becomes terminal only after the worker observes it; a late cancel after publication linearization is refused and the completed snapshot can publish.
 
-The completeness policy requires `config.json` plus non-empty selected safetensors and known-size byte agreement. This does not claim independent LFS checksum verification beyond metadata and transfer evidence available to the current downloader.
+The completeness policy requires `config.json`, at least one selected safetensors weight file, known-size byte agreement where metadata/headers provide a size, and LFS SHA-256 metadata for every safetensors file on the anonymous WebUI path. The stream is hashed before fd-relative rename, so same-size corrupted weights fail before publication.
 
 ### Managed-cache deletion only
 
@@ -49,9 +49,9 @@ Deletion opens the configured cache root, owner, target, and private quarantine 
 Parent pre-review found and the implementation addressed these high-risk items before publication:
 
 - Cancellation after the last transfer chunk but before publish is now linearized by `begin_publish_operation`, with a deterministic regression that late cancellation is refused and the operation succeeds.
-- Known HEAD sizes are checked against actual bytes before fd-relative rename, and metadata/file counts/names are bounded before selected downloads are admitted.
+- Metadata now requests `?blobs=true`; safetensors without LFS SHA-256 are rejected, streams are hashed before fd-relative rename, known metadata/HEAD sizes are checked against actual bytes, and metadata/file counts/names are bounded before selected downloads are admitted.
 - Anonymous WebUI metadata no longer constructs `hf-hub` API builders that read saved token files; tests seed token files and env vars and assert no Authorization header on metadata, HEAD, or GET fake requests.
-- Removal now reserves lifecycle state with `operation_busy`, so rescans preserve the original entry until the removal worker finishes.
+- Removal now reserves lifecycle state with `operation_busy`, rechecks after acquiring the per-entry operation guard, and rejects physical aliases from configured models-dir or preset entries so cache deletion cannot remove a user/preset-owned loaded snapshot.
 - Parent-swap and nested stat/open deletion races have deterministic tests and fail without deleting the wrong tree.
 - New hand-written modules are below the 500-line cap after extracting `anchored_delete.rs` and adjacent test modules.
 
@@ -62,11 +62,14 @@ Parent pre-review found and the implementation addressed these high-risk items b
 | `cargo test --profile test-fast --features metal,accelerate anchored_remove -- --nocapture` | Passed: managed-cache quarantine deletion and parent/final-unlink swap regressions |
 | `cargo test --profile test-fast --features metal,accelerate anchored_publish -- --nocapture` | Passed: no-replace publish, owner/staging identity, symlink cleanup regressions |
 | `cargo test --profile test-fast --features metal,accelerate anchored_delete -- --nocapture` | Passed: nested directory stat/open swap regression |
-| Focused downloader/router/WebUI filters | Passed: anonymous transport, saved token negative, fd staging, known-size mismatch, manifest bounds, lifecycle fixtures, WebUI library routes, duplicate replay, queue saturation, publish cancel linearization, case-alias reject, absent-store no-mkdir, managed removal, and rescan guard |
+| `cargo test --lib --profile test-fast --features metal,accelerate downloader::tests:: -- --nocapture` | Passed: 69 passed, 1 ignored; fake anonymous metadata/HEAD/GET, saved-token negative, `?blobs=true`, metadata status, offline, disconnect truncation, checksum, no-weight completeness, path filtering, size mismatch, and token-mode tests |
+| `cargo test --lib --profile test-fast --features metal,accelerate router_models_tests:: -- --nocapture` | Passed: 47 passed; shared download queue/idempotency/revision-alias/progress/cancellation, managed removal reservation, physical alias blocks, in-flight compatibility removal, and rescan guard |
+| `cargo test --lib --profile test-fast --features metal,accelerate router_lifecycle_tests:: -- --nocapture` | Passed: 16 passed; whole producer comparisons for download operation/event fixtures plus lifecycle coordinator regressions |
+| `cargo test --lib --profile test-fast --features metal,accelerate router_cache:: -- --nocapture` | Passed: 11 passed; descriptor-anchored publish/remove/delete race regressions |
+| Focused route filters | Passed: `ui_download_route_replays_same_idempotency_key` and `ui_model_removal_route_matches_operation_accepted_fixture` |
 | `cargo fmt --check` and `git diff --check` | Passed |
 | `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` | Passed |
 | `PATH=/tmp/mlxcel-webui-contract/bin:$PATH make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` | Passed: 43 WebUI contract fixtures, DTO drift, and schema strictness |
-| `PATH=/tmp/mlxcel-webui-contract/bin:$PATH make verify-llama-compat verify-versions verify-kernel-dtype-keys` | Passed |
 | Root-owned real SmolLM download/load/generate/delete acceptance | Not run by this unit |
 | Full workspace serial `make verify-test`, workspace all-target clippy, CUDA/GB10 checks | Not run by this unit; GB10 runner was reported down and the maintainer approved skipping only that unavailable required runner gate |
 
@@ -84,9 +87,26 @@ The local evidence is deliberately CPU/fake-network scoped. It does not establis
 | Contracts | Added full producer fixtures for running and succeeded download operations while preserving nullable `RevisionRef` compatibility |
 | Tests | Added fake HTTP/token, filesystem race, lifecycle idempotency, cancellation, bounded queue, case alias, no-mkdir, and deletion race regressions |
 
-Statistics at PR creation: 24 files changed, 3,576 insertions, 231 deletions. Implementation commit: `466c6071 feat: add safe WebUI model library operations`.
+Statistics after repair checkpoint `b7555005`: the repair commit changes 13 files with 1,617 insertions and 153 deletions on top of the original implementation. Original implementation commit: `466c6071 feat: add safe WebUI model library operations`; repair commit: `b7555005 fix: harden WebUI model library edge cases`.
 
-## 6. Learning Points and Follow-up
+
+## 6. Fake Acceptance Matrix at Source Repair Checkpoint
+
+| Required fake case | Evidence in this PR | Status |
+|---|---|---|
+| Public valid download | `a_download_emits_the_b10621_event_sequence_and_lands_in_the_cache`; `anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get` | Covered with fake downloader and fake HTTP/fd path |
+| Bad repo / invalid revision / gated or private / 404 | `anonymous_fd_download_maps_metadata_status_without_publishing` covers 403 guidance and 404 missing repo/revision behavior | Covered for metadata-status handling |
+| Offline | `anonymous_fd_download_offline_rejects_before_metadata_request` | Covered before metadata request |
+| Timeout | No deterministic true read-timeout test was added because the production client timeout is 30 seconds; generic worker failure remains covered by `a_failed_download_emits_download_failed_and_drops_the_entry` | Missing exact timeout case |
+| Disconnect / truncation | `anonymous_fd_download_rejects_disconnect_truncation_before_publish`; `stream_file_rejects_known_size_mismatch_before_publish` | Covered |
+| Disk full | No deterministic ENOSPC/disk-full fake is present; generic write/open failures and cleanup are exercised but not an ENOSPC-specific path | Missing exact disk-full case |
+| Checksum and completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | Covered for the anonymous WebUI fd path |
+| Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay tests cover cancel and replay, but no explicit successful retry-after-failure test is present | Cancel covered; retry-after-failure missing |
+| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup tests and `cache_source_list_does_not_create_absent_store_root` cover staging isolation/no startup mkdir; no full process-restart reconciliation test is present | Partially covered |
+| Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | Covered |
+| Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | Covered |
+
+## 7. Learning Points and Follow-up
 
 A WebUI library action is an authority boundary, not just a button over an existing helper. Admission must be cheap and bounded, network and disk work must occur outside pool locks, and the final write/delete step must recheck the filesystem identity it is about to mutate.
 
