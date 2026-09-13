@@ -1,7 +1,7 @@
 # Technical Report: PR #1871 - feat: enable model-free WebUI startup
 
 **Date**: 2026-09-13
-**Status**: Completed
+**Status**: Needs Follow-up — `pending_host_recovery` (PR remains in review)
 **Languages**: Rust, TypeScript contract fixtures, Markdown
 **Risk Level**: High
 
@@ -57,6 +57,12 @@ The WebUI epic had already landed the schema, static bundle, lifecycle coordinat
 
 **Trade-off:** The helper is WebUI-feature gated, so no-default-feature builds need explicit cfg guards around callers. The final feature-off check caught and fixed that boundary.
 
+### 2.4 Preserve canonical read-only responses and Unicode limits
+
+Bootstrap capability availability now follows the actual pool cache rather than a startup-path hint. Catalog diagnostics redact filesystem paths before truncating to the schema's 512 Unicode-code-point limit; the TypeScript validator counts code points rather than UTF-16 code units. Real inventory exposed this boundary where synthetic short diagnostics did not.
+
+The read-only fix at `534563fb704619f407e4ea699482fda9c22fac98` mounts stateless single-model refusals for model actions, downloads, removals, cancellation, and catalog refresh: each returns canonical `422 unsupported` without mutating or loading a model. Unknown operation lookup returns a canonical `404`. The API adds the missing catalog-refresh `422` response declaration without changing DTO limits. A mounted fake-AppState test first reproduced the previous empty `404`; this is CPU-only HTTP evidence, not real single-model inference acceptance.
+
 ## 3. Change Summary
 
 | Category | Summary |
@@ -64,20 +70,32 @@ The WebUI epic had already landed the schema, static bundle, lifecycle coordinat
 | Startup | `--ui`/`--webui` now enable model-free WebUI router mode for both binaries, while disabling aliases remain accepted and unsupported adjacent llama.cpp UI/tool/MCP/proxy flags still fail clearly. |
 | Security | Production startup constructs the WebUI security policy with generated loopback keys or explicit non-loopback TLS/key requirements, and recognizes `[::1]` as loopback. |
 | Catalog and runtime | Router and single-model UI catalog/runtime routes use persistent per-app catalog caches, selected-entry runtime configuration, and explicit readable-root validation for CLI/env cache roots. |
+| Contract boundaries | Cache capabilities follow actual pool state; catalog diagnostics and client validation agree on Unicode length; the single-model refusal fix preserves typed error envelopes. |
 | Events | Router and single-model UI events share canonical cursor parsing, replay subscription, gap handling, and SSE serialization. |
 | Documentation | WebUI bundling, catalog, architecture, and llama compatibility docs now describe mounted production startup and remaining unsupported adjacent surfaces. |
 
-## 4. Validation
+## 4. Validation and Remaining Blockers
 
-- Targeted WebUI route/startup tests passed for selected runtime config, paired SSE replay, invalid cursors, explicit model-store roots, bracketed IPv6 loopback classification, and single-model mounted SSE replay fixtures.
-- `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` passed.
-- `make verify-webui-contract WEBUI_CONTRACT_PY=/tmp/mlxcel-webui-contract/bin/python` passed with 41 fixtures.
-- `make verify-llama-compat verify-versions verify-kernel-dtype-keys` passed.
-- `cargo check --no-default-features --features metal,accelerate,surgery --lib --tests` passed with existing no-WebUI unused warnings.
-- GB10 CUDA CI was not run because the required runner is down; the maintainer approved proceeding with local validation and a root-owned merge exception for that unavailable required job.
+Validation is tied to the source revision below. An earlier full pass is not a full pass for the current changes.
+
+| Revision / scope | Result |
+|------------------|--------|
+| `985f4a87` full local gate | Passed: 11,236 tests, 0 failed, 361 ignored across 123 summaries; workspace all-target Clippy, structural/contract checks, and feature-off workspace check passed. The feature-off check emitted 42 warnings. |
+| `985f4a87` actual test-fast binaries | Both `mlxcel-server` and `mlxcel serve` passed relocated empty-HOME/offline model-free startup and controlling-TTY/key/port-zero authority checks. These are not release-binary results. |
+| `985f4a87` real inventory | Failed strict schema validation on four oversized diagnostic fields from two DFlash entries in a 212-entry catalog. The attempted real lifecycle stopped before inference; `1ff25a18` fixes this boundary. |
+| `1ff25a18` catalog and RouterPool acceptance | All 212 entries remained unloaded and passed strict schema validation. Real Llama streamed 467 characters, drain refusal returned 400, worker exit was observed, Granite returned “Affirmative.”, and SIGINT cleanup reported one attempted and one completed worker shutdown. Complete loaded UI snapshots passed canonical validation. This is router-mode evidence, not explicit-`-m` single-model acceptance. |
+| `1ff25a18` targeted checks | 36 Rust catalog tests, scoped Clippy, 48 frontend tests, type/lint checks, 42 strict contract fixtures, and deterministic bundle verification passed. Independent correctness and security reviews of this delta cleared. |
+| `1ff25a18` full local gate | Failed in the unchanged `mlxcel-core` test `dflash_round_loop_starts_at_the_configured_depth`: SIG6 with Metal `commandbufferDiscarded` / `InnocentVictim` recovery. An isolated run of the exact same binary passed once and failed again on its second run. Cause remains unknown; this is neither a full pass nor an assumed transient failure. |
+| `534563fb704619f407e4ea699482fda9c22fac98` single-model refusal fix | Passed: three CPU-only mounted single-control tests with valid payloads, one existing single-model SSE replay test, 12 shared WebUI security tests, 44 strict contract fixtures, 48 frontend tests, type/lint checks, and deterministic bundle verification. Scoped Clippy and independent correctness and security delta reviews also cleared. The root CPU-only gate passed workspace all-target Clippy, 44 contract fixtures, structural checks, formatting, and diff checks at this exact runtime revision. |
+| Explicit-`-m` real acceptance and both release-binary relocation gates | Not run. All GPU work is paused pending Mac host recovery; a reboot has been requested. |
+
+Earlier full attempts also exposed a synthetic route-identity mismatch (`0238c814`) and a stale cache fixture (`70d4e409`). Both were corrected without weakening the relevant assertion, and the subsequent `985f4a87` full gate passed. Process RSS observed during the real lifecycle is not evidence that GPU allocations were freed.
+
+The maintainer's GB10-down exception applies only to unavailable required runner checks. It does not waive the local GPU failure, outstanding release acceptance, or review findings, and does not establish CUDA execution coverage. No branch-protection changes are part of this work.
 
 ## 5. Follow-up Actions
 
-- Complete independent implementation and security reviews before merge.
-- Root should run the broad workspace/full production binary gates and any serialized real-model acceptance required by the epic.
-- Later WebUI issues still own page-level chat, downloads/removal, rich metrics, Safari/VoiceOver acceptance for revised UI, and actual GB10 CUDA validation when the runner is available.
+- Recover the Mac host and diagnose/revalidate the failed GPU gate before resuming GPU work; do not repeatedly retry on the unhealthy host.
+- Rerun required full acceptance against the final runtime revision `534563fb704619f407e4ea699482fda9c22fac98` after host recovery.
+- Run explicit-`-m` real single-model acceptance and both release-binary relocated/offline gates. Keep PR #1871 in review until required local evidence is complete.
+- Later WebUI issues own downloads/removal adapters (#1841), rich metrics (#1847), page-level workflows, and Safari/VoiceOver acceptance for the revised UI. Actual GB10 CUDA validation remains unavailable until runner recovery.
