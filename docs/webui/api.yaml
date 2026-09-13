@@ -294,6 +294,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Catalog refresh is unsupported in read-only single-model mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }

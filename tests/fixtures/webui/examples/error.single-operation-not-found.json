@@ -1,0 +1,9 @@
+{
+  "$schemaName": "ErrorEnvelope",
+  "error": {
+    "code": "not_found",
+    "message": "operation not found",
+    "retryable": false
+  },
+  "request_id": "req_single_fixture"
+}
