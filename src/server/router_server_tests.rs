@@ -75,13 +75,14 @@ fn add_catalog_model(root: &std::path::Path, name: &str, model_type: &str) {
 struct InstantDownloader;
 
 impl RouterDownloader for InstantDownloader {
-    fn validate(&self, _repo_id: &str) -> anyhow::Result<()> {
+    fn validate(&self, _repo_id: &str, _revision: Option<&str>) -> anyhow::Result<()> {
         Ok(())
     }
 
     fn download(
         &self,
         repo_id: &str,
+        _revision: Option<&str>,
         dest_root: &Path,
         hooks: DownloadHooks,
     ) -> anyhow::Result<()> {
@@ -193,6 +194,7 @@ async fn send(
     (status, json)
 }
 
+#[allow(clippy::duplicate_mod)]
 #[path = "router_contract_test_support.rs"]
 mod contract;
 #[cfg(feature = "webui")]
@@ -981,6 +983,87 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["error"]["code"], "unsupported");
     assert_eq!(body["error"]["operation_id"], accepted.operation_id);
+}
+
+#[tokio::test]
+async fn ui_download_route_replays_same_idempotency_key() {
+    let root = temp_models_dir("ui-download-route");
+    let cache_root = temp_models_dir("ui-download-route-cache");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: Some(CacheSource::new(cache_root, Arc::new(InstantDownloader))),
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let app = create_router_app_with_authenticated_ui(state);
+    let body = serde_json::json!({
+        "repo_id": "mlx-community/replay-http",
+        "idempotency_key": "download-route-replay-0001"
+    })
+    .to_string();
+
+    let (first_status, first) = send(
+        app.clone(),
+        Method::POST,
+        "/ui-api/v1/downloads",
+        &body,
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::ACCEPTED, "{first}");
+    contract::assert_operation_accepted(&first);
+    assert_eq!(first["idempotent_replay"], false);
+
+    let (second_status, second) = send(
+        app,
+        Method::POST,
+        "/ui-api/v1/downloads",
+        &body,
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::ACCEPTED, "{second}");
+    assert_eq!(second["operation_id"], first["operation_id"]);
+    assert_eq!(second["idempotent_replay"], true);
+}
+
+#[tokio::test]
+async fn ui_model_removal_route_matches_operation_accepted_fixture() {
+    let root = temp_models_dir("ui-removal-route");
+    let cache_root = temp_models_dir("ui-removal-route-cache");
+    add_fake_model(&cache_root.join("mlx-community"), "remove-route");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: Some(CacheSource::new(cache_root, Arc::new(InstantDownloader))),
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    );
+    let entry = state
+        .pool
+        .get("mlx-community/remove-route")
+        .expect("cache entry");
+    let body = serde_json::json!({
+        "model_id": entry.ui_model_id,
+        "expected_revision": entry.lifecycle_revision(),
+        "idempotency_key": "removal-route-0001"
+    });
+    let app = create_router_app_with_authenticated_ui(state);
+    let (status, response) = send(
+        app,
+        Method::POST,
+        "/ui-api/v1/model-removals",
+        &body.to_string(),
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+    contract::assert_operation_accepted(&response);
 }
 
 #[tokio::test]

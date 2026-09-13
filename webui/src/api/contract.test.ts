@@ -17,6 +17,8 @@ const exampleSchemas = new Map<string, string>([
   ['event.3.json', 'UiEvent'],
   ['event.gap.json', 'UiEvent'],
   ['operation.accepted.json', 'OperationAccepted'],
+  ['operation.download-running.json', 'Operation'],
+  ['operation.download-succeeded.json', 'Operation'],
   ['operation.running.json', 'Operation'],
   ['operation.succeeded.json', 'Operation'],
   ['operations.list.json', 'OperationsListResponse'],
@@ -60,7 +62,7 @@ function failSchema(path: string): never {
 describe('canonical WebUI contract fixtures', () => {
   it('validates every shared fixture at the JavaScript runtime boundary', () => {
     const entries = Object.entries(fixtures).sort(([left], [right]) => left.localeCompare(right));
-    expect(entries).toHaveLength(41);
+    expect(entries).toHaveLength(43);
     for (const [path] of entries) validateAgainstSchema(schemaFor(path), cloneFixture(path), path);
   });
 

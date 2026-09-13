@@ -119,6 +119,7 @@ use futures::StreamExt;
 use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::{Repo, RepoType};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -174,6 +175,10 @@ const SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 /// Younger partial files are left in place to avoid racing against a concurrent
 /// `mlxcel` process that is mid-download in the same destination directory.
 const PARTIAL_TEMPFILE_STALE_AGE: Duration = Duration::from_secs(60 * 60);
+const MAX_HF_SIBLINGS: usize = 16_384;
+const MAX_SELECTED_DOWNLOAD_FILES: usize = 8_192;
+const MAX_REPO_FILENAME_BYTES: usize = 512;
+const MAX_HF_METADATA_BYTES: usize = 8 * 1024 * 1024;
 
 /// Resolved options for a download invocation.
 ///
@@ -181,6 +186,14 @@ const PARTIAL_TEMPFILE_STALE_AGE: Duration = Duration::from_secs(60 * 60);
 /// shared adapter both binaries use). The struct exists so that programmatic
 /// callers (and unit tests) can drive [`download_repo`] without going through
 /// clap parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenMode {
+    /// Resolve an explicit token first, then HF_TOKEN / HUGGING_FACE_HUB_TOKEN.
+    Environment,
+    /// Use anonymous HuggingFace requests; explicit and ambient tokens are ignored.
+    Anonymous,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadOptions {
     /// HuggingFace repository identifier, e.g. `mlx-community/Qwen3-4B-4bit`.
@@ -199,9 +212,13 @@ pub struct DownloadOptions {
     /// Repository revision (branch, tag, or commit). Defaults to `main` when
     /// `None`.
     pub revision: Option<String>,
-    /// Authentication token override. When `None`, falls back to environment
-    /// variables (`HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`).
+    /// Authentication token override. When `None` and `token_mode` is
+    /// [`TokenMode::Environment`], falls back to environment variables
+    /// (`HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`). WebUI-managed library
+    /// downloads set [`TokenMode::Anonymous`] so browser actions never
+    /// silently consume ambient Hub credentials.
     pub token: Option<String>,
+    pub token_mode: TokenMode,
     /// Optional repository-relative glob allow-list applied after the built-in
     /// safe file-type filter. Empty means every built-in-allowed file.
     pub include: Vec<String>,
@@ -219,6 +236,7 @@ impl DownloadOptions {
             models_dir: args.models_dir.clone(),
             revision: args.revision.clone(),
             token: args.token.clone(),
+            token_mode: TokenMode::Environment,
             include: args.include.clone(),
             force: args.force,
         }
@@ -264,6 +282,13 @@ impl DownloadOptions {
 /// targeted error message that names the env var or flag — see
 /// [`validate_token`] which is invoked at HTTP-client construction time.
 pub fn resolve_token(explicit: Option<&str>) -> Option<String> {
+    resolve_token_with_mode(explicit, TokenMode::Environment)
+}
+
+pub fn resolve_token_with_mode(explicit: Option<&str>, mode: TokenMode) -> Option<String> {
+    if mode == TokenMode::Anonymous {
+        return None;
+    }
     if let Some(t) = explicit {
         let trimmed = t.trim();
         if !trimmed.is_empty() {
@@ -312,6 +337,10 @@ fn build_api(token: Option<String>) -> Result<Api> {
     if let Some(tok) = token {
         builder = builder.with_token(Some(tok));
     }
+    finish_api_builder(builder)
+}
+
+fn finish_api_builder(builder: ApiBuilder) -> Result<Api> {
     builder
         .build()
         .map_err(|err| anyhow!("Failed to initialize Hugging Face API client: {err}"))
@@ -534,6 +563,153 @@ fn file_url(endpoint: &str, repo_id: &str, revision: &str, filename: &str) -> St
     format!("{endpoint}/{repo_enc}/resolve/{rev_enc}/{file_enc}")
 }
 
+fn repo_info_url(endpoint: &str, repo_id: &str, revision: &str) -> String {
+    let endpoint = endpoint.trim_end_matches('/');
+    let repo_enc = encode_path_segments(repo_id);
+    let rev_enc = encode_path_segments(revision);
+    format!("{endpoint}/api/models/{repo_enc}/revision/{rev_enc}?blobs=true")
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubRepoInfo {
+    sha: String,
+    #[serde(default)]
+    siblings: Vec<HubSibling>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubSibling {
+    rfilename: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    lfs: Option<HubLfs>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubLfs {
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedDownloadFile {
+    filename: String,
+    expected_size: Option<u64>,
+    sha256: Option<String>,
+}
+
+impl SelectedDownloadFile {
+    fn from_sibling(repo_id: &str, sibling: &HubSibling) -> Result<Self> {
+        validate_manifest_filename(repo_id, &sibling.rfilename)?;
+        let sha256 = sibling
+            .lfs
+            .as_ref()
+            .and_then(|lfs| lfs.sha256.as_deref())
+            .map(|hash| validate_sha256_hex(&sibling.rfilename, hash))
+            .transpose()?;
+        if sibling.rfilename.ends_with(".safetensors") && sha256.is_none() {
+            return Err(anyhow!(
+                "Repository metadata for '{}' is missing an LFS SHA-256 digest; refusing to publish unverifiable weights",
+                sibling.rfilename
+            ));
+        }
+        Ok(Self {
+            filename: sibling.rfilename.clone(),
+            expected_size: sibling
+                .lfs
+                .as_ref()
+                .and_then(|lfs| lfs.size)
+                .or(sibling.size),
+            sha256,
+        })
+    }
+}
+
+fn build_reqwest_client(token: Option<&str>, enforce_https: bool) -> Result<reqwest::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(tok) = token {
+        validate_token(tok)?;
+        let auth_val = format!("Bearer {tok}");
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&auth_val).with_context(
+                || "HF token contains invalid characters (must be ASCII, no control chars)",
+            )?,
+        );
+    }
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
+        .default_headers(headers);
+    if enforce_https {
+        builder = builder.https_only(true);
+    }
+    for cert in load_extra_ca_certificates()? {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().context("Failed to create HTTP client")
+}
+
+async fn fetch_anonymous_repo_info(
+    client: &reqwest::Client,
+    endpoint: &str,
+    repo_id: &str,
+    revision: &str,
+) -> Result<HubRepoInfo> {
+    let url = repo_info_url(endpoint, repo_id, revision);
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("HTTP request failed for repository metadata '{repo_id}'"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let code = status.as_u16();
+        return Err(match code {
+            401 | 403 => anyhow!(
+                "Repository '{repo_id}' requires authentication, is gated, or is private; WebUI downloads use anonymous public Hub access only"
+            ),
+            404 => anyhow!("Repository '{repo_id}' or revision '{revision}' was not found"),
+            _ => anyhow!("HTTP {code} while fetching repository metadata for '{repo_id}'"),
+        });
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| {
+            format!("Stream error while reading repository metadata for '{repo_id}'")
+        })?;
+        if body.len().saturating_add(chunk.len()) > MAX_HF_METADATA_BYTES {
+            return Err(anyhow!(
+                "Repository metadata for '{repo_id}' exceeds the mlxcel {MAX_HF_METADATA_BYTES}-byte safety limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice::<HubRepoInfo>(&body)
+        .with_context(|| format!("Failed to parse HuggingFace repository metadata for '{repo_id}'"))
+}
+
+fn fetch_anonymous_repo_info_blocking(
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<HubRepoInfo> {
+    let endpoint = hf_endpoint();
+    let requested_revision = revision.unwrap_or("main");
+    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
+    let client = build_reqwest_client(None, false)?;
+    rt.block_on(fetch_anonymous_repo_info(
+        &client,
+        &endpoint,
+        repo_id,
+        requested_revision,
+    ))
+}
+
 /// Download a single file via reqwest streaming, ticking the per-file and
 /// aggregate progress bars as each chunk arrives.
 ///
@@ -663,9 +839,12 @@ async fn stream_to_tempfile(
         ));
     }
 
-    // Prefer the response's own Content-Length over the HEAD-pass estimate:
-    // it reflects the entity actually being served.
-    let total_size = response.content_length().unwrap_or(expected_size);
+    // Prefer a known metadata/HEAD size for stable UI totals, then fall back to
+    // the response's own Content-Length for validation when no manifest size is
+    // available.
+    let response_size = response.content_length();
+    let expected_size = (expected_size > 0).then_some(expected_size);
+    let total_size = expected_size.or(response_size).unwrap_or(0);
 
     let mut stream = response.bytes_stream();
     let mut bytes_written: u64 = 0;
@@ -690,6 +869,7 @@ async fn stream_to_tempfile(
         .await
         .with_context(|| format!("Flush error for {filename}"))?;
     drop(out);
+    validate_downloaded_size(filename, expected_size.or(response_size), bytes_written)?;
 
     tokio::fs::rename(tmp, dest)
         .await
@@ -753,6 +933,16 @@ pub fn ensure_online(what: &str) -> Result<()> {
 /// download when `DELETE /models` removes the model. Both needs are optional
 /// observations of the same download loop, so they ride along as hooks rather
 /// than forking the implementation.
+#[derive(Debug, Clone)]
+pub struct DownloadPlan {
+    pub repo_id: String,
+    pub requested_revision: String,
+    pub resolved_revision: String,
+    pub destination: PathBuf,
+    pub selected_files: usize,
+    pub total_bytes: Option<u64>,
+}
+
 #[derive(Clone, Default)]
 pub struct DownloadHooks {
     /// Called as bytes arrive for each file: `(url, downloaded, total)`.
@@ -760,6 +950,15 @@ pub struct DownloadHooks {
     /// report one terminal call with `downloaded == total`. Called from the
     /// download worker thread; keep it fast and non-blocking.
     pub progress: Option<std::sync::Arc<dyn Fn(&str, u64, u64) + Send + Sync>>,
+    /// Called after repository metadata and selected file sizes are known but
+    /// before the first transfer starts. `total_bytes` is `None` when one or
+    /// more selected files have unknown length.
+    pub plan: Option<std::sync::Arc<dyn Fn(DownloadPlan) + Send + Sync>>,
+    /// Called immediately before an already-complete staged snapshot is made
+    /// visible. Returning `false` aborts publication as a cooperative cancel;
+    /// returning `true` is the linearization point after which cancellation may
+    /// be refused by the coordinator.
+    pub begin_publish: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
     /// Cooperative cancellation flag, checked between streamed chunks and
     /// between files. When it becomes `true`, the download aborts with an
     /// error wrapping [`DownloadCancelled`], leaving no partial tempfiles
@@ -771,6 +970,8 @@ impl std::fmt::Debug for DownloadHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DownloadHooks")
             .field("progress", &self.progress.is_some())
+            .field("plan", &self.plan.is_some())
+            .field("begin_publish", &self.begin_publish.is_some())
             .field("cancel", &self.cancel.is_some())
             .finish()
     }
@@ -806,6 +1007,80 @@ fn check_cancelled(hooks: &DownloadHooks) -> Result<()> {
     Ok(())
 }
 
+fn validate_manifest_filename(repo_id: &str, filename: &str) -> Result<()> {
+    if filename.len() > MAX_REPO_FILENAME_BYTES {
+        return Err(anyhow!(
+            "Repository '{repo_id}' contains a filename longer than {MAX_REPO_FILENAME_BYTES} bytes; refusing to download it"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_bounds(
+    repo_id: &str,
+    sibling_count: usize,
+    selected_count: usize,
+) -> Result<()> {
+    if sibling_count > MAX_HF_SIBLINGS {
+        return Err(anyhow!(
+            "Repository '{repo_id}' exposes {sibling_count} files, above the mlxcel limit of {MAX_HF_SIBLINGS}"
+        ));
+    }
+    if selected_count > MAX_SELECTED_DOWNLOAD_FILES {
+        return Err(anyhow!(
+            "Repository '{repo_id}' selected {selected_count} files for download, above the mlxcel limit of {MAX_SELECTED_DOWNLOAD_FILES}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_downloaded_size(
+    filename: &str,
+    expected_size: Option<u64>,
+    bytes_written: u64,
+) -> Result<()> {
+    if let Some(expected_size) = expected_size
+        && bytes_written != expected_size
+    {
+        return Err(anyhow!(
+            "Downloaded size mismatch for '{filename}': expected {expected_size} bytes, wrote {bytes_written} bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sha256_hex(filename: &str, hash: &str) -> Result<String> {
+    if hash.len() != 64 || !hash.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "Repository metadata for '{filename}' contains an invalid SHA-256 digest"
+        ));
+    }
+    Ok(hash.to_ascii_lowercase())
+}
+
+fn sha256_hex(digest: impl AsRef<[u8]>) -> String {
+    let bytes = digest.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn verify_downloaded_sha256(filename: &str, expected: Option<&str>, actual: &[u8]) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = sha256_hex(actual);
+    if actual != expected {
+        return Err(anyhow!(
+            "Downloaded checksum mismatch for '{filename}': expected SHA-256 {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
 /// Probe that `repo_id` names a reachable HuggingFace model repository
 /// (issue #1438). Resolves the ambient token, builds the API client, and
 /// fetches the repository manifest without downloading any file. The router
@@ -813,8 +1088,20 @@ fn check_cancelled(hooks: &DownloadHooks) -> Result<()> {
 /// starting the background download, mirroring b10621's synchronous metadata
 /// fetch in its own handler. Blocking: call from a blocking-capable thread.
 pub fn probe_repo(repo_id: &str, revision: Option<&str>) -> Result<()> {
+    probe_repo_with_token_mode(repo_id, revision, TokenMode::Environment)
+}
+
+pub fn probe_repo_with_token_mode(
+    repo_id: &str,
+    revision: Option<&str>,
+    token_mode: TokenMode,
+) -> Result<()> {
     ensure_online(&format!("the repository manifest for '{repo_id}'"))?;
-    let token = resolve_token(None);
+    if token_mode == TokenMode::Anonymous {
+        let repo_id = normalize_repo_id(repo_id)?;
+        return fetch_anonymous_repo_info_blocking(&repo_id, revision).map(|_| ());
+    }
+    let token = resolve_token_with_mode(None, token_mode);
     let api = build_api(token)?;
     let repo = build_repo_handle(repo_id, revision);
     api.repo(repo)
@@ -867,6 +1154,347 @@ pub fn download_repo_with_hooks(opts: DownloadOptions, hooks: DownloadHooks) -> 
     download_repo_blocking(opts, hooks)
 }
 
+#[cfg(unix)]
+pub fn download_repo_to_existing_dir_fd(
+    repo_id: &str,
+    revision: Option<&str>,
+    dir_fd: std::os::fd::RawFd,
+    reported_destination: PathBuf,
+    hooks: DownloadHooks,
+) -> Result<()> {
+    ensure_online(&format!("the model snapshot '{repo_id}'"))?;
+    let repo_id = normalize_repo_id(repo_id)?;
+    let requested_revision = revision.unwrap_or("main").to_string();
+    let endpoint = hf_endpoint();
+    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
+    let client = build_reqwest_client(None, false)?;
+    let info = rt.block_on(fetch_anonymous_repo_info(
+        &client,
+        &endpoint,
+        &repo_id,
+        &requested_revision,
+    ))?;
+    let resolved_revision = info.sha.clone();
+    if info.siblings.len() > MAX_HF_SIBLINGS {
+        validate_manifest_bounds(&repo_id, info.siblings.len(), 0)?;
+    }
+    let mut wanted: Vec<SelectedDownloadFile> = info
+        .siblings
+        .iter()
+        .map(|sibling| SelectedDownloadFile::from_sibling(&repo_id, sibling))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|file| is_wanted_file(&file.filename))
+        .collect();
+    validate_manifest_bounds(&repo_id, info.siblings.len(), wanted.len())?;
+    if wanted.is_empty() {
+        return Err(anyhow!(
+            "Repository '{repo_id}' does not expose any supported model files. Expected config/tokenizer JSON and safetensors/weights files."
+        ));
+    }
+    if !wanted
+        .iter()
+        .any(|file| file.filename.ends_with(".safetensors"))
+    {
+        return Err(anyhow!(
+            "Repository '{repo_id}' metadata is incomplete: no safetensors weight files were selected"
+        ));
+    }
+    let revision = resolved_revision.as_str();
+    if (hooks.progress.is_some() || hooks.plan.is_some())
+        && wanted.iter().any(|file| file.expected_size.is_none())
+    {
+        let size_map = rt.block_on(async {
+            let client_ref = &client;
+            let endpoint_ref = &endpoint;
+            let repo_id_ref = &repo_id;
+            futures::stream::iter(
+                wanted
+                    .iter()
+                    .filter(|file| file.expected_size.is_none())
+                    .map(|file| file.filename.clone()),
+            )
+            .map(move |filename| async move {
+                let url = file_url(endpoint_ref, repo_id_ref, revision, &filename);
+                let size = client_ref
+                    .head(&url)
+                    .send()
+                    .await
+                    .ok()
+                    .and_then(|r| {
+                        r.headers()
+                            .get(reqwest::header::CONTENT_LENGTH)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                    })
+                    .filter(|size| *size > 0);
+                (filename, size)
+            })
+            .buffer_unordered(8)
+            .collect::<std::collections::HashMap<String, Option<u64>>>()
+            .await
+        });
+        for file in &mut wanted {
+            if file.expected_size.is_none()
+                && let Some(size) = size_map.get(&file.filename).and_then(|size| *size)
+            {
+                file.expected_size = Some(size);
+            }
+        }
+    }
+    let total_bytes = wanted
+        .iter()
+        .try_fold(0u64, |acc, file| {
+            file.expected_size
+                .map(|size| acc.saturating_add(size))
+                .ok_or(())
+        })
+        .ok();
+    if let Some(plan) = &hooks.plan {
+        plan(DownloadPlan {
+            repo_id: repo_id.clone(),
+            requested_revision: requested_revision.clone(),
+            resolved_revision: resolved_revision.clone(),
+            destination: reported_destination,
+            selected_files: wanted.len(),
+            total_bytes,
+        });
+    }
+    for file in &wanted {
+        check_cancelled(&hooks)?;
+        let url = file_url(&endpoint, &repo_id, revision, &file.filename);
+        rt.block_on(stream_file_to_dir_fd(
+            &client,
+            &url,
+            dir_fd,
+            &file.filename,
+            file.expected_size,
+            file.sha256.as_deref(),
+            &hooks,
+        ))?;
+    }
+    if !file_exists_nonempty_at(dir_fd, "config.json")? {
+        return Err(anyhow!(
+            "Downloaded files for '{repo_id}' are incomplete: missing config.json"
+        ));
+    }
+    if !wanted
+        .iter()
+        .filter(|file| file.filename.ends_with(".safetensors"))
+        .all(|file| file_exists_nonempty_at(dir_fd, &file.filename).unwrap_or(false))
+    {
+        return Err(anyhow!(
+            "Downloaded files for '{repo_id}' are incomplete: one or more safetensors files are missing or empty"
+        ));
+    }
+    unsafe {
+        libc::fsync(dir_fd);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn stream_file_to_dir_fd(
+    client: &reqwest::Client,
+    url: &str,
+    root_fd: std::os::fd::RawFd,
+    filename: &str,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+    hooks: &DownloadHooks,
+) -> Result<u64> {
+    stream_file_to_dir_fd_with_writer_factory(
+        client,
+        url,
+        root_fd,
+        filename,
+        expected_size,
+        expected_sha256,
+        hooks,
+        tokio::fs::File::from_std,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn stream_file_to_dir_fd_with_writer_factory<W, F>(
+    client: &reqwest::Client,
+    url: &str,
+    root_fd: std::os::fd::RawFd,
+    filename: &str,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+    hooks: &DownloadHooks,
+    writer_factory: F,
+) -> Result<u64>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    F: FnOnce(std::fs::File) -> W,
+{
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (parent, leaf) = open_parent_dir_fd(root_fd, filename)?;
+    let tmp_name = std::ffi::CString::new(format!(
+        ".mlxcel-partial.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ))?;
+    let tmp_fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            tmp_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if tmp_fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("Failed to create tempfile for {filename}"));
+    }
+    let std_file = unsafe { std::fs::File::from_raw_fd(tmp_fd) };
+    let mut out = writer_factory(std_file);
+    let result = async {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("HTTP request failed for {filename}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            return Err(anyhow!("HTTP {code} downloading '{filename}'"));
+        }
+        let response_size = response.content_length();
+        let total_size = expected_size.or(response_size).unwrap_or(0);
+        let mut stream = response.bytes_stream();
+        let mut bytes_written = 0u64;
+        let mut hasher = expected_sha256.map(|_| Sha256::new());
+        while let Some(chunk) = stream.next().await {
+            check_cancelled(hooks)
+                .with_context(|| format!("Cancelled while downloading {filename}"))?;
+            let chunk =
+                chunk.with_context(|| format!("Stream error while downloading {filename}"))?;
+            out.write_all(&chunk)
+                .await
+                .with_context(|| format!("Write error while downloading {filename}"))?;
+            if let Some(hasher) = hasher.as_mut() {
+                hasher.update(&chunk);
+            }
+            bytes_written += chunk.len() as u64;
+            if let Some(progress) = &hooks.progress {
+                progress(url, bytes_written, total_size);
+            }
+        }
+        out.flush()
+            .await
+            .with_context(|| format!("Flush error for {filename}"))?;
+        drop(out);
+        validate_downloaded_size(filename, expected_size.or(response_size), bytes_written)?;
+        if let Some(hasher) = hasher {
+            let digest = hasher.finalize();
+            verify_downloaded_sha256(filename, expected_sha256, &digest)?;
+        }
+        let rc = unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                tmp_name.as_ptr(),
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("Rename error for {filename}"));
+        }
+        Ok(bytes_written)
+    }
+    .await;
+    if result.is_err() {
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), tmp_name.as_ptr(), 0);
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn open_parent_dir_fd(
+    root_fd: std::os::fd::RawFd,
+    filename: &str,
+) -> Result<(std::fs::File, std::ffi::CString)> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut parts = filename.split('/').collect::<Vec<_>>();
+    let leaf = parts
+        .pop()
+        .ok_or_else(|| anyhow!("invalid empty filename in repository manifest"))?;
+    let leaf = cstring_repo_component(leaf)?;
+    let dup = unsafe { libc::dup(root_fd) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to duplicate root fd");
+    }
+    let mut current = unsafe { std::fs::File::from_raw_fd(dup) };
+    for part in parts {
+        let name = cstring_repo_component(part)?;
+        let rc = unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EEXIST) {
+                return Err(err)
+                    .with_context(|| format!("failed to create directory for {filename}"));
+            }
+        }
+        let fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to open directory for {filename}"));
+        }
+        current = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok((current, leaf))
+}
+
+#[cfg(unix)]
+fn cstring_repo_component(component: &str) -> Result<std::ffi::CString> {
+    if component.is_empty() || component == "." || component == ".." || component.contains('\\') {
+        return Err(anyhow!("unsafe repository filename component"));
+    }
+    std::ffi::CString::new(component).map_err(|_| anyhow!("repository filename contains NUL byte"))
+}
+
+#[cfg(unix)]
+fn file_exists_nonempty_at(root_fd: std::os::fd::RawFd, filename: &str) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+    let (parent, leaf) = open_parent_dir_fd(root_fd, filename)?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(false);
+        }
+        return Err(err).context("failed to stat downloaded file");
+    }
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFREG && stat.st_size > 0)
+}
+
 fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result<()> {
     // Issue #171: expand a bare, prefix-less model name (e.g. `Qwen3-4B-4bit`)
     // to `<default-org>/<name>` BEFORE anything is derived from `opts.repo_id` —
@@ -914,7 +1542,7 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
     }
 
     let local_dir = opts.resolve_local_dir();
-    let token = resolve_token(opts.token.as_deref());
+    let token = resolve_token_with_mode(opts.token.as_deref(), opts.token_mode);
     let endpoint = hf_endpoint();
 
     // M1 — refuse plaintext endpoints when a token would be sent over the
@@ -938,13 +1566,24 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
     let info = api_repo
         .info()
         .map_err(|err| map_hf_error(err, &opts.repo_id, opts.revision.as_deref(), None))?;
+    let requested_revision = opts.revision.as_deref().unwrap_or("main").to_string();
+    let resolved_revision = info.sha.clone();
+    if info.siblings.len() > MAX_HF_SIBLINGS {
+        validate_manifest_bounds(&opts.repo_id, info.siblings.len(), 0)?;
+    }
     let wanted: Vec<String> = info
         .siblings
         .iter()
-        .map(|s| s.rfilename.clone())
+        .map(|sibling| {
+            validate_manifest_filename(&opts.repo_id, &sibling.rfilename)?;
+            Ok(sibling.rfilename.clone())
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|name| is_wanted_file(name))
         .filter(|name| matches_include_patterns(name, &include_patterns))
         .collect();
+    validate_manifest_bounds(&opts.repo_id, info.siblings.len(), wanted.len())?;
 
     if wanted.is_empty() {
         return Err(anyhow!(
@@ -1021,38 +1660,9 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
     // so we honor their decision here as well.
     let enforce_https = token.is_some() && !is_insecure_endpoint_opt_out();
     let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
-    let client = rt.block_on(async {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(ref tok) = token {
-            // L3: reject non-ASCII or control-char tokens with
-            // a domain-specific error instead of the panic that the prior
-            // `.expect("token must be ASCII")` would produce. `validate_token`
-            // also rejects more characters than `HeaderValue::from_str` would
-            // strictly need (e.g., embedded `\r\n`), making it harder to
-            // smuggle header-injection payloads through a malformed env var.
-            validate_token(tok)?;
-            let auth_val = format!("Bearer {tok}");
-            headers.insert(
-                reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&auth_val).with_context(
-                    || "HF token contains invalid characters (must be ASCII, no control chars)",
-                )?,
-            );
-        }
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .read_timeout(Duration::from_secs(30))
-            .default_headers(headers);
-        if enforce_https {
-            builder = builder.https_only(true);
-        }
-        for cert in load_extra_ca_certificates()? {
-            builder = builder.add_root_certificate(cert);
-        }
-        builder.build().context("Failed to create HTTP client")
-    })?;
+    let client = build_reqwest_client(token.as_deref(), enforce_https)?;
 
-    let revision = opts.revision.as_deref().unwrap_or("main");
+    let revision = resolved_revision.as_str();
 
     // Build per-file sizes map for accurate bar lengths. `hf-hub 0.5` does
     // not expose per-file sizes in the manifest (Siblings only has `rfilename`),
@@ -1066,38 +1676,56 @@ fn download_repo_blocking(opts: DownloadOptions, hooks: DownloadHooks) -> Result
     // The HEAD-request size pass also runs when a progress hook is installed
     // (issue #1438): the router's SSE `download_progress` events carry
     // per-file totals, which come from nowhere else.
-    let size_map: std::collections::HashMap<String, u64> = if show_bars || hooks.progress.is_some()
-    {
-        rt.block_on(async {
-            let client_ref = &client;
-            let endpoint_ref = &endpoint;
-            let repo_id_ref = &opts.repo_id;
-            futures::stream::iter(wanted.iter().cloned())
-                .map(move |filename| async move {
-                    let url = file_url(endpoint_ref, repo_id_ref, revision, &filename);
-                    let size = client_ref
-                        .head(&url)
-                        .send()
-                        .await
-                        .ok()
-                        .and_then(|r| {
-                            r.headers()
-                                .get(reqwest::header::CONTENT_LENGTH)
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|s| s.parse::<u64>().ok())
-                        })
-                        .unwrap_or(0);
-                    (filename, size)
-                })
-                .buffer_unordered(8)
-                .collect::<std::collections::HashMap<String, u64>>()
-                .await
-        })
-    } else {
-        std::collections::HashMap::new()
-    };
+    let size_map: std::collections::HashMap<String, u64> =
+        if show_bars || hooks.progress.is_some() || hooks.plan.is_some() {
+            rt.block_on(async {
+                let client_ref = &client;
+                let endpoint_ref = &endpoint;
+                let repo_id_ref = &opts.repo_id;
+                futures::stream::iter(wanted.iter().cloned())
+                    .map(move |filename| async move {
+                        let url = file_url(endpoint_ref, repo_id_ref, revision, &filename);
+                        let size = client_ref
+                            .head(&url)
+                            .send()
+                            .await
+                            .ok()
+                            .and_then(|r| {
+                                r.headers()
+                                    .get(reqwest::header::CONTENT_LENGTH)
+                                    .and_then(|v| v.to_str().ok())
+                                    .and_then(|s| s.parse::<u64>().ok())
+                            })
+                            .unwrap_or(0);
+                        (filename, size)
+                    })
+                    .buffer_unordered(8)
+                    .collect::<std::collections::HashMap<String, u64>>()
+                    .await
+            })
+        } else {
+            std::collections::HashMap::new()
+        };
 
     let total_known_bytes: u64 = size_map.values().sum();
+    let total_bytes = if wanted
+        .iter()
+        .all(|name| size_map.get(name.as_str()).copied().unwrap_or(0) > 0)
+    {
+        Some(total_known_bytes)
+    } else {
+        None
+    };
+    if let Some(plan) = &hooks.plan {
+        plan(DownloadPlan {
+            repo_id: opts.repo_id.clone(),
+            requested_revision: requested_revision.clone(),
+            resolved_revision: resolved_revision.clone(),
+            destination: local_dir.clone(),
+            selected_files: wanted.len(),
+            total_bytes,
+        });
+    }
 
     let mp = progress::create_multi_progress();
     let aggregate_pb = progress::add_aggregate_bar(&mp, total_known_bytes);

@@ -61,13 +61,14 @@ fn router_sources_reject_symlinked_config_evidence_consistently() {
 
     struct NoopDownloader;
     impl RouterDownloader for NoopDownloader {
-        fn validate(&self, _repo_id: &str) -> anyhow::Result<()> {
+        fn validate(&self, _repo_id: &str, _revision: Option<&str>) -> anyhow::Result<()> {
             Ok(())
         }
 
         fn download(
             &self,
             _repo_id: &str,
+            _revision: Option<&str>,
             _dest_root: &std::path::Path,
             _hooks: DownloadHooks,
         ) -> anyhow::Result<()> {

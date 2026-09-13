@@ -13,40 +13,32 @@
 // limitations under the License.
 
 //! Router-mode model cache source (llama-server b10621, issue #1438).
-//!
-//! b10621's router lists its download cache as removable model entries
-//! (`source: "cache"`, `can_remove: true`), lets `POST /models` download a
-//! new HuggingFace repository into that cache, and lets `DELETE /models`
-//! remove a cache entry from disk. mlxcel's equivalent cache is its model
-//! store (the directory `--model-store-root` / `MLXCEL_MODELS_DIR` /
-//! `MLXCEL_CACHE_DIR` resolve, holding `<owner>/<name>` MLX snapshots), so
-//! the router's cache source wraps that store.
-//!
-//! Confinement: every path in and out of the store goes through
-//! [`crate::downloader::store`]'s sanitized `<owner>/<name>` composition, and
-//! removal re-asserts containment under the store root before deleting
-//! (`remove_model_with_override`), so an HTTP-supplied model name can never
-//! escape the cache directory in either direction. The downloader is behind a
-//! trait so tests exercise the full download flow without the network.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::downloader::{self, DownloadHooks, DownloadOptions};
+use anyhow::Context;
+
+use crate::downloader::{self, DownloadHooks, TokenMode};
+
+pub const STAGING_DIR: &str = ".mlxcel-staging";
 
 /// How a router downloads a repository into the cache. The production
 /// implementation is [`HfRouterDownloader`]; tests substitute a fake that
 /// writes files locally and drives the same hooks.
 pub trait RouterDownloader: Send + Sync {
-    /// Synchronously validate that `repo_id` names a fetchable repository
-    /// (b10621 validates by fetching metadata before answering `POST
-    /// /models`). Blocking; called from a blocking-capable thread.
-    fn validate(&self, repo_id: &str) -> anyhow::Result<()>;
+    /// Synchronously validate that `repo_id` names a fetchable repository.
+    fn validate(&self, repo_id: &str, revision: Option<&str>) -> anyhow::Result<()>;
 
     /// Download `repo_id` into the models root at `dest_root`, reporting
     /// progress and honoring cancellation through `hooks`. Blocking.
-    fn download(&self, repo_id: &str, dest_root: &Path, hooks: DownloadHooks)
-    -> anyhow::Result<()>;
+    fn download(
+        &self,
+        repo_id: &str,
+        revision: Option<&str>,
+        dest_root: &Path,
+        hooks: DownloadHooks,
+    ) -> anyhow::Result<()>;
 }
 
 /// The real HuggingFace-backed downloader.
@@ -54,28 +46,52 @@ pub trait RouterDownloader: Send + Sync {
 pub struct HfRouterDownloader;
 
 impl RouterDownloader for HfRouterDownloader {
-    fn validate(&self, repo_id: &str) -> anyhow::Result<()> {
-        downloader::probe_repo(repo_id, None)
+    fn validate(&self, repo_id: &str, revision: Option<&str>) -> anyhow::Result<()> {
+        downloader::probe_repo_with_token_mode(repo_id, revision, TokenMode::Anonymous)
     }
 
     fn download(
         &self,
         repo_id: &str,
+        revision: Option<&str>,
         dest_root: &Path,
         hooks: DownloadHooks,
     ) -> anyhow::Result<()> {
-        downloader::download_repo_with_hooks(
-            DownloadOptions {
-                repo_id: repo_id.to_string(),
-                local_dir: None,
-                models_dir: Some(dest_root.to_path_buf()),
-                revision: None,
-                token: None,
-                include: Vec::new(),
-                force: false,
-            },
-            hooks,
-        )
+        #[cfg(not(unix))]
+        {
+            let _ = (repo_id, revision, dest_root, hooks);
+            anyhow::bail!("router-managed HuggingFace downloads require Unix directory-fd safety");
+        }
+        #[cfg(unix)]
+        {
+            let final_dir = downloader::model_dir_with_override(repo_id, Some(dest_root))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cannot resolve cache destination for '{repo_id}'")
+                })?;
+            let mut stage = AnchoredStage::create(dest_root, repo_id)?;
+            let begin_publish = hooks.begin_publish.clone();
+            let result = downloader::download_repo_to_existing_dir_fd(
+                repo_id,
+                revision,
+                stage.stage_fd(),
+                final_dir.clone(),
+                hooks,
+            );
+            if let Err(err) = result {
+                stage.cleanup();
+                return Err(err);
+            }
+            if let Some(begin_publish) = begin_publish
+                && !begin_publish()
+            {
+                stage.cleanup();
+                return Err(anyhow::Error::new(crate::downloader::DownloadCancelled));
+            }
+            stage.publish().with_context(|| {
+                format!("failed to publish downloaded snapshot for '{repo_id}'")
+            })?;
+            Ok(())
+        }
     }
 }
 
@@ -98,14 +114,10 @@ impl CacheSource {
         Self { root, downloader }
     }
 
-    /// The models root this cache lists, downloads into, and removes from.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Enumerate complete snapshots as `(repo_id, path)` pairs. Uses the
-    /// store's own listing (a directory counts only when it holds a
-    /// `config.json`), so a half-finished download is not offered as a model.
     pub fn list(&self) -> Vec<(String, PathBuf)> {
         crate::downloader::list_models_with_override(Some(&self.root))
             .into_iter()
@@ -114,58 +126,48 @@ impl CacheSource {
             .collect()
     }
 
-    /// The snapshot directory `repo_id` would occupy (whether or not it
-    /// exists yet). Repo-id segments are sanitized by the store so the
-    /// composed path cannot escape the root.
     pub fn snapshot_dir(&self, repo_id: &str) -> PathBuf {
         crate::downloader::model_dir_with_override(repo_id, Some(&self.root))
             .unwrap_or_else(|| self.root.join(repo_id))
     }
 
-    /// Normalize a requested model name into the repo id used as the cache
-    /// entry name (bare names expand to the default organization, exactly as
-    /// `-m <name>` resolution does).
     pub fn normalize_name(&self, name: &str) -> anyhow::Result<String> {
         downloader::normalize_repo_id(name)
     }
 
-    /// Validate that `repo_id` is fetchable (metadata probe, no file
-    /// downloads). Blocking.
-    pub fn validate(&self, repo_id: &str) -> anyhow::Result<()> {
-        self.downloader.validate(repo_id)
+    pub fn validate(&self, repo_id: &str, revision: Option<&str>) -> anyhow::Result<()> {
+        self.downloader.validate(repo_id, revision)
     }
 
-    /// Download `repo_id` into the cache. Blocking; run on a worker thread.
-    pub fn download(&self, repo_id: &str, hooks: DownloadHooks) -> anyhow::Result<()> {
-        self.downloader.download(repo_id, &self.root, hooks)
+    pub fn download(
+        &self,
+        repo_id: &str,
+        revision: Option<&str>,
+        hooks: DownloadHooks,
+    ) -> anyhow::Result<()> {
+        self.downloader
+            .download(repo_id, revision, &self.root, hooks)
     }
 
-    /// Remove `repo_id`'s snapshot from the cache. Deleting is contained to
-    /// the store root by `remove_model_under`'s re-assertion; a missing
-    /// snapshot (for example a cancelled download that never completed a
-    /// file) is not an error, matching b10621's best-effort
-    /// `common_download_remove`.
     pub fn remove(&self, repo_id: &str) -> anyhow::Result<()> {
-        use crate::downloader::{RemoveOutcome, remove_model_with_override};
-        match remove_model_with_override(repo_id, None, Some(&self.root)) {
-            Ok(RemoveOutcome::Removed { path, size_bytes }) => {
-                tracing::info!(
-                    "router: removed cache model '{repo_id}' ({size_bytes} bytes) at {}",
-                    path.display()
-                );
-                Ok(())
+        #[cfg(not(unix))]
+        {
+            let _ = repo_id;
+            anyhow::bail!("router-managed cache removal requires Unix directory-fd safety");
+        }
+        #[cfg(unix)]
+        {
+            match anchored_remove::remove_managed_snapshot(&self.root, repo_id)? {
+                Some(removed) => {
+                    tracing::info!(
+                        "router: removed managed cache model '{repo_id}' ({} bytes) at {}",
+                        removed.size_bytes,
+                        removed.path.display()
+                    );
+                    Ok(())
+                }
+                None => Ok(()),
             }
-            Ok(RemoveOutcome::HfCacheOnly { hf_path }) => {
-                // The read-only HuggingFace cache is not ours to manage; the
-                // router's cache never lists it, so this arm is unreachable
-                // from HTTP. Refuse rather than pretend.
-                anyhow::bail!(
-                    "model '{repo_id}' only exists in the read-only HuggingFace cache at {}",
-                    hf_path.display()
-                )
-            }
-            Ok(RemoveOutcome::NotFound) => Ok(()),
-            Err(err) => Err(anyhow::anyhow!(err.to_string())),
         }
     }
 }
@@ -175,3 +177,18 @@ fn regular_file_exists(path: &Path) -> bool {
         .map(|meta| meta.file_type().is_file())
         .unwrap_or(false)
 }
+
+#[cfg(unix)]
+#[path = "router_cache/anchored_delete.rs"]
+mod anchored_delete;
+
+#[cfg(unix)]
+#[path = "router_cache/anchored_publish.rs"]
+mod anchored_publish;
+
+#[cfg(unix)]
+#[path = "router_cache/anchored_remove.rs"]
+mod anchored_remove;
+
+#[cfg(unix)]
+use anchored_publish::AnchoredStage;

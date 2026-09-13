@@ -1,0 +1,28 @@
+{
+  "operation_id": "op_download_003",
+  "kind": "download",
+  "state": "succeeded",
+  "created_at": "2026-09-12T03:06:00Z",
+  "updated_at": "2026-09-12T03:06:20Z",
+  "idempotency_scope": "server_instance",
+  "target": {
+    "target_kind": "download",
+    "repo_id": "mlx-community/SmolLM-135M-Instruct-4bit",
+    "revision": "main"
+  },
+  "progress": {
+    "completed_bytes": 75789919,
+    "total_bytes": 75789919,
+    "indeterminate": false
+  },
+  "result": {
+    "result_kind": "download",
+    "repo_id": "mlx-community/SmolLM-135M-Instruct-4bit",
+    "revision": "642e06afe3fab57fd6cc518637c471af0a569e1e",
+    "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+    "download": "complete"
+  },
+  "error": null,
+  "cancellable": false,
+  "cancel_reason": null
+}
