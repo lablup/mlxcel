@@ -116,10 +116,10 @@ pub use store::{
 
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;
-use hf_hub::api::RepoInfo;
 use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::{Repo, RepoType};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -567,7 +567,65 @@ fn repo_info_url(endpoint: &str, repo_id: &str, revision: &str) -> String {
     let endpoint = endpoint.trim_end_matches('/');
     let repo_enc = encode_path_segments(repo_id);
     let rev_enc = encode_path_segments(revision);
-    format!("{endpoint}/api/models/{repo_enc}/revision/{rev_enc}")
+    format!("{endpoint}/api/models/{repo_enc}/revision/{rev_enc}?blobs=true")
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubRepoInfo {
+    sha: String,
+    #[serde(default)]
+    siblings: Vec<HubSibling>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubSibling {
+    rfilename: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    lfs: Option<HubLfs>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HubLfs {
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedDownloadFile {
+    filename: String,
+    expected_size: Option<u64>,
+    sha256: Option<String>,
+}
+
+impl SelectedDownloadFile {
+    fn from_sibling(repo_id: &str, sibling: &HubSibling) -> Result<Self> {
+        validate_manifest_filename(repo_id, &sibling.rfilename)?;
+        let sha256 = sibling
+            .lfs
+            .as_ref()
+            .and_then(|lfs| lfs.sha256.as_deref())
+            .map(|hash| validate_sha256_hex(&sibling.rfilename, hash))
+            .transpose()?;
+        if sibling.rfilename.ends_with(".safetensors") && sha256.is_none() {
+            return Err(anyhow!(
+                "Repository metadata for '{}' is missing an LFS SHA-256 digest; refusing to publish unverifiable weights",
+                sibling.rfilename
+            ));
+        }
+        Ok(Self {
+            filename: sibling.rfilename.clone(),
+            expected_size: sibling
+                .lfs
+                .as_ref()
+                .and_then(|lfs| lfs.size)
+                .or(sibling.size),
+            sha256,
+        })
+    }
 }
 
 fn build_reqwest_client(token: Option<&str>, enforce_https: bool) -> Result<reqwest::Client> {
@@ -600,7 +658,7 @@ async fn fetch_anonymous_repo_info(
     endpoint: &str,
     repo_id: &str,
     revision: &str,
-) -> Result<RepoInfo> {
+) -> Result<HubRepoInfo> {
     let url = repo_info_url(endpoint, repo_id, revision);
     let response = client
         .get(&url)
@@ -632,11 +690,14 @@ async fn fetch_anonymous_repo_info(
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice::<RepoInfo>(&body)
+    serde_json::from_slice::<HubRepoInfo>(&body)
         .with_context(|| format!("Failed to parse HuggingFace repository metadata for '{repo_id}'"))
 }
 
-fn fetch_anonymous_repo_info_blocking(repo_id: &str, revision: Option<&str>) -> Result<RepoInfo> {
+fn fetch_anonymous_repo_info_blocking(
+    repo_id: &str,
+    revision: Option<&str>,
+) -> Result<HubRepoInfo> {
     let endpoint = hf_endpoint();
     let requested_revision = revision.unwrap_or("main");
     let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
@@ -778,9 +839,12 @@ async fn stream_to_tempfile(
         ));
     }
 
-    // Prefer the response's own Content-Length over the HEAD-pass estimate:
-    // it reflects the entity actually being served.
-    let total_size = response.content_length().unwrap_or(expected_size);
+    // Prefer a known metadata/HEAD size for stable UI totals, then fall back to
+    // the response's own Content-Length for validation when no manifest size is
+    // available.
+    let response_size = response.content_length();
+    let expected_size = (expected_size > 0).then_some(expected_size);
+    let total_size = expected_size.or(response_size).unwrap_or(0);
 
     let mut stream = response.bytes_stream();
     let mut bytes_written: u64 = 0;
@@ -805,7 +869,7 @@ async fn stream_to_tempfile(
         .await
         .with_context(|| format!("Flush error for {filename}"))?;
     drop(out);
-    validate_downloaded_size(filename, expected_size, bytes_written)?;
+    validate_downloaded_size(filename, expected_size.or(response_size), bytes_written)?;
 
     tokio::fs::rename(tmp, dest)
         .await
@@ -970,10 +1034,48 @@ fn validate_manifest_bounds(
     Ok(())
 }
 
-fn validate_downloaded_size(filename: &str, expected_size: u64, bytes_written: u64) -> Result<()> {
-    if expected_size > 0 && bytes_written != expected_size {
+fn validate_downloaded_size(
+    filename: &str,
+    expected_size: Option<u64>,
+    bytes_written: u64,
+) -> Result<()> {
+    if let Some(expected_size) = expected_size
+        && bytes_written != expected_size
+    {
         return Err(anyhow!(
             "Downloaded size mismatch for '{filename}': expected {expected_size} bytes, wrote {bytes_written} bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sha256_hex(filename: &str, hash: &str) -> Result<String> {
+    if hash.len() != 64 || !hash.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "Repository metadata for '{filename}' contains an invalid SHA-256 digest"
+        ));
+    }
+    Ok(hash.to_ascii_lowercase())
+}
+
+fn sha256_hex(digest: impl AsRef<[u8]>) -> String {
+    let bytes = digest.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn verify_downloaded_sha256(filename: &str, expected: Option<&str>, actual: &[u8]) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = sha256_hex(actual);
+    if actual != expected {
+        return Err(anyhow!(
+            "Downloaded checksum mismatch for '{filename}': expected SHA-256 {expected}, got {actual}"
         ));
     }
     Ok(())
@@ -1076,65 +1178,78 @@ pub fn download_repo_to_existing_dir_fd(
     if info.siblings.len() > MAX_HF_SIBLINGS {
         validate_manifest_bounds(&repo_id, info.siblings.len(), 0)?;
     }
-    let wanted: Vec<String> = info
+    let mut wanted: Vec<SelectedDownloadFile> = info
         .siblings
         .iter()
-        .map(|sibling| {
-            validate_manifest_filename(&repo_id, &sibling.rfilename)?;
-            Ok(sibling.rfilename.as_str())
-        })
+        .map(|sibling| SelectedDownloadFile::from_sibling(&repo_id, sibling))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
-        .filter(|name| is_wanted_file(name))
-        .map(|name| name.to_string())
+        .filter(|file| is_wanted_file(&file.filename))
         .collect();
     validate_manifest_bounds(&repo_id, info.siblings.len(), wanted.len())?;
     if wanted.is_empty() {
         return Err(anyhow!(
-            "Repository '{repo_id}' does not expose any supported model files. \
-             Expected config/tokenizer JSON and safetensors/weights files."
+            "Repository '{repo_id}' does not expose any supported model files. Expected config/tokenizer JSON and safetensors/weights files."
+        ));
+    }
+    if !wanted
+        .iter()
+        .any(|file| file.filename.ends_with(".safetensors"))
+    {
+        return Err(anyhow!(
+            "Repository '{repo_id}' metadata is incomplete: no safetensors weight files were selected"
         ));
     }
     let revision = resolved_revision.as_str();
-    let size_map: std::collections::HashMap<String, u64> =
-        if hooks.progress.is_some() || hooks.plan.is_some() {
-            rt.block_on(async {
-                let client_ref = &client;
-                let endpoint_ref = &endpoint;
-                let repo_id_ref = &repo_id;
-                futures::stream::iter(wanted.iter().cloned())
-                    .map(move |filename| async move {
-                        let url = file_url(endpoint_ref, repo_id_ref, revision, &filename);
-                        let size = client_ref
-                            .head(&url)
-                            .send()
-                            .await
-                            .ok()
-                            .and_then(|r| {
-                                r.headers()
-                                    .get(reqwest::header::CONTENT_LENGTH)
-                                    .and_then(|v| v.to_str().ok())
-                                    .and_then(|s| s.parse::<u64>().ok())
-                            })
-                            .unwrap_or(0);
-                        (filename, size)
-                    })
-                    .buffer_unordered(8)
-                    .collect::<std::collections::HashMap<String, u64>>()
-                    .await
-            })
-        } else {
-            std::collections::HashMap::new()
-        };
-    let total_known_bytes: u64 = size_map.values().sum();
-    let total_bytes = if wanted
-        .iter()
-        .all(|name| size_map.get(name.as_str()).copied().unwrap_or(0) > 0)
+    if (hooks.progress.is_some() || hooks.plan.is_some())
+        && wanted.iter().any(|file| file.expected_size.is_none())
     {
-        Some(total_known_bytes)
-    } else {
-        None
-    };
+        let size_map = rt.block_on(async {
+            let client_ref = &client;
+            let endpoint_ref = &endpoint;
+            let repo_id_ref = &repo_id;
+            futures::stream::iter(
+                wanted
+                    .iter()
+                    .filter(|file| file.expected_size.is_none())
+                    .map(|file| file.filename.clone()),
+            )
+            .map(move |filename| async move {
+                let url = file_url(endpoint_ref, repo_id_ref, revision, &filename);
+                let size = client_ref
+                    .head(&url)
+                    .send()
+                    .await
+                    .ok()
+                    .and_then(|r| {
+                        r.headers()
+                            .get(reqwest::header::CONTENT_LENGTH)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                    })
+                    .filter(|size| *size > 0);
+                (filename, size)
+            })
+            .buffer_unordered(8)
+            .collect::<std::collections::HashMap<String, Option<u64>>>()
+            .await
+        });
+        for file in &mut wanted {
+            if file.expected_size.is_none()
+                && let Some(size) = size_map.get(&file.filename).and_then(|size| *size)
+            {
+                file.expected_size = Some(size);
+            }
+        }
+    }
+    let total_bytes = wanted
+        .iter()
+        .try_fold(0u64, |acc, file| {
+            file.expected_size
+                .map(|size| acc.saturating_add(size))
+                .ok_or(())
+        })
+        .ok();
     if let Some(plan) = &hooks.plan {
         plan(DownloadPlan {
             repo_id: repo_id.clone(),
@@ -1145,16 +1260,16 @@ pub fn download_repo_to_existing_dir_fd(
             total_bytes,
         });
     }
-    for filename in &wanted {
+    for file in &wanted {
         check_cancelled(&hooks)?;
-        let url = file_url(&endpoint, &repo_id, revision, filename);
-        let expected_size = *size_map.get(filename.as_str()).unwrap_or(&0);
+        let url = file_url(&endpoint, &repo_id, revision, &file.filename);
         rt.block_on(stream_file_to_dir_fd(
             &client,
             &url,
             dir_fd,
-            filename,
-            expected_size,
+            &file.filename,
+            file.expected_size,
+            file.sha256.as_deref(),
             &hooks,
         ))?;
     }
@@ -1165,8 +1280,8 @@ pub fn download_repo_to_existing_dir_fd(
     }
     if !wanted
         .iter()
-        .filter(|name| name.ends_with(".safetensors"))
-        .all(|name| file_exists_nonempty_at(dir_fd, name).unwrap_or(false))
+        .filter(|file| file.filename.ends_with(".safetensors"))
+        .all(|file| file_exists_nonempty_at(dir_fd, &file.filename).unwrap_or(false))
     {
         return Err(anyhow!(
             "Downloaded files for '{repo_id}' are incomplete: one or more safetensors files are missing or empty"
@@ -1184,7 +1299,8 @@ async fn stream_file_to_dir_fd(
     url: &str,
     root_fd: std::os::fd::RawFd,
     filename: &str,
-    expected_size: u64,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
     hooks: &DownloadHooks,
 ) -> Result<u64> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -1223,9 +1339,11 @@ async fn stream_file_to_dir_fd(
             let code = status.as_u16();
             return Err(anyhow!("HTTP {code} downloading '{filename}'"));
         }
-        let total_size = response.content_length().unwrap_or(expected_size);
+        let response_size = response.content_length();
+        let total_size = expected_size.or(response_size).unwrap_or(0);
         let mut stream = response.bytes_stream();
         let mut bytes_written = 0u64;
+        let mut hasher = expected_sha256.map(|_| Sha256::new());
         while let Some(chunk) = stream.next().await {
             check_cancelled(hooks)
                 .with_context(|| format!("Cancelled while downloading {filename}"))?;
@@ -1234,6 +1352,9 @@ async fn stream_file_to_dir_fd(
             out.write_all(&chunk)
                 .await
                 .with_context(|| format!("Write error while downloading {filename}"))?;
+            if let Some(hasher) = hasher.as_mut() {
+                hasher.update(&chunk);
+            }
             bytes_written += chunk.len() as u64;
             if let Some(progress) = &hooks.progress {
                 progress(url, bytes_written, total_size);
@@ -1243,7 +1364,11 @@ async fn stream_file_to_dir_fd(
             .await
             .with_context(|| format!("Flush error for {filename}"))?;
         drop(out);
-        validate_downloaded_size(filename, expected_size, bytes_written)?;
+        validate_downloaded_size(filename, expected_size.or(response_size), bytes_written)?;
+        if let Some(hasher) = hasher {
+            let digest = hasher.finalize();
+            verify_downloaded_sha256(filename, expected_sha256, &digest)?;
+        }
         let rc = unsafe {
             libc::renameat(
                 parent.as_raw_fd(),

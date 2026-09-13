@@ -480,10 +480,18 @@ fn anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get() 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
     let endpoint = format!("http://{addr}");
+    let data_hash = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(b"data");
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let captured_for_thread = captured.clone();
     let server = std::thread::spawn(move || {
-        for _ in 0..5 {
+        for _ in 0..4 {
             let (mut stream, _) = listener.accept().expect("accept");
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).expect("read request");
@@ -497,7 +505,9 @@ fn anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get() 
             let method = parts.next().unwrap_or_default();
             let path = parts.next().unwrap_or_default();
             if path.starts_with("/api/models/owner/model/revision/main") {
-                let body = r#"{"siblings":[{"rfilename":"config.json"},{"rfilename":"model.safetensors"}],"sha":"0123456789abcdef0123456789abcdef01234567"}"#;
+                let body = format!(
+                    r#"{{"siblings":[{{"rfilename":"config.json"}},{{"rfilename":"model.safetensors","lfs":{{"sha256":"{data_hash}","size":4}}}}],"sha":"0123456789abcdef0123456789abcdef01234567"}}"#
+                );
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -567,7 +577,7 @@ fn anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get() 
     restore_env("HF_TOKEN", prev_hf);
     restore_env("HUGGING_FACE_HUB_TOKEN", prev_alt);
     if result.is_err() {
-        for _ in 0..5 {
+        for _ in 0..4 {
             let _ = std::net::TcpStream::connect(addr);
         }
     }
@@ -578,13 +588,22 @@ fn anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get() 
     assert!(root.path().join("model.safetensors").is_file());
     assert!(
         progress_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "progress hook should force HEAD sizing and observe GET progress"
+        "progress hook should observe metadata-sized and HEAD-sized GET progress"
     );
     let requests = captured.lock().expect("captured");
     assert_eq!(
         requests.len(),
-        5,
-        "expected metadata, two HEADs and two GETs"
+        4,
+        "expected metadata, one HEAD fallback for config.json, and two GETs"
+    );
+    let metadata_path = requests[0]
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .expect("metadata request path");
+    assert_eq!(
+        metadata_path, "/api/models/owner/model/revision/main?blobs=true",
+        "anonymous WebUI metadata request must ask HuggingFace to include LFS blob size and SHA-256 fields"
     );
     for request in requests.iter() {
         assert!(
@@ -592,6 +611,333 @@ fn anonymous_fd_download_sends_no_ambient_credentials_on_metadata_head_or_get() 
             "anonymous WebUI metadata/HEAD/GET must not send ambient Hub credentials; request was {request:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn anonymous_fd_download_maps_metadata_status_without_publishing() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    for (status, reason, expected) in [
+        (403, "Forbidden", "requires authentication"),
+        (404, "Not Found", "was not found"),
+    ] {
+        let _env_guard = env_lock();
+        let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let endpoint = format!("http://{addr}");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).expect("read request");
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("status response");
+        });
+
+        let root = tempfile::tempdir().expect("download root");
+        let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+        unsafe {
+            std::env::set_var("HF_ENDPOINT", &endpoint);
+        }
+        let result = download_repo_to_existing_dir_fd(
+            "owner/model",
+            Some("bad-revision"),
+            root_dir.as_raw_fd(),
+            root.path().to_path_buf(),
+            DownloadHooks::default(),
+        );
+        restore_env("HF_ENDPOINT", prev_endpoint);
+        server.join().expect("server thread");
+
+        let err = result.expect_err("metadata status must fail");
+        assert!(err.to_string().contains(expected), "{err:#}");
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("root list")
+                .next()
+                .is_none(),
+            "metadata errors must not publish files"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn anonymous_fd_download_offline_rejects_before_metadata_request() {
+    use std::os::fd::AsRawFd;
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    set_offline_mode(true);
+    let result = download_repo_to_existing_dir_fd(
+        "owner/model",
+        None,
+        root_dir.as_raw_fd(),
+        root.path().to_path_buf(),
+        DownloadHooks::default(),
+    );
+    set_offline_mode(false);
+
+    let err = result.expect_err("offline mode must fail before metadata");
+    assert!(err.to_string().contains("offline mode is on"), "{err:#}");
+    assert!(
+        std::fs::read_dir(root.path())
+            .expect("root list")
+            .next()
+            .is_none(),
+        "offline rejection must not write files"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn anonymous_fd_download_rejects_disconnect_truncation_before_publish() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let _env_guard = env_lock();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let endpoint = format!("http://{addr}");
+    let data_hash = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(b"data");
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default();
+            if path.starts_with("/api/models/owner/model/revision/main") {
+                let body = format!(
+                    r#"{{"siblings":[{{"rfilename":"config.json","size":2}},{{"rfilename":"model.safetensors","lfs":{{"sha256":"{data_hash}","size":4}}}}],"sha":"0123456789abcdef0123456789abcdef01234567"}}"#
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("metadata response");
+            } else if path.ends_with("/config.json") {
+                let body = b"{}";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("config header");
+                stream.write_all(body).expect("config body");
+            } else if path.ends_with("/model.safetensors") {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nda"
+                )
+                .expect("truncated weights response");
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("not found response");
+            }
+        }
+    });
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    unsafe {
+        std::env::set_var("HF_ENDPOINT", &endpoint);
+    }
+    let result = download_repo_to_existing_dir_fd(
+        "owner/model",
+        None,
+        root_dir.as_raw_fd(),
+        root.path().to_path_buf(),
+        DownloadHooks::default(),
+    );
+    restore_env("HF_ENDPOINT", prev_endpoint);
+    server.join().expect("server thread");
+
+    let err = result.expect_err("truncated transfer must fail");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("size mismatch") || rendered.contains("Stream error"),
+        "{err:#}"
+    );
+    assert!(root.path().join("config.json").is_file());
+    assert!(
+        !root.path().join("model.safetensors").exists(),
+        "truncated weights must not be published"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let _env_guard = env_lock();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let endpoint = format!("http://{addr}");
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let captured_for_thread = captured.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).expect("read request");
+        captured_for_thread
+            .lock()
+            .expect("captured")
+            .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+        let body = r#"{"siblings":[{"rfilename":"config.json","size":2}],"sha":"0123456789abcdef0123456789abcdef01234567"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("metadata response");
+    });
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    unsafe {
+        std::env::set_var("HF_ENDPOINT", &endpoint);
+    }
+    let result = download_repo_to_existing_dir_fd(
+        "owner/model",
+        None,
+        root_dir.as_raw_fd(),
+        root.path().to_path_buf(),
+        DownloadHooks::default(),
+    );
+    restore_env("HF_ENDPOINT", prev_endpoint);
+    server.join().expect("server thread");
+
+    let err = result.expect_err("metadata without safetensors must fail");
+    assert!(err.to_string().contains("no safetensors"), "{err:#}");
+    assert_eq!(captured.lock().expect("captured").len(), 1);
+    assert!(
+        !root.path().join("config.json").exists(),
+        "incomplete metadata must fail before publishing config-only snapshots"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let _env_guard = env_lock();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let endpoint = format!("http://{addr}");
+    let good_hash = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(b"good");
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default();
+            if path.starts_with("/api/models/owner/model/revision/main") {
+                assert_eq!(
+                    path, "/api/models/owner/model/revision/main?blobs=true",
+                    "anonymous WebUI metadata request must ask for LFS blob fields"
+                );
+                let body = format!(
+                    r#"{{"siblings":[{{"rfilename":"config.json","size":2}},{{"rfilename":"model.safetensors","lfs":{{"sha256":"{good_hash}","size":4}}}}],"sha":"0123456789abcdef0123456789abcdef01234567"}}"#
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("metadata response");
+            } else if path.ends_with("/config.json") {
+                let body = b"{}";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("config header");
+                stream.write_all(body).expect("config body");
+            } else if path.ends_with("/model.safetensors") {
+                let body = b"evil";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("weights header");
+                stream.write_all(body).expect("weights body");
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("not found response");
+            }
+        }
+    });
+
+    let root = tempfile::tempdir().expect("download root");
+    let root_dir = std::fs::File::open(root.path()).expect("open root fd");
+    unsafe {
+        std::env::set_var("HF_ENDPOINT", &endpoint);
+    }
+    let result = download_repo_to_existing_dir_fd(
+        "owner/model",
+        None,
+        root_dir.as_raw_fd(),
+        root.path().to_path_buf(),
+        DownloadHooks::default(),
+    );
+    restore_env("HF_ENDPOINT", prev_endpoint);
+    server.join().expect("server thread");
+
+    let err = result.expect_err("checksum mismatch must fail");
+    assert!(err.to_string().contains("checksum mismatch"), "{err:#}");
+    assert!(root.path().join("config.json").is_file());
+    assert!(
+        !root.path().join("model.safetensors").exists(),
+        "corrupt same-size weights must not be published"
+    );
 }
 
 #[test]
@@ -818,6 +1164,35 @@ xy",
 
     assert!(err.to_string().contains("size mismatch"), "{err:#}");
     assert!(!dest.exists(), "mismatched file must not be published");
+}
+
+#[test]
+fn selected_safetensors_requires_lfs_sha256() {
+    let missing = HubSibling {
+        rfilename: "model.safetensors".to_string(),
+        size: Some(4),
+        lfs: None,
+    };
+    let err = SelectedDownloadFile::from_sibling("owner/model", &missing)
+        .expect_err("safetensors without LFS SHA-256 must be rejected");
+    assert!(
+        err.to_string().contains("missing an LFS SHA-256"),
+        "{err:#}"
+    );
+
+    let present = HubSibling {
+        rfilename: "model.safetensors".to_string(),
+        size: None,
+        lfs: Some(HubLfs {
+            sha256: Some(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            ),
+            size: Some(0),
+        }),
+    };
+    let selected = SelectedDownloadFile::from_sibling("owner/model", &present)
+        .expect("sha256-backed safetensors accepted");
+    assert_eq!(selected.expected_size, Some(0));
 }
 
 #[test]

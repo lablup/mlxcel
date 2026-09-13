@@ -45,7 +45,11 @@ pub(super) fn catalog_entry(model: RouterCatalogModel) -> CatalogEntry {
     let supported = metadata.support.architecturally_supported
         && metadata.support.runnable_on_backend
         && complete;
-    let removal = removal_status(model.source, &model.lifecycle);
+    let removal = removal_status(
+        model.source,
+        &model.lifecycle,
+        model.removal_blocked_reason.as_deref(),
+    );
     let mut entry = CatalogEntry {
         identity: ModelIdentity {
             id: model.ui_model_id,
@@ -77,7 +81,11 @@ pub(super) fn apply_runtime_fields(entry: &mut CatalogEntry, model: &RouterCatal
     entry.identity.revision = model.revision;
     entry.identity.generation = model.generation;
     entry.lifecycle = model.lifecycle.clone();
-    let removal = removal_status(model.source, &model.lifecycle);
+    let removal = removal_status(
+        model.source,
+        &model.lifecycle,
+        model.removal_blocked_reason.as_deref(),
+    );
     entry.removable = removal.eligible;
     entry.removal = removal;
     apply_provider_confirmed_capabilities(entry, model.provider_capabilities);
@@ -439,13 +447,27 @@ fn support_reason(architectural: bool, runnable: bool, complete_reason: &str) ->
     }
 }
 
-fn removal_status(source: RouterModelSource, lifecycle: &LifecycleSnapshot) -> RemovalStatus {
+fn removal_status(
+    source: RouterModelSource,
+    lifecycle: &LifecycleSnapshot,
+    blocked_reason: Option<&str>,
+) -> RemovalStatus {
     if source != RouterModelSource::Cache {
         return RemovalStatus {
             eligible: false,
             reason: Some("only managed cache entries can be removed".to_string()),
             instructions: Some(
                 "Use model-free mode with the managed cache to delete downloaded snapshots."
+                    .to_string(),
+            ),
+        };
+    }
+    if let Some(reason) = blocked_reason {
+        return RemovalStatus {
+            eligible: false,
+            reason: Some(reason.to_string()),
+            instructions: Some(
+                "Remove the non-cache alias or reconfigure overlapping roots before deleting the managed cache snapshot."
                     .to_string(),
             ),
         };
