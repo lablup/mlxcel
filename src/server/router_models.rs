@@ -476,6 +476,10 @@ fn snapshot_physical_identity(path: &Path) -> anyhow::Result<SnapshotPhysicalIde
     })
 }
 
+fn path_tree_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 #[derive(Clone)]
 struct EvictionTarget {
     entry: Arc<RouterModelEntry>,
@@ -897,21 +901,24 @@ impl RouterPool {
             return Some("managed cache snapshot is also exposed by a preset alias".to_string());
         }
         if let Some(models_dir) = &self.sources.models_dir
-            && entry.path.starts_with(models_dir)
+            && path_tree_overlap(&entry.path, models_dir)
         {
             return Some(
                 "managed cache snapshot overlaps the configured --models-dir root".to_string(),
             );
         }
         entries.values().find_map(|other| {
-            if Arc::ptr_eq(other, entry) || other.path != entry.path {
+            if Arc::ptr_eq(other, entry) || !path_tree_overlap(&entry.path, &other.path) {
                 return None;
             }
             if other.source != RouterModelSource::Cache {
                 return Some(format!(
-                    "managed cache snapshot is also exposed by a {} entry",
+                    "managed cache snapshot is also exposed by an overlapping {} entry",
                     other.source.as_str()
                 ));
+            }
+            if other.path != entry.path {
+                return Some("managed cache snapshot overlaps another cache entry".to_string());
             }
             (other.reserves_capacity() || other.is_downloading())
                 .then(|| "managed cache snapshot is in use by another cache alias".to_string())
@@ -968,7 +975,7 @@ impl RouterPool {
         if let Some(models_dir) = &self.sources.models_dir {
             let models_dir_identity = models_dir.canonicalize().ok();
             match models_dir_identity {
-                Some(root) if target_identity.canonical_path.starts_with(&root) => {
+                Some(root) if path_tree_overlap(&target_identity.canonical_path, &root) => {
                     return Err(Self::removal_unsupported(
                         operation_id,
                         "managed cache snapshot overlaps the configured --models-dir root",
@@ -997,30 +1004,41 @@ impl RouterPool {
                 continue;
             }
             let same_literal_path = other.path == entry.path;
-            let same_physical = if same_literal_path {
-                true
+            let overlap_identity = if same_literal_path {
+                Some(target_identity.clone())
             } else {
                 match snapshot_physical_identity(&other.path) {
-                    Ok(identity) => identity == target_identity,
+                    Ok(identity) => (identity == target_identity
+                        || path_tree_overlap(
+                            &target_identity.canonical_path,
+                            &identity.canonical_path,
+                        ))
+                    .then_some(identity),
                     Err(_) if other.source != RouterModelSource::Cache => {
                         return Err(Self::removal_conflict(
                             operation_id,
                             "model removal could not prove a configured model source is disjoint from the cache snapshot",
                         ));
                     }
-                    Err(_) => false,
+                    Err(_) => None,
                 }
             };
-            if !same_physical {
+            let Some(overlap_identity) = overlap_identity else {
                 continue;
-            }
+            };
             if other.source != RouterModelSource::Cache {
                 return Err(Self::removal_unsupported(
                     operation_id,
                     format!(
-                        "managed cache snapshot is also exposed by a {} entry",
+                        "managed cache snapshot is also exposed by an overlapping {} entry",
                         other.source.as_str()
                     ),
+                ));
+            }
+            if overlap_identity != target_identity {
+                return Err(Self::removal_conflict(
+                    operation_id,
+                    "managed cache snapshot overlaps another cache entry",
                 ));
             }
             if other.reserves_capacity()

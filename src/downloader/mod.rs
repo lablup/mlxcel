@@ -1303,6 +1303,35 @@ async fn stream_file_to_dir_fd(
     expected_sha256: Option<&str>,
     hooks: &DownloadHooks,
 ) -> Result<u64> {
+    stream_file_to_dir_fd_with_writer_factory(
+        client,
+        url,
+        root_fd,
+        filename,
+        expected_size,
+        expected_sha256,
+        hooks,
+        tokio::fs::File::from_std,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn stream_file_to_dir_fd_with_writer_factory<W, F>(
+    client: &reqwest::Client,
+    url: &str,
+    root_fd: std::os::fd::RawFd,
+    filename: &str,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+    hooks: &DownloadHooks,
+    writer_factory: F,
+) -> Result<u64>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    F: FnOnce(std::fs::File) -> W,
+{
     use std::os::fd::{AsRawFd, FromRawFd};
 
     let (parent, leaf) = open_parent_dir_fd(root_fd, filename)?;
@@ -1327,7 +1356,7 @@ async fn stream_file_to_dir_fd(
             .with_context(|| format!("Failed to create tempfile for {filename}"));
     }
     let std_file = unsafe { std::fs::File::from_raw_fd(tmp_fd) };
-    let mut out = tokio::fs::File::from_std(std_file);
+    let mut out = writer_factory(std_file);
     let result = async {
         let response = client
             .get(url)
