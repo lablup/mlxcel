@@ -17,9 +17,10 @@
 use axum::{
     Router,
     body::Body,
-    extract::{DefaultBodyLimit, State},
-    http::{Method, Request},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    http::{HeaderMap, Method, Request, StatusCode, Uri},
     middleware::{self, Next},
+    response::Json,
     response::{IntoResponse, Response},
     routing::{MethodRouter, get, post},
 };
@@ -165,6 +166,35 @@ pub fn create_app(state: AppState) -> Router {
 /// `Access-Control-Allow-Origin` to the same response.
 pub fn create_app_without_cors(state: AppState) -> Router {
     create_app_impl(state, false)
+}
+
+#[cfg(feature = "webui")]
+pub(crate) fn create_app_with_secured_ui(
+    state: AppState,
+    policy: super::webui::security::WebUiSecurityPolicy,
+) -> Router {
+    let api_keys = state.config.api_keys.clone();
+    let api_prefix = state.config.api_prefix.clone();
+    let ui_api = single_webui_api_routes().layer(DefaultBodyLimit::max(
+        super::webui::api::WEBUI_JSON_BODY_BYTES as usize,
+    ));
+    let ui_api = if api_prefix.is_empty() {
+        ui_api
+    } else {
+        Router::new().nest(&api_prefix, ui_api)
+    };
+    let static_routes = if api_prefix.is_empty() {
+        super::webui::assets::router()
+    } else {
+        Router::new().nest(&api_prefix, super::webui::assets::router())
+    };
+    super::webui::security::secure_webui_router(
+        create_app_impl(state.clone(), true)
+            .merge(ui_api.with_state(state.clone()))
+            .merge(static_routes.with_state(state.clone())),
+        api_keys,
+        policy,
+    )
 }
 
 fn create_app_impl(state: AppState, with_cors: bool) -> Router {
@@ -522,6 +552,292 @@ fn build_routes(state: &AppState) -> Router<AppState> {
     app
 }
 
+#[cfg(feature = "webui")]
+fn single_webui_api_routes() -> Router<AppState> {
+    Router::new()
+        .route("/ui-api/v1/bootstrap", get(single_ui_bootstrap))
+        .route("/ui-api/v1/catalog", get(single_ui_catalog_list))
+        .route("/ui-api/v1/catalog/refresh", post(single_ui_read_only))
+        .route("/ui-api/v1/model-actions", post(single_ui_read_only))
+        .route("/ui-api/v1/downloads", post(single_ui_read_only))
+        .route("/ui-api/v1/model-removals", post(single_ui_read_only))
+        .route("/ui-api/v1/catalog/:id", get(single_ui_catalog_get))
+        .route("/ui-api/v1/runtime", get(single_ui_runtime))
+        .route("/ui-api/v1/operations", get(single_ui_operations_list))
+        .route("/ui-api/v1/operations/:id", get(single_ui_operation_get))
+        .route(
+            "/ui-api/v1/operations/:id/cancel",
+            post(single_ui_read_only),
+        )
+        .route("/ui-api/v1/events", get(single_ui_events))
+}
+
+// Explicit -m mode does not run administrative lifecycle operations. Refuse known
+// controls before extracting request DTOs and never touch the model provider.
+// The shared outer security middleware still authenticates and bounds bodies.
+#[cfg(feature = "webui")]
+async fn single_ui_read_only() -> Response {
+    single_webui_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "unsupported",
+        "single-model mode is read-only; restart without -m to manage models",
+        false,
+    )
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_operation_get() -> Response {
+    single_webui_error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "operation not found",
+        false,
+    )
+}
+
+#[cfg(feature = "webui")]
+fn single_webui_error(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+) -> Response {
+    (
+        status,
+        Json(super::router_lifecycle::ErrorEnvelope {
+            error: super::router_lifecycle::ErrorBody {
+                code: code.to_string(),
+                message: message.into(),
+                retryable,
+                field_errors: None,
+                operation_id: None,
+            },
+            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "webui")]
+fn single_invalid_field(field: &'static str, message: &'static str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(super::router_lifecycle::ErrorEnvelope {
+            error: super::router_lifecycle::ErrorBody {
+                code: "invalid_request".to_string(),
+                message: "request does not match the WebUI contract".to_string(),
+                retryable: true,
+                field_errors: Some(vec![super::router_lifecycle::FieldError {
+                    field: field.to_string(),
+                    code: "invalid_format".to_string(),
+                    message: message.to_string(),
+                }]),
+                operation_id: None,
+            },
+            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "webui")]
+fn valid_model_id(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("mdl_") else {
+        return false;
+    };
+    suffix.len() == 43
+        && suffix
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+#[cfg(feature = "webui")]
+async fn single_catalog_entry_blocking(
+    state: AppState,
+) -> Result<super::webui::catalog::CatalogEntry, tokio::task::JoinError> {
+    let cache = state.webui_catalog_cache.clone();
+    tokio::task::spawn_blocking(move || {
+        super::webui::catalog::single_model_entry_from_state_with_cache(&cache, &state)
+    })
+    .await
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_bootstrap(State(state): State<AppState>) -> Response {
+    Json(super::webui::api::bootstrap_response(
+        &state.webui_startup,
+        &state.config,
+        state.webui_lifecycle.server_instance_id().to_string(),
+        super::webui::api::WebUiServerMode::SingleModel,
+        false,
+    ))
+    .into_response()
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_catalog_list(
+    State(state): State<AppState>,
+    Query(query): Query<super::webui::catalog::CatalogQuery>,
+) -> Response {
+    let limit = query
+        .limit
+        .unwrap_or(super::webui::api::CATALOG_DEFAULT_PAGE_SIZE as usize);
+    if !(1..=super::webui::api::CATALOG_MAX_PAGE_SIZE as usize).contains(&limit) {
+        return single_invalid_field("limit", "limit must be between 1 and 200");
+    }
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > super::webui::api::CURSOR_BYTES as usize)
+    {
+        return single_invalid_field("cursor", "cursor is too long");
+    }
+    let server_instance_id = state.webui_lifecycle.server_instance_id().to_string();
+    let snapshot_sequence = state.webui_lifecycle.snapshot_sequence();
+    match single_catalog_entry_blocking(state).await {
+        Ok(entry) => {
+            let items = if query.cursor.is_some() {
+                Vec::new()
+            } else {
+                vec![entry]
+            };
+            Json(super::webui::catalog::CatalogListResponse {
+                schema_version: super::router_lifecycle::SCHEMA_VERSION.to_string(),
+                pagination: super::webui::catalog::Pagination {
+                    limit,
+                    next_cursor: None,
+                    total_known: Some(items.len()),
+                },
+                items,
+                server_instance_id,
+                snapshot_sequence,
+            })
+            .into_response()
+        }
+        Err(err) => single_webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("catalog projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_catalog_get(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if !valid_model_id(&id) {
+        return single_invalid_field("id", "model_id must match ^mdl_[A-Za-z0-9_-]{43}$");
+    }
+    match single_catalog_entry_blocking(state).await {
+        Ok(entry) if entry.identity.id == id => Json(entry).into_response(),
+        Ok(_) => single_webui_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "catalog entry not found",
+            true,
+        ),
+        Err(err) => single_webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("catalog projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+#[derive(Default, serde::Deserialize)]
+struct SingleRuntimeQuery {
+    model_id: Option<String>,
+    autoload: Option<bool>,
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_runtime(
+    State(state): State<AppState>,
+    Query(query): Query<SingleRuntimeQuery>,
+) -> Response {
+    if query.autoload.unwrap_or(false) {
+        return single_invalid_field("autoload", "runtime observations must use autoload=false");
+    }
+    let Some(model_id) = query.model_id else {
+        return single_invalid_field("model_id", "model_id is required");
+    };
+    if !valid_model_id(&model_id) {
+        return single_invalid_field("model_id", "model_id must match ^mdl_[A-Za-z0-9_-]{43}$");
+    }
+    match single_catalog_entry_blocking(state.clone()).await {
+        Ok(entry) if entry.identity.id == model_id => Json(super::webui::api::runtime_snapshot(
+            state.webui_lifecycle.server_instance_id().to_string(),
+            model_id,
+            entry.identity.revision,
+            state.webui_lifecycle.snapshot_sequence(),
+            &state.config,
+        ))
+        .into_response(),
+        Ok(_) => single_webui_error(StatusCode::NOT_FOUND, "not_found", "model not found", true),
+        Err(err) => single_webui_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("runtime projection task failed: {err}"),
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "webui")]
+#[derive(Default, serde::Deserialize)]
+struct SingleOperationsQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_operations_list(
+    State(state): State<AppState>,
+    Query(query): Query<SingleOperationsQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return single_invalid_field("limit", "limit must be between 1 and 200");
+    }
+    Json(
+        state
+            .webui_lifecycle
+            .list_operations(limit, query.cursor.as_deref(), None, None, None),
+    )
+    .into_response()
+}
+
+#[cfg(feature = "webui")]
+async fn single_ui_events(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let runtime_model_ids = match single_catalog_entry_blocking(state.clone()).await {
+        Ok(entry) => vec![entry.identity.id],
+        Err(err) => {
+            return single_webui_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                format!("event model identity projection task failed: {err}"),
+                true,
+            );
+        }
+    };
+    super::webui::events::ui_events_response(
+        state.webui_lifecycle.clone(),
+        runtime_model_ids,
+        headers,
+        uri,
+    )
+}
+
+#[cfg(all(test, feature = "webui"))]
+#[path = "app_single_webui_control_tests.rs"]
+mod single_webui_control_tests;
+
 #[cfg(test)]
 #[path = "api_prefix_tests.rs"]
 mod api_prefix_tests;
@@ -629,6 +945,122 @@ mod tests {
                 post(|| async { StatusCode::NO_CONTENT }),
             )
             .layer(DefaultBodyLimit::max(AUDIO_MAX_UPLOAD_BYTES))
+    }
+
+    #[cfg(feature = "webui")]
+    fn single_webui_state() -> crate::server::AppState {
+        use std::path::PathBuf;
+        use std::sync::{Arc, mpsc};
+
+        let (options_tx, _options_rx) = mpsc::channel();
+        let provider = Arc::new(crate::server::ModelProvider::recording_for_route_tests(
+            options_tx,
+        ));
+        let batch_metrics = provider.batch_metrics().clone();
+        crate::server::AppState::new(
+            provider,
+            crate::server::ServerConfig::default(),
+            crate::server::ChatTemplateProcessor::with_template("ok".to_string()),
+            crate::tokenizer::MlxcelTokenizer::stub(),
+            PathBuf::from("single-webui-route-test-model"),
+            batch_metrics,
+        )
+    }
+
+    #[cfg(feature = "webui")]
+    fn assert_single_model_revision_event(chunk: &str, server_instance: &str, model_id: &str) {
+        let data = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE JSON data");
+        let event_id = chunk
+            .lines()
+            .find_map(|line| line.strip_prefix("id: "))
+            .expect("SSE id");
+        let mut actual: Value = serde_json::from_str(data).expect("producer event JSON");
+        assert_eq!(actual["server_instance_id"], server_instance);
+        assert_eq!(actual["type"], "model_revision");
+        assert_eq!(actual["payload"]["model_id"], model_id);
+        assert_eq!(actual["event_id"], event_id);
+        assert!(super::valid_model_id(model_id));
+        assert!(event_id.starts_with("evt_"));
+        assert!(
+            actual["payload"]["revision"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        );
+        assert!(actual["sequence"].as_u64().is_some());
+        assert!(
+            actual["emitted_at"]
+                .as_str()
+                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        );
+        let mut expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/webui/examples/event.1.json"
+        ))
+        .expect("event fixture");
+        for path in [
+            "/server_instance_id",
+            "/event_id",
+            "/sequence",
+            "/emitted_at",
+            "/payload/model_id",
+            "/payload/revision",
+        ] {
+            *actual.pointer_mut(path).expect("actual dynamic") =
+                expected.pointer(path).expect("expected dynamic").clone();
+        }
+        expected
+            .as_object_mut()
+            .expect("fixture object")
+            .remove("$schemaName");
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "webui")]
+    async fn first_single_sse_chunk(app: Router, uri: &str, last_event_id: Option<&str>) -> String {
+        use axum::http::header;
+        use futures::StreamExt;
+
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::ACCEPT, "text/event-stream");
+        if let Some(event_id) = last_event_id {
+            builder = builder.header("Last-Event-ID", event_id);
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("sse chunk timeout")
+            .expect("sse chunk")
+            .expect("sse body ok");
+        String::from_utf8(chunk.to_vec()).expect("utf8 sse")
+    }
+
+    #[cfg(feature = "webui")]
+    async fn single_events_status(
+        app: Router,
+        uri: &str,
+        last_event_id: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder().method(Method::GET).uri(uri);
+        if let Some(event_id) = last_event_id {
+            builder = builder.header("Last-Event-ID", event_id);
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+        let json = serde_json::from_slice(&bytes).expect("json body");
+        (status, json)
     }
 
     #[test]
@@ -869,6 +1301,45 @@ mod tests {
                 "{path} alias must be mounted"
             );
         }
+    }
+
+    #[cfg(feature = "webui")]
+    #[tokio::test]
+    async fn single_webui_events_use_shared_replay_cursor_and_fixtures() {
+        let state = single_webui_state();
+        let entry = crate::server::webui::catalog::single_model_entry_from_state_with_cache(
+            &state.webui_catalog_cache,
+            &state,
+        );
+        let server_instance = state.webui_lifecycle.server_instance_id().to_string();
+        let lifecycle = crate::server::router_lifecycle::ModelLifecycle::new(
+            crate::server::router_lifecycle::DownloadState::Complete,
+        );
+        lifecycle.mark_loading();
+        state.webui_lifecycle.publish_model_revision(
+            &entry.identity.id,
+            entry.identity.revision,
+            lifecycle.snapshot(),
+        );
+        let app = super::single_webui_api_routes().with_state(state);
+
+        let replay = first_single_sse_chunk(
+            app.clone(),
+            &format!("/ui-api/v1/events?server_instance_id={server_instance}&after_sequence=0"),
+            None,
+        )
+        .await;
+        assert!(replay.contains("event: model_revision"), "{replay}");
+        assert_single_model_revision_event(&replay, &server_instance, &entry.identity.id);
+
+        let (status, response) = single_events_status(
+            app,
+            &format!("/ui-api/v1/events?server_instance_id={server_instance}&after_sequence=1"),
+            Some("evt_conflict"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(response["error"]["field_errors"][0]["code"], "conflict");
     }
 
     #[tokio::test]

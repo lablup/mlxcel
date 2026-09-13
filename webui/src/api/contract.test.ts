@@ -9,6 +9,7 @@ const fixtures = import.meta.glob('../../../tests/fixtures/webui/**/*.json', { e
 const exampleSchemas = new Map<string, string>([
   ['bootstrap.model-free.json', 'BootstrapResponse'],
   ['catalog.page.json', 'CatalogListResponse'],
+  ['catalog.dflash-page.json', 'CatalogListResponse'],
   ['error.forbidden-origin.json', 'ErrorEnvelope'],
   ['error.stale-revision.json', 'ErrorEnvelope'],
   ['error.unauthorized.json', 'ErrorEnvelope'],
@@ -60,7 +61,7 @@ function failSchema(path: string): never {
 describe('canonical WebUI contract fixtures', () => {
   it('validates every shared fixture at the JavaScript runtime boundary', () => {
     const entries = Object.entries(fixtures).sort(([left], [right]) => left.localeCompare(right));
-    expect(entries).toHaveLength(41);
+    expect(entries).toHaveLength(44);
     for (const [path] of entries) validateAgainstSchema(schemaFor(path), cloneFixture(path), path);
   });
 
@@ -89,6 +90,25 @@ describe('canonical WebUI contract fixtures', () => {
     expect(() => validateCatalogEntry(entry)).toThrow();
     metadata.declared_architectures = ['a'.repeat(129)];
     expect(() => validateCatalogEntry(entry)).toThrow();
+  });
+
+  it('rejects DFlash catalog reason overflow and structural drift independently', () => {
+    const path = '../../../tests/fixtures/webui/examples/catalog.dflash-page.json';
+    for (const [containerName, field] of [
+      ['support', 'architecturally_supported_reason'],
+      ['unknown_reasons', 'architecture'],
+    ]) {
+      const mutations = containerName === 'support' ? ['oversized', 'missing', 'extra'] : ['oversized', 'extra'];
+      for (const mutation of mutations) {
+        const page = cloneFixture(path);
+        const metadata = (page.items as MutableJsonObject[])[0].metadata as MutableJsonObject;
+        const container = metadata[containerName] as MutableJsonObject;
+        if (mutation === 'oversized') container[field] = 'a'.repeat(513);
+        if (mutation === 'missing') metadata[containerName] = Object.fromEntries(Object.entries(container).filter(([key]) => key !== field));
+        if (mutation === 'extra') container.unexpected_diagnostic = 'drift';
+        expect(() => validateAgainstSchema('CatalogListResponse', page)).toThrow();
+      }
+    }
   });
 
   it('rejects extra properties, missing required nulls, invalid date-time and wrong discriminators', () => {

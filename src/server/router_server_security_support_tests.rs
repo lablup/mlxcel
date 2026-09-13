@@ -81,10 +81,19 @@ fn router_state_from(
     config: ServerConfig,
     autoload: bool,
 ) -> RouterServerState {
+    router_state_with_startup(sources, config, ServerStartupConfig::default(), autoload)
+}
+
+fn router_state_with_startup(
+    sources: RouterSources,
+    config: ServerConfig,
+    startup: ServerStartupConfig,
+    autoload: bool,
+) -> RouterServerState {
     let pool = Arc::new(
         RouterPool::new(
             sources,
-            ServerStartupConfig::default(),
+            startup.clone(),
             config.api_keys.clone(),
             PresetCliOverrides::default(),
             4,
@@ -96,8 +105,165 @@ fn router_state_from(
         pool,
         config: Arc::new(config),
         #[cfg(feature = "webui")]
+        startup: Arc::new(startup),
+        #[cfg(feature = "webui")]
         catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
     }
+}
+
+fn secured_router_app_from_state(state: RouterServerState) -> Router {
+    let policy =
+        crate::server::webui::security::WebUiSecurityPolicy::with_prefixes_limits_and_rate(
+            vec!["127.0.0.1:18037".to_string()],
+            vec![HeaderValue::from_static("http://127.0.0.1:18037")],
+            "/webui",
+            "/",
+            32,
+            16,
+            120,
+        )
+        .expect("security policy");
+    create_router_app_with_secured_ui(state, policy)
+}
+
+fn normalize_bootstrap_fixture(value: &mut serde_json::Value, expected: &serde_json::Value) {
+    let server_id = value
+        .pointer("/server/server_instance_id")
+        .and_then(|v| v.as_str())
+        .expect("server_instance_id string");
+    assert!(
+        server_id.starts_with("srv_") && server_id.len() <= 128,
+        "unexpected server_instance_id: {server_id}"
+    );
+    *value.pointer_mut("/server/server_instance_id").unwrap() =
+        expected["server"]["server_instance_id"].clone();
+
+    let build = value
+        .pointer_mut("/server/build")
+        .and_then(|v| v.as_object_mut())
+        .expect("build object");
+    let version = build
+        .get("version")
+        .and_then(|v| v.as_str())
+        .expect("build.version string");
+    assert!(!version.is_empty(), "build.version must not be empty");
+    build.insert(
+        "version".to_string(),
+        expected["server"]["build"]["version"].clone(),
+    );
+
+    let git_commit = build.get("git_commit").expect("build.git_commit present");
+    assert!(
+        git_commit.is_null()
+            || git_commit.as_str().is_some_and(|commit| {
+                commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }),
+        "build.git_commit must be null or a hex commit"
+    );
+    build.insert(
+        "git_commit".to_string(),
+        expected["server"]["build"]["git_commit"].clone(),
+    );
+
+    let target = build
+        .get("target")
+        .and_then(|v| v.as_str())
+        .expect("build.target string");
+    assert!(target.contains('-'), "build.target must describe arch-os");
+    build.insert(
+        "target".to_string(),
+        expected["server"]["build"]["target"].clone(),
+    );
+}
+
+struct NoBootstrapDownload;
+
+impl crate::server::router_cache::RouterDownloader for NoBootstrapDownload {
+    fn validate(&self, _: &str) -> anyhow::Result<()> {
+        panic!("bootstrap must not probe the network");
+    }
+
+    fn download(
+        &self,
+        _: &str,
+        _: &Path,
+        _: crate::downloader::DownloadHooks,
+    ) -> anyhow::Result<()> {
+        panic!("bootstrap must not download a model");
+    }
+}
+
+async fn assert_mounted_bootstrap_fixture(with_cache: bool) {
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    let cache_root = tempfile::tempdir().expect("bootstrap fixture cache");
+    let mut startup = ServerStartupConfig {
+        model_store_root: Some(cache_root.path().to_path_buf()),
+        ..Default::default()
+    };
+    startup.webui_enabled = true;
+    let config = ServerConfig {
+        enable_settings_endpoint: true,
+        ..keyed_config()
+    };
+    let state = router_state_with_startup(
+        RouterSources {
+            models_dir: None,
+            cache: with_cache.then(|| {
+                crate::server::router_cache::CacheSource::new(
+                    cache_root.path().to_path_buf(),
+                    Arc::new(NoBootstrapDownload),
+                )
+            }),
+            presets: Default::default(),
+        },
+        config,
+        startup,
+        false,
+    );
+    let response = secured_request(
+        secured_router_app_from_state(state),
+        Method::GET,
+        "/ui-api/v1/bootstrap",
+        Some(ROUTER_KEY),
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 32 * 1024).await.unwrap();
+    let mut actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let mut expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/webui/examples/bootstrap.model-free.json"
+    ))
+    .unwrap();
+    if !with_cache {
+        // The no-cache case intentionally keeps a startup hint, but its pool
+        // has no cache source. Change only expected cache-dependent fields;
+        // compare every producer field without normalizing away this state.
+        expected["roots"] = serde_json::json!([]);
+        for action in ["download", "cache_delete"] {
+            expected["actions"][action]["reason"] =
+                serde_json::json!("no writable managed cache route is available in this mode");
+        }
+    }
+    normalize_bootstrap_fixture(&mut actual, &expected);
+    assert_eq!(
+        actual, expected,
+        "mounted bootstrap producer drifted from the schema-validated fixture"
+    );
+}
+
+#[tokio::test]
+async fn mounted_bootstrap_matches_full_model_free_fixture() {
+    assert_mounted_bootstrap_fixture(true).await;
+}
+
+#[tokio::test]
+async fn mounted_bootstrap_without_pool_cache_ignores_startup_cache_hint() {
+    assert_mounted_bootstrap_fixture(false).await;
 }
 
 fn secured_router_app(control_limit: usize, sse_limit: usize, control_rate_limit: usize) -> Router {
@@ -156,6 +322,121 @@ pub(super) async fn secured_request(
     app.oneshot(builder.body(body).expect("request builds"))
         .await
         .expect("router answers")
+}
+
+#[tokio::test]
+async fn secured_router_mounts_static_bootstrap_catalog_runtime_and_events() {
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    let shell = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        "/webui/",
+        None,
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(shell.status(), StatusCode::OK);
+
+    let unauthenticated_bootstrap = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        "/ui-api/v1/bootstrap",
+        None,
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(unauthenticated_bootstrap.status(), StatusCode::UNAUTHORIZED);
+
+    let bootstrap = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        "/ui-api/v1/bootstrap",
+        Some(ROUTER_KEY),
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(bootstrap.status(), StatusCode::OK);
+    let bytes = to_bytes(bootstrap.into_body(), 32 * 1024).await.unwrap();
+    let bootstrap_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(bootstrap_json["schema_version"], "webui.ui-api.v1");
+    assert_eq!(bootstrap_json["server"]["mode"], "router_pool");
+    assert_eq!(bootstrap_json["actions"]["download"]["state"], "read_only");
+
+    let catalog = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        "/ui-api/v1/catalog?autoload=false",
+        Some(ROUTER_KEY),
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(catalog.status(), StatusCode::OK);
+    let bytes = to_bytes(catalog.into_body(), 64 * 1024).await.unwrap();
+    let catalog_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let model_id = catalog_json["items"][0]["identity"]["id"]
+        .as_str()
+        .expect("catalog id")
+        .to_string();
+
+    let runtime = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        &format!("/ui-api/v1/runtime?model_id={model_id}&autoload=false"),
+        Some(ROUTER_KEY),
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(runtime.status(), StatusCode::OK);
+    let bytes = to_bytes(runtime.into_body(), 32 * 1024).await.unwrap();
+    let runtime_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(runtime_json["model_id"], model_id);
+    assert!(runtime_json["measurements"]["gpu_utilization"]["value"].is_null());
+
+    let unknown = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        &format!(
+            "/ui-api/v1/runtime?model_id=mdl_{}&autoload=false",
+            "z".repeat(43)
+        ),
+        Some(ROUTER_KEY),
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let events = secured_request(
+        secured_router_app_with_limits(32, 16),
+        Method::GET,
+        "/ui-api/v1/events",
+        Some(ROUTER_KEY),
+        None,
+        Some("same-origin"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    assert!(
+        events
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"))
+    );
 }
 
 // Each expected value is independently validated by verify-webui-contract.

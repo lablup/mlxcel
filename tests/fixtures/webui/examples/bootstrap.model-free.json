@@ -14,6 +14,7 @@
         "catalog",
         "load",
         "unload",
+        "chat",
         "runtime",
         "settings"
       ]
@@ -22,8 +23,6 @@
   "features": [
     "webui",
     "catalog",
-    "download",
-    "cache_delete",
     "load",
     "unload",
     "chat",
@@ -37,11 +36,16 @@
       "instructions": null
     },
     "download": {
-      "state": "enabled",
-      "reason": null,
-      "instructions": null
+      "state": "read_only",
+      "reason": "download adapter is not mounted in this build",
+      "instructions": "Downloads are handled by the WebUI download adapter in issue #1841"
     },
     "cache_delete": {
+      "state": "read_only",
+      "reason": "cache removal adapter is not mounted in this build",
+      "instructions": "Cache deletion is handled by the WebUI removal adapter in issue #1841"
+    },
+    "unload": {
       "state": "enabled",
       "reason": null,
       "instructions": null

@@ -580,6 +580,16 @@ pub struct AppState {
     /// Vertex AI predict adapter is enabled (#1456), so per-instance
     /// dispatch runs through the same middleware stack in-process.
     pub(crate) gcp_dispatch: Arc<std::sync::OnceLock<axum::Router>>,
+    /// Per-app WebUI catalog projection cache. Static metadata is cached here;
+    /// live provider/lifecycle fields are reprojected on every UI response.
+    #[cfg(feature = "webui")]
+    pub(crate) webui_catalog_cache: Arc<super::webui::catalog::CatalogProjectionCache>,
+    /// Single-model WebUI operation/event coordinator.
+    #[cfg(feature = "webui")]
+    pub(crate) webui_lifecycle: Arc<super::router_lifecycle::LifecycleCoordinator>,
+    /// Startup shape exposed by the WebUI bootstrap route.
+    #[cfg(feature = "webui")]
+    pub(crate) webui_startup: Arc<super::ServerStartupConfig>,
 }
 
 impl AppState {
@@ -777,6 +787,12 @@ impl AppState {
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
             started_at_unix: chrono::Utc::now().timestamp(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(feature = "webui")]
+            webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
+            #[cfg(feature = "webui")]
+            webui_lifecycle: Arc::new(super::router_lifecycle::LifecycleCoordinator::new()),
+            #[cfg(feature = "webui")]
+            webui_startup: Arc::new(super::ServerStartupConfig::default()),
         }
     }
 
@@ -840,6 +856,12 @@ impl AppState {
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
             started_at_unix: chrono::Utc::now().timestamp(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(feature = "webui")]
+            webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
+            #[cfg(feature = "webui")]
+            webui_lifecycle: Arc::new(super::router_lifecycle::LifecycleCoordinator::new()),
+            #[cfg(feature = "webui")]
+            webui_startup: Arc::new(super::ServerStartupConfig::default()),
         }
     }
 
@@ -857,6 +879,14 @@ impl AppState {
     #[must_use]
     pub(crate) fn with_video_dir_allowlist(mut self, allowlist: Arc<Vec<PathBuf>>) -> Self {
         self.video_dir_allowlist = allowlist;
+        self
+    }
+
+    /// Attach the startup configuration snapshot exposed by WebUI bootstrap.
+    #[cfg(feature = "webui")]
+    #[must_use]
+    pub(crate) fn with_webui_startup(mut self, startup: Arc<super::ServerStartupConfig>) -> Self {
+        self.webui_startup = startup;
         self
     }
 
