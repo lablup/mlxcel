@@ -1,7 +1,7 @@
 # Technical Report: PR #1872 — Safe WebUI model library operations
 
 **Date**: 2026-09-13
-**Status**: Open PR; unload repair and ui-common integration retained; latest full gate failed on GPU firmware timeout; corrected full/real acceptance awaits an owner-coordinated quiet window
+**Status**: Open PR / status:review; source `84f1aeb2` passed full, strict real-model and hosted acceptance; pending central merge
 **Languages**: Rust, JSON/OpenAPI fixtures
 **Risk Level**: High
 **Implementation snapshot**: integrated baseline `3cb4817d` plus the owned-drain revision correction described below; earlier repair checkpoints `d688ea4f` and `b7555005`
@@ -153,3 +153,11 @@ The GB10 runner subsequently executed the `71552f8c` hosted jobs: clippy failed 
 The user has now confirmed GPU availability; root exclusively owns the next GPU/full and real-acceptance runs, while this unit remains CPU-only. The failed first real unload and latest Metal firmware timeout remain preserved; unchanged real download/restart/load/unload/delete acceptance must still be rerun by root. No existing user checkpoint is removed by this preparation.
 
 CPU preparation passed: unload5, policy1, secured router9, owned restart2 plus two child runs, anchored filesystem13 (including both new identity regressions), normal scoped library/test clippy, feature-disabled library/binary clippy, format/diff checks, 46 strict contracts, 76 frontend tests, type/lint and deterministic bundle verification. No GPU, browser or full-suite run was executed by this unit.
+
+## 11. Final acceptance at source 84f1aeb2 (2026-09-14)
+
+This section supersedes historical pending statuses above. After the user confirmed GPU availability, root's serialized chain at `84f1aeb2b4f5706bb0d63866b20ca48d74bf340a` exited0: 11,313 unique top-level tests passed, zero failed and 361 ignored across 124 summaries, plus two nested restart-child passes counted separately. Workspace all-target clippy passed with warnings denied in both default and feature-disabled configurations. All46 contracts, structural/format checks and both binaries' test-fast production relocated empty/offline/TTY checks passed. Actual hosted run [34844128193](https://github.com/lablup/mlxcel/actions/runs/34844128193) passed Linux clippy, OpenXLA feature compilation, WebUI bundle/feature-off and selected static checks; no GB10 exception was needed. Workflow-skipped CUDA sm70, MLX pin extraction and OpenXLA link are not execution claims.
+
+The unchanged strict fresh-cache driver downloaded public `mlx-community/SmolLM-135M-Instruct-4bit` at `642e06afe3fab57fd6cc518637c471af0a569e1e`, verifying 75,789,919 SafeTensors bytes with SHA256 `e91560ee24b13eee6ddeb14879d728a90780053d69057b15ff199ccadfcfe33b`. Production CLI restart changed server identity, returned canonical404 for the old operation and retained the complete unloaded model's stable catalog ID. Actual load, nonempty 32-token generation, unload with `worker_exit_observed=true`, API deletion of only the newly downloaded checkpoint and an empty final catalog passed. Repetitive output demonstrates execution, not generation quality. Both owned servers exited0 without forced termination. Tested server binary SHA256: `4a1d0d3c2805b9b81f5e20e9d925337776d850702e8947896cf0e7d9fe7d6fe0`.
+
+The first `3cb4817d` unload failure and `857937ca` Metal firmware timeout remain failures in the historical record; this later pass establishes neither an external cause nor a reboot claim. This final report update changes no source or bundle. Safari, VoiceOver and native 200% checks remain user-deferred until the whole implementation is ready, not passed. PR status remains review pending central merge.

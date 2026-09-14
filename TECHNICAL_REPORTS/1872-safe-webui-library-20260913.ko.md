@@ -1,7 +1,7 @@
 # 기술 리포트: PR #1872 — 안전한 WebUI 모델 라이브러리 작업
 
 **작성일**: 2026-09-13
-**상태**: 열린 PR; unload 수정과 ui-common 통합 유지, 최신 전체 게이트가 GPU firmware timeout으로 실패하여 소유자와 조율한 quiet window에서 전체·실모델 재검증 대기
+**상태**: 열린 PR / status:review; 소스 `84f1aeb2` 전체·strict 실모델·hosted acceptance 통과, 중앙 머지 대기
 **언어**: Rust, JSON/OpenAPI fixture
 **위험도**: 높음
 **구현 스냅샷**: 통합 기준 `3cb4817d`와 아래 owned-drain revision 수정; 이전 보완 체크포인트 `d688ea4f` 및 `b7555005`
@@ -153,3 +153,11 @@ CPU-only rebase 검증: unload/token5, 순수 policy1, 보안 fake-router9, owne
 사용자가 이제 GPU 사용 가능 상태를 확인했습니다. 다음 GPU·전체 suite 및 실제 acceptance는 루트가 독점 실행하며 이 유닛은 CPU-only를 유지합니다. 첫 실제 unload 실패와 최신 Metal firmware timeout은 그대로 기록하며, 루트가 변경하지 않은 실제 download/restart/load/unload/delete acceptance를 다시 실행해야 합니다. 이 준비 과정에서 기존 사용자 checkpoint를 삭제하지 않습니다.
 
 CPU 준비 검증은 unload 5개, policy 1개, secured router 9개, owned restart 2개와 child 실행 2회, anchored filesystem 13개(새 identity 회귀 2개 포함), 일반 scoped library/test clippy, feature-disabled library/binary clippy, 포맷·diff, strict contract 46개, frontend 테스트 76개, type/lint 및 결정적 bundle 검증을 통과했습니다. 이 유닛은 GPU·브라우저·전체 suite를 실행하지 않았습니다.
+
+## 11. 소스 84f1aeb2 최종 acceptance (2026-09-14)
+
+이 절은 앞선 과거의 대기 상태를 갱신합니다. 사용자가 GPU 사용 가능 상태를 확인한 뒤 루트가 `84f1aeb2b4f5706bb0d63866b20ca48d74bf340a`에서 실행한 직렬 chain은 exit0으로 종료했습니다. Summary 124개에서 고유 top-level 테스트 11,313개 통과, 실패 0개, ignored 361개이며 nested restart-child 실행 2회 통과는 별도 집계했습니다. Workspace all-target clippy는 default 및 feature-disabled 구성 모두 warnings denied로 통과했습니다. Contract 46개, 구조·포맷 검사, 두 바이너리의 test-fast production relocated empty/offline/TTY도 통과했습니다. 실제 hosted run [34844128193](https://github.com/lablup/mlxcel/actions/runs/34844128193)은 Linux clippy, OpenXLA feature compilation, WebUI bundle/feature-off 및 선택된 정적 검사를 통과했으며 GB10 예외는 필요하지 않았습니다. Workflow가 건너뛴 CUDA sm70, MLX pin extraction, OpenXLA link는 실행 주장이 아닙니다.
+
+변경하지 않은 strict fresh-cache driver는 공개 `mlx-community/SmolLM-135M-Instruct-4bit`의 `642e06afe3fab57fd6cc518637c471af0a569e1e`를 다운로드하고 75,789,919바이트 SafeTensors의 SHA256 `e91560ee24b13eee6ddeb14879d728a90780053d69057b15ff199ccadfcfe33b`를 검증했습니다. Production CLI 재시작 후 server identity 변경, 이전 operation의 canonical404, complete/unloaded 모델의 stable catalog ID 유지를 확인했습니다. 실제 load, 비어 있지 않은 32-token 생성, `worker_exit_observed=true`인 unload, 방금 받은 checkpoint만 API로 삭제, 최종 빈 catalog를 모두 통과했습니다. 출력은 반복적이므로 실행 검증이지 생성 품질 주장이 아닙니다. 소유한 서버 두 개는 강제 종료 없이 모두 exit0으로 종료했습니다. 검증한 서버 바이너리 SHA256: `4a1d0d3c2805b9b81f5e20e9d925337776d850702e8947896cf0e7d9fe7d6fe0`.
+
+첫 `3cb4817d` unload 실패와 `857937ca` Metal firmware timeout은 과거 실패 기록으로 보존합니다. 이후 통과는 외부 원인을 확정하거나 재부팅을 주장하지 않습니다. 최종 리포트 갱신은 소스와 bundle을 변경하지 않습니다. Safari·VoiceOver·native 200% 검사는 전체 구현 준비 후로 사용자가 유예했으며 통과가 아닙니다. PR은 중앙 머지 전까지 review 상태입니다.
