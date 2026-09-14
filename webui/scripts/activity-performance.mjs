@@ -1,5 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-/* global URL, process, setTimeout, fetch, document */
+/* global URL, process, setTimeout, fetch, document, AbortSignal */
 // Root-owned real acceptance. Never run alongside unrelated GPU inference/tests.
 import { readFile, writeFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
@@ -51,7 +51,7 @@ async function clients(mode) {
   }
 }
 async function request(mode, pair) {
-  const response = await fetch(api('completion?autoload=false'), { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, n_predict: 256, seed: 42, temperature: 0, cache_prompt: false, stream: false }) });
+  const response = await fetch(api('completion?autoload=false'), { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, n_predict: 256, seed: 42, temperature: 0, cache_prompt: false, stream: false }), signal: AbortSignal.timeout(600000) });
   if (!response.ok) throw new Error(`Native completion failed (${response.status}); no response body logged.`);
   const body = await response.json();
   const rate = body.timings?.predicted_per_second;
