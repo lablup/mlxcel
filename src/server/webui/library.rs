@@ -80,21 +80,8 @@ async fn ui_downloads(State(state): State<RouterServerState>, body: axum::body::
     if let Some(response) = validate_idempotency_key(&request.idempotency_key) {
         return response;
     }
-    if crate::downloader::offline_mode() {
-        return webui_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported",
-            "offline mode is enabled; download the model out of band into the configured cache",
-            false,
-        );
-    }
-    if !state.pool.has_cache() {
-        return webui_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported",
-            "no model cache is configured; set --model-store-root, MLXCEL_MODELS_DIR, or MLXCEL_CACHE_DIR",
-            false,
-        );
+    if let Some(response) = mutation_unavailable(&state, true) {
+        return response;
     }
     match state.pool.submit_download(
         &request.repo_id,
@@ -134,6 +121,9 @@ async fn ui_model_removals(
     if let Some(response) = validate_idempotency_key(&request.idempotency_key) {
         return response;
     }
+    if let Some(response) = mutation_unavailable(&state, false) {
+        return response;
+    }
     match state.pool.submit_cache_removal_by_model_id(
         &request.model_id,
         request.expected_revision,
@@ -142,6 +132,24 @@ async fn ui_model_removals(
         Ok(accepted) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
         Err(err) => webui_pool_error_response(err),
     }
+}
+
+fn mutation_unavailable(state: &RouterServerState, download: bool) -> Option<Response> {
+    let availability = super::library_policy::availability(
+        super::api::WebUiServerMode::RouterPool,
+        state.pool.has_cache(),
+        download,
+    );
+    (availability.state != "enabled").then(|| {
+        webui_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported",
+            availability
+                .reason
+                .unwrap_or("library mutation is unavailable"),
+            false,
+        )
+    })
 }
 
 fn request_id() -> String {

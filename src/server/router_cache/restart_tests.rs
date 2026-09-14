@@ -349,6 +349,7 @@ async fn assert_missing_operation(pool: Arc<RouterPool>, id: &str) {
     let app = create_router_app_with_authenticated_ui(RouterServerState {
         pool,
         config: Arc::new(config),
+        startup: Arc::new(ServerStartupConfig::default()),
         catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
     });
     let response = app

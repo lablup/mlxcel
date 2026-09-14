@@ -179,13 +179,14 @@ fn normalize_bootstrap_fixture(value: &mut serde_json::Value, expected: &serde_j
 struct NoBootstrapDownload;
 
 impl crate::server::router_cache::RouterDownloader for NoBootstrapDownload {
-    fn validate(&self, _: &str) -> anyhow::Result<()> {
+    fn validate(&self, _: &str, _: Option<&str>) -> anyhow::Result<()> {
         panic!("bootstrap must not probe the network");
     }
 
     fn download(
         &self,
         _: &str,
+        _: Option<&str>,
         _: &Path,
         _: crate::downloader::DownloadHooks,
     ) -> anyhow::Result<()> {
@@ -245,8 +246,18 @@ async fn assert_mounted_bootstrap_fixture(with_cache: bool) {
         // compare every producer field without normalizing away this state.
         expected["roots"] = serde_json::json!([]);
         for action in ["download", "cache_delete"] {
-            expected["actions"][action]["reason"] =
-                serde_json::json!("no writable managed cache route is available in this mode");
+            expected["actions"][action] = serde_json::json!({
+                "state": "disabled", "reason": "no managed model cache is configured",
+                "instructions": "Configure --model-store-root and restart to enable library mutations"
+            });
+            for pointer in ["/features", "/server/build/features"] {
+                expected
+                    .pointer_mut(pointer)
+                    .unwrap()
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|feature| feature != action);
+            }
         }
     }
     normalize_bootstrap_fixture(&mut actual, &expected);
@@ -368,7 +379,7 @@ async fn secured_router_mounts_static_bootstrap_catalog_runtime_and_events() {
     let bootstrap_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(bootstrap_json["schema_version"], "webui.ui-api.v1");
     assert_eq!(bootstrap_json["server"]["mode"], "router_pool");
-    assert_eq!(bootstrap_json["actions"]["download"]["state"], "read_only");
+    assert_eq!(bootstrap_json["actions"]["download"]["state"], "disabled");
 
     let catalog = secured_request(
         secured_router_app_with_limits(32, 16),
@@ -696,3 +707,6 @@ async fn assembled_ui_router_body_boundary_reaches_actual_action_handler() {
 async fn assembled_ui_off_router_body_boundary_preserves_legacy_load_handler() {
     assembled_router_boundary(false).await;
 }
+
+#[path = "router_library_integration_tests.rs"]
+mod library_integration_tests;

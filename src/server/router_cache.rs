@@ -23,6 +23,17 @@ use crate::downloader::{self, DownloadHooks, TokenMode};
 
 pub const STAGING_DIR: &str = ".mlxcel-staging";
 
+/// Compile-time availability of the anchored atomic mutation primitives.
+/// This never probes or creates the configured cache directory.
+#[cfg(feature = "webui")]
+pub(crate) const fn managed_mutations_supported() -> bool {
+    cfg!(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios"
+    ))
+}
+
 /// How a router downloads a repository into the cache. The production
 /// implementation is [`HfRouterDownloader`]; tests substitute a fake that
 /// writes files locally and drives the same hooks.

@@ -240,20 +240,10 @@ fn assert_bootstrap_reports_cache_authority(body: &serde_json::Value) {
     assert_eq!(body["server"]["mode"], "model_free", "{body}");
     assert_eq!(body["actions"]["load"]["state"], "enabled", "{body}");
     assert_eq!(body["actions"]["unload"]["state"], "enabled", "{body}");
-    assert_eq!(body["actions"]["download"]["state"], "read_only", "{body}");
-    assert_eq!(
-        body["actions"]["download"]["reason"], "download adapter is not mounted in this build",
-        "{body}"
-    );
-    assert_eq!(
-        body["actions"]["cache_delete"]["state"], "read_only",
-        "{body}"
-    );
-    assert_eq!(
-        body["actions"]["cache_delete"]["reason"],
-        "cache removal adapter is not mounted in this build",
-        "{body}"
-    );
+    for name in ["download", "cache_delete"] {
+        assert_eq!(body["actions"][name]["state"], "enabled", "{body}");
+        assert!(body["actions"][name]["reason"].is_null(), "{body}");
+    }
     let roots = body["roots"].as_array().expect("roots array");
     assert!(
         roots.iter().any(|root| root["kind"] == "cache"
