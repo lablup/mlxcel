@@ -38,3 +38,9 @@ No screenshot thresholds, geometry, appearance fixtures, production fonts, asset
 | `390-dark-product-login.png` | `c5526ec17fa6d6a8da67666098bddf0ab05e812d554171370f596f9714be7c0c` |
 | `390-dark-product-signed-in.png` | `e86838ae6afd7b827a8da373fc3a4e732d4c89c7627433e6b4b42bf3ece89971` |
 | `390-opaque-gallery-controls-drawer-cjk.png` | `25af05a349715cb2fae649ecfa0069539f21916e4081a3975d6ff62b3526d6cc` |
+
+## ui-common migration: Darwin States
+
+The Darwin `1440-highcontrast-gallery-states.png` image was rendered locally with the pinned Chromium/Node/pnpm toolchain from source commit `3c61a4d1fa0e6a67d1af81f644b9b6e765d2951b` (source digest `cbf8adfc3304a5d0440685dd55241b8e433fbb6edc5d85a6dcaedfee871e068a`) and visually reviewed before adoption. It preserves the approved aligned sidebar header and title-case lifecycle labels; measured and unknown progress examples share one gallery cell. Its SHA-256 is `8899ca95933cea8b221ab09722601bff4f80593a94d5dc05090491df9c0e53ed`. No other baseline or screenshot threshold changes accompany this update; the hosted Linux counterpart requires its own review.
+
+The migration's heading regression reads Chromium's actual accessibility tree after repeated tab remounts. Playwright 1.63's role-level helper prefers a native `h3` tag over `aria-level`, whereas the browser exposes the adapter's explicit level 2 correctly. DOM attributes, computed role/name/level, and non-ignored visibility are asserted together. This Chromium check does not establish native Safari/VoiceOver acceptance for the migrated DOM.
