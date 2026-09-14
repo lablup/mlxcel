@@ -146,13 +146,16 @@ const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 /// live device; `metal_available` mirrors `mlx::core::metal::is_available()`.
 ///
 /// The cap is family-agnostic, but it only governs families whose fused decode
-/// goes through the shared [`SwitchGLU::forward_fused_kernel`] (Mixtral,
-/// Qwen3-MoE, Qwen3-VL-MoE, OLMoE, phi-3.5-moe, dots.llm1, and the rest of the
-/// module `Used by:` list). Two families still drive a fused kernel from their
-/// own expert type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and
-/// the qwen3_omni_moe talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel).
-/// Qwen3-MoE and Qwen3-VL-MoE ignored it the same way until issue #1884 moved
-/// them onto the shared type. The backend is resolved at runtime via
+/// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
+/// BailingMoe, Cohere2Moe, DBRX, dots.llm1, Klear, Laguna, LFM2, Mellum,
+/// MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe), Qwen2Moe, Qwen3-MoE and
+/// Qwen3-VL-MoE. Two families still drive a fused kernel from their own expert
+/// type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and the
+/// qwen3_omni_moe talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel), and
+/// NemotronH's opt-in `MLXCEL_FUSED_MOE_RELU2` path launches the down kernel
+/// without it as well. Qwen3-MoE and Qwen3-VL-MoE ignored it the same way until
+/// issue #1884 moved them onto the shared type. The backend is resolved at
+/// runtime via
 /// `metal_is_available()` (at the call site in `forward_fused_kernel`) rather
 /// than a `cfg!(feature = "cuda")` compile-time switch, so a single binary built
 /// with both backends picks the cap from the live device. This matches the fused
@@ -198,8 +201,10 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
 /// `*StageModel::from_filtered_weights` entry points, the VLM text wrappers
 /// (`glm4v_moe`, `ernie4_5_moe_vl`, `loading/vlm_step3p7.rs`), `glm_moe_dsa` and
 /// `audio/qwen3_omni_moe/talker.rs` all build expert planes without ever calling
-/// the family's own model constructor, and two families build the quantized
-/// variant as a bare struct literal from a different module entirely. The pair
+/// the family's own model constructor, `ernie4_5_moe_vl` builds
+/// `ernie4_5_moe`'s quantized variant as a bare struct literal from another
+/// module, and `nemotron_h` has no named constructor for its
+/// `QuantizedSwitchLinear` at all. The pair
 /// also arrives from more than one config type per expert enum, so bounding the
 /// producer would not cover it either.
 ///
@@ -246,7 +251,7 @@ pub(crate) fn validate_expert_quantization_params(
 /// overflows `i32` well inside the range
 /// [`mlxcel_core::layers::validate_quantization_params`] accepts.
 ///
-/// Used by: DeepSeek. The other sixteen families listed on
+/// Used by: DeepSeek. The other fifteen families listed on
 ///          [`validate_expert_quantization_params`] are the obvious next
 ///          adopters and are left alone here so this stays one logical change;
 ///          they are unaffected either way, because none of them reads a
@@ -287,7 +292,9 @@ pub(crate) fn validate_expert_quantization_shapes(
 /// control is the declared `group_size` / `bits` pair.
 ///
 /// Used by: the guard tests of every family listed on
-///          [`validate_expert_quantization_params`]
+///          [`validate_expert_quantization_params`], plus the Qwen3MoE and
+///          Qwen3VLMoE block-loader guard tests (their experts moved onto the
+///          shared loader in issue #1884)
 #[cfg(test)]
 pub(crate) fn insert_stacked_quantized_expert_plane(
     weights: &mut WeightMap,
