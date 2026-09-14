@@ -30,6 +30,7 @@
     "vite.config.ts",
     "vitest.config.ts",
     "playwright.config.ts",
-    "eslint.config.js"
+    "eslint.config.js",
+    "playwright.csp.config.ts"
   ]
 }

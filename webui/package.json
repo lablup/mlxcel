@@ -13,10 +13,12 @@
     "verify-generated": "python3 ../scripts/webui/build_bundle.py --verify"
   },
   "dependencies": {
+    "@lablup/ui-common": "0.1.0-alpha.19",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.63.0",
     "@types/node": "22.20.2",

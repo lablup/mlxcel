@@ -8,6 +8,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    server: { deps: { inline: ['@lablup/ui-common'] } },
     globals: true,
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
   },
