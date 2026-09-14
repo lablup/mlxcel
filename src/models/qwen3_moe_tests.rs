@@ -24,8 +24,8 @@ use mlxcel_core::layers::KVCache;
 
 use super::{Attention, DecoderLayer, MLPType, ModelArgs, Qwen3MoeModel, SparseMoeBlock};
 use crate::models::switch_layers::{
-    HOSTILE_QUANT_PARAMS, fused_moe_enabled, insert_stacked_quantized_expert_plane,
-    moe_weighted_sum,
+    HONEST_EXPERT_GROUP_SIZE, HOSTILE_QUANT_PARAMS, fused_moe_enabled,
+    insert_honest_affine_swiglu_experts, insert_stacked_quantized_expert_plane, moe_weighted_sum,
 };
 
 /// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
@@ -294,61 +294,28 @@ fn qwen3_moe_switch_linear_rejects_quantization_params_that_would_abort_gather_q
     }
 }
 
-/// Hidden width and group size of the fused-kernel geometry below: a single
-/// quantization group per input row, so the kernel's `din` is 64 and one token
-/// carries 64 elements.
-const FUSED_HIDDEN: i32 = 64;
-const FUSED_GROUP: i32 = 64;
+/// Hidden width of the fused-kernel geometry below: one quantization group per
+/// input row, so the kernel's `din` is 64 and one token carries 64 elements.
+const FUSED_HIDDEN: i32 = HONEST_EXPERT_GROUP_SIZE;
 const FUSED_EXPERTS: i32 = 2;
 
-/// Deterministic values in `[-0.5, 0.5)`, so the quantized planes are honest
-/// rather than constant.
-fn pseudo_random(len: usize, seed: u64) -> Vec<f32> {
-    let mut state = seed;
-    (0..len)
-        .map(|_| {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
-        })
-        .collect()
-}
-
 /// A Qwen3-MoE `SparseMoeBlock` over two honest affine 4-bit bf16 experts of
-/// intermediate width `dff`, built with `quantize_weights` and loaded through
-/// the real family loader, so the fused-kernel decision under test runs on the
-/// exact type and stored triple a converted checkpoint produces.
+/// intermediate width `dff`, loaded through the real family loader, so the
+/// fused-kernel decision under test runs on the exact type and stored triple a
+/// converted checkpoint produces.
 fn fused_geometry_block(dff: i32) -> SparseMoeBlock {
     let mut weights = WeightMap::new();
-    let mut seed = u64::from(dff.unsigned_abs());
-    for (leaf, out, input) in [
-        ("gate_proj", dff, FUSED_HIDDEN),
-        ("up_proj", dff, FUSED_HIDDEN),
-        ("down_proj", FUSED_HIDDEN, dff),
-    ] {
-        let (mut w, mut s, mut b) = (Vec::new(), Vec::new(), Vec::new());
-        for _ in 0..FUSED_EXPERTS {
-            seed += 1;
-            let dense = mlxcel_core::from_slice_f32(
-                &pseudo_random((out * input) as usize, seed),
-                &[out, input],
-            );
-            let dense = mlxcel_core::astype(&dense, mlxcel_core::dtype::BFLOAT16);
-            let q = mlxcel_core::quantize_weights(&dense, FUSED_GROUP, 4);
-            w.push(mlxcel_core::quantized_weights_w(&q));
-            s.push(mlxcel_core::quantized_weights_scales(&q));
-            b.push(mlxcel_core::quantized_weights_biases(&q));
-        }
-        let plane = format!("{BLOCK_PREFIX}.switch_mlp.{leaf}");
-        weights.insert(format!("{plane}.weight"), mlxcel_core::stack_owned(&w, 0));
-        weights.insert(format!("{plane}.scales"), mlxcel_core::stack_owned(&s, 0));
-        weights.insert(format!("{plane}.biases"), mlxcel_core::stack_owned(&b, 0));
-    }
+    insert_honest_affine_swiglu_experts(
+        &mut weights,
+        &format!("{BLOCK_PREFIX}.switch_mlp"),
+        FUSED_EXPERTS,
+        FUSED_HIDDEN,
+        dff,
+    );
     insert_tensor(
         &mut weights,
         &format!("{BLOCK_PREFIX}.gate.weight"),
-        pseudo_random((FUSED_EXPERTS * FUSED_HIDDEN) as usize, 7),
+        values((FUSED_EXPERTS * FUSED_HIDDEN) as usize, -0.2, 0.004),
         &[FUSED_EXPERTS, FUSED_HIDDEN],
     );
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
@@ -366,7 +333,7 @@ fn fused_geometry_block(dff: i32) -> SparseMoeBlock {
         "rms_norm_eps": 1e-5,
         "num_key_value_heads": 1,
         "head_dim": FUSED_HIDDEN,
-        "quantization": { "group_size": FUSED_GROUP, "bits": 4 },
+        "quantization": { "group_size": HONEST_EXPERT_GROUP_SIZE, "bits": 4 },
     }))
     .expect("fused-geometry config must parse");
     SparseMoeBlock::from_weights(&weights, &args, BLOCK_PREFIX)
@@ -395,7 +362,10 @@ fn qwen3_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
         return;
     }
     let x = mlxcel_core::astype(
-        &mlxcel_core::from_slice_f32(&pseudo_random(FUSED_HIDDEN as usize, 3), &[1, FUSED_HIDDEN]),
+        &mlxcel_core::from_slice_f32(
+            &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
+            &[1, FUSED_HIDDEN],
+        ),
         mlxcel_core::dtype::BFLOAT16,
     );
     let indices = mlxcel_core::from_slice_i32(&[0, 1], &[1, FUSED_EXPERTS]);

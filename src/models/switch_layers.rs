@@ -306,6 +306,60 @@ pub(crate) fn insert_stacked_quantized_expert_plane(
     weights.insert(format!("{prefix}.biases"), plane(num_groups, 0.0));
 }
 
+/// Group size of the planes [`insert_honest_affine_swiglu_experts`] builds.
+#[cfg(test)]
+pub(crate) const HONEST_EXPERT_GROUP_SIZE: i32 = 64;
+
+/// Insert `experts` affine 4-bit SwiGLU expert planes (`gate_proj`, `up_proj`,
+/// `down_proj`) of intermediate width `dff` under a `...switch_mlp` `prefix`,
+/// quantized with `quantize_weights` from deterministic bf16 values and stacked
+/// into the pre-stacked layout a converted checkpoint ships.
+///
+/// Unlike [`insert_stacked_quantized_expert_plane`], whose all-zero codes only
+/// exercise a loader, these planes carry real codes, so a `gather_qmm` forward
+/// or a fused-kernel launch over them computes something checkable. `hidden`
+/// and `dff` must both be multiples of [`HONEST_EXPERT_GROUP_SIZE`]. Nothing is
+/// evaluated here; the quantization stays lazy until a caller evaluates it.
+///
+/// Used by: the fused-kernel `dff` decline tests of Qwen3MoE and Qwen3VLMoE
+///          (issue #1884)
+#[cfg(test)]
+pub(crate) fn insert_honest_affine_swiglu_experts(
+    weights: &mut WeightMap,
+    prefix: &str,
+    experts: i32,
+    hidden: i32,
+    dff: i32,
+) {
+    let mut state = 0x1884_u64 ^ u64::from(dff.unsigned_abs());
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    };
+    for (leaf, out, input) in [
+        ("gate_proj", dff, hidden),
+        ("up_proj", dff, hidden),
+        ("down_proj", hidden, dff),
+    ] {
+        let (mut w, mut s, mut b) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..experts {
+            let data: Vec<f32> = (0..out * input).map(|_| next()).collect();
+            let dense = mlxcel_core::from_slice_f32(&data, &[out, input]);
+            let dense = mlxcel_core::astype(&dense, dtype::BFLOAT16);
+            let q = mlxcel_core::quantize_weights(&dense, HONEST_EXPERT_GROUP_SIZE, 4);
+            w.push(mlxcel_core::quantized_weights_w(&q));
+            s.push(mlxcel_core::quantized_weights_scales(&q));
+            b.push(mlxcel_core::quantized_weights_biases(&q));
+        }
+        let plane = format!("{prefix}.{leaf}");
+        weights.insert(format!("{plane}.weight"), mlxcel_core::stack_owned(&w, 0));
+        weights.insert(format!("{plane}.scales"), mlxcel_core::stack_owned(&s, 0));
+        weights.insert(format!("{plane}.biases"), mlxcel_core::stack_owned(&b, 0));
+    }
+}
+
 /// The `group_size` / `bits` pairs no tensor layout can describe, paired with
 /// the config field each one must be blamed on.
 ///
