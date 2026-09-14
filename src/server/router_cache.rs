@@ -192,3 +192,7 @@ mod anchored_remove;
 
 #[cfg(unix)]
 use anchored_publish::AnchoredStage;
+
+#[cfg(all(test, unix))]
+#[path = "router_cache/restart_tests.rs"]
+mod restart_tests;

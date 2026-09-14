@@ -1,7 +1,7 @@
 # 기술 리포트: PR #1872 — 안전한 WebUI 모델 라이브러리 작업
 
 **작성일**: 2026-09-13
-**상태**: 열린 PR; repair cycle 2 CPU·fake 검증 완료, 루트 실모델·restart/rebase·전체 workspace 게이트 대기
+**상태**: 열린 PR; repair cycle 2 CPU·fake 검증 완료, 시작 경로 통합·실제 CLI 재시작·실모델·전체 workspace 검증 대기
 **언어**: Rust, JSON/OpenAPI fixture
 **위험도**: 높음
 **구현 스냅샷**: 최신 소스 보완 체크포인트 `d688ea4f`; 이전 보완 체크포인트 `b7555005`; 최초 구현 체크포인트 `466c6071`
@@ -102,7 +102,7 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 | Disk full | `fd_stream_enospc_writer_cleans_partial_without_publishing`가 production fd stream cleanup 경로 주위의 test-only writer factory로 `ENOSPC`를 주입합니다 | simulated ENOSPC로 커버; 실제 물리 disk exhaustion은 실행하지 않음 |
 | Checksum 및 completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | 익명 WebUI fd 경로 커버 |
 | Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay 테스트; `failed_download_can_retry_same_repo_with_new_idempotency_key`가 첫 실패 후 새 operation id로 재시도 성공 및 catalog entry 1개를 확인합니다 | cancel, replay, retry-after-failure 커버 |
-| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup 테스트와 `cache_source_list_does_not_create_absent_store_root`가 staging 격리와 startup no-mkdir를 커버하지만 #1838 integration/rebase는 root 소유이므로 전체 process restart reconciliation 테스트는 없습니다 | 부분 커버; full restart는 여전히 pending |
+| Restart / staging reconciliation | `killed_writer_and_terminal_history_reconcile_across_processes`가 소유한 Rust 테스트 프로세스 3개, 실제 RouterPool/coordinator와 anchored publication, 로컬 fake writer로 실행·대기 작업 중단과 세션 이력 초기화, 명시적 재시도 및 다음 재시작의 catalog entry 1개를 검증합니다 | CPU 테스트 프로세스 범위; 실제 production CLI 재시작은 대기 |
 | Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | 커버 |
 | Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | 커버 |
 
@@ -111,3 +111,11 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 WebUI library action은 기존 helper 위의 버튼이 아니라 권한 경계입니다. 접수는 싸고 제한되어야 하며, network와 disk 작업은 pool lock 밖에서 수행되어야 하고, 마지막 write/delete 단계는 지금 변경하려는 filesystem identity를 다시 확인해야 합니다.
 
 남은 작업은 이 리포트 안의 숨은 구현이 아니라 acceptance입니다. 루트는 pinned small SmolLM 실제 download/load/generate/delete driver, CI-faithful 전체 workspace gate, workspace all-target clippy, 사용 가능한 CUDA/GB10 검사 또는 runner outage waiver 기록을 수행해야 합니다. Page 계층은 이 backend wire contract를 바꾸지 않으면서 눈에 보이는 삭제 확인을 제공하고 unload와 disk deletion을 명확히 구분해야 합니다.
+
+## 7. 제한된 재시작 검증 준비 (2026-09-14)
+
+회귀 테스트는 실제 writer 실행과 queued operation을 관찰한 뒤 자신이 소유한 자식 프로세스만 종료합니다. 중단된 private stage는 두 번의 재시작 동안 바이트가 유지되며 catalog에 노출되지 않습니다. 새 server instance에서는 이전 operation 조회가 신규 작업 접수 전에 전체 canonical 404 응답을 반환하며, 같은 idempotency key도 이전 작업으로 replay되지 않습니다. operation ID 문자열의 전역 유일성을 가정하지 않고 `(server_instance_id, operation_id)`를 비교합니다. 명시적 재시도는 새 anchored stage에서 한 번만 publish하고 다음 프로세스 재시작에도 동일한 catalog model identity를 유지합니다. 완료된 작업 이력도 새 세션에는 남지 않습니다. 모델은 로드하지 않으며 fake weight는 유효한 checkpoint가 아닙니다. 실제 전송·checksum·production CLI 시작·전원 장애 내구성 검증을 대신하지 않습니다.
+
+루트의 head 42186c6a CPU 게이트는 workspace all-target clippy, 43 contract fixture, 구조 검사, 포맷 및 diff 검사를 통과했습니다. 통합 후 전체 테스트와 실모델 게이트는 별도로 남아 있습니다. 버려진 stage의 자동 삭제나 resume 동작은 추가하지 않았습니다.
+
+이번 변경 검증: 정확한 `server::router_cache::restart_tests::` 필터의 테스트2개와 부모 재시작 테스트의 추가 실행을 통과했습니다. scoped library/test clippy, 포맷, diff 검사와43 strict contract fixture도 통과했습니다. 초기 fixture는 operation 문자열의 전역 유일성과 optional 오류 필드의 null 직렬화를 잘못 가정했고 실행·리뷰에서 발견하여 테스트 기대값만 수정했습니다. 이 테스트·문서 변경에 대한 독립 correctness/security 리뷰의 HIGH/CRITICAL 잔여 사항은 없습니다.

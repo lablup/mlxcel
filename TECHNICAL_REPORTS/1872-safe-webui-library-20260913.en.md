@@ -1,7 +1,7 @@
 # Technical Report: PR #1872 — Safe WebUI model library operations
 
 **Date**: 2026-09-13
-**Status**: Open PR; repair-cycle 2 CPU/fake validation complete; root real-model, restart/rebase, and broad workspace gates pending
+**Status**: Open PR; repair-cycle 2 CPU/fake validation complete; startup integration, actual CLI restart, real-model and full workspace acceptance pending
 **Languages**: Rust, JSON/OpenAPI fixtures
 **Risk Level**: High
 **Implementation snapshot**: latest source repair checkpoint `d688ea4f`; prior repair checkpoint `b7555005`; original implementation checkpoint `466c6071`
@@ -102,7 +102,7 @@ Statistics after repair checkpoint `d688ea4f`: the latest cycle-2 source commit 
 | Disk full | `fd_stream_enospc_writer_cleans_partial_without_publishing` injects `ENOSPC` through a test-only writer factory around the production fd stream cleanup path | Covered as simulated ENOSPC; physical disk exhaustion was not run |
 | Checksum and completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | Covered for the anonymous WebUI fd path |
 | Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay tests; `failed_download_can_retry_same_repo_with_new_idempotency_key` verifies a failed first operation can be retried successfully with a new operation id and one catalog entry | Covered for cancel, replay, and retry-after-failure |
-| Restart / staging reconciliation | `router_cache::anchored_publish` cleanup tests and `cache_source_list_does_not_create_absent_store_root` cover staging isolation/no startup mkdir; no full process-restart reconciliation test is present because #1838 integration/rebase remains root-owned | Partially covered; full restart still pending |
+| Restart / staging reconciliation | `killed_writer_and_terminal_history_reconcile_across_processes` uses three owned Rust test processes, real RouterPool/coordinator and anchored publication, and a fake local file writer; it checks killed running/queued work, session-local operation reset, explicit retry and one published catalog entry after another restart | CPU test-process coverage; actual production CLI restart remains pending |
 | Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | Covered |
 | Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | Covered |
 
@@ -111,3 +111,11 @@ Statistics after repair checkpoint `d688ea4f`: the latest cycle-2 source commit 
 A WebUI library action is an authority boundary, not just a button over an existing helper. Admission must be cheap and bounded, network and disk work must occur outside pool locks, and the final write/delete step must recheck the filesystem identity it is about to mutate.
 
 The remaining follow-up is acceptance, not hidden implementation work in this report: root should run the pinned small SmolLM real download/load/generate/delete driver, the CI-faithful full workspace gate, workspace all-target clippy, and any available CUDA/GB10 checks or document the runner outage waiver. The page layer should provide the visible deletion confirmation and distinguish unload from disk deletion without changing this backend wire contract.
+
+## 7. Bounded restart preparation (2026-09-14)
+
+The regression terminates only its owned child after observing a real running writer and queued operation. The interrupted private stage survives both restarts byte-for-byte and never becomes a catalog entry. A new server instance has no old operation history: authenticated operation GET returns the entire canonical 404 response before new admission, the same idempotency key is not replayed, and operation identity is compared as `(server_instance_id, operation_id)` rather than assuming globally unique ID strings. A new explicit retry uses fresh anchored staging, publishes once, and retains the same catalog model identity across the next process restart. Terminal history is likewise absent in that new session. No model is loaded; fake weight bytes are not a valid checkpoint and do not validate transport, checksum, production CLI startup or power-loss durability.
+
+The independent root CPU gate at head 42186c6a passed workspace all-target clippy, 43 contract fixtures, structural checks, formatting and diff checks. This does not replace the pending post-integration full test and real-checkpoint gates. No automatic abandoned-stage cleanup or resume behavior was added.
+
+Validation of this delta: the exact `server::router_cache::restart_tests::` filter passed 2 tests, and a second execution of the parent restart test passed. Scoped library/test clippy, formatting, diff checks and 43 strict contract fixtures passed. The first fixture attempts incorrectly assumed globally unique operation strings and null optional error fields; execution/review caught both assumptions and only test expectations changed. Independent bounded correctness and security reviews have no remaining HIGH/CRITICAL finding in this test/docs delta.
