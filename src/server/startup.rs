@@ -2892,6 +2892,10 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     {
         let hw = mlxcel_core::hardware::get_hardware();
         tracing::debug!(
+            vendor = ?hw.vendor,
+            device_name = hw.device_name,
+            device_architecture = hw.device_architecture.as_deref().unwrap_or(""),
+            device_memory_bytes = hw.device_memory_bytes,
             silicon_gen = %hw.silicon_gen,
             gpu_cores = hw.gpu_core_count,
             memory_gb = hw.unified_memory_gb,
@@ -2911,6 +2915,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             compute_capability = ?mlxcel_core::hardware::cuda_compute_capability(),
             compiled_cuda_architectures = mlxcel_core::hardware::compiled_cuda_architectures(),
             "CUDA architecture capabilities detected"
+        );
+        // The ROCm half (#1805), recorded the same way. `gfx_target` is None
+        // on every backend but ROCm, so this record is empty rather than
+        // misleading off AMD.
+        tracing::debug!(
+            gfx_target = mlxcel_core::rocm_arch::device_gfx_target().unwrap_or(""),
+            compiled_rocm_architectures = mlxcel_core::rocm_arch::compiled_rocm_architectures(),
+            "HIP architecture capabilities detected"
         );
         // The graph capture budget `main` applied for this checkpoint's
         // family before any MLX op (#1798). Info, not debug: it changes

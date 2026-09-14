@@ -290,9 +290,7 @@ pub(crate) fn load_smolvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
     // the remaining plain bf16 tensors ourselves (keeping quant scales/biases).
     let mut weights = load_vlm_weights_common(model_path, None)?;
     let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown
-        && text_args.quantization.is_some()
-    {
+    if hw.is_apple_silicon() && text_args.quantization.is_some() {
         let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
             key.ends_with(".scales") || key.ends_with(".biases")
         });

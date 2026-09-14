@@ -53,7 +53,10 @@ On a model-serving node, the endpoint is always mounted, unlike `/props`, `/slot
 | `mtp_enabled` | boolean or null | Whether the *policy* is not blocking the B=1 MTP burst right now. This is the live gate, not the verdict: it is `true` while profiling, because profiling forces MTP on at the policy level. It does not mean a burst is actually running: later runtime gates (target support, exactness, capability checks) can still reject every burst attempt, in which case profiling never accumulates a sample despite `mtp_enabled: true`. |
 | `target` | string or null | Served model directory basename. |
 | `drafter` | string or null | Draft model directory basename. |
-| `hardware` | string or null | Coarse hardware-class label, for example `"M5-16c"`. Apple GPU generation plus GPU core count; non-Apple hosts report `"Unknown-0c"`. |
+| `hardware` | string or null | Coarse hardware-class label, for example `"M5-16c"`. Apple GPU generation plus GPU core count; non-Apple hosts report `"Unknown-0c"` and this field does not distinguish an NVIDIA host from an AMD one. Read `gpu_vendor` for that. |
+| `gpu_vendor` | string | GPU vendor of the serving host: `"Apple"`, `"Nvidia"`, `"Amd"` or `"Unknown"`. |
+| `gpu_device` | string or null | Device name as the backend reports it, for example `"AMD Radeon 8060S Graphics"`, or null when the backend publishes none. |
+| `gpu_architecture` | string or null | Architecture string in the running backend's own vocabulary: `gfx1151` on ROCm, `sm_89` on CUDA, an Apple GPU family string on Metal. Not comparable across vendors, so read it together with `gpu_vendor`. |
 | `block_size` | integer or null | Draft block size (K) the pairing is keyed on. |
 | `acceptance_rate` | number or null | Coarse measured acceptance rate (accepted draft tokens over proposed). Running value while profiling, final value once settled, `null` when nothing was measured. Rounded to two decimals once settled, matching the persisted hint exactly; while profiling it is the raw unrounded running quotient instead. |
 | `samples` | integer | Qualifying samples accumulated so far, or behind the settled verdict. `0` when forced or unavailable. |

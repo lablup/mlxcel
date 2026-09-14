@@ -539,7 +539,7 @@ pub(crate) fn load_minicpmv4_6_vlm(model_path: &Path) -> Result<LoadedModel> {
     // Apply bf16→f16 for non-quantized text model weights on Apple Silicon.
     if bits == 0 {
         let hw = mlxcel_core::hardware::get_hardware();
-        if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+        if hw.is_apple_silicon() {
             let had_bf16 = models::convert_bf16_weights_with_keep(&mut text_weights, |key| {
                 key.ends_with(".scales") || key.ends_with(".biases")
             });
@@ -1955,7 +1955,7 @@ pub(crate) fn load_molmo_vlm(model_path: &Path) -> Result<LoadedModel> {
     // skips conversion because the model is quantized.
     let mut weights = remap_molmo_weights(load_vlm_weights_common(model_path, None)?);
     let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+    if hw.is_apple_silicon() {
         let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
             key.ends_with(".scales") || key.ends_with(".biases")
         });

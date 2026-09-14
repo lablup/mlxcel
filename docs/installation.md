@@ -209,6 +209,22 @@ it needs. Every published release also ships a CycloneDX SBOM named
 vulnerability scanning. Treat other GPU/OS combinations as source builds that
 need local validation.
 
+### ROCm architecture selection
+
+`src/lib/mlxcel-core/build.rs` reads `MLX_ROCM_ARCHITECTURES`. If it is unset, the build script asks `rocminfo` for the GPU agent's `gfx` target and fails with a named error when no agent is reported, which is what happens in a container that cannot reach `/dev/kfd`. Setting the variable bypasses detection entirely and is used verbatim, so a build host with no visible GPU can still produce a binary for one.
+
+```bash
+# The Radeon 8060S (Ryzen AI MAX+ 395) used for ROCm validation.
+MLX_ROCM_ARCHITECTURES=gfx1151 cargo build --release --features rocm
+
+# Multiple targets, semicolon-separated.
+MLX_ROCM_ARCHITECTURES="gfx1100;gfx1151" cargo build --release --features rocm
+```
+
+HIP coverage is not the ordering CUDA coverage is. A CUDA cubin runs on a higher minor revision and its PTX JITs forward across majors, so a list can cover a device it does not name. A HIP code object is built for one `gfx` target and runs on that target only, with no JIT fallback, so `gfx1151` and `gfx1150` are unrelated despite the adjacent numbers and a list covers exactly the targets it names. Target-feature suffixes (`gfx90a:xnack+`) select code-object features on one target rather than naming another, so they are ignored when the list is compared against the device.
+
+A binary whose compiled `gfx` list does not contain the device it is started on refuses to start and names both, rather than failing later with an opaque HIP error at the first kernel launch (issue #1805). Set `MLXCEL_TRACE_ARCH` (see [Environment variables](environment-variables.md)) to print the running target, the compiled list and whether it is covered; the same summary appears next to the `Detected N GPU(s)` line at startup, alongside the device name and its memory. `MLXCEL_DEVICE=cpu` bypasses the refusal, so a binary built for the wrong target can still run on the CPU while a correct one is built.
+
 ### Prebuilt CUDA artifact: runtime requirements
 
 MLX's CUDA backend compiles some kernels at runtime with NVRTC the first time

@@ -120,10 +120,66 @@ impl std::fmt::Display for AppleSiliconGen {
     }
 }
 
+/// Which vendor made the GPU this process will run on.
+///
+/// Kept separate from [`AppleSiliconGen`] on purpose. That enum answers "which
+/// Apple Silicon generation", and twelve call sites across the VLM loaders,
+/// `models/sanitize.rs` and `drafter/dflash/drafter.rs` read its `Unknown`
+/// variant as "this is not Apple Silicon" in order to gate a bf16 to f16 weight
+/// conversion. Adding a vendor variant there would flip all eleven to true on
+/// that vendor and silently enable the conversion, which is the same shape of
+/// defect issue #1803 removed one layer down, where `!metal::is_available()`
+/// was read as "CUDA" because only two backends existed.
+///
+/// `#[non_exhaustive]` so a future vendor does not break a downstream `match`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuVendor {
+    Apple,
+    Nvidia,
+    Amd,
+    /// No GPU, or one this build does not identify.
+    Unknown,
+}
+
+/// Which GPU backend MLX resolved for this process.
+///
+/// The Rust view of `mlxcel::GpuKernelBackend` (issue #1803). Read this rather
+/// than inferring the backend from which `device_info()` keys are present: the
+/// ROCm backend publishes `compute_capability_major`/`minor` from the `gfx`
+/// target, so key presence says "AMD looks like CUDA", which is the misreport
+/// this type exists to stop.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuBackendKind {
+    /// No GPU backend, or one this build does not know.
+    None,
+    Metal,
+    Cuda,
+    Rocm,
+}
+
+/// The GPU backend MLX resolved, probed once per process.
+#[must_use]
+pub fn gpu_backend_kind() -> GpuBackendKind {
+    static KIND: OnceLock<GpuBackendKind> = OnceLock::new();
+    *KIND.get_or_init(|| match crate::ffi::gpu_backend_kind() {
+        1 => GpuBackendKind::Metal,
+        2 => GpuBackendKind::Cuda,
+        3 => GpuBackendKind::Rocm,
+        // 0 is `None`; anything else is a bridge the Rust side does not know
+        // yet, which is also "no backend I can report on".
+        _ => GpuBackendKind::None,
+    })
+}
+
 /// Hardware capabilities detected at runtime.
 #[derive(Debug, Clone)]
 pub struct HardwareCapabilities {
-    /// Apple Silicon chip generation.
+    /// Which vendor made the GPU. Ask [`HardwareCapabilities::is_apple_silicon`]
+    /// rather than comparing `silicon_gen` when the question is "is this Apple".
+    pub vendor: GpuVendor,
+    /// Apple Silicon chip generation. `Unknown` on every non-Apple vendor.
     pub silicon_gen: AppleSiliconGen,
     /// Number of GPU cores (performance cluster logical CPUs as a proxy).
     pub gpu_core_count: u32,
@@ -136,12 +192,40 @@ pub struct HardwareCapabilities {
     /// Approximate memory bandwidth in GB/s (estimated from chip generation).
     pub memory_bandwidth_gbps: f64,
     /// Unified memory size in GB.
+    ///
+    /// Apple only. Left at 0 on every other vendor on purpose: it is the third
+    /// step of `resolve_available_memory`, and filling it from device memory
+    /// would change what that walk returns on CUDA and ROCm. Read
+    /// [`HardwareCapabilities::device_memory_bytes`] for device memory.
     pub unified_memory_gb: u32,
+    /// Device name as the backend reports it ("AMD Radeon Graphics", "NVIDIA
+    /// GB10"), or empty when the backend publishes none.
+    pub device_name: String,
+    /// Architecture string as the running backend spells it, or `None` when
+    /// this build did not probe one.
+    ///
+    /// `None` on macOS even though Metal publishes an architecture: detection
+    /// runs before MLX's environment defaults are applied there, so it reads
+    /// sysctl rather than initialising the device. Read `silicon_gen` for the
+    /// Apple generation.
+    ///
+    /// Each backend has its own vocabulary and they are not comparable:
+    /// `gfx1151` on ROCm, `sm_89` on CUDA, an Apple GPU family string on
+    /// Metal. Treating this as a `gfx` target is exactly the cross-vendor
+    /// confusion #1805 exists to remove, so code that means the HIP target
+    /// reads [`crate::rocm_arch::device_gfx_target`], which is `None` off
+    /// ROCm and normalized. This field is for reporting.
+    pub device_architecture: Option<String>,
+    /// Total device memory in bytes, or 0 when the backend does not publish
+    /// it. On a UMA host, Apple or an AMD carve-out, this is the unified pool
+    /// rather than a separate VRAM figure.
+    pub device_memory_bytes: u64,
 }
 
 impl Default for HardwareCapabilities {
     fn default() -> Self {
         Self {
+            vendor: GpuVendor::Unknown,
             silicon_gen: AppleSiliconGen::Unknown,
             gpu_core_count: 0,
             has_neural_accelerator: false,
@@ -149,7 +233,25 @@ impl Default for HardwareCapabilities {
             macos_supports_na: false,
             memory_bandwidth_gbps: 0.0,
             unified_memory_gb: 0,
+            device_name: String::new(),
+            device_architecture: None,
+            device_memory_bytes: 0,
         }
+    }
+}
+
+impl HardwareCapabilities {
+    /// True when this is Apple Silicon.
+    ///
+    /// This is the predicate twelve call sites use to decide whether to convert
+    /// bf16 weights to f16 (the VLM loaders, `models/sanitize.rs` and
+    /// `drafter/dflash/drafter.rs`). It reads `silicon_gen` rather than
+    /// `vendor` so that adding a vendor cannot change what those sites do:
+    /// a new vendor leaves `silicon_gen` at `Unknown` and the answer stays
+    /// false. `gpu_vendor_does_not_imply_apple_silicon` pins that.
+    #[must_use]
+    pub fn is_apple_silicon(&self) -> bool {
+        self.silicon_gen != AppleSiliconGen::Unknown
     }
 }
 
@@ -369,7 +471,40 @@ pub fn detect_hardware() -> HardwareCapabilities {
 
     #[cfg(not(target_os = "macos"))]
     {
-        HardwareCapabilities::default()
+        detect_hardware_gpu()
+    }
+}
+
+/// Detection off macOS, where the vendor comes from the resolved MLX backend
+/// and the device strings come from `device_info()`.
+///
+/// Everything Apple-specific stays at its default: `silicon_gen` `Unknown`, no
+/// Neural Accelerator, and `unified_memory_gb` 0 so `resolve_available_memory`
+/// keeps the order it had on CUDA before this function existed. What it adds
+/// is the vendor tag plus the three device strings the ROCm backend publishes
+/// and nothing previously read (issue #1805).
+#[cfg(not(target_os = "macos"))]
+fn detect_hardware_gpu() -> HardwareCapabilities {
+    let backend = gpu_backend_kind();
+    let vendor = match backend {
+        GpuBackendKind::Metal => GpuVendor::Apple,
+        GpuBackendKind::Cuda => GpuVendor::Nvidia,
+        GpuBackendKind::Rocm => GpuVendor::Amd,
+        GpuBackendKind::None => GpuVendor::Unknown,
+    };
+    if vendor == GpuVendor::Unknown {
+        // No device to describe; asking for its name would just return "".
+        return HardwareCapabilities::default();
+    }
+    let architecture = crate::ffi::gpu_architecture(0);
+    HardwareCapabilities {
+        vendor,
+        device_name: crate::ffi::gpu_device_name(0),
+        // Empty means no device at index 0. `None` says that; "" would read as
+        // an architecture named nothing at every consumer.
+        device_architecture: (!architecture.is_empty()).then_some(architecture),
+        device_memory_bytes: crate::ffi::gpu_total_memory(0) as u64,
+        ..HardwareCapabilities::default()
     }
 }
 
@@ -513,6 +648,10 @@ fn detect_hardware_macos() -> HardwareCapabilities {
     let memory_bandwidth_gbps = estimate_bandwidth(silicon_gen, unified_memory_gb);
 
     HardwareCapabilities {
+        // macOS only ever runs the Metal backend here, so the vendor is not a
+        // probe result. `silicon_gen` still carries the generation, and
+        // `is_apple_silicon()` still reads that field rather than this one.
+        vendor: GpuVendor::Apple,
         silicon_gen,
         gpu_core_count,
         has_neural_accelerator,
@@ -520,6 +659,16 @@ fn detect_hardware_macos() -> HardwareCapabilities {
         macos_supports_na,
         memory_bandwidth_gbps,
         unified_memory_gb,
+        // Both of these come from sysctl rather than from MLX `device_info()`,
+        // because this function runs at the top of `main`, before the
+        // environment defaults MLX reads are applied, and probing the device
+        // here would move device initialisation ahead of them. On a SoC the
+        // chip brand is the device name a reader wants anyway, and the
+        // architecture is left unreported rather than guessed.
+        device_name: brand,
+        device_architecture: None,
+        // Unified memory: on Apple Silicon the GPU pool is host RAM.
+        device_memory_bytes: mem_bytes,
     }
 }
 
@@ -1041,6 +1190,7 @@ mod tests {
             macos_supports_na,
             memory_bandwidth_gbps: 150.0,
             unified_memory_gb: memory_gb,
+            ..Default::default()
         }
     }
 
@@ -1301,5 +1451,100 @@ mod tests {
             "Expected INT4 for 128K context on tight memory, got: {:?}",
             rec_128k
         );
+    }
+
+    /// No vendor other than Apple may make `is_apple_silicon()` true.
+    ///
+    /// That predicate gates a bf16 to f16 weight conversion at eleven call
+    /// sites (the VLM loaders, `models/sanitize.rs`,
+    /// `drafter/dflash/drafter.rs`). If a vendor ever answers true here, those
+    /// sites start converting weights on hardware where bf16 is native, the
+    /// output changes, and nothing else fails: the code compiles, and the gate
+    /// stays green wherever that vendor's checkpoints are absent. Hence a test
+    /// rather than a comment.
+    #[test]
+    fn gpu_vendor_does_not_imply_apple_silicon() {
+        for vendor in [GpuVendor::Nvidia, GpuVendor::Amd, GpuVendor::Unknown] {
+            let hw = HardwareCapabilities {
+                vendor,
+                ..Default::default()
+            };
+            assert!(
+                !hw.is_apple_silicon(),
+                "{vendor:?} must not be reported as Apple Silicon; \
+                 is_apple_silicon() gates the bf16 to f16 weight conversion"
+            );
+        }
+        // The Apple arm is decided by `silicon_gen`, not by the vendor tag, so
+        // an Apple tag with no generation is still not Apple Silicon.
+        let tagged_but_ungenerationed = HardwareCapabilities {
+            vendor: GpuVendor::Apple,
+            ..Default::default()
+        };
+        assert!(!tagged_but_ungenerationed.is_apple_silicon());
+        let real_apple = HardwareCapabilities {
+            vendor: GpuVendor::Apple,
+            silicon_gen: AppleSiliconGen::M1,
+            ..Default::default()
+        };
+        assert!(real_apple.is_apple_silicon());
+    }
+
+    #[test]
+    fn the_detected_vendor_agrees_with_the_resolved_backend() {
+        // The vendor is read off the backend MLX resolved, not guessed from
+        // which `device_info()` keys are present. Those two can disagree: the
+        // ROCm backend publishes `compute_capability_major`/`minor`, so key
+        // presence alone says "AMD is CUDA" (issue #1805).
+        let hw = get_hardware();
+        let expected = match gpu_backend_kind() {
+            GpuBackendKind::Metal => GpuVendor::Apple,
+            GpuBackendKind::Cuda => GpuVendor::Nvidia,
+            GpuBackendKind::Rocm => GpuVendor::Amd,
+            GpuBackendKind::None => GpuVendor::Unknown,
+        };
+        assert_eq!(
+            hw.vendor,
+            expected,
+            "backend {:?} must report vendor {expected:?}",
+            gpu_backend_kind()
+        );
+    }
+
+    #[test]
+    fn the_architecture_string_is_never_empty_and_never_a_gfx_claim() {
+        // Every backend publishes an `architecture`, each in its own
+        // vocabulary: `gfx1151`, `sm_89`, an Apple GPU family string. The
+        // field carries whichever one this backend speaks, and "" is never a
+        // value, only `None`.
+        let hw = get_hardware();
+        if let Some(arch) = hw.device_architecture.as_deref() {
+            assert!(!arch.is_empty(), "an empty architecture must be None");
+        }
+        // Only ROCm has a gfx target. A CUDA host reporting `sm_89` here must
+        // not make `device_gfx_target()` answer, which is the misreading that
+        // sent AMD down the CUDA path in the first place.
+        if gpu_backend_kind() != GpuBackendKind::Rocm {
+            assert_eq!(
+                crate::rocm_arch::device_gfx_target(),
+                None,
+                "only ROCm has a gfx target, whatever `architecture` says"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_memory_stays_apple_only() {
+        // `resolve_available_memory` reads this field at step 3. Filling it
+        // from device memory off Apple would change what that walk returns on
+        // CUDA and ROCm, which #1805 put out of scope; `device_memory_bytes`
+        // is the field that carries device memory instead.
+        let hw = get_hardware();
+        if hw.vendor != GpuVendor::Apple {
+            assert_eq!(
+                hw.unified_memory_gb, 0,
+                "unified_memory_gb must stay 0 off Apple; read device_memory_bytes instead"
+            );
+        }
     }
 }

@@ -119,6 +119,27 @@ int32_t gpu_device_count();
 // which is exactly the case the mismatch check (#1537) has to report.
 int32_t gpu_compute_capability(int32_t index);
 
+// Free-form device strings MLX publishes per device, as `device_info()` spells
+// them: `device_name` ("AMD Radeon 8060S Graphics", "NVIDIA GB10", "Apple M3
+// Max") and `architecture`. Every backend publishes an architecture, each in
+// its own vocabulary: `gfx1151` on ROCm, `sm_89` on CUDA, an Apple GPU family
+// string on Metal. They are not comparable across backends, so a caller that
+// means "the HIP gfx target" must check the backend first rather than assume
+// this string is one. Empty when no device sits at `index`; the caller reads
+// empty as "not reported" rather than as a failure.
+//
+// Cached per index after the first call, since none of the three can change
+// for the life of a device.
+rust::String gpu_device_name(int32_t index);
+rust::String gpu_architecture(int32_t index);
+
+// Total device memory in bytes from `device_info()["total_memory"]`, or 0 when
+// the backend does not publish it (Metal, which publishes `memory_size` and
+// `max_recommended_working_set_size` instead). Distinct from
+// `gpu_max_memory_size()`, which prefers Metal's recommended working-set size
+// and falls back to this.
+size_t gpu_total_memory(int32_t index);
+
 // New stream pinned to GPU `index` (0-based). `index` must be in
 // `[0, gpu_device_count())`; the Rust wrapper validates this before
 // calling, so an out-of-range index here is undefined per MLX.
@@ -1317,6 +1338,15 @@ bool gpu_backend_available();
 // Metal or CUDA (issue #1803). Narrower than `gpu_backend_available`, which
 // only says a GPU exists.
 bool custom_kernels_available();
+
+// The resolved GPU backend as a small integer, matching
+// `mlxcel::GpuKernelBackend`: 0 none, 1 Metal, 2 CUDA, 3 ROCm (issue #1803).
+// `custom_kernels_available()` collapses this to "has fused kernel ports";
+// callers that need to know *which* backend, such as vendor reporting and the
+// compute-capability probe, read the kind instead of inferring it from which
+// `device_info()` keys happen to be present.
+int32_t gpu_backend_kind();
+
 
 // True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm
 // (issues #1803, #1862).

@@ -208,11 +208,44 @@ fn checked_init_agrees_with_the_architecture_check_on_this_host() {
     // is never, and the two must not be able to drift apart: a refusal with no
     // mismatch, or a mismatch that starts anyway, are both bugs.
     let mismatch = mlxcel_core::hardware::cuda_arch_mismatch();
-    assert_eq!(
-        super::initialize_runtime_checked().is_err(),
-        mismatch.is_some(),
-        "refusal must track cuda_arch_mismatch(), which reported {mismatch:?}"
-    );
+    if mismatch.is_some() {
+        assert!(
+            super::initialize_runtime_checked().is_err(),
+            "a CUDA architecture mismatch must refuse to start: {mismatch:?}"
+        );
+    } else if mlxcel_core::rocm_arch::rocm_arch_mismatch().is_none() {
+        // Only assert the converse when the ROCm check has nothing to report
+        // either. `initialize_runtime_checked` gained a second refusal source
+        // in #1805, so without this guard a gfx mismatch would fail this test
+        // for the other backend's reason.
+        assert!(
+            super::initialize_runtime_checked().is_ok(),
+            "no CUDA architecture mismatch on this host, so start must not be refused"
+        );
+    }
+}
+
+#[test]
+fn checked_init_agrees_with_the_rocm_architecture_check_on_this_host() {
+    // The ROCm counterpart of the test above (issue #1805). Same standard: a
+    // refusal with no mismatch, or a mismatch that starts anyway, are both
+    // bugs. Inert off ROCm, where `rocm_arch_mismatch()` is always `None`.
+    let mismatch = mlxcel_core::rocm_arch::rocm_arch_mismatch();
+    if mismatch.is_some() {
+        assert!(
+            super::initialize_runtime_checked().is_err(),
+            "a gfx mismatch must refuse to start: {mismatch:?}"
+        );
+    } else {
+        // Only assert the converse when CUDA has nothing to report either,
+        // so this test cannot fail for the other backend's reason.
+        if mlxcel_core::hardware::cuda_arch_mismatch().is_none() {
+            assert!(
+                super::initialize_runtime_checked().is_ok(),
+                "no architecture mismatch on this host, so start must not be refused"
+            );
+        }
+    }
 }
 
 #[test]

@@ -306,8 +306,15 @@ fn the_build_records_the_architecture_list_it_compiled_for() {
 
 #[test]
 fn the_capability_probe_agrees_with_the_backend() {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+
     let capability = cuda_compute_capability();
-    if cfg!(feature = "cuda") {
+    // The premise is the resolved backend, not the `cuda` cargo feature. Those
+    // agreed while Metal and CUDA were the only GPU backends; ROCm broke it,
+    // because its `device_info()` publishes `compute_capability_major`/`minor`
+    // derived from the `gfx` target and the probe reported `(11, 5)` on an AMD
+    // device (issue #1805). A build whose feature is off can still have a GPU.
+    if gpu_backend_kind() == GpuBackendKind::Cuda {
         // A CUDA build on a host with no visible device legitimately reports
         // `None`; what must never happen is a nonsense pair.
         if let Some((major, minor)) = capability {
@@ -317,9 +324,33 @@ fn the_capability_probe_agrees_with_the_backend() {
             );
         }
     } else {
+        // Assert on the raw bridge probe as well as on the wrapper. Checking
+        // only the wrapper would restate the backend gate inside
+        // `cuda_compute_capability` and could never fail. What has to hold is
+        // the relation between the two, and it differs per backend: Metal and
+        // CPU-only publish no capability keys at all, so the bridge itself
+        // answers -1; ROCm publishes well-formed ones derived from the `gfx`
+        // target, so the bridge answers a real number and the gate is the only
+        // thing suppressing it. That second case is the #1805 regression.
+        let raw = crate::ffi::gpu_compute_capability(0);
+        if gpu_backend_kind() == GpuBackendKind::Rocm {
+            assert!(
+                raw >= 0,
+                "the ROCm backend publishes compute_capability keys, so the bridge should \
+                 still report {raw}; if this changed, the gate above is no longer what makes \
+                 the wrapper return None"
+            );
+        } else {
+            assert_eq!(
+                raw, -1,
+                "a backend with no compute-capability keys must answer -1 at the bridge"
+            );
+        }
         assert_eq!(
-            capability, None,
-            "a non-CUDA build has no compute capability to report"
+            capability,
+            None,
+            "only CUDA has a CUDA compute capability; backend is {:?} and the bridge said {raw}",
+            gpu_backend_kind()
         );
     }
     // The probe is cached, so a second call must not disagree with the first.

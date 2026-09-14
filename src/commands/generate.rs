@@ -140,6 +140,28 @@ fn load_generation_model(
     if let Some(summary) = mlxcel_core::hardware::cuda_arch_startup_summary() {
         println!("{summary}");
     }
+    // The ROCm counterpart (#1805). Prints the running `gfx` target and the
+    // compiled HIP list; silent on every other backend. Before this, an AMD
+    // device reported nothing here except a CUDA compute capability derived
+    // from its `gfx` number, which named the wrong vendor entirely.
+    if let Some(summary) = mlxcel_core::rocm_arch::rocm_arch_startup_summary() {
+        println!("{summary}");
+    }
+    // Name the device itself, which no backend reported before: on ROCm the
+    // `device_info()` name and the carve-out size are the only way a log says
+    // which AMD GPU ran and how much memory it had.
+    let hw = mlxcel_core::hardware::get_hardware();
+    if !hw.device_name.is_empty() {
+        let memory = if hw.device_memory_bytes > 0 {
+            format!(
+                ", {:.2} GiB device memory",
+                hw.device_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            )
+        } else {
+            String::new()
+        };
+        println!("GPU: {} ({:?}){memory}.", hw.device_name, hw.vendor);
+    }
     // And whether this process raised MLX's CUDA graph capture budgets for
     // this checkpoint's family (#1798); silent when it applied nothing.
     if let Some(summary) = mlxcel_core::hardware::cuda_graph_budget_startup_summary() {

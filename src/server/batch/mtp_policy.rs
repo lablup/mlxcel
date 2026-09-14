@@ -582,6 +582,13 @@ impl PolicyKey {
 /// generation plus the GPU-core proxy distinguishes M1 Max from M1 Ultra (the
 /// regression discriminator in #165) without recording anything
 /// request-specific. Non-Apple hosts collapse to `"Unknown-0c"`.
+///
+/// That collapse means a CUDA host and a ROCm host share a `PolicyKey`, so a
+/// profile measured on one is reused on the other. Widening it here is not a
+/// free fix: this label is persisted in the hint files, so any new spelling
+/// discards every profile recorded under the old one. #1805 therefore reports
+/// the vendor alongside this label in the `/v1/internal/mtp-policy` body
+/// (`gpu_vendor`, `gpu_device`, `gpu_architecture`) and leaves the key alone.
 #[must_use]
 pub(crate) fn hardware_label() -> String {
     let hw = mlxcel_core::hardware::get_hardware();
@@ -1029,18 +1036,15 @@ impl MtpPolicy {
         let key = PolicyKey::new(target_id, drafter_id, hardware_label(), block_size);
         let hw = mlxcel_core::hardware::get_hardware();
         let wide_quantized_projections = hw.silicon_gen.wide_quantized_projections();
-        // Compute-bound = non-Apple-Silicon (CUDA / GB10): the runtime hardware
-        // probe reports `AppleSiliconGen::Unknown` off Apple GPUs. On such hosts
-        // the K-wide verify does not amortize (issue #638), so the policy
-        // de-rates its optimistic speedup estimate. Caveat: `parse_silicon_gen`
+        // Compute-bound = non-Apple-Silicon (CUDA / GB10 / ROCm): the runtime
+        // hardware probe reports `AppleSiliconGen::Unknown` off Apple GPUs. On
+        // such hosts the K-wide verify does not amortize (issue #638), so the
+        // policy de-rates its optimistic speedup estimate. Caveat: `parse_silicon_gen`
         // also maps Apple generations newer than the enumerated ones to
         // `Unknown`, so the "Apple byte-identical" guarantee is scoped to the
         // enumerated gens; extend the enum when a new Apple generation ships
         // (same staleness contract as `wide_quantized_projections`).
-        let compute_bound = matches!(
-            hw.silicon_gen,
-            mlxcel_core::hardware::AppleSiliconGen::Unknown
-        );
+        let compute_bound = !hw.is_apple_silicon();
         let force = parse_force_override(std::env::var("MLXCEL_ENABLE_MTP_B1").ok().as_deref());
         let store = PolicyStore::from_cache_root();
         Some(Self::from_parts(
