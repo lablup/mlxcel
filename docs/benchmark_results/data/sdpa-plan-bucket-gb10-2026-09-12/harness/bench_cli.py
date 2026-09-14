@@ -53,13 +53,17 @@ def run_once(a, cfg, presets, prompt, wrap=""):
     gate_wait_s = hostgate.wait_quiet(log=sys.stderr)
     load1 = os.getloadavg()[0]
     ci_job = hostgate.ci_job_running()
+    # Re-checked immediately before the load and again after: the gate above can
+    # clear and a foreign session can start in the gap (#1820).
+    foreign_before = hostgate.foreign_model_procs()
     t0 = time.perf_counter()
-    p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
+    p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=3600)
     wall = time.perf_counter() - t0
     out = ANSI.sub("", p.stdout)
     err = ANSI.sub("", p.stderr)
     rec = {"cfg": cfg, "block": block, "load1_before": load1, "ci_job_running": ci_job, "gate_wait_s": gate_wait_s, "wall_s": wall,
-           "rc": p.returncode}
+           "foreign_models_before": foreign_before, "foreign_models_after": hostgate.foreign_model_procs(),
+           "prompt_file": a.prompt_file, "max_tokens": a.max_tokens, "rc": p.returncode}
     m = GEN_RE.search(out)
     if m:
         rec["gen_tokens"] = int(m.group(1))
