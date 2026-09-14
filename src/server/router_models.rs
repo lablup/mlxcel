@@ -1891,7 +1891,13 @@ impl RouterPool {
         let Some(app) = app else {
             return Err(RouterPoolError::NotLoaded);
         };
-        entry.lifecycle.begin_drain();
+        let (_, drain_revision) = entry.lifecycle.begin_drain_with_revision().ok_or_else(|| {
+            RouterPoolError::LoadFailed("model lifecycle lock poisoned during drain".into())
+        })?;
+        let drain_expectation = expectation.map(|expected| LoadEntryExpectation {
+            model_id: expected.model_id.clone(),
+            revision: drain_revision,
+        });
         self.notify_lifecycle(&entry);
         self.notify_status(&entry);
         if !entry
@@ -1911,7 +1917,12 @@ impl RouterPool {
             )));
         }
 
-        self.ensure_entry_is_current(&entry, expectation)?;
+        // The caller's revision was checked before our own drain transition.
+        // Recheck the owned token and registry identity after the wait: request
+        // lease completion preserves it, external lifecycle changes do not.
+        // Legacy/shutdown callers supplied no revision precondition: preserve
+        // their identity-only cleanup semantics for failed workers.
+        self.ensure_entry_is_current(&entry, drain_expectation.as_ref())?;
         entry.lifecycle.mark_unloading();
         self.notify_lifecycle(&entry);
         let observer = app.state.model_provider.worker_exit_observer();
@@ -3051,3 +3062,7 @@ mod router_models_tests;
 #[cfg(test)]
 #[path = "router_models_discovery_tests.rs"]
 mod router_models_discovery_tests;
+
+#[cfg(test)]
+#[path = "router_unload_revision_tests.rs"]
+mod router_unload_revision_tests;

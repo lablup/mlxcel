@@ -325,19 +325,29 @@ impl ModelLifecycle {
     }
 
     pub fn begin_drain(&self) -> bool {
-        let mut changed = false;
+        self.begin_drain_with_revision()
+            .is_some_and(|(changed, _)| changed)
+    }
+
+    /// Capture the owned transition revision under the same lifecycle lock.
+    /// A caller revalidating after drain must use this token, not its pre-drain
+    /// revision or a guessed increment of the shared revision authority.
+    /// Poisoning returns no token, so mutation callers can fail closed.
+    pub(crate) fn begin_drain_with_revision(&self) -> Option<(bool, u64)> {
+        let mut transition = None;
         self.mutate(|g| {
-            if matches!(
+            let changed = matches!(
                 g.state,
                 ModelLifecycleState::Loading | ModelLifecycleState::Ready
-            ) {
+            );
+            if changed {
                 g.state = ModelLifecycleState::Draining;
                 g.admission_stopped = true;
                 g.revision = self.next_revision_after(g.revision);
-                changed = true;
             }
+            transition = Some((changed, g.revision));
         });
-        changed
+        transition
     }
 
     pub fn mark_unloading(&self) {

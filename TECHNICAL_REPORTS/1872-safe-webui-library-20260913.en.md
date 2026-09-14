@@ -1,10 +1,10 @@
 # Technical Report: PR #1872 — Safe WebUI model library operations
 
 **Date**: 2026-09-13
-**Status**: Open PR; repair-cycle 2 CPU/fake validation complete; startup integration, actual CLI restart, real-model and full workspace acceptance pending
+**Status**: Open PR; startup integrated; first full gate passed; real acceptance exposed an unload revision defect, with corrected full/real acceptance pending
 **Languages**: Rust, JSON/OpenAPI fixtures
 **Risk Level**: High
-**Implementation snapshot**: latest source repair checkpoint `d688ea4f`; prior repair checkpoint `b7555005`; original implementation checkpoint `466c6071`
+**Implementation snapshot**: integrated baseline `3cb4817d` plus the owned-drain revision correction described below; earlier repair checkpoints `d688ea4f` and `b7555005`
 
 ## Executive Summary
 
@@ -102,7 +102,7 @@ Statistics after repair checkpoint `d688ea4f`: the latest cycle-2 source commit 
 | Disk full | `fd_stream_enospc_writer_cleans_partial_without_publishing` injects `ENOSPC` through a test-only writer factory around the production fd stream cleanup path | Covered as simulated ENOSPC; physical disk exhaustion was not run |
 | Checksum and completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | Covered for the anonymous WebUI fd path |
 | Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay tests; `failed_download_can_retry_same_repo_with_new_idempotency_key` verifies a failed first operation can be retried successfully with a new operation id and one catalog entry | Covered for cancel, replay, and retry-after-failure |
-| Restart / staging reconciliation | `killed_writer_and_terminal_history_reconcile_across_processes` uses three owned Rust test processes, real RouterPool/coordinator and anchored publication, and a fake local file writer; it checks killed running/queued work, session-local operation reset, explicit retry and one published catalog entry after another restart | CPU test-process coverage; actual production CLI restart remains pending |
+| Restart / staging reconciliation | `killed_writer_and_terminal_history_reconcile_across_processes` uses three owned Rust test processes, real RouterPool/coordinator and anchored publication, and a fake local file writer; it checks killed running/queued work, session-local operation reset, explicit retry and one published catalog entry after another restart | CPU test-process coverage; root observed production CLI restart at `3cb4817d`, while the corrected complete real flow awaits rerun |
 | Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | Covered |
 | Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | Covered |
 
@@ -119,3 +119,17 @@ The regression terminates only its owned child after observing a real running wr
 The independent root CPU gate at head 42186c6a passed workspace all-target clippy, 43 contract fixtures, structural checks, formatting and diff checks. This does not replace the pending post-integration full test and real-checkpoint gates. No automatic abandoned-stage cleanup or resume behavior was added.
 
 Validation of this delta: the exact `server::router_cache::restart_tests::` filter passed 2 tests, and a second execution of the parent restart test passed. Scoped library/test clippy, formatting, diff checks and 43 strict contract fixtures passed. The first fixture attempts incorrectly assumed globally unique operation strings and null optional error fields; execution/review caught both assumptions and only test expectations changed. Independent bounded correctness and security reviews have no remaining HIGH/CRITICAL finding in this test/docs delta.
+
+## 8. Integrated acceptance and unload correction (2026-09-14)
+
+Integration checkpoint `3cb4817d` is based on centrally merged #1838/main `7e4577b1`. Library routes are mounted once inside the existing secured API-prefix composition. A shared pure policy drives bootstrap capabilities and mutation admission from actual cache authority, mode, offline policy and descriptor-platform support; single-model mode remains read-only and observation never creates cache directories. All 46 merged fixtures, including upstream Unicode/error cases, and 48 frontend tests passed. Independent integration reviews cleared the bounded source scope.
+
+Root's complete gate at `3cb4817d` passed 11,299 unique top-level tests with 361 ignored, plus two successful nested restart-child runs. The raw 11,301 aggregate includes those subprocess summaries and must not be presented as unique top-level coverage. Workspace all-target clippy, 46 strict fixtures, structural/format checks, feature-disabled compilation and both binaries' relocated empty/TTY checks passed. This is evidence for the pre-correction checkpoint, not a substitute for rerunning after the fix below.
+
+The first isolated real driver downloaded and hash-verified the pinned public SmolLM checkpoint, restarted the production CLI, verified changed server identity and old-operation 404, rediscovered the same complete unloaded catalog identity, loaded and generated nonempty chat. Unload then failed with `stale_revision` expected3/current4; removal was not attempted. Both owned server processes exited0, and the new temporary checkpoint was retained. This failure is preserved, not relabeled success.
+
+The defect already existed in merged main: unload validates the caller's revision, then its own Ready-to-Draining transition advances the revision, and its post-drain check incorrectly compares against the original token. A generic harness retry would hide this by retrying an already-draining model. The repair returns the owned drain revision atomically under the lifecycle mutex and rechecks that token/current entry after waiting. Shared revision authority means +1 cannot be assumed. RequestLease completion does not change revision. Only callers supplying a revision precondition (WebUI and explicit eviction) use the new token; legacy/shutdown callers retain identity-only cleanup, including failed-worker cleanup. The real harness is unchanged.
+
+The loaded fake-provider regression failed before the repair with the same expected3/current4 error as the real run. After the final compatibility refinement, five unload/token tests, 16 lifecycle tests and 50 router fake tests passed. Coverage includes a held request lease, rescan preserving the current loaded entry, observed worker exit, genuine external revision/registry replacement rejection, shared revision authority and legacy failed-worker cleanup. Independent correctness/security rechecks found no remaining HIGH/CRITICAL issue in this bounded repair.
+
+Final scoped library/test clippy, formatting and diff checks passed after the None-preserving refinement. Corrected full workspace and real-checkpoint acceptance remain root-owned and pending.

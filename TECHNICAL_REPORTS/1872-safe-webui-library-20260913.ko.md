@@ -1,10 +1,10 @@
 # 기술 리포트: PR #1872 — 안전한 WebUI 모델 라이브러리 작업
 
 **작성일**: 2026-09-13
-**상태**: 열린 PR; repair cycle 2 CPU·fake 검증 완료, 시작 경로 통합·실제 CLI 재시작·실모델·전체 workspace 검증 대기
+**상태**: 열린 PR; 시작 경로 통합 및 첫 전체 게이트 통과, 실모델 검증에서 unload revision 결함 발견 후 수정본 전체·실모델 재검증 대기
 **언어**: Rust, JSON/OpenAPI fixture
 **위험도**: 높음
-**구현 스냅샷**: 최신 소스 보완 체크포인트 `d688ea4f`; 이전 보완 체크포인트 `b7555005`; 최초 구현 체크포인트 `466c6071`
+**구현 스냅샷**: 통합 기준 `3cb4817d`와 아래 owned-drain revision 수정; 이전 보완 체크포인트 `d688ea4f` 및 `b7555005`
 
 ## 요약
 
@@ -102,7 +102,7 @@ Parent pre-review에서 지적된 다음 고위험 항목을 PR 게시 전 반�
 | Disk full | `fd_stream_enospc_writer_cleans_partial_without_publishing`가 production fd stream cleanup 경로 주위의 test-only writer factory로 `ENOSPC`를 주입합니다 | simulated ENOSPC로 커버; 실제 물리 disk exhaustion은 실행하지 않음 |
 | Checksum 및 completeness | `anonymous_fd_download_rejects_same_size_checksum_mismatch_before_publish`; `anonymous_fd_download_rejects_metadata_without_weight_files_before_transfer`; `selected_safetensors_requires_lfs_sha256` | 익명 WebUI fd 경로 커버 |
 | Cancel/retry | `cancel_after_publish_linearization_is_refused_and_download_completes`; `remove_cancels_an_in_flight_download`; duplicate replay 테스트; `failed_download_can_retry_same_repo_with_new_idempotency_key`가 첫 실패 후 새 operation id로 재시도 성공 및 catalog entry 1개를 확인합니다 | cancel, replay, retry-after-failure 커버 |
-| Restart / staging reconciliation | `killed_writer_and_terminal_history_reconcile_across_processes`가 소유한 Rust 테스트 프로세스 3개, 실제 RouterPool/coordinator와 anchored publication, 로컬 fake writer로 실행·대기 작업 중단과 세션 이력 초기화, 명시적 재시도 및 다음 재시작의 catalog entry 1개를 검증합니다 | CPU 테스트 프로세스 범위; 실제 production CLI 재시작은 대기 |
+| Restart / staging reconciliation | `killed_writer_and_terminal_history_reconcile_across_processes`가 소유한 Rust 테스트 프로세스 3개, 실제 RouterPool/coordinator와 anchored publication, 로컬 fake writer로 실행·대기 작업 중단과 세션 이력 초기화, 명시적 재시도 및 다음 재시작의 catalog entry 1개를 검증합니다 | CPU 테스트 프로세스 검증 및 루트의 `3cb4817d` production CLI 재시작 확인; 수정본 전체 실모델 흐름 재검증 대기 |
 | Duplicate action | `duplicate_download_with_same_idempotency_key_replays_active_operation`; `active_download_replays_resolved_revision_alias`; `duplicate_download_idempotency_key_rejects_different_payload_before_alias_replay`; `ui_download_route_replays_same_idempotency_key` | 커버 |
 | Bounded queue saturation | `download_admission_rejects_queue_saturation_before_worker_network` | 커버 |
 
@@ -119,3 +119,17 @@ WebUI library action은 기존 helper 위의 버튼이 아니라 권한 경계�
 루트의 head 42186c6a CPU 게이트는 workspace all-target clippy, 43 contract fixture, 구조 검사, 포맷 및 diff 검사를 통과했습니다. 통합 후 전체 테스트와 실모델 게이트는 별도로 남아 있습니다. 버려진 stage의 자동 삭제나 resume 동작은 추가하지 않았습니다.
 
 이번 변경 검증: 정확한 `server::router_cache::restart_tests::` 필터의 테스트2개와 부모 재시작 테스트의 추가 실행을 통과했습니다. scoped library/test clippy, 포맷, diff 검사와43 strict contract fixture도 통과했습니다. 초기 fixture는 operation 문자열의 전역 유일성과 optional 오류 필드의 null 직렬화를 잘못 가정했고 실행·리뷰에서 발견하여 테스트 기대값만 수정했습니다. 이 테스트·문서 변경에 대한 독립 correctness/security 리뷰의 HIGH/CRITICAL 잔여 사항은 없습니다.
+
+## 8. 통합 검증과 unload 수정 (2026-09-14)
+
+통합 체크포인트 `3cb4817d`는 중앙에서 머지한 #1838/main `7e4577b1` 기반입니다. 기존 보안·API prefix 구성 안에 library route를 한 번만 연결하고, 순수한 공유 정책으로 실제 cache 권한·mode·offline·descriptor platform에 따른 bootstrap capability와 mutation admission을 일치시켰습니다. 단일 모델 모드는 read-only이며 관찰 중 cache 디렉터리를 생성하지 않습니다. 상위 Unicode/error 사례를 포함한 fixture 46개와 frontend 테스트 48개를 통과했고 독립 통합 리뷰도 제한된 범위에서 완료했습니다.
+
+루트의 `3cb4817d` 전체 게이트는 고유 top-level 테스트 11,299개 통과, 361개 ignored 및 별도 nested restart-child 실행 2개 통과입니다. 원시 합계 11,301에는 subprocess 결과가 포함되므로 고유 top-level 수로 보고하지 않습니다. Workspace all-target clippy, strict fixture 46개, 구조·포맷 검사, feature-disabled 컴파일과 두 바이너리의 relocated empty/TTY 검증도 통과했습니다. 이는 아래 수정 전 체크포인트의 증거이며 수정 후 재검증을 대신하지 않습니다.
+
+첫 격리 실모델 driver는 고정한 공개 SmolLM checkpoint의 실제 다운로드·hash 검증, production CLI 재시작, 새 server identity와 이전 operation 404, 동일한 complete/unloaded catalog identity, 실제 load 및 비어 있지 않은 chat 생성을 확인했습니다. 이후 unload가 `stale_revision` expected3/current4로 실패하여 삭제는 시도하지 않았습니다. 소유한 서버 두 프로세스는 모두 exit0으로 종료했고 새 임시 checkpoint는 보존했습니다. 이 실패를 성공으로 바꾸어 기록하지 않습니다.
+
+결함은 이미 merged main에 있었습니다. unload가 caller revision을 검사한 뒤 자신의 Ready-to-Draining 전환으로 revision을 증가시키고, 대기 후에도 이전 token을 비교하여 스스로 거부했습니다. 일반적인 harness 재시도는 이미 draining인 모델을 재시도하면서 결함을 가릴 수 있습니다. 수정은 lifecycle mutex 안에서 자신의 drain revision을 원자적으로 반환하고 대기 후 그 token과 현재 entry를 검사합니다. 공유 revision authority 때문에 +1을 가정하지 않으며 RequestLease 종료도 revision을 변경하지 않습니다. Revision precondition이 있는 WebUI·명시적 eviction caller만 새 token을 사용하고, legacy·shutdown은 failed-worker 정리를 포함한 기존 identity-only 검사를 유지합니다. 실제 harness는 변경하지 않았습니다.
+
+로드된 fake provider 회귀 테스트는 수정 전에 실제 실행과 동일한 expected3/current4 오류로 실패했습니다. 최종 호환성 보완 후 unload/token 테스트 5개, lifecycle 테스트 16개, router fake 테스트 50개를 통과했습니다. 활성 request lease, loaded entry를 유지하는 rescan, 실제 worker 종료 관찰, 외부 revision·registry 교체 거부, 공유 revision authority 및 legacy failed-worker 정리를 검증합니다. 독립 correctness/security 재검토에서 이 제한된 수정의 HIGH/CRITICAL 잔여 사항은 없습니다.
+
+None caller의 기존 동작을 보존한 최종 수정 후 scoped library/test clippy, 포맷 및 diff 검사를 통과했습니다. 수정본 전체 workspace·실모델 검증은 루트 담당으로 남아 있습니다.
