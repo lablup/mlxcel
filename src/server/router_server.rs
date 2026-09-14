@@ -33,22 +33,28 @@ use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, Query, State};
+#[cfg(feature = "webui")]
+use axum::extract::Path as AxumPath;
+use axum::extract::{Query, State};
+#[cfg(feature = "webui")]
 use axum::http::HeaderMap;
-use axum::http::{Method, Request, StatusCode, Uri};
+#[cfg(feature = "webui")]
+use axum::http::Uri;
+use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 
 use super::config::ServerConfig;
+#[cfg(feature = "webui")]
 use super::router_lifecycle::{
     CancelError, ErrorBody, ErrorEnvelope, FieldError, OperationError, OperationKind,
     OperationResult, OperationState, OperationTarget,
 };
-use super::router_models::{
-    ROUTER_SHUTDOWN_TIMEOUT, RouterModelAction, RouterPool, RouterPoolError,
-};
+#[cfg(feature = "webui")]
+use super::router_models::RouterModelAction;
+use super::router_models::{ROUTER_SHUTDOWN_TIMEOUT, RouterPool, RouterPoolError};
 use super::routes::slots::{llama_error_response, llama_invalid_request};
 
 /// How long an autoload dispatch waits for the model to become ready before
@@ -138,10 +144,12 @@ fn llama_not_found(message: &str) -> Response {
     llama_error_response(StatusCode::NOT_FOUND, "not_found_error", message)
 }
 
+#[cfg(feature = "webui")]
 fn request_id() -> String {
     format!("req_{}", chrono::Utc::now().timestamp_micros())
 }
 
+#[cfg(feature = "webui")]
 fn webui_error(
     status: StatusCode,
     code: &str,
@@ -165,6 +173,7 @@ fn webui_error(
         .into_response()
 }
 
+#[cfg(feature = "webui")]
 fn webui_field_error(
     status: StatusCode,
     code: &str,
@@ -224,6 +233,7 @@ fn pool_error_response(err: RouterPoolError) -> Response {
     }
 }
 
+#[cfg(feature = "webui")]
 fn webui_pool_error_response(err: RouterPoolError) -> Response {
     match err {
         RouterPoolError::OperationRejected(error) => (
@@ -449,6 +459,7 @@ async fn router_models_unload(
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg(feature = "webui")]
 enum UiModelActionKind {
     Load,
     Unload,
@@ -456,25 +467,35 @@ enum UiModelActionKind {
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "webui")]
 struct UiLoadProfile {
     ctx_size: Option<u64>,
     n_parallel: Option<u64>,
     kv_cache_mode: Option<String>,
 }
 
+#[cfg(feature = "webui")]
 impl UiLoadProfile {
     fn has_overrides(&self) -> bool {
         self.ctx_size.is_some() || self.n_parallel.is_some() || self.kv_cache_mode.is_some()
     }
 }
 
+#[cfg(feature = "webui")]
 const MODEL_ID_PREFIX: &str = "mdl_";
+#[cfg(feature = "webui")]
 const MODEL_ID_SUFFIX_LEN: usize = 43;
+#[cfg(feature = "webui")]
 const IDEMPOTENCY_KEY_MIN: usize = 8;
+#[cfg(feature = "webui")]
 const IDEMPOTENCY_KEY_MAX: usize = 128;
+#[cfg(feature = "webui")]
 const OPERATION_ID_MAX: usize = 128;
+#[cfg(feature = "webui")]
 const CURSOR_TOKEN_MAX: usize = 512;
+#[cfg(feature = "webui")]
 const OPERATION_TARGET_TOKEN_MAX: usize = 128;
+#[cfg(feature = "webui")]
 const KV_CACHE_MODE_NAMES: &[&str] = &[
     "fp16",
     "float16",
@@ -491,15 +512,18 @@ const KV_CACHE_MODE_NAMES: &[&str] = &[
     "fp16+turbo4-delegated",
 ];
 
+#[cfg(feature = "webui")]
 fn is_webui_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
 }
 
+#[cfg(feature = "webui")]
 fn is_webui_token(value: &str, min: usize, max: usize) -> bool {
     let bytes = value.as_bytes();
     (min..=max).contains(&bytes.len()) && bytes.iter().copied().all(is_webui_token_byte)
 }
 
+#[cfg(feature = "webui")]
 fn valid_model_id(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix(MODEL_ID_PREFIX) else {
         return false;
@@ -511,6 +535,7 @@ fn valid_model_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+#[cfg(feature = "webui")]
 fn invalid_webui_field(
     field: &str,
     field_code: &str,
@@ -526,6 +551,7 @@ fn invalid_webui_field(
     )
 }
 
+#[cfg(feature = "webui")]
 fn validate_idempotency_key(value: &str) -> Option<Response> {
     if value.len() < IDEMPOTENCY_KEY_MIN {
         return Some(invalid_webui_field(
@@ -551,6 +577,7 @@ fn validate_idempotency_key(value: &str) -> Option<Response> {
     None
 }
 
+#[cfg(feature = "webui")]
 fn validate_model_id(value: &str, field: &str) -> Option<Response> {
     if !valid_model_id(value) {
         return Some(invalid_webui_field(
@@ -562,6 +589,7 @@ fn validate_model_id(value: &str, field: &str) -> Option<Response> {
     None
 }
 
+#[cfg(feature = "webui")]
 fn validate_operation_id(value: &str, field: &str) -> Option<Response> {
     if !is_webui_token(value, 1, OPERATION_ID_MAX) {
         return Some(invalid_webui_field(
@@ -573,6 +601,7 @@ fn validate_operation_id(value: &str, field: &str) -> Option<Response> {
     None
 }
 
+#[cfg(feature = "webui")]
 fn validate_cursor(value: &str) -> Option<Response> {
     if !is_webui_token(value, 1, CURSOR_TOKEN_MAX) {
         return Some(invalid_webui_field(
@@ -598,6 +627,7 @@ fn validate_cursor(value: &str) -> Option<Response> {
     None
 }
 
+#[cfg(feature = "webui")]
 fn validate_target_filter(value: &str) -> Option<Response> {
     if !is_webui_token(value, 1, OPERATION_TARGET_TOKEN_MAX) {
         return Some(invalid_webui_field(
@@ -609,6 +639,7 @@ fn validate_target_filter(value: &str) -> Option<Response> {
     None
 }
 
+#[cfg(feature = "webui")]
 fn validate_load_profile(profile: &UiLoadProfile) -> Option<Response> {
     if let Some(ctx_size) = profile.ctx_size
         && !(1..=262_144).contains(&ctx_size)
@@ -921,6 +952,7 @@ fn catalog_error_response(err: super::webui::catalog::CatalogError) -> Response 
     }
 }
 
+#[cfg(feature = "webui")]
 fn operation_begin_error_response(err: OperationError) -> Response {
     match err {
         OperationError::Conflict { operation_id } => (
@@ -949,6 +981,7 @@ fn operation_begin_error_response(err: OperationError) -> Response {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "webui")]
 struct UiModelActionRequest {
     model_id: String,
     action: UiModelActionKind,
@@ -958,6 +991,7 @@ struct UiModelActionRequest {
     eviction_target_id: Option<String>,
 }
 
+#[cfg(feature = "webui")]
 fn ui_action_to_router(action: &UiModelActionKind) -> RouterModelAction {
     match action {
         UiModelActionKind::Load => RouterModelAction::Load,
@@ -966,6 +1000,7 @@ fn ui_action_to_router(action: &UiModelActionKind) -> RouterModelAction {
 }
 
 /// POST /ui-api/v1/model-actions.
+#[cfg(feature = "webui")]
 async fn ui_model_actions(
     State(state): State<RouterServerState>,
     body: axum::body::Bytes,
@@ -1034,6 +1069,7 @@ async fn ui_model_actions(
 }
 
 #[derive(Default, serde::Deserialize)]
+#[cfg(feature = "webui")]
 struct OperationsQuery {
     limit: Option<usize>,
     cursor: Option<String>,
@@ -1042,6 +1078,7 @@ struct OperationsQuery {
     target: Option<String>,
 }
 
+#[cfg(feature = "webui")]
 fn parse_operation_state(value: Option<&str>) -> Option<OperationState> {
     match value? {
         "queued" => Some(OperationState::Queued),
@@ -1054,6 +1091,7 @@ fn parse_operation_state(value: Option<&str>) -> Option<OperationState> {
     }
 }
 
+#[cfg(feature = "webui")]
 fn parse_operation_kind(value: Option<&str>) -> Option<OperationKind> {
     match value? {
         "catalog_refresh" => Some(OperationKind::CatalogRefresh),
@@ -1066,6 +1104,7 @@ fn parse_operation_kind(value: Option<&str>) -> Option<OperationKind> {
     }
 }
 
+#[cfg(feature = "webui")]
 async fn ui_operations_list(
     State(state): State<RouterServerState>,
     Query(query): Query<OperationsQuery>,
@@ -1125,6 +1164,7 @@ async fn ui_operations_list(
     .into_response()
 }
 
+#[cfg(feature = "webui")]
 async fn ui_operation_get(
     State(state): State<RouterServerState>,
     AxumPath(id): AxumPath<String>,
@@ -1143,6 +1183,7 @@ async fn ui_operation_get(
     }
 }
 
+#[cfg(feature = "webui")]
 async fn ui_operation_cancel(
     State(state): State<RouterServerState>,
     AxumPath(id): AxumPath<String>,

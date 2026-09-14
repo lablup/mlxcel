@@ -196,6 +196,7 @@ async fn send(
     (status, json)
 }
 
+#[cfg(feature = "webui")]
 fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
     // SAFETY: callers hold `crate::test_support::env_lock::env_lock()` for the
     // full mutation window.

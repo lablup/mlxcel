@@ -78,6 +78,7 @@ impl ApiKeys {
     }
 
     /// Return a key set with one additional in-memory key.
+    #[cfg(feature = "webui")]
     pub(crate) fn with_extra_key(mut self, key: String) -> Self {
         if !key.is_empty() {
             self.0.push(key);

@@ -17,12 +17,17 @@
 use axum::{
     Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
-    http::{HeaderMap, Method, Request, StatusCode, Uri},
+    extract::{DefaultBodyLimit, State},
+    http::{Method, Request},
     middleware::{self, Next},
-    response::Json,
     response::{IntoResponse, Response},
     routing::{MethodRouter, get, post},
+};
+#[cfg(feature = "webui")]
+use axum::{
+    extract::{Path as AxumPath, Query},
+    http::{HeaderMap, StatusCode, Uri},
+    response::Json,
 };
 use tower_http::trace::TraceLayer;
 
