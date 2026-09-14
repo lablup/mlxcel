@@ -492,11 +492,19 @@ impl Attention {
         // a four-token prompt (layers 0 through 29 track the reference to three
         // decimal places first, so the overflow is the only symptom and it
         // arrives late). The cache itself stays f16; only the arithmetic widens.
+        //
+        // Upstream widens the queries alone
+        // (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/phixtral.py,
+        // and https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/phixtral/language.py),
+        // and MLX promotes the score matmul to match its wider operand, so that
+        // is enough to keep `q @ k^T` out of f16. The values are only ever
+        // multiplied by probabilities in [0, 1] and cannot overflow, so widening
+        // them would double the V read on every decode step and buy nothing.
+        // `3576d734` made the same narrowing in `phi.rs` and `stablelm.rs`;
+        // this file was left behind and issue #1829's audit found it.
         let dtype = mlxcel_core::array_dtype(&cache_v);
         let f32_dtype = mlxcel_core::dtype::FLOAT32;
         let q = mlxcel_core::astype(&q, f32_dtype);
-        let cache_k = mlxcel_core::astype(&cache_k, f32_dtype);
-        let cache_v = mlxcel_core::astype(&cache_v, f32_dtype);
 
         let attn_out = if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
